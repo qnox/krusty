@@ -216,6 +216,7 @@ fn lower_file_at_reporting_impl(
         cur_fn_suspend: false,
         cur_tparams: Vec::new(),
         synthetic_seq_by_owner: HashMap::new(),
+        local_class_captures: HashMap::new(),
         shared_cell_vars: std::collections::HashSet::new(),
         boxed_elem: HashMap::new(),
         local_fun_ids: HashMap::new(),
@@ -820,11 +821,20 @@ fn lower_file_at_reporting_impl(
         if let Decl::Class(c) = file.decl(d) {
             lo.set_bail("deep:class-register"); // pass 1a phase marker (survey diagnostic only)
             let internal = class_internal(file, &c.name);
-            let anonymous_captures = info
+            // An anonymous object's captures and a local class's are the same shape here: values
+            // the class reads from the frame that created it, which have to reach the instance
+            // through its constructor.
+            let mut anonymous_captures = info
                 .anonymous_object_captures_by_class
                 .get(&d)
                 .cloned()
                 .unwrap_or_default();
+            anonymous_captures.extend(
+                info.local_class_captures_by_class
+                    .get(&d)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
             // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
             if let Some(s) = class_generic_sig(file, c, &*lo.syms.libraries, &lo.syms.class_names) {
                 lo.ir.insert_class_signature(&internal, s);
@@ -1268,12 +1278,11 @@ fn lower_file_at_reporting_impl(
                         }
                     }))
                     .chain(c.props.iter().enumerate().map(|(i, p)| {
+                        // `ClassSig::ctor_params` is the SOURCE signature — the parameters a call
+                        // site writes — so it is indexed by the source position. Captures are a
+                        // lowering addition and are not in it.
                         let t = ty_to_ir(stored_value_ty(
-                            class_sig
-                                .ctor_params
-                                .get(anonymous_captures.len() + i)
-                                .copied()
-                                .unwrap_or(Ty::Error),
+                            class_sig.ctor_params.get(i).copied().unwrap_or(Ty::Error),
                         ));
                         let t = if p.ty.nullable() { mark_nullable(t) } else { t };
                         // A non-null reference param gets an `Intrinsics.checkNotNullParameter` guard at
@@ -1345,6 +1354,12 @@ fn lower_file_at_reporting_impl(
                 runtime_retained: c.kind == ast::ClassKind::Annotation
                     && runtime_annotation_decl(file, &c.name).is_some(),
             });
+            // Record a LOCAL class's captures against its IR id, so every construction supplies
+            // them (`emit_new`). An anonymous object is not recorded: its single construction site
+            // has its own lowering, which already carries them.
+            if let Some(captures) = info.local_class_captures_by_class.get(&d) {
+                lo.local_class_captures.insert(id, captures.clone());
+            }
             // For an `annotation class`, ALSO emit the synthetic IMPLEMENTATION class (kotlinc's
             // `…$annotationImpl`) implementing the annotation interface + the `java.lang.annotation.
             // Annotation` contract, so `A(args)` can construct an annotation instance. The backend
@@ -2961,11 +2976,17 @@ fn lower_file_at_reporting_impl(
             }
             Decl::Class(c) => {
                 lo.set_bail("deep:class");
-                let anonymous_captures = info
+                let mut anonymous_captures = info
                     .anonymous_object_captures_by_class
                     .get(&d)
                     .cloned()
                     .unwrap_or_default();
+                anonymous_captures.extend(
+                    info.local_class_captures_by_class
+                        .get(&d)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
                 let internal = class_internal(file, &c.name);
                 if let Some(super_int) = lo.class_info(&internal)?.super_internal {
                     // A param/return typed by a class type-param that carries a *class* upper bound
@@ -5716,6 +5737,10 @@ pub(crate) struct Lower<'a> {
     cur_tparams: Vec<(String, Ty, bool)>,
     /// Synthetic-method sequence shared by declarations with the same JVM owner and name.
     synthetic_seq_by_owner: HashMap<(Option<TypeName>, String), u32>,
+    /// A local class's captures, by IR class id. The class carries each one as a leading constructor
+    /// parameter, so every construction of it — whichever argument-mapping arm reaches `emit_new` —
+    /// supplies them ahead of the source arguments.
+    local_class_captures: HashMap<u32, Vec<AnonymousObjectCapture>>,
     /// Names of local `var`s in the current lowered body that need a shared mutable cell because a
     /// non-inlined closure captures them from an outer local scope.
     shared_cell_vars: std::collections::HashSet<String>,
@@ -6437,14 +6462,43 @@ impl<'a> Lower<'a> {
         })
     }
 
-    fn emit_new(&mut self, class: u32, args: Vec<u32>, ctor_params: Option<Vec<Ty>>) -> u32 {
+    /// Construct `class`, supplying any captures it carries ahead of `args`.
+    ///
+    /// This is the single seam every construction goes through, which is why the capture arguments
+    /// are prepended HERE rather than in each of the argument-mapping arms that build `args`: a new
+    /// arm cannot forget them.
+    fn emit_new(
+        &mut self,
+        class: u32,
+        args: Vec<u32>,
+        ctor_params: Option<Vec<Ty>>,
+    ) -> Option<u32> {
+        let captures = self.local_class_captures.get(&class).cloned();
+        let (args, ctor_params) = match captures {
+            None => (args, ctor_params),
+            Some(captures) => {
+                let mut prefixed = Vec::with_capacity(captures.len() + args.len());
+                for capture in &captures {
+                    prefixed.push(self.lower_anonymous_capture(capture)?);
+                }
+                prefixed.extend(args);
+                let ctor_params = ctor_params.map(|params| {
+                    captures
+                        .iter()
+                        .map(|capture| capture.ty)
+                        .chain(params)
+                        .collect()
+                });
+                (prefixed, ctor_params)
+            }
+        };
         let internal = self.ir.classes[class as usize].fq_name_id();
-        self.ir.add_expr(IrExpr::New {
+        Some(self.ir.add_expr(IrExpr::New {
             internal,
             args,
             ctor_params,
             ctor_desc: None,
-        })
+        }))
     }
 
     fn emit_new_external(
@@ -10440,7 +10494,7 @@ impl<'a> Lower<'a> {
             .collect();
         let comp_get = self.emit_get_value(completion_idx);
         new_args.push(self.emit_type_op(IrTypeOp::Cast, comp_get, cont_ir.clone()));
-        let new_inst = self.emit_new(class_id, new_args, None);
+        let new_inst = self.emit_new(class_id, new_args, None)?;
         let r_idx = arity as u32 + 2;
         let mut inv_stmts = vec![self.emit_variable(r_idx, lambda_ty.clone(), Some(new_inst))];
         // Store each own parameter (coerced from the erased `Object` argument) into its field —
@@ -10485,7 +10539,7 @@ impl<'a> Lower<'a> {
             .collect();
         // The completion parameter is already a `Continuation` (the ctor's last param) — no cast.
         create_new_args.push(self.emit_get_value(completion_idx));
-        let create_new = self.emit_new(class_id, create_new_args, None);
+        let create_new = self.emit_new(class_id, create_new_args, None)?;
         let cr_idx = arity as u32 + 2;
         let mut create_stmts = vec![self.emit_variable(cr_idx, lambda_ty, Some(create_new))];
         for (i, pty) in params.iter().enumerate() {
@@ -10526,7 +10580,7 @@ impl<'a> Lower<'a> {
             .map(|(_, v, _)| self.emit_get_value(*v))
             .collect();
         site_args.push(self.emit_const(IrConst::Null));
-        Some(self.emit_new(class_id, site_args, None))
+        self.emit_new(class_id, site_args, None)
     }
 
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
@@ -11149,7 +11203,7 @@ impl<'a> Lower<'a> {
             let args: Vec<u32> = (0..fields.len())
                 .map(|i| self.emit_get_value(i as u32 + 1))
                 .collect();
-            let new = self.emit_new(class_id, args, None);
+            let new = self.emit_new(class_id, args, None)?;
             let ret = self.emit_return(Some(new));
             let body = self.emit_block(vec![ret], None);
             if let Some(copy_fid) = self.add_synth_method(
@@ -12789,11 +12843,11 @@ impl<'a> Lower<'a> {
         });
         if let Some(recv_e) = capture {
             // `new <Synth>(receiver)` — the captured receiver is the constructor's `Object` argument.
-            Some(self.emit_new(
+            self.emit_new(
                 synth_id,
                 vec![recv_e],
                 Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
-            ))
+            )
         } else {
             Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE"))
         }
@@ -12908,11 +12962,11 @@ impl<'a> Lower<'a> {
             runtime_retained: false,
         });
         match capture {
-            Some(cap) => Some(self.emit_new(
+            Some(cap) => self.emit_new(
                 synth_id,
                 vec![cap],
                 Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
-            )),
+            ),
             None => Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE")),
         }
     }
@@ -13941,11 +13995,11 @@ impl<'a> Lower<'a> {
             runtime_retained: false,
         });
         match capture {
-            Some(cap) => Some(self.emit_new(
+            Some(cap) => self.emit_new(
                 synth_id,
                 vec![cap],
                 Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
-            )),
+            ),
             None => Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE")),
         }
     }
@@ -21735,7 +21789,7 @@ impl<'a> Lower<'a> {
                 for capture in &captures {
                     arguments.push(self.lower_anonymous_capture(capture)?);
                 }
-                self.emit_new(class, arguments, None)
+                self.emit_new(class, arguments, None)?
             }
             Expr::Call { callee, args } => return self.expr_inner_call(e, callee, args),
         })
@@ -22439,7 +22493,7 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 let argvals: Vec<u32> = (0..arity as u32).map(|i| self.emit_get_value(i)).collect();
-                let new_e = self.emit_new(class_id, argvals, None);
+                let new_e = self.emit_new(class_id, argvals, None)?;
                 let ret_e = self.emit_return(Some(new_e));
                 let block = self.emit_block(vec![ret_e], None);
                 let seq = self.next_synthetic_seq();
@@ -25345,7 +25399,7 @@ impl<'a> Lower<'a> {
                         for (i, &arg) in args.iter().enumerate() {
                             a.push(self.lower_arg(arg, &field_tys[i + 1])?);
                         }
-                        return Some(self.emit_new(class, a, None));
+                        return self.emit_new(class, a, None);
                     }
                     return None;
                 }
@@ -25497,7 +25551,7 @@ impl<'a> Lower<'a> {
                         )?;
                     let exact_params = (!primary || !default_masks.is_empty() || value_class)
                         .then_some(invoke_params);
-                    let new = self.emit_new(class, lowered, exact_params);
+                    let new = self.emit_new(class, lowered, exact_params)?;
                     return Some(self.wrap_arg_prelude(new, prelude));
                 }
                 let arg_prims: Vec<Option<Ty>> = (0..args.len())
@@ -25529,7 +25583,7 @@ impl<'a> Lower<'a> {
                             a.push(self.lower_arg(arg, &field_tys[i])?);
                         }
                     }
-                    return Some(self.emit_new(class, a, None));
+                    return self.emit_new(class, a, None);
                 }
                 let meta: Vec<(String, Option<AstExprId>)> = source_ctor_decl
                     .as_ref()
@@ -25586,11 +25640,11 @@ impl<'a> Lower<'a> {
                     for (arg, pt) in args.iter().zip(&sc.params) {
                         a.push(self.lower_arg(*arg, pt)?);
                     }
-                    self.emit_new(class, a, Some(sc.params))
+                    self.emit_new(class, a, Some(sc.params))?
                 } else if let Some((a, prelude)) =
                     self.lower_args_defaulted(e, &meta, &args, &field_tys)
                 {
-                    let new = self.emit_new(class, a, None);
+                    let new = self.emit_new(class, a, None)?;
                     self.wrap_arg_prelude(new, prelude)
                 } else if let Some((mut a, omitted)) = {
                     // A `@JvmInline value class` uses `constructor-impl$default`, NOT `<init>$default`
@@ -25609,7 +25663,7 @@ impl<'a> Lower<'a> {
                     // class that registers ctor defaults.
                     self.append_default_masks_marker(&mut a, field_tys.len(), omitted);
                     let params = Self::ctor_default_param_tys(&field_tys);
-                    self.emit_new(class, a, Some(params))
+                    self.emit_new(class, a, Some(params))?
                 } else {
                     let sc = no_named
                         .then(|| {
@@ -25624,7 +25678,7 @@ impl<'a> Lower<'a> {
                     for (arg, pt) in args.iter().zip(&sc.params) {
                         a.push(self.lower_arg(*arg, pt)?);
                     }
-                    self.emit_new(class, a, Some(sc.params))
+                    self.emit_new(class, a, Some(sc.params))?
                 }
             }
         };
@@ -25905,7 +25959,7 @@ impl<'a> Lower<'a> {
                     for (arg, pt) in args.iter().zip(&field_tys[1..]) {
                         a.push(self.lower_arg(*arg, pt)?);
                     }
-                    return Some(self.emit_new(class_id, a, None));
+                    return self.emit_new(class_id, a, None);
                 }
             }
             // `iterable.forEach { x -> body }` is the stdlib `inline fun` whose body is
@@ -26123,7 +26177,7 @@ impl<'a> Lower<'a> {
                         if let Some((a, prelude)) =
                             self.lower_args_defaulted(e, &meta, &args, &field_tys)
                         {
-                            let new = self.emit_new(class, a, None);
+                            let new = self.emit_new(class, a, None)?;
                             return Some(self.wrap_arg_prelude(new, prelude));
                         }
                         return None;

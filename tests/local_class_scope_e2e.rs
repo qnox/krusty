@@ -5,9 +5,11 @@
 //! from its `Stmt::LocalClass`, on a class rung that carries the enclosing instance — which makes
 //! the enclosing declaration's type parameters and receivers reachable, exactly as kotlinc has them.
 //!
-//! Capture of an enclosing VALUE is a separate matter: lowering does not yet give a local class the
-//! constructor parameters a capture needs, so it is rejected (the file skips) instead of being
-//! emitted without them. Each test records the reference `kotlinc` (2.4.10) verdict.
+//! Capture of an enclosing VALUE follows from that: what the class reads is decided in the scope it
+//! was written in, and lowering carries each captured binding as a leading constructor parameter.
+//! A reference that is not modelled yet (the enclosing INSTANCE, a local function, a reassigned
+//! `var`, or a capture read during construction) is rejected — the file skips rather than emitting a
+//! class without what it needs. Each test records the reference `kotlinc` (2.4.10) verdict.
 
 use super::common;
 
@@ -56,17 +58,62 @@ fn a_local_class_property_shadows_an_enclosing_member_of_the_same_name() {
     assert_eq!(run(SRC).expect("own property shadows the outer one"), "OK");
 }
 
-/// kotlinc: accepted — krusty limitation, the file skips.
+/// kotlinc: accepted.
 ///
-/// The local class reads a local of the enclosing function. Resolving it is what the lexical scope
-/// buys; EMITTING it needs a constructor parameter carrying the captured value, which lowering does
-/// not synthesize yet. Rejecting is the sound outcome — emitting the class without that parameter
-/// produced `NoSuchMethodError` on construction.
+/// The local class reads a local of the enclosing function. The lexical scope is what resolves it;
+/// the captured binding then reaches the instance as a leading constructor parameter, supplied at
+/// the construction site.
 #[test]
-fn a_local_class_capturing_an_enclosing_local_is_rejected() {
+fn a_local_class_captures_an_enclosing_local() {
     const SRC: &str = "fun f(): String {\n\
         \x20   val captured = \"OK\"\n\
         \x20   class L { fun read() = captured }\n\
+        \x20   return L().read()\n\
+        }\n\
+        fun box(): String = f()\n";
+    assert_eq!(run(SRC).expect("captured local is carried"), "OK");
+}
+
+/// kotlinc: accepted.
+///
+/// Several captures plus the class's own constructor argument: the captures come FIRST and the
+/// source argument after, so the two cannot be confused for one another.
+#[test]
+fn captures_precede_the_classs_own_constructor_arguments() {
+    const SRC: &str = "fun f(): String {\n\
+        \x20   val a = \"O\"\n\
+        \x20   val b = \"K\"\n\
+        \x20   class L(val own: String) { fun read() = a + b + own }\n\
+        \x20   return L(\"!\").read()\n\
+        }\n\
+        fun box(): String = if (f() == \"OK!\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("captures precede source arguments"), "OK");
+}
+
+/// kotlinc: accepted.
+///
+/// A capture read from a parameter of the enclosing function, constructed more than once — each
+/// construction supplies the value from the frame it runs in.
+#[test]
+fn a_captured_parameter_is_supplied_at_every_construction() {
+    const SRC: &str = "fun f(p: String): String {\n\
+        \x20   class L { fun read() = p }\n\
+        \x20   return L().read() + L().read()\n\
+        }\n\
+        fun box(): String = if (f(\"O\") == \"OO\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("every construction supplies it"), "OK");
+}
+
+/// kotlinc: accepted — krusty limitation, the file skips.
+///
+/// A captured `var` that is reassigned is shared MUTABLE state: copying it into the instance would
+/// freeze the value at construction, so only an effectively-immutable binding is captured.
+#[test]
+fn a_reassigned_captured_var_is_rejected() {
+    const SRC: &str = "fun f(): String {\n\
+        \x20   var captured = \"no\"\n\
+        \x20   class L { fun read() = captured }\n\
+        \x20   captured = \"OK\"\n\
         \x20   return L().read()\n\
         }\n\
         fun box(): String = f()\n";
@@ -75,9 +122,10 @@ fn a_local_class_capturing_an_enclosing_local_is_rejected() {
 
 /// kotlinc: accepted — krusty limitation, the file skips.
 ///
-/// The capture sits in a primary-constructor parameter DEFAULT, evaluated in the synthetic
-/// `$default` constructor. Scanning only member bodies missed it, and the box corpus caught the
-/// miscompile (`localClasses/capturingInDefaultConstructorParameter.kt`).
+/// The capture is read during CONSTRUCTION — here from a primary-constructor parameter default,
+/// which is evaluated in a synthetic constructor that carries no captures at all. Scanning only
+/// member bodies missed this, and the box corpus caught the miscompile
+/// (`localClasses/capturingInDefaultConstructorParameter.kt`).
 #[test]
 fn a_capture_in_a_constructor_parameter_default_is_rejected() {
     const SRC: &str = "fun f(): String {\n\
@@ -91,8 +139,8 @@ fn a_capture_in_a_constructor_parameter_default_is_rejected() {
 
 /// kotlinc: accepted — krusty limitation, the file skips.
 ///
-/// Reaching the enclosing INSTANCE needs the same missing constructor parameter as reaching a
-/// local, so a member read through the implicit outer receiver is a capture too.
+/// Reaching the enclosing INSTANCE is a second capture kind: the receiver itself, not a binding in
+/// the chain. Not modelled yet, so a member read through the implicit outer receiver is rejected.
 #[test]
 fn a_local_class_reading_an_enclosing_member_is_rejected() {
     const SRC: &str = "class Outer {\n\

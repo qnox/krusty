@@ -7388,22 +7388,28 @@ fn bc_complex_s(file: &File, s: StmtId, vforbid: bool, cross: bool) -> bool {
 
 /// Returns true if the expression subtree (or any statement within it) references a name from
 /// `outer`. Used to detect captures in local function bodies before allowing lift-to-static.
-/// The first name in `outer` that `e`'s subtree reads, in a stable order. Same traversal (and same
-/// shadowing rules) as [`local_fun_body_uses_any`], but it names the culprit for a diagnostic.
+/// Every name in `outer` that `e`'s subtree reads, in a stable order. Same traversal (and the same
+/// shadowing rules) as [`local_fun_body_uses_any`], which answers the yes/no question.
+fn used_names(file: &File, e: ExprId, outer: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut names: Vec<&String> = outer.iter().collect();
+    names.sort();
+    names
+        .into_iter()
+        .filter(|name| {
+            let one: std::collections::HashSet<String> = std::iter::once((*name).clone()).collect();
+            local_fun_body_uses_any(file, e, &one)
+        })
+        .cloned()
+        .collect()
+}
+
+/// The first name in `outer` that `e`'s subtree reads — the one a diagnostic names.
 fn first_used_name(
     file: &File,
     e: ExprId,
     outer: &std::collections::HashSet<String>,
 ) -> Option<String> {
-    let mut names: Vec<&String> = outer.iter().collect();
-    names.sort();
-    names
-        .into_iter()
-        .find(|name| {
-            let one: std::collections::HashSet<String> = std::iter::once((*name).clone()).collect();
-            local_fun_body_uses_any(file, e, &one)
-        })
-        .cloned()
+    used_names(file, e, outer).into_iter().next()
 }
 
 fn local_fun_body_uses_any(
@@ -9483,6 +9489,10 @@ pub struct TypeInfo {
     resolved_type_refs: HashMap<(u32, u32), TypeName>,
     pub anonymous_object_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     pub anonymous_object_captures_by_construction: HashMap<ExprId, Vec<AnonymousObjectCapture>>,
+    /// The enclosing bindings a statement-position local class reads, keyed by its hoisted
+    /// declaration — the resolution the scope chain performed, in declaration order. What a capture
+    /// costs to represent is lowering's decision, not this one's.
+    pub local_class_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     pub anonymous_object_types: HashMap<DeclId, TypeName>,
     /// Selected expression lowerings that cannot be recovered from the expression shape alone.
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
@@ -11701,6 +11711,7 @@ fn make_checker<'a>(
         symbolic_signature_inference: false,
         discover_anonymous_captures: false,
         discovered_anonymous_captures: HashMap::new(),
+        discovered_local_class_captures: HashMap::new(),
         anonymous_lexical_scope: AnonymousLexicalClassScope::default(),
         capture_scope: None,
         loop_labels: Vec::new(),
@@ -13055,6 +13066,7 @@ fn check_file_at_impl_mode(
         context_args,
         super_ctor_params,
         discovered_anonymous_captures,
+        discovered_local_class_captures,
         source_contracts,
         ..
     } = c;
@@ -13174,6 +13186,7 @@ fn check_file_at_impl_mode(
         resolved_type_refs,
         anonymous_object_captures_by_class,
         anonymous_object_captures_by_construction,
+        local_class_captures_by_class: discovered_local_class_captures,
         anonymous_object_types,
         expr_lowers,
         stmt_lowers,
@@ -13569,6 +13582,7 @@ struct Checker<'a> {
     symbolic_signature_inference: bool,
     discover_anonymous_captures: bool,
     discovered_anonymous_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+    discovered_local_class_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     /// The file's anonymous-object ownership graph and (in capture-discovery mode) the narrowed set
     /// of declarations to walk. Both are per-FILE facts every classifier check needs, and a local
     /// class is entered from a statement deep inside a body — threading them down as parameters
@@ -13580,6 +13594,15 @@ struct Checker<'a> {
     loop_labels: Vec<String>,
     loop_depth: usize,
     return_allowed: bool,
+}
+
+/// What a local class reads from its enclosing scope, split by whether the reference is modelled.
+#[derive(Default)]
+struct LocalClassCaptures {
+    /// Enclosing bindings read from ordinary member bodies, in declaration order.
+    values: Vec<AnonymousObjectCapture>,
+    /// The first reference that is NOT modelled, if any. Its presence rejects the class.
+    unsupported: Option<String>,
 }
 
 /// The checker state scoped to ONE function/property body, saved across a nested classifier check.
@@ -13847,29 +13870,37 @@ impl<'a> Checker<'a> {
     /// Deliberately syntactic and conservative: a name the class also declares is not a capture, but
     /// a name that merely *looks* like one is treated as such. Over-reporting costs a skipped file;
     /// under-reporting costs a class emitted without the constructor parameter the capture needs.
-    fn local_class_capture(&self, scope: &CheckerScope<'_>, cl: &ClassDecl) -> Option<String> {
+    /// What a statement-position local class reads from its enclosing scope.
+    ///
+    /// Deliberately syntactic and conservative: a name the class also declares is not a capture, but
+    /// a name that merely *looks* like one is treated as such. Over-reporting costs a skipped file;
+    /// under-reporting emits a class without the constructor parameter its capture needs.
+    fn local_class_captures(&self, scope: &CheckerScope<'_>, cl: &ClassDecl) -> LocalClassCaptures {
+        let mut result = LocalClassCaptures::default();
         let mut outer: std::collections::HashSet<String> = std::collections::HashSet::new();
         scope.visit_bindings(Ns::Value, |name, _| {
             outer.insert(name.to_string());
         });
+        // A local FUNCTION carries captures of its own; reaching one from a local class would have
+        // to compose the two, which is not modelled.
+        let mut unsupported: std::collections::HashSet<String> = std::collections::HashSet::new();
         scope.visit_bindings(Ns::Function, |name, _| {
-            outer.insert(name.to_string());
+            unsupported.insert(name.to_string());
         });
-        // An enclosing instance is reached the same way a local is, and needs the same (missing)
-        // constructor parameter — so every member reachable through it counts as a capture, as does
-        // an explicit `this`/`this@Outer` naming it.
+        // Reaching the enclosing INSTANCE is a second capture kind — the receiver itself, not a
+        // binding in the chain — and is not modelled yet.
         for receiver in scope.implicit_receivers() {
             let Some(internal) = receiver.obj_internal() else {
                 continue;
             };
-            outer.insert("this".to_string());
+            unsupported.insert("this".to_string());
             if let Some(class) = self.syms.class_by_type_name(internal) {
-                outer.extend(class.props.iter().map(|(name, _, _)| name.clone()));
-                outer.extend(class.methods.keys().cloned());
+                unsupported.extend(class.props.iter().map(|(name, _, _)| name.clone()));
+                unsupported.extend(class.methods.keys().cloned());
             }
         }
         for label in &self.this_labels {
-            outer.insert(format!("this@{}", class_declaration_label(&label.0)));
+            unsupported.insert(format!("this@{}", class_declaration_label(&label.0)));
         }
         // Anything the class declares itself shadows the outer name.
         for name in cl
@@ -13881,36 +13912,32 @@ impl<'a> Checker<'a> {
             .chain(cl.companion_methods.iter().map(|m| &m.name))
         {
             outer.remove(name);
+            unsupported.remove(name);
         }
-        outer.remove("this");
-        if outer.is_empty() {
-            return None;
+        unsupported.remove("this");
+        // A name is either a supported value capture or an unsupported one, never both.
+        for name in &unsupported {
+            outer.remove(name);
         }
-        let mut bodies: Vec<ExprId> = Vec::new();
-        let mut member_scoped: Vec<(Vec<String>, ExprId)> = Vec::new();
-        for m in cl.methods.iter().chain(&cl.companion_methods) {
-            if let FunBody::Expr(e) | FunBody::Block(e) = m.body {
-                member_scoped.push((m.params.iter().map(|p| p.name.clone()).collect(), e));
-            }
-        }
+        // A capture read during CONSTRUCTION (an initializer, an `init` block, a base-constructor
+        // argument, a parameter default, a secondary constructor) is not modelled yet: it is live
+        // before the object exists, which is a different problem from a member body reading it.
+        let mut construction_bodies: Vec<ExprId> = Vec::new();
         for p in &cl.body_props {
-            bodies.extend(p.init);
-            if let Some(FunBody::Expr(e) | FunBody::Block(e)) = p.getter {
-                bodies.push(e);
-            }
+            construction_bodies.extend(p.init);
         }
         for step in &cl.init_order {
             if let ClassInit::Block(b) = step {
-                bodies.push(*b);
+                construction_bodies.push(*b);
             }
         }
-        bodies.extend(cl.base_args.iter().copied());
-        // A primary-constructor parameter DEFAULT is evaluated in the `$default` synthetic ctor,
-        // which needs the capture exactly like a body does (`class Local(val t: String = x)`).
-        bodies.extend(cl.props.iter().filter_map(|p| p.default));
-        bodies.extend(cl.companion_base_args.iter().copied());
+        construction_bodies.extend(cl.base_args.iter().copied());
+        construction_bodies.extend(cl.props.iter().filter_map(|p| p.default));
+        construction_bodies.extend(cl.companion_base_args.iter().copied());
+        let mut everything = outer.clone();
+        everything.extend(unsupported.iter().cloned());
         for ctor in &cl.secondary_ctors {
-            let mut visible = outer.clone();
+            let mut visible = everything.clone();
             for p in &ctor.params {
                 visible.remove(&p.name);
             }
@@ -13925,22 +13952,61 @@ impl<'a> Checker<'a> {
                 .chain(delegation_args.iter().copied())
             {
                 if let Some(name) = first_used_name(self.file, body, &visible) {
-                    return Some(name);
+                    result.unsupported.get_or_insert(name);
                 }
             }
         }
-        for (params, body) in member_scoped {
-            let mut visible = outer.clone();
+        for body in construction_bodies {
+            if let Some(name) = first_used_name(self.file, body, &everything) {
+                result.unsupported.get_or_insert(name);
+            }
+        }
+        // Member bodies (including a computed property's accessors, which are methods) may capture.
+        let mut member_bodies: Vec<(Vec<String>, ExprId)> = Vec::new();
+        for m in cl.methods.iter().chain(&cl.companion_methods) {
+            if let FunBody::Expr(e) | FunBody::Block(e) = m.body {
+                member_bodies.push((m.params.iter().map(|p| p.name.clone()).collect(), e));
+            }
+        }
+        for p in &cl.body_props {
+            if let Some(FunBody::Expr(e) | FunBody::Block(e)) = p.getter {
+                member_bodies.push((Vec::new(), e));
+            }
+        }
+        let narrows = scope.local_narrowings();
+        let mut captured: Vec<String> = Vec::new();
+        for (params, body) in member_bodies {
+            let mut visible = everything.clone();
             for p in &params {
                 visible.remove(p);
             }
-            if let Some(name) = first_used_name(self.file, body, &visible) {
-                return Some(name);
+            for name in used_names(self.file, body, &visible) {
+                if unsupported.contains(&name) {
+                    result.unsupported.get_or_insert(name);
+                } else if !captured.contains(&name) {
+                    captured.push(name);
+                }
             }
         }
-        bodies
-            .into_iter()
-            .find_map(|body| first_used_name(self.file, body, &outer))
+        captured.sort();
+        for name in captured {
+            let Some(local) = self.lookup(scope, &name) else {
+                result.unsupported.get_or_insert(name);
+                continue;
+            };
+            // A captured `var` that is reassigned anywhere is shared MUTABLE state; only an
+            // effectively-immutable binding can be captured by value.
+            if local.is_var && self.fn_reassigned.contains(&name) {
+                result.unsupported.get_or_insert(name);
+                continue;
+            }
+            result.values.push(AnonymousObjectCapture {
+                ty: narrows.get(&name).copied().unwrap_or(local.ty),
+                name,
+                source: AnonymousObjectCaptureSource::LexicalValue,
+            });
+        }
+        result
     }
 
     fn reset_body_mutations(&mut self, body: Option<ExprId>) {
@@ -38412,11 +38478,12 @@ impl<'a> Checker<'a> {
                 // Checking a classifier mid-body rewrites the checker's per-BODY state (the
                 // expected return, the loop labels a `break` may name, the mutation summary), so
                 // the enclosing body's is saved across it.
-                // Lowering does not yet give a local class the constructor parameters a capture
-                // needs, so a capturing one is rejected rather than silently emitted without them.
-                // Before this statement was checked at all, the capture simply failed to resolve;
-                // the outcome is the same skip, with a diagnostic that says why.
-                if let Some(captured) = self.local_class_capture(scope, &cl) {
+                // What the class reads from here is decided in THIS scope — the only place the
+                // enclosing bindings exist. A reference the pipeline cannot represent is rejected;
+                // before this statement was checked at all it simply failed to resolve, so the
+                // outcome is the same skip with a diagnostic that says why.
+                let captures = self.local_class_captures(scope, &cl);
+                if let Some(captured) = &captures.unsupported {
                     self.diags.error(
                         cl.span,
                         format!(
@@ -38424,6 +38491,9 @@ impl<'a> Checker<'a> {
                             class_declaration_label(&cl.name)
                         ),
                     );
+                } else if !captures.values.is_empty() {
+                    self.discovered_local_class_captures
+                        .insert(d, captures.values);
                 }
                 let saved = self.take_body_state();
                 self.check_class(scope, &cl, d);

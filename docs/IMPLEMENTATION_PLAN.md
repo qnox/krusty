@@ -4089,23 +4089,26 @@ steps have landed; the remaining three are blocked on lowering, not on the front
   declaration; the file walk skips that declaration so it is not checked twice. Signature collection
   still sees only the hoisted declaration, so the enclosing declaration's type parameters are handed
   to it explicitly (`local_class_enclosing_tparams`).
-- ⛔ **A capturing local class is rejected**, not emitted. Resolving a capture is now possible;
-  emitting one is not — the class needs a constructor parameter carrying the captured value and
-  lowering does not synthesize it. Rejecting keeps the old outcome (the file skips) with a
-  diagnostic that says why. Two box-corpus cases proved the alternative is a miscompile
-  (`NoSuchMethodError` on construction), both capturing in a primary-constructor parameter DEFAULT.
+- ✅ **A local class captures enclosing bindings.** The checker decides WHAT is captured (it is the
+  only place the enclosing bindings exist); lowering decides what that costs — a leading constructor
+  parameter and field per capture, supplied by `Lower::emit_new`, the single seam every construction
+  goes through, so no argument-mapping arm can forget them. `emit_new` returns `Option` for that
+  reason. `ClassSig::ctor_params` stays the source signature; a latent off-by-captures index into it
+  (harmless while only anonymous objects had captures, since those have no source arguments) is
+  fixed. Box corpus: 3540 → 3544 compiled, 0 FAIL.
+- ⛔ **Four capture shapes stay rejected**: the enclosing INSTANCE, a local function, a reassigned
+  `var`, and a capture read during construction (initializer, `init`, base-constructor argument,
+  secondary constructor, parameter default). Two box-corpus cases proved the last one is a
+  miscompile if admitted (`NoSuchMethodError` on construction).
 
 Remaining, in order:
 
-1. **Lower a local class's captures as leading constructor parameters.** The anonymous-object
-   machinery (`AnonymousObjectCapture`, `anonymous_object_captures_by_class` →
-   `Lower::ctor_fields`) is the model, but it cannot be reused as-is: it appends the captures to
-   `ClassSig::ctor_params`, which works only because an anonymous object has no source-level
-   constructor arguments. A local class does, so its captures have to be HIDDEN leading parameters —
-   invisible to source-level constructor resolution, prepended at every construction site (which is
-   `expr_inner_call`'s ordinary source-constructor path, not the anonymous-object special case), and
-   inherited by the `$default` synthetic constructor. Capture of the enclosing INSTANCE
-   (`this$0`) is the second half of the same step.
+1. **The four unmodelled capture shapes.** The enclosing instance is the valuable one: it is the
+   `AnonymousObjectCaptureSource::EnclosingInstance` half of the same mechanism, and
+   `lower_anonymous_capture` already lowers it — what is missing is deciding, in the checker, that
+   the class needs the receiver rather than a binding. A capture read during construction needs the
+   capture fields stored before the initializer runs (they already are) and a `$default` synthetic
+   constructor that carries them (it does not).
 2. **Register the local classifier without the parser rename.** `scope_local_classes` gives each
    local class a file-unique name and rewrites its `Expr::Name` construction references, which is
    what makes the hoisted declaration resolvable. The replacement is a `StmtId`-derived internal

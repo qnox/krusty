@@ -4058,13 +4058,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   own property shadows a same-named member of the enclosing class. Signature collection sees the
   hoisted declaration without that context, so the enclosing declaration's type parameters are
   supplied to it explicitly (`local_class_enclosing_tparams`).
-  Capturing an enclosing local (or reading a member through the enclosing instance) is REJECTED:
-  lowering does not synthesize the constructor parameter carrying the captured value, and emitting
-  the class without it produced `NoSuchMethodError` on construction
-  (`codegen/box/localClasses/capturingInDefaultConstructorParameter.kt`). The capture check is
-  syntactic and conservative — over-reporting skips a file, under-reporting miscompiles — and covers
-  member bodies, initializers, `init` blocks, secondary constructors, and primary-constructor
-  parameter DEFAULTS (the last is where the box corpus caught it).
+  WHAT a local class captures is decided in that scope — the only place the enclosing bindings
+  exist — and recorded as `TypeInfo::local_class_captures_by_class`. How a capture is represented is
+  lowering's decision: each captured binding becomes a leading constructor parameter and field, and
+  `Lower::emit_new` supplies them ahead of the source arguments at every construction, so no
+  argument-mapping arm can forget them. `ClassSig::ctor_params` stays the SOURCE signature and is
+  indexed by source position — captures are not in it.
+  Four capture shapes are NOT modelled yet and are rejected (the file skips): the enclosing INSTANCE
+  (a receiver, not a binding in the chain), a local function (which carries captures of its own), a
+  reassigned `var` (shared mutable state, not capturable by value), and a capture read during
+  CONSTRUCTION — an initializer, an `init` block, a base-constructor argument, a secondary
+  constructor, or a primary-constructor parameter default. The capture scan is syntactic and
+  conservative: over-reporting skips a file, under-reporting emits a class without what it needs,
+  which the box corpus caught as `NoSuchMethodError` on construction
+  (`codegen/box/localClasses/capturingInDefaultConstructorParameter.kt`).
   Tests: `tests/local_class_scope_e2e.rs`.
 
 ## 8. Success criteria for the PoC
