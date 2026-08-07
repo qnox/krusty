@@ -4034,7 +4034,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A type parameter is a lexical binding, declared on the rung of the declaration that introduces
   it.** `class C<T>` binds `T` on its CLASS rung, `fun <T> f()` on the function's own rung — one
   namespace (`Ns::Classifier`), different declaring rung — so a parameter retires with its
-  declaration instead of being replaced wholesale on a scope shared with siblings. `reified` is a
+  declaration instead of being replaced wholesale on a scope shared with siblings. The rung KIND
+  says which it is: a declaration's signature rung is `ScopeKind::Function` (carrying no receiver),
+  never the `Block` kind reserved for `if`/`when` branches, loop bodies and lambdas. `reified` is a
   field of that binding rather than a parallel set, so the two cannot drift and an
   `inline fun <reified T>` cannot leave `T` reified for the next declaration that reuses the name
   (kotlinc: `cannot use 'T' as reified type parameter. Use a class instead.`).
