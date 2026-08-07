@@ -4073,3 +4073,47 @@ property references, and the harness does supply `kotlin-reflect.jar`); what was
   CLASSPATH target had its value-class mangle applied twice (`decode-X4E9McA-X4E9McA` — a method that
   exists nowhere), and a generic function's `@Metadata` recorded an INFERRED type-parameter return as
   `Any` with no JVM signature handle, which left reflection unable to identify the method.
+
+## Phase — local classifiers and type parameters in the lexical scope chain  ◐
+
+Removing the parser's local-class hoisting hack in favour of proper lexical scoping. Two of the five
+steps have landed; the remaining three are blocked on lowering, not on the front end.
+
+- ✅ **Type parameters are classifier bindings.** `Scope` no longer carries a `RefCell<TParams>`
+  replaced wholesale per declaration, nor a parallel `reified` set. Both live in the binding list as
+  `ScopeBinding::TypeParam { bound, extra_bounds, reified }` under `Ns::Classifier`, declared on the
+  rung of the declaration that introduces them. The lookup walk stops at a class rung with
+  `carries_outer == false` — the same cut `implicit_receivers` makes. See `docs/SPEC.md`.
+- ✅ **A local class is checked from its `Stmt::LocalClass`**, in the scope it was written in, on a
+  rung with `carries_outer == true`. `File::local_class_decls` links the statement to the hoisted
+  declaration; the file walk skips that declaration so it is not checked twice. Signature collection
+  still sees only the hoisted declaration, so the enclosing declaration's type parameters are handed
+  to it explicitly (`local_class_enclosing_tparams`).
+- ⛔ **A capturing local class is rejected**, not emitted. Resolving a capture is now possible;
+  emitting one is not — the class needs a constructor parameter carrying the captured value and
+  lowering does not synthesize it. Rejecting keeps the old outcome (the file skips) with a
+  diagnostic that says why. Two box-corpus cases proved the alternative is a miscompile
+  (`NoSuchMethodError` on construction), both capturing in a primary-constructor parameter DEFAULT.
+
+Remaining, in order:
+
+1. **Lower a local class's captures as leading constructor parameters.** The anonymous-object
+   machinery (`AnonymousObjectCapture`, `anonymous_object_captures_by_class` →
+   `Lower::ctor_fields`) is the model, but it cannot be reused as-is: it appends the captures to
+   `ClassSig::ctor_params`, which works only because an anonymous object has no source-level
+   constructor arguments. A local class does, so its captures have to be HIDDEN leading parameters —
+   invisible to source-level constructor resolution, prepended at every construction site (which is
+   `expr_inner_call`'s ordinary source-constructor path, not the anonymous-object special case), and
+   inherited by the `$default` synthetic constructor. Capture of the enclosing INSTANCE
+   (`this$0`) is the second half of the same step.
+2. **Register the local classifier without the parser rename.** `scope_local_classes` gives each
+   local class a file-unique name and rewrites its `Expr::Name` construction references, which is
+   what makes the hoisted declaration resolvable. The replacement is a `StmtId`-derived internal
+   name plus a `ScopeBinding::LocalClass` in `Ns::Classifier`, consulted by the checker's classifier
+   chains (`scoped_classifier_name` and the `resolve_ty` heads) so the SOURCE name resolves
+   lexically. Note those chains take `&self`, not a scope — each head that has a scope in hand needs
+   a scope-aware variant.
+3. **Delete `hoist_local_classes` and `scope_local_classes`.** Only sound once (1) and (2) hold:
+   deleting the hoist today costs the 7 tests in `tests/local_class_e2e.rs` and
+   `tests/local_class_scoping_e2e.rs` outright, because the hoisted declaration is what signature
+   collection and lowering consume.
