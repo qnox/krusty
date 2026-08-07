@@ -509,6 +509,26 @@ mod tests {
     }
 
     #[test]
+    fn a_function_rung_does_not_cut_the_type_parameter_walk() {
+        // `class C<T> { fun <U> m() { … } }`: the method's parameters sit on ITS rung and the
+        // class's on the class rung — one namespace, different declaring rung — and the body sees
+        // both. Only a class rung that drops its outer instance ends the walk.
+        let root: Scope<'_, u32> = Scope::root();
+        let class_scope = root.child(class("C", false));
+        class_scope.rebind("T", Ns::Classifier, 1);
+        let method = class_scope.child(ScopeKind::Function { receiver: None });
+        method.rebind("U", Ns::Classifier, 2);
+        let body = method.child(ScopeKind::Block);
+        assert_eq!(classifier(&body, "U"), Some(2));
+        assert_eq!(classifier(&body, "T"), Some(1));
+        assert_eq!(
+            classifier(&class_scope, "U"),
+            None,
+            "the method's parameters retire with the method's rung"
+        );
+    }
+
+    #[test]
     fn an_inner_type_parameter_shadows_an_enclosing_one_of_the_same_name() {
         let root: Scope<'_, u32> = Scope::root();
         let class_scope = root.child(class("A", false));

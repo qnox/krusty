@@ -11401,6 +11401,11 @@ impl CheckerScope<'_> {
     /// The rung that calls this OWNS the parameters: they retire with it. Nothing replaces or
     /// removes a rung's parameters afterwards, which is what keeps a sibling declaration from
     /// inheriting them.
+    ///
+    /// This deliberately does NOT report a redeclaration, even though `Ns::Classifier` could: a
+    /// class rung also carries the parameters of the enclosing classes an `inner class` can reach,
+    /// and `class A<T> { inner class B<T> }` shadows rather than conflicts. The
+    /// "conflicting declaration" checks stay on each declaration's OWN parameter list.
     fn declare_tparams(&self, names: &[String], tparams: &TParams, reified: impl Fn(&str) -> bool) {
         for name in names {
             self.rebind(
@@ -12669,7 +12674,7 @@ fn preinfer_returns_pass_with_owners(
         if let Decl::Fun(f) = file.decl(d) {
             if function_needs_return_preinfer(f) {
                 let resolve = class_internal_resolver(pre.syms);
-                let decl_scope = scope.child(ScopeKind::Block);
+                let decl_scope = scope.child(ScopeKind::Function { receiver: None });
                 let scope = &decl_scope;
                 scope.declare_tparams(
                     &f.type_params,
@@ -12727,7 +12732,7 @@ fn preinfer_returns_pass_with_owners(
                     .count();
                 // The property's own type parameters get their own rung, so they retire with it
                 // rather than staying visible to the next property in the loop.
-                let property_scope = scope.child(ScopeKind::Block);
+                let property_scope = scope.child(ScopeKind::Function { receiver: None });
                 let scope = &property_scope;
                 scope.declare_tparams(
                     &property.type_params,
@@ -12767,7 +12772,7 @@ fn preinfer_returns_pass_with_owners(
             }
             for m in &cl.methods {
                 if function_needs_return_preinfer(m) {
-                    let method_scope = scope.child(ScopeKind::Block);
+                    let method_scope = scope.child(ScopeKind::Function { receiver: None });
                     let scope = &method_scope;
                     scope.declare_tparams(
                         &m.type_params,
@@ -20561,7 +20566,7 @@ impl<'a> Checker<'a> {
     /// CALLER's scope would leave them visible to every later declaration in the file.
     fn check_top_level_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, d: DeclId) {
         let resolve = class_internal_resolver(self.syms);
-        let decl_scope = scope.child(ScopeKind::Block);
+        let decl_scope = scope.child(ScopeKind::Function { receiver: None });
         let scope = &decl_scope;
         scope.declare_tparams(
             &f.type_params,
@@ -20580,7 +20585,7 @@ impl<'a> Checker<'a> {
         // scope over its receiver, declared type, and accessor bodies — bind them (erased) so
         // `T` resolves rather than reading as an unresolved reference.
         let resolve = class_internal_resolver(self.syms);
-        let decl_scope = scope.child(ScopeKind::Block);
+        let decl_scope = scope.child(ScopeKind::Function { receiver: None });
         let scope = &decl_scope;
         scope.declare_tparams(
             &p.type_params,
@@ -21315,7 +21320,7 @@ impl<'a> Checker<'a> {
                     // with the iteration. The hidden-binding restore below must still land in
                     // `body_scope` (it has to outlive this property), so that rung is named.
                     let body_scope = scope;
-                    let property_scope = scope.child(ScopeKind::Block);
+                    let property_scope = scope.child(ScopeKind::Function { receiver: None });
                     let scope = &property_scope;
                     scope.declare_tparams(
                         &bp.type_params,
@@ -21644,7 +21649,7 @@ impl<'a> Checker<'a> {
         let resolve = class_internal_resolver(self.syms);
         // The method's own type parameters (and its `reified` marks) belong to a rung of its own:
         // the caller's scope is the CLASS rung, shared with every sibling member.
-        let method_scope = scope.child(ScopeKind::Block);
+        let method_scope = scope.child(ScopeKind::Function { receiver: None });
         let scope = &method_scope;
         scope.declare_tparams(
             &f.type_params,
