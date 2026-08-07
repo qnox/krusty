@@ -1099,10 +1099,32 @@ fn lower_file_at_reporting_impl(
                 })
             })
             .map(str::to_string);
+            // A LOCAL class writes its supertypes by their SOURCE name, while the hoisted
+            // declarations are registered under a name qualified by the declaration they were
+            // written in — so no AST name matches. The checker already resolved them; take its
+            // answer, and only when it names a declaration in THIS file, which is exactly what
+            // `resolve_file_supertype` establishes for every other class.
+            let sig_supertype = |want_iface: bool, position: usize| -> Option<String> {
+                let sig = lo.syms.class_by_internal(&internal)?;
+                let resolved = if want_iface {
+                    sig.interfaces.iter().nth(position)?
+                } else {
+                    sig.super_internal_name()?
+                };
+                file.decls
+                    .iter()
+                    .any(|&d| {
+                        matches!(file.decl(d), Decl::Class(bc)
+                            if bc.is_interface() == want_iface
+                                && type_name(&class_internal(file, &bc.name)) == resolved)
+                    })
+                    .then(|| resolved.render())
+            };
             let base_class = c.base_class.as_deref().or(parenless_base.as_deref());
             let super_internal: Option<TypeName> = match base_class {
                 Some(base) => {
-                    let file_base = resolve_file_supertype(base, false);
+                    let file_base =
+                        resolve_file_supertype(base, false).or_else(|| sig_supertype(false, 0));
                     let resolved = file_base.as_deref().map(type_name).unwrap_or_else(|| {
                         lo.syms
                             .class_names
@@ -1132,10 +1154,11 @@ fn lower_file_at_reporting_impl(
                 if parenless_base.as_deref() == Some(st.as_str()) {
                     continue;
                 }
-                let resolved = if let Some(internal) = resolve_file_supertype(st, true) {
-                    type_name(&internal)
-                } else {
-                    lo.syms.class_names.get(st).unwrap_or_else(|| type_name(st))
+                let resolved = match resolve_file_supertype(st, true)
+                    .or_else(|| sig_supertype(true, iface_internals.len()))
+                {
+                    Some(internal) => type_name(&internal),
+                    None => lo.syms.class_names.get(st).unwrap_or_else(|| type_name(st)),
                 };
                 if symbols
                     .inheritance_shape_name(resolved)
@@ -1231,6 +1254,7 @@ fn lower_file_at_reporting_impl(
             let id = lo.ir.add_class(IrClass {
                 fq_name: type_name(&internal),
                 is_inner_class: inner_outer.is_some(),
+                is_local_class: file.is_local_declaration(d),
                 is_value: c.is_value,
                 is_data: c.is_data,
                 decl_line: c.decl_line,
@@ -2314,6 +2338,7 @@ fn lower_file_at_reporting_impl(
                 let comp_id = lo.ir.add_class(IrClass {
                     fq_name: type_name(&comp_fq),
                     is_inner_class: false,
+                    is_local_class: false,
                     is_value: false,
                     is_data: false,
                     decl_line: c.companion_decl_line,
@@ -4382,6 +4407,7 @@ fn lower_file_at_reporting_impl(
                         let sub_id = lo.ir.add_class(IrClass {
                             fq_name: type_name(&sub_fq),
                             is_inner_class: false,
+                            is_local_class: false,
                             is_value: false,
                             is_data: false,
                             decl_line: 0,
@@ -7301,6 +7327,20 @@ impl<'a> Lower<'a> {
     /// verbatim as a class constant (`Array<Any>::class` → `[Ljava/lang/Object;`). Primitive literals use
     /// the same boxed reference representation as ordinary `Int::class` literals.
     fn class_literal_ldc_internal(&self, ty: Ty) -> Option<String> {
+        // A class literal on a LOCAL class is skipped: reflection reports its `simpleName` from the
+        // Kotlin `@Metadata`, which marks a classifier local through
+        // `StringTableTypes.localName` — a marking krusty does not emit, so the name comes back as
+        // the qualified `owner$Local` instead of `Local`
+        // (`codegen/box/reflection/classes/localClassSimpleName.kt`). The class file's own
+        // `InnerClasses` and `EnclosingMethod` are already correct; only the metadata side is
+        // missing. Skipping the file is sound; reporting a wrong name is not.
+        if ty
+            .obj_internal()
+            .and_then(|internal| self.class_info_name(internal))
+            .is_some_and(|info| self.ir.classes[info.id as usize].is_local_class)
+        {
+            return None;
+        }
         let ty = ty.jvm_boxed_ref().unwrap_or(ty);
         let d = self.runtime.type_descriptor(ty)?;
         Some(
@@ -10283,6 +10323,7 @@ impl<'a> Lower<'a> {
         let class = IrClass {
             fq_name: type_name(&internal),
             is_inner_class: false,
+            is_local_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -12630,7 +12671,20 @@ impl<'a> Lower<'a> {
                     Some(self.emit_get_value(v)),
                 ),
                 None => {
-                    let named_owner = type_name(&class_internal(self.afile, &rn));
+                    // A statement-position classifier is registered under a name qualified by the
+                    // declaration it was written in, so the SOURCE name names no class here. The
+                    // reference's own type carries the receiver the checker resolved.
+                    let named_owner = Some(type_name(&class_internal(self.afile, &rn)))
+                        .filter(|candidate| self.class_info_name(*candidate).is_some())
+                        .or_else(|| {
+                            match crate::types::callable_reference_function_type(self.info.ty(e)) {
+                                Ty::Fun(signature) => {
+                                    signature.params.first().and_then(|r| r.obj_internal())
+                                }
+                                _ => None,
+                            }
+                        })
+                        .unwrap_or_else(|| type_name(&class_internal(self.afile, &rn)));
                     let source_object = match self.info.expr_lowers.get(&recv) {
                         Some(ExprLowering::ObjectValue { internal }) => Some(*internal),
                         _ => self
@@ -12790,6 +12844,7 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_inner_class: false,
+            is_local_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -12911,6 +12966,7 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_inner_class: false,
+            is_local_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -13222,6 +13278,7 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_inner_class: false,
+            is_local_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -13366,8 +13423,13 @@ impl<'a> Lower<'a> {
         let (capture, recv_ty): (Option<u32>, Ty) = match self.lookup(&rn) {
             Some((v, ty)) => (Some(self.emit_get_value(v)), ty),
             None => {
-                let internal = class_internal(self.afile, &rn);
-                let internal_name = type_name(&internal);
+                // A statement-position classifier is registered under a name qualified by the
+                // declaration it was written in, so the SOURCE name resolves to nothing here. For an
+                // UNBOUND reference the checker already recorded the receiver class: it is the
+                // reference's own first parameter.
+                let internal_name = Some(type_name(&class_internal(self.afile, &rn)))
+                    .filter(|candidate| self.class_info_name(*candidate).is_some())
+                    .or_else(|| params.first().and_then(|receiver| receiver.obj_internal()))?;
                 let cid = self.class_info_name(internal_name)?.id;
                 if self.ir.classes[cid as usize].is_object {
                     let inst = self.emit_static_instance(cid, cid, "INSTANCE");
@@ -13932,6 +13994,7 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_inner_class: false,
+            is_local_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -17729,16 +17792,26 @@ impl<'a> Lower<'a> {
             // A dotted CLASSPATH nested type (`Subject.User`) → `Outer$Nested`, matching the checker's
             // `resolve_ty` — so an `is`/`as` target on such a type resolves the same internal name.
             Ty::obj(&internal)
-        } else {
+        } else if let Some(internal) = self
+            .cur_class
+            .as_ref()
+            .map(|c| format!("{c}${}", r.name))
+            .filter(|n| self.contains_class(n))
+        {
             // A sibling nested type unqualified within the enclosing class body (`is Inner`/`as Inner` /
             // `Inner` type in `class Outer { class Inner }`) → `Outer$Inner`, matching the checker's
             // nested-type scoping (`resolve_ty`/`resolve_ty_no_diag`).
-            let internal = self
-                .cur_class
-                .as_ref()
-                .map(|c| format!("{c}${}", r.name))
-                .filter(|n| self.contains_class(n))?;
             Ty::obj(&internal)
+        } else {
+            // Every name-based route above has missed. A classifier declared in STATEMENT position
+            // is visible only in the scope it was written in, which no name lookup here can
+            // reconstruct — but the checker resolved this very reference there and recorded the
+            // answer against its span. Take it.
+            let internal = self
+                .info
+                .resolved_type_ref(r)
+                .filter(|internal| self.contains_class(&internal.render()))?;
+            Ty::obj_name(internal)
         };
         if t.is_reference() {
             Some(t)

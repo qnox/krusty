@@ -749,6 +749,10 @@ pub struct IrClass {
     /// A language-level non-static nested class. Backends consume this declaration property directly;
     /// a synthetic receiver field or its physical name does not imply inner-class semantics.
     pub is_inner_class: bool,
+    /// A classifier declared in STATEMENT position. Its name is qualified by the declaration it was
+    /// written in, so it contains a `$` that names no class — a local class is not a member of
+    /// anything, and the JVM says so with `outer_class_info_index = 0` in its `InnerClasses` entry.
+    pub is_local_class: bool,
     /// `@JvmInline value class` — a single-field class represented unboxed (as its one field's type) by
     /// the JVM `jvm::value_classes` IR pass. The IR otherwise treats it as a plain class.
     pub is_value: bool,
@@ -2318,6 +2322,7 @@ mod tests {
         IrClass {
             fq_name: fq.into(),
             is_inner_class: false,
+            is_local_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,

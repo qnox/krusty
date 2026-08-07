@@ -4106,20 +4106,25 @@ steps have landed; the remaining three are blocked on lowering, not on the front
   parameter default). Two box-corpus cases proved the last one is a miscompile if admitted
   (`NoSuchMethodError` on construction).
 
+- ✅ **The parser's rename/rewrite pass is gone.** A hoisted local class is named after the
+  declaration it was written in; the SOURCE name is a `ScopeBinding::LocalClass` in `Ns::Classifier`
+  and the checker's classifier chains consult the scope first. Signature collection and lowering
+  have no chain, so they take the checker's recorded answers: `TypeInfo::resolved_type_ref` for a
+  type reference, the reference's own first parameter for an unbound `Type::m`, `ClassSig` for a
+  supertype, and an explicit sibling map for collection.
+
 Remaining, in order:
 
 1. **The three unmodelled capture shapes.** A capture read during construction needs a `$default`
    synthetic constructor that carries the captures (it does not today); the capture fields are
    already stored before the initializers run. A reassigned `var` needs the shared-cell
    representation local functions already use.
-2. **Register the local classifier without the parser rename.** `scope_local_classes` gives each
-   local class a file-unique name and rewrites its `Expr::Name` construction references, which is
-   what makes the hoisted declaration resolvable. The replacement is a `StmtId`-derived internal
-   name plus a `ScopeBinding::LocalClass` in `Ns::Classifier`, consulted by the checker's classifier
-   chains (`scoped_classifier_name` and the `resolve_ty` heads) so the SOURCE name resolves
-   lexically. Note those chains take `&self`, not a scope — each head that has a scope in hand needs
-   a scope-aware variant.
-3. **Delete `hoist_local_classes` and `scope_local_classes`.** Only sound once (1) and (2) hold:
-   deleting the hoist today costs the 7 tests in `tests/local_class_e2e.rs` and
-   `tests/local_class_scoping_e2e.rs` outright, because the hoisted declaration is what signature
-   collection and lowering consume.
+2. **The Kotlin-metadata local-class marking.** `StringTableTypes.localName` names the string
+   indices that denote local classifiers; reflection reads it to decide whether `simpleName` is the
+   last `$` segment or the whole qualified name. Without it a class literal on a local class is
+   skipped, which costs `localClasses/localGenericWithTypeParameters.kt` as collateral (it takes a
+   local class literal but never reads its name). Two encodings of the field were tried and neither
+   changed the reported name, so the reader's expectation needs establishing first — decode a
+   kotlinc-produced local class's metadata and compare.
+3. **`hoist_local_classes` itself.** The hoisted `Decl::Class` is still what signature collection and
+   lowering consume; removing it means teaching both to read a classifier out of `stmt_arena`.

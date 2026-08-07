@@ -208,3 +208,81 @@ fn capturing_an_unboxed_value_class_receiver_is_rejected() {
         fun box(): String = V(\"OK\").m()\n";
     assert_rejected(SRC);
 }
+
+/// kotlinc: accepted.
+///
+/// Two local classes of the same name in different bodies. Neither reference is rewritten: each
+/// hoisted declaration is named after the declaration it was written in, and the SOURCE name
+/// resolves through the scope chain where it stands.
+#[test]
+fn same_named_local_classes_resolve_to_their_own_declaration() {
+    const SRC: &str = "fun f1(): String {\n\
+        \x20   class A(val x: String) { fun g() = x }\n\
+        \x20   return A(\"O\").g()\n\
+        }\n\
+        fun f2(): String {\n\
+        \x20   class A(val y: String) { fun g() = y + \"K\" }\n\
+        \x20   return A(\"\").g()\n\
+        }\n\
+        fun box(): String = f1() + f2()\n";
+    assert_eq!(run(SRC).expect("each resolves to its own"), "OK");
+}
+
+/// kotlinc: accepted.
+///
+/// A local class names a sibling local class as its supertype by the SOURCE name. Signature
+/// collection has no scope chain, so it is handed the body's classifiers explicitly.
+#[test]
+fn a_local_class_inherits_from_a_sibling_local_class() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20   open class Base { open fun name() = \"FAIL\" }\n\
+        \x20   class Derived : Base() { override fun name() = \"OK\" }\n\
+        \x20   val b: Base = Derived()\n\
+        \x20   return b.name()\n\
+        }\n";
+    assert_eq!(run(SRC).expect("local supertype resolves"), "OK");
+}
+
+/// kotlinc: accepted.
+///
+/// A local class in an `is`/`as` target. Lowering has no scope chain either — it falls back to the
+/// type reference the checker already resolved, keyed by span.
+#[test]
+fn a_local_class_is_a_type_test_target() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20   class L(val v: String)\n\
+        \x20   val a: Any = L(\"OK\")\n\
+        \x20   return if (a is L) (a as L).v else \"FAIL\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("is/as on a local class"), "OK");
+}
+
+/// kotlinc: accepted.
+///
+/// An unbound member reference whose receiver is a local class. The AST name names no class after
+/// hoisting, so lowering takes the receiver from the reference's own first parameter — the type the
+/// checker recorded.
+#[test]
+fn an_unbound_member_reference_on_a_local_class() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20   class L { fun foo(): String = \"OK\" }\n\
+        \x20   return (L::foo)(L())\n\
+        }\n";
+    assert_eq!(run(SRC).expect("unbound ref on a local class"), "OK");
+}
+
+/// kotlinc: accepted.
+///
+/// An `inner class` of a local class, constructed through an instance of it. The nested declaration
+/// is hoisted during the local class's parse and has to be requalified with it — including the
+/// `inner_of` edge its synthetic outer-instance field is typed from.
+#[test]
+fn an_inner_class_of_a_local_class() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20   class Outer(val tag: String) {\n\
+        \x20       inner class Inner { fun read() = tag }\n\
+        \x20   }\n\
+        \x20   return Outer(\"OK\").Inner().read()\n\
+        }\n";
+    assert_eq!(run(SRC).expect("inner class of a local class"), "OK");
+}

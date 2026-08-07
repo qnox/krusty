@@ -575,6 +575,15 @@ impl ClassWriter {
         ));
     }
 
+    /// Set only the enclosing CLASS. The JVM spec allows `method_index = 0` — "not immediately
+    /// enclosed by a method or constructor" — and the attribute's presence is what makes reflection
+    /// treat the class as local rather than top-level, which is what decides `simpleName`. Used
+    /// where the enclosing method's descriptor is not reconstructable; a wrong one would make
+    /// `Class.getEnclosingMethod()` throw, while absent is well-defined.
+    pub fn set_enclosing_class(&mut self, owner: &str) {
+        self.enclosing_method = Some((owner.to_string(), String::new(), String::new()));
+    }
+
     /// Register a candidate `InnerClasses` entry (a nested class in this file). `finish` emits it only
     /// if `inner` is referenced as a class constant. Register the whole file's nest on every writer —
     /// the per-class filter then yields exactly the entries kotlinc emits for that class.
@@ -2030,7 +2039,12 @@ impl ClassWriter {
         let enclosing_method_attr = self.enclosing_method.take().map(|(owner, method, desc)| {
             let name = self.cp.utf8("EnclosingMethod");
             let class_idx = self.cp.class(&owner);
-            let nat_idx = self.cp.name_and_type(&method, &desc);
+            // An empty method name is the class-only form: `method_index = 0`.
+            let nat_idx = if method.is_empty() {
+                0
+            } else {
+                self.cp.name_and_type(&method, &desc)
+            };
             let mut body = Vec::new();
             u2(&mut body, class_idx);
             u2(&mut body, nat_idx);

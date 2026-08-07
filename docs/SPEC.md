@@ -4060,6 +4060,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   own property shadows a same-named member of the enclosing class. Signature collection sees the
   hoisted declaration without that context, so the enclosing declaration's type parameters are
   supplied to it explicitly (`local_class_enclosing_tparams`).
+  A local class's hoisted declaration is named after the declaration it was written in
+  (`Outer.m.Local` → `Outer$m$Local`), which is both how kotlinc names one and the spelling every
+  lexical-prefix walk in the compiler already understands; nothing in the source is rewritten to
+  match, because the SOURCE name is bound in `Ns::Classifier` and resolves where it was written.
+  A local class is NOT a member class: its `InnerClasses` entry carries `outer_class_info_index = 0`
+  and it gets an `EnclosingMethod` attribute (class only — the JVM spec permits `method_index = 0`,
+  and a wrong descriptor would make `Class.getEnclosingMethod()` throw). The class that CONSTRUCTS
+  it must carry the same `InnerClasses` entry, including the file facade: reflection cross-checks
+  the two sides and throws `IncompatibleClassChangeError` when only one has it.
+  A class literal on a local class is rejected (the file skips): reflection reports `simpleName`
+  from the Kotlin `@Metadata` local-class marking, which krusty does not emit, so the name would come
+  back qualified (`codegen/box/reflection/classes/localClassSimpleName.kt`).
+
   WHAT a local class captures is decided in that scope — the only place the enclosing bindings
   exist — and recorded as `TypeInfo::local_class_captures_by_class`. How a capture is represented is
   lowering's decision: each captured binding becomes a leading constructor parameter and field, and

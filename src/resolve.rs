@@ -4627,6 +4627,10 @@ fn collect_signatures_with_cp_impl(
         .iter()
         .map(local_class_enclosing_tparams)
         .collect::<Vec<_>>();
+    let local_class_siblings = files
+        .iter()
+        .map(local_class_sibling_names)
+        .collect::<Vec<_>>();
     let source_classifier_visibility = files
         .iter()
         .flat_map(|file| {
@@ -5334,6 +5338,16 @@ fn collect_signatures_with_cp_impl(
                         for (simple, (_, internal)) in lexical_nested {
                             // A lexical nested classifier shadows top-level/imported classifiers.
                             ext.insert_name(simple, internal);
+                        }
+                        // A LOCAL class's siblings — the other classes declared in the same body —
+                        // are visible to it by their SOURCE name (`class Derived : Base()`), which
+                        // is not the name their hoisted declaration was registered under. The
+                        // checker resolves those through the scope chain; collection has none, so
+                        // the body's classifiers are handed to it.
+                        for (simple, internal) in
+                            local_class_siblings[i].get(&d).into_iter().flatten()
+                        {
+                            ext.insert_name(simple.clone(), *internal);
                         }
                         ext
                     };
@@ -11424,17 +11438,31 @@ impl CheckerScope<'_> {
     /// parameter here. Walks [`classifier_rungs`](scope::Scope::classifier_rungs), so an outer
     /// declaration's parameters stop at a class rung that does not carry its outer instance.
     fn tparam_binding(&self, name: &str) -> Option<(Ty, Vec<Ty>, bool)> {
-        self.classifier_rungs().find_map(|rung| {
-            match rung.own_binding(name, Ns::Classifier)? {
+        self.classifier_rungs()
+            .find_map(|rung| match rung.own_binding(name, Ns::Classifier)? {
                 ScopeBinding::TypeParam {
                     bound,
                     extra_bounds,
                     reified,
                 } => Some((bound, extra_bounds, reified)),
-                // `Ns::Classifier` holds nothing else.
+                ScopeBinding::LocalClass(_) => None,
                 _ => None,
-            }
-        })
+            })
+    }
+
+    /// The internal name a statement-position classifier is registered under, if `name` denotes one
+    /// here.
+    ///
+    /// Unlike a type parameter this walks the WHOLE chain, not [`classifier_rungs`]: a type
+    /// parameter is only meaningful where the instance supplying it is reachable, while a class
+    /// NAME needs nothing — a local `object` may name a sibling local class even though it cuts the
+    /// receiver chain.
+    fn local_classifier(&self, name: &str) -> Option<TypeName> {
+        self.ancestors()
+            .find_map(|rung| match rung.own_binding(name, Ns::Classifier)? {
+                ScopeBinding::LocalClass(internal) => Some(internal),
+                _ => None,
+            })
     }
 
     /// The type parameters visible here, assembled from the classifier bindings of every rung in
@@ -11529,19 +11557,27 @@ enum ScopeBinding {
         extra_bounds: Vec<Ty>,
         reified: bool,
     },
+    /// A classifier declared in statement position (`fun f() { class L … }`), bound under its
+    /// SOURCE name to the internal name its hoisted declaration was registered under. This is what
+    /// replaced rewriting the references in the AST: the name resolves where it was written.
+    LocalClass(TypeName),
 }
 
 impl ScopeBinding {
     fn value(&self) -> Option<Local> {
         match self {
             ScopeBinding::Value(local) => Some(*local),
-            ScopeBinding::Funs(_) | ScopeBinding::TypeParam { .. } => None,
+            ScopeBinding::Funs(_)
+            | ScopeBinding::TypeParam { .. }
+            | ScopeBinding::LocalClass(_) => None,
         }
     }
     fn funs(&self) -> &[(StmtId, Signature)] {
         match self {
             ScopeBinding::Funs(entries) => entries,
-            ScopeBinding::Value(_) | ScopeBinding::TypeParam { .. } => &[],
+            ScopeBinding::Value(_)
+            | ScopeBinding::TypeParam { .. }
+            | ScopeBinding::LocalClass(_) => &[],
         }
     }
 }
@@ -12337,9 +12373,17 @@ impl AnonymousLexicalClassScope {
 /// inside it (`any_child_stmt` stops at the local class, but its members are written in the same
 /// lexical scope).
 fn reachable_stmts(file: &File, root: ExprId) -> Vec<StmtId> {
+    reachable_nodes(file, root).0
+}
+
+/// Every `StmtId` and `ExprId` reachable from `root`, including the member bodies of a local class
+/// declared inside it (`any_child_stmt` stops at the local class, but its members are written in the
+/// same lexical scope).
+fn reachable_nodes(file: &File, root: ExprId) -> (Vec<StmtId>, Vec<ExprId>) {
     let mut exprs: Vec<ExprId> = vec![root];
     let mut stmts: Vec<StmtId> = Vec::new();
-    let mut out: Vec<StmtId> = Vec::new();
+    let mut out_stmts: Vec<StmtId> = Vec::new();
+    let mut out_exprs: Vec<ExprId> = Vec::new();
     let mut guard = 0usize;
     loop {
         guard += 1;
@@ -12347,6 +12391,7 @@ fn reachable_stmts(file: &File, root: ExprId) -> Vec<StmtId> {
             break;
         }
         if let Some(e) = exprs.pop() {
+            out_exprs.push(e);
             file.any_child_expr(
                 e,
                 &mut |child| {
@@ -12359,7 +12404,7 @@ fn reachable_stmts(file: &File, root: ExprId) -> Vec<StmtId> {
                 },
             );
         } else if let Some(s) = stmts.pop() {
-            out.push(s);
+            out_stmts.push(s);
             file.any_child_stmt(s, &mut |child| {
                 exprs.push(child);
                 false
@@ -12375,7 +12420,7 @@ fn reachable_stmts(file: &File, root: ExprId) -> Vec<StmtId> {
             break;
         }
     }
-    out
+    (out_stmts, out_exprs)
 }
 
 /// The type parameters visible to each statement-position local class, taken from the declaration
@@ -12419,6 +12464,86 @@ fn local_class_enclosing_tparams(file: &File) -> HashMap<DeclId, Vec<String>> {
     for names in out.values_mut() {
         names.sort();
         names.dedup();
+    }
+    out
+}
+
+/// The statement-position classifiers visible to each hoisted local-class declaration, by their
+/// SOURCE name. A local class names its siblings as it wrote them (`class Derived : Base()`), not by
+/// the name their hoisted declaration was registered under; the checker resolves that through the
+/// scope chain, but signature collection has no chain, so it is handed the body's classifiers.
+///
+/// Visibility is approximated per enclosing DECLARATION body rather than per block — a local class
+/// in one block naming one from a sibling block resolves here where kotlinc would reject it. The
+/// checker's chain, which the same reference also goes through, gives the real answer.
+fn local_class_sibling_names(file: &File) -> HashMap<DeclId, Vec<(String, TypeName)>> {
+    let mut out: HashMap<DeclId, Vec<(String, TypeName)>> = HashMap::new();
+    if file.local_class_decls.is_empty() {
+        return out;
+    }
+    let record = |body: &FunBody, out: &mut HashMap<DeclId, Vec<(String, TypeName)>>| {
+        let (FunBody::Expr(root) | FunBody::Block(root)) = body else {
+            return;
+        };
+        let mut here: Vec<(String, TypeName)> = Vec::new();
+        let mut declarations: Vec<DeclId> = Vec::new();
+        let (stmts, exprs) = reachable_nodes(file, *root);
+        for stmt in stmts {
+            let Some(&declaration) = file.local_class_decls.get(&stmt) else {
+                continue;
+            };
+            let Stmt::LocalClass(class) = file.stmt(stmt) else {
+                continue;
+            };
+            let Decl::Class(hoisted) = file.decl(declaration) else {
+                continue;
+            };
+            here.push((
+                class.name.clone(),
+                type_name(&class_internal(file, &hoisted.name)),
+            ));
+            declarations.push(declaration);
+        }
+        // An ANONYMOUS OBJECT written in the same body is hoisted the same way and sees the same
+        // classifiers — `object : B() {}` where `B` is a local class declared beside it.
+        for expr in exprs {
+            if let Some(&declaration) = file.anonymous_object_classes.get(&expr) {
+                declarations.push(declaration);
+            }
+        }
+        for declaration in declarations {
+            out.entry(declaration)
+                .or_default()
+                .extend(here.iter().cloned());
+        }
+    };
+    for &d in &file.decls {
+        match file.decl(d) {
+            Decl::Fun(f) => record(&f.body, &mut out),
+            Decl::Class(c) => {
+                for m in c.methods.iter().chain(&c.companion_methods) {
+                    record(&m.body, &mut out);
+                }
+                for step in &c.init_order {
+                    if let ClassInit::Block(b) = step {
+                        record(&FunBody::Block(*b), &mut out);
+                    }
+                }
+                for p in &c.body_props {
+                    if let Some(init) = p.init {
+                        record(&FunBody::Expr(init), &mut out);
+                    }
+                }
+                for p in c.props.iter().filter_map(|p| p.default) {
+                    record(&FunBody::Expr(p), &mut out);
+                }
+            }
+            Decl::Property(p) => {
+                if let Some(init) = p.init {
+                    record(&FunBody::Expr(init), &mut out);
+                }
+            }
+        }
     }
     out
 }
@@ -19024,12 +19149,36 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// [`Self::module_class_named`], consulting the lexical chain first — a classifier declared in
+    /// statement position is the nearest binding and is registered under a name no simple-name
+    /// lookup can reach.
+    fn module_class_named_in(&self, scope: &CheckerScope<'_>, name: &str) -> Option<&ClassSig> {
+        match scope.local_classifier(name) {
+            Some(internal) => self.syms.class_by_type_name(internal),
+            None => self.module_class_named(name),
+        }
+    }
+
     /// The module classifier bound by `name`, narrowed to a singleton object. This keeps lookup and
     /// classification on the same resolved `ClassSig`; a parallel simple-name set cannot preserve
     /// identity across packages.
     fn module_object_named(&self, name: &str) -> Option<&ClassSig> {
         self.module_class_named(name)
             .filter(|class| class.is_object())
+    }
+
+    /// [`Self::scoped_classifier_name`], consulting the lexical chain first: a classifier declared
+    /// in statement position is visible only where it was written, so it is the NEAREST binding and
+    /// wins over every file-level and classpath namespace below.
+    fn scoped_classifier_name_in(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> InheritedNestedClassifier {
+        match scope.local_classifier(name) {
+            Some(internal) => InheritedNestedClassifier::Found(internal),
+            None => self.scoped_classifier_name(name),
+        }
     }
 
     fn scoped_classifier_name(&self, name: &str) -> InheritedNestedClassifier {
@@ -19265,7 +19414,7 @@ impl<'a> Checker<'a> {
         if self.lookup(scope, n).is_some() {
             return None;
         }
-        let scoped = self.scoped_classifier_name(n);
+        let scoped = self.scoped_classifier_name_in(scope, n);
         if scoped == InheritedNestedClassifier::Ambiguous {
             return None;
         }
@@ -19315,7 +19464,7 @@ impl<'a> Checker<'a> {
         let scoped = if scope.tparam_contains(&r.name) {
             Some(scope.tparam_bound(&r.name))
         } else {
-            match self.scoped_classifier_name(&r.name) {
+            match self.scoped_classifier_name_in(scope, &r.name) {
                 InheritedNestedClassifier::Found(internal) => {
                     classifier_over_default(&r.name, Some(internal))
                         .map(|internal| self.obj_with_targs_name(scope, internal, r))
@@ -19411,7 +19560,7 @@ impl<'a> Checker<'a> {
             if tparams.contains(name) {
                 erased_type_key(tparams.bound(name))
             } else {
-                let internal = self.scoped_classifier_name(name);
+                let internal = self.scoped_classifier_name_in(scope, name);
                 if internal == InheritedNestedClassifier::Ambiguous {
                     ErasedTypeKey::Unresolved(name.to_string())
                 } else if let Some(internal) = classifier_over_default(name, internal.found()) {
@@ -19873,7 +20022,7 @@ impl<'a> Checker<'a> {
                 base
             };
         }
-        let internal = self.scoped_classifier_name(&r.name);
+        let internal = self.scoped_classifier_name_in(scope, &r.name);
         let base = if scope.tparam_contains(&r.name) {
             scope.tparam_bound(&r.name)
         } else if internal == InheritedNestedClassifier::Ambiguous {
@@ -26924,7 +27073,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Constructor reference `::ClassName` → `Fun(ctor_params, ClassName)`.
-                let scoped_classifier = self.scoped_classifier_name(&name);
+                let scoped_classifier = self.scoped_classifier_name_in(scope, &name);
                 if scoped_classifier == InheritedNestedClassifier::Ambiguous {
                     return self.set(e, Ty::Error);
                 }
@@ -27014,7 +27163,7 @@ impl<'a> Checker<'a> {
                     if !self.value_root_shadows_classifier(scope, &rn)
                         && self.module_object_named(&rn).is_none()
                     {
-                        if let Some(cls) = self.module_class_named(&rn).cloned() {
+                        if let Some(cls) = self.module_class_named_in(scope, &rn).cloned() {
                             if let Some(sig) = cls.method(&name).cloned() {
                                 if sig.requires_all_args() {
                                     let cls_internal = cls.internal();
@@ -32247,7 +32396,7 @@ impl<'a> Checker<'a> {
                 if self.value_root_shadows_classifier(scope, root) {
                     return None;
                 }
-                let fq = match self.scoped_classifier_name(root) {
+                let fq = match self.scoped_classifier_name_in(scope, root) {
                     InheritedNestedClassifier::Found(outer) => {
                         format!("{}{}", outer.render(), &path[root.len()..])
                     }
@@ -34490,7 +34639,7 @@ impl<'a> Checker<'a> {
                 // path and let the receiver resolve as that property value below.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
                     if !self.value_root_shadows_classifier(scope, &cls) {
-                        let scoped_classifier = self.scoped_classifier_name(&cls);
+                        let scoped_classifier = self.scoped_classifier_name_in(scope, &cls);
                         if scoped_classifier == InheritedNestedClassifier::Ambiguous {
                             return Ty::Error;
                         }
@@ -36992,8 +37141,11 @@ impl<'a> Checker<'a> {
                         );
                         return Ty::Error;
                     }
-                    let scoped_nested_internal = self
-                        .enclosing_nested_type_name(&fname)
+                    // A statement-position classifier is the NEAREST binding — it wins over an
+                    // enclosing class's nested type and over anything at file level.
+                    let scoped_nested_internal = scope
+                        .local_classifier(&fname)
+                        .or_else(|| self.enclosing_nested_type_name(&fname))
                         .or_else(|| inherited.found());
                     let inherited_shape = self
                         .enclosing_nested_type_name(&fname)
@@ -38507,6 +38659,21 @@ impl<'a> Checker<'a> {
                     return;
                 };
                 let cl = cl.clone();
+                // Bind the SOURCE name to the internal name the hoisted declaration was registered
+                // under, in the scope holding this statement — so it stays visible to the rest of
+                // the block AND to the class's own body (a member may name its own class).
+                if let Stmt::LocalClass(source) = self.file.stmt(s) {
+                    if let Some(internal) = self
+                        .same_package_class(&cl.name)
+                        .map(ClassSig::internal_name)
+                    {
+                        scope.rebind(
+                            &source.name,
+                            Ns::Classifier,
+                            ScopeBinding::LocalClass(internal),
+                        );
+                    }
+                }
                 // A local class captures its enclosing instance, so its rung carries the outer
                 // `this` — and with it the enclosing class's type parameters (kotlinc 2.4.10
                 // accepts `class A<T>(val t: T) { fun m() { class L { fun k(): T = t } } }`).
