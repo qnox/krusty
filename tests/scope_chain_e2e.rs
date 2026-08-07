@@ -183,3 +183,60 @@ fn assigning_to_a_shadowing_variable_keeps_the_outer_narrowing() {
         fun box(): String = if (f(true) == 10) \"OK\" else \"FAIL\"\n";
     assert_eq!(run(SRC).expect("outer narrowing survives"), "OK");
 }
+
+/// kotlinc: `error: unresolved reference 'T'.`
+///
+/// A plain nested class does not carry its outer instance, and the same cut applies to the outer
+/// declaration's TYPE parameters: `A<T>`'s `T` is unreachable from `A.B`. Type parameters are
+/// scope-chain bindings in the classifier namespace, so the cut is the one rung walk — not a
+/// separate rule.
+#[test]
+fn a_nested_class_cannot_name_the_outer_classs_type_parameter() {
+    const SRC: &str = "class A<T> {\n\
+        \x20   class B {\n\
+        \x20       fun g(): T? = null\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = \"OK\"\n";
+    assert_rejected(SRC);
+}
+
+/// kotlinc: accepted.
+///
+/// An `inner class` keeps the enclosing instance, so it keeps `T` too — the same rung that carries
+/// `this@A` carries the type parameters declared on it.
+#[test]
+fn an_inner_class_can_name_the_outer_classs_type_parameter() {
+    const SRC: &str = "class A<T>(val t: T) {\n\
+        \x20   inner class C {\n\
+        \x20       fun h(): T = t\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = if (A(\"s\").C().h() == \"s\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("inner class keeps T"), "OK");
+}
+
+/// kotlinc: `error: unresolved reference 'T'.`
+///
+/// A declaration's type parameters retire with the rung that declared them. Binding them into the
+/// shared enclosing scope instead would leave them visible to every later declaration in the file,
+/// so `g` would silently accept `T` — a name that does not exist there.
+#[test]
+fn a_type_parameter_does_not_leak_to_the_next_declaration() {
+    const SRC: &str = "fun <T> f(t: T): T = t\n\
+        fun g(): T? = null\n\
+        fun box(): String = \"OK\"\n";
+    assert_rejected(SRC);
+}
+
+/// kotlinc: `error: cannot use 'T' as reified type parameter. Use a class instead.`
+///
+/// `reified` is a property OF the type-parameter binding, not a parallel set: an `inline fun
+/// <reified T>` cannot leave `T` reified for a later declaration that merely reuses the name.
+#[test]
+fn a_reified_mark_does_not_leak_to_the_next_declaration() {
+    const SRC: &str = "inline fun <reified T> f(): String = T::class.java.name\n\
+        fun <T> g(): String = T::class.java.name\n\
+        fun box(): String = \"OK\"\n";
+    assert_rejected(SRC);
+}

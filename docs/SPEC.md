@@ -4031,6 +4031,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   cannot know which parameter the argument lands in.
   Test: `tests/classpath_member_overload_no_names_e2e.rs`.
 
+- **A type parameter is a lexical binding, declared on the rung of the declaration that introduces
+  it.** `class C<T>` binds `T` on its CLASS rung, `fun <T> f()` on the function's own rung — one
+  namespace (`Ns::Classifier`), different declaring rung — so a parameter retires with its
+  declaration instead of being replaced wholesale on a scope shared with siblings. `reified` is a
+  field of that binding rather than a parallel set, so the two cannot drift and an
+  `inline fun <reified T>` cannot leave `T` reified for the next declaration that reuses the name
+  (kotlinc: `cannot use 'T' as reified type parameter. Use a class instead.`).
+  The lookup walk stops at a class rung that does not carry its outer instance — the same cut
+  `implicit_receivers` makes. Verified against kotlinc 2.4.10:
+  `class A<T> { class B { fun g(): T? } }` is `unresolved reference 'T'`, while an `inner class`,
+  a local class inside a member, and an anonymous object all still resolve `T`.
+  Tests: `tests/scope_chain_e2e.rs`
+  (`a_nested_class_cannot_name_the_outer_classs_type_parameter`,
+  `an_inner_class_can_name_the_outer_classs_type_parameter`,
+  `a_type_parameter_does_not_leak_to_the_next_declaration`,
+  `a_reified_mark_does_not_leak_to_the_next_declaration`), `src/resolve/scope.rs` unit tests.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

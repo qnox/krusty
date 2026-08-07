@@ -11072,20 +11072,21 @@ pub struct TParams {
 }
 
 impl TParams {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.erasure.is_empty()
+    /// Record one parameter's bound (and the bounds beyond the first), replacing any entry of the
+    /// same name — used to reassemble a `TParams` view from the scope chain's classifier bindings,
+    /// outermost rung first, so an inner declaration's parameter shadows the outer one.
+    pub(crate) fn insert_binding(&mut self, name: &str, bound: Ty, extra_bounds: Vec<Ty>) {
+        self.erasure.insert(name.to_string(), bound);
+        if extra_bounds.is_empty() {
+            self.extra_bounds.remove(name);
+        } else {
+            self.extra_bounds.insert(name.to_string(), extra_bounds);
+        }
     }
 
-    /// Merge `other` over `self`; `other` wins on a name declared by both (it is the inner scope).
-    pub(crate) fn absorb(&mut self, other: &TParams) {
-        self.erasure
-            .extend(other.erasure.iter().map(|(n, t)| (n.clone(), *t)));
-        self.extra_bounds.extend(
-            other
-                .extra_bounds
-                .iter()
-                .map(|(n, b)| (n.clone(), b.clone())),
-        );
+    /// The bounds `name` declares beyond the first.
+    pub(crate) fn extra_bounds_of(&self, name: &str) -> Vec<Ty> {
+        self.extra_bounds.get(name).cloned().unwrap_or_default()
     }
 
     pub(crate) fn contains(&self, name: &str) -> bool {
@@ -11109,20 +11110,6 @@ impl TParams {
             erasure: bindings.into_iter().collect(),
             ..Default::default()
         }
-    }
-
-    /// The bounds beyond the first of every parameter whose ERASURE is `erased`. A type parameter
-    /// reaches the body already erased to its first bound, so that erasure — not the parameter's name —
-    /// is what a member lookup has in hand; this maps back from it.
-    pub(crate) fn extra_bounds_for_erasure(&self, erased: Ty) -> Vec<Ty> {
-        let Some(want) = erased.obj_internal() else {
-            return Vec::new();
-        };
-        self.extra_bounds
-            .iter()
-            .filter(|(name, _)| self.bound(name).obj_internal() == Some(want))
-            .flat_map(|(_, bounds)| bounds.iter().copied())
-            .collect()
     }
 
     /// All parameters erased to `Object` (no primitive specialization). Used for CLASS type parameters:
@@ -11287,27 +11274,6 @@ impl TParams {
         );
         out
     }
-
-    pub(crate) fn insert_decl_with(
-        &mut self,
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Vec<String> {
-        let scoped = TParams::from_decl_with(names, bounds, resolve);
-        let mut added = Vec::new();
-        for (n, e) in scoped.erasure {
-            if !self.erasure.contains_key(&n) {
-                self.erasure.insert(n.clone(), e);
-                added.push(n);
-            }
-        }
-        added
-    }
-
-    pub(crate) fn remove(&mut self, name: &str) {
-        self.erasure.remove(name);
-    }
 }
 
 /// The JVM erasure of a type parameter from its declared upper bound. kotlinc erases a bounded `T` to
@@ -11389,36 +11355,113 @@ fn tparam_bound_semantic(b: &TypeRef, resolve: &dyn Fn(&str) -> Option<TypeName>
 }
 
 impl CheckerScope<'_> {
-    /// The type parameters visible here: this scope's, over those of every enclosing scope. An
-    /// inner declaration of the same name shadows the outer one, matching lexical nesting.
+    /// Bind `names` as this scope's type parameters, taking each one's bound (and any bounds beyond
+    /// the first) from `tparams` — the caller computes those, since a parameter's bound may name an
+    /// enclosing declaration's parameter. `reified` answers whether a name was declared `reified`
+    /// (only an `inline fun` may).
+    ///
+    /// The rung that calls this OWNS the parameters: they retire with it. Nothing replaces or
+    /// removes a rung's parameters afterwards, which is what keeps a sibling declaration from
+    /// inheriting them.
+    fn declare_tparams(&self, names: &[String], tparams: &TParams, reified: impl Fn(&str) -> bool) {
+        for name in names {
+            self.rebind(
+                name,
+                Ns::Classifier,
+                ScopeBinding::TypeParam {
+                    bound: tparams.bound(name),
+                    extra_bounds: tparams.extra_bounds_of(name),
+                    reified: reified(name),
+                },
+            );
+        }
+    }
+
+    /// The innermost type-parameter binding for `name`, or `None` when `name` is not a type
+    /// parameter here. Walks [`classifier_rungs`](scope::Scope::classifier_rungs), so an outer
+    /// declaration's parameters stop at a class rung that does not carry its outer instance.
+    fn tparam_binding(&self, name: &str) -> Option<(Ty, Vec<Ty>, bool)> {
+        self.classifier_rungs().find_map(|rung| {
+            match rung.own_binding(name, Ns::Classifier)? {
+                ScopeBinding::TypeParam {
+                    bound,
+                    extra_bounds,
+                    reified,
+                } => Some((bound, extra_bounds, reified)),
+                // `Ns::Classifier` holds nothing else.
+                _ => None,
+            }
+        })
+    }
+
+    /// The type parameters visible here, assembled from the classifier bindings of every rung in
+    /// scope. An inner declaration of the same name shadows the outer one, matching lexical nesting.
     fn visible_tparams(&self) -> TParams {
         let mut out = TParams::default();
-        for rung in self.ancestors().collect::<Vec<_>>().into_iter().rev() {
-            out.absorb(&rung.own_tparams());
+        for rung in self
+            .classifier_rungs()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            rung.own_bindings(Ns::Classifier, |name, binding| {
+                if let ScopeBinding::TypeParam {
+                    bound,
+                    extra_bounds,
+                    ..
+                } = binding
+                {
+                    out.insert_binding(name, *bound, extra_bounds.clone());
+                }
+            });
         }
         out
     }
 
     /// Whether `name` is a type parameter in scope.
     fn tparam_contains(&self, name: &str) -> bool {
-        self.ancestors()
-            .any(|rung| rung.own_tparams().contains(name))
+        self.tparam_binding(name).is_some()
     }
 
     /// The declared upper bound of type parameter `name` (`kotlin/Any` when unbounded), from the
     /// innermost scope declaring it.
     fn tparam_bound(&self, name: &str) -> Ty {
-        self.ancestors()
-            .find(|rung| rung.own_tparams().contains(name))
-            .map(|rung| rung.own_tparams().bound(name))
+        self.tparam_binding(name)
+            .map(|(bound, _, _)| bound)
             .unwrap_or(Ty::obj("java/lang/Object"))
     }
 
-    /// Bounds beyond the first for whichever in-scope parameter has `bound` as its first.
+    /// Whether `name` is a `reified` type parameter in scope.
+    fn is_reified(&self, name: &str) -> bool {
+        self.tparam_binding(name)
+            .is_some_and(|(_, _, reified)| reified)
+    }
+
+    /// Bounds beyond the first for whichever in-scope parameter has `bound` as its first. A type
+    /// parameter reaches the body already erased to its first bound, so that erasure — not the
+    /// parameter's name — is what a member lookup has in hand; this maps back from it.
     fn tparam_extra_bounds(&self, bound: Ty) -> Vec<Ty> {
-        self.ancestors()
-            .map(|rung| rung.own_tparams().extra_bounds_for_erasure(bound))
-            .find(|bounds| !bounds.is_empty())
+        let Some(want) = bound.obj_internal() else {
+            return Vec::new();
+        };
+        self.classifier_rungs()
+            .map(|rung| {
+                let mut out = Vec::new();
+                rung.own_bindings(Ns::Classifier, |_, binding| {
+                    if let ScopeBinding::TypeParam {
+                        bound,
+                        extra_bounds,
+                        ..
+                    } = binding
+                    {
+                        if bound.obj_internal() == Some(want) {
+                            out.extend(extra_bounds.iter().copied());
+                        }
+                    }
+                });
+                out
+            })
+            .find(|bounds: &Vec<Ty>| !bounds.is_empty())
             .unwrap_or_default()
     }
 }
@@ -11430,19 +11473,32 @@ enum ScopeBinding {
     Value(Local),
     /// Local-function overloads in declaration order; the last is the innermost declaration.
     Funs(Vec<(StmtId, Signature)>),
+    /// A generic type parameter (`Ns::Classifier`). `bound` is the declared upper bound the checker
+    /// types the parameter as (its JVM erasure for a value parameter, the symbolic `Ty::TyParam` when
+    /// a signature is being inferred); `extra_bounds` are the bounds beyond the first
+    /// (`where T : A, T : B`), which `Ty::TyParam` cannot carry.
+    ///
+    /// `reified` lives ON the parameter rather than in a parallel set: the two cannot drift, and the
+    /// mark retires with the rung that declared the parameter — an `inline fun <reified T>` cannot
+    /// leave `T` reified for a later sibling declaration.
+    TypeParam {
+        bound: Ty,
+        extra_bounds: Vec<Ty>,
+        reified: bool,
+    },
 }
 
 impl ScopeBinding {
     fn value(&self) -> Option<Local> {
         match self {
             ScopeBinding::Value(local) => Some(*local),
-            ScopeBinding::Funs(_) => None,
+            ScopeBinding::Funs(_) | ScopeBinding::TypeParam { .. } => None,
         }
     }
     fn funs(&self) -> &[(StmtId, Signature)] {
         match self {
             ScopeBinding::Funs(entries) => entries,
-            ScopeBinding::Value(_) => &[],
+            ScopeBinding::Value(_) | ScopeBinding::TypeParam { .. } => &[],
         }
     }
 }
@@ -11450,7 +11506,7 @@ impl ScopeBinding {
 /// The checker's lexical scope chain. See [`scope`] — the chain is threaded as a parameter, not
 /// held on the checker, so a scope cannot outlive its parent and cannot be left open by an early
 /// return.
-type CheckerScope<'p> = scope::Scope<'p, ScopeBinding, TParams>;
+type CheckerScope<'p> = scope::Scope<'p, ScopeBinding>;
 
 #[derive(Clone)]
 struct ScopedProperty {
@@ -12482,12 +12538,11 @@ fn preinfer_returns_pass_with_owners(
                 let resolve = class_internal_resolver(pre.syms);
                 let decl_scope = scope.child(ScopeKind::Block);
                 let scope = &decl_scope;
-                scope.declare_tparams(TParams::from_decl_with(
+                scope.declare_tparams(
                     &f.type_params,
-                    &f.type_param_bounds,
-                    &resolve,
-                ));
-                scope.declare_reified(f.reified_type_params.iter().cloned());
+                    &TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve),
+                    |name| f.reified_type_params.contains(name),
+                );
                 pre.check_fun(scope, f, Some(d));
             }
         } else if let Decl::Class(cl) = file.decl(d) {
@@ -12516,6 +12571,9 @@ fn preinfer_returns_pass_with_owners(
                 receiver: Some(dispatch_ty),
             });
             let scope = &dispatch_scope;
+            // The class's own type parameters live on the class's rung; a member's are declared on
+            // the member's rung below, so they retire with it.
+            scope.declare_tparams(&cl.type_params, &class_tparams, |_| false);
             if anonymous_lexical_scope.declarations.contains(&d) {
                 let outer = pre.anonymous_outer_receiver_labels();
                 pre.this_labels.extend(outer);
@@ -12534,11 +12592,19 @@ fn preinfer_returns_pass_with_owners(
                         previous.receiver.is_some() && previous.name == property.name
                     })
                     .count();
-                scope.declare_tparams(class_tparams.symbolic_extended_with(
+                // The property's own type parameters get their own rung, so they retire with it
+                // rather than staying visible to the next property in the loop.
+                let property_scope = scope.child(ScopeKind::Block);
+                let scope = &property_scope;
+                scope.declare_tparams(
                     &property.type_params,
-                    &property.type_param_bounds,
-                    &class_internal_resolver(pre.syms),
-                ));
+                    &class_tparams.symbolic_extended_with(
+                        &property.type_params,
+                        &property.type_param_bounds,
+                        &class_internal_resolver(pre.syms),
+                    ),
+                    |_| false,
+                );
                 let receiver_ty = pre.resolve_ty(scope, receiver);
                 pre.this_labels
                     .push((property.name.clone(), receiver_ty, false));
@@ -12570,12 +12636,15 @@ fn preinfer_returns_pass_with_owners(
                 if function_needs_return_preinfer(m) {
                     let method_scope = scope.child(ScopeKind::Block);
                     let scope = &method_scope;
-                    scope.declare_tparams(class_tparams.symbolic_extended_with(
+                    scope.declare_tparams(
                         &m.type_params,
-                        &m.type_param_bounds,
-                        &class_internal_resolver(pre.syms),
-                    ));
-                    scope.declare_reified(m.reified_type_params.iter().cloned());
+                        &class_tparams.symbolic_extended_with(
+                            &m.type_params,
+                            &m.type_param_bounds,
+                            &class_internal_resolver(pre.syms),
+                        ),
+                        |name| m.reified_type_params.contains(name),
+                    );
                     pre.check_method(scope, m, &properties);
                 }
             }
@@ -20106,12 +20175,11 @@ impl<'a> Checker<'a> {
         let resolve = class_internal_resolver(self.syms);
         let decl_scope = scope.child(ScopeKind::Block);
         let scope = &decl_scope;
-        scope.declare_tparams(TParams::from_decl_with(
+        scope.declare_tparams(
             &f.type_params,
-            &f.type_param_bounds,
-            &resolve,
-        ));
-        scope.declare_reified(f.reified_type_params.iter().cloned());
+            &TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve),
+            |name| f.reified_type_params.contains(name),
+        );
         self.check_fun(scope, f, Some(d));
     }
 
@@ -20124,11 +20192,13 @@ impl<'a> Checker<'a> {
         // scope over its receiver, declared type, and accessor bodies — bind them (erased) so
         // `T` resolves rather than reading as an unresolved reference.
         let resolve = class_internal_resolver(self.syms);
-        scope.declare_tparams(TParams::from_decl_with(
+        let decl_scope = scope.child(ScopeKind::Block);
+        let scope = &decl_scope;
+        scope.declare_tparams(
             &p.type_params,
-            &p.type_param_bounds,
-            &resolve,
-        ));
+            &TParams::from_decl_with(&p.type_params, &p.type_param_bounds, &resolve),
+            |_| false,
+        );
         self.check_duplicate_param_names(&p.context_params, p.context_params.len(), p.span);
         let prev_extension_receiver = self.this_extension_receiver;
         // For an extension property (`val Recv.name: T get() = …`), `this` inside the
@@ -20394,7 +20464,6 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        scope.declare_tparams(TParams::erased(&tparam_names));
         let current_owner = self
             .same_package_class(&cl.name)
             .map(ClassSig::internal_name);
@@ -20421,6 +20490,9 @@ impl<'a> Checker<'a> {
                 None => scope.child(ScopeKind::Block),
             };
             let scope = &class_scope;
+            // The class's type parameters belong to the CLASS rung, so they retire with it rather
+            // than staying visible to the next declaration checked from the same enclosing scope.
+            scope.declare_tparams(&tparam_names, &TParams::erased(&tparam_names), |_| false);
             // Push the enclosing-class labels for the duration of this class's member checks: the
             // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
             // class's own label (`this@C`) innermost. Walk `inner_of` outward. An anonymous object
@@ -20849,15 +20921,21 @@ impl<'a> Checker<'a> {
                         .iter()
                         .filter(|previous| previous.receiver.is_some() && previous.name == bp.name)
                         .count();
-                    // The property's own type parameters must not survive the iteration, and
-                    // the hidden-binding restore below has to land in `body_scope`, so this
-                    // saves and restores rather than opening a rung around both.
-                    let outer_tparams = scope.own_tparams();
-                    scope.declare_tparams(scope.visible_tparams().extended_with(
+                    // The property's own type parameters get a rung of their own, so they retire
+                    // with the iteration. The hidden-binding restore below must still land in
+                    // `body_scope` (it has to outlive this property), so that rung is named.
+                    let body_scope = scope;
+                    let property_scope = scope.child(ScopeKind::Block);
+                    let scope = &property_scope;
+                    scope.declare_tparams(
                         &bp.type_params,
-                        &bp.type_param_bounds,
-                        &class_internal_resolver(self.syms),
-                    ));
+                        &scope.visible_tparams().extended_with(
+                            &bp.type_params,
+                            &bp.type_param_bounds,
+                            &class_internal_resolver(self.syms),
+                        ),
+                        |_| false,
+                    );
                     self.check_duplicate_param_names(
                         &bp.context_params,
                         bp.context_params.len(),
@@ -21006,9 +21084,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                     for (name, binding) in hidden_dispatch_bindings {
-                        scope.rebind(&name, Ns::Value, binding);
+                        body_scope.rebind(&name, Ns::Value, binding);
                     }
-                    scope.declare_tparams(outer_tparams);
                     if extension_receiver.is_some() {
                         self.extension_receiver_labels.pop();
                         self.this_labels.pop();
@@ -21176,19 +21253,15 @@ impl<'a> Checker<'a> {
     fn check_method(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, props: &[ScopedProperty]) {
         self.reset_body_mutations(fun_body_expr(&f.body));
         let resolve = class_internal_resolver(self.syms);
-        let mut added = Vec::new();
-        scope.update_tparams(
-            |tparams| {
-                added = tparams.insert_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
-            },
-            TParams::is_empty,
+        // The method's own type parameters (and its `reified` marks) belong to a rung of its own:
+        // the caller's scope is the CLASS rung, shared with every sibling member.
+        let method_scope = scope.child(ScopeKind::Block);
+        let scope = &method_scope;
+        scope.declare_tparams(
+            &f.type_params,
+            &TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve),
+            |name| f.reified_type_params.contains(name),
         );
-        let reified_added: Vec<String> = f
-            .reified_type_params
-            .iter()
-            .filter(|t| scope.add_reified(t))
-            .cloned()
-            .collect();
         let dispatch_this = scope.this_ty();
         let dispatch_extension_receiver = self.this_extension_receiver;
         let extension_receiver = f.receiver.as_ref().map(|r| self.resolve_ty(scope, r));
@@ -21303,17 +21376,6 @@ impl<'a> Checker<'a> {
             } else {
                 self.check_fun_body(scope, f);
             }
-        }
-        scope.update_tparams(
-            |tparams| {
-                for t in added {
-                    tparams.remove(&t);
-                }
-            },
-            TParams::is_empty,
-        );
-        for t in reified_added {
-            scope.remove_reified(&t);
         }
         if f.receiver.is_some() {
             self.extension_receiver_labels.pop();
@@ -38962,19 +39024,8 @@ impl<'a> Checker<'a> {
             })
             .collect();
 
-        // Add the local function's own type parameters (a primitive/reference bound carries through).
-        let resolve = class_internal_resolver(self.syms);
-        let added_tparams = {
-            let mut added = Vec::new();
-            scope.update_tparams(
-                |tparams| {
-                    added =
-                        tparams.insert_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
-                },
-                TParams::is_empty,
-            );
-            added
-        };
+        // A local function declares no type parameters of its own — `f.type_params` non-empty was
+        // rejected above — so there is nothing to bind here.
 
         // Resolve parameter types.
         let params: Vec<Ty> = f
@@ -39106,14 +39157,6 @@ impl<'a> Checker<'a> {
             }
             c.this_extension_receiver = previous_extension_receiver;
         });
-        scope.update_tparams(
-            |tparams| {
-                for t in added_tparams {
-                    tparams.remove(&t);
-                }
-            },
-            TParams::is_empty,
-        );
     }
 }
 

@@ -92,6 +92,11 @@ pub(crate) struct Flow {
 pub(crate) enum Ns {
     Value,
     Function,
+    /// Types introduced lexically: a generic type parameter (`class C<T>`, `fun <T> f()`). One
+    /// namespace, different declaring RUNG — a class's parameters sit on its class rung, a
+    /// function's on its function rung, so each retires with the declaration that introduced it
+    /// instead of being replaced wholesale on a shared rung.
+    Classifier,
 }
 
 struct Binding<B> {
@@ -100,8 +105,8 @@ struct Binding<B> {
     payload: B,
 }
 
-pub(crate) struct Scope<'p, B, T> {
-    parent: Option<&'p Scope<'p, B, T>>,
+pub(crate) struct Scope<'p, B> {
+    parent: Option<&'p Scope<'p, B>>,
     kind: ScopeKind,
     /// Bindings introduced by THIS scope, in declaration order. Declaration order is what makes
     /// `fun g(a: Int, b: Int = a)` resolve and `fun g(a: Int = b, b: Int)` not.
@@ -113,33 +118,25 @@ pub(crate) struct Scope<'p, B, T> {
     /// Flow facts recorded in this scope. Dropped with the scope, which is the Kotlin rule: a smart
     /// cast established inside a branch does not survive it.
     flow: RefCell<Flow>,
-    /// Generic type parameters DECLARED by this scope: a class's over its members, a function's
-    /// over its body. Retired with the scope, like every other binding here.
-    tparams: RefCell<T>,
-    /// The subset of `tparams` declared `reified` (only an `inline fun` may). A class literal
-    /// `T::class` is valid only on one of these.
-    reified: RefCell<std::collections::HashSet<String>>,
 }
 
-impl<B, T: Default> Scope<'static, B, T> {
-    pub(crate) fn root() -> Scope<'static, B, T> {
+impl<B> Scope<'static, B> {
+    pub(crate) fn root() -> Scope<'static, B> {
         Scope::with_parent(None, ScopeKind::File)
     }
 }
 
-impl<'p, B, T: Default> Scope<'p, B, T> {
-    fn with_parent(parent: Option<&'p Scope<'p, B, T>>, kind: ScopeKind) -> Scope<'p, B, T> {
+impl<'p, B> Scope<'p, B> {
+    fn with_parent(parent: Option<&'p Scope<'p, B>>, kind: ScopeKind) -> Scope<'p, B> {
         Scope {
             parent,
             kind,
             bindings: RefCell::new(Vec::new()),
             flow: RefCell::new(Flow::default()),
-            tparams: RefCell::new(T::default()),
-            reified: RefCell::new(std::collections::HashSet::new()),
         }
     }
 
-    pub(crate) fn child(&'p self, kind: ScopeKind) -> Scope<'p, B, T> {
+    pub(crate) fn child(&'p self, kind: ScopeKind) -> Scope<'p, B> {
         debug_assert!(
             !matches!(kind, ScopeKind::File),
             "the file scope is the root of the chain"
@@ -168,8 +165,30 @@ impl<'p, B, T: Default> Scope<'p, B, T> {
     }
 
     /// This scope and every enclosing one, innermost first.
-    pub(crate) fn ancestors<'s>(&'s self) -> impl Iterator<Item = &'s Scope<'p, B, T>> {
-        std::iter::successors(Some(self), |s: &&'s Scope<'p, B, T>| s.parent)
+    pub(crate) fn ancestors<'s>(&'s self) -> impl Iterator<Item = &'s Scope<'p, B>> {
+        std::iter::successors(Some(self), |s: &&'s Scope<'p, B>| s.parent)
+    }
+
+    /// The rungs a CLASSIFIER lookup may consult, innermost first. Same cut as
+    /// [`Self::implicit_receivers`]: a class rung that does not carry its outer instance ends the
+    /// walk, because the outer declaration's type parameters are not reachable from it —
+    /// `class A<T> { class B { fun g(): T } }` is rejected by kotlinc, while an `inner class`, a
+    /// local class and an anonymous object all keep `T`.
+    pub(crate) fn classifier_rungs<'s>(&'s self) -> impl Iterator<Item = &'s Scope<'p, B>> {
+        let mut cut = false;
+        self.ancestors().take_while(move |rung| {
+            if cut {
+                return false;
+            }
+            cut = matches!(
+                rung.kind,
+                ScopeKind::Class {
+                    carries_outer: false,
+                    ..
+                }
+            );
+            true
+        })
     }
 
     /// A binding introduced by THIS scope only. The caller walks `ancestors` itself, because an
@@ -242,58 +261,14 @@ impl<'p, B, T: Default> Scope<'p, B, T> {
         None
     }
 
-    /// Record the `reified` type parameters this scope declares.
-    pub(crate) fn declare_reified(&self, names: impl IntoIterator<Item = String>) {
-        self.reified.borrow_mut().extend(names);
-    }
-
-    /// Whether `name` is a reified type parameter in scope.
-    pub(crate) fn is_reified(&self, name: &str) -> bool {
-        self.ancestors()
-            .any(|rung| rung.reified.borrow().contains(name))
-    }
-
-    /// Add `name` as reified in the innermost scope, reporting whether it was new there.
-    pub(crate) fn add_reified(&self, name: &str) -> bool {
-        self.reified.borrow_mut().insert(name.to_string())
-    }
-
-    /// Drop `name` from the reified set of whichever scope holds it.
-    pub(crate) fn remove_reified(&self, name: &str) {
-        for rung in self.ancestors() {
-            if rung.reified.borrow_mut().remove(name) {
-                return;
+    /// Every binding THIS scope introduces in `ns`, in declaration order. The per-rung view a
+    /// namespace whose lookup is rung-sensitive needs (classifiers stop at [`Self::classifier_rungs`]).
+    pub(crate) fn own_bindings(&self, ns: Ns, mut visit: impl FnMut(&str, &B)) {
+        for binding in self.bindings.borrow().iter() {
+            if binding.ns == ns {
+                visit(&binding.name, &binding.payload);
             }
         }
-    }
-
-    /// The type parameters THIS scope declares, ignoring enclosing ones.
-    pub(crate) fn own_tparams(&self) -> T
-    where
-        T: Clone,
-    {
-        self.tparams.borrow().clone()
-    }
-
-    /// Bind the type parameters this scope declares. They are visible to everything it encloses.
-    pub(crate) fn declare_tparams(&self, tparams: T) {
-        *self.tparams.borrow_mut() = tparams;
-    }
-
-    /// Apply `update` to the type parameters of the INNERMOST scope that declares any.
-    pub(crate) fn update_tparams(
-        &self,
-        update: impl FnOnce(&mut T),
-        is_empty: impl Fn(&T) -> bool,
-    ) {
-        for rung in self.ancestors() {
-            let mut tparams = rung.tparams.borrow_mut();
-            if !is_empty(&tparams) {
-                update(&mut tparams);
-                return;
-            }
-        }
-        update(&mut self.tparams.borrow_mut());
     }
 
     /// Prove a property path in THIS scope. The proof dies with the scope, which is the Kotlin
@@ -406,7 +381,7 @@ mod tests {
 
     #[test]
     fn shadowing_is_legal_and_scoped_to_the_scope_that_declares_it() {
-        let root: Scope<'_, u32, ()> = Scope::root();
+        let root: Scope<'_, u32> = Scope::root();
         let outer = root.child(ScopeKind::Function { receiver: None });
         outer.rebind("x", Ns::Value, 1);
         assert!(outer.declared_here("x", Ns::Value));
@@ -430,7 +405,7 @@ mod tests {
     fn a_parameter_is_an_outer_scope_to_the_body() {
         // `fun f(x: Int) { val x = 1 }` is a warning in Kotlin, not "conflicting declarations",
         // which holds only if params and body are DIFFERENT scopes (unlike Java).
-        let root: Scope<'_, u32, ()> = Scope::root();
+        let root: Scope<'_, u32> = Scope::root();
         let params = root.child(ScopeKind::Function { receiver: None });
         params.rebind("x", Ns::Value, 1);
         let body = params.child(ScopeKind::Block);
@@ -439,7 +414,7 @@ mod tests {
 
     #[test]
     fn nested_class_cuts_the_receiver_chain_but_inner_does_not() {
-        let root: Scope<'_, u32, ()> = Scope::root();
+        let root: Scope<'_, u32> = Scope::root();
         let outer = root.child(class("A", false));
 
         let nested = outer.child(class("A$C", false));
@@ -459,7 +434,7 @@ mod tests {
 
     #[test]
     fn extension_receiver_is_a_rung_between_class_rungs() {
-        let root: Scope<'_, u32, ()> = Scope::root();
+        let root: Scope<'_, u32> = Scope::root();
         let class_scope = root.child(class("A", false));
         let ext = class_scope.child(ScopeKind::Function {
             receiver: Some(obj("kotlin/String")),
@@ -475,7 +450,7 @@ mod tests {
     #[test]
     fn a_local_class_inside_a_member_function_sees_both_receivers() {
         // class A { fun f() { class B { fun g() { <here> } } } }
-        let root: Scope<'_, u32, ()> = Scope::root();
+        let root: Scope<'_, u32> = Scope::root();
         let a = root.child(class("A", false));
         let f = a.child(ScopeKind::Function { receiver: None });
         let b = f.child(class("B", true));
@@ -483,9 +458,70 @@ mod tests {
         assert_eq!(g.implicit_receivers(), vec![obj("B"), obj("A")]);
     }
 
+    /// The innermost classifier binding for `name`, as the checker's type-parameter lookup does it.
+    fn classifier(scope: &Scope<'_, u32>, name: &str) -> Option<u32> {
+        scope
+            .classifier_rungs()
+            .find_map(|rung| rung.own_binding(name, Ns::Classifier))
+    }
+
+    #[test]
+    fn a_plain_nested_class_cuts_the_type_parameter_walk_but_a_local_class_does_not() {
+        // kotlinc 2.4.10: `class A<T> { class B { fun g(): T } }` is "unresolved reference 'T'",
+        // while a local class or an anonymous object inside a member of `A` still sees `T`.
+        let root: Scope<'_, u32> = Scope::root();
+        let a = root.child(class("A", false));
+        a.rebind("T", Ns::Classifier, 1);
+
+        let nested = a.child(class("A$B", false));
+        assert_eq!(
+            classifier(&nested, "T"),
+            None,
+            "a plain nested class cannot reach the outer class's type parameters"
+        );
+
+        let member = a.child(ScopeKind::Function { receiver: None });
+        let local = member.child(class("L", true));
+        assert_eq!(
+            classifier(&local, "T"),
+            Some(1),
+            "a local class carries the outer instance, so `T` stays reachable"
+        );
+    }
+
+    #[test]
+    fn a_type_parameter_retires_with_the_rung_that_declared_it() {
+        // The bug the binding model rules out: declaring a declaration's type parameters into the
+        // SHARED enclosing scope leaves them (and their `reified` marks) visible to the next
+        // declaration checked from it.
+        let root: Scope<'_, u32> = Scope::root();
+        {
+            let first = root.child(ScopeKind::Block);
+            first.rebind("T", Ns::Classifier, 1);
+            assert_eq!(classifier(&first, "T"), Some(1));
+        }
+        let second = root.child(ScopeKind::Block);
+        assert_eq!(
+            classifier(&second, "T"),
+            None,
+            "a sibling declaration must not inherit the previous one's type parameters"
+        );
+    }
+
+    #[test]
+    fn an_inner_type_parameter_shadows_an_enclosing_one_of_the_same_name() {
+        let root: Scope<'_, u32> = Scope::root();
+        let class_scope = root.child(class("A", false));
+        class_scope.rebind("T", Ns::Classifier, 1);
+        let method = class_scope.child(ScopeKind::Block);
+        method.rebind("T", Ns::Classifier, 2);
+        assert_eq!(classifier(&method, "T"), Some(2));
+        assert_eq!(classifier(&class_scope, "T"), Some(1));
+    }
+
     #[test]
     fn a_flow_fact_belongs_to_the_scope_that_proved_it() {
-        let root: Scope<'_, u32, ()> = Scope::root();
+        let root: Scope<'_, u32> = Scope::root();
         let function = root.child(ScopeKind::Function { receiver: None });
         function.narrow_local("x", Some(Ty::Int));
 
@@ -506,7 +542,7 @@ mod tests {
 
     #[test]
     fn ancestors_runs_innermost_first_and_terminates_at_the_root() {
-        let root: Scope<'_, u32, ()> = Scope::root();
+        let root: Scope<'_, u32> = Scope::root();
         let a = root.child(class("A", false));
         let f = a.child(ScopeKind::Function { receiver: None });
         let b = f.child(ScopeKind::Block);
