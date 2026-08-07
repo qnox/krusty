@@ -4064,11 +4064,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Lower::emit_new` supplies them ahead of the source arguments at every construction, so no
   argument-mapping arm can forget them. `ClassSig::ctor_params` stays the SOURCE signature and is
   indexed by source position — captures are not in it.
-  Four capture shapes are NOT modelled yet and are rejected (the file skips): the enclosing INSTANCE
-  (a receiver, not a binding in the chain), a local function (which carries captures of its own), a
-  reassigned `var` (shared mutable state, not capturable by value), and a capture read during
-  CONSTRUCTION — an initializer, an `init` block, a base-constructor argument, a secondary
-  constructor, or a primary-constructor parameter default. The capture scan is syntactic and
+  The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in
+  the chain — and is carried as ONE capture however many of its members are read, placed FIRST
+  because lowering identifies it by position (field 0), which is what an outer member read and a
+  `this@Outer` both go through. It is rejected when the enclosing receiver is a `@JvmInline value
+  class`: there is no instance to capture, since `this` is the bare underlying value there
+  (`codegen/box/inlineClasses/initBlock.kt` fails verification otherwise).
+  Three capture shapes are NOT modelled yet and are rejected (the file skips): a local function
+  (which carries captures of its own), a reassigned `var` (shared mutable state, not capturable by
+  value), and a capture read during CONSTRUCTION — an initializer, an `init` block, a
+  base-constructor argument, a secondary constructor, or a primary-constructor parameter default. The capture scan is syntactic and
   conservative: over-reporting skips a file, under-reporting emits a class without what it needs,
   which the box corpus caught as `NoSuchMethodError` on construction
   (`codegen/box/localClasses/capturingInDefaultConstructorParameter.kt`).

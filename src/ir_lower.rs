@@ -25381,10 +25381,13 @@ impl<'a> Lower<'a> {
                 // krusty's synthetic outer-instance marker (created by inner-class synthesis and by
                 // the anonymous-object outer-instance capture; `$` cannot appear in a plain Kotlin
                 // identifier), so it exactly identifies a class with a captured outer instance.
-                let captures_outer = self.ir.classes[class as usize]
-                    .fields
-                    .first()
-                    .is_some_and(|f| f.name == "this$0");
+                // A LOCAL class's captures — the enclosing instance among them — are supplied by
+                // `emit_new` for every construction, so this arm must not supply one as well.
+                let captures_outer = !self.local_class_captures.contains_key(&class)
+                    && self.ir.classes[class as usize]
+                        .fields
+                        .first()
+                        .is_some_and(|f| f.name == "this$0");
                 if captures_outer {
                     let field_tys: Vec<Ty> = self.ir.classes[class as usize]
                         .fields
@@ -25938,7 +25941,10 @@ impl<'a> Lower<'a> {
                     // The inner's `this$0` field type must match the receiver's type (the outer
                     // instance) — guards against a same-named method returning an inner-typed value.
                     let this0_outer = match c.fields.first() {
-                        Some(IrField { name: n0, ty, .. }) if n0 == "this$0" => {
+                        // As above: a local class's captures are `emit_new`'s job.
+                        Some(IrField { name: n0, ty, .. })
+                            if n0 == "this$0" && !self.local_class_captures.contains_key(&id) =>
+                        {
                             ty.non_null().obj_internal()
                         }
                         _ => None,

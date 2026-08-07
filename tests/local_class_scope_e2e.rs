@@ -7,9 +7,11 @@
 //!
 //! Capture of an enclosing VALUE follows from that: what the class reads is decided in the scope it
 //! was written in, and lowering carries each captured binding as a leading constructor parameter.
-//! A reference that is not modelled yet (the enclosing INSTANCE, a local function, a reassigned
-//! `var`, or a capture read during construction) is rejected — the file skips rather than emitting a
-//! class without what it needs. Each test records the reference `kotlinc` (2.4.10) verdict.
+//! The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in
+//! the chain — and is carried as one capture, first, since lowering identifies it by position.
+//! A reference that is not modelled yet (a local function, a reassigned `var`, or a capture read
+//! during construction) is rejected — the file skips rather than emitting a class without what it
+//! needs. Each test records the reference `kotlinc` (2.4.10) verdict.
 
 use super::common;
 
@@ -137,19 +139,72 @@ fn a_capture_in_a_constructor_parameter_default_is_rejected() {
     assert_rejected(SRC);
 }
 
-/// kotlinc: accepted — krusty limitation, the file skips.
+/// kotlinc: accepted.
 ///
-/// Reaching the enclosing INSTANCE is a second capture kind: the receiver itself, not a binding in
-/// the chain. Not modelled yet, so a member read through the implicit outer receiver is rejected.
+/// Reading a member through the implicit outer receiver captures the enclosing INSTANCE, not the
+/// member: one capture however many members are read, and the read goes through it.
 #[test]
-fn a_local_class_reading_an_enclosing_member_is_rejected() {
+fn a_local_class_captures_the_enclosing_instance() {
     const SRC: &str = "class Outer {\n\
-        \x20   val tag: String = \"OK\"\n\
+        \x20   val tag: String = \"O\"\n\
+        \x20   fun suffix() = \"K\"\n\
         \x20   fun m(): String {\n\
-        \x20       class L { fun read() = tag }\n\
+        \x20       class L { fun read() = tag + suffix() }\n\
         \x20       return L().read()\n\
         \x20   }\n\
         }\n\
         fun box(): String = Outer().m()\n";
+    assert_eq!(run(SRC).expect("enclosing instance is carried"), "OK");
+}
+
+/// kotlinc: accepted.
+///
+/// An explicit `this@Outer` reaches the same capture as an unqualified member read.
+#[test]
+fn a_local_class_captures_a_labeled_enclosing_this() {
+    const SRC: &str = "class Outer {\n\
+        \x20   val tag: String = \"OK\"\n\
+        \x20   fun m(): String {\n\
+        \x20       class L { fun read() = this@Outer.tag }\n\
+        \x20       return L().read()\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = Outer().m()\n";
+    assert_eq!(run(SRC).expect("labeled outer this is carried"), "OK");
+}
+
+/// kotlinc: accepted.
+///
+/// The enclosing instance and an enclosing local, together: the instance comes FIRST, because
+/// lowering finds it at field 0.
+#[test]
+fn the_enclosing_instance_precedes_a_captured_local() {
+    const SRC: &str = "class Outer {\n\
+        \x20   val tag: String = \"O\"\n\
+        \x20   fun m(): String {\n\
+        \x20       val extra = \"K\"\n\
+        \x20       class L { fun read() = tag + extra }\n\
+        \x20       return L().read()\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = Outer().m()\n";
+    assert_eq!(run(SRC).expect("instance first, then locals"), "OK");
+}
+
+/// kotlinc: accepted — krusty limitation, the file skips.
+///
+/// A `@JvmInline value class` has no instance to capture: `this` is the bare underlying value, so a
+/// field typed as the class would hold something else entirely. The box corpus caught this as a
+/// `VerifyError` (`codegen/box/inlineClasses/initBlock.kt`).
+#[test]
+fn capturing_an_unboxed_value_class_receiver_is_rejected() {
+    const SRC: &str = "@JvmInline\n\
+        value class V(val s: String) {\n\
+        \x20   fun m(): String {\n\
+        \x20       class L { fun read() = s }\n\
+        \x20       return L().read()\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = V(\"OK\").m()\n";
     assert_rejected(SRC);
 }

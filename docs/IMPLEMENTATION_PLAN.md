@@ -4096,19 +4096,22 @@ steps have landed; the remaining three are blocked on lowering, not on the front
   reason. `ClassSig::ctor_params` stays the source signature; a latent off-by-captures index into it
   (harmless while only anonymous objects had captures, since those have no source arguments) is
   fixed. Box corpus: 3540 → 3544 compiled, 0 FAIL.
-- ⛔ **Four capture shapes stay rejected**: the enclosing INSTANCE, a local function, a reassigned
-  `var`, and a capture read during construction (initializer, `init`, base-constructor argument,
-  secondary constructor, parameter default). Two box-corpus cases proved the last one is a
-  miscompile if admitted (`NoSuchMethodError` on construction).
+- ✅ **The enclosing INSTANCE is captured too** — one capture however many members are read, placed
+  first, which is where `captured_outer_method` and `LabeledThisOuter` already look. Two lowering
+  arms supplied an outer instance of their own for `inner class` construction and had to stop doing
+  so for a class whose captures `emit_new` supplies. Rejected for a `@JvmInline value class`
+  receiver: there is no instance there, only the underlying value.
+- ⛔ **Three capture shapes stay rejected**: a local function, a reassigned `var`, and a capture read
+  during construction (initializer, `init`, base-constructor argument, secondary constructor,
+  parameter default). Two box-corpus cases proved the last one is a miscompile if admitted
+  (`NoSuchMethodError` on construction).
 
 Remaining, in order:
 
-1. **The four unmodelled capture shapes.** The enclosing instance is the valuable one: it is the
-   `AnonymousObjectCaptureSource::EnclosingInstance` half of the same mechanism, and
-   `lower_anonymous_capture` already lowers it — what is missing is deciding, in the checker, that
-   the class needs the receiver rather than a binding. A capture read during construction needs the
-   capture fields stored before the initializer runs (they already are) and a `$default` synthetic
-   constructor that carries them (it does not).
+1. **The three unmodelled capture shapes.** A capture read during construction needs a `$default`
+   synthetic constructor that carries the captures (it does not today); the capture fields are
+   already stored before the initializers run. A reassigned `var` needs the shared-cell
+   representation local functions already use.
 2. **Register the local classifier without the parser rename.** `scope_local_classes` gives each
    local class a file-unique name and rewrites its `Expr::Name` construction references, which is
    what makes the hoisted declaration resolvable. The replacement is a `StmtId`-derived internal

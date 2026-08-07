@@ -13887,20 +13887,21 @@ impl<'a> Checker<'a> {
         scope.visit_bindings(Ns::Function, |name, _| {
             unsupported.insert(name.to_string());
         });
-        // Reaching the enclosing INSTANCE is a second capture kind — the receiver itself, not a
-        // binding in the chain — and is not modelled yet.
+        // Reaching the enclosing INSTANCE is the second capture kind: the receiver itself, not a
+        // binding in the chain. It is carried as ONE capture however many of its members are read.
+        let mut through_outer: std::collections::HashSet<String> = std::collections::HashSet::new();
         for receiver in scope.implicit_receivers() {
             let Some(internal) = receiver.obj_internal() else {
                 continue;
             };
-            unsupported.insert("this".to_string());
+            through_outer.insert("this".to_string());
             if let Some(class) = self.syms.class_by_type_name(internal) {
-                unsupported.extend(class.props.iter().map(|(name, _, _)| name.clone()));
-                unsupported.extend(class.methods.keys().cloned());
+                through_outer.extend(class.props.iter().map(|(name, _, _)| name.clone()));
+                through_outer.extend(class.methods.keys().cloned());
             }
         }
         for label in &self.this_labels {
-            unsupported.insert(format!("this@{}", class_declaration_label(&label.0)));
+            through_outer.insert(format!("this@{}", class_declaration_label(&label.0)));
         }
         // Anything the class declares itself shadows the outer name.
         for name in cl
@@ -13913,11 +13914,15 @@ impl<'a> Checker<'a> {
         {
             outer.remove(name);
             unsupported.remove(name);
+            through_outer.remove(name);
         }
-        unsupported.remove("this");
-        // A name is either a supported value capture or an unsupported one, never both.
-        for name in &unsupported {
+        through_outer.remove("this");
+        // Each name belongs to exactly one channel; the nearer binding wins.
+        for name in unsupported.iter().chain(&through_outer) {
             outer.remove(name);
+        }
+        for name in &unsupported {
+            through_outer.remove(name);
         }
         // A capture read during CONSTRUCTION (an initializer, an `init` block, a base-constructor
         // argument, a parameter default, a secondary constructor) is not modelled yet: it is live
@@ -13936,6 +13941,7 @@ impl<'a> Checker<'a> {
         construction_bodies.extend(cl.companion_base_args.iter().copied());
         let mut everything = outer.clone();
         everything.extend(unsupported.iter().cloned());
+        everything.extend(through_outer.iter().cloned());
         for ctor in &cl.secondary_ctors {
             let mut visible = everything.clone();
             for p in &ctor.params {
@@ -13975,6 +13981,7 @@ impl<'a> Checker<'a> {
         }
         let narrows = scope.local_narrowings();
         let mut captured: Vec<String> = Vec::new();
+        let mut needs_outer = false;
         for (params, body) in member_bodies {
             let mut visible = everything.clone();
             for p in &params {
@@ -13983,8 +13990,32 @@ impl<'a> Checker<'a> {
             for name in used_names(self.file, body, &visible) {
                 if unsupported.contains(&name) {
                     result.unsupported.get_or_insert(name);
+                } else if through_outer.contains(&name) {
+                    needs_outer = true;
                 } else if !captured.contains(&name) {
                     captured.push(name);
+                }
+            }
+        }
+        // The enclosing instance goes FIRST: lowering identifies it by POSITION (field 0), which is
+        // what both an outer member read and a `this@Outer` go through.
+        if needs_outer {
+            // A `@JvmInline value class` has no instance to capture: inside its constructor `this`
+            // is the bare underlying value, so a field typed as the class would hold something else
+            // entirely (`codegen/box/inlineClasses/initBlock.kt` fails verification).
+            let unboxed_receiver = scope
+                .this_ty()
+                .and_then(Ty::obj_internal)
+                .and_then(|internal| self.syms.class_by_type_name(internal))
+                .is_some_and(|class| class.value_field.is_some());
+            match scope.this_ty().filter(|_| !unboxed_receiver) {
+                Some(outer) => result.values.push(AnonymousObjectCapture {
+                    name: "this$0".to_string(),
+                    ty: outer,
+                    source: AnonymousObjectCaptureSource::EnclosingInstance,
+                }),
+                None => {
+                    result.unsupported.get_or_insert("this".to_string());
                 }
             }
         }
