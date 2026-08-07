@@ -4623,6 +4623,10 @@ fn collect_signatures_with_cp_impl(
         .iter()
         .map(anonymous_lexical_class_scope)
         .collect::<Vec<_>>();
+    let local_class_tparams = files
+        .iter()
+        .map(local_class_enclosing_tparams)
+        .collect::<Vec<_>>();
     let source_classifier_visibility = files
         .iter()
         .flat_map(|file| {
@@ -5188,6 +5192,12 @@ fn collect_signatures_with_cp_impl(
                     // Iterator<T>` where `T` is the outer's parameter). Walk the `inner_of` chain and
                     // include each enclosing class's parameters (erased, like the class's own).
                     let mut ctp_names = c.type_params.clone();
+                    // A LOCAL class is written inside another declaration's body, so that
+                    // declaration's type parameters are in scope for its member types too — the
+                    // hoisted `Decl::Class` collected here has lost that context.
+                    if let Some(enclosing) = local_class_tparams[i].get(&d) {
+                        ctp_names.extend(enclosing.iter().cloned());
+                    }
                     {
                         let mut outer = c.inner_of.clone();
                         let mut guard = 0;
@@ -7378,6 +7388,24 @@ fn bc_complex_s(file: &File, s: StmtId, vforbid: bool, cross: bool) -> bool {
 
 /// Returns true if the expression subtree (or any statement within it) references a name from
 /// `outer`. Used to detect captures in local function bodies before allowing lift-to-static.
+/// The first name in `outer` that `e`'s subtree reads, in a stable order. Same traversal (and same
+/// shadowing rules) as [`local_fun_body_uses_any`], but it names the culprit for a diagnostic.
+fn first_used_name(
+    file: &File,
+    e: ExprId,
+    outer: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let mut names: Vec<&String> = outer.iter().collect();
+    names.sort();
+    names
+        .into_iter()
+        .find(|name| {
+            let one: std::collections::HashSet<String> = std::iter::once((*name).clone()).collect();
+            local_fun_body_uses_any(file, e, &one)
+        })
+        .cloned()
+}
+
 fn local_fun_body_uses_any(
     file: &File,
     e: ExprId,
@@ -11673,6 +11701,8 @@ fn make_checker<'a>(
         symbolic_signature_inference: false,
         discover_anonymous_captures: false,
         discovered_anonymous_captures: HashMap::new(),
+        anonymous_lexical_scope: AnonymousLexicalClassScope::default(),
+        capture_scope: None,
         loop_labels: Vec::new(),
         loop_depth: 0,
         return_allowed: true,
@@ -12116,6 +12146,7 @@ fn method_may_publish_inferred_return(function: &FunDecl) -> bool {
         && matches!(function.body, FunBody::Expr(_))
 }
 
+#[derive(Clone)]
 struct ClassCapturePlan {
     /// One decision per method in the retained instance/enum-entry prefix. A shorter vector means
     /// the remaining suffix is irrelevant; `false` inside the vector means semantic checking may be
@@ -12256,7 +12287,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct AnonymousLexicalClassScope {
     owners: HashMap<DeclId, DeclId>,
     declarations: std::collections::HashSet<DeclId>,
@@ -12286,6 +12317,96 @@ impl AnonymousLexicalClassScope {
 /// the lexical classifier scope of the construction site (`object : Base(Inner()) {}` inside `Outer`
 /// may name `Outer.Inner` unqualified). This map preserves that source relationship without making
 /// the anonymous class an `inner` class or changing its runtime capture ABI.
+/// Every `StmtId` reachable from `root`, including the member bodies of a local class declared
+/// inside it (`any_child_stmt` stops at the local class, but its members are written in the same
+/// lexical scope).
+fn reachable_stmts(file: &File, root: ExprId) -> Vec<StmtId> {
+    let mut exprs: Vec<ExprId> = vec![root];
+    let mut stmts: Vec<StmtId> = Vec::new();
+    let mut out: Vec<StmtId> = Vec::new();
+    let mut guard = 0usize;
+    loop {
+        guard += 1;
+        if guard > 1_000_000 {
+            break;
+        }
+        if let Some(e) = exprs.pop() {
+            file.any_child_expr(
+                e,
+                &mut |child| {
+                    exprs.push(child);
+                    false
+                },
+                &mut |child| {
+                    stmts.push(child);
+                    false
+                },
+            );
+        } else if let Some(s) = stmts.pop() {
+            out.push(s);
+            file.any_child_stmt(s, &mut |child| {
+                exprs.push(child);
+                false
+            });
+            if let Stmt::LocalClass(class) = file.stmt(s) {
+                for m in class.methods.iter().chain(&class.companion_methods) {
+                    if let FunBody::Expr(e) | FunBody::Block(e) = m.body {
+                        exprs.push(e);
+                    }
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// The type parameters visible to each statement-position local class, taken from the declaration
+/// whose body contains it. A local class is hoisted to a top-level `Decl::Class` so that signature
+/// collection and lowering treat it like any other class, but its member types were written in the
+/// enclosing declaration's scope: kotlinc 2.4.10 accepts
+/// `class A<T> { fun m() { class L { fun k(): T? = null } } }`.
+fn local_class_enclosing_tparams(file: &File) -> HashMap<DeclId, Vec<String>> {
+    let mut out: HashMap<DeclId, Vec<String>> = HashMap::new();
+    if file.local_class_decls.is_empty() {
+        return out;
+    }
+    let record = |body: &FunBody, tparams: Vec<String>, out: &mut HashMap<DeclId, Vec<String>>| {
+        if tparams.is_empty() {
+            return;
+        }
+        let (FunBody::Expr(root) | FunBody::Block(root)) = body else {
+            return;
+        };
+        for stmt in reachable_stmts(file, *root) {
+            if let Some(&declaration) = file.local_class_decls.get(&stmt) {
+                out.entry(declaration)
+                    .or_default()
+                    .extend(tparams.iter().cloned());
+            }
+        }
+    };
+    for &d in &file.decls {
+        match file.decl(d) {
+            Decl::Fun(f) => record(&f.body, f.type_params.clone(), &mut out),
+            Decl::Class(c) => {
+                for m in c.methods.iter().chain(&c.companion_methods) {
+                    let mut tparams = c.type_params.clone();
+                    tparams.extend(m.type_params.iter().cloned());
+                    record(&m.body, tparams, &mut out);
+                }
+            }
+            Decl::Property(_) => {}
+        }
+    }
+    for names in out.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    out
+}
+
 fn anonymous_lexical_class_scope(file: &File) -> AnonymousLexicalClassScope {
     if file.anonymous_object_classes.is_empty() {
         return AnonymousLexicalClassScope::default();
@@ -12527,12 +12648,13 @@ fn preinfer_returns_pass_with_owners(
 ) -> PreinferPassResult {
     let mut scratch = DiagSink::new();
     let mut pre = make_checker(file, file_index, None, &*syms, &mut scratch);
+    pre.anonymous_lexical_scope = anonymous_lexical_scope.clone();
     // Entry point: the file scope is the root of every chain (see `scope`).
     let root = CheckerScope::root();
     let scope = &root;
     let mut inferred_member_ext_rets = Vec::new();
     for &d in &file.decls {
-        pre.set_anonymous_lexical_class_context(d, anonymous_lexical_scope);
+        pre.set_anonymous_lexical_class_context(d);
         if let Decl::Fun(f) = file.decl(d) {
             if function_needs_return_preinfer(f) {
                 let resolve = class_internal_resolver(pre.syms);
@@ -12846,29 +12968,27 @@ fn check_file_at_impl_mode(
     // regardless of the order function bodies are checked in.
     c.collect_source_contracts(scope);
 
-    // Each top-level declaration is checked in its OWN scope. Reset to the base depth (file-level
-    // scope, e.g. top-level properties) before each one so a prior decl's leftover scope can't leak —
-    // notably a function's locals must NOT be visible to a hoisted local class (`hoist_local_classes`)
-    // checked afterward, or a captured outer name would wrongly resolve instead of skipping the file.
-    let capture_scope = capture_discovery.then(|| capture_discovery_scope(file));
+    // Each top-level declaration is checked in its OWN scope, so a prior declaration's bindings
+    // cannot leak into the next one.
+    c.anonymous_lexical_scope = anonymous_lexical_scope;
+    c.capture_scope = capture_discovery.then(|| capture_discovery_scope(file));
     for &d in &file.decls {
-        if capture_scope
+        if c.capture_scope
             .as_ref()
             .is_some_and(|scope| !scope.declarations.contains(&d))
         {
             continue;
         }
-        c.set_anonymous_lexical_class_context(d, &anonymous_lexical_scope);
+        // A LOCAL class is entered from its `Stmt::LocalClass`, in the lexical scope it was written
+        // in — checking it here as well would check it a second time with no enclosing scope at all.
+        if file.is_local_declaration(d) {
+            continue;
+        }
+        c.set_anonymous_lexical_class_context(d);
         match file.decl(d) {
             Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
             Decl::Class(cl) => {
-                c.check_class(
-                    scope,
-                    cl,
-                    d,
-                    capture_scope.as_ref(),
-                    &anonymous_lexical_scope,
-                );
+                c.check_class(scope, cl, d);
             }
             Decl::Property(p) => {
                 c.check_property(scope, p, d);
@@ -12877,7 +12997,7 @@ fn check_file_at_impl_mode(
     }
     if let Some(body) = file.script_body.filter(|_| {
         !capture_discovery
-            || capture_scope
+            || c.capture_scope
                 .as_ref()
                 .is_some_and(|scope| scope.script_body)
     }) {
@@ -13449,11 +13569,33 @@ struct Checker<'a> {
     symbolic_signature_inference: bool,
     discover_anonymous_captures: bool,
     discovered_anonymous_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+    /// The file's anonymous-object ownership graph and (in capture-discovery mode) the narrowed set
+    /// of declarations to walk. Both are per-FILE facts every classifier check needs, and a local
+    /// class is entered from a statement deep inside a body — threading them down as parameters
+    /// would mean carrying them through every `stmt`/`expr` frame.
+    anonymous_lexical_scope: AnonymousLexicalClassScope,
+    capture_scope: Option<CaptureDiscoveryScope>,
     /// In-scope loop labels (`l@ for …`), innermost last. A `break@l`/`continue@l` must name one of
     /// these — an unknown label is rejected (the file skips) rather than silently retargeting a loop.
     loop_labels: Vec<String>,
     loop_depth: usize,
     return_allowed: bool,
+}
+
+/// The checker state scoped to ONE function/property body, saved across a nested classifier check.
+struct BodyState {
+    ret_ty: Ty,
+    return_allowed: bool,
+    loop_labels: Vec<String>,
+    loop_depth: usize,
+    this_extension_receiver: Option<Span>,
+    companion_of: Option<String>,
+    allow_lambda_mutation: bool,
+    symbolic_signature_inference: bool,
+    fn_reassigned: std::collections::HashSet<String>,
+    fn_closure_reassigned: std::collections::HashSet<String>,
+    lexical_class_context: Vec<TypeName>,
+    exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
 }
 
 enum ClasspathMemberSlotCall {
@@ -13660,6 +13802,147 @@ fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
 }
 
 impl<'a> Checker<'a> {
+    /// Take the checker state that belongs to the BODY currently being checked, leaving the checker
+    /// as if no body were open. Checking a local class enters a fresh set of bodies part-way through
+    /// an enclosing one; without this, the class's last member would leave its expected return, its
+    /// receiver and its mutation summary behind for the rest of the enclosing body.
+    fn take_body_state(&mut self) -> BodyState {
+        BodyState {
+            ret_ty: std::mem::replace(&mut self.ret_ty, Ty::Unit),
+            return_allowed: std::mem::replace(&mut self.return_allowed, true),
+            // A `break`/`continue` inside a local class's member cannot target an enclosing loop.
+            loop_labels: std::mem::take(&mut self.loop_labels),
+            loop_depth: std::mem::replace(&mut self.loop_depth, 0),
+            this_extension_receiver: self.this_extension_receiver.take(),
+            companion_of: self.companion_of.take(),
+            allow_lambda_mutation: std::mem::replace(&mut self.allow_lambda_mutation, false),
+            symbolic_signature_inference: std::mem::replace(
+                &mut self.symbolic_signature_inference,
+                false,
+            ),
+            fn_reassigned: std::mem::take(&mut self.fn_reassigned),
+            fn_closure_reassigned: std::mem::take(&mut self.fn_closure_reassigned),
+            lexical_class_context: std::mem::take(&mut self.lexical_class_context),
+            exact_anonymous_class_roots: std::mem::take(&mut self.exact_anonymous_class_roots),
+        }
+    }
+
+    fn restore_body_state(&mut self, saved: BodyState) {
+        self.ret_ty = saved.ret_ty;
+        self.return_allowed = saved.return_allowed;
+        self.loop_labels = saved.loop_labels;
+        self.loop_depth = saved.loop_depth;
+        self.this_extension_receiver = saved.this_extension_receiver;
+        self.companion_of = saved.companion_of;
+        self.allow_lambda_mutation = saved.allow_lambda_mutation;
+        self.symbolic_signature_inference = saved.symbolic_signature_inference;
+        self.fn_reassigned = saved.fn_reassigned;
+        self.fn_closure_reassigned = saved.fn_closure_reassigned;
+        self.lexical_class_context = saved.lexical_class_context;
+        self.exact_anonymous_class_roots = saved.exact_anonymous_class_roots;
+    }
+
+    /// The first enclosing-scope name a local class's own bodies read, if any — its CAPTURE.
+    ///
+    /// Deliberately syntactic and conservative: a name the class also declares is not a capture, but
+    /// a name that merely *looks* like one is treated as such. Over-reporting costs a skipped file;
+    /// under-reporting costs a class emitted without the constructor parameter the capture needs.
+    fn local_class_capture(&self, scope: &CheckerScope<'_>, cl: &ClassDecl) -> Option<String> {
+        let mut outer: std::collections::HashSet<String> = std::collections::HashSet::new();
+        scope.visit_bindings(Ns::Value, |name, _| {
+            outer.insert(name.to_string());
+        });
+        scope.visit_bindings(Ns::Function, |name, _| {
+            outer.insert(name.to_string());
+        });
+        // An enclosing instance is reached the same way a local is, and needs the same (missing)
+        // constructor parameter — so every member reachable through it counts as a capture, as does
+        // an explicit `this`/`this@Outer` naming it.
+        for receiver in scope.implicit_receivers() {
+            let Some(internal) = receiver.obj_internal() else {
+                continue;
+            };
+            outer.insert("this".to_string());
+            if let Some(class) = self.syms.class_by_type_name(internal) {
+                outer.extend(class.props.iter().map(|(name, _, _)| name.clone()));
+                outer.extend(class.methods.keys().cloned());
+            }
+        }
+        for label in &self.this_labels {
+            outer.insert(format!("this@{}", class_declaration_label(&label.0)));
+        }
+        // Anything the class declares itself shadows the outer name.
+        for name in cl
+            .props
+            .iter()
+            .map(|p| &p.name)
+            .chain(cl.body_props.iter().map(|p| &p.name))
+            .chain(cl.methods.iter().map(|m| &m.name))
+            .chain(cl.companion_methods.iter().map(|m| &m.name))
+        {
+            outer.remove(name);
+        }
+        outer.remove("this");
+        if outer.is_empty() {
+            return None;
+        }
+        let mut bodies: Vec<ExprId> = Vec::new();
+        let mut member_scoped: Vec<(Vec<String>, ExprId)> = Vec::new();
+        for m in cl.methods.iter().chain(&cl.companion_methods) {
+            if let FunBody::Expr(e) | FunBody::Block(e) = m.body {
+                member_scoped.push((m.params.iter().map(|p| p.name.clone()).collect(), e));
+            }
+        }
+        for p in &cl.body_props {
+            bodies.extend(p.init);
+            if let Some(FunBody::Expr(e) | FunBody::Block(e)) = p.getter {
+                bodies.push(e);
+            }
+        }
+        for step in &cl.init_order {
+            if let ClassInit::Block(b) = step {
+                bodies.push(*b);
+            }
+        }
+        bodies.extend(cl.base_args.iter().copied());
+        // A primary-constructor parameter DEFAULT is evaluated in the `$default` synthetic ctor,
+        // which needs the capture exactly like a body does (`class Local(val t: String = x)`).
+        bodies.extend(cl.props.iter().filter_map(|p| p.default));
+        bodies.extend(cl.companion_base_args.iter().copied());
+        for ctor in &cl.secondary_ctors {
+            let mut visible = outer.clone();
+            for p in &ctor.params {
+                visible.remove(&p.name);
+            }
+            let delegation_args = match &ctor.delegation {
+                CtorDelegation::None => &[][..],
+                CtorDelegation::This(call) | CtorDelegation::Super(call) => call.args.as_slice(),
+            };
+            for body in ctor
+                .body
+                .into_iter()
+                .chain(ctor.params.iter().filter_map(|p| p.default))
+                .chain(delegation_args.iter().copied())
+            {
+                if let Some(name) = first_used_name(self.file, body, &visible) {
+                    return Some(name);
+                }
+            }
+        }
+        for (params, body) in member_scoped {
+            let mut visible = outer.clone();
+            for p in &params {
+                visible.remove(p);
+            }
+            if let Some(name) = first_used_name(self.file, body, &visible) {
+                return Some(name);
+            }
+        }
+        bodies
+            .into_iter()
+            .find_map(|body| first_used_name(self.file, body, &outer))
+    }
+
     fn reset_body_mutations(&mut self, body: Option<ExprId>) {
         self.fn_reassigned.clear();
         self.fn_closure_reassigned.clear();
@@ -18824,14 +19107,22 @@ impl<'a> Checker<'a> {
     /// Install the source-class ownership chain for a hoisted anonymous-object declaration. The AST
     /// relation is acyclic, but retain explicit cycle detection so malformed/recovered trees cannot
     /// spin forever without imposing an arbitrary nesting limit on valid generated Kotlin.
-    fn set_anonymous_lexical_class_context(
-        &mut self,
-        declaration: DeclId,
-        scope: &AnonymousLexicalClassScope,
-    ) {
+    fn set_anonymous_lexical_class_context(&mut self, declaration: DeclId) {
         self.lexical_class_context.clear();
         self.exact_anonymous_class_roots.clear();
-        for (index, candidate) in scope.declaration_chain(declaration).into_iter().enumerate() {
+        let chain: Vec<(DeclId, bool)> = self
+            .anonymous_lexical_scope
+            .declaration_chain(declaration)
+            .into_iter()
+            .map(|candidate| {
+                let anonymous = self
+                    .anonymous_lexical_scope
+                    .declarations
+                    .contains(&candidate);
+                (candidate, anonymous)
+            })
+            .collect();
+        for (index, (candidate, anonymous)) in chain.into_iter().enumerate() {
             if let Decl::Class(class) = self.file.decl(candidate) {
                 if let Some(internal) = self
                     .same_package_class(&class.name)
@@ -18843,7 +19134,7 @@ impl<'a> Checker<'a> {
                     if index > 0 {
                         self.lexical_class_context.push(internal);
                     }
-                    if scope.declarations.contains(&candidate) {
+                    if anonymous {
                         self.exact_anonymous_class_roots.insert(internal);
                     }
                 }
@@ -20319,14 +20610,15 @@ impl<'a> Checker<'a> {
     ///
     /// Takes the scope rather than assuming file level, so a local class — declared inside a
     /// function body and able to see the bindings around it — can be checked through the same path.
-    fn check_class(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        cl: &ClassDecl,
-        d: DeclId,
-        capture_scope: Option<&CaptureDiscoveryScope>,
-        anonymous_lexical_scope: &AnonymousLexicalClassScope,
-    ) {
+    fn check_class(&mut self, scope: &CheckerScope<'_>, cl: &ClassDecl, d: DeclId) {
+        // Read once: `capture_scope` and `anonymous_lexical_scope` live on the checker, and the
+        // member walks below take `&mut self`.
+        let class_capture_plan = self
+            .capture_scope
+            .as_ref()
+            .and_then(|scope| scope.class_plans.get(&d))
+            .cloned();
+        let is_anonymous_object = self.anonymous_lexical_scope.declarations.contains(&d);
         // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
         // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
         // and plain) in order.
@@ -20480,12 +20772,15 @@ impl<'a> Checker<'a> {
         if let Some(owner) = current_owner {
             props.extend(self.scoped_properties(scope, owner));
         }
-        // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`.
+        // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
+        // does a LOCAL class — it is entered from the body it was written in and captures the
+        // enclosing instance, so the outer receivers and type parameters stay reachable.
+        let carries_outer = cl.inner_of.is_some() || self.file.is_local_declaration(d);
         {
             let class_scope = match current_owner {
                 Some(owner) => scope.child(ScopeKind::Class {
                     ty: owner,
-                    carries_outer: cl.inner_of.is_some(),
+                    carries_outer,
                 }),
                 None => scope.child(ScopeKind::Block),
             };
@@ -20498,7 +20793,7 @@ impl<'a> Checker<'a> {
             // class's own label (`this@C`) innermost. Walk `inner_of` outward. An anonymous object
             // has no `inner_of` edge; its outer chain is the structural ownership chain.
             let mut labels = class_receiver_labels(cl, self.syms, scope.this_ty());
-            if anonymous_lexical_scope.declarations.contains(&d) {
+            if is_anonymous_object {
                 let mut outer = self.anonymous_outer_receiver_labels();
                 outer.append(&mut labels);
                 labels = outer;
@@ -20599,9 +20894,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            let method_capture_plan = capture_scope
-                .as_ref()
-                .and_then(|scope| scope.class_plans.get(&d));
+            let method_capture_plan = class_capture_plan.as_ref();
             let mut method_check_index = 0;
             for m in &cl.methods {
                 self.check_method_in_capture_plan(
@@ -21231,9 +21524,8 @@ impl<'a> Checker<'a> {
                 }
             }
             for (method_index, m) in cl.companion_methods.iter().enumerate() {
-                if capture_scope
+                if class_capture_plan
                     .as_ref()
-                    .and_then(|scope| scope.class_plans.get(&d))
                     // A missing plan means completeness fell back to the full semantic walk;
                     // an unexpected length mismatch must fail conservative for the same reason.
                     .is_none_or(|plan| {
@@ -38099,9 +38391,44 @@ impl<'a> Checker<'a> {
             Stmt::LocalFun(f) => {
                 self.check_local_fun(scope, &f.clone(), s);
             }
-            // A local class is hoisted to a top-level `Decl::Class` (see `hoist_local_classes`) and
-            // checked there — nothing to do for the in-body statement.
-            Stmt::LocalClass(_) => {}
+            // A local class is checked HERE, from the scope it was written in — the enclosing
+            // function's parameters and locals are visible to it, so a capture resolves instead of
+            // reporting an unresolved reference. `check_class` was extracted for exactly this: a
+            // classifier can be entered from any scope.
+            Stmt::LocalClass(_) => {
+                let Some(&d) = self.file.local_class_decls.get(&s) else {
+                    // Not hoisted (a local class with super-constructor arguments): no declaration
+                    // to check against, so the reference stays unresolved and the file skips.
+                    return;
+                };
+                let Decl::Class(cl) = self.file.decl(d) else {
+                    return;
+                };
+                let cl = cl.clone();
+                // A local class captures its enclosing instance, so its rung carries the outer
+                // `this` — and with it the enclosing class's type parameters (kotlinc 2.4.10
+                // accepts `class A<T>(val t: T) { fun m() { class L { fun k(): T = t } } }`).
+                //
+                // Checking a classifier mid-body rewrites the checker's per-BODY state (the
+                // expected return, the loop labels a `break` may name, the mutation summary), so
+                // the enclosing body's is saved across it.
+                // Lowering does not yet give a local class the constructor parameters a capture
+                // needs, so a capturing one is rejected rather than silently emitted without them.
+                // Before this statement was checked at all, the capture simply failed to resolve;
+                // the outcome is the same skip, with a diagnostic that says why.
+                if let Some(captured) = self.local_class_capture(scope, &cl) {
+                    self.diags.error(
+                        cl.span,
+                        format!(
+                            "krusty: local class '{}' captures '{captured}' from its enclosing scope (unsupported)",
+                            class_declaration_label(&cl.name)
+                        ),
+                    );
+                }
+                let saved = self.take_body_state();
+                self.check_class(scope, &cl, d);
+                self.restore_body_state(saved);
+            }
         }
     }
 

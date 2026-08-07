@@ -322,11 +322,11 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
 }
 
 /// Hoist every local class (`class`/`interface`/… declared inside a function body, parsed as
-/// `Stmt::LocalClass`) to a top-level `Decl::Class`, so signature collection, checking, and lowering
-/// treat it like any other class — zero changes to those passes. The `Stmt::LocalClass` stays in the
-/// body as a no-op. A local class that captures outer locals is checked with no enclosing scope, so its
-/// outer references fail to resolve and the file cleanly skips (never miscompiles). Two same-named local
-/// classes (or a clash with a top-level name) become a "conflicting declarations" skip — also sound.
+/// `Stmt::LocalClass`) to a top-level `Decl::Class`, so signature collection and lowering treat it
+/// like any other class. The `Stmt::LocalClass` stays in the body and is where the CHECKER enters
+/// the class (`File::local_class_decls` links the two), so it is checked in the lexical scope it
+/// was written in. Two same-named local classes (or a clash with a top-level name) become a
+/// "conflicting declarations" skip — sound.
 /// Give each LOCAL class a globally-unique name so same-named local classes in DIFFERENT functions do
 /// not collide once hoisted to top-level declarations (`fun f() { class A … }; fun g() { class A … }`
 /// registered `A` twice → the second shadowed the first, mis-resolving the first's construction). For
@@ -518,23 +518,27 @@ fn collect_subtree(file: &File, root: ExprId, exprs: &mut Vec<ExprId>, stmts: &m
 }
 
 fn hoist_local_classes(file: &mut File) {
-    use crate::ast::{Decl, Stmt};
-    let hoisted: Vec<crate::ast::ClassDecl> = file
+    use crate::ast::{Decl, Stmt, StmtId};
+    let hoisted: Vec<(StmtId, crate::ast::ClassDecl)> = file
         .stmt_arena
         .iter()
-        .filter_map(|s| match s {
+        .enumerate()
+        .filter_map(|(index, s)| match s {
             // A local class with super-CONSTRUCTOR arguments (`class Z : C(s)`) can capture an outer
             // local through that call, which the hoisted (outer-scope-free) check doesn't currently
             // reject — so it would miscompile. Don't hoist those; the reference stays unresolved and the
             // file skips (sound). Local-class INHERITANCE is a later slice. Everything else hoists.
-            Stmt::LocalClass(c) if c.base_args.is_empty() => Some(c.clone()),
+            Stmt::LocalClass(c) if c.base_args.is_empty() => {
+                Some((StmtId(index as u32), c.clone()))
+            }
             _ => None,
         })
         .collect();
-    for c in hoisted {
+    for (stmt, c) in hoisted {
         let id = file.add_decl(Decl::Class(c));
         file.decls.push(id);
         file.mark_local_declaration(id);
+        file.local_class_decls.insert(stmt, id);
     }
 }
 
