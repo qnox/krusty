@@ -358,6 +358,16 @@ pub enum IrExpr {
         name: String,
         descriptor: String,
     },
+    /// Write a static field of a class OUTSIDE the file being lowered — `putstatic owner.name:desc`.
+    /// The write counterpart of [`IrExpr::ExternalStaticField`]. A companion property's backing static
+    /// lives on its OWNER, and `IrFile::statics` holds only the file being lowered, so a companion
+    /// declared in a sibling source file has no statics index to write through.
+    SetExternalStaticField {
+        owner: TypeName,
+        name: String,
+        descriptor: String,
+        value: ExprId,
+    },
     /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
     EnumValues {
         class: ClassId,
@@ -1826,7 +1836,9 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             f(*lhs);
             f(*rhs);
         }
-        IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => f(*value),
+        IrExpr::SetValue { value, .. }
+        | IrExpr::SetStatic { value, .. }
+        | IrExpr::SetExternalStaticField { value, .. } => f(*value),
         IrExpr::SetField {
             receiver, value, ..
         }

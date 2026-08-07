@@ -890,6 +890,8 @@ mod property_conversion_inference_e2e;
 mod property_infer_member_e2e;
 #[path = "qq1_safecall_diverging_scope_block_e2e.rs"]
 mod qq1_safecall_diverging_scope_block_e2e;
+#[path = "qualified_name_e2e.rs"]
+mod qualified_name_e2e;
 #[path = "range_property_e2e.rs"]
 mod range_property_e2e;
 #[path = "range_step_e2e.rs"]

@@ -1742,7 +1742,25 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
         if fq.ends_with("$$serializer") {
             continue; // handled above (special inner name `$serializer`)
         }
-        let Some(pos) = fq.rfind('$') else {
+        // Where the OUTER class ends is not the last `$`: a backticked declaration may carry `$` in
+        // its own simple name (`class \`Nested$With$Dollars\``), and splitting there named an outer
+        // class that does not exist — the loader then failed with `NoClassDefFoundError` on the
+        // invented name. The boundary is the longest proper prefix that is ITSELF a class of this
+        // file; only when no declared class is a prefix does the textual split stand in (an outer
+        // this file does not declare).
+        let Some(pos) = ir
+            .classes
+            .iter()
+            .map(IrClass::fq_name)
+            .filter(|outer| {
+                outer.len() < fq.len()
+                    && fq.starts_with(outer.as_str())
+                    && fq.as_bytes()[outer.len()] == b'$'
+            })
+            .map(|outer| outer.len())
+            .max()
+            .or_else(|| fq.rfind('$'))
+        else {
             continue; // top-level class — not nested
         };
         let name = &fq[pos + 1..];
@@ -9974,6 +9992,22 @@ impl<'a> Emitter<'a> {
                 };
                 code.getstatic(f, words);
             }
+            IrExpr::SetExternalStaticField {
+                owner,
+                name,
+                descriptor,
+                value,
+            } => {
+                let owner = owner.render();
+                let f = self.cw.fieldref(&owner, name, descriptor);
+                let words = if descriptor == "J" || descriptor == "D" {
+                    2
+                } else {
+                    1
+                };
+                self.emit_value(*value, code);
+                code.putstatic(f, words);
+            }
             IrExpr::EnumValues { class } => {
                 let fq = self.ir.classes[*class as usize].fq_name();
                 let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));
@@ -12145,6 +12179,9 @@ impl<'a> Emitter<'a> {
             }
             // A write is a statement: it leaves nothing on the stack, so nothing is discarded after it.
             IrExpr::PropertyWrite { .. } => Ty::Unit,
+            // A store leaves nothing on the stack; typing it as a value made statement position
+            // emit a `pop` against an empty stack (`VerifyError: Operand stack underflow`).
+            IrExpr::SetExternalStaticField { .. } => Ty::Unit,
             IrExpr::GetStatic(i) => ir_ty_to_jvm(&self.ir.statics[*i as usize].ty),
             IrExpr::New { internal, .. } => Ty::obj(&internal.render()),
             IrExpr::MethodCall { class, index, .. } => {

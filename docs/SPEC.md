@@ -4094,6 +4094,69 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`codegen/box/localClasses/capturingInDefaultConstructorParameter.kt`).
   Tests: `tests/local_class_scope_e2e.rs`.
 
+- **Fully-qualified name references resolve by SEGMENT ITERATION over a package/classifier
+  namespace, not by matching spellings.** Kotlin admits a fully-qualified reference with no import
+  wherever a simple name is legal — `pkg.Cls()`, `pkg.Cls.COMPANION_VALUE`, `pkg.Obj.fn()`,
+  `val x: pkg.Cls`, `pkg.Cls::class`, `a is pkg.Cls`, `pkg.topLevelFun()`,
+  `java.util.concurrent.atomic.AtomicInteger(1)`. There is no syntax that separates the package part
+  from the classifier part: `a.b.C.D` is ambiguous between package `a.b` + class `C` + member `D`,
+  package `a` + class `b.C` + …, and so on. So a dotted reference is resolved one segment at a time,
+  and every prefix denotes exactly one of two things — a **package** or a **classifier**
+  (`QualifiedPrefix`, `src/symbol_resolver.rs`). Under a package, the next segment is a classifier of
+  that package or a subpackage; under a classifier, it is a nested classifier. The first segment that
+  is neither ends the walk, and the position that owns the reference (a read, a call, a class
+  literal, a constructor) resolves that segment as a MEMBER of whatever the prefix denoted.
+  This is what makes the qualified spelling end at the SAME resolved identity the imported simple
+  name reaches, for a same-module source classifier and a classpath one alike — the walk consults the
+  federated module + classpath source at every step, so origin never enters the rule.
+
+  Resolving a prefix to a **package** requires a package namespace, which is the half that was
+  missing: `SymbolSource::package_exists` (`src/symbol_source.rs`), answered by the classpath's
+  package catalog (`PackageTree::has_package` — jars, class directories, and the JDK jimage, plus the
+  intermediate packages that own no classes of their own, so `java` answers as well as `java/util`)
+  and by the module's own declarations (`ModuleSymbols::package_exists`, derived from the package of
+  every declared classifier and facade). Packages UNION across sources rather than shadowing: the
+  same package legitimately holds module and classpath declarations.
+
+  Two shadowing rules, both taken from the reference compiler:
+  - **A value root shadows both a classifier and a package.** kotlinc resolves the leftmost segment
+    as an expression first, so a local, a member property reached through an implicit receiver, a
+    top-level property, or a property brought in by an EXPLICIT OR WILDCARD import makes the
+    reference a member chain. With `import other.plib` (or `import other.*`) binding a property named
+    `plib`, `plib.Cls` reads `plib`'s `Cls` member and does not name the class `plib.Cls`.
+  - **An in-scope classifier shadows a package path**, so `Outer.Nested` resolves through the
+    in-scope chain and never through a package named `Outer`.
+
+  Package references are ABSOLUTE from the root: inside `package top`, `sub.Deep()` does NOT resolve
+  to `top.sub.Deep` (kotlinc: `unresolved reference 'sub'`), unlike Java.
+
+  Covered in both origins: construction (including a nested classifier and one under an `object`),
+  companion/static const/val/var read and write, companion function call, `object` member read/write
+  and call, an `object` or companion reached as a VALUE, nested-`object` members, enum entries, type
+  annotations (nullable, type arguments, explicit type arguments, supertypes), `is`/`as`/`when is`,
+  class literals (including `pkg.Cls.Nested::class` and `java.util.ArrayList::class`), and
+  package-qualified top-level function, property, `const val`, and `var` write; enum synthetic statics
+  (`values()`/`valueOf`); an explicitly named `Companion`; an unbound callable reference
+  (`pkg.Cls::method`); and construction through a `typealias`. A `typealias` resolves to its TARGET on
+  both sides of the pipeline — the module's alias edges are keyed by fully-qualified name
+  (`SymbolTable::source_alias_fqns`, since a per-file key cannot answer a reference from another
+  file), and lowering follows the same edge, because returning the alias spelling made the lowered
+  internal disagree with the checker's recorded result type and the construction was dropped.
+
+  The walk must FALL THROUGH when a step fails rather than return: a compiled Kotlin `typealias` is
+  `@Metadata` on a file facade, not a class file, so the package walk cannot see it while the older
+  alias-table arms can. Returning early from the constructor path hid every spelling those arms
+  answer.
+
+  Lowering must end at the identity the checker resolved, not re-derive it: the constructor path now
+  takes the recorded result type, the qualified-path candidate split is the shared one, and a
+  `const val` read is a facade FIELD (it has no accessor — calling one threw `NoSuchMethodError`).
+  A callable declared in another SOURCE file of the module carries no physical descriptor, so a
+  receiver-less static call to one is emitted as `Callee::CrossFile`, which derives the descriptor
+  from the signature; emitting the library form wrote an EMPTY descriptor, which the JVM rejects as a
+  zero-length constant-pool entry.
+  Tests: `tests/qualified_name_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

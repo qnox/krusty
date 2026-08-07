@@ -17,7 +17,7 @@ use crate::libraries::{
     EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
 use crate::names::{nested_internal_name_candidates, property_getter_name, property_setter_name};
-use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
+use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier, QualifiedPrefix};
 use crate::symbol_source::SymbolSource;
 use crate::types::{existing_type_name, ty_mentions_param, type_name, Ty, TypeName, Visibility};
 use scope::{NarrowPath, Ns, ScopeKind};
@@ -757,6 +757,10 @@ pub struct DeclaredPropertySig {
 /// the AST that declares it. Consumers must not rediscover the distinction from file ownership,
 /// property names, or the presence of a generated class: ordinary properties live in an outer-class
 /// static field, while field-less custom accessors dispatch through the companion singleton.
+/// The Kotlin name of an unnamed `companion object` — the classifier segment (`Outer$Companion`)
+/// and the static field (`Outer.Companion`) that holds its singleton.
+pub(crate) const COMPANION_OBJECT_NAME: &str = "Companion";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StaticPropertyStorage {
     OuterStaticField,
@@ -1741,6 +1745,12 @@ pub struct SymbolTable {
     /// edge to a classifier identity, not another class declaration; keeping it separate prevents a
     /// simple alias key from corrupting the internal-name invariant of [`Self::classes`].
     source_class_aliases: HashMap<(u32, String), TypeName>,
+    /// The same alias edges keyed by FULLY-QUALIFIED name (`pkg/Alias` → the target's internal name).
+    /// The per-file index above answers a spelling inside its declaring file; a qualified reference
+    /// (`pkg.Alias(…)`) names the alias from anywhere and has no file to key on, so the declaring
+    /// file's package is folded into the key here. Kept beside the per-file map rather than in
+    /// [`Self::classes`], whose keys must stay real classifier identities.
+    pub source_alias_fqns: HashMap<TypeName, TypeName>,
     anonymous_object_types: HashMap<(u32, DeclId), TypeName>,
     anonymous_object_captures: HashMap<(u32, DeclId), Vec<AnonymousObjectCapture>>,
     anonymous_object_capture_discovered: std::collections::HashSet<(u32, DeclId)>,
@@ -1817,6 +1827,7 @@ impl Default for SymbolTable {
             classes: HashMap::new(),
             source_class_headers: HashMap::new(),
             source_class_aliases: HashMap::new(),
+            source_alias_fqns: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),
             anonymous_object_capture_discovered: std::collections::HashSet::new(),
@@ -6843,6 +6854,15 @@ fn collect_signatures_with_cp_impl(
                 table
                     .source_class_aliases
                     .insert((file_index as u32, alias.clone()), internal);
+                // The qualified spelling of the same edge. A reference from another file names the
+                // alias by its package, which no per-file key can answer.
+                let package = file.package.as_deref().unwrap_or("").replace('.', "/");
+                let fqn = if package.is_empty() {
+                    alias.clone()
+                } else {
+                    format!("{package}/{alias}")
+                };
+                table.source_alias_fqns.insert(type_name(&fqn), internal);
             }
         }
     }
@@ -9588,6 +9608,11 @@ pub struct TypeInfo {
     pub resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
     /// Selected enum-entry owners keyed by member-read expression.
     pub resolved_enum_entries: HashMap<ExprId, TypeName>,
+    /// Enum classifiers whose SYNTHETIC statics (`values()`, `valueOf(s)`) a call selected, keyed by
+    /// the call expression. These are declarations of the classifier rather than of any file, so a
+    /// cross-file or fully-qualified spelling reaches them with no IR class of its own to consult;
+    /// recording the owner is what lets lowering emit the static call without rediscovering it.
+    pub resolved_enum_statics: HashMap<ExprId, TypeName>,
     /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
     /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
@@ -10713,6 +10738,17 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: TypeName },
+    /// A class's COMPANION object used as a value — the classifier itself in a value position
+    /// (`val c = pkg.Cls`), or the receiver of a companion member (`pkg.Cls.member`). The companion
+    /// instance lives in a static field on the OUTER class, so the owner/field/companion-type triple is
+    /// handed over as the checker resolved it. Recorded whenever the classifier was named by a
+    /// QUALIFIED path: lowering rediscovers a companion from a simple name through the import scope,
+    /// which a package-qualified path never enters.
+    CompanionValue {
+        owner: TypeName,
+        field: String,
+        companion: TypeName,
+    },
     /// A static/companion property read selected semantically by resolution. `storage` is the exact
     /// physical capability exposed by the declaration; lowering does not inspect file ownership,
     /// provider origin, generated names, or declaration ASTs to choose field versus accessor.
@@ -10891,6 +10927,15 @@ pub enum StmtLowering {
     MemberExtensionPropertyWrite {
         owner: TypeName,
         receiver: Ty,
+        ty: Ty,
+    },
+    /// A write to a TOP-LEVEL property named through its PACKAGE (`pkg.topLevelVar = v`), resolved to
+    /// its declaring facade's receiver-less static setter — the write analogue of
+    /// [`ExprLowering::TopLevelPropertyGet`]. The backing field is private to the facade, so the
+    /// accessor is the realization even when the value crosses no file boundary; carrying the selected
+    /// callable keeps lowering out of the field-versus-accessor decision.
+    TopLevelPropertySet {
+        setter: Box<crate::libraries::LibraryCallable>,
         ty: Ty,
     },
     /// A `kotlin.contracts.contract { … }` statement: erased metadata, never executed and emits no
@@ -11739,6 +11784,7 @@ fn make_checker<'a>(
         resolved_default_member_calls: HashMap::new(),
         resolved_library_companion_consts: HashMap::new(),
         resolved_enum_entries: HashMap::new(),
+        resolved_enum_statics: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         synthetic_ext_calls: HashMap::new(),
@@ -13189,6 +13235,7 @@ fn check_file_at_impl_mode(
         resolved_default_member_calls,
         resolved_library_companion_consts,
         resolved_enum_entries,
+        resolved_enum_statics,
         resolved_call_arg_slots,
         resolved_whole_array_vararg_args,
         synthetic_ext_calls,
@@ -13345,6 +13392,7 @@ fn check_file_at_impl_mode(
         resolved_default_member_calls,
         resolved_library_companion_consts,
         resolved_enum_entries,
+        resolved_enum_statics,
         resolved_call_arg_slots,
         resolved_whole_array_vararg_args,
         synthetic_ext_calls,
@@ -13685,6 +13733,7 @@ struct Checker<'a> {
     resolved_default_member_calls: HashMap<ExprId, ResolvedDefaultMemberCall>,
     resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
     resolved_enum_entries: HashMap<ExprId, TypeName>,
+    resolved_enum_statics: HashMap<ExprId, TypeName>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
@@ -18045,6 +18094,15 @@ impl<'a> Checker<'a> {
         }
         ty
     }
+    /// Whether the leftmost segment of a dotted reference is a VALUE, so the reference is a member
+    /// chain rather than a qualified name. kotlinc resolves the root as an expression FIRST: a value
+    /// of that spelling shadows both a classifier and a package (verified against the reference
+    /// compiler for a local, a member property, and a property reached by explicit or wildcard import
+    /// — see `docs/SPEC.md`, "Fully-qualified name references").
+    ///
+    /// The IMPORTED rungs matter as much as the lexical ones: `import other.plib` (or `import other.*`)
+    /// binding a property named like a package makes `plib.Cls` a read of `plib`'s `Cls` member, not a
+    /// reference to the class `plib.Cls`.
     fn value_root_shadows_classifier(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
         self.lexical_value_declares(scope, name)
             || self.syms.props.contains_key(name)
@@ -18059,6 +18117,18 @@ impl<'a> Checker<'a> {
                         .is_some_and(|internal| self.lookup_prop_name(internal, name).is_some())
                         || self.resolve_property_member(receiver, name).is_some()
                 })
+            || self.imported_source_companion_property(name).is_some()
+            || self
+                .imports
+                .get(name)
+                .and_then(|full| {
+                    let (package, member) = full.rsplit_once('/')?;
+                    self.syms
+                        .libraries
+                        .top_level_static_field(type_name(package), member)
+                })
+                .is_some()
+            || self.top_level_property(name).is_some()
     }
     /// Declare a local function in the CURRENT scope, appending to its overload set.
     fn register_local_fun(
@@ -18142,6 +18212,20 @@ impl<'a> Checker<'a> {
         let root = self.dotted_root(receiver)?;
         if self.value_root_shadows_classifier(scope, &root) {
             return None;
+        }
+        // A FULLY-QUALIFIED constructor (`pkg.Cls(…)`, `pkg.Cls.Nested(…)`, `pkg.sub.Cls(…)`): walk the
+        // receiver from its package root and take `name` in whatever namespace that prefix denotes.
+        // The walk is the general rule, so a deep path and a nested classifier need no separate arm.
+        // Fall THROUGH when the walk does not reach a classifier: a Kotlin `typealias` on the classpath
+        // is metadata on a file facade rather than a class file, so the package walk cannot see it and
+        // the arms below (which consult the alias table) still can. Returning early here hid every
+        // spelling those arms answer.
+        if let Some(prefix) = self.package_rooted_prefix(scope, receiver) {
+            if let Some(QualifiedPrefix::Classifier(internal)) =
+                self.step_qualified_prefix(prefix, name)
+            {
+                return Some(internal);
+            }
         }
         match self.file.expr(receiver) {
             // `Outer.Nested(…)` — a nested type under an in-scope/imported outer type.
@@ -26399,6 +26483,31 @@ impl<'a> Checker<'a> {
                 let ty = self.record_external_static_field(Some(e), field);
                 return self.set(e, ty);
             }
+            // The WHOLE chain is a fully-qualified classifier path (`pkg.Obj`, `pkg.Cls.NestObj`,
+            // `pkg.Cls.Companion`). An `object`/companion is a VALUE here; any other classifier is only
+            // a qualifier, and the position enclosing this one consumes it.
+            if let Some(internal) = self.package_qualified_classifier(scope, e) {
+                if let Some(ty) = self.classifier_value_ty(e, internal) {
+                    return self.set(e, ty);
+                }
+            }
+            // The member after a fully-qualified prefix, resolved in the namespace that prefix denotes:
+            // a package's top-level properties, or a classifier's companion/static members and enum
+            // entries. An `object` classifier is left to the rung above — it resolves as a value, and
+            // its members then resolve by ordinary member checking on the singleton.
+            match self.package_rooted_prefix(scope, receiver) {
+                Some(QualifiedPrefix::Package(package)) => {
+                    if let Some(ty) = self.package_qualified_property_read(e, package, &name) {
+                        return self.set(e, ty);
+                    }
+                }
+                Some(QualifiedPrefix::Classifier(owner)) => {
+                    if let Some(ty) = self.qualified_classifier_member_read(e, owner, &name) {
+                        return self.set(e, ty);
+                    }
+                }
+                None => {}
+            }
             // `Outer.NestedEnum.ENTRY` — a nested enum accessed through its enclosing type name.
             // The receiver `Outer.NestedEnum` is a `Member` chain (not a bare `Name`); flatten it
             // to the hoisted dotted key (`A.E`) under which the nested enum's entries register.
@@ -26823,6 +26932,76 @@ impl<'a> Checker<'a> {
         self.set(e, reflect)
     }
 
+    /// An UNBOUND callable/property reference on a classifier named by its FULLY-QUALIFIED path
+    /// (`pkg.Cls::method`). The reference's first parameter is the receiver, exactly as for the simple
+    /// name an import would bind — this differs only in how the classifier is named, so it resolves
+    /// the path to ONE identity and then runs the same member/property rungs against it.
+    ///
+    /// An `object` is deliberately excluded: `pkg.Obj::m` is BOUND to the singleton, which emit does
+    /// not model, and typing it as unbound would miscompile rather than reject.
+    fn qualified_unbound_ref(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        expected: Option<Ty>,
+        receiver: ExprId,
+        name: &str,
+    ) -> Option<Ty> {
+        let internal = self.package_qualified_classifier(scope, receiver)?;
+        if self.classifier_is_object(internal) {
+            return None;
+        }
+        let receiver_ty = Ty::obj_name(internal);
+        // A MODULE class answers from its own signature (source methods and backing-field properties).
+        if let Some(class) = self.syms.class_by_type_name(internal).cloned() {
+            if let Some(signature) = class.method(name).cloned() {
+                if signature.requires_all_args() {
+                    let mut params = vec![receiver_ty];
+                    params.extend(signature.params.iter().copied());
+                    return Some(Ty::fun(params, signature.ret));
+                }
+            }
+            if let Some((property_ty, is_var)) = class
+                .props
+                .iter()
+                .find_map(|(candidate, ty, is_var)| (candidate == name).then_some((*ty, *is_var)))
+            {
+                return self.property_ref_ty(1, is_var, &[receiver_ty, property_ty]);
+            }
+        }
+        // A CLASSPATH classifier answers through the same resolved-reference seams the bare-name rung
+        // uses; the recorded lowering carries the selected member/property verbatim.
+        if let Some(property) = self.resolve_property_ref(receiver_ty, name) {
+            let ty =
+                self.property_ref_ty(1, property.setter.is_some(), EXTENSION_PROPERTY_REF_ARGS)?;
+            self.expr_lowers.insert(
+                expression,
+                ExprLowering::ClasspathUnboundPropertyRef(Box::new(property)),
+            );
+            return Some(ty);
+        }
+        if let Some(member) = self.resolve_instance_ref(receiver_ty, name) {
+            if !member.suspend() && member.ret != Ty::Nothing {
+                let mut params = vec![receiver_ty];
+                params.extend(member.params.iter().copied());
+                let ret = member.ret;
+                self.expr_lowers.insert(
+                    expression,
+                    ExprLowering::ClasspathUnboundMemberRef {
+                        receiver: receiver_ty,
+                        member: Box::new(member),
+                    },
+                );
+                return Some(Ty::fun(params, ret));
+            }
+        }
+        let expected_function = match expected {
+            Some(Ty::Fun(function)) => Some(function),
+            _ => None,
+        };
+        self.source_extension_ref(expression, receiver_ty, name, expected_function)
+    }
+
     fn callable_ref_function_type(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -26859,7 +27038,11 @@ impl<'a> Checker<'a> {
                     self.class_literal_unbound_ty(scope, &n)
                         .or_else(|| scope.is_reified(&n).then(|| Ty::obj(&n)))
                 } else {
-                    None
+                    // A QUALIFIED type name (`pkg.Cls::class`, `java.util.ArrayList::class`,
+                    // `Outer.Nested::class`) is an unbound literal exactly like the simple name an
+                    // import would bind — the receiver is a classifier, not a value to evaluate.
+                    self.classifier_receiver_internal(scope, recv)
+                        .map(Ty::obj_name)
                 };
                 if unbound.is_none() {
                     // Bound: a reference receiver, or a boxable primitive (boxed then `getClass`).
@@ -27092,6 +27275,15 @@ impl<'a> Checker<'a> {
                             Ty::fun(cls.ctor_params.clone(), Ty::obj(&cls.internal())),
                         );
                     }
+                }
+            }
+            // An UNBOUND method/property reference whose receiver is a FULLY-QUALIFIED classifier
+            // (`pkg.Cls::method`, `pkg.Outer.Nested::prop`). The rungs below are the same ones the
+            // simple-name receiver uses; only the way the classifier is named differs, so this arm
+            // resolves the path to one identity and hands that over.
+            if let Some(r) = receiver {
+                if let Some(ty) = self.qualified_unbound_ref(scope, e, expected, r, &name) {
+                    return self.set(e, ty);
                 }
             }
             // Method references on a user class: bound `obj::m` (receiver is a value, captured →
@@ -32381,6 +32573,246 @@ impl<'a> Checker<'a> {
             .or_else(|| self.syms.class_names.get(name))
     }
 
+    /// The classifier identity a resolvable name denotes, following a `typealias` to its target — the
+    /// one step of the qualifier walk that consults the federated module + classpath source.
+    fn qualifier_classifier_identity(&self, candidate: TypeName) -> Option<TypeName> {
+        let classifier = self.fed_source().resolve_type_name(candidate)?;
+        Some(classifier.alias_target.unwrap_or(candidate))
+    }
+
+    /// Step the qualifier walk across ONE segment. This is the whole of Kotlin's qualified-name rule:
+    /// under a package, a segment is a classifier of that package or a subpackage; under a classifier,
+    /// it is a nested classifier. Anything else ends the walk — the segment is a MEMBER (a property, a
+    /// callable, an enum entry), which the position that owns the reference resolves.
+    fn step_qualified_prefix(
+        &self,
+        prefix: QualifiedPrefix,
+        segment: &str,
+    ) -> Option<QualifiedPrefix> {
+        match prefix {
+            QualifiedPrefix::Package(package) => {
+                let candidate = crate::types::type_name_child(package, segment);
+                if let Some(classifier) = self.qualifier_classifier_identity(candidate) {
+                    return Some(QualifiedPrefix::Classifier(classifier));
+                }
+                self.fed_source()
+                    .package_exists(candidate)
+                    .then_some(QualifiedPrefix::Package(candidate))
+            }
+            QualifiedPrefix::Classifier(owner) => {
+                let nested = type_name(&format!("{}${segment}", owner.render()));
+                self.qualifier_classifier_identity(nested)
+                    .map(QualifiedPrefix::Classifier)
+            }
+        }
+    }
+
+    /// What a FULLY-QUALIFIED dotted path denotes, resolved SEGMENT BY SEGMENT from a package root.
+    ///
+    /// Kotlin admits such a path with no import wherever a simple name is legal, and the only way to
+    /// tell `a.b.C.D` apart from `a.b.C` + member `D` — or from package `a` + class `b`, for that
+    /// matter — is to walk it: each prefix denotes a package, a classifier, or nothing, and the walk
+    /// stops at the first segment that is neither. Resolution therefore ends at the SAME identity the
+    /// imported spelling reaches through `scoped_classifier_name`, and a bogus path stays unresolved
+    /// rather than becoming a phantom classifier.
+    ///
+    /// The root must be a PACKAGE: a name that is a value or a classifier in scope shadows a package of
+    /// the same spelling (kotlinc resolves the in-scope name first), and those spellings already
+    /// resolve through the in-scope chain.
+    fn package_rooted_prefix(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+    ) -> Option<QualifiedPrefix> {
+        let path = self.dotted_full_path(expression)?;
+        let mut segments = path.split('.');
+        let root = segments.next()?;
+        if self.value_root_shadows_classifier(scope, root)
+            || self
+                .scoped_classifier_name_in(scope, root)
+                .found()
+                .is_some()
+        {
+            return None;
+        }
+        let root = type_name(root);
+        if !self.fed_source().package_exists(root) {
+            crate::trace_compiler!(
+                "resolve",
+                "qualified prefix: '{path}' root is not a package"
+            );
+            return None;
+        }
+        segments.try_fold(QualifiedPrefix::Package(root), |prefix, segment| {
+            self.step_qualified_prefix(prefix, segment)
+        })
+    }
+
+    /// The classifier a fully-qualified path names, when the whole path is one.
+    fn package_qualified_classifier(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+    ) -> Option<TypeName> {
+        match self.package_rooted_prefix(scope, expression)? {
+            QualifiedPrefix::Classifier(internal) => Some(internal),
+            QualifiedPrefix::Package(_) => None,
+        }
+    }
+
+    /// Whether a resolved classifier identity is an `object`, from either origin.
+    fn classifier_is_object(&self, internal: TypeName) -> bool {
+        self.syms
+            .class_by_type_name(internal)
+            .map(ClassSig::is_object)
+            .or_else(|| {
+                self.resolved_type_name(internal)
+                    .map(|classifier| classifier.is_object())
+            })
+            .unwrap_or(false)
+    }
+
+    /// The VALUE a resolved classifier identity denotes in an expression position: an `object` is its
+    /// singleton, a class with a companion is that companion instance. Keyed on the IDENTITY rather
+    /// than on a source name, so a fully-qualified spelling produces exactly the value the simple name
+    /// an import would bind. `None` means the classifier is only a QUALIFIER — the enclosing position
+    /// (a member read, a call, a class literal) consumes it.
+    fn classifier_value_ty(&mut self, expression: ExprId, internal: TypeName) -> Option<Ty> {
+        if self.classifier_is_object(internal) {
+            self.expr_lowers
+                .insert(expression, ExprLowering::ObjectValue { internal });
+            return Some(Ty::obj_name(internal));
+        }
+        // A MODULE class whose companion declares a supertype is registered as `C$Companion`; a plain
+        // companion is not a first-class value, exactly as in the bare-name rung.
+        let companion = type_name(&format!("{}$Companion", internal.render()));
+        if self.syms.class_by_type_name(companion).is_some() {
+            self.expr_lowers.insert(
+                expression,
+                ExprLowering::CompanionValue {
+                    owner: internal,
+                    field: COMPANION_OBJECT_NAME.to_string(),
+                    companion,
+                },
+            );
+            return Some(Ty::obj_name(companion));
+        }
+        // A CLASSPATH class with a companion object: the value is the companion instance, typed as the
+        // companion's own type so its members resolve as ordinary instance members.
+        let (field, companion) = self
+            .resolved_type_name(internal)?
+            .companion_object
+            .clone()?;
+        self.expr_lowers.insert(
+            expression,
+            ExprLowering::CompanionValue {
+                owner: internal,
+                field,
+                companion,
+            },
+        );
+        Some(Ty::obj_name(companion))
+    }
+
+    /// A member read off a classifier named by its FULLY-QUALIFIED path (`pkg.Cls.CONST`,
+    /// `pkg.E.ENTRY`). The owner is already one resolved identity, so these are the origin-agnostic
+    /// rungs the simple-name cascade ends at: an enum entry, a companion/static property, a classpath
+    /// static field. An `object` owner is deliberately NOT answered here — it is a VALUE, so its
+    /// members resolve through ordinary member checking on the singleton.
+    fn qualified_classifier_member_read(
+        &mut self,
+        expression: ExprId,
+        owner: TypeName,
+        name: &str,
+    ) -> Option<Ty> {
+        if self.classifier_is_object(owner) {
+            return None;
+        }
+        let is_entry = self
+            .syms
+            .enum_entries_of(owner)
+            .is_some_and(|entries| entries.iter().any(|entry| entry == name))
+            || self
+                .resolved_type_name(owner)
+                .is_some_and(|classifier| classifier.is_enum_entry(name));
+        if is_entry {
+            self.resolved_enum_entries.insert(expression, owner);
+            return Some(Ty::obj_name(owner));
+        }
+        // `pkg.Cls.Companion` — the companion singleton named EXPLICITLY. Every companion is emitted
+        // as an `Outer$Companion` class held in an `Outer.Companion` static field, but only one that
+        // declares a supertype gets a registered `ClassSig`; the rest are known solely through their
+        // OWNER's companion members. So decide from the owner and hand lowering the field triple,
+        // rather than requiring a classifier identity that was never registered.
+        if name == COMPANION_OBJECT_NAME {
+            if let Some(class) = self.syms.class_by_type_name(owner) {
+                if !class.companion_fun_names.is_empty() || !class.static_props.is_empty() {
+                    let companion =
+                        type_name(&format!("{}${COMPANION_OBJECT_NAME}", owner.render()));
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::CompanionValue {
+                            owner,
+                            field: COMPANION_OBJECT_NAME.to_string(),
+                            companion,
+                        },
+                    );
+                    return Some(Ty::obj_name(companion));
+                }
+            }
+        }
+        if let Some(visibility) = self
+            .syms
+            .class_by_type_name(owner)
+            .and_then(|class| class.static_props.get(name))
+            .map(|property| property.visibility)
+        {
+            self.reject_if_inaccessible(visibility, name, owner, self.span(expression));
+            if let Some(ty) = self.record_class_static_property_read(expression, owner, name) {
+                return Some(ty);
+            }
+        }
+        let field = self.resolver().static_field(owner, name)?;
+        Some(self.record_external_static_field(Some(expression), field))
+    }
+
+    /// A read of a TOP-LEVEL property named through its package (`pkg.topLevelProp`, `pkg.TOP_CONST`).
+    /// The package is the only scope consulted — a fully-qualified reference names one declaration, so
+    /// nothing about the file's imports may shadow or widen it. A `const val` has no accessor, so the
+    /// platform's field storage answers it; everything else reads through its getter, exactly as the
+    /// imported spelling does.
+    fn package_qualified_property_read(
+        &mut self,
+        expression: ExprId,
+        package: TypeName,
+        name: &str,
+    ) -> Option<Ty> {
+        if let Some(field) = self.syms.libraries.top_level_static_field(package, name) {
+            return Some(self.record_external_static_field(Some(expression), field));
+        }
+        let property = self
+            .resolver_in_scope(std::slice::from_ref(&package))
+            .resolve_top_level_property(name)
+            .filter(|property| property.getter.ret.is_read_value_result())?;
+        let ty = property.ty;
+        // A `const val` has NO accessor — the value lives in a field on the declaring facade, and
+        // calling the getter that its property shape nominally carries throws `NoSuchMethodError`.
+        let lowering = if property.is_const {
+            ExprLowering::StaticPropertyRead {
+                owner: property.owner,
+                name: name.to_string(),
+                descriptor: None,
+                storage: StaticPropertyStorage::OuterStaticField,
+            }
+        } else {
+            ExprLowering::TopLevelPropertyGet {
+                getter: Box::new(property.getter),
+            }
+        };
+        self.expr_lowers.insert(expression, lowering);
+        Some(ty)
+    }
+
     fn classifier_receiver_internal(
         &self,
         scope: &CheckerScope<'_>,
@@ -32596,12 +33028,30 @@ impl<'a> Checker<'a> {
 
     /// The INTERNAL name (`pkg/Outer$Inner`) for a nested class construction `Outer.Inner(args)`
     /// whose `Outer` binds a module class in this file.
-    fn same_file_nested_class_internal(
+    /// The MODULE class a qualified construction `qualifier.Name(args)` names, so the call routes to
+    /// SOURCE constructor selection (defaults, varargs, secondaries, generic inference) rather than the
+    /// metadata path a compiled classifier uses.
+    ///
+    /// Both spellings that can name one are accepted: a nested class under an in-scope outer type
+    /// (`Outer.Inner`), and a fully-qualified path (`pkg.Cls`, `pkg.Outer.Inner`, `pkg.sub.Cls`). The
+    /// qualified form resolves through the origin-agnostic segment walk and is then filtered to a
+    /// module declaration here — the classpath half of the same walk is handled by the caller's
+    /// library-constructor arm.
+    fn module_qualified_class_internal(
         &self,
         scope: &CheckerScope<'_>,
         receiver: ExprId,
         name: &str,
     ) -> Option<TypeName> {
+        if let Some(prefix) = self.package_rooted_prefix(scope, receiver) {
+            if let Some(QualifiedPrefix::Classifier(internal)) =
+                self.step_qualified_prefix(prefix, name)
+            {
+                if self.syms.classes.contains_key(&internal) {
+                    return Some(internal);
+                }
+            }
+        }
         let Expr::Name(root) = self.file.expr(receiver) else {
             return None;
         };
@@ -34152,7 +34602,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Nested-class construction `Outer.Inner(args)`.
-                if let Some(internal) = self.same_file_nested_class_internal(scope, receiver, &name)
+                if let Some(internal) = self.module_qualified_class_internal(scope, receiver, &name)
                 {
                     if let Some(cls) = self.syms.classes.get(&internal).cloned() {
                         // The hoisted source spelling (`Outer.Inner`) for param-list lookup and
@@ -34629,6 +35079,64 @@ impl<'a> Checker<'a> {
                             let ret = m.ret;
                             self.resolved_calls.insert(call, ResolvedCall::Companion(m));
                             return ret;
+                        }
+                    }
+                }
+                // A call through a FULLY-QUALIFIED classifier prefix (`pkg.Cls.cfn()`,
+                // `pkg.sub.Outer.Nested.fn()`). The prefix walk yields one classifier identity, and the
+                // rungs below it are the same ones a simple-name receiver uses — a qualified spelling
+                // must not grow its own notion of what a companion or a static call is. An `object`
+                // prefix is absent here on purpose: it resolves as a VALUE, so its members are found by
+                // ordinary member checking on the singleton.
+                if let Some(QualifiedPrefix::Classifier(owner)) =
+                    self.package_rooted_prefix(scope, receiver)
+                {
+                    // `pkg.E.values()` / `pkg.E.valueOf(s)` — an enum's synthetic statics. They are
+                    // declarations of the classifier, not of any file, so the qualified spelling
+                    // reaches them exactly as the imported simple name does.
+                    if self.syms.enum_entries_of(owner).is_some() {
+                        if name == "values" && args.is_empty() {
+                            self.resolved_enum_statics.insert(call, owner);
+                            return Ty::array(Ty::obj_name(owner));
+                        }
+                        if let ("valueOf", [argument]) = (name.as_str(), args) {
+                            let argument_ty = self.expr(scope, *argument);
+                            self.expect_assignable(
+                                Ty::String,
+                                argument_ty,
+                                self.span(*argument),
+                                "argument",
+                            );
+                            self.resolved_enum_statics.insert(call, owner);
+                            return Ty::obj_name(owner);
+                        }
+                    }
+                    if let Some(class) = self.syms.class_by_type_name(owner).cloned() {
+                        if class.companion_fun_names.contains(&name) {
+                            if let Some(ret) = self.check_source_companion_call(
+                                scope,
+                                call,
+                                &class,
+                                &name,
+                                args,
+                                CompanionCallMode {
+                                    require_operator: false,
+                                    applicable_only: false,
+                                },
+                            ) {
+                                return ret;
+                            }
+                        }
+                        if let Some(signature) = class.static_methods.get(&name).cloned() {
+                            let arg_tys = self.arg_tys(scope, args);
+                            self.expect_call_args(
+                                scope,
+                                &signature.params,
+                                signature.vararg(),
+                                args,
+                                &arg_tys,
+                            );
+                            return signature.ret;
                         }
                     }
                 }
@@ -39163,10 +39671,51 @@ impl<'a> Checker<'a> {
         // NAME, not a value, so it must NOT be typed as an expression — a class without a
         // first-class companion instance would be reported as an unresolved reference. The read
         // (`getstatic C.prop`) already resolves through the same `static_props`.
-        if let Expr::Name(class_name) = self.file.expr(receiver).clone() {
-            if !self.value_root_shadows_classifier(scope, &class_name) {
-                let static_write = self.module_class_named(&class_name).and_then(|class| {
-                    let owner = class.internal_name();
+        // `pkg.topLevelVar = v` — a top-level `var` named through its PACKAGE. The receiver is a
+        // package, so there is no value to evaluate: the write is the declaring facade's `setX`
+        // accessor, selected in that package's scope alone (a fully-qualified reference names one
+        // declaration, so this file's imports must neither shadow nor widen it).
+        if let Some(QualifiedPrefix::Package(package)) = self.package_rooted_prefix(scope, receiver)
+        {
+            if let Some(property) = self
+                .resolver_in_scope(std::slice::from_ref(&package))
+                .resolve_top_level_property(&name)
+            {
+                let Some(setter) = property.setter.clone() else {
+                    self.diags.error(
+                        self.file.stmt_spans[s.0 as usize],
+                        format!("val cannot be reassigned: '{name}'"),
+                    );
+                    return;
+                };
+                let value_ty = self.expr(scope, value);
+                self.expect_assignable(property.ty, value_ty, self.span(value), "assignment");
+                self.stmt_lowers.insert(
+                    s,
+                    StmtLowering::TopLevelPropertySet {
+                        setter: Box::new(setter),
+                        ty: property.ty,
+                    },
+                );
+                return;
+            }
+        }
+        // The classifier is named either by a simple name in scope or by a fully-qualified path
+        // (`pkg.Cls.PROP = v`); both end at one identity, and the write below is keyed on that.
+        let static_owner = match self.file.expr(receiver).clone() {
+            Expr::Name(class_name) if !self.value_root_shadows_classifier(scope, &class_name) => {
+                self.module_class_named(&class_name)
+                    .map(ClassSig::internal_name)
+            }
+            _ => match self.package_rooted_prefix(scope, receiver) {
+                Some(QualifiedPrefix::Classifier(owner)) => Some(owner),
+                Some(QualifiedPrefix::Package(_)) | None => None,
+            },
+        };
+        {
+            {
+                let static_write = static_owner.and_then(|owner| {
+                    let class = self.syms.class_by_type_name(owner)?;
                     class.static_props.get(&name).map(|property| {
                         (
                             property.ty,

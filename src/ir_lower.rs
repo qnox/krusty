@@ -5884,6 +5884,7 @@ impl<'a> Lower<'a> {
     /// Record why lowering last bailed, into the caller-owned `bail` sink (a survey diagnostic + the
     /// internal `deep*`-phase refinement). Replaces the former free `set_bail` thread-local write.
     fn set_bail(&self, reason: &str) {
+        crate::trace_compiler!("lower", "bail: {reason}");
         *self.bail.borrow_mut() = reason.to_string();
     }
 
@@ -6124,11 +6125,52 @@ impl<'a> Lower<'a> {
         }
         let element = array.array_elem()?;
         let mut elements = Vec::with_capacity(trailing.len());
+        let mut spreads = Vec::with_capacity(trailing.len());
         for &argument in trailing {
-            elements.push(self.lower_arg(argument, &ty_to_ir(element))?);
+            // A SPREAD (`*xs`) contributes its WHOLE array, so it lowers at the array type and the
+            // parallel flag routes the emitter to kotlinc's `SpreadBuilder` sequence. The
+            // pass-through above only catches a spread whose type equals the parameter array
+            // exactly; a Java vararg widens (`Array<String>` into `Object[]`), and packing that as
+            // one ELEMENT passed a one-element array — `Constructor.newInstance(*empty)` then
+            // failed at run time with "wrong number of arguments: 1 expected: 0".
+            let is_spread = self.afile.is_spread_arg(argument);
+            elements.push(if is_spread {
+                self.lower_arg(argument, &ty_to_ir(*array))?
+            } else {
+                self.lower_arg(argument, &ty_to_ir(element))?
+            });
+            spreads.push(is_spread);
         }
-        lowered.push(self.emit_vararg(*array, elements));
+        lowered.push(self.emit_vararg_with_spreads(*array, elements, spreads));
         Some(lowered)
+    }
+
+    /// An enum's SYNTHETIC statics (`values()`, `valueOf(s)`) on an owner this file does not declare —
+    /// a sibling source file's enum or a classpath one. The `EnumValues`/`EnumValueOf` nodes index this
+    /// file's own IR classes, so they cannot name such an owner; the descriptors here are the ones the
+    /// JVM fixes for every enum, so nothing about the declaration needs re-reading.
+    fn emit_external_enum_static(
+        &mut self,
+        owner: TypeName,
+        name: &str,
+        args: Vec<u32>,
+    ) -> Option<u32> {
+        let rendered = owner.render();
+        let descriptor = match (name, args.len()) {
+            ("values", 0) => format!("()[L{rendered};"),
+            ("valueOf", 1) => format!("(Ljava/lang/String;)L{rendered};"),
+            _ => return None,
+        };
+        Some(self.emit_call(
+            Callee::Static {
+                owner,
+                name: name.to_string(),
+                descriptor,
+                inline: crate::libraries::InlineKind::None,
+            },
+            None,
+            args,
+        ))
     }
 
     fn emit_virtual_call(
@@ -6151,6 +6193,24 @@ impl<'a> Lower<'a> {
             Some(recv),
             args,
         )
+    }
+
+    /// A COMPANION object used as a value, as the checker resolved it. The instance is a static field
+    /// on the outer class, and the field name/companion type come from the recorded classifier shape —
+    /// a qualified spelling (`pkg.Cls`) gives lowering no simple name to re-resolve through imports.
+    fn lower_recorded_companion_value(&mut self, expression: AstExprId) -> Option<u32> {
+        let ExprLowering::CompanionValue {
+            owner,
+            field,
+            companion,
+        } = self.info.expr_lowers.get(&expression)?.clone()
+        else {
+            return None;
+        };
+        let read =
+            self.runtime
+                .companion_instance_field(&owner.render(), &companion.render(), &field)?;
+        Some(self.platform_static_field(read))
     }
 
     fn lower_recorded_static_property(&mut self, expression: AstExprId) -> Option<u32> {
@@ -6181,6 +6241,32 @@ impl<'a> Lower<'a> {
                 Some(self.emit_external_static_field(owner.render(), name, descriptor))
             }
         }
+    }
+
+    /// A receiver-less static call to a callable of EITHER origin.
+    ///
+    /// A compiled callable carries its physical descriptor; a callable declared in another SOURCE file
+    /// of this module has none — its descriptor is derived at emit time from the signature, which is
+    /// what `Callee::CrossFile` exists for. Emitting the library form for one of those wrote
+    /// `invokestatic pkg/FileKt.f:` with an EMPTY descriptor: a zero-length constant-pool entry the JVM
+    /// rejects outright (`ClassFormatError`). Origin is a property of the resolved callable, so route on
+    /// it here rather than at each call site.
+    fn emit_module_or_library_static_call(
+        &mut self,
+        callable: crate::libraries::LibraryCallable,
+        args: Vec<u32>,
+        record_suspend: bool,
+    ) -> Option<u32> {
+        if callable.descriptor.is_empty() && !callable.owner.render().is_empty() {
+            return Some(self.emit_cross_file_call(
+                callable.owner,
+                callable.name,
+                callable.params,
+                callable.ret,
+                args,
+            ));
+        }
+        self.emit_library_static_call(callable, args, record_suspend)
     }
 
     fn emit_library_static_call(
@@ -8471,11 +8557,12 @@ impl<'a> Lower<'a> {
         match self.afile.expr(receiver) {
             Expr::Name(outer) => self.resolve_qualified_nested(&format!("{outer}.{name}")),
             Expr::Member { .. } => {
-                let internal = format!("{}/{name}", qualified_path(self.afile, receiver)?);
-                self.syms
-                    .libraries
-                    .resolve_type(&internal)
-                    .map(|_| internal)
+                // Ask the shared candidate resolver for the WHOLE path. The package part and the
+                // nesting part are not syntactically separable, so assuming a flat `pkg/Name` here
+                // missed every deeper spelling (`pkg.Cls.Nested`, `pkg.sub.Cls`) that the checker's
+                // qualifier walk resolves.
+                let path = qualified_path(self.afile, receiver)?.replace('/', ".");
+                self.resolve_qualified_nested(&format!("{path}.{name}"))
             }
             _ => None,
         }
@@ -8527,7 +8614,7 @@ impl<'a> Lower<'a> {
             let call_inline = c.inline.can_inline();
             let erased_generic_ret = self.substituted_ret_needs_coercion(logical_ret, physical_ret);
             let suspend = c.suspend;
-            let call = self.emit_library_static_call(c, a, suspend)?;
+            let call = self.emit_module_or_library_static_call(c, a, suspend)?;
             return Some(if call_inline || erased_generic_ret {
                 self.coerce_erased_call_result(e, call, &physical_ret, true)
             } else {
@@ -8576,7 +8663,7 @@ impl<'a> Lower<'a> {
         let logical_ret = c.ret;
         let erased_generic_ret = self.substituted_ret_needs_coercion(logical_ret, physical_ret);
         let suspend = c.suspend;
-        let call = self.emit_library_static_call(c, a, suspend)?;
+        let call = self.emit_module_or_library_static_call(c, a, suspend)?;
         let call = if arg_prelude.is_empty() {
             call
         } else {
@@ -13414,8 +13501,20 @@ impl<'a> Lower<'a> {
         if ret == Ty::Nothing {
             return None;
         }
-        let Expr::Name(rn) = self.afile.expr(recv).clone() else {
-            return None;
+        // A QUALIFIED classifier receiver (`pkg.Cls::m`) names no value, so the reference is UNBOUND
+        // and its receiver class is its own first parameter — exactly as for a simple class name. A
+        // dotted chain rooted in a VALUE is a bound reference and is lowered elsewhere, so it is left
+        // alone here.
+        let rn = match self.afile.expr(recv).clone() {
+            Expr::Name(rn) => rn,
+            Expr::Member { .. }
+                if self
+                    .ast_dotted_root(recv)
+                    .is_some_and(|root| self.lookup(&root).is_none()) =>
+            {
+                String::new()
+            }
+            _ => return None,
         };
         // Bound `obj::m` (`rn` an in-scope value) / `O::m` (`rn` an object → its `INSTANCE`): the
         // receiver is CAPTURED. Unbound `Type::m` (`rn` a class): the receiver is the reference's first
@@ -13430,12 +13529,25 @@ impl<'a> Lower<'a> {
                 let internal_name = Some(type_name(&class_internal(self.afile, &rn)))
                     .filter(|candidate| self.class_info_name(*candidate).is_some())
                     .or_else(|| params.first().and_then(|receiver| receiver.obj_internal()))?;
-                let cid = self.class_info_name(internal_name)?.id;
-                if self.ir.classes[cid as usize].is_object {
-                    let inst = self.emit_static_instance(cid, cid, "INSTANCE");
-                    (Some(inst), Ty::obj_name(internal_name))
-                } else {
-                    (None, *params.first()?)
+                // A class declared in ANOTHER file of the module has no IR class here. Only the
+                // OBJECT case needs one (its capture is that class's emitted `INSTANCE` field); an
+                // unbound reference captures nothing, so it just needs the receiver type — and the
+                // reference's own first parameter IS that receiver, which is why the check below
+                // insists the two agree rather than trusting an arbitrary leading parameter.
+                match self.class_info_name(internal_name) {
+                    Some(info) if self.ir.classes[info.id as usize].is_object => {
+                        let cid = info.id;
+                        let inst = self.emit_static_instance(cid, cid, "INSTANCE");
+                        (Some(inst), Ty::obj_name(internal_name))
+                    }
+                    Some(_) => (None, *params.first()?),
+                    None => {
+                        let receiver = *params.first()?;
+                        if receiver.obj_internal() != Some(internal_name) {
+                            return None;
+                        }
+                        (None, receiver)
+                    }
                 }
             }
         };
@@ -13512,6 +13624,38 @@ impl<'a> Lower<'a> {
                 param_tys,
                 ty_to_ir(ret),
                 capture,
+                None,
+            );
+        }
+        // A class declared in ANOTHER file of the module has no `FunId` here, so the FunId-keyed
+        // reference below cannot name its method — but the reference does not need one: the invoke is
+        // an ordinary `invokevirtual <owner>.<name>` on the receiver, which is the same shape the
+        // `java/lang/Object` methods above already emit. Only an UNBOUND reference is taken this way;
+        // a bound one would have to capture a receiver whose declaration this file cannot see.
+        if capture.is_none() && self.class_info_name(internal).is_none() {
+            let signature = self.syms.method_of_name(internal, name)?;
+            if !signature.requires_all_args() || signature.ret == Ty::Nothing {
+                return None;
+            }
+            let interface = self
+                .syms
+                .class_by_type_name(internal)
+                .is_some_and(|class| class.is_interface());
+            let param_tys = tys_to_ir(params);
+            return self.make_func_ref(
+                e.0,
+                false,
+                params.len() as u8,
+                Some(internal),
+                name.to_string(),
+                0,
+                crate::ir::FrDispatch::VirtualUnbound,
+                Some(internal),
+                name.to_string(),
+                interface,
+                param_tys,
+                ty_to_ir(ret),
+                None,
                 None,
             );
         }
@@ -17702,21 +17846,46 @@ impl<'a> Lower<'a> {
                 });
             if let Some(base) = base {
                 let candidate = format!("{base}${}", rest.replace('.', "$"));
-                if self.type_exists(&candidate) {
-                    return Some(candidate);
+                if let Some(resolved) = self.resolved_classifier_internal(&candidate) {
+                    return Some(resolved);
                 }
             }
         }
-        // A fully-qualified PACKAGE path (`lib.Thing` → `lib/Thing`) — verified on the classpath. Mirrors
-        // the checker so a qualified constructor / type ref lowers to the same internal name.
+        // A fully-qualified path (`lib.Thing` → `lib/Thing`, `a.b.Outer.Inner` → `a/b/Outer$Inner`).
+        // The package part and the nesting part are not syntactically distinguishable, so try the same
+        // candidates the checker's qualifier walk ends at — `/` → `$` from the RIGHT until the type
+        // exists. Sharing the candidate order is what keeps the lowered internal name equal to the one
+        // the checker resolved; a flat `/`-only form silently missed every nested tail.
         let fq = name.replace('.', "/");
-        if self.type_exists(&fq) {
-            return Some(fq);
+        if let Some(resolved) = crate::names::nested_internal_name_candidates(&fq)
+            .into_iter()
+            .find_map(|candidate| self.resolved_classifier_internal(&candidate))
+        {
+            return Some(resolved);
         }
         // An unqualified same-package classpath type (`Thing` in this file's package) → `<pkg>/Thing`.
         let pkg = self.afile.package.as_deref()?;
         let cand = format!("{}/{}", pkg.replace('.', "/"), name.replace('.', "$"));
-        self.type_exists(&cand).then_some(cand)
+        self.resolved_classifier_internal(&cand)
+    }
+
+    /// The classifier identity a candidate internal name denotes, following a `typealias` to its
+    /// TARGET. The checker's qualifier walk follows the same edge, so returning the alias spelling
+    /// here made the lowered internal disagree with the checker's recorded result type — and the
+    /// construction was then dropped as unresolved rather than emitted.
+    fn resolved_classifier_internal(&self, candidate: &str) -> Option<String> {
+        if let Some(target) = self
+            .syms
+            .libraries
+            .resolve_type(candidate)
+            .and_then(|classifier| classifier.alias_target)
+        {
+            return Some(target.render());
+        }
+        if let Some(target) = self.syms.source_alias_fqns.get(&type_name(candidate)) {
+            return Some(target.render());
+        }
+        self.type_exists(candidate).then(|| candidate.to_string())
     }
 
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
@@ -18348,6 +18517,17 @@ impl<'a> Lower<'a> {
     }
 
     fn stmt_inner(&mut self, s: crate::ast::StmtId) -> Option<u32> {
+        // `pkg.topLevelVar = value` — a top-level property named through its package. The receiver is
+        // a package, so there is nothing to evaluate as a receiver: the write is the declaring
+        // facade's static setter, exactly as the read is its static getter.
+        if let Some(StmtLowering::TopLevelPropertySet { setter, ty }) =
+            self.info.stmt_lowers.get(&s).cloned()
+        {
+            if let Stmt::AssignMember { value, .. } = self.afile.stmt(s).clone() {
+                let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
+                return self.emit_module_or_library_static_call(*setter, vec![lowered], false);
+            }
+        }
         // `C.prop = value` on a companion (static) property — the write mirror of the `getstatic
         // C.prop` read. The checker resolved the owner and property type; the static itself was
         // registered while lowering the companion's declarations.
@@ -18373,13 +18553,25 @@ impl<'a> Lower<'a> {
                     );
                 }
                 // `ir.statics` holds only the statics of the file being LOWERED, so a companion
-                // declared in another file of the module has no index here. Writing one needs an
-                // external static store, which the IR has no node for (`ExternalStaticField` is a read
-                // only) — decline with a NAMED reason instead of skipping the file silently.
+                // declared in another file of the module has no index here — and its backing field is
+                // private to its owner anyway, so a direct store would not be legal even with one.
+                // kotlinc writes such a property through the companion's SETTER
+                // (`getstatic Cls.Companion; invokevirtual Cls$Companion.setX`), which is exactly the
+                // accessor path above; take it rather than declining the file.
                 let Some(index) = self.ir.statics.iter().position(|static_field| {
                     static_field.owner == Some(owner) && static_field.name == name
                 }) else {
-                    return self.bail("companion-static write to another file");
+                    // Declared in a SIBLING source file: `ir.statics` holds only this file's, so there
+                    // is no index to write through. The backing static lives on the companion's OWNER
+                    // and this backend emits it accessibly, so name the field directly.
+                    let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
+                    let descriptor = self.runtime.type_descriptor(ty)?;
+                    return Some(self.ir.add_expr(IrExpr::SetExternalStaticField {
+                        owner,
+                        name,
+                        descriptor,
+                        value: lowered,
+                    }));
                 };
                 let index = index as u32;
                 let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
@@ -22755,6 +22947,9 @@ impl<'a> Lower<'a> {
                 let field = self.runtime.object_instance_field(&internal)?;
                 return Some(self.platform_static_field(field));
             }
+            if let Some(read) = self.lower_recorded_companion_value(e) {
+                return Some(read);
+            }
             // A class NAME with a typed `companion object` used as a VALUE (`val c: I = C`): read its
             // companion singleton `getstatic C.Companion:LC$Companion;`. Only classes whose companion
             // declares a supertype get a registered `C$Companion` ClassSig (checked here); a local of
@@ -23172,6 +23367,22 @@ impl<'a> Lower<'a> {
                 let internal = internal.render();
                 let field = self.runtime.object_instance_field(&internal)?;
                 return Some(self.platform_static_field(field));
+            }
+            // A TOP-LEVEL property named through its PACKAGE (`pkg.topLevelProp`): the selected
+            // facade's receiver-less static getter. Same handoff as the bare-name rung — the qualifier
+            // is a package, so there is no receiver to lower, and descending into it would try to
+            // evaluate the package name as a value.
+            if let Some(ExprLowering::TopLevelPropertyGet { getter }) =
+                self.info.expr_lowers.get(&e).cloned()
+            {
+                let physical_ret = getter.physical_ret;
+                let call = self.emit_module_or_library_static_call(*getter, Vec::new(), false)?;
+                return Some(self.coerce_erased_call_result(e, call, &physical_ret, true));
+            }
+            // A companion object named through a QUALIFIED path (`pkg.Cls`) → the companion-instance
+            // static field on the outer class, exactly as the checker resolved it.
+            if let Some(read) = self.lower_recorded_companion_value(e) {
+                return Some(read);
             }
             if let Some(ExprLowering::ExtensionPropertyGet { getter }) =
                 self.info.expr_lowers.get(&e).cloned()
@@ -25769,6 +25980,19 @@ impl<'a> Lower<'a> {
         name: String,
     ) -> Option<u32> {
         {
+            // An enum's synthetic statics the checker selected on an owner outside this file (a
+            // sibling source file, or a qualified path to either origin). The same-file form is the
+            // `EnumValues`/`EnumValueOf` node emitted further down, which can only name an IR class
+            // of this file.
+            if let Some(owner) = self.info.resolved_enum_statics.get(&e).copied() {
+                if self.class_info(&owner.render()).is_none() {
+                    let lowered = args
+                        .iter()
+                        .map(|&argument| self.lower_arg(argument, &ty_to_ir(Ty::String)))
+                        .collect::<Option<Vec<_>>>()?;
+                    return self.emit_external_enum_static(owner, &name, lowered);
+                }
+            }
             if let Some(ExprLowering::ObjectMemberCall { internal, member }) =
                 self.info.expr_lowers.get(&e)
             {
@@ -25839,7 +26063,22 @@ impl<'a> Lower<'a> {
             // classpath internal (`lib/Subject$User`, not an IR class). Emit `new … invokespecial`.
             {
                 {
-                    if let Some(internal) = self.nested_ctor_internal(receiver, &name).filter(|i| {
+                    // The CHECKER already resolved this qualified construction, and its result type IS
+                    // the classifier identity — after the qualifier walk and after following any
+                    // `typealias`. Re-deriving the internal from the source path can only disagree
+                    // with it, which is exactly what left `pkg.Cls.Nested(…)` and `pkg.Alias(…)`
+                    // resolved-but-unlowerable. So take the recorded identity when the receiver is a
+                    // qualifier (its root is not a value in scope) and a constructor was recorded.
+                    let resolved = self.nested_ctor_internal(receiver, &name).or_else(|| {
+                        let qualifier_receiver = self
+                            .ast_dotted_root(receiver)
+                            .is_some_and(|root| self.lookup(&root).is_none());
+                        (qualifier_receiver && self.info.resolved_constructor(e).is_some())
+                            .then(|| self.info.ty(e).obj_internal())
+                            .flatten()
+                            .map(TypeName::render)
+                    });
+                    if let Some(internal) = resolved.filter(|i| {
                         !self.contains_class(i)
                             && self
                                 .info
@@ -26497,6 +26736,25 @@ impl<'a> Lower<'a> {
                                 self.runtime_call(RuntimeOp::UIntToLong, rty, vec![r])
                             {
                                 return Some(call);
+                            }
+                        }
+                        // Unsigned → FLOATING. The carrier holds the value's bits, so an ordinary
+                        // coercion emits the SIGNED `i2f`/`l2f` and reads a large unsigned value as
+                        // negative (`UInt.MAX_VALUE.toFloat()` came out `-1.0`). kotlinc widens
+                        // through the stdlib helper and narrows to `float` afterwards.
+                        if matches!(target, Ty::Float | Ty::Double) {
+                            if let Some(widened) =
+                                self.runtime_call(RuntimeOp::UnsignedToDouble, rty, vec![r])
+                            {
+                                return Some(if target == Ty::Double {
+                                    widened
+                                } else {
+                                    self.emit_type_op(
+                                        IrTypeOp::ImplicitCoercion,
+                                        widened,
+                                        ty_to_ir(Ty::Float),
+                                    )
+                                });
                             }
                         }
                         if self.has_scalar_value_repr(rrepr) && self.has_scalar_value_repr(trepr) {

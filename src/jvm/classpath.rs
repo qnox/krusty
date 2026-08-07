@@ -1713,6 +1713,11 @@ impl Classpath {
         tree
     }
 
+    /// Whether a slashed path names a PACKAGE on this classpath. See [`PackageTree::has_package`].
+    pub fn has_package(&self, package: &str) -> bool {
+        !package.is_empty() && self.package_tree().has_package(package)
+    }
+
     fn entry_packages(&self, entry_id: usize) -> std::sync::Arc<JarPackages> {
         global_jar_packages().get_or_build_if(
             &self.cache_key[entry_id],
@@ -3762,6 +3767,12 @@ pub struct PackageNode {
 pub struct PackageTree {
     names: NameTree,
     packages: HashMap<NameId, PackageNode>,
+    /// Every package path that EXISTS as a qualifier, including the intermediate ones no jar declares
+    /// directly. A catalog records only the packages that own class files, so `java/util` is a node
+    /// while `java` — which owns none — is not; name resolution walking `java.util.ArrayList` segment
+    /// by segment must still be able to answer "`java` is a package". Ancestors are folded in once at
+    /// compose time rather than re-derived per query.
+    package_prefixes: std::collections::HashSet<NameId>,
     /// Exact class owners, sorted by name and classpath order.
     classes: Vec<(NameId, JarId)>,
     incomplete_entries: Vec<JarId>,
@@ -3783,6 +3794,17 @@ impl PackageTree {
     #[allow(dead_code)]
     fn node_for(&self, pkg: &str) -> Option<&PackageNode> {
         self.names.get(pkg).and_then(|id| self.packages.get(&id))
+    }
+
+    /// Whether a slashed path names a PACKAGE on this classpath — the qualifier half of name
+    /// resolution. A dotted reference is resolved segment by segment, and each prefix is either a
+    /// package, a classifier, or nothing; only this table can answer the first case, so an intermediate
+    /// package that owns no classes of its own (`java`, `kotlin/collections`' parent) answers `true`
+    /// here as well as a leaf one.
+    pub fn has_package(&self, pkg: &str) -> bool {
+        self.names.get(pkg).is_some_and(|id| {
+            self.packages.contains_key(&id) || self.package_prefixes.contains(&id)
+        })
     }
 
     fn jars_for_class(&self, internal: &str) -> Vec<JarId> {
@@ -4002,6 +4024,15 @@ fn compose_package_tree(parts: &[std::sync::Arc<JarPackages>]) -> PackageTree {
             }
             if entry.has_builtins && !node.builtins_jars.contains(&jar_id) {
                 node.builtins_jars.push(jar_id);
+            }
+            // Every ancestor of a declared package is itself a package qualifier, even when no jar
+            // declares it directly.
+            let mut ancestor = pkg;
+            while let Some(parent) = tree.names.parent(ancestor) {
+                if parent == NameTree::ROOT || !tree.package_prefixes.insert(parent) {
+                    break;
+                }
+                ancestor = parent;
             }
         }
         for &class_id in &jp.classes {
