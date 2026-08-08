@@ -49,16 +49,16 @@ fn assert_resolves(d: &[String], what: &str) {
     );
 }
 
-// The intellij-community shape: a sealed class whose companion holds a `@JvmField val` (plus a
-// `@JvmStatic fun`, which already resolved) in a dependency module.
-const SEALED_DEP: &str = r#"
+// A sealed dependency type whose companion holds a `@JvmField val` plus a `@JvmStatic fun`. The
+// function is the control: it already crossed the fallback boundary before property projection.
+const SEALED_STATUS_DEP: &str = r#"
 package dep
 
-sealed class AnActionResult {
-    class Failed : AnActionResult()
+sealed class StatusResult {
+    class Failure : StatusResult()
     companion object {
-        @JvmField val PERFORMED: AnActionResult = object : AnActionResult() {}
-        @JvmStatic fun failed(): AnActionResult = Failed()
+        @JvmField val COMPLETED: StatusResult = object : StatusResult() {}
+        @JvmStatic fun failure(): StatusResult = Failure()
     }
 }
 "#;
@@ -69,14 +69,14 @@ fn jvm_field_companion_val_of_sealed_class_resolves() {
         r#"
 package app
 
-import dep.AnActionResult
+import dep.StatusResult
 
-fun performed(): AnActionResult = AnActionResult.PERFORMED
-fun failed(): AnActionResult = AnActionResult.failed()
+fun completed(): StatusResult = StatusResult.COMPLETED
+fun failure(): StatusResult = StatusResult.failure()
 "#,
-        SEALED_DEP,
+        SEALED_STATUS_DEP,
     );
-    assert_resolves(&d, "AnActionResult.PERFORMED / AnActionResult.failed()");
+    assert_resolves(&d, "StatusResult.COMPLETED / StatusResult.failure()");
 }
 
 #[test]
@@ -125,30 +125,83 @@ class Limits {
     assert_resolves(&d, "Limits.MAX");
 }
 
-// The ActionUiKind shape: an interface whose companion holds ONLY `@JvmField val`s.
+// An interface whose companion holds only `@JvmField val`s ensures the projection does not depend
+// on a sibling companion function having caused the companion classifier to be materialized first.
 #[test]
 fn interface_companion_jvm_field_vals_resolve() {
     let d = fallback_diagnostics(
         r#"
 package app
 
-import dep.ActionUiKind
+import dep.PresentationMode
 
-fun compact(): ActionUiKind = ActionUiKind.COMPACT
-fun full(): ActionUiKind = ActionUiKind.FULL
+fun compact(): PresentationMode = PresentationMode.COMPACT
+fun full(): PresentationMode = PresentationMode.FULL
 "#,
         r#"
 package dep
 
-interface ActionUiKind {
+interface PresentationMode {
     companion object {
-        @JvmField val COMPACT: ActionUiKind = object : ActionUiKind {}
-        @JvmField val FULL: ActionUiKind = object : ActionUiKind {}
+        @JvmField val COMPACT: PresentationMode = object : PresentationMode {}
+        @JvmField val FULL: PresentationMode = object : PresentationMode {}
     }
 }
 "#,
     );
-    assert_resolves(&d, "ActionUiKind.COMPACT / ActionUiKind.FULL");
+    assert_resolves(&d, "PresentationMode.COMPACT / PresentationMode.FULL");
+}
+
+#[test]
+fn source_enum_entry_keeps_using_the_shared_field_realization() {
+    // Enum entries already crossed this fallback as static classifier values. Companion fields now
+    // use the same semantic field projection with a deferred physical token, so pin the pre-existing
+    // enum path as a control: unifying provider-neutral projection must not trade one source-backed
+    // field shape for another.
+    let d = fallback_diagnostics(
+        r#"
+package app
+
+import dep.Signal
+
+fun ready(): Signal = Signal.READY
+"#,
+        r#"
+package dep
+
+enum class Signal { READY, WAITING }
+"#,
+    );
+    assert_resolves(&d, "Signal.READY");
+}
+
+#[test]
+fn computed_companion_property_is_not_projected_as_a_field() {
+    // `StaticPropertyStorage::CompanionAccessors` is authoritative: a fallback provider cannot turn
+    // a field-less getter into an outer-class field merely because both declarations are properties.
+    let d = fallback_diagnostics(
+        r#"
+package app
+
+import dep.Settings
+
+fun dynamic(): String = Settings.dynamic
+"#,
+        r#"
+package dep
+
+class Settings {
+    companion object {
+        val dynamic: String get() = "computed"
+    }
+}
+"#,
+    );
+    assert!(
+        d.iter()
+            .any(|m| m.contains("unresolved reference 'Settings'.")),
+        "a computed companion property has no fallback static field: {d:?}"
+    );
 }
 
 // A genuinely-absent member must keep reporting the same unresolved-reference diagnostic.

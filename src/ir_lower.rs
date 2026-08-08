@@ -6176,10 +6176,15 @@ impl<'a> Lower<'a> {
         // exactly which field holds it (a plain object's `INSTANCE`, or the outer class's field for a
         // companion), so the load is a read of that field and the invoke is virtual.
         let call = if let Some(singleton) = callable.singleton_dispatch.clone() {
+            // A singleton dispatch is contributed by a compiled provider and therefore must carry
+            // its exact physical field token. Source-only static declarations may omit descriptors,
+            // but they never use this callable-dispatch path; declining here prevents an opaque
+            // provider gap from turning into a malformed backend field reference.
+            let descriptor = singleton.descriptor.clone()?;
             let receiver = self.emit_external_static_field(
                 singleton.owner.render(),
                 &singleton.name,
-                singleton.descriptor.clone(),
+                descriptor,
             );
             if callable.inline.must_inline() {
                 // `@InlineOnly` (the shape `Duration.Companion`'s accessors have): the method is

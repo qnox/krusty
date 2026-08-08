@@ -30578,7 +30578,7 @@ impl<'a> Checker<'a> {
                 ExprLowering::StaticPropertyRead {
                     owner: field.owner,
                     name: field.name,
-                    descriptor: Some(field.descriptor),
+                    descriptor: field.descriptor,
                     storage: StaticPropertyStorage::OuterStaticField,
                 },
             );
