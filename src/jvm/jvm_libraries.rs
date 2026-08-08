@@ -1272,6 +1272,23 @@ impl JvmLibraries {
                         && function.jvm_desc == Some(m.descriptor.as_str())
                 });
                 let semantic_metadata = member_metadata.or(member_extension_metadata);
+                // Kotlin metadata is the semantic authority for EVERY Kotlin member's generic
+                // signature, not only for member extensions. The raw JVM Signature necessarily
+                // renders an unconstrained Kotlin `<T>` as `<T : java.lang.Object>` and therefore
+                // loses the nullable implicit upper bound; consuming that raw shape made
+                // `member<T>(plain, nullable)` reject the joined `T := String?` even though the same
+                // top-level and extension declarations accepted it. Publish the already
+                // descriptor-aligned metadata shape at this provider boundary so all downstream
+                // member spellings (positional, named, defaulted, inherited) share one contract.
+                //
+                // Keep the JVM signature only when metadata has no generic shape: that preserves
+                // Java members and synthetic/bridge declarations without asking the checker to
+                // distinguish class-file origins or parse backend signature strings.
+                if let Some(signature) =
+                    semantic_metadata.and_then(|metadata| metadata.generic_sig.as_ref())
+                {
+                    member.generic_sig = Some(signature.clone());
+                }
                 if let Some(metadata) = member_extension_metadata {
                     // Normalize the callable's SOURCE identity at the provider boundary. A value-class
                     // parameter may mangle the JVM method name, but downstream overload selection must
@@ -1281,12 +1298,9 @@ impl JvmLibraries {
                         member.physical_name = Some(metadata.jvm_name.clone());
                         member.name = metadata.kotlin_name.clone();
                     }
-                    // JVM `Signature` sees the extension receiver as an ordinary leading parameter;
-                    // Kotlin metadata represents it as the receiver attribute. Prefer that normalized
-                    // semantic shape so generic inference is identical to a module declaration.
-                    if metadata.generic_sig.is_some() {
-                        member.generic_sig = metadata.generic_sig.clone();
-                    }
+                    // Generic receiver normalization is already covered by the metadata-primary
+                    // handoff above; this branch now carries only the extension's source/physical
+                    // naming distinction rather than a second origin-specific signature policy.
                 }
                 member.set_suspend(semantic_metadata.is_some_and(metadata::MetaFn::is_suspend));
                 member.set_is_member_extension(member_extension_metadata.is_some());
@@ -2234,13 +2248,22 @@ fn concrete_metadata_shape(ty: Ty) -> bool {
         }
 }
 
-/// The LOGICAL return of a `suspend` method, recovered from its generic signature: the last parameter is
-/// `Continuation<-T>`, whose type argument `T` is the source return type (`Continuation<-Config>` →
-/// `Config`). A `Continuation<-Unit>` maps to `Ty::Unit` (the source `Unit` return).
+/// The LOGICAL return of a `suspend` method, recovered from either normalized provider metadata or a
+/// raw JVM generic signature. Metadata already publishes the source return in `ret` and omits the
+/// emit-only continuation; a JVM signature instead appends `Continuation<-T>` and erases `ret` to
+/// `Object`. `logical_param_count` distinguishes those two aligned representations without testing a
+/// provider kind or class name. In both forms, owner variables are substituted from the applied
+/// receiver (`Repo<Cfg>` turns its declaration-level `T` into `Cfg`).
 fn suspend_return_from_gsig(
     gsig: &GenericSig,
+    logical_param_count: usize,
     binds: &std::collections::HashMap<String, Ty>,
 ) -> Option<Ty> {
+    if gsig.params.len() == logical_param_count {
+        return Some(canonicalize_jvm_collections(
+            crate::symbol_resolver::ty_subst(gsig.ret, binds),
+        ));
+    }
     match *gsig.params.last()? {
         Ty::Obj(n, args) if crate::types::same(n, crate::types::wk::continuation()) => {
             match *args.first()? {
@@ -3581,7 +3604,9 @@ impl SymbolSource for JvmLibraries {
                                 .unwrap_or_default();
                             let base = generic_sig
                                 .as_ref()
-                                .and_then(|g| suspend_return_from_gsig(g, &recv_binds))
+                                .and_then(|g| {
+                                    suspend_return_from_gsig(g, params.len(), &recv_binds)
+                                })
                                 .unwrap_or(m.ret);
                             // `suspend_return_from_gsig` canonicalized a collection return to its
                             // READ-ONLY Kotlin form (the JVM signature erases read-only vs mutable).

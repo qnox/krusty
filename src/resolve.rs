@@ -17218,15 +17218,26 @@ impl<'a> Checker<'a> {
                 &value_signature,
                 trailing_lambda,
             ) {
-                Ok(slots) => mapped.push((
-                    self.call_slot_score_vararg(
-                        value_params,
-                        &slots,
-                        candidate.call_sig.vararg_index,
-                    ),
-                    slots,
-                    candidate,
-                )),
+                Ok(slots) => {
+                    // Semantic shapes may come from source or compiled metadata. Align them with
+                    // the value-parameter slice after context parameters are stripped; otherwise
+                    // score solely against the selected physical parameters.
+                    let semantic_shapes = candidate
+                        .generic_sig
+                        .as_ref()
+                        .filter(|gsig| gsig.params.len() == candidate.callable.params.len())
+                        .map(|gsig| &gsig.params[context_count..]);
+                    mapped.push((
+                        self.call_slot_score_vararg(
+                            value_params,
+                            &slots,
+                            candidate.call_sig.vararg_index,
+                            semantic_shapes,
+                        ),
+                        slots,
+                        candidate,
+                    ));
+                }
                 Err(error) => failures.push((error, candidate)),
             }
         }
@@ -23757,6 +23768,83 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Logical parameter expectations for one already-selected callable, independent of provider
+    /// origin, receiver spelling, or argument spelling. `physical_params` remain erased emit handles;
+    /// when a semantic generic signature is available, join the actual types by their PARAMETER slots
+    /// and overlay the fully-bound substitutions. Explicit type arguments win over inference.
+    ///
+    /// Returning a complete vector over the physical fallback gives named/default/vararg/ordinary
+    /// checking one contract instead of four copies of "substitute if possible, otherwise erase". A
+    /// shape that is unaligned, context-bearing, partially unbound, still contains an outer formal, or
+    /// violates an upper bound keeps its physical slot. In particular, `<T : Any>` cannot acquire a
+    /// nullable binding merely because `<T>` without that bound would join `String` and `String?`.
+    fn selected_call_param_expectations(
+        &self,
+        physical_params: &[Ty],
+        generic_signature: Option<&crate::libraries::GenericSig>,
+        context_count: usize,
+        actuals: &[(usize, Ty)],
+        type_args: &[Ty],
+    ) -> Vec<Ty> {
+        let mut expectations = physical_params.to_vec();
+        let Some(gsig) = generic_signature else {
+            return expectations;
+        };
+        if gsig.formals.is_empty()
+            || context_count > 0
+            || gsig.params.len() != physical_params.len()
+        {
+            return expectations;
+        }
+        let mut binds = crate::symbol_resolver::infer_generic_bindings(
+            gsig,
+            actuals.iter().copied().filter(|(_, ty)| *ty != Ty::Error),
+        );
+        for (formal, targ) in gsig.formals.iter().zip(type_args) {
+            binds.insert(formal.clone(), *targ);
+        }
+        if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+            gsig,
+            &binds,
+            |actual, bound| self.receiver_is_assignable(actual, bound),
+        ) {
+            return expectations;
+        }
+        for (slot, parameter) in gsig.params.iter().copied().enumerate() {
+            if Self::ty_mentions_unbound_param(parameter, &binds) {
+                continue;
+            }
+            let substituted = crate::symbol_resolver::ty_subst(parameter, &binds);
+            // A binding can itself carry a formal from an enclosing declaration. That placeholder is
+            // not a concrete call expectation; retain the callable's physical slot instead.
+            if !Self::ty_mentions_type_param(substituted) {
+                expectations[slot] = substituted;
+            }
+        }
+        expectations
+    }
+
+    /// Whether `ty` mentions a type parameter `binds` does not bind. `ty_subst` erases such a
+    /// formal to `Any`, which is NOT the declaration's expectation (a bounded formal erases to its
+    /// bound) — the caller must keep the erased parameter instead.
+    fn ty_mentions_unbound_param(ty: Ty, binds: &crate::symbol_resolver::GSigBinds) -> bool {
+        match ty {
+            Ty::TyParam(name, _) => !binds.contains_key(name),
+            Ty::Nullable(inner) => Self::ty_mentions_unbound_param(*inner, binds),
+            Ty::Obj(_, args) => args
+                .iter()
+                .any(|argument| Self::ty_mentions_unbound_param(*argument, binds)),
+            Ty::Fun(signature) => {
+                signature
+                    .params
+                    .iter()
+                    .any(|parameter| Self::ty_mentions_unbound_param(*parameter, binds))
+                    || Self::ty_mentions_unbound_param(signature.ret, binds)
+            }
+            _ => false,
+        }
+    }
+
     fn resolved_explicit_type_args(&mut self, scope: &CheckerScope<'_>, call: ExprId) -> Vec<Ty> {
         self.file
             .call_type_args
@@ -29179,6 +29267,11 @@ impl<'a> Checker<'a> {
                                 &entry.1,
                                 &entry.2,
                                 entry.0.call_sig.vararg_index,
+                                entry
+                                    .0
+                                    .generic_sig
+                                    .as_ref()
+                                    .map(|signature| signature.params.as_slice()),
                             )
                             .unwrap_or(0);
                         if best_mapped.as_ref().is_none_or(|(best, _)| score > *best) {
@@ -29270,7 +29363,50 @@ impl<'a> Checker<'a> {
             }
             return Some(Ty::Error);
         }
-        let (fi, _params, slots, callable, selection_params) = selected?;
+        let (fi, physical_params, slots, callable, selection_params) = selected?;
+        // `selection_params` made the candidate applicable, but it may still contain the provider's
+        // erased `Any` slots. Rebuild only the CHECKING view from the selected semantic signature and
+        // the authoritative named/default slot map. Physical parameters remain untouched in `fi` and
+        // `callable`, so this generic rule cannot change descriptors or lowering ownership.
+        let expectation_actuals = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(parameter, argument)| {
+                let argument = (*argument)?;
+                (!matches!(self.file.expr(argument), Expr::Lambda { .. }))
+                    .then_some((parameter, self.expr_types[argument.0 as usize]))
+            })
+            .collect::<Vec<_>>();
+        let expected_params = self.selected_call_param_expectations(
+            &physical_params,
+            fi.generic_sig.as_ref(),
+            fi.context_count,
+            &expectation_actuals,
+            type_args,
+        );
+        let selection_params = args
+            .iter()
+            .map(|argument| {
+                let slot = slots
+                    .iter()
+                    .position(|candidate| candidate.as_ref() == Some(argument))
+                    .or(fi.call_sig.vararg_index)?;
+                let parameter = *expected_params.get(slot)?;
+                let actual = self.expr_types[argument.0 as usize];
+                if fi.call_sig.vararg_index == Some(slot)
+                    && !self.file.is_spread_arg(*argument)
+                    && actual != parameter
+                {
+                    parameter.array_elem()
+                } else {
+                    Some(parameter)
+                }
+            })
+            // A malformed provider shape must not erase an already-valid selection. Keeping the
+            // selector's complete vector is the conservative fallback and mirrors the helper's
+            // physical-slot fallback for incomplete or bound-violating generic substitutions.
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or(selection_params);
         let call_names = self.file.call_arg_names.get(&call.0).cloned();
         let vararg_array = fi
             .call_sig
@@ -32145,6 +32281,12 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         implicit_receiver: bool,
     ) -> ClasspathMemberSlotCall {
+        // Resolve source type arguments once before the provider query. Named/default member calls
+        // used to ask for an untyped candidate and later validate its mapped arguments against erased
+        // parameters, so `<String>` and inferred nullable joins disappeared specifically on this call
+        // spelling. The selected callable still owns emission; these types affect only semantic
+        // selection and the provider-neutral post-selection expectation overlay below.
+        let type_args = self.resolved_explicit_type_args(scope, call);
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         let needs_slot_map = arg_names.is_some();
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
@@ -32157,7 +32299,7 @@ impl<'a> Checker<'a> {
         };
         let mut candidates: Vec<_> = self
             .resolver()
-            .resolve_symbol(receiver, name, &[], &[])
+            .resolve_symbol(receiver, name, &[], &type_args)
             .map(crate::symbol_resolver::Symbol::overloads)
             .unwrap_or_default()
             .into_iter()
@@ -32209,7 +32351,14 @@ impl<'a> Checker<'a> {
                         .map(|slot| slot.map_or(Ty::Error, |a| self.expr_types[a.0 as usize]))
                         .collect::<Vec<_>>(),
                 );
-                let score = self.call_slot_score_vararg(&params, &slots, o.call_sig.vararg_index);
+                let score = self.call_slot_score_vararg(
+                    &params,
+                    &slots,
+                    o.call_sig.vararg_index,
+                    o.generic_sig
+                        .as_ref()
+                        .map(|signature| signature.params.as_slice()),
+                );
                 Some((score, o, params, slots))
             })
             .collect();
@@ -32324,9 +32473,29 @@ impl<'a> Checker<'a> {
         let Some((_, fi, params, slots)) = candidates.into_iter().next() else {
             return ClasspathMemberSlotCall::NoMatch;
         };
+        // Selection deliberately keeps `params` physical: lowering needs the exact provider method
+        // shape. Checking instead consumes a complete logical overlay inferred from the semantic slot
+        // map. This is the same contract used by receiver-less calls and prevents a member-only branch
+        // from reintroducing the erased `Any` mismatch after generic applicability already succeeded.
+        let expectation_actuals = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(parameter, argument)| {
+                let argument = (*argument)?;
+                (!matches!(self.file.expr(argument), Expr::Lambda { .. }))
+                    .then_some((parameter, self.expr_types[argument.0 as usize]))
+            })
+            .collect::<Vec<_>>();
+        let expected_params = self.selected_call_param_expectations(
+            &params,
+            fi.generic_sig.as_ref(),
+            fi.context_count,
+            &expectation_actuals,
+            &type_args,
+        );
         for (i, slot) in slots.iter().enumerate() {
             if let Some(a) = slot {
-                self.commit_mapped_argument_type(*a, params[i]);
+                self.commit_mapped_argument_type(*a, expected_params[i]);
             }
         }
         let ret = if matches!(fi.callable.origin, Origin::Module { .. }) {
@@ -32459,6 +32628,7 @@ impl<'a> Checker<'a> {
         params: &[Ty],
         slots: &[Option<ExprId>],
         vararg_index: Option<usize>,
+        semantic_shapes: Option<&[Ty]>,
     ) -> Option<usize> {
         if params.len() != slots.len() {
             return None;
@@ -32478,6 +32648,14 @@ impl<'a> Checker<'a> {
             } else {
                 params[i]
             };
+            // A semantic type-parameter slot must reach inference before it can be judged against a
+            // concrete expectation. This applies equally to source/module and compiled candidates;
+            // the post-selection checker validates the resulting substitution. Ignore a shape vector
+            // that is not slot-aligned instead of letting provider representation alter applicability.
+            let inference_slot = semantic_shapes
+                .filter(|shapes| shapes.len() == params.len())
+                .and_then(|shapes| shapes.get(i).copied())
+                .is_some_and(Self::ty_mentions_type_param);
             // Kotlin contextually discards a lambda literal's value when the selected parameter
             // returns `Unit`. Mapped calls used to miss the shared adaptation and happened to pass
             // only while provider parameters stayed erased `FunctionN` objects; publishing a
@@ -32488,6 +32666,7 @@ impl<'a> Checker<'a> {
                 .unit_coerced_lambda_type(*arg, expected, aty)
                 .unwrap_or(aty);
             if aty != Ty::Error
+                && !inference_slot
                 && !self.receiver_is_assignable(aty, expected)
                 && !argument.adapts_integer_literal_to(expected)
                 && !self.erased_function_param_fits(expected, aty)
@@ -38599,6 +38778,43 @@ impl<'a> Checker<'a> {
                         let vararg = last_is_array
                             && (c.params.len() != arg_tys.len()
                                 || c.params.last().map_or(false, |p| arg_tys.last() != Some(p)));
+                        let default_trailing_lambda = c.default_call
+                            && arg_tys.last().is_some_and(|ty| matches!(ty, Ty::Fun(_)))
+                            && !arg_tys.is_empty()
+                            && arg_tys.len() < c.params.len();
+                        // Compute generic inference inputs ONCE from the selected call's semantic
+                        // argument-to-parameter relationship. Named omissions already carry their
+                        // slots; a vararg's selected element type owns its trailing elements; the
+                        // legacy default/trailing-lambda shape contributes only its positional
+                        // prefix; every ordinary selected argument maps index-for-index. Literal
+                        // lambdas are intentionally excluded because their bodies were contextually
+                        // typed from the selected parameter rather than independently inferred.
+                        let expectation_slots: Vec<usize> =
+                            if let Some(slots) = named_slots.as_ref().filter(|_| c.default_call) {
+                                slots.clone()
+                            } else if vararg && !c.params.is_empty() {
+                                (0..(c.params.len() - 1).min(arg_tys.len())).collect()
+                            } else if default_trailing_lambda {
+                                (0..arg_tys.len() - 1).collect()
+                            } else {
+                                (0..arg_tys.len()).collect()
+                            };
+                        let expectation_actuals: Vec<(usize, Ty)> = expectation_slots
+                            .into_iter()
+                            .zip(arg_tys.iter().copied())
+                            .zip(sel_args.iter().copied())
+                            .filter_map(|((parameter, actual), argument)| {
+                                (!matches!(self.file.expr(argument), Expr::Lambda { .. }))
+                                    .then_some((parameter, actual))
+                            })
+                            .collect();
+                        let expected_params = self.selected_call_param_expectations(
+                            &c.params,
+                            c.generic_sig.as_deref(),
+                            c.context_count,
+                            &expectation_actuals,
+                            &call_targs,
+                        );
                         if let Some(slots) = named_slots.as_ref().filter(|_| c.default_call) {
                             // The labelled, parameter-omitting form: each argument is checked against
                             // the parameter its label named, not against the one at its position.
@@ -38612,7 +38828,7 @@ impl<'a> Checker<'a> {
                                     continue;
                                 };
                                 self.expect_library_call_arg(
-                                    declared,
+                                    expected_params.get(parameter).copied().unwrap_or(declared),
                                     arg_tys[index],
                                     argument,
                                     "argument",
@@ -38623,9 +38839,12 @@ impl<'a> Checker<'a> {
                             let elem = c.vararg_elem.unwrap_or_else(|| {
                                 c.params[fixed].array_elem().unwrap_or(Ty::Error)
                             });
+                            // The trailing element arguments already measure against the INFERRED
+                            // element (`c.vararg_elem`); only the fixed prefix consumes the shared
+                            // selected-call expectations.
                             for i in 0..fixed.min(arg_tys.len()) {
                                 self.expect_library_call_arg(
-                                    c.params[i],
+                                    expected_params[i],
                                     arg_tys[i],
                                     sel_args[i],
                                     "argument",
@@ -38639,16 +38858,12 @@ impl<'a> Checker<'a> {
                                     "vararg argument",
                                 );
                             }
-                        } else if c.default_call
-                            && arg_tys.last().is_some_and(|t| matches!(t, Ty::Fun(_)))
-                            && !arg_tys.is_empty()
-                            && arg_tys.len() < c.params.len()
-                        {
+                        } else if default_trailing_lambda {
                             let prefix_len = arg_tys.len() - 1;
                             let last = c.params.len() - 1;
                             for i in 0..prefix_len {
                                 self.expect_library_call_arg(
-                                    c.params[i],
+                                    expected_params[i],
                                     arg_tys[i],
                                     sel_args[i],
                                     "argument",
@@ -38657,7 +38872,7 @@ impl<'a> Checker<'a> {
                             let lambda_arg = sel_args[prefix_len];
                             if !matches!(self.file.expr(lambda_arg), Expr::Lambda { .. }) {
                                 self.expect_library_call_arg(
-                                    c.params[last],
+                                    expected_params[last],
                                     arg_tys[prefix_len],
                                     lambda_arg,
                                     "argument",
@@ -38669,7 +38884,7 @@ impl<'a> Checker<'a> {
                                     continue;
                                 }
                                 self.expect_library_call_arg(
-                                    c.params[i],
+                                    expected_params[i],
                                     *a,
                                     sel_args[i],
                                     "argument",
