@@ -15,7 +15,7 @@ pub use crate::resolve::TypeInfo as FrontendTypeInfo;
 pub use crate::resolve::{
     check_file, check_file_at, check_file_in_source_set, collect_signatures,
     collect_signatures_with_cp, preinfer_module_returns, AnonymousObjectCapture,
-    CompoundAssignmentTarget, SourceConstructorMatcher,
+    AnonymousObjectCaptureSource, CompoundAssignmentTarget, SourceConstructorMatcher,
 };
 pub(crate) use crate::resolve::{
     classifier_over_default, function_import_scope, pick_overload, qualified_path, typeref_leaf,
@@ -23,7 +23,7 @@ pub(crate) use crate::resolve::{
     FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo,
     ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall, ResolvedConstructor,
     ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
+    ResolvedModuleTopLevelCall, SigFlags, Signature, StaticPropertyStorage, StmtLowering,
 };
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
@@ -720,6 +720,7 @@ mod tests {
                 receiver: Some(receiver),
                 params: value_params,
                 ret: Ty::Unit,
+                return_policy: Default::default(),
             });
             ResolvedSymbols {
                 classifier,
@@ -770,7 +771,7 @@ mod tests {
                 crate::libraries::StaticFieldRef {
                     owner: crate::types::type_name(internal),
                     name: name.to_string(),
-                    descriptor: "Lfixture/CollisionEnum;".to_string(),
+                    descriptor: Some("Lfixture/CollisionEnum;".to_string()),
                     ty: Ty::obj("fixture/CollisionEnum"),
                     constant: None,
                 }

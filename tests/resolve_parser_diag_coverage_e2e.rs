@@ -168,6 +168,78 @@ fn referential_equality_on_strings() {
 }
 
 #[test]
+fn referential_equality_on_a_value_class_operand() {
+    // kotlinc: "identity equality for arguments of types 'Any' and 'UInt' is prohibited." An inline /
+    // `@JvmInline value` class has no stable boxed identity, so `===` on one is an ERROR there — not the
+    // "unstable because of implicit boxing" warning a plain primitive operand gets. krusty must reject
+    // it too: the backend would otherwise box it through `box-impl` and happily emit an `if_acmp*` for a
+    // program kotlinc refuses to compile.
+    let d = diags("fun box(): Int { val a: Any = 1; val b: UInt = 1u; val c = a === b; return 0 }");
+    assert_rejected(&d, "referential equality on an unsigned operand");
+    let d = diags(
+        "@JvmInline value class VC(val x: Int)\n\
+         fun box(): Int { val a: Any = 1; val b = VC(1); val c = a === b; return 0 }",
+    );
+    assert_rejected(&d, "referential equality on a value-class operand");
+    // Both operands the same value class is prohibited as well.
+    let d = diags(
+        "@JvmInline value class VC(val x: Int)\n\
+         fun box(): Int { val a = VC(1); val b = VC(1); val c = a === b; return 0 }",
+    );
+    assert_rejected(&d, "referential equality on two value-class operands");
+    // A dependency inline class (`kotlin.time.Duration`) must be caught by the SAME semantic query.
+    // Such a type reaches the backend as its unboxed carrier (`Duration` → `Ty::Long`), so an
+    // unrejected `===` silently compares carriers or boxes one as an unrelated JVM wrapper. Keeping
+    // source value metadata in the provider-neutral classifier shape makes this regression exercise
+    // the federated resolver instead of an identity-specific source/classpath branch.
+    let d = diags(
+        "import kotlin.time.Duration\n\
+         fun box(a: Duration, b: Duration): Int { val c = a === b; return 0 }",
+    );
+    assert_rejected(
+        &d,
+        "referential equality on a classpath value-class operand",
+    );
+    // Pin the message, not merely "some diagnostic": `assert_rejected` accepts any non-empty string,
+    // so without this an unrelated resolution failure would keep the test green.
+    if common::stdlib_toolchain_ready() {
+        assert!(
+            d.iter().any(|m| m.contains("is prohibited")),
+            "expected kotlinc's \"is prohibited\" wording, got: {d:?}"
+        );
+    }
+}
+
+#[test]
+fn referential_equality_on_mismatched_primitive_types() {
+    // Plain primitives of the SAME type may use `===` (with kotlinc's warning) and lower as value
+    // equality. Different primitive types are a hard error: they have neither object identity nor a
+    // shared scalar comparison domain. Pin all JVM comparison families so the emitter can never be
+    // asked to choose an int/long/float/double operation from only one mismatched operand.
+    for (source, description) in [
+        (
+            "fun bad(a: Int, b: Long): Boolean = a === b",
+            "referential equality between Int and Long",
+        ),
+        (
+            "fun bad(a: Int, b: Char): Boolean = a === b",
+            "referential equality between Int and Char",
+        ),
+        (
+            "fun bad(a: Float, b: Double): Boolean = a === b",
+            "referential equality between Float and Double",
+        ),
+    ] {
+        let d = diags(source);
+        assert_rejected(&d, description);
+        assert!(
+            d.iter().any(|m| m.contains("is prohibited")),
+            "expected the identity-prohibition diagnostic for {description}, got: {d:?}"
+        );
+    }
+}
+
+#[test]
 fn nested_try_with_finally() {
     let d = diags("fun box(): Int { try { try { return 1 } finally {} } finally {}; return 0 }");
     assert_rejected(&d, "nested try combined with finally");
