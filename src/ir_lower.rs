@@ -6576,9 +6576,12 @@ impl<'a> Lower<'a> {
 
     /// Construct `class`, supplying any captures it carries ahead of `args`.
     ///
-    /// This is the single seam every construction goes through, which is why the capture arguments
-    /// are prepended HERE rather than in each of the argument-mapping arms that build `args`: a new
-    /// arm cannot forget them.
+    /// Every construction of a class declared in THIS file goes through here, which is why the
+    /// capture arguments are prepended HERE rather than in each of the argument-mapping arms that
+    /// build `args`: a new arm cannot forget them. (`IrFile::new_cross_file` and
+    /// `IrFile::new_external` construct classes from elsewhere, which by construction have no
+    /// captures of this file's frames — a local class is only visible in the body it was written
+    /// in.)
     fn emit_new(
         &mut self,
         class: u32,

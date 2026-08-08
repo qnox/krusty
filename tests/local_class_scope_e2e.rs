@@ -284,3 +284,83 @@ fn an_inner_class_of_a_local_class() {
         }\n";
     assert_eq!(run(SRC).expect("inner class of a local class"), "OK");
 }
+
+/// kotlinc: accepted, prints `OK`.
+///
+/// A local class SHADOWS an enclosing type parameter of the same name: one classifier namespace, so
+/// the innermost binding wins whatever kind it is. Stepping over the class binding to keep walking
+/// for a type parameter resolved `T` to the parameter and `v.s()` was `unresolved reference 's'`.
+#[test]
+fn a_local_class_shadows_an_enclosing_type_parameter_of_the_same_name() {
+    const SRC: &str = "fun <T> f(): String {\n\
+        \x20   class T { fun s(): String = \"OK\" }\n\
+        \x20   val v: T = T()\n\
+        \x20   return v.s()\n\
+        }\n\
+        fun box(): String = f<Int>()\n";
+    assert_eq!(
+        run(SRC).expect("the local class shadows the type parameter"),
+        "OK"
+    );
+}
+
+/// kotlinc: accepted — krusty limitation, the file skips.
+///
+/// A local class reading a receiver FURTHER OUT than the innermost one would need a chain of
+/// captures (`L.this$0` is the `B` instance, and `this@A` is another hop through `B.this$0`), which
+/// is not modelled. Only the innermost receiver contributes capture names, so `this@A` finds no
+/// binding and the class is rejected instead of being handed a `this$0` that holds the wrong object.
+#[test]
+fn a_local_class_reading_a_grandparent_receiver_is_rejected() {
+    const SRC: &str = "class A(val x: String) {\n\
+        \x20   inner class B {\n\
+        \x20       fun m(): String {\n\
+        \x20           class L { fun k(): String = this@A.x }\n\
+        \x20           return L().k()\n\
+        \x20       }\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = A(\"OK\").B().m()\n";
+    assert_rejected(SRC);
+}
+
+/// kotlinc: accepted — krusty limitation, the file skips.
+///
+/// Inside a member EXTENSION function the nearest `this` is the extension receiver, while lowering
+/// supplies a captured enclosing instance from the DISPATCH receiver. The two are different objects,
+/// so the enclosing instance contributes no capture names at all and the read is rejected rather
+/// than emitted as a field typed after one receiver holding the other.
+#[test]
+fn a_local_class_capturing_through_a_member_extension_receiver_is_rejected() {
+    const SRC: &str = "class Outer(val n: Int) {\n\
+        \x20   fun greet(): String = \"hi\" + n\n\
+        \x20   fun String.ext(): String {\n\
+        \x20       class L { fun read(): String = greet() }\n\
+        \x20       return L().read()\n\
+        \x20   }\n\
+        \x20   fun run(): String = \"x\".ext()\n\
+        }\n\
+        fun box(): String = Outer(3).run()\n";
+    assert_rejected(SRC);
+}
+
+/// kotlinc: accepted, prints `OK`.
+///
+/// The plain case the two rejections above must not cost: a local class in an ordinary member
+/// function, where the innermost `this` IS the dispatch receiver, still captures the enclosing
+/// instance and calls its method.
+#[test]
+fn a_local_class_in_a_plain_member_captures_the_enclosing_instance() {
+    const SRC: &str = "class Outer(val n: Int) {\n\
+        \x20   fun greet(): String = if (n == 3) \"OK\" else \"FAIL\"\n\
+        \x20   fun run(): String {\n\
+        \x20       class L { fun read(): String = greet() }\n\
+        \x20       return L().read()\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = Outer(3).run()\n";
+    assert_eq!(
+        run(SRC).expect("a plain member's local class captures the enclosing instance"),
+        "OK"
+    );
+}

@@ -173,9 +173,15 @@ impl<'p, B> Scope<'p, B> {
     /// walk, because the outer declaration's type parameters are not reachable from it —
     /// `class A<T> { class B { fun g(): T } }` is rejected by kotlinc, while an `inner class`, a
     /// local class and an anonymous object all keep `T`.
+    ///
+    /// The FILE rung is always consulted, cut or not: it is the root of every chain, and nothing
+    /// that severs the receiver walk can put a declaration outside the file it was written in.
     pub(crate) fn classifier_rungs<'s>(&'s self) -> impl Iterator<Item = &'s Scope<'p, B>> {
         let mut cut = false;
-        self.ancestors().take_while(move |rung| {
+        self.ancestors().filter(move |rung| {
+            if matches!(rung.kind, ScopeKind::File) {
+                return true;
+            }
             if cut {
                 return false;
             }
@@ -215,17 +221,20 @@ impl<'p, B> Scope<'p, B> {
             .any(|b| b.ns == ns && b.name == name)
     }
 
-    /// Remove and return the innermost binding of `name`, wherever in the chain it lives. Used to
-    /// HIDE a binding for the duration of a nested resolution (a class property that would
-    /// otherwise shadow an extension receiver); the caller re-binds it afterwards.
-    pub(crate) fn take_binding(&self, name: &str, ns: Ns) -> Option<B> {
-        for scope in self.ancestors() {
-            let mut bindings = scope.bindings.borrow_mut();
-            if let Some(at) = bindings.iter().rposition(|b| b.ns == ns && b.name == name) {
-                return Some(bindings.remove(at).payload);
-            }
-        }
-        None
+    /// Remove and return a binding THIS scope introduced. Used to HIDE a binding for the duration
+    /// of a nested resolution (a class property that would otherwise shadow an extension receiver);
+    /// the caller re-binds it afterwards.
+    ///
+    /// Deliberately this rung only, not the chain: the restore is a [`Self::rebind`] on some named
+    /// scope, and taking from an ancestor would put the binding back on a DIFFERENT rung than it
+    /// came from — silently changing what `declared_here` reports and where
+    /// [`Self::narrow_local`]'s invalidation stops.
+    pub(crate) fn take_own_binding(&self, name: &str, ns: Ns) -> Option<B> {
+        let mut bindings = self.bindings.borrow_mut();
+        let at = bindings
+            .iter()
+            .rposition(|b| b.ns == ns && b.name == name)?;
+        Some(bindings.remove(at).payload)
     }
 
     /// Every live binding in the chain, innermost scope first. Used by capture discovery, which
@@ -535,6 +544,47 @@ mod tests {
         method.rebind("T", Ns::Classifier, 2);
         assert_eq!(classifier(&method, "T"), Some(2));
         assert_eq!(classifier(&class_scope, "T"), Some(1));
+    }
+
+    #[test]
+    fn the_file_rung_survives_the_classifier_cut() {
+        // A plain nested class ends the classifier walk, but the FILE rung is the root of every
+        // chain: nothing that severs the receiver chain can put a declaration outside its own file.
+        let root: Scope<'_, u32> = Scope::root();
+        root.rebind("FileWide", Ns::Classifier, 7);
+        let a = root.child(class("A", false));
+        a.rebind("T", Ns::Classifier, 1);
+        let nested = a.child(class("A$B", false));
+
+        assert_eq!(
+            classifier(&nested, "T"),
+            None,
+            "the outer class's type parameters stop at the cut"
+        );
+        assert_eq!(
+            classifier(&nested, "FileWide"),
+            Some(7),
+            "the file rung is consulted past the cut"
+        );
+    }
+
+    #[test]
+    fn take_own_binding_does_not_reach_into_an_enclosing_rung() {
+        // The restore is a `rebind` on some NAMED scope, so taking from an ancestor would put the
+        // binding back on a different rung than it came from — silently moving what
+        // `declared_here` reports and where `narrow_local`'s invalidation stops.
+        let root: Scope<'_, u32> = Scope::root();
+        let outer = root.child(ScopeKind::Function { receiver: None });
+        outer.rebind("x", Ns::Value, 1);
+        let inner = outer.child(ScopeKind::Block);
+
+        assert_eq!(inner.take_own_binding("x", Ns::Value), None);
+        assert!(
+            outer.declared_here("x", Ns::Value),
+            "the enclosing rung keeps its binding"
+        );
+        assert_eq!(outer.take_own_binding("x", Ns::Value), Some(1));
+        assert!(!outer.declared_here("x", Ns::Value));
     }
 
     #[test]

@@ -1477,24 +1477,28 @@ fn project_module_assignments(
 
 /// Partition the open documents into the source sets that are analyzed together.
 ///
-/// Each module owns one group, so a module's analysis never sees another module's sources. The
-/// documents the model claims for no module — a scratch file, a source root the build system does
-/// not describe — share the unowned group. That group carries no module classpath and no support
-/// sources, which is the same isolation a document gets when the workspace has no build system at
-/// all. Dropping those documents instead would leave them open in the editor with no diagnostics,
-/// no completion, and no navigation.
+/// Each module owns one group, so a module's analysis never sees another module's sources. A
+/// document the model claims for no module — a scratch file, a source root the build system does
+/// not describe — gets a group to ITSELF, carrying no module classpath and no support sources.
+/// Pooling the unowned documents into one group instead would let two unrelated scratch files see
+/// each other's top-level declarations, so the same `fun` in each would report a conflict; dropping
+/// them would leave them open in the editor with no diagnostics, no completion, and no navigation.
+///
+/// A workspace with no model at all is a different case and does not reach here: every document is
+/// assigned the one synthetic module by [`project_module_assignments`], because a plain folder of
+/// `.kt` files is meant to be one source set.
 fn project_analysis_groups(
     module_assignments: &[Option<usize>],
 ) -> Vec<(Option<usize>, Vec<usize>)> {
     let mut groups: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
     for (document_index, module_index) in module_assignments.iter().copied().enumerate() {
-        if let Some((_, document_indices)) = groups
-            .iter_mut()
-            .find(|(candidate, _)| *candidate == module_index)
-        {
-            document_indices.push(document_index);
-        } else {
-            groups.push((module_index, vec![document_index]));
+        match module_index.and_then(|module| {
+            groups
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == Some(module))
+        }) {
+            Some((_, document_indices)) => document_indices.push(document_index),
+            None => groups.push((module_index, vec![document_index])),
         }
     }
     groups
@@ -1819,9 +1823,13 @@ mod tests {
             project_analysis_groups(&assignments),
             [(Some(0), vec![0]), (None, vec![1]), (Some(1), vec![2])]
         );
-        // Documents the model claims for no module are analyzed as one isolated group rather than
-        // dropped, so an open scratch file still gets diagnostics and navigation.
-        assert_eq!(project_analysis_groups(&[None, None]), [(None, vec![0, 1])]);
+        // A document the model claims for no module is analyzed rather than dropped, so an open
+        // scratch file still gets diagnostics and navigation — and each gets a group of its own, so
+        // two unrelated scratch files do not see each other's declarations.
+        assert_eq!(
+            project_analysis_groups(&[None, None]),
+            [(None, vec![0]), (None, vec![1])]
+        );
         assert_eq!(
             open_documents_from_modules(
                 &module_graph.get(1).unwrap().dependencies,

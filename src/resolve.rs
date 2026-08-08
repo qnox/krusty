@@ -11482,17 +11482,23 @@ impl CheckerScope<'_> {
     /// The innermost type-parameter binding for `name`, or `None` when `name` is not a type
     /// parameter here. Walks [`classifier_rungs`](scope::Scope::classifier_rungs), so an outer
     /// declaration's parameters stop at a class rung that does not carry its outer instance.
+    ///
+    /// A nearer classifier binding of another kind — a local class of the same name — SHADOWS the
+    /// parameter rather than being stepped over: one namespace, so the innermost binding wins
+    /// whatever kind it is.
     fn tparam_binding(&self, name: &str) -> Option<(Ty, Vec<Ty>, bool)> {
-        self.classifier_rungs()
-            .find_map(|rung| match rung.own_binding(name, Ns::Classifier)? {
-                ScopeBinding::TypeParam {
+        for rung in self.classifier_rungs() {
+            match rung.own_binding(name, Ns::Classifier) {
+                Some(ScopeBinding::TypeParam {
                     bound,
                     extra_bounds,
                     reified,
-                } => Some((bound, extra_bounds, reified)),
-                ScopeBinding::LocalClass(_) => None,
-                _ => None,
-            })
+                }) => return Some((bound, extra_bounds, reified)),
+                Some(_) => return None,
+                None => {}
+            }
+        }
+        None
     }
 
     /// The internal name a statement-position classifier is registered under, if `name` denotes one
@@ -11502,12 +11508,18 @@ impl CheckerScope<'_> {
     /// parameter is only meaningful where the instance supplying it is reachable, while a class
     /// NAME needs nothing — a local `object` may name a sibling local class even though it cuts the
     /// receiver chain.
+    ///
+    /// A nearer type parameter of the same name shadows the class name, for the same reason a local
+    /// class shadows a parameter in [`Self::tparam_binding`]: one namespace, innermost binding wins.
     fn local_classifier(&self, name: &str) -> Option<TypeName> {
-        self.ancestors()
-            .find_map(|rung| match rung.own_binding(name, Ns::Classifier)? {
-                ScopeBinding::LocalClass(internal) => Some(internal),
-                _ => None,
-            })
+        for rung in self.ancestors() {
+            match rung.own_binding(name, Ns::Classifier) {
+                Some(ScopeBinding::LocalClass(internal)) => return Some(internal),
+                Some(_) => return None,
+                None => {}
+            }
+        }
+        None
     }
 
     /// The type parameters visible here, assembled from the classifier bindings of every rung in
@@ -14058,20 +14070,29 @@ impl<'a> Checker<'a> {
             unsupported.insert(name.to_string());
         });
         // Reaching the enclosing INSTANCE is the second capture kind: the receiver itself, not a
-        // binding in the chain. It is carried as ONE capture however many of its members are read.
+        // binding in the chain. It is carried as ONE capture however many of its members are read,
+        // so only the INNERMOST receiver contributes names — that is the object lowering supplies,
+        // and reading a member of a further-out receiver would need a CHAIN of captures that is not
+        // modelled.
+        //
+        // It contributes nothing unless that receiver is the DISPATCH receiver, which is what the
+        // innermost label being a CLASS label says: lowering supplies the capture from `$dispatch`,
+        // so with an extension receiver or a receiver lambda nearer than the enclosing class the
+        // checker's `this` and the object handed to the constructor are two different values. Every
+        // name then falls through to the value channel, finds no binding, and the class is rejected.
+        let innermost_label = self.this_labels.last();
+        let enclosing_instance = scope
+            .this_ty()
+            .filter(|_| innermost_label.is_some_and(|label| label.2));
         let mut through_outer: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for receiver in scope.implicit_receivers() {
-            let Some(internal) = receiver.obj_internal() else {
-                continue;
-            };
-            through_outer.insert("this".to_string());
+        if let Some(internal) = enclosing_instance.and_then(Ty::obj_internal) {
             if let Some(class) = self.syms.class_by_type_name(internal) {
                 through_outer.extend(class.props.iter().map(|(name, _, _)| name.clone()));
                 through_outer.extend(class.methods.keys().cloned());
             }
-        }
-        for label in &self.this_labels {
-            through_outer.insert(format!("this@{}", class_declaration_label(&label.0)));
+            if let Some(label) = innermost_label {
+                through_outer.insert(format!("this@{}", class_declaration_label(&label.0)));
+            }
         }
         // Anything the class declares itself shadows the outer name.
         for name in cl
@@ -14086,7 +14107,6 @@ impl<'a> Checker<'a> {
             unsupported.remove(name);
             through_outer.remove(name);
         }
-        through_outer.remove("this");
         // Each name belongs to exactly one channel; the nearer binding wins.
         for name in unsupported.iter().chain(&through_outer) {
             outer.remove(name);
@@ -14173,12 +14193,11 @@ impl<'a> Checker<'a> {
             // A `@JvmInline value class` has no instance to capture: inside its constructor `this`
             // is the bare underlying value, so a field typed as the class would hold something else
             // entirely (`codegen/box/inlineClasses/initBlock.kt` fails verification).
-            let unboxed_receiver = scope
-                .this_ty()
+            let unboxed_receiver = enclosing_instance
                 .and_then(Ty::obj_internal)
                 .and_then(|internal| self.syms.class_by_type_name(internal))
                 .is_some_and(|class| class.value_field.is_some());
-            match scope.this_ty().filter(|_| !unboxed_receiver) {
+            match enclosing_instance.filter(|_| !unboxed_receiver) {
                 Some(outer) => result.values.push(AnonymousObjectCapture {
                     name: "this$0".to_string(),
                     ty: outer,
@@ -21607,7 +21626,9 @@ impl<'a> Checker<'a> {
                         self.symbolic_signature_inference = true;
                     }
                     // Cached class properties would bypass the extension receiver. Hide them while
-                    // the accessor resolves the ordered implicit receiver chain.
+                    // the accessor resolves the ordered implicit receiver chain. Taken from
+                    // `body_scope`, the rung that declared them and the rung the restore below puts
+                    // them back on — the two must name the same scope or a binding changes rung.
                     let hidden_dispatch_bindings = if extension_receiver.is_some() {
                         let names = props
                             .iter()
@@ -21617,8 +21638,8 @@ impl<'a> Checker<'a> {
                         names
                             .into_iter()
                             .filter_map(|name| {
-                                scope
-                                    .take_binding(&name, Ns::Value)
+                                body_scope
+                                    .take_own_binding(&name, Ns::Value)
                                     .map(|binding| (name, binding))
                             })
                             .collect::<Vec<_>>()
