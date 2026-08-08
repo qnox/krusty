@@ -771,7 +771,7 @@ mod tests {
                 crate::libraries::StaticFieldRef {
                     owner: crate::types::type_name(internal),
                     name: name.to_string(),
-                    descriptor: "Lfixture/CollisionEnum;".to_string(),
+                    descriptor: Some("Lfixture/CollisionEnum;".to_string()),
                     ty: Ty::obj("fixture/CollisionEnum"),
                     constant: None,
                 }

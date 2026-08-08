@@ -10,7 +10,7 @@ use crate::types::{Ty, TypeName, Visibility};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::SymbolTable;
+use super::{StaticPropertyStorage, SymbolTable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceTypeAccess {
@@ -101,18 +101,40 @@ impl SourceFallbackPlatform {
 
     fn public_source_static_field(&self, internal: TypeName, name: &str) -> Option<StaticFieldRef> {
         self.public_source_type_name(internal)?;
-        let ty = self
+        let ty = if let Some(ty) = self
             .symbols
             .static_classifier_values
-            .get(&internal)?
-            .get(name)
-            .copied()?;
+            .get(&internal)
+            .and_then(|values| values.get(name))
+            .copied()
+        {
+            ty
+        } else {
+            // The declaration signature already owns the physical-storage decision used by
+            // same-file, cross-file, and dependency-source reads. Consume that normalized fact
+            // directly: rebuilding it from an accessor-name side set here would let provider origin
+            // change the same property.
+            let class = self.symbols.class_by_type_name(internal)?;
+            let property = class.static_props.get(name)?;
+            if property.storage != StaticPropertyStorage::OuterStaticField {
+                return None;
+            }
+            // Cross-module reads see PUBLIC companion statics only: an `internal` one is
+            // module-scoped (kotlinc rejects the dependent module's read), matching the
+            // `public_functions` / `public_properties` filters the merged callables already apply.
+            if property.visibility != Visibility::Public {
+                return None;
+            }
+            property.ty
+        };
+        // Enum entries and companion backing fields are the same semantic field shape. A
+        // source-only provider cannot know the selected target's opaque physical token, so leave the
+        // descriptor absent and let lowering ask its runtime—exactly as it does for same-module source
+        // fields. A source `const val` also lacks a recorded VALUE, so folding remains unavailable.
         Some(StaticFieldRef {
             owner: internal,
             name: name.to_string(),
-            // `static_classifier_values` contains enum entries, whose JVM field type is the enum
-            // itself. Dependency sources use their source internal name as their physical JVM name.
-            descriptor: format!("L{};", internal.render()),
+            descriptor: None,
             ty,
             constant: None,
         })

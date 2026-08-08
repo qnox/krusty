@@ -173,7 +173,11 @@ pub struct LibraryMember {
 pub struct StaticFieldRef {
     pub owner: TypeName,
     pub name: String,
-    pub descriptor: String,
+    /// Opaque target field token when the provider knows the physical declaration. Source-only
+    /// providers leave it absent; lowering then asks the selected target runtime to realize the
+    /// checked semantic type. Keeping absence explicit avoids embedding a target descriptor or a
+    /// sentinel string in the provider-neutral resolver.
+    pub descriptor: Option<String>,
     pub ty: Ty,
     pub constant: Option<LibraryConst>,
 }

@@ -315,7 +315,7 @@ impl JvmLibraries {
                 let field = |owner: TypeName, field_name: &str| crate::libraries::StaticFieldRef {
                     owner,
                     name: field_name.to_string(),
-                    descriptor: descriptor.clone(),
+                    descriptor: Some(descriptor.clone()),
                     ty: Ty::obj_name(candidate),
                     constant: None,
                 };
@@ -3802,7 +3802,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 return Some(crate::libraries::StaticFieldRef {
                     owner: cur,
                     name: name.to_string(),
-                    descriptor: f.descriptor.clone(),
+                    descriptor: Some(f.descriptor.clone()),
                     ty,
                     constant,
                 });
