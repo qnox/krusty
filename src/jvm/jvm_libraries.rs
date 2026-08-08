@@ -2248,13 +2248,22 @@ fn concrete_metadata_shape(ty: Ty) -> bool {
         }
 }
 
-/// The LOGICAL return of a `suspend` method, recovered from its generic signature: the last parameter is
-/// `Continuation<-T>`, whose type argument `T` is the source return type (`Continuation<-Config>` →
-/// `Config`). A `Continuation<-Unit>` maps to `Ty::Unit` (the source `Unit` return).
+/// The LOGICAL return of a `suspend` method, recovered from either normalized provider metadata or a
+/// raw JVM generic signature. Metadata already publishes the source return in `ret` and omits the
+/// emit-only continuation; a JVM signature instead appends `Continuation<-T>` and erases `ret` to
+/// `Object`. `logical_param_count` distinguishes those two aligned representations without testing a
+/// provider kind or class name. In both forms, owner variables are substituted from the applied
+/// receiver (`Repo<Cfg>` turns its declaration-level `T` into `Cfg`).
 fn suspend_return_from_gsig(
     gsig: &GenericSig,
+    logical_param_count: usize,
     binds: &std::collections::HashMap<String, Ty>,
 ) -> Option<Ty> {
+    if gsig.params.len() == logical_param_count {
+        return Some(canonicalize_jvm_collections(
+            crate::symbol_resolver::ty_subst(gsig.ret, binds),
+        ));
+    }
     match *gsig.params.last()? {
         Ty::Obj(n, args) if crate::types::same(n, crate::types::wk::continuation()) => {
             match *args.first()? {
@@ -3595,7 +3604,9 @@ impl SymbolSource for JvmLibraries {
                                 .unwrap_or_default();
                             let base = generic_sig
                                 .as_ref()
-                                .and_then(|g| suspend_return_from_gsig(g, &recv_binds))
+                                .and_then(|g| {
+                                    suspend_return_from_gsig(g, params.len(), &recv_binds)
+                                })
                                 .unwrap_or(m.ret);
                             // `suspend_return_from_gsig` canonicalized a collection return to its
                             // READ-ONLY Kotlin form (the JVM signature erases read-only vs mutable).
