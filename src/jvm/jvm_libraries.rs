@@ -2714,6 +2714,12 @@ fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -
 }
 
 impl SymbolSource for JvmLibraries {
+    /// The classpath's package catalog answers directly: it already records every package a jar, class
+    /// directory, or the JDK jimage declares, plus their ancestors.
+    fn package_exists(&self, package: TypeName) -> bool {
+        self.cp.has_package(&package.render())
+    }
+
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
         let Some(internal) = ty.obj_internal() else {
             return Vec::new();
@@ -4373,6 +4379,23 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                 "(I)J".to_string(),
             ),
             RuntimeOp::UIntToLong => None,
+            RuntimeOp::UnsignedToDouble if ty == Ty::UInt => callable(
+                "kotlin/UnsignedKt",
+                "uintToDouble",
+                vec![Ty::UInt],
+                Ty::Double,
+                Ty::Double,
+                "(I)D".to_string(),
+            ),
+            RuntimeOp::UnsignedToDouble if ty == Ty::ULong => callable(
+                "kotlin/UnsignedKt",
+                "ulongToDouble",
+                vec![Ty::ULong],
+                Ty::Double,
+                Ty::Double,
+                "(J)D".to_string(),
+            ),
+            RuntimeOp::UnsignedToDouble => None,
             RuntimeOp::PrimitiveCompare if ty != Ty::Boolean => {
                 let cmp_ty = ty.int_arithmetic_repr();
                 let (cmp_owner, cmp_prim) = match cmp_ty {

@@ -89,6 +89,18 @@ pub trait SymbolSource {
         self.resolve_type(&internal.render()).map(std::rc::Rc::new)
     }
 
+    /// Whether a slashed path names a PACKAGE in this source.
+    ///
+    /// A Kotlin reference is resolved one segment at a time, and each prefix denotes a package, a
+    /// classifier, or nothing. Classifiers are answered by `resolve_type_name`; this is the other half,
+    /// without which a fully-qualified reference (`java.util.ArrayList`, `pkg.topLevelFun()`) has no
+    /// way to know that its leading segments are a package rather than an unresolved name. Intermediate
+    /// packages that declare nothing themselves must answer `true`. Empty default — a source with no
+    /// package namespace of its own contributes nothing to the walk.
+    fn package_exists(&self, _package: TypeName) -> bool {
+        false
+    }
+
     /// The declaration visibility of a classifier.
     fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {
         self.resolve_type_name(internal).map(|classifier| {
@@ -230,6 +242,13 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|c| c.resolve_type_name(internal))
+    }
+
+    /// A package exists if ANY source declares it — packages are a union across the module and the
+    /// classpath, not a shadowing lookup: the same package name legitimately holds declarations from
+    /// both, and a qualifier walk must be able to continue through either.
+    fn package_exists(&self, package: TypeName) -> bool {
+        self.children.iter().any(|c| c.package_exists(package))
     }
 
     fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {

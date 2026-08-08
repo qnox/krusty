@@ -4031,6 +4031,132 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   cannot know which parameter the argument lands in.
   Test: `tests/classpath_member_overload_no_names_e2e.rs`.
 
+- **A type parameter is a lexical binding, declared on the rung of the declaration that introduces
+  it.** `class C<T>` binds `T` on its CLASS rung, `fun <T> f()` on the function's own rung — one
+  namespace (`Ns::Classifier`), different declaring rung — so a parameter retires with its
+  declaration instead of being replaced wholesale on a scope shared with siblings. The rung KIND
+  says which it is: a declaration's signature rung is `ScopeKind::Function` (carrying no receiver),
+  never the `Block` kind reserved for `if`/`when` branches, loop bodies and lambdas. `reified` is a
+  field of that binding rather than a parallel set, so the two cannot drift and an
+  `inline fun <reified T>` cannot leave `T` reified for the next declaration that reuses the name
+  (kotlinc: `cannot use 'T' as reified type parameter. Use a class instead.`).
+  The lookup walk stops at a class rung that does not carry its outer instance — the same cut
+  `implicit_receivers` makes. Verified against kotlinc 2.4.10:
+  `class A<T> { class B { fun g(): T? } }` is `unresolved reference 'T'`, while an `inner class`,
+  a local class inside a member, and an anonymous object all still resolve `T`.
+  Tests: `tests/scope_chain_e2e.rs`
+  (`a_nested_class_cannot_name_the_outer_classs_type_parameter`,
+  `an_inner_class_can_name_the_outer_classs_type_parameter`,
+  `a_type_parameter_does_not_leak_to_the_next_declaration`,
+  `a_reified_mark_does_not_leak_to_the_next_declaration`), `src/resolve/scope.rs` unit tests.
+
+- **A local class is checked in the scope it was written in, and captures an enclosing VALUE only
+  through a constructor parameter it does not have yet.** The class is hoisted to a top-level
+  `Decl::Class` for signature collection and lowering, but the checker enters it from its
+  `Stmt::LocalClass` (`File::local_class_decls` links the two), on a class rung with
+  `carries_outer == true` — a local class captures the enclosing instance, so the enclosing
+  receivers and type parameters stay reachable. Verified against kotlinc 2.4.10:
+  `class A<T> { fun m() { class L { fun k(): T? = null } } }` compiles, as does a local class whose
+  own property shadows a same-named member of the enclosing class. Signature collection sees the
+  hoisted declaration without that context, so the enclosing declaration's type parameters are
+  supplied to it explicitly (`local_class_enclosing_tparams`).
+  A local class's hoisted declaration is named after the declaration it was written in
+  (`Outer.m.Local` → `Outer$m$Local`), which is both how kotlinc names one and the spelling every
+  lexical-prefix walk in the compiler already understands; nothing in the source is rewritten to
+  match, because the SOURCE name is bound in `Ns::Classifier` and resolves where it was written.
+  A local class is NOT a member class: its `InnerClasses` entry carries `outer_class_info_index = 0`
+  and it gets an `EnclosingMethod` attribute (class only — the JVM spec permits `method_index = 0`,
+  and a wrong descriptor would make `Class.getEnclosingMethod()` throw). The class that CONSTRUCTS
+  it must carry the same `InnerClasses` entry, including the file facade: reflection cross-checks
+  the two sides and throws `IncompatibleClassChangeError` when only one has it.
+  A class literal on a local class is rejected (the file skips): reflection reports `simpleName`
+  from the Kotlin `@Metadata` local-class marking, which krusty does not emit, so the name would come
+  back qualified (`codegen/box/reflection/classes/localClassSimpleName.kt`).
+
+  WHAT a local class captures is decided in that scope — the only place the enclosing bindings
+  exist — and recorded as `TypeInfo::local_class_captures_by_class`. How a capture is represented is
+  lowering's decision: each captured binding becomes a leading constructor parameter and field, and
+  `Lower::emit_new` supplies them ahead of the source arguments at every construction, so no
+  argument-mapping arm can forget them. `ClassSig::ctor_params` stays the SOURCE signature and is
+  indexed by source position — captures are not in it.
+  The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in
+  the chain — and is carried as ONE capture however many of its members are read, placed FIRST
+  because lowering identifies it by position (field 0), which is what an outer member read and a
+  `this@Outer` both go through. It is rejected when the enclosing receiver is a `@JvmInline value
+  class`: there is no instance to capture, since `this` is the bare underlying value there
+  (`codegen/box/inlineClasses/initBlock.kt` fails verification otherwise).
+  Three capture shapes are NOT modelled yet and are rejected (the file skips): a local function
+  (which carries captures of its own), a reassigned `var` (shared mutable state, not capturable by
+  value), and a capture read during CONSTRUCTION — an initializer, an `init` block, a
+  base-constructor argument, a secondary constructor, or a primary-constructor parameter default. The capture scan is syntactic and
+  conservative: over-reporting skips a file, under-reporting emits a class without what it needs,
+  which the box corpus caught as `NoSuchMethodError` on construction
+  (`codegen/box/localClasses/capturingInDefaultConstructorParameter.kt`).
+  Tests: `tests/local_class_scope_e2e.rs`.
+
+- **Fully-qualified name references resolve by SEGMENT ITERATION over a package/classifier
+  namespace, not by matching spellings.** Kotlin admits a fully-qualified reference with no import
+  wherever a simple name is legal — `pkg.Cls()`, `pkg.Cls.COMPANION_VALUE`, `pkg.Obj.fn()`,
+  `val x: pkg.Cls`, `pkg.Cls::class`, `a is pkg.Cls`, `pkg.topLevelFun()`,
+  `java.util.concurrent.atomic.AtomicInteger(1)`. There is no syntax that separates the package part
+  from the classifier part: `a.b.C.D` is ambiguous between package `a.b` + class `C` + member `D`,
+  package `a` + class `b.C` + …, and so on. So a dotted reference is resolved one segment at a time,
+  and every prefix denotes exactly one of two things — a **package** or a **classifier**
+  (`QualifiedPrefix`, `src/symbol_resolver.rs`). Under a package, the next segment is a classifier of
+  that package or a subpackage; under a classifier, it is a nested classifier. The first segment that
+  is neither ends the walk, and the position that owns the reference (a read, a call, a class
+  literal, a constructor) resolves that segment as a MEMBER of whatever the prefix denoted.
+  This is what makes the qualified spelling end at the SAME resolved identity the imported simple
+  name reaches, for a same-module source classifier and a classpath one alike — the walk consults the
+  federated module + classpath source at every step, so origin never enters the rule.
+
+  Resolving a prefix to a **package** requires a package namespace, which is the half that was
+  missing: `SymbolSource::package_exists` (`src/symbol_source.rs`), answered by the classpath's
+  package catalog (`PackageTree::has_package` — jars, class directories, and the JDK jimage, plus the
+  intermediate packages that own no classes of their own, so `java` answers as well as `java/util`)
+  and by the module's own declarations (`ModuleSymbols::package_exists`, derived from the package of
+  every declared classifier and facade). Packages UNION across sources rather than shadowing: the
+  same package legitimately holds module and classpath declarations.
+
+  Two shadowing rules, both taken from the reference compiler:
+  - **A value root shadows both a classifier and a package.** kotlinc resolves the leftmost segment
+    as an expression first, so a local, a member property reached through an implicit receiver, a
+    top-level property, or a property brought in by an EXPLICIT OR WILDCARD import makes the
+    reference a member chain. With `import other.plib` (or `import other.*`) binding a property named
+    `plib`, `plib.Cls` reads `plib`'s `Cls` member and does not name the class `plib.Cls`.
+  - **An in-scope classifier shadows a package path**, so `Outer.Nested` resolves through the
+    in-scope chain and never through a package named `Outer`.
+
+  Package references are ABSOLUTE from the root: inside `package top`, `sub.Deep()` does NOT resolve
+  to `top.sub.Deep` (kotlinc: `unresolved reference 'sub'`), unlike Java.
+
+  Covered in both origins: construction (including a nested classifier and one under an `object`),
+  companion/static const/val/var read and write, companion function call, `object` member read/write
+  and call, an `object` or companion reached as a VALUE, nested-`object` members, enum entries, type
+  annotations (nullable, type arguments, explicit type arguments, supertypes), `is`/`as`/`when is`,
+  class literals (including `pkg.Cls.Nested::class` and `java.util.ArrayList::class`), and
+  package-qualified top-level function, property, `const val`, and `var` write; enum synthetic statics
+  (`values()`/`valueOf`); an explicitly named `Companion`; an unbound callable reference
+  (`pkg.Cls::method`); and construction through a `typealias`. A `typealias` resolves to its TARGET on
+  both sides of the pipeline — the module's alias edges are keyed by fully-qualified name
+  (`SymbolTable::source_alias_fqns`, since a per-file key cannot answer a reference from another
+  file), and lowering follows the same edge, because returning the alias spelling made the lowered
+  internal disagree with the checker's recorded result type and the construction was dropped.
+
+  The walk must FALL THROUGH when a step fails rather than return: a compiled Kotlin `typealias` is
+  `@Metadata` on a file facade, not a class file, so the package walk cannot see it while the older
+  alias-table arms can. Returning early from the constructor path hid every spelling those arms
+  answer.
+
+  Lowering must end at the identity the checker resolved, not re-derive it: the constructor path now
+  takes the recorded result type, the qualified-path candidate split is the shared one, and a
+  `const val` read is a facade FIELD (it has no accessor — calling one threw `NoSuchMethodError`).
+  A callable declared in another SOURCE file of the module carries no physical descriptor, so a
+  receiver-less static call to one is emitted as `Callee::CrossFile`, which derives the descriptor
+  from the signature; emitting the library form wrote an EMPTY descriptor, which the JVM rejects as a
+  zero-length constant-pool entry.
+  Tests: `tests/qualified_name_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
