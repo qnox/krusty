@@ -575,6 +575,15 @@ impl ClassWriter {
         ));
     }
 
+    /// Set only the enclosing CLASS. The JVM spec allows `method_index = 0` — "not immediately
+    /// enclosed by a method or constructor" — and the attribute's presence is what makes reflection
+    /// treat the class as local rather than top-level, which is what decides `simpleName`. Used
+    /// where the enclosing method's descriptor is not reconstructable; a wrong one would make
+    /// `Class.getEnclosingMethod()` throw, while absent is well-defined.
+    pub fn set_enclosing_class(&mut self, owner: &str) {
+        self.enclosing_method = Some((owner.to_string(), String::new(), String::new()));
+    }
+
     /// Register a candidate `InnerClasses` entry (a nested class in this file). `finish` emits it only
     /// if `inner` is referenced as a class constant. Register the whole file's nest on every writer —
     /// the per-class filter then yields exactly the entries kotlinc emits for that class.
@@ -1958,10 +1967,18 @@ impl ClassWriter {
         };
         // Attribute construction must finish before serializing the constant pool.
         let inner_classes_attr = {
+            // A class must declare its OWN member classes even when its code never mentions them: the
+            // JVM cross-checks the outer's and the inner's attributes and throws
+            // `IncompatibleClassChangeError: … disagree on InnerClasses attribute` from
+            // `getEnclosingClass`/`getDeclaringClass` when only one side carries the entry. The
+            // reference filter below is right for every OTHER entry (a nested class this file merely
+            // uses), and kotlinc emits both sides for its own nest too.
+            let own_member =
+                |spec: &InnerClassSpec| spec.outer.as_deref() == Some(self.internal_name.as_str());
             let referenced: Vec<InnerClassSpec> = self
                 .inner_class_candidates
                 .iter()
-                .filter(|s| self.cp.has_class(&s.inner))
+                .filter(|s| own_member(s) || self.cp.has_class(&s.inner))
                 .cloned()
                 .collect();
             (!referenced.is_empty()).then(|| {
@@ -2030,7 +2047,12 @@ impl ClassWriter {
         let enclosing_method_attr = self.enclosing_method.take().map(|(owner, method, desc)| {
             let name = self.cp.utf8("EnclosingMethod");
             let class_idx = self.cp.class(&owner);
-            let nat_idx = self.cp.name_and_type(&method, &desc);
+            // An empty method name is the class-only form: `method_index = 0`.
+            let nat_idx = if method.is_empty() {
+                0
+            } else {
+                self.cp.name_and_type(&method, &desc)
+            };
             let mut body = Vec::new();
             u2(&mut body, class_idx);
             u2(&mut body, nat_idx);
@@ -3327,12 +3349,13 @@ mod tests {
 
     #[test]
     fn inner_classes_emitted_only_when_referenced() {
-        // A registered nested class that is NOT referenced as a class constant emits no entry.
+        // A nested class of ANOTHER owner that this class does not reference as a class constant
+        // emits no entry. (Its own nest is a different rule — see `own_nest_members_always_emitted`.)
         let mut unref = ClassWriter::new("C", "java/lang/Object");
         unref.add_inner_class(InnerClassSpec {
-            inner: "C$Companion".to_string(),
-            outer: Some("C".to_string()),
-            name: Some("Companion".to_string()),
+            inner: "dep/Outer$Nested".to_string(),
+            outer: Some("dep/Outer".to_string()),
+            name: Some("Nested".to_string()),
             access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
         });
         let bytes = unref.finish();
@@ -3352,6 +3375,26 @@ mod tests {
         assert!(has(b"InnerClasses"));
         assert!(has(b"C$Companion"));
         assert!(has(b"Companion"));
+    }
+
+    /// kotlinc emits an `InnerClasses` entry for a class's OWN member classes whether or not its code
+    /// mentions them (verified against the reference compiler for both `class C { class Nested }` and
+    /// `class D { companion object }`). The JVM requires it: it cross-checks the outer's and the
+    /// inner's attributes and throws `IncompatibleClassChangeError: … disagree on InnerClasses` from
+    /// `getEnclosingClass` when only the inner carries the entry.
+    #[test]
+    fn own_nest_members_always_emitted() {
+        let mut writer = ClassWriter::new("C", "java/lang/Object");
+        writer.add_inner_class(InnerClassSpec {
+            inner: "C$Nested".to_string(),
+            outer: Some("C".to_string()),
+            name: Some("Nested".to_string()),
+            access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+        });
+        let bytes = writer.finish();
+        let has = |n: &[u8]| bytes.windows(n.len()).any(|w| w == n);
+        assert!(has(b"InnerClasses"));
+        assert!(has(b"C$Nested"));
     }
 
     #[test]

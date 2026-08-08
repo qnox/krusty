@@ -445,6 +445,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
     crate::ir::IrClass {
         fq_name: fq_name.into(),
         is_inner_class: false,
+        is_local_class: false,
         is_value: false,
         is_data: false,
         decl_line: 0,

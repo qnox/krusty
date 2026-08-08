@@ -1742,7 +1742,25 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
         if fq.ends_with("$$serializer") {
             continue; // handled above (special inner name `$serializer`)
         }
-        let Some(pos) = fq.rfind('$') else {
+        // Where the OUTER class ends is not the last `$`: a backticked declaration may carry `$` in
+        // its own simple name (`class \`Nested$With$Dollars\``), and splitting there named an outer
+        // class that does not exist — the loader then failed with `NoClassDefFoundError` on the
+        // invented name. The boundary is the longest proper prefix that is ITSELF a class of this
+        // file; only when no declared class is a prefix does the textual split stand in (an outer
+        // this file does not declare).
+        let Some(pos) = ir
+            .classes
+            .iter()
+            .map(IrClass::fq_name)
+            .filter(|outer| {
+                outer.len() < fq.len()
+                    && fq.starts_with(outer.as_str())
+                    && fq.as_bytes()[outer.len()] == b'$'
+            })
+            .map(|outer| outer.len())
+            .max()
+            .or_else(|| fq.rfind('$'))
+        else {
             continue; // top-level class — not nested
         };
         let name = &fq[pos + 1..];
@@ -1750,9 +1768,15 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
             continue; // handled above
         }
         let anonymous = is_coroutine_state_machine(c);
+        // A LOCAL class is not a member of anything: its name is qualified by the DECLARATION it
+        // was written in, so the text before the last `$` names no class. The JVM spells that with
+        // `outer_class_info_index = 0` and a non-zero `inner_name_index` — which is also what
+        // reflection reads back as `simpleName`. Treating the prefix as an outer class makes the
+        // loader look for a class that does not exist.
+        let member = !anonymous && !c.is_local_class;
         cw.add_inner_class(InnerClassSpec {
             inner: fq.clone(),
-            outer: (!anonymous).then(|| fq[..pos].to_string()),
+            outer: member.then(|| fq[..pos].to_string()),
             name: (!anonymous).then(|| name.to_string()),
             access: if anonymous {
                 0x0008 | 0x0010
@@ -2193,6 +2217,10 @@ fn emit_pass(
         .flat_map(|c| c.methods.iter().copied())
         .collect();
     let mut cw = new_writer(facade, "java/lang/Object", opts);
+    // The facade constructs the file's local classes, and a class that references one as a class
+    // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws
+    // `IncompatibleClassChangeError` when only one carries the entry. kotlinc emits it here too.
+    register_inner_classes(&mut cw, ir);
     // PRIVATE facade functions a CLASS body calls (`Callee::Local` from a lambda impl, a
     // continuation class, or any class member): a cross-class private invokestatic is illegal, so
     // kotlinc emits a `public static final synthetic access$<name>` forwarding bridge on the facade
@@ -2974,6 +3002,21 @@ fn emit_class(
     let raw_class_sig = ir.class_signature(&fq_name);
     let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
     let mut cw = new_writer_generic(&fq_name, jvm_sig.as_deref(), &superclass, opts);
+    // A LOCAL class needs an `EnclosingMethod` attribute: without it reflection reads the class as
+    // top-level and `simpleName` reports the whole `owner$Local` name instead of `Local`. The
+    // enclosing class is the longest `$`-prefix of the name that is itself an emitted class (a local
+    // class inside a member) — otherwise the file facade, which is where a top-level function lives.
+    if c.is_local_class {
+        let owner = fq_name
+            .match_indices('$')
+            .map(|(at, _)| &fq_name[..at])
+            .rfind(|candidate| ir.classes.iter().any(|other| other.fq_name() == *candidate))
+            .map(str::to_string)
+            .or_else(|| (!facade.is_empty()).then(|| facade.to_string()));
+        if let Some(owner) = owner {
+            cw.set_enclosing_class(&owner);
+        }
+    }
     let continuation_metadata = env.continuation_metadata.get(&fq_name);
     if let Some(metadata) = continuation_metadata {
         cw.set_enclosing_method(
@@ -9949,6 +9992,22 @@ impl<'a> Emitter<'a> {
                 };
                 code.getstatic(f, words);
             }
+            IrExpr::SetExternalStaticField {
+                owner,
+                name,
+                descriptor,
+                value,
+            } => {
+                let owner = owner.render();
+                let f = self.cw.fieldref(&owner, name, descriptor);
+                let words = if descriptor == "J" || descriptor == "D" {
+                    2
+                } else {
+                    1
+                };
+                self.emit_value(*value, code);
+                code.putstatic(f, words);
+            }
             IrExpr::EnumValues { class } => {
                 let fq = self.ir.classes[*class as usize].fq_name();
                 let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));
@@ -12120,6 +12179,9 @@ impl<'a> Emitter<'a> {
             }
             // A write is a statement: it leaves nothing on the stack, so nothing is discarded after it.
             IrExpr::PropertyWrite { .. } => Ty::Unit,
+            // A store leaves nothing on the stack; typing it as a value made statement position
+            // emit a `pop` against an empty stack (`VerifyError: Operand stack underflow`).
+            IrExpr::SetExternalStaticField { .. } => Ty::Unit,
             IrExpr::GetStatic(i) => ir_ty_to_jvm(&self.ir.statics[*i as usize].ty),
             IrExpr::New { internal, .. } => Ty::obj(&internal.render()),
             IrExpr::MethodCall { class, index, .. } => {

@@ -33,6 +33,22 @@ impl InheritedNestedClassifier {
     }
 }
 
+/// What the resolved prefix of a dotted reference denotes.
+///
+/// Kotlin resolves a qualified name one segment at a time, and every prefix lands in exactly one of
+/// these two namespaces; the segment after the prefix is then looked up in THAT namespace, which is
+/// what makes `pkg.Cls.MEMBER`, `pkg.subpkg.Cls`, and `Outer.Nested.MEMBER` one rule instead of a
+/// case per spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QualifiedPrefix {
+    /// A package path (slashed). Its members are that package's classifiers, its subpackages, and its
+    /// top-level callables and properties.
+    Package(TypeName),
+    /// A classifier identity. Its members are nested classifiers, companion/static members, and enum
+    /// entries — and, when it is an `object` or has a companion, a value.
+    Classifier(TypeName),
+}
+
 /// Return a source class and its lexical owners, nearest first.
 pub(crate) fn lexical_enclosing_classifier_names(
     owner: TypeName,

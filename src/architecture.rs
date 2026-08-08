@@ -285,9 +285,12 @@ mod tests {
 
     #[test]
     fn module_symbols_uses_only_frontend_symbol_handoff_dependencies() {
+        // `names` is a dependency-free leaf of Kotlin naming conventions (accessor spellings, the
+        // package-vs-nesting internal-name split). Surfacing a top-level property needs its accessor
+        // names, and re-deriving them here would fork the convention rather than share it.
         assert_allowed_crate_modules(
             "src/module_symbols.rs",
-            &["frontend", "libraries", "symbol_source", "types"],
+            &["frontend", "libraries", "names", "symbol_source", "types"],
         );
     }
 

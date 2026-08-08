@@ -1257,6 +1257,14 @@ pub struct File {
     /// so member/element types resolve. Absent ⇒ no explicit type arguments.
     pub call_type_args: std::collections::HashMap<u32, Vec<TypeRef>>,
     pub anonymous_object_classes: std::collections::HashMap<ExprId, DeclId>,
+    /// The hoisted `Decl::Class` of each statement-position local class (`Stmt::LocalClass`). The
+    /// declaration carries the class for signature collection and lowering; the STATEMENT is where
+    /// the checker enters it, so that it is checked in the lexical scope it was written in rather
+    /// than at file level.
+    pub local_class_decls: std::collections::HashMap<StmtId, DeclId>,
+    /// Nested types hoisted out of a local class during its parse, named by the path from that
+    /// class (`Local.Inner`). They are requalified with it when it is given its final name.
+    pub local_class_nested: std::collections::HashMap<StmtId, Vec<DeclId>>,
     /// Explicit parameter type annotations on a lambda literal (`{ x: Int, y -> … }`), keyed by the
     /// lambda's `ExprId`, parallel to its `params`. `None` for an unannotated parameter. Lets the
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
@@ -1398,6 +1406,8 @@ impl File {
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
         self.anonymous_object_classes = Default::default();
+        self.local_class_decls = Default::default();
+        self.local_class_nested = Default::default();
         self.lambda_param_types = Default::default();
         self.anon_fun_lambdas = Default::default();
         self.suspend_lambdas = Default::default();

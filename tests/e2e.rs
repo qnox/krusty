@@ -690,6 +690,8 @@ mod lnt_parity_e2e;
 mod local_capture_coverage_e2e;
 #[path = "local_class_e2e.rs"]
 mod local_class_e2e;
+#[path = "local_class_scope_e2e.rs"]
+mod local_class_scope_e2e;
 #[path = "local_class_scoping_e2e.rs"]
 mod local_class_scoping_e2e;
 #[path = "local_fun_default_args_e2e.rs"]
@@ -888,6 +890,8 @@ mod property_conversion_inference_e2e;
 mod property_infer_member_e2e;
 #[path = "qq1_safecall_diverging_scope_block_e2e.rs"]
 mod qq1_safecall_diverging_scope_block_e2e;
+#[path = "qualified_name_e2e.rs"]
+mod qualified_name_e2e;
 #[path = "range_property_e2e.rs"]
 mod range_property_e2e;
 #[path = "range_step_e2e.rs"]
@@ -960,6 +964,8 @@ mod sam_generic_lambda_param_e2e;
 mod same_package_classpath_e2e;
 #[path = "samefile_nested_object_value_e2e.rs"]
 mod samefile_nested_object_value_e2e;
+#[path = "scope_chain_e2e.rs"]
+mod scope_chain_e2e;
 #[path = "scope_function_value_arg_e2e.rs"]
 mod scope_function_value_arg_e2e;
 #[path = "sealed_cross_file_metadata_e2e.rs"]

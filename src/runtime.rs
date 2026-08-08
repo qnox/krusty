@@ -87,6 +87,10 @@ pub enum RuntimeOp {
     UnsignedRemainder,
     UnsignedToString,
     UIntToLong,
+    /// Unsigned → floating conversion. The carrier holds the value's BITS, so the signed `i2f`/`l2f`
+    /// opcodes read a large unsigned value as negative; kotlinc routes both through the stdlib
+    /// widening helpers instead (`UInt.MAX_VALUE.toFloat()` must be `4.2949673E9`, not `-1.0`).
+    UnsignedToDouble,
     PrimitiveCompare,
     HashCode,
     ArrayToString,
