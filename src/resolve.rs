@@ -17,10 +17,12 @@ use crate::libraries::{
     EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
 use crate::names::{nested_internal_name_candidates, property_getter_name, property_setter_name};
-use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
+use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier, QualifiedPrefix};
 use crate::symbol_source::SymbolSource;
 use crate::types::{existing_type_name, ty_mentions_param, type_name, Ty, TypeName, Visibility};
+use scope::{NarrowPath, Ns, ScopeKind};
 
+mod scope;
 mod source_fallback;
 pub(crate) use source_fallback::SourceFallbackPlatform;
 
@@ -749,6 +751,30 @@ pub struct DeclaredPropertySig {
     pub context_params: Vec<Ty>,
 }
 
+/// Physical storage selected for a source companion property.
+///
+/// This is part of the declaration signature because a use may be checked in a different file from
+/// the AST that declares it. Consumers must not rediscover the distinction from file ownership,
+/// property names, or the presence of a generated class: ordinary properties live in an outer-class
+/// static field, while field-less custom accessors dispatch through the companion singleton.
+/// The Kotlin name of an unnamed `companion object` — the classifier segment (`Outer$Companion`)
+/// and the static field (`Outer.Companion`) that holds its singleton.
+pub(crate) const COMPANION_OBJECT_NAME: &str = "Companion";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaticPropertyStorage {
+    OuterStaticField,
+    CompanionAccessors,
+}
+
+#[derive(Clone, Debug)]
+pub struct StaticPropertySig {
+    pub ty: Ty,
+    pub visibility: Visibility,
+    pub is_var: bool,
+    pub storage: StaticPropertyStorage,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassSig {
     pub internal: TypeName,
@@ -787,11 +813,10 @@ pub struct ClassSig {
     /// `serializer()`). A `ClassName.fn(...)` call lowers to `getstatic Companion; invokevirtual` only
     /// for a source companion function; a plugin-owned name is left to the plugin's own emit path.
     pub companion_fun_names: std::collections::HashSet<String>,
-    /// `companion object` properties and their source visibility.
-    /// Companion (static) properties: name → (type, visibility, `is_var`). Mutability belongs here
-    /// rather than being re-derived from a declaration's AST — a write may come from any file of the
-    /// module, so the current file's declarations are not the authority on it.
-    pub static_props: HashMap<String, (Ty, Visibility, bool)>,
+    /// Companion properties keyed by source name. Type, visibility, mutability, and physical storage
+    /// travel together so cross-file reads/writes cannot combine facts from drifting parallel maps or
+    /// re-derive ABI shape from the using file's AST.
+    pub static_props: HashMap<String, StaticPropertySig>,
     /// Names of `lateinit` properties (instance and companion) — reads emit a null-check that throws.
     pub lateinit_props: std::collections::HashSet<String>,
     /// Internal names of interfaces this type implements (for subtyping).
@@ -871,20 +896,24 @@ fn generic_member_lambda_params(plan: &GenericMemberPlan, parameter: usize) -> O
 }
 
 fn module_member_lambda_params(
+    lib: &dyn SemanticPlatform,
     member: &crate::libraries::LibraryMember,
     parameter: usize,
 ) -> Option<Vec<Ty>> {
-    let Ty::Fun(function) = member.params.get(parameter)? else {
-        return None;
-    };
-    Some(
-        member
-            .call_sig
-            .lambda_param_types
-            .get(parameter)
-            .cloned()
-            .unwrap_or_else(|| function.params.clone()),
-    )
+    match member.params.get(parameter)? {
+        Ty::Fun(function) => Some(
+            member
+                .call_sig
+                .lambda_param_types
+                .get(parameter)
+                .cloned()
+                .unwrap_or_else(|| function.params.clone()),
+        ),
+        // A functional-interface parameter contributes its single abstract method's value-parameter
+        // shape. `LibraryMember` is already the federated semantic form, so declaration origin does
+        // not enter this fallback.
+        &param => crate::symbol_resolver::semantic_sam_signature(lib, param).map(|sam| sam.params),
+    }
 }
 
 impl ClassSig {
@@ -1229,22 +1258,16 @@ struct LambdaExpectation {
 /// contributes its single method's parameter types. Any other parameter gives no expectation.
 fn lambda_expectation(
     lib: &dyn crate::libraries::SemanticPlatform,
-    candidate: &crate::libraries::LibraryMember,
+    call_sig: &crate::libraries::CallSig,
     index: usize,
     param: Ty,
 ) -> Option<LambdaExpectation> {
-    let has_receiver = candidate
-        .call_sig
+    let has_receiver = call_sig
         .lambda_receiver_params
         .get(index)
         .copied()
         .unwrap_or(false);
-    let metadata_receiver = candidate
-        .call_sig
-        .lambda_receivers
-        .get(index)
-        .copied()
-        .flatten();
+    let metadata_receiver = call_sig.lambda_receivers.get(index).copied().flatten();
     match param.non_null() {
         Ty::Fun(sig) => {
             let (receiver, skip) = if has_receiver {
@@ -1277,13 +1300,12 @@ fn lambda_expectation(
             // retain the erased FunctionN arity with `Error` placeholders so explicit lambda
             // parameters still get the right count without inventing concrete types.
             let receiver = metadata_receiver?;
-            let context_count = candidate
-                .call_sig
+            let context_count = call_sig
                 .lambda_context_counts
                 .get(index)
                 .copied()
                 .unwrap_or_default();
-            let decoded = candidate.call_sig.lambda_param_types.get(index);
+            let decoded = call_sig.lambda_param_types.get(index);
             let value_params = decoded
                 .filter(|params| !params.is_empty())
                 .map(|params| params.get(context_count + 1..).unwrap_or_default().to_vec())
@@ -1296,7 +1318,7 @@ fn lambda_expectation(
                 receiver: Some(receiver),
             })
         }
-        param => crate::symbol_resolver::classpath_sam_signature(lib, param).map(|sam| {
+        param => crate::symbol_resolver::semantic_sam_signature(lib, param).map(|sam| {
             LambdaExpectation {
                 value_params: sam.params,
                 receiver: None,
@@ -1692,6 +1714,16 @@ struct MemberExtensionProperty {
 pub struct AnonymousObjectCapture {
     pub name: String,
     pub ty: Ty,
+    /// Semantic source of the captured value. Keep this separate from `name`: `this$0` is one JVM
+    /// field spelling, not a reliable front-end discriminator. A backend or future target may choose
+    /// a different physical name while the enclosing-instance meaning remains unchanged.
+    pub source: AnonymousObjectCaptureSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnonymousObjectCaptureSource {
+    LexicalValue,
+    EnclosingInstance,
 }
 
 pub struct SymbolTable {
@@ -1713,6 +1745,12 @@ pub struct SymbolTable {
     /// edge to a classifier identity, not another class declaration; keeping it separate prevents a
     /// simple alias key from corrupting the internal-name invariant of [`Self::classes`].
     source_class_aliases: HashMap<(u32, String), TypeName>,
+    /// The same alias edges keyed by FULLY-QUALIFIED name (`pkg/Alias` → the target's internal name).
+    /// The per-file index above answers a spelling inside its declaring file; a qualified reference
+    /// (`pkg.Alias(…)`) names the alias from anywhere and has no file to key on, so the declaring
+    /// file's package is folded into the key here. Kept beside the per-file map rather than in
+    /// [`Self::classes`], whose keys must stay real classifier identities.
+    pub source_alias_fqns: HashMap<TypeName, TypeName>,
     anonymous_object_types: HashMap<(u32, DeclId), TypeName>,
     anonymous_object_captures: HashMap<(u32, DeclId), Vec<AnonymousObjectCapture>>,
     anonymous_object_capture_discovered: std::collections::HashSet<(u32, DeclId)>,
@@ -1789,6 +1827,7 @@ impl Default for SymbolTable {
             classes: HashMap::new(),
             source_class_headers: HashMap::new(),
             source_class_aliases: HashMap::new(),
+            source_alias_fqns: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),
             anonymous_object_capture_discovered: std::collections::HashSet::new(),
@@ -4595,6 +4634,14 @@ fn collect_signatures_with_cp_impl(
         .iter()
         .map(anonymous_lexical_class_scope)
         .collect::<Vec<_>>();
+    let local_class_tparams = files
+        .iter()
+        .map(local_class_enclosing_tparams)
+        .collect::<Vec<_>>();
+    let local_class_siblings = files
+        .iter()
+        .map(local_class_sibling_names)
+        .collect::<Vec<_>>();
     let source_classifier_visibility = files
         .iter()
         .flat_map(|file| {
@@ -5160,6 +5207,12 @@ fn collect_signatures_with_cp_impl(
                     // Iterator<T>` where `T` is the outer's parameter). Walk the `inner_of` chain and
                     // include each enclosing class's parameters (erased, like the class's own).
                     let mut ctp_names = c.type_params.clone();
+                    // A LOCAL class is written inside another declaration's body, so that
+                    // declaration's type parameters are in scope for its member types too — the
+                    // hoisted `Decl::Class` collected here has lost that context.
+                    if let Some(enclosing) = local_class_tparams[i].get(&d) {
+                        ctp_names.extend(enclosing.iter().cloned());
+                    }
                     {
                         let mut outer = c.inner_of.clone();
                         let mut guard = 0;
@@ -5296,6 +5349,16 @@ fn collect_signatures_with_cp_impl(
                         for (simple, (_, internal)) in lexical_nested {
                             // A lexical nested classifier shadows top-level/imported classifiers.
                             ext.insert_name(simple, internal);
+                        }
+                        // A LOCAL class's siblings — the other classes declared in the same body —
+                        // are visible to it by their SOURCE name (`class Derived : Base()`), which
+                        // is not the name their hoisted declaration was registered under. The
+                        // checker resolves those through the scope chain; collection has none, so
+                        // the body's classifiers are handed to it.
+                        for (simple, internal) in
+                            local_class_siblings[i].get(&d).into_iter().flatten()
+                        {
+                            ext.insert_name(simple.clone(), *internal);
                         }
                         ext
                     };
@@ -5612,7 +5675,7 @@ fn collect_signatures_with_cp_impl(
                                         .iter()
                                         .map(|parameter| {
                                             symbolic_btp
-                                                .erase(parameter)
+                                                .bound(parameter)
                                                 .ty_param_bound()
                                                 .unwrap_or_else(|| Ty::obj("kotlin/Any"))
                                         })
@@ -5945,7 +6008,7 @@ fn collect_signatures_with_cp_impl(
                                     .iter()
                                     .map(|parameter| {
                                         method_tparams
-                                            .erase(parameter)
+                                            .bound(parameter)
                                             .ty_param_bound()
                                             .unwrap_or_else(|| Ty::obj("kotlin/Any"))
                                     })
@@ -6231,7 +6294,7 @@ fn collect_signatures_with_cp_impl(
                             },
                         );
                     }
-                    let static_props: HashMap<String, (Ty, Visibility, bool)> = c
+                    let static_props: HashMap<String, StaticPropertySig> = c
                         .companion_props
                         .iter()
                         .zip(companion_property_scope.iter())
@@ -6253,7 +6316,19 @@ fn collect_signatures_with_cp_impl(
                             if (p.getter.is_some() || p.setter.is_some()) && !is_computed {
                                 diags.error(p.span, "krusty: this companion-object property accessor shape is not supported".to_string());
                             }
-                            (name.clone(), (*ty, p.visibility, p.is_var))
+                            (
+                                name.clone(),
+                                StaticPropertySig {
+                                    ty: *ty,
+                                    visibility: p.visibility,
+                                    is_var: p.is_var,
+                                    storage: if is_computed {
+                                        StaticPropertyStorage::CompanionAccessors
+                                    } else {
+                                        StaticPropertyStorage::OuterStaticField
+                                    },
+                                },
+                            )
                         })
                         .collect();
                     let lateinit_props: std::collections::HashSet<String> = c
@@ -6779,6 +6854,15 @@ fn collect_signatures_with_cp_impl(
                 table
                     .source_class_aliases
                     .insert((file_index as u32, alias.clone()), internal);
+                // The qualified spelling of the same edge. A reference from another file names the
+                // alias by its package, which no per-file key can answer.
+                let package = file.package.as_deref().unwrap_or("").replace('.', "/");
+                let fqn = if package.is_empty() {
+                    alias.clone()
+                } else {
+                    format!("{package}/{alias}")
+                };
+                table.source_alias_fqns.insert(type_name(&fqn), internal);
             }
         }
     }
@@ -7013,6 +7097,7 @@ fn call_argument_parameter_indices(
 }
 
 fn module_member_lambda_shape(
+    lib: &dyn SemanticPlatform,
     member: &crate::libraries::LibraryMember,
     generic_member: Option<&GenericMemberPlan>,
     args: &[ExprId],
@@ -7033,7 +7118,7 @@ fn module_member_lambda_shape(
             .map(|&parameter| {
                 generic_member
                     .and_then(|plan| generic_member_lambda_params(plan, parameter))
-                    .or_else(|| module_member_lambda_params(member, parameter))
+                    .or_else(|| module_member_lambda_params(lib, member, parameter))
             })
             .collect(),
         signatures: indices
@@ -7337,6 +7422,30 @@ fn bc_complex_s(file: &File, s: StmtId, vforbid: bool, cross: bool) -> bool {
 
 /// Returns true if the expression subtree (or any statement within it) references a name from
 /// `outer`. Used to detect captures in local function bodies before allowing lift-to-static.
+/// Every name in `outer` that `e`'s subtree reads, in a stable order. Same traversal (and the same
+/// shadowing rules) as [`local_fun_body_uses_any`], which answers the yes/no question.
+fn used_names(file: &File, e: ExprId, outer: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut names: Vec<&String> = outer.iter().collect();
+    names.sort();
+    names
+        .into_iter()
+        .filter(|name| {
+            let one: std::collections::HashSet<String> = std::iter::once((*name).clone()).collect();
+            local_fun_body_uses_any(file, e, &one)
+        })
+        .cloned()
+        .collect()
+}
+
+/// The first name in `outer` that `e`'s subtree reads — the one a diagnostic names.
+fn first_used_name(
+    file: &File,
+    e: ExprId,
+    outer: &std::collections::HashSet<String>,
+) -> Option<String> {
+    used_names(file, e, outer).into_iter().next()
+}
+
 fn local_fun_body_uses_any(
     file: &File,
     e: ExprId,
@@ -7631,7 +7740,8 @@ fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::Ha
 
 /// Names reassigned (`=`/`++`/`--`) INSIDE a nested lambda within `e`. A closure that writes a captured
 /// `var` (possibly to null) could run between a narrowing assignment and a later read, so such a `var`
-/// must never be flow-narrowed (soundness for [`Local::narrowed`]). Mirrors [`collect_all_reassigned`]
+/// must never be flow-narrowed (soundness for the scope chain's straight-line reads). Mirrors
+/// [`collect_all_reassigned`]
 /// but only collects once the traversal has descended into a lambda body.
 fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
     let cell = std::cell::RefCell::new(std::mem::take(out));
@@ -7858,12 +7968,56 @@ fn array_builtin_ret(fname: &str, arg_tys: &[Ty]) -> Option<Ty> {
     }
     if fname == "arrayOf" {
         if let Some(&first) = arg_tys.first() {
-            if first.is_reference() && arg_tys.iter().all(|&t| t == first) {
+            // A null-only `arrayOf(null)` still declines: `Null` is reference-like but the element
+            // type needs the expected-type context the full checker has (`Array<Nothing?>`).
+            if first.is_reference() && first != Ty::Null && arg_tys.iter().all(|&t| t == first) {
                 return Some(Ty::array(first));
             }
         }
     }
     None
+}
+
+/// The return type a top-level call's EXPLICIT type arguments determine on their own, for the
+/// lightweight signature inferer: every top-level overload of `name` must declare exactly
+/// `targs.len()` type parameters, and substituting the arguments into each overload's return must
+/// produce the SAME fully-bound type (`fun <T> build(…): T` with `<C>` → `C`).
+/// `None` — a sound skip to the full checker — when overloads disagree, when a return still
+/// mentions an unbound type parameter (it depends on argument inference), or when the name has no
+/// top-level overloads. Deliberately blind to the argument list: it exists for calls whose
+/// arguments the positional selection cannot map (named arguments out of declared position).
+fn explicit_targ_return_agreement(
+    resolver: &crate::symbol_resolver::SymbolResolver,
+    name: &str,
+    targs: &[Ty],
+) -> Option<Ty> {
+    let overloads = resolver
+        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+        .map(crate::symbol_resolver::Symbol::overloads)
+        .unwrap_or_default();
+    let mut agreed: Option<Ty> = None;
+    for overload in (crate::libraries::FunctionSet { overloads }).into_top_level() {
+        let semantic = overload.semantic_signature();
+        if semantic.formals.len() != targs.len() {
+            return None;
+        }
+        let binds: crate::symbol_resolver::GSigBinds = semantic
+            .formals
+            .iter()
+            .cloned()
+            .zip(targs.iter().copied())
+            .collect();
+        let ret = crate::symbol_resolver::ty_subst(semantic.ret, &binds);
+        if ret == Ty::Error || ret.mentions_ty_param() {
+            return None;
+        }
+        match agreed {
+            None => agreed = Some(ret),
+            Some(previous) if previous == ret => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
 }
 
 /// The common type of two branch values for the lightweight signature inferer: identical types
@@ -8314,6 +8468,11 @@ fn infer_lit_ty_p(
         Expr::BoolLit(_) => Ty::Boolean,
         Expr::CharLit(_) => Ty::Char,
         Expr::StringLit(_) | Expr::Template(_) => Ty::String,
+        // A `null` literal carries its type like every other literal. Recording `Ty::Null` here lets
+        // the ordinary applicability rules decide whether each selected reference parameter accepts
+        // it, while primitive parameters and ambiguous reference overloads continue to decline. The
+        // full checker uses the same semantic type; no callable or provider needs a null-specific path.
+        Expr::NullLit => Ty::Null,
         // A bare name referring to a property (or `this` — the receiver of an expression-bodied
         // extension function `fun Int.double() = this * 2`, supplied as a `"this"` scope entry), or a
         // classpath/stdlib `object` used as a value (`val ctx = EmptyCoroutineContext`): its value is the
@@ -8497,6 +8656,17 @@ fn infer_lit_ty_p(
                             .and_then(crate::symbol_resolver::Symbol::top_level_call)
                         {
                             return c.ret;
+                        }
+                    }
+                    // An argument list the positional selection above cannot map — a NAMED argument
+                    // out of its declared position (`build<C>(enabled = true)`), or an argument whose
+                    // type this lightweight pass cannot infer — with EXPLICIT type arguments that by
+                    // themselves determine the return. Bind them into each overload's return; when
+                    // every overload agrees on a fully-bound type, that IS the property's type
+                    // (argument legality stays with the full checker, which maps names itself).
+                    if !call_targs.is_empty() {
+                        if let Some(t) = explicit_targ_return_agreement(&resolver, n, &call_targs) {
+                            return t;
                         }
                     }
                 }
@@ -8770,245 +8940,6 @@ fn callable_reference_invoke_arity(internal: TypeName) -> Option<usize> {
         .or_else(|| crate::types::kfunction_arity(internal))
 }
 
-/// Generic type parameters in scope, each with its JVM erasure. A parameter with a wrappable standard
-/// primitive upper bound (`<T : Int>`) erases to that PRIMITIVE — kotlinc specializes it (descriptor
-/// `(I)I`, not `(Object)Object`); every other parameter erases to `java/lang/Object`.
-#[derive(Default, Clone)]
-pub struct TParams {
-    erasure: std::collections::HashMap<String, Ty>,
-    /// Bounds BEYOND the first, for a parameter declared with several (`where T : A, T : B`). Kotlin
-    /// gives such a parameter an INTERSECTION bound; `Ty::TyParam` carries a single one — the erasure,
-    /// which is the FIRST, matching kotlinc's JVM rule. Member lookup consults these so a member
-    /// declared only on a later bound still resolves.
-    extra_bounds: std::collections::HashMap<String, Vec<Ty>>,
-}
-
-impl TParams {
-    pub fn contains(&self, name: &str) -> bool {
-        self.erasure.contains_key(name)
-    }
-
-    /// The erasure of type parameter `name` (`Object` if unbounded / reference-bounded).
-    pub fn erase(&self, name: &str) -> Ty {
-        self.erasure
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-    }
-
-    /// Build directly from explicit name→type bindings — a SUBSTITUTION (concrete types), not an
-    /// erasure. Used to map a generic method's type parameters to their receiver-supplied / inferred
-    /// concrete types so `ty_of_ref` realizes `T`/`R` to `String`/`Int` rather than the erased `Object`.
-    pub fn from_bindings(bindings: impl IntoIterator<Item = (String, Ty)>) -> Self {
-        TParams {
-            erasure: bindings.into_iter().collect(),
-            ..Default::default()
-        }
-    }
-
-    /// The bounds beyond the first of every parameter whose ERASURE is `erased`. A type parameter
-    /// reaches the body already erased to its first bound, so that erasure — not the parameter's name —
-    /// is what a member lookup has in hand; this maps back from it.
-    pub fn extra_bounds_for_erasure(&self, erased: Ty) -> Vec<Ty> {
-        let Some(want) = erased.obj_internal() else {
-            return Vec::new();
-        };
-        self.extra_bounds
-            .iter()
-            .filter(|(name, _)| self.erase(name).obj_internal() == Some(want))
-            .flat_map(|(_, bounds)| bounds.iter().copied())
-            .collect()
-    }
-
-    /// All parameters erased to `Object` (no primitive specialization). Used for CLASS type parameters:
-    /// kotlinc specializes a class's primitive-bounded param too, but krusty's value-class pass already
-    /// owns class-param bound handling, and naive specialization there breaks the Object/value-class
-    /// boundary (VerifyError) — so classes keep the erased model; only FUNCTION params specialize.
-    pub fn erased(names: &[String]) -> Self {
-        let erasure = names
-            .iter()
-            .map(|n| (n.clone(), Ty::obj("kotlin/Any")))
-            .collect();
-        TParams {
-            erasure,
-            ..Default::default()
-        }
-    }
-
-    /// Build from declared names + their upper bounds, resolving a CLASS/interface bound to its JVM
-    /// type so member access on `T` resolves and the descriptor erases to the bound (`<T: CharSequence>`
-    /// → `java/lang/CharSequence`, not `Object`). `resolve` maps a bound's simple class name to its JVM
-    /// internal name (primitive/`String` bounds need no resolver). Without a resolver (`from_decl`) only
-    /// primitive bounds are recovered — a reference bound stays `Any`.
-    pub fn from_decl_with(
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        let erasure = names
-            .iter()
-            .map(|n| {
-                // A bound may name ANOTHER type parameter of the same declaration
-                // (`<T1 : C, T2 : T1>`): follow the chain to the first bound that is a real
-                // class/primitive so `T2` erases to `C`, not `Any`. Cycle-guarded (`<A : B, B : A>`).
-                let mut cur = n.as_str();
-                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-                let erased = loop {
-                    let b = bounds.iter().find_map(|(bn, b)| (bn == cur).then_some(b));
-                    match b {
-                        // The bound is itself a (non-nullable, un-parameterized) type parameter of this
-                        // declaration — hop to it and keep chasing.
-                        Some(tb)
-                            if !tb.nullable()
-                                && names.iter().any(|m| m == &tb.name)
-                                && seen.insert(cur) =>
-                        {
-                            cur = tb.name.as_str();
-                        }
-                        other => break tparam_bound_erasure(other, resolve),
-                    }
-                };
-                (n.clone(), erased)
-            })
-            .collect();
-        // Every bound after the first for each name. The first IS the erasure above; the rest are only
-        // reachable through `extra_bounds`, since `Ty::TyParam` holds exactly one.
-        let extra_bounds = names
-            .iter()
-            .filter_map(|n| {
-                let rest: Vec<Ty> = bounds
-                    .iter()
-                    .filter(|(bn, _)| bn == n)
-                    .skip(1)
-                    .map(|(_, b)| tparam_bound_erasure(Some(b), resolve))
-                    .filter(|ty| *ty != Ty::obj("kotlin/Any"))
-                    .collect();
-                (!rest.is_empty()).then(|| (n.clone(), rest))
-            })
-            .collect();
-        TParams {
-            erasure,
-            extra_bounds,
-        }
-    }
-
-    pub fn extended_with(
-        &self,
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        let mut out = self.clone();
-        let mut declared = TParams::from_decl_with(names, bounds, resolve);
-        for name in names {
-            if let Some(bound) = self.enclosing_bound_erasure(name, names, bounds) {
-                declared.erasure.insert(name.clone(), bound);
-            }
-        }
-        out.erasure.extend(declared.erasure);
-        out.extra_bounds.extend(declared.extra_bounds);
-        out
-    }
-
-    fn enclosing_bound_erasure(
-        &self,
-        name: &str,
-        local_names: &[String],
-        bounds: &[(String, TypeRef)],
-    ) -> Option<Ty> {
-        let mut current = name;
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            if !seen.insert(current) {
-                return None;
-            }
-            let bound = bounds
-                .iter()
-                .find_map(|(owner, bound)| (owner == current).then_some(bound))?;
-            if bound.nullable()
-                || bound.arg.is_some()
-                || !bound.targs.is_empty()
-                || !bound.fun_params.is_empty()
-            {
-                return None;
-            }
-            if local_names.iter().any(|local| local == &bound.name) {
-                current = &bound.name;
-                continue;
-            }
-            let mut erased = self.erasure.get(&bound.name).copied()?;
-            let mut bound_names = std::collections::HashSet::new();
-            while let Ty::TyParam(parameter, upper) = erased {
-                if !bound_names.insert(parameter) {
-                    return None;
-                }
-                erased = *upper;
-            }
-            return Some(erased);
-        }
-    }
-
-    /// Preserve type variables while inferring a declaration's semantic shape.
-    fn symbolic_from_decl_with(
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        TParams {
-            erasure: names
-                .iter()
-                .map(|name| {
-                    let bound = declared_tparam_semantic_bound(name, names, bounds, resolve)
-                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                    (name.clone(), Ty::ty_param(name, bound))
-                })
-                .collect(),
-            ..Default::default()
-        }
-    }
-
-    fn symbolic_extended_with(
-        &self,
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        let declared = self.extended_with(names, bounds, resolve);
-        let mut out = self.clone();
-        out.erasure.extend(
-            names
-                .iter()
-                .map(|name| (name.clone(), Ty::ty_param(name, declared.erase(name)))),
-        );
-        out
-    }
-
-    pub fn insert_decl_with(
-        &mut self,
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Vec<String> {
-        let scoped = TParams::from_decl_with(names, bounds, resolve);
-        let mut added = Vec::new();
-        for (n, e) in scoped.erasure {
-            if !self.erasure.contains_key(&n) {
-                self.erasure.insert(n.clone(), e);
-                added.push(n);
-            }
-        }
-        added
-    }
-
-    pub fn remove(&mut self, name: &str) {
-        self.erasure.remove(name);
-    }
-
-    pub fn clear(&mut self) {
-        self.erasure.clear();
-    }
-}
-
 fn unify_ty_common(
     shape: Ty,
     actual: Ty,
@@ -9052,7 +8983,7 @@ fn is_function_property_shape(ty: Ty) -> bool {
 /// A bound-name → JVM-internal resolver over a `SymbolTable`: the merged class-name map, which binds
 /// a bare contract/tparam-bound name to its internal for both module and classpath classes (and
 /// already carries the Kotlin built-in → JVM mapping, `CharSequence` → `java/lang/CharSequence`).
-/// Borrows only the (copied) `&SymbolTable`, so a caller can hold it while mutating `self.tparams`.
+/// Borrows only the (copied) `&SymbolTable`, so a caller can hold it while mutating its own state.
 /// Shared with the jvm backend (via `frontend`) so the checker and the `@Metadata` emitter resolve
 /// contract type references through ONE lookup and cannot drift.
 pub(crate) fn class_internal_resolver(
@@ -9062,81 +8993,6 @@ pub(crate) fn class_internal_resolver(
         // The class map keys on internal names; `class_names` covers both module and classpath
         // bindings for a bare contract/tparam-bound name, so consult it directly.
         syms.class_names.get(n)
-    }
-}
-
-/// The JVM erasure of a type parameter from its declared upper bound. kotlinc erases a bounded `T` to
-/// its bound's type — a specializable integral primitive bound (`<T: Int>`) to that primitive, any other
-/// reference bound (`<T: CharSequence>`, `<T: Comparable<T>>`, a user class) to the bound's class — so a
-/// value of type `T` accesses the bound's members and the descriptor uses the bound, not `Object`.
-/// `Any` when there's no bound, a nullable bound, an unresolved bound, or a non-specializable primitive
-/// (`Double`/unsigned/value — those bounds stay rejected on use).
-fn tparam_bound_erasure(b: Option<&TypeRef>, resolve: &dyn Fn(&str) -> Option<TypeName>) -> Ty {
-    let any = Ty::obj("kotlin/Any");
-    let Some(b) = b else { return any };
-    // A nullable / generic-instantiated bound name still resolves by its head: `<T: Comparable<T>>`
-    // erases to `Comparable` (type args drop on erasure). A nullable bound keeps `Any` (conservative).
-    if b.nullable() {
-        return any;
-    }
-    if let Some(prim) = Ty::from_name(&b.name) {
-        // Integral primitive bound specializes; `String`/`Any` reference bounds erase to themselves;
-        // other primitives (`Double`, unsigned, value) are not specialized → `Any`.
-        return if prim.is_specializable_bound() || prim.is_reference() {
-            prim
-        } else {
-            any
-        };
-    }
-    match resolve(&b.name) {
-        Some(internal) => Ty::obj_name(internal),
-        None => any,
-    }
-}
-
-/// Resolve a type-parameter bound without erasing nullability.
-fn tparam_bound_semantic(b: &TypeRef, resolve: &dyn Fn(&str) -> Option<TypeName>) -> Ty {
-    let base = if let Some(prim) = Ty::from_name(&b.name) {
-        prim
-    } else {
-        resolve(&b.name)
-            .map(Ty::obj_name)
-            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-    };
-    if b.nullable() {
-        Ty::nullable(base)
-    } else {
-        base
-    }
-}
-
-/// Follow a declared bound through bare type-parameter references.
-fn declared_tparam_semantic_bound(
-    name: &str,
-    names: &[String],
-    bounds: &[(String, TypeRef)],
-    resolve: &dyn Fn(&str) -> Option<TypeName>,
-) -> Option<Ty> {
-    let mut current = name;
-    let mut seen = std::collections::HashSet::new();
-    loop {
-        let bound = bounds
-            .iter()
-            .find_map(|(parameter, bound)| (parameter == current).then_some(bound))?;
-        if !bound.nullable()
-            && !bound.definitely_non_null()
-            && bound.arg.is_none()
-            && bound.targs.is_empty()
-            && bound.fun_params.is_empty()
-            && names.iter().any(|candidate| candidate == &bound.name)
-        {
-            if !seen.insert(current) {
-                return Some(Ty::obj("kotlin/Any"));
-            }
-            current = &bound.name;
-            continue;
-        }
-        return Some(tparam_bound_semantic(bound, resolve));
     }
 }
 
@@ -9525,6 +9381,7 @@ fn source_generic_signature_from_tparams(
         receiver,
         params,
         ret,
+        return_policy: Default::default(),
     }
 }
 
@@ -9588,7 +9445,7 @@ fn ty_of_ref_with(
         return Ty::Error;
     }
     let scoped = if tparams.contains(&r.name) {
-        Some(tparams.erase(&r.name))
+        Some(tparams.bound(&r.name))
     } else {
         classes.classifier_over_default(&r.name).map(|internal| {
             if r.targs.is_empty() {
@@ -9667,6 +9524,10 @@ pub struct TypeInfo {
     resolved_type_refs: HashMap<(u32, u32), TypeName>,
     pub anonymous_object_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     pub anonymous_object_captures_by_construction: HashMap<ExprId, Vec<AnonymousObjectCapture>>,
+    /// The enclosing bindings a statement-position local class reads, keyed by its hoisted
+    /// declaration — the resolution the scope chain performed, in declaration order. What a capture
+    /// costs to represent is lowering's decision, not this one's.
+    pub local_class_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     pub anonymous_object_types: HashMap<DeclId, TypeName>,
     /// Selected expression lowerings that cannot be recovered from the expression shape alone.
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
@@ -9693,6 +9554,12 @@ pub struct TypeInfo {
     /// [`ResolvedCall`] for the target kinds and the typed accessors ([`Self::resolved_member`],
     /// [`Self::resolved_top_level`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// The exact semantic receiver selected for an unqualified member access through the implicit-receiver
+    /// stack. This is deliberately separate from [`Self::resolved_calls`]: the selected callable says
+    /// what to invoke, while this map says which runtime object supplies its dispatch/extension
+    /// receiver. Reconstructing that choice in lowering from local names loses captured enclosing
+    /// instances (and can invoke/read a dependency member on the anonymous object itself).
+    pub implicit_receiver_selections: HashMap<ExprId, Ty>,
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     source_extension_properties: HashMap<ExprId, crate::libraries::PropertyInfo>,
     source_extension_property_writes: HashMap<StmtId, crate::libraries::PropertyInfo>,
@@ -9742,6 +9609,11 @@ pub struct TypeInfo {
     pub resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
     /// Selected enum-entry owners keyed by member-read expression.
     pub resolved_enum_entries: HashMap<ExprId, TypeName>,
+    /// Enum classifiers whose SYNTHETIC statics (`values()`, `valueOf(s)`) a call selected, keyed by
+    /// the call expression. These are declarations of the classifier rather than of any file, so a
+    /// cross-file or fully-qualified spelling reaches them with no IR class of its own to consult;
+    /// recording the owner is what lets lowering emit the static call without rediscovering it.
+    pub resolved_enum_statics: HashMap<ExprId, TypeName>,
     /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
     /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
@@ -9885,6 +9757,31 @@ impl SelectedCallCapabilities {
 }
 
 impl ResolvedCall {
+    /// Generic declaration retained by library-backed call targets. Expected-type inference asks this
+    /// semantic question once; it must not duplicate the variant/origin switch used for emission.
+    fn generic_sig(&self) -> Option<&GenericSig> {
+        match self {
+            Self::Member(resolved) => resolved.member.generic_sig.as_ref(),
+            Self::Companion(member) => member.generic_sig.as_ref(),
+            Self::TopLevel(callable) | Self::Extension(callable) => callable.generic_sig.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Refine the logical return of a library-backed call after an enclosing expectation binds a
+    /// previously unbound generic result. Physical return/descriptor facts remain untouched, so lowering
+    /// inserts the required coercion from the erased producer. Returns false for target kinds that do not
+    /// expose this refinement contract.
+    fn refine_logical_return(&mut self, expected: Ty) -> bool {
+        match self {
+            Self::Member(resolved) => resolved.ret = expected,
+            Self::Companion(member) => member.ret = expected,
+            Self::TopLevel(callable) | Self::Extension(callable) => callable.ret = expected,
+            _ => return false,
+        }
+        true
+    }
+
     /// Whether the selected callee is `suspend`, for every target kind that records the flag. The
     /// Local functions derive the same fact from their retained signature. Every selected target that
     /// can carry `suspend` must report it here: this query decides whether the enclosing lambda receives
@@ -10842,12 +10739,25 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: TypeName },
-    /// A static field read selected semantically by resolution, independent of whether its symbol
-    /// came from the current file, another module file, or a platform/classpath provider.
-    StaticFieldRead {
+    /// A class's COMPANION object used as a value — the classifier itself in a value position
+    /// (`val c = pkg.Cls`), or the receiver of a companion member (`pkg.Cls.member`). The companion
+    /// instance lives in a static field on the OUTER class, so the owner/field/companion-type triple is
+    /// handed over as the checker resolved it. Recorded whenever the classifier was named by a
+    /// QUALIFIED path: lowering rediscovers a companion from a simple name through the import scope,
+    /// which a package-qualified path never enters.
+    CompanionValue {
+        owner: TypeName,
+        field: String,
+        companion: TypeName,
+    },
+    /// A static/companion property read selected semantically by resolution. `storage` is the exact
+    /// physical capability exposed by the declaration; lowering does not inspect file ownership,
+    /// provider origin, generated names, or declaration ASTs to choose field versus accessor.
+    StaticPropertyRead {
         owner: TypeName,
         name: String,
         descriptor: Option<String>,
+        storage: StaticPropertyStorage,
     },
     /// Kotlin's synthetic `EnumType.entries` property. `accessor` is the exact physical realization
     /// advertised by the selected enum shape. Keeping the target here makes source, module, and
@@ -10865,8 +10775,9 @@ pub enum ExprLowering {
     /// A `this@Label` that denotes the INNERMOST receiver (the current `this`), so it lowers as a bare
     /// `this`. Only recorded for the innermost match; an outer-receiver label is left unresolved/skipped.
     LabeledThisInner,
-    /// A `this@Outer` denoting the IMMEDIATE enclosing class of an `inner class` — one class level up —
-    /// so it lowers as the inner class's captured outer instance (`this.this$0`).
+    /// A `this@Outer` denoting the IMMEDIATE enclosing class of an `inner class` or an anonymous
+    /// object — one class level up — so it lowers as the class's captured outer instance
+    /// (`this.this$0`).
     LabeledThisOuter,
     /// A platform property implemented by an intrinsic getter.
     IntrinsicProperty(Box<crate::libraries::LibraryMember>),
@@ -10983,13 +10894,15 @@ pub enum StmtLowering {
     LocalFunction(Box<LocalFunInfo>),
     /// A compound assignment (`target op= rhs`) selected as an in-place `opAssign` operator call.
     PlusAssign(CompoundAssignmentTarget),
-    /// `C.prop = value` where `prop` is a companion (static) property of a same-file class. The
-    /// receiver is a CLASS NAME, not a value, so the write is a static store on the outer class —
-    /// the mirror of the `getstatic C.prop` the read already emits.
+    /// `C.prop = value` where `prop` is a companion property. The receiver is a classifier, not a
+    /// value; `storage` carries the declaration-selected field/accessor realization across files.
     CompanionStaticWrite {
         owner: TypeName,
         name: String,
         ty: Ty,
+        /// The declaration-selected physical realization. Lowering must not consult its current
+        /// file's companion maps to decide whether this is a field store or an accessor call.
+        storage: StaticPropertyStorage,
     },
     /// A bare property write selected on an implicit receiver other than a lexical local. Lowering
     /// uses the recorded receiver instead of assuming the innermost `this`.
@@ -11015,6 +10928,15 @@ pub enum StmtLowering {
     MemberExtensionPropertyWrite {
         owner: TypeName,
         receiver: Ty,
+        ty: Ty,
+    },
+    /// A write to a TOP-LEVEL property named through its PACKAGE (`pkg.topLevelVar = v`), resolved to
+    /// its declaring facade's receiver-less static setter — the write analogue of
+    /// [`ExprLowering::TopLevelPropertyGet`]. The backing field is private to the facade, so the
+    /// accessor is the realization even when the value crosses no file boundary; carrying the selected
+    /// callable keeps lowering out of the field-versus-accessor decision.
+    TopLevelPropertySet {
+        setter: Box<crate::libraries::LibraryCallable>,
         ty: Ty,
     },
     /// A `kotlin.contracts.contract { … }` statement: erased metadata, never executed and emits no
@@ -11178,47 +11100,548 @@ impl TypeInfo {
     }
 }
 
-/// A STABLE ACCESS PATH a flow narrowing (smart cast) applies to: an immutable ROOT binding
-/// (`this`, a local `val`/parameter) followed by immutable property segments (`a.b.c`). A root-only
-/// path is the classic name narrowing; segments extend the same proofs (`==`/`!=` null checks,
-/// `is`/`!is` type tests, contract conclusions) to property reads, like kotlinc. One machinery
-/// serves every condition shape and application site — nothing keys on the condition's syntax.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct NarrowPath {
-    root: String,
-    segments: Vec<String>,
-}
-
-impl NarrowPath {
-    fn root_only(root: &str) -> Self {
-        NarrowPath {
-            root: root.to_string(),
-            segments: Vec::new(),
-        }
-    }
-}
-
-/// A recorded property-path narrowing: the proven type plus the RECEIVER GENERATION it was
-/// proven against. A `this`-rooted path names a property of one specific receiver object; every
-/// `this` rebind (a receiver lambda, an inner class, an extension receiver — even to the SAME
-/// type, since that is a different object) bumps [`Checker::this_gen`], so the narrowing applies
-/// only while the generation matches. Save/restore sites restore the generation with the type,
-/// so an outer narrowing is valid again once the nested receiver scope ends.
 #[derive(Clone, Copy)]
-struct PathNarrowing {
-    ty: Ty,
-    this_gen: u64,
-}
-
 struct Local {
     ty: Ty,
     is_var: bool,
     origin: ReceiverFnValueOrigin,
-    /// A flow-narrowed READ type for a `var` that was assigned a non-null value (`var x: Int?; x = 10`
-    /// smart-casts subsequent reads to `Int`). Separate from the declared `ty`, which still governs
-    /// what may be ASSIGNED (a later `x = null` stays legal). `None` = read as the declared type.
-    narrowed: Option<Ty>,
 }
+
+/// The per-argument view of a call site used during overload scoring: the argument expressions,
+/// whatever types are known so far, their labels, and whether the last one is a trailing lambda.
+/// All four are indexed by the same argument position.
+#[derive(Clone, Copy)]
+struct ArgSlots<'a> {
+    args: &'a [ExprId],
+    partial_arg_tys: &'a [Option<Ty>],
+    arg_names: Option<&'a [Option<String>]>,
+    trailing_lambda: bool,
+}
+
+/// How a companion call is being probed: whether only an `operator fun` counts, and whether the
+/// probe merely asks "would this resolve?" rather than recording a resolution.
+#[derive(Clone, Copy)]
+struct CompanionCallMode {
+    require_operator: bool,
+    applicable_only: bool,
+}
+
+/// The receiver stack a lambda body is checked under: any context receivers, the extension
+/// receiver, and the declared value-parameter types. They are always chosen together from one
+/// expected function type.
+#[derive(Clone, Copy)]
+struct LambdaShape<'a> {
+    context_types: &'a [Ty],
+    extension_receiver: Option<Ty>,
+    value_types: &'a [Ty],
+}
+
+/// A call's argument expressions with their checked types — parallel slices that must stay the
+/// same length, so they are passed as one value rather than two.
+#[derive(Clone, Copy)]
+struct CallArgs<'a> {
+    call: ExprId,
+    args: &'a [ExprId],
+    arg_tys: &'a [Ty],
+}
+
+/// What an expression is being checked against: the expected type, and whether the expression's
+/// value is actually used. The two always travel together — a result-position expression carries
+/// both, a statement-position one carries neither.
+#[derive(Clone, Copy)]
+struct Wanted {
+    expected: Option<Ty>,
+    value_required: bool,
+}
+
+/// Generic type parameters in scope, each with its JVM erasure. A parameter with a wrappable standard
+/// primitive upper bound (`<T : Int>`) erases to that PRIMITIVE — kotlinc specializes it (descriptor
+/// `(I)I`, not `(Object)Object`); every other parameter erases to `java/lang/Object`.
+#[derive(Default, Clone)]
+pub struct TParams {
+    erasure: std::collections::HashMap<String, Ty>,
+    /// The subset declared `reified` (only an `inline fun` may). A class literal `T::class` is
+    /// valid only on one of these. Kept HERE rather than beside the parameters so the two cannot
+    /// Bounds BEYOND the first, for a parameter declared with several (`where T : A, T : B`). Kotlin
+    /// gives such a parameter an INTERSECTION bound; `Ty::TyParam` carries a single one — the erasure,
+    /// which is the FIRST, matching kotlinc's JVM rule. Member lookup consults these so a member
+    /// declared only on a later bound still resolves.
+    extra_bounds: std::collections::HashMap<String, Vec<Ty>>,
+}
+
+impl TParams {
+    /// Record one parameter's bound (and the bounds beyond the first), replacing any entry of the
+    /// same name — used to reassemble a `TParams` view from the scope chain's classifier bindings,
+    /// outermost rung first, so an inner declaration's parameter shadows the outer one.
+    pub(crate) fn insert_binding(&mut self, name: &str, bound: Ty, extra_bounds: Vec<Ty>) {
+        self.erasure.insert(name.to_string(), bound);
+        if extra_bounds.is_empty() {
+            self.extra_bounds.remove(name);
+        } else {
+            self.extra_bounds.insert(name.to_string(), extra_bounds);
+        }
+    }
+
+    /// The bounds `name` declares beyond the first.
+    pub(crate) fn extra_bounds_of(&self, name: &str) -> Vec<Ty> {
+        self.extra_bounds.get(name).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        self.erasure.contains_key(name)
+    }
+
+    /// The erasure of type parameter `name` (`Object` if unbounded / reference-bounded).
+    /// The declared upper bound of `name` — what the checker types `T` as.
+    pub(crate) fn bound(&self, name: &str) -> Ty {
+        self.erasure
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+    }
+
+    /// Build directly from explicit name→type bindings — a SUBSTITUTION (concrete types), not an
+    /// erasure. Used to map a generic method's type parameters to their receiver-supplied / inferred
+    /// concrete types so `ty_of_ref` realizes `T`/`R` to `String`/`Int` rather than the erased `Object`.
+    pub(crate) fn from_bindings(bindings: impl IntoIterator<Item = (String, Ty)>) -> Self {
+        TParams {
+            erasure: bindings.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    /// All parameters erased to `Object` (no primitive specialization). Used for CLASS type parameters:
+    /// kotlinc specializes a class's primitive-bounded param too, but krusty's value-class pass already
+    /// owns class-param bound handling, and naive specialization there breaks the Object/value-class
+    /// boundary (VerifyError) — so classes keep the erased model; only FUNCTION params specialize.
+    pub(crate) fn erased(names: &[String]) -> Self {
+        let erasure = names
+            .iter()
+            .map(|n| (n.clone(), Ty::obj("kotlin/Any")))
+            .collect();
+        TParams {
+            erasure,
+            ..Default::default()
+        }
+    }
+
+    /// Build from declared names + their upper bounds, resolving a CLASS/interface bound to its JVM
+    /// type so member access on `T` resolves and the descriptor erases to the bound (`<T: CharSequence>`
+    /// → `java/lang/CharSequence`, not `Object`). `resolve` maps a bound's simple class name to its JVM
+    /// internal name (primitive/`String` bounds need no resolver). Without a resolver (`from_decl`) only
+    /// primitive bounds are recovered — a reference bound stays `Any`.
+    pub(crate) fn from_decl_with(
+        names: &[String],
+        bounds: &[(String, TypeRef)],
+        resolve: &dyn Fn(&str) -> Option<TypeName>,
+    ) -> Self {
+        let erasure = names
+            .iter()
+            .map(|n| {
+                // A bound may name ANOTHER type parameter of the same declaration
+                // (`<T1 : C, T2 : T1>`): follow the chain to the first bound that is a real
+                // class/primitive so `T2` erases to `C`, not `Any`. Cycle-guarded (`<A : B, B : A>`).
+                let mut cur = n.as_str();
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                let erased = loop {
+                    let b = bounds.iter().find_map(|(bn, b)| (bn == cur).then_some(b));
+                    match b {
+                        // The bound is itself a (non-nullable, un-parameterized) type parameter of this
+                        // declaration — hop to it and keep chasing.
+                        Some(tb)
+                            if !tb.nullable()
+                                && names.iter().any(|m| m == &tb.name)
+                                && seen.insert(cur) =>
+                        {
+                            cur = tb.name.as_str();
+                        }
+                        other => break tparam_bound_erasure(other, resolve),
+                    }
+                };
+                (n.clone(), erased)
+            })
+            .collect();
+        // Every bound after the first for each name. The first IS the erasure above; the rest are only
+        // reachable through `extra_bounds`, since `Ty::TyParam` holds exactly one.
+        let extra_bounds = names
+            .iter()
+            .filter_map(|n| {
+                let rest: Vec<Ty> = bounds
+                    .iter()
+                    .filter(|(bn, _)| bn == n)
+                    .skip(1)
+                    .map(|(_, b)| tparam_bound_erasure(Some(b), resolve))
+                    .filter(|ty| *ty != Ty::obj("kotlin/Any"))
+                    .collect();
+                (!rest.is_empty()).then(|| (n.clone(), rest))
+            })
+            .collect();
+        TParams {
+            erasure,
+            extra_bounds,
+        }
+    }
+
+    pub(crate) fn extended_with(
+        &self,
+        names: &[String],
+        bounds: &[(String, TypeRef)],
+        resolve: &dyn Fn(&str) -> Option<TypeName>,
+    ) -> Self {
+        let mut out = self.clone();
+        let mut declared = TParams::from_decl_with(names, bounds, resolve);
+        for name in names {
+            if let Some(bound) = self.enclosing_bound_erasure(name, names, bounds) {
+                declared.erasure.insert(name.clone(), bound);
+            }
+        }
+        out.erasure.extend(declared.erasure);
+        out.extra_bounds.extend(declared.extra_bounds);
+        out
+    }
+
+    pub(crate) fn enclosing_bound_erasure(
+        &self,
+        name: &str,
+        local_names: &[String],
+        bounds: &[(String, TypeRef)],
+    ) -> Option<Ty> {
+        let mut current = name;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(current) {
+                return None;
+            }
+            let bound = bounds
+                .iter()
+                .find_map(|(owner, bound)| (owner == current).then_some(bound))?;
+            if bound.nullable()
+                || bound.arg.is_some()
+                || !bound.targs.is_empty()
+                || !bound.fun_params.is_empty()
+            {
+                return None;
+            }
+            if local_names.iter().any(|local| local == &bound.name) {
+                current = &bound.name;
+                continue;
+            }
+            let mut erased = self.erasure.get(&bound.name).copied()?;
+            let mut bound_names = std::collections::HashSet::new();
+            while let Ty::TyParam(parameter, upper) = erased {
+                if !bound_names.insert(parameter) {
+                    return None;
+                }
+                erased = *upper;
+            }
+            return Some(erased);
+        }
+    }
+
+    /// Preserve type variables while inferring a declaration's semantic shape.
+    pub(crate) fn symbolic_from_decl_with(
+        names: &[String],
+        bounds: &[(String, TypeRef)],
+        resolve: &dyn Fn(&str) -> Option<TypeName>,
+    ) -> Self {
+        TParams {
+            erasure: names
+                .iter()
+                .map(|name| {
+                    let bound = declared_tparam_semantic_bound(name, names, bounds, resolve)
+                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                    (name.clone(), Ty::ty_param(name, bound))
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn symbolic_extended_with(
+        &self,
+        names: &[String],
+        bounds: &[(String, TypeRef)],
+        resolve: &dyn Fn(&str) -> Option<TypeName>,
+    ) -> Self {
+        let declared = self.extended_with(names, bounds, resolve);
+        let mut out = self.clone();
+        out.erasure.extend(
+            names
+                .iter()
+                .map(|name| (name.clone(), Ty::ty_param(name, declared.bound(name)))),
+        );
+        out
+    }
+}
+
+/// The JVM erasure of a type parameter from its declared upper bound. kotlinc erases a bounded `T` to
+/// its bound's type — a specializable integral primitive bound (`<T: Int>`) to that primitive, any other
+/// reference bound (`<T: CharSequence>`, `<T: Comparable<T>>`, a user class) to the bound's class — so a
+/// value of type `T` accesses the bound's members and the descriptor uses the bound, not `Object`.
+/// `Any` when there's no bound, a nullable bound, an unresolved bound, or a non-specializable primitive
+/// (`Double`/unsigned/value — those bounds stay rejected on use).
+pub(crate) fn tparam_bound_erasure(
+    b: Option<&TypeRef>,
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+) -> Ty {
+    let any = Ty::obj("kotlin/Any");
+    let Some(b) = b else { return any };
+    // A nullable / generic-instantiated bound name still resolves by its head: `<T: Comparable<T>>`
+    // erases to `Comparable` (type args drop on erasure). A nullable bound keeps `Any` (conservative).
+    if b.nullable() {
+        return any;
+    }
+    if let Some(prim) = Ty::from_name(&b.name) {
+        // Integral primitive bound specializes; `String`/`Any` reference bounds erase to themselves;
+        // other primitives (`Double`, unsigned, value) are not specialized → `Any`.
+        return if prim.is_specializable_bound() || prim.is_reference() {
+            prim
+        } else {
+            any
+        };
+    }
+    match resolve(&b.name) {
+        Some(internal) => Ty::obj_name(internal),
+        None => any,
+    }
+}
+
+/// Follow a declared bound through bare type-parameter references.
+pub(crate) fn declared_tparam_semantic_bound(
+    name: &str,
+    names: &[String],
+    bounds: &[(String, TypeRef)],
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+) -> Option<Ty> {
+    let mut current = name;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let bound = bounds
+            .iter()
+            .find_map(|(parameter, bound)| (parameter == current).then_some(bound))?;
+        if !bound.nullable()
+            && !bound.definitely_non_null()
+            && bound.arg.is_none()
+            && bound.targs.is_empty()
+            && bound.fun_params.is_empty()
+            && names.iter().any(|candidate| candidate == &bound.name)
+        {
+            if !seen.insert(current) {
+                return Some(Ty::obj("kotlin/Any"));
+            }
+            current = &bound.name;
+            continue;
+        }
+        return Some(tparam_bound_semantic(bound, resolve));
+    }
+}
+
+/// Resolve a type-parameter bound without erasing nullability.
+fn tparam_bound_semantic(b: &TypeRef, resolve: &dyn Fn(&str) -> Option<TypeName>) -> Ty {
+    let base = if let Some(prim) = Ty::from_name(&b.name) {
+        prim
+    } else {
+        resolve(&b.name)
+            .map(Ty::obj_name)
+            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+    };
+    if b.nullable() {
+        Ty::nullable(base)
+    } else {
+        base
+    }
+}
+
+impl CheckerScope<'_> {
+    /// Bind `names` as this scope's type parameters, taking each one's bound (and any bounds beyond
+    /// the first) from `tparams` — the caller computes those, since a parameter's bound may name an
+    /// enclosing declaration's parameter. `reified` answers whether a name was declared `reified`
+    /// (only an `inline fun` may).
+    ///
+    /// The rung that calls this OWNS the parameters: they retire with it, so a sibling declaration
+    /// checked from the same enclosing scope never inherits them.
+    ///
+    /// This deliberately does NOT report a redeclaration, even though `Ns::Classifier` could: a
+    /// class rung also carries the parameters of the enclosing classes an `inner class` can reach,
+    /// and `class A<T> { inner class B<T> }` shadows rather than conflicts. The
+    /// "conflicting declaration" checks stay on each declaration's OWN parameter list.
+    fn declare_tparams(&self, names: &[String], tparams: &TParams, reified: impl Fn(&str) -> bool) {
+        for name in names {
+            self.rebind(
+                name,
+                Ns::Classifier,
+                ScopeBinding::TypeParam {
+                    bound: tparams.bound(name),
+                    extra_bounds: tparams.extra_bounds_of(name),
+                    reified: reified(name),
+                },
+            );
+        }
+    }
+
+    /// The innermost type-parameter binding for `name`, or `None` when `name` is not a type
+    /// parameter here. Walks [`classifier_rungs`](scope::Scope::classifier_rungs), so an outer
+    /// declaration's parameters stop at a class rung that does not carry its outer instance.
+    ///
+    /// A nearer classifier binding of another kind — a local class of the same name — SHADOWS the
+    /// parameter rather than being stepped over: one namespace, so the innermost binding wins
+    /// whatever kind it is.
+    fn tparam_binding(&self, name: &str) -> Option<(Ty, Vec<Ty>, bool)> {
+        for rung in self.classifier_rungs() {
+            match rung.own_binding(name, Ns::Classifier) {
+                Some(ScopeBinding::TypeParam {
+                    bound,
+                    extra_bounds,
+                    reified,
+                }) => return Some((bound, extra_bounds, reified)),
+                Some(_) => return None,
+                None => {}
+            }
+        }
+        None
+    }
+
+    /// The internal name a statement-position classifier is registered under, if `name` denotes one
+    /// here.
+    ///
+    /// Unlike a type parameter this walks the WHOLE chain, not [`classifier_rungs`]: a type
+    /// parameter is only meaningful where the instance supplying it is reachable, while a class
+    /// NAME needs nothing — a local `object` may name a sibling local class even though it cuts the
+    /// receiver chain.
+    ///
+    /// A nearer type parameter of the same name shadows the class name, for the same reason a local
+    /// class shadows a parameter in [`Self::tparam_binding`]: one namespace, innermost binding wins.
+    fn local_classifier(&self, name: &str) -> Option<TypeName> {
+        for rung in self.ancestors() {
+            match rung.own_binding(name, Ns::Classifier) {
+                Some(ScopeBinding::LocalClass(internal)) => return Some(internal),
+                Some(_) => return None,
+                None => {}
+            }
+        }
+        None
+    }
+
+    /// The type parameters visible here, assembled from the classifier bindings of every rung in
+    /// scope. An inner declaration of the same name shadows the outer one, matching lexical nesting.
+    fn visible_tparams(&self) -> TParams {
+        let mut out = TParams::default();
+        for rung in self
+            .classifier_rungs()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            rung.own_bindings(Ns::Classifier, |name, binding| {
+                if let ScopeBinding::TypeParam {
+                    bound,
+                    extra_bounds,
+                    ..
+                } = binding
+                {
+                    out.insert_binding(name, *bound, extra_bounds.clone());
+                }
+            });
+        }
+        out
+    }
+
+    /// Whether `name` is a type parameter in scope.
+    fn tparam_contains(&self, name: &str) -> bool {
+        self.tparam_binding(name).is_some()
+    }
+
+    /// The declared upper bound of type parameter `name` (`kotlin/Any` when unbounded), from the
+    /// innermost scope declaring it.
+    fn tparam_bound(&self, name: &str) -> Ty {
+        self.tparam_binding(name)
+            .map(|(bound, _, _)| bound)
+            .unwrap_or(Ty::obj("java/lang/Object"))
+    }
+
+    /// Whether `name` is a `reified` type parameter in scope.
+    fn is_reified(&self, name: &str) -> bool {
+        self.tparam_binding(name)
+            .is_some_and(|(_, _, reified)| reified)
+    }
+
+    /// Bounds beyond the first for whichever in-scope parameter has `bound` as its first. A type
+    /// parameter reaches the body already erased to its first bound, so that erasure — not the
+    /// parameter's name — is what a member lookup has in hand; this maps back from it.
+    fn tparam_extra_bounds(&self, bound: Ty) -> Vec<Ty> {
+        let Some(want) = bound.obj_internal() else {
+            return Vec::new();
+        };
+        self.classifier_rungs()
+            .map(|rung| {
+                let mut out = Vec::new();
+                rung.own_bindings(Ns::Classifier, |_, binding| {
+                    if let ScopeBinding::TypeParam {
+                        bound,
+                        extra_bounds,
+                        ..
+                    } = binding
+                    {
+                        if bound.obj_internal() == Some(want) {
+                            out.extend(extra_bounds.iter().copied());
+                        }
+                    }
+                });
+                out
+            })
+            .find(|bounds: &Vec<Ty>| !bounds.is_empty())
+            .unwrap_or_default()
+    }
+}
+
+/// A lexical binding: a value (local, parameter, narrowing shadow) or the overload set of a local
+/// function. Both are lexically scoped and retired by the scope that declared them.
+#[derive(Clone)]
+enum ScopeBinding {
+    Value(Local),
+    /// Local-function overloads in declaration order; the last is the innermost declaration.
+    Funs(Vec<(StmtId, Signature)>),
+    /// A generic type parameter (`Ns::Classifier`). `bound` is the declared upper bound the checker
+    /// types the parameter as (its JVM erasure for a value parameter, the symbolic `Ty::TyParam` when
+    /// a signature is being inferred); `extra_bounds` are the bounds beyond the first
+    /// (`where T : A, T : B`), which `Ty::TyParam` cannot carry.
+    ///
+    /// `reified` retires with the rung that declared the parameter, so an `inline fun <reified T>`
+    /// cannot leave `T` reified for a later sibling declaration.
+    TypeParam {
+        bound: Ty,
+        extra_bounds: Vec<Ty>,
+        reified: bool,
+    },
+    /// A classifier declared in statement position (`fun f() { class L … }`), bound under its
+    /// SOURCE name to the internal name its hoisted declaration was registered under, so the name
+    /// resolves where it was written.
+    LocalClass(TypeName),
+}
+
+impl ScopeBinding {
+    fn value(&self) -> Option<Local> {
+        match self {
+            ScopeBinding::Value(local) => Some(*local),
+            ScopeBinding::Funs(_)
+            | ScopeBinding::TypeParam { .. }
+            | ScopeBinding::LocalClass(_) => None,
+        }
+    }
+    fn funs(&self) -> &[(StmtId, Signature)] {
+        match self {
+            ScopeBinding::Funs(entries) => entries,
+            ScopeBinding::Value(_)
+            | ScopeBinding::TypeParam { .. }
+            | ScopeBinding::LocalClass(_) => &[],
+        }
+    }
+}
+
+/// The checker's lexical scope chain. See [`scope`] — the chain is threaded as a parameter, not
+/// held on the checker, so a scope cannot outlive its parent and cannot be left open by an early
+/// return.
+type CheckerScope<'p> = scope::Scope<'p, ScopeBinding>;
 
 #[derive(Clone)]
 struct ScopedProperty {
@@ -11322,18 +11745,12 @@ fn make_checker<'a>(
         diags,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         resolved_type_refs: HashMap::new(),
-        scopes: Vec::new(),
-        path_narrows: Vec::new(),
         ret_ty: Ty::Unit,
         expected: None,
         imports,
         import_levels,
         fn_scope,
         function_import_scope,
-        tparams: Default::default(),
-        reified_tparams: std::collections::HashSet::new(),
-        this_ty: None,
-        this_gen: 0,
         this_unavailable: false,
         this_extension_receiver: None,
         this_narrow: None,
@@ -11343,7 +11760,6 @@ fn make_checker<'a>(
         extension_receiver_labels: Vec::new(),
         field_ty: None,
         companion_of: None,
-        local_funs: Vec::new(),
         in_script_body: false,
         expr_lowers: HashMap::new(),
         inferred_fun_rets: HashMap::new(),
@@ -11357,6 +11773,7 @@ fn make_checker<'a>(
         narrowed_this_member: HashMap::new(),
         pending_unknown_named_arg: HashMap::new(),
         resolved_calls: HashMap::new(),
+        implicit_receiver_selections: HashMap::new(),
         source_contracts: HashMap::new(),
         resolved_source_calls: HashMap::new(),
         source_extension_properties: HashMap::new(),
@@ -11378,6 +11795,7 @@ fn make_checker<'a>(
         resolved_default_member_calls: HashMap::new(),
         resolved_library_companion_consts: HashMap::new(),
         resolved_enum_entries: HashMap::new(),
+        resolved_enum_statics: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         synthetic_ext_calls: HashMap::new(),
@@ -11386,12 +11804,14 @@ fn make_checker<'a>(
         context_args: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         fn_closure_reassigned: std::collections::HashSet::new(),
-        narrow_active: false,
         expr_depth: 0,
         allow_lambda_mutation: false,
         symbolic_signature_inference: false,
         discover_anonymous_captures: false,
         discovered_anonymous_captures: HashMap::new(),
+        discovered_local_class_captures: HashMap::new(),
+        anonymous_lexical_scope: AnonymousLexicalClassScope::default(),
+        capture_scope: None,
         loop_labels: Vec::new(),
         loop_depth: 0,
         return_allowed: true,
@@ -11407,7 +11827,6 @@ fn class_receiver_labels(
     symbols: &SymbolTable,
     current: Option<Ty>,
 ) -> Vec<(String, Ty, bool)> {
-    let mut labels = Vec::new();
     // Start from the collected signature's semantic nesting edge. Reconstructing the owner from
     // `ClassDecl::name` / `inner_of` would make receiver labels depend on whether this declaration was
     // spelled as a dotted nested source name, and previously required a separate fallback for an
@@ -11415,24 +11834,10 @@ fn class_receiver_labels(
     // signature, so its normalized internal name gives source files and later module consumers one
     // origin-independent path to the lexical outer chain.
     let current_internal = current.and_then(Ty::obj_internal);
-    let mut outer = current_internal
+    let outer = current_internal
         .and_then(|internal| symbols.class_by_type_name(internal))
         .and_then(ClassSig::inner_of_name);
-    while let Some(internal) = outer {
-        let Some(signature) = symbols.class_by_type_name(internal) else {
-            break;
-        };
-        let declaration = symbols
-            .class_simple_name(internal)
-            .unwrap_or_else(|| "<anonymous>".to_string());
-        labels.push((
-            class_declaration_label(&declaration).to_string(),
-            Ty::obj_name(signature.internal_name()),
-            true,
-        ));
-        outer = signature.inner_of_name();
-    }
-    labels.reverse();
+    let mut labels = enclosing_receiver_labels(symbols, outer);
     if let Some(ty) = current {
         // The current AST declaration is the authoritative source spelling for its explicit label;
         // using a reverse symbol-table lookup here would be ambiguous in an already-diagnosed duplicate
@@ -11440,6 +11845,44 @@ fn class_receiver_labels(
         labels.push((class_declaration_label(&class.name).to_string(), ty, true));
     }
     labels
+}
+
+/// Build receiver labels for one or more semantic enclosing-class roots. `roots` is nearest-first;
+/// each root's `inner_of` chain is expanded through the same path, deduplicated, then returned
+/// outermost-first. Ordinary inner classes and structurally owned anonymous objects feed this helper
+/// different roots but share the graph traversal and label construction policy.
+fn enclosing_receiver_labels(
+    symbols: &SymbolTable,
+    roots: impl IntoIterator<Item = TypeName>,
+) -> Vec<(String, Ty, bool)> {
+    let mut owners = Vec::new();
+    for root in roots {
+        let mut current = Some(root);
+        while let Some(internal) = current {
+            if owners.contains(&internal) {
+                break;
+            }
+            owners.push(internal);
+            current = symbols
+                .class_by_type_name(internal)
+                .and_then(ClassSig::inner_of_name);
+        }
+    }
+    owners
+        .into_iter()
+        .rev()
+        .filter_map(|internal| {
+            let signature = symbols.class_by_type_name(internal)?;
+            let declaration = symbols
+                .class_simple_name(internal)
+                .unwrap_or_else(|| "<anonymous>".to_string());
+            Some((
+                class_declaration_label(&declaration).to_string(),
+                Ty::obj_name(signature.internal_name()),
+                true,
+            ))
+        })
+        .collect()
 }
 
 fn anonymous_body_bound_names(
@@ -11577,10 +12020,66 @@ fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty
                 .any(|expression| expression_has_member_call_named(file, expression, name))
 }
 
+/// Whether an anonymous class body reaches the ENCLOSING class instance: an explicit `this@Outer`
+/// naming the immediate structural owner, or a reference to one of its members (declared or
+/// inherited, skipping names the anonymous class itself binds). Such references cannot be
+/// captured by value like an immutable property — they bind through the synthetic `this$0`
+/// outer-instance capture. Names the body does not reference keep the capture out, so a
+/// construction with superclass arguments (`object : Base(1) { … }`) stays on the
+/// ordinary constructor path.
+fn anonymous_body_needs_outer_this(
+    file: &File,
+    declaration: DeclId,
+    resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+    outer_label: &str,
+    outer: Ty,
+) -> bool {
+    let Decl::Class(class) = file.decl(declaration) else {
+        return false;
+    };
+    let Some(internal) = outer.obj_internal() else {
+        return false;
+    };
+    let bound = anonymous_body_bound_names(file, declaration);
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The receiver stack owns the source label spelling; do not recover it from a generated class
+    // name. Member names below come from the federated type shape, so this capture rule does not stop
+    // when a source owner inherits from a dependency classifier or require a source/classpath fallback.
+    names.insert(format!("this@{outer_label}"));
+    let mut hierarchy = vec![internal];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(owner) = hierarchy.pop() {
+        if !visited.insert(owner) {
+            continue;
+        }
+        let Some(shape) = resolver.resolve_type_name(owner) else {
+            continue;
+        };
+        names.extend(shape.members.iter().map(|member| member.name.clone()));
+        hierarchy.extend(shape.supertypes.iter_ids());
+    }
+    let names: std::collections::HashSet<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !bound.contains(*name))
+        .collect();
+    if names.is_empty() {
+        return false;
+    }
+    class
+        .methods
+        .iter()
+        .filter_map(|method| fun_body_expr(&method.body))
+        .chain(class.body_props.iter().filter_map(|property| property.init))
+        .chain(class.base_args.iter().copied())
+        .any(|expression| file.expr_uses_any_name_deep(expression, &names))
+}
+
 #[derive(Clone)]
 struct AnonymousCaptureCandidate {
     name: String,
     ty: Ty,
+    source: AnonymousObjectCaptureSource,
 }
 
 fn record_anonymous_construction_captures(
@@ -11602,14 +12101,27 @@ fn record_anonymous_construction_captures(
                 .any(|later| later.name == candidate.name)
         })
         .filter(|(_, candidate)| candidate.ty != Ty::Error)
-        .filter(|(_, candidate)| !bound.contains(&candidate.name))
-        .filter(|(_, candidate)| !anonymous_body_writes_name(file, declaration, &candidate.name))
         .filter(|(_, candidate)| {
-            anonymous_body_uses_name(file, declaration, &candidate.name, candidate.ty)
+            match candidate.source {
+                // Enclosing-instance need was decided against the anonymous body's receiver uses.
+                // It has no source variable name, so lexical bound/write/use filters do not apply.
+                AnonymousObjectCaptureSource::EnclosingInstance => true,
+                AnonymousObjectCaptureSource::LexicalValue => {
+                    !bound.contains(&candidate.name)
+                        && !anonymous_body_writes_name(file, declaration, &candidate.name)
+                        && anonymous_body_uses_name(
+                            file,
+                            declaration,
+                            &candidate.name,
+                            candidate.ty,
+                        )
+                }
+            }
         })
         .map(|(_, candidate)| AnonymousObjectCapture {
             name: candidate.name.clone(),
             ty: candidate.ty,
+            source: candidate.source,
         })
         .collect();
     captures.insert(declaration, selected);
@@ -11637,6 +12149,8 @@ fn install_anonymous_object_captures(
             {
                 continue;
             }
+            // Each capture becomes a private synthetic property; for the `this$0` capture this
+            // property doubles as the outer-instance field lowering reads at index 0.
             class.props.push((capture.name.clone(), capture.ty, false));
             class.declared_props.insert(
                 capture.name.clone(),
@@ -11741,6 +12255,7 @@ fn method_may_publish_inferred_return(function: &FunDecl) -> bool {
         && matches!(function.body, FunBody::Expr(_))
 }
 
+#[derive(Clone)]
 struct ClassCapturePlan {
     /// One decision per method in the retained instance/enum-entry prefix. A shorter vector means
     /// the remaining suffix is irrelevant; `false` inside the vector means semantic checking may be
@@ -11881,7 +12396,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct AnonymousLexicalClassScope {
     owners: HashMap<DeclId, DeclId>,
     declarations: std::collections::HashSet<DeclId>,
@@ -11911,6 +12426,185 @@ impl AnonymousLexicalClassScope {
 /// the lexical classifier scope of the construction site (`object : Base(Inner()) {}` inside `Outer`
 /// may name `Outer.Inner` unqualified). This map preserves that source relationship without making
 /// the anonymous class an `inner` class or changing its runtime capture ABI.
+/// Every `StmtId` reachable from `root`, including the member bodies of a local class declared
+/// inside it (`any_child_stmt` stops at the local class, but its members are written in the same
+/// lexical scope).
+fn reachable_stmts(file: &File, root: ExprId) -> Vec<StmtId> {
+    reachable_nodes(file, root).0
+}
+
+/// Every `StmtId` and `ExprId` reachable from `root`, including the member bodies of a local class
+/// declared inside it (`any_child_stmt` stops at the local class, but its members are written in the
+/// same lexical scope).
+fn reachable_nodes(file: &File, root: ExprId) -> (Vec<StmtId>, Vec<ExprId>) {
+    let mut exprs: Vec<ExprId> = vec![root];
+    let mut stmts: Vec<StmtId> = Vec::new();
+    let mut out_stmts: Vec<StmtId> = Vec::new();
+    let mut out_exprs: Vec<ExprId> = Vec::new();
+    let mut guard = 0usize;
+    loop {
+        guard += 1;
+        if guard > 1_000_000 {
+            break;
+        }
+        if let Some(e) = exprs.pop() {
+            out_exprs.push(e);
+            file.any_child_expr(
+                e,
+                &mut |child| {
+                    exprs.push(child);
+                    false
+                },
+                &mut |child| {
+                    stmts.push(child);
+                    false
+                },
+            );
+        } else if let Some(s) = stmts.pop() {
+            out_stmts.push(s);
+            file.any_child_stmt(s, &mut |child| {
+                exprs.push(child);
+                false
+            });
+            if let Stmt::LocalClass(class) = file.stmt(s) {
+                for m in class.methods.iter().chain(&class.companion_methods) {
+                    if let FunBody::Expr(e) | FunBody::Block(e) = m.body {
+                        exprs.push(e);
+                    }
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    (out_stmts, out_exprs)
+}
+
+/// The type parameters visible to each statement-position local class, taken from the declaration
+/// whose body contains it. A local class is hoisted to a top-level `Decl::Class` so that signature
+/// collection and lowering treat it like any other class, but its member types were written in the
+/// enclosing declaration's scope: kotlinc 2.4.10 accepts
+/// `class A<T> { fun m() { class L { fun k(): T? = null } } }`.
+fn local_class_enclosing_tparams(file: &File) -> HashMap<DeclId, Vec<String>> {
+    let mut out: HashMap<DeclId, Vec<String>> = HashMap::new();
+    if file.local_class_decls.is_empty() {
+        return out;
+    }
+    let record = |body: &FunBody, tparams: Vec<String>, out: &mut HashMap<DeclId, Vec<String>>| {
+        if tparams.is_empty() {
+            return;
+        }
+        let (FunBody::Expr(root) | FunBody::Block(root)) = body else {
+            return;
+        };
+        for stmt in reachable_stmts(file, *root) {
+            if let Some(&declaration) = file.local_class_decls.get(&stmt) {
+                out.entry(declaration)
+                    .or_default()
+                    .extend(tparams.iter().cloned());
+            }
+        }
+    };
+    for &d in &file.decls {
+        match file.decl(d) {
+            Decl::Fun(f) => record(&f.body, f.type_params.clone(), &mut out),
+            Decl::Class(c) => {
+                for m in c.methods.iter().chain(&c.companion_methods) {
+                    let mut tparams = c.type_params.clone();
+                    tparams.extend(m.type_params.iter().cloned());
+                    record(&m.body, tparams, &mut out);
+                }
+            }
+            Decl::Property(_) => {}
+        }
+    }
+    for names in out.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    out
+}
+
+/// The statement-position classifiers visible to each hoisted local-class declaration, by their
+/// SOURCE name. A local class names its siblings as it wrote them (`class Derived : Base()`), not by
+/// the name their hoisted declaration was registered under; the checker resolves that through the
+/// scope chain, but signature collection has no chain, so it is handed the body's classifiers.
+///
+/// Visibility is approximated per enclosing DECLARATION body rather than per block — a local class
+/// in one block naming one from a sibling block resolves here where kotlinc would reject it. The
+/// checker's chain, which the same reference also goes through, gives the real answer.
+fn local_class_sibling_names(file: &File) -> HashMap<DeclId, Vec<(String, TypeName)>> {
+    let mut out: HashMap<DeclId, Vec<(String, TypeName)>> = HashMap::new();
+    if file.local_class_decls.is_empty() {
+        return out;
+    }
+    let record = |body: &FunBody, out: &mut HashMap<DeclId, Vec<(String, TypeName)>>| {
+        let (FunBody::Expr(root) | FunBody::Block(root)) = body else {
+            return;
+        };
+        let mut here: Vec<(String, TypeName)> = Vec::new();
+        let mut declarations: Vec<DeclId> = Vec::new();
+        let (stmts, exprs) = reachable_nodes(file, *root);
+        for stmt in stmts {
+            let Some(&declaration) = file.local_class_decls.get(&stmt) else {
+                continue;
+            };
+            let Stmt::LocalClass(class) = file.stmt(stmt) else {
+                continue;
+            };
+            let Decl::Class(hoisted) = file.decl(declaration) else {
+                continue;
+            };
+            here.push((
+                class.name.clone(),
+                type_name(&class_internal(file, &hoisted.name)),
+            ));
+            declarations.push(declaration);
+        }
+        // An ANONYMOUS OBJECT written in the same body is hoisted the same way and sees the same
+        // classifiers — `object : B() {}` where `B` is a local class declared beside it.
+        for expr in exprs {
+            if let Some(&declaration) = file.anonymous_object_classes.get(&expr) {
+                declarations.push(declaration);
+            }
+        }
+        for declaration in declarations {
+            out.entry(declaration)
+                .or_default()
+                .extend(here.iter().cloned());
+        }
+    };
+    for &d in &file.decls {
+        match file.decl(d) {
+            Decl::Fun(f) => record(&f.body, &mut out),
+            Decl::Class(c) => {
+                for m in c.methods.iter().chain(&c.companion_methods) {
+                    record(&m.body, &mut out);
+                }
+                for step in &c.init_order {
+                    if let ClassInit::Block(b) = step {
+                        record(&FunBody::Block(*b), &mut out);
+                    }
+                }
+                for p in &c.body_props {
+                    if let Some(init) = p.init {
+                        record(&FunBody::Expr(init), &mut out);
+                    }
+                }
+                for p in c.props.iter().filter_map(|p| p.default) {
+                    record(&FunBody::Expr(p), &mut out);
+                }
+            }
+            Decl::Property(p) => {
+                if let Some(init) = p.init {
+                    record(&FunBody::Expr(init), &mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn anonymous_lexical_class_scope(file: &File) -> AnonymousLexicalClassScope {
     if file.anonymous_object_classes.is_empty() {
         return AnonymousLexicalClassScope::default();
@@ -12152,18 +12846,24 @@ fn preinfer_returns_pass_with_owners(
 ) -> PreinferPassResult {
     let mut scratch = DiagSink::new();
     let mut pre = make_checker(file, file_index, None, &*syms, &mut scratch);
+    pre.anonymous_lexical_scope = anonymous_lexical_scope.clone();
+    // Entry point: the file scope is the root of every chain (see `scope`).
+    let root = CheckerScope::root();
+    let scope = &root;
     let mut inferred_member_ext_rets = Vec::new();
     for &d in &file.decls {
-        pre.set_anonymous_lexical_class_context(d, anonymous_lexical_scope);
+        pre.set_anonymous_lexical_class_context(d);
         if let Decl::Fun(f) = file.decl(d) {
             if function_needs_return_preinfer(f) {
                 let resolve = class_internal_resolver(pre.syms);
-                pre.tparams =
-                    TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
-                pre.reified_tparams = f.reified_type_params.iter().cloned().collect();
-                pre.check_fun(f, Some(d));
-                pre.tparams.clear();
-                pre.reified_tparams.clear();
+                let decl_scope = scope.child(ScopeKind::Function { receiver: None });
+                let scope = &decl_scope;
+                scope.declare_tparams(
+                    &f.type_params,
+                    &TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve),
+                    |name| f.reified_type_params.contains(name),
+                );
+                pre.check_fun(scope, f, Some(d));
             }
         } else if let Decl::Class(cl) = file.decl(d) {
             let Some(internal_name) = pre
@@ -12181,14 +12881,26 @@ fn preinfer_returns_pass_with_owners(
                 internal_name,
                 &cl.type_params
                     .iter()
-                    .map(|name| class_tparams.erase(name))
+                    .map(|name| class_tparams.bound(name))
                     .collect::<Vec<_>>(),
             );
             let labels_depth = pre.this_labels.len();
-            pre.set_this_ty(Some(dispatch_ty));
+            // The dispatch rung carries the APPLIED type (`C<T>`, not the raw `C`), which is what
+            // the member bodies resolve against.
+            let dispatch_scope = scope.child(ScopeKind::Function {
+                receiver: Some(dispatch_ty),
+            });
+            let scope = &dispatch_scope;
+            // The class's own type parameters live on the class's rung; a member's are declared on
+            // the member's rung below, so they retire with it.
+            scope.declare_tparams(&cl.type_params, &class_tparams, |_| false);
+            if anonymous_lexical_scope.declarations.contains(&d) {
+                let outer = pre.anonymous_outer_receiver_labels();
+                pre.this_labels.extend(outer);
+            }
             pre.this_labels
                 .extend(class_receiver_labels(cl, pre.syms, Some(dispatch_ty)));
-            let properties = pre.scoped_properties(internal_name);
+            let properties = pre.scoped_properties(scope, internal_name);
             for (property_index, property) in cl.body_props.iter().enumerate() {
                 let Some((receiver, getter)) = member_extension_property_preinfer_body(property)
                 else {
@@ -12200,26 +12912,37 @@ fn preinfer_returns_pass_with_owners(
                         previous.receiver.is_some() && previous.name == property.name
                     })
                     .count();
-                pre.tparams = class_tparams.symbolic_extended_with(
+                // The property's own type parameters get their own rung, so they retire with it
+                // rather than staying visible to the next property in the loop.
+                let property_scope = scope.child(ScopeKind::Function { receiver: None });
+                let scope = &property_scope;
+                scope.declare_tparams(
                     &property.type_params,
-                    &property.type_param_bounds,
-                    &class_internal_resolver(pre.syms),
+                    &class_tparams.symbolic_extended_with(
+                        &property.type_params,
+                        &property.type_param_bounds,
+                        &class_internal_resolver(pre.syms),
+                    ),
+                    |_| false,
                 );
-                let receiver_ty = pre.resolve_ty(receiver);
-                pre.set_this_ty(Some(receiver_ty));
+                let receiver_ty = pre.resolve_ty(scope, receiver);
                 pre.this_labels
                     .push((property.name.clone(), receiver_ty, false));
                 pre.symbolic_signature_inference = true;
-                pre.push_scope();
-                for parameter in &property.context_params {
-                    if parameter.name == "_" {
-                        continue;
+                let inferred = {
+                    let getter_scope = scope.child(ScopeKind::Function {
+                        receiver: Some(receiver_ty),
+                    });
+                    let scope = &getter_scope;
+                    for parameter in &property.context_params {
+                        if parameter.name == "_" {
+                            continue;
+                        }
+                        let parameter_type = pre.resolve_ty(scope, &parameter.ty);
+                        pre.declare(scope, &parameter.name, parameter_type, false);
                     }
-                    let parameter_type = pre.resolve_ty(&parameter.ty);
-                    pre.declare(&parameter.name, parameter_type, false);
-                }
-                let inferred = pre.expr(getter);
-                pre.pop_scope();
+                    pre.expr(scope, getter)
+                };
                 pre.symbolic_signature_inference = false;
                 inferred_member_ext_rets.push((
                     internal_name,
@@ -12228,24 +12951,24 @@ fn preinfer_returns_pass_with_owners(
                     inferred,
                 ));
                 pre.this_labels.pop();
-                pre.set_this_ty(Some(dispatch_ty));
-                pre.tparams.clear();
             }
             for m in &cl.methods {
                 if function_needs_return_preinfer(m) {
-                    pre.tparams = class_tparams.symbolic_extended_with(
+                    let method_scope = scope.child(ScopeKind::Function { receiver: None });
+                    let scope = &method_scope;
+                    scope.declare_tparams(
                         &m.type_params,
-                        &m.type_param_bounds,
-                        &class_internal_resolver(pre.syms),
+                        &class_tparams.symbolic_extended_with(
+                            &m.type_params,
+                            &m.type_param_bounds,
+                            &class_internal_resolver(pre.syms),
+                        ),
+                        |name| m.reified_type_params.contains(name),
                     );
-                    pre.reified_tparams = m.reified_type_params.iter().cloned().collect();
-                    pre.check_method(m, &properties);
-                    pre.tparams.clear();
-                    pre.reified_tparams.clear();
+                    pre.check_method(scope, m, &properties);
                 }
             }
             pre.this_labels.truncate(labels_depth);
-            pre.set_this_ty(None);
         }
     }
     let fun_rets = std::mem::take(&mut pre.inferred_fun_rets);
@@ -12434,1050 +13157,58 @@ fn check_file_at_impl_mode(
     }
 
     let mut c = make_checker(file, file_index, source_files, &*syms, diags);
+    // Entry point: the file scope is the root of every chain (see `scope`).
+    let root = CheckerScope::root();
+    let scope = &root;
     c.discover_anonymous_captures = capture_discovery;
     // Decode every top-level function's `contract { … }` up front (decode needs only the AST
     // plus the intrinsic-identity check), so a call site sees a source function's contract
     // regardless of the order function bodies are checked in.
-    c.collect_source_contracts();
+    c.collect_source_contracts(scope);
 
-    // Each top-level declaration is checked in its OWN scope. Reset to the base depth (file-level
-    // scope, e.g. top-level properties) before each one so a prior decl's leftover scope can't leak —
-    // notably a function's locals must NOT be visible to a hoisted local class (`hoist_local_classes`)
-    // checked afterward, or a captured outer name would wrongly resolve instead of skipping the file.
-    let base_scope_depth = c.scopes.len();
-    let capture_scope = capture_discovery.then(|| capture_discovery_scope(file));
+    // Each top-level declaration is checked in its OWN scope, so a prior declaration's bindings
+    // cannot leak into the next one.
+    c.anonymous_lexical_scope = anonymous_lexical_scope;
+    c.capture_scope = capture_discovery.then(|| capture_discovery_scope(file));
     for &d in &file.decls {
-        if capture_scope
+        if c.capture_scope
             .as_ref()
             .is_some_and(|scope| !scope.declarations.contains(&d))
         {
             continue;
         }
-        c.scopes.truncate(base_scope_depth);
-        c.set_anonymous_lexical_class_context(d, &anonymous_lexical_scope);
+        // A LOCAL class is entered from its `Stmt::LocalClass`, in the lexical scope it was written
+        // in — checking it here as well would check it a second time with no enclosing scope at all.
+        if file.is_local_declaration(d) {
+            continue;
+        }
+        c.set_anonymous_lexical_class_context(d);
         match file.decl(d) {
-            Decl::Fun(f) => {
-                let resolve = class_internal_resolver(c.syms);
-                c.tparams = TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
-                c.reified_tparams = f.reified_type_params.iter().cloned().collect();
-                c.check_fun(f, Some(d));
-                c.tparams.clear();
-                c.reified_tparams.clear();
-            }
+            Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
             Decl::Class(cl) => {
-                // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
-                // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
-                // and plain) in order.
-                {
-                    let mut seen = std::collections::HashSet::new();
-                    for pp in &cl.props {
-                        if !seen.insert(pp.name.as_str()) {
-                            c.diags.error(
-                                cl.span,
-                                format!("conflicting declaration: constructor parameter '{}' is declared more than once", pp.name),
-                            );
-                        }
-                    }
-                }
-                // A `data class`'s primary-constructor parameters must all be `val`/`var` (kotlinc:
-                // "data class primary constructor must have only property (val / var) parameters").
-                if cl.is_data {
-                    for pp in &cl.props {
-                        if !pp.is_property {
-                            c.diags.error(
-                                cl.span,
-                                format!("data class primary-constructor parameter '{}' must be 'val' or 'var'", pp.name),
-                            );
-                        }
-                    }
-                }
-                // Duplicate class type-parameter names (`class C<T, T>`) are illegal.
-                {
-                    let mut seen = std::collections::HashSet::new();
-                    for tp in &cl.type_params {
-                        if !seen.insert(tp.as_str()) {
-                            c.diags.error(
-                                cl.span,
-                                format!("conflicting declaration: type parameter '{tp}' is declared more than once"),
-                            );
-                        }
-                    }
-                }
-                // Duplicate enum entry names (`enum class E { A, B, A }`) are illegal.
-                {
-                    let mut seen = std::collections::HashSet::new();
-                    for entry in &cl.enum_entries {
-                        if !seen.insert(entry.name.as_str()) {
-                            c.diags.error(
-                                cl.span,
-                                format!("conflicting declaration: enum entry '{}' is declared more than once", entry.name),
-                            );
-                        }
-                    }
-                }
-                // An `abstract` member is only allowed in an abstract class, an interface, or an enum
-                // class (whose entries override the abstract member per-entry) — kotlinc rejects it in a
-                // final class: "modifier 'abstract' is not applicable inside a final class".
-                if !cl.is_abstract() && !cl.is_interface() && !cl.is_enum() {
-                    for m in &cl.methods {
-                        if m.is_abstract() {
-                            c.diags.error(
-                                m.span,
-                                format!(
-                                    "abstract member '{}' is not allowed in a non-abstract class",
-                                    m.name
-                                ),
-                            );
-                        }
-                    }
-                }
-                // `abstract` modifier consistency (illegal in any class kind): an abstract member has no
-                // body, and cannot also be `final` (kotlinc rejects each).
-                for m in &cl.methods {
-                    if m.is_abstract() && !matches!(m.body, FunBody::None) {
-                        c.diags.error(
-                            m.span,
-                            format!("abstract member '{}' cannot have a body", m.name),
-                        );
-                    }
-                    if m.is_abstract() && m.is_final() {
-                        c.diags.error(
-                            m.span,
-                            format!("member '{}' cannot be both 'abstract' and 'final'", m.name),
-                        );
-                    }
-                }
-                // In a class WITH a primary constructor every secondary must delegate to it (`this(…)`);
-                // `super(…)`/implicit delegation isn't emitted there, so reject it. A class with NO
-                // primary constructor admits `this(…)`/`super(…)`/implicit delegation (each becomes its
-                // own `<init>`).
-                if cl.has_primary_ctor {
-                    for sc in &cl.secondary_ctors {
-                        if !matches!(sc.delegation, CtorDelegation::This(_)) {
-                            c.diags.error(sc.span, "krusty: a secondary constructor must delegate to the primary (this(…))".to_string());
-                        }
-                    }
-                }
-                // `@JvmInline value class` compiles UNBOXED (a value is its underlying type; `X.class`
-                // carries the static `-impl` members). The lowering handles construction + sole-property
-                // access; uses it can't represent unboxed yet (a value-class-typed local/param/field/
-                // return, boxing, equality) make `lower_file` bail so the file skips rather than
-                // miscompile. No blanket rejection here.
-                // An annotation class emits as a JVM annotation interface + a synthetic impl whose
-                // `equals`/`hashCode` are CONTENT-based (`Arrays.equals`/`Arrays.hashCode` for array
-                // members) per the `java.lang.annotation.Annotation` contract — so an array member is
-                // supported (no krusty-synthesized reference-equality member to miscompile).
-                // Class type parameters are in scope for all members (erased; only function params
-                // specialize — see `TParams::erased`). An `inner class` also captures the enclosing
-                // instance, so the outer class's type parameters are visible in its members
-                // (kotlinc); walk the `inner_of` chain and include each enclosing class's parameters.
-                let mut tparam_names = cl.type_params.clone();
-                {
-                    let mut outer = cl.inner_of.as_deref().and_then(|o| {
-                        c.same_package_class(o)
-                            .map(ClassSig::internal_name)
-                            .or_else(|| existing_type_name(o))
-                    });
-                    let mut guard = 0;
-                    while let Some(o) = outer {
-                        guard += 1;
-                        if guard > 32 {
-                            break;
-                        }
-                        if let Some(s) = syms.class_by_type_name(o) {
-                            tparam_names.extend(s.tparam_names.iter().cloned());
-                            outer = s.inner_of_name();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                c.tparams = TParams::erased(&tparam_names);
-                let current_owner = c.same_package_class(&cl.name).map(ClassSig::internal_name);
-                let mut props = cl
-                    .inner_of
-                    .as_deref()
-                    .and_then(|outer| {
-                        c.same_package_class(outer)
-                            .map(ClassSig::internal_name)
-                            .or_else(|| existing_type_name(outer))
-                    })
-                    .map(|owner| c.scoped_properties(owner))
-                    .unwrap_or_default();
-                if let Some(owner) = current_owner {
-                    props.extend(c.scoped_properties(owner));
-                }
-                c.set_this_ty(current_owner.map(Ty::obj_name));
-                // Push the enclosing-class labels for the duration of this class's member checks: the
-                // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
-                // class's own label (`this@C`) innermost. Walk `inner_of` outward.
-                let labels = class_receiver_labels(cl, c.syms, c.this_ty);
-                let label_depth = labels.len();
-                c.this_labels.extend(labels);
-                let methods: Vec<&FunDecl> = cl.methods.iter().collect();
-                c.check_no_erased_clash(&methods);
-                if let Some(internal) = c.same_package_class(&cl.name).map(ClassSig::internal_name)
-                {
-                    // An `override` member must MATCH a supertype member (same name + arity) —
-                    // kotlinc rejects an `override` that overrides nothing. With member overloads a
-                    // same-name sibling of a different arity no longer pairs, so check explicitly.
-                    // Only when the hierarchy is MODULE-closed: a classpath supertype's members are
-                    // invisible to this walk, so absence there proves nothing (properties and
-                    // property-overrides are likewise out of scope — this checks methods only).
-                    if c.syms.hierarchy_is_module_closed(internal) {
-                        let supers = c.syms.supertype_methods_name(internal);
-                        let super_member_extensions =
-                            c.syms.supertype_member_ext_funs_name(internal);
-                        // `kotlin/Any`'s universal members are overridable in every class but never
-                        // appear in the module supertype walk.
-                        let is_any_member = |m: &FunDecl| {
-                            matches!(
-                                (m.name.as_str(), m.params.len()),
-                                ("toString", 0) | ("hashCode", 0) | ("equals", 1)
-                            )
-                        };
-                        for m in &cl.methods {
-                            let overrides_super = if let Some(receiver_ref) = &m.receiver {
-                                let class = c
-                                    .syms
-                                    .class_by_type_name(internal)
-                                    .expect("checked class has a collected signature");
-                                let class_bindings = class
-                                    .type_parameter_bindings(Ty::obj_name(class.internal_name()));
-                                let method_tparams = TParams::from_bindings(class_bindings)
-                                    .extended_with(
-                                        &m.type_params,
-                                        &m.type_param_bounds,
-                                        &class_internal_resolver(c.syms),
-                                    );
-                                let mut scratch = DiagSink::new();
-                                let receiver = ty_of_ref(
-                                    receiver_ref,
-                                    &c.syms.class_names,
-                                    &method_tparams,
-                                    &mut scratch,
-                                );
-                                let params = m
-                                    .params
-                                    .iter()
-                                    .map(|parameter| {
-                                        let ty = ty_of_ref(
-                                            &parameter.ty,
-                                            &c.syms.class_names,
-                                            &method_tparams,
-                                            &mut scratch,
-                                        );
-                                        if parameter.is_vararg {
-                                            Ty::array(ty)
-                                        } else {
-                                            ty
-                                        }
-                                    })
-                                    .collect::<Vec<_>>();
-                                super_member_extensions.iter().any(|signature| {
-                                    signature.name == m.name
-                                        && signature.receiver == receiver
-                                        && signature.params == params
-                                        && signature.visibility != Visibility::Private
-                                        && !signature.is_final
-                                })
-                            } else {
-                                supers.iter().any(|(name, signature)| {
-                                    *name == m.name && signature.params.len() == m.params.len()
-                                })
-                            };
-                            if m.is_override() && !is_any_member(m) && !overrides_super {
-                                c.diags
-                                    .error(m.span, format!("'{}' overrides nothing", m.name));
-                            }
-                        }
-                    }
-                    c.check_no_bridge_needed(internal, cl.span);
-                    // A `data class` implementing an interface that declares `copy`/`componentN` would
-                    // need bridges for its *synthesized* members (which return the class itself, not
-                    // the supertype) — krusty doesn't emit those, so reject (cleanly skip).
-                    if cl.is_data {
-                        let supers = syms.supertype_methods_name(internal);
-                        if let Some((sn, _)) = supers
-                            .iter()
-                            .find(|(sn, _)| sn == "copy" || sn.starts_with("component"))
-                        {
-                            c.diags.error(cl.span, format!("krusty: data class overriding synthesized member '{sn}' needs a bridge method (unsupported)"));
-                        }
-                    }
-                }
-                let method_capture_plan = capture_scope
-                    .as_ref()
-                    .and_then(|scope| scope.class_plans.get(&d));
-                let mut method_check_index = 0;
-                for m in &cl.methods {
-                    c.check_method_in_capture_plan(
-                        m,
-                        &props,
-                        method_capture_plan,
-                        method_check_index,
-                    );
-                    method_check_index += 1;
-                }
-                // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
-                // checked like a method of the enum — `this` is the enum type, the enum's properties AND
-                // the entry's own body properties are in scope, and the return type comes from the
-                // abstract member it overrides.
-                for entry in &cl.enum_entries {
-                    // Type each entry-body property's initializer, then make it visible (as a member) to
-                    // that entry's override methods.
-                    let mut entry_props = props.clone();
-                    if !entry.props.is_empty() {
-                        c.push_scope();
-                        for property in &props {
-                            c.declare_dispatch_property(
-                                &property.name,
-                                property.ty,
-                                property.is_var,
-                                property.owner,
-                            );
-                        }
-                        for bp in &entry.props {
-                            let ty = match (&bp.ty, bp.init) {
-                                (Some(r), _) => c.resolve_ty(r),
-                                (None, Some(init)) => c.expr(init),
-                                _ => Ty::Error,
-                            };
-                            if let (Some(r), Some(init)) = (&bp.ty, bp.init) {
-                                let declared = c.resolve_ty(r);
-                                let it = c.expr_expected(init, declared);
-                                let sp = c.value_diagnostic_span(init, it);
-                                c.expect_assignable(declared, it, sp, "property initializer");
-                            }
-                            let owner = current_owner.expect("enum class must have a source owner");
-                            c.declare_dispatch_property(&bp.name, ty, bp.is_var, owner);
-                            entry_props.push(ScopedProperty {
-                                name: bp.name.clone(),
-                                ty,
-                                is_var: bp.is_var,
-                                owner,
-                            });
-                        }
-                        c.pop_scope();
-                    }
-                    for bm in &entry.methods {
-                        c.check_method_in_capture_plan(
-                            bm,
-                            &entry_props,
-                            method_capture_plan,
-                            method_check_index,
-                        );
-                        method_check_index += 1;
-                    }
-                }
-                // Secondary constructors: check and record one delegation target before the body.
-                let primary_params = c
-                    .same_package_class(&cl.name)
-                    .map(|s| s.ctor_params.clone())
-                    .unwrap_or_default();
-                // A *deferred* `val` (no initializer/getter/setter) is definitely-assigned once in a
-                // constructor body, so it is assignable WITHIN a secondary constructor (kotlinc allows
-                // it) — same relaxation the primary-ctor body uses below.
-                let sc_deferred_val: std::collections::HashSet<&str> = cl
-                    .body_props
-                    .iter()
-                    .filter(|bp| {
-                        !bp.is_var
-                            && bp.init.is_none()
-                            && (bp.getter.is_none() || bp.getter_reads_field)
-                            && bp.ty.is_some()
-                    })
-                    .map(|bp| bp.name.as_str())
-                    .collect();
-                for (sc_index, sc) in cl.secondary_ctors.iter().enumerate() {
-                    c.push_scope();
-                    for property in &props {
-                        c.declare_dispatch_property(
-                            &property.name,
-                            property.ty,
-                            property.is_var || sc_deferred_val.contains(property.name.as_str()),
-                            property.owner,
-                        );
-                    }
-                    for p in &sc.params {
-                        let ty = c.secondary_ctor_param_ty(p);
-                        c.declare(&p.name, ty, false);
-                    }
-                    for p in &sc.params {
-                        if let Some(default) = p.default {
-                            let ty = c.secondary_ctor_param_ty(p);
-                            // A ctor-param default is evaluated in the CALLER's context — no `this`.
-                            c.with_this_unavailable(|c| {
-                                c.check_default_arg(&p.ty, default, ty);
-                            });
-                        }
-                    }
-                    // Delegation-call args (`this(…)`/`super(…)`) run before the delegated
-                    // constructor — `this` is UNINITIALIZED there (same guard as the primary
-                    // `super(…)` clause below).
-                    c.with_this_unavailable(|c| match &sc.delegation {
-                        CtorDelegation::This(delegation) => {
-                            for &argument in &delegation.args {
-                                // A delegation lambda is contextual: leave its initial `Error`
-                                // placeholder until the shared constructor selector maps it to a
-                                // parameter slot, just like a primary class-header base argument.
-                                if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
-                                    c.expr(argument);
-                                }
-                            }
-                            let candidates =
-                                c.this_ctor_delegation_candidates(cl, sc_index, &primary_params);
-                            c.select_ctor_delegation(
-                                CtorDelegationSite {
-                                    class: d,
-                                    secondary: sc_index,
-                                    span: sc.span,
-                                    label: "this",
-                                    value_class: cl.is_value,
-                                },
-                                delegation,
-                                candidates,
-                            );
-                        }
-                        CtorDelegation::Super(delegation) => {
-                            for &argument in &delegation.args {
-                                if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
-                                    c.expr(argument);
-                                }
-                            }
-                            let candidates = c.super_ctor_delegation_candidates(cl);
-                            c.select_ctor_delegation(
-                                CtorDelegationSite {
-                                    class: d,
-                                    secondary: sc_index,
-                                    span: sc.span,
-                                    label: "super",
-                                    value_class: cl.is_value,
-                                },
-                                delegation,
-                                candidates,
-                            );
-                        }
-                        CtorDelegation::None if !cl.has_primary_ctor => {
-                            let arguments = CtorDelegationCall {
-                                args: Vec::new(),
-                                names: Vec::new(),
-                                trailing_lambda: false,
-                            };
-                            let candidates = c.super_ctor_delegation_candidates(cl);
-                            c.select_ctor_delegation(
-                                CtorDelegationSite {
-                                    class: d,
-                                    secondary: sc_index,
-                                    span: sc.span,
-                                    label: "super",
-                                    value_class: cl.is_value,
-                                },
-                                &arguments,
-                                candidates,
-                            );
-                        }
-                        CtorDelegation::None => {}
-                    });
-                    if let Some(body) = sc.body {
-                        c.with_ret(Ty::Unit, |c| {
-                            c.expr_statement(body);
-                        });
-                    }
-                    c.pop_scope();
-                }
-                c.validate_ctor_delegation_graph(d, cl);
-                // Primary-constructor parameter defaults (`class A(val ctx: CoroutineContext =
-                // EmptyCoroutineContext)`) are evaluated in the CALLER's context — they may not read other
-                // ctor params (enforced in collect) and have no `this` — so check each in a fresh scope.
-                // This records each default's sub-expression types and object-value references, which the
-                // default-fill lowering needs (a call-site `A()` fill, and the `super(<defaults>)` synthesized
-                // for a subclass or a typed `companion object : A()`). Mirrors `check_fun`'s param-default
-                // pass so a function-typed parameter's lambda default types concretely.
-                c.push_scope();
-                for p in &cl.props {
-                    if let Some(dx) = p.default {
-                        let pty = c.resolve_ty(&p.ty);
-                        // A ctor-param default is evaluated in the CALLER's context — no `this`.
-                        c.with_this_unavailable(|c| c.check_default_arg(&p.ty, dx, pty));
-                    }
-                }
-                c.pop_scope();
-                // Body-property initializers and `init` blocks see the properties (implicit `this`)
-                // and the primary-constructor parameters (including non-property ones).
-                // A *deferred* `val` (declared with no initializer/getter — `val a: Int`) is assigned
-                // exactly once in an `init` block, so it is treated as assignable WITHIN the constructor
-                // body (kotlinc's definite-assignment allows it; a normal `val` stays immutable).
-                let deferred_val: std::collections::HashSet<&str> = cl
-                    .body_props
-                    .iter()
-                    .filter(|bp| {
-                        !bp.is_var
-                            && bp.init.is_none()
-                            && (bp.getter.is_none() || bp.getter_reads_field)
-                            && bp.ty.is_some()
-                    })
-                    .map(|bp| bp.name.as_str())
-                    .collect();
-                c.push_scope();
-                for property in &props {
-                    c.declare_dispatch_property(
-                        &property.name,
-                        property.ty,
-                        property.is_var || deferred_val.contains(property.name.as_str()),
-                        property.owner,
-                    );
-                }
-                for p in &cl.props {
-                    let ty = c.resolve_ty(&p.ty);
-                    c.declare(&p.name, ty, p.is_var);
-                }
-                // Base class constructor args are evaluated before the body and may reference ctor params.
-                // A LAMBDA arg is typed against the selected super ctor's parameter type (a receiver
-                // lambda's `this` scope comes from that expected type), so it is deferred here and
-                // checked below once the ctor is resolved; anything else is typed up front.
-                let file = c.file;
-                let is_lambda = |arg: ExprId| matches!(file.expr(arg), Expr::Lambda { .. });
-                // `this` is UNINITIALIZED inside `super(…)` args — an implicit-`this` callable ref
-                // there must not resolve (see `this_unavailable`).
-                c.with_this_unavailable(|c| {
-                    for &arg in &cl.base_args {
-                        if !is_lambda(arg) {
-                            c.expr(arg);
-                        }
-                    }
-                    // Resolve the primary constructor's `Base(args)` clause through the SAME delegation
-                    // candidates and argument-slot mapper used by secondary `super(args)` calls. Besides
-                    // keeping same-file, sibling-module, and classpath bases on one path, the resulting
-                    // source-order `argument_types` are essential for named/vararg arguments: zipping the
-                    // source arguments with parameter order would contextually type the wrong lambda.
-                    if !cl.base_args.is_empty() {
-                        let internal = class_internal(c.file, &cl.name);
-                        let names = cl
-                            .base_args
-                            .first()
-                            .and_then(|argument| c.file.base_arg_names.get(&argument.0))
-                            .cloned()
-                            .unwrap_or_else(|| vec![None; cl.base_args.len()]);
-                        let arguments = CtorDelegationCall {
-                            args: cl.base_args.clone(),
-                            names,
-                            trailing_lambda: false,
-                        };
-                        let candidates = c.super_ctor_delegation_candidates(cl);
-                        if let Some(selected) = c.select_source_constructor(&arguments, &candidates)
-                        {
-                            // A receiver lambda's implicit label is the source-level base class's SIMPLE
-                            // name. Split every internal/nested separator so `Outer.Base` and `Outer$Base`
-                            // both expose `Base`, rather than exposing a JVM-internal spelling as a label.
-                            let label = cl.base_class.as_deref().map(|base| {
-                                base.rsplit(['/', '.', '$'])
-                                    .next()
-                                    .unwrap_or(base)
-                                    .to_string()
-                            });
-                            for ((&arg, &expected), &has_receiver) in cl
-                                .base_args
-                                .iter()
-                                .zip(&selected.argument_types)
-                                .zip(&selected.argument_lambda_receivers)
-                            {
-                                if is_lambda(arg) {
-                                    c.check_argument_expected(
-                                        arg,
-                                        expected,
-                                        has_receiver,
-                                        label.as_deref(),
-                                    );
-                                }
-                            }
-                            c.super_ctor_params
-                                .insert(internal, selected.target.params().to_vec());
-                        } else {
-                            // No unique ctor match: type the deferred lambda args without an expected type.
-                            for &arg in &cl.base_args {
-                                if is_lambda(arg) {
-                                    c.expr(arg);
-                                }
-                            }
-                        }
-                    }
-                });
-                // Interface-delegation expressions (`: I by mk(x)`) are evaluated in the constructor too,
-                // so they're typed here — with the ctor params and `this` in scope.
-                for (_iface, e) in &cl.delegation_exprs {
-                    c.expr(*e);
-                }
-                for (bp_index, bp) in cl.body_props.iter().enumerate() {
-                    let member_extension_index = cl.body_props[..bp_index]
-                        .iter()
-                        .filter(|previous| previous.receiver.is_some() && previous.name == bp.name)
-                        .count();
-                    let outer_tparams = c.tparams.clone();
-                    c.tparams = c.tparams.extended_with(
-                        &bp.type_params,
-                        &bp.type_param_bounds,
-                        &class_internal_resolver(c.syms),
-                    );
-                    c.check_duplicate_param_names(
-                        &bp.context_params,
-                        bp.context_params.len(),
-                        bp.span,
-                    );
-                    let declared_property = c
-                        .same_package_class(&cl.name)
-                        .and_then(|class| class.declared_props.get(&bp.name))
-                        .map(|property| (property.ty, property.storage_ty));
-                    if let Some(init) = bp.init {
-                        let declared = declared_property
-                            .map(|(property_ty, field_ty)| field_ty.unwrap_or(property_ty))
-                            .or_else(|| bp.ty.as_ref().map(|r| c.resolve_ty(r)));
-                        let it = match declared {
-                            Some(expected) => c.expr_expected(init, expected),
-                            None => c.expr(init),
-                        };
-                        if let Some(declared) = declared {
-                            c.expect_assignable(
-                                declared,
-                                it,
-                                c.value_diagnostic_span(init, it),
-                                "property initializer",
-                            );
-                        }
-                    }
-                    // A delegated member property's delegate expression (`by Del()`) — type-check it so
-                    // its (and its sub-expressions') types are recorded for the `x$delegate` field lowering.
-                    if let Some(de) = bp.delegate {
-                        let dt = c.expr(de);
-                        c.record_delegate_getvalue(de, dt);
-                    }
-                    // A property's accessor bodies are checked like methods, with `field` bound to
-                    // the backing-field type (the implicit-`this` scope of props is already active).
-                    // A member extension accessor uses the extension receiver as `this`.
-                    let dispatch_this = c.this_ty;
-                    let dispatch_this_gen = c.this_gen;
-                    let dispatch_extension_receiver = c.this_extension_receiver;
-                    let outer_symbolic_signature_inference = c.symbolic_signature_inference;
-                    let extension_receiver =
-                        bp.receiver.as_ref().map(|receiver| c.resolve_ty(receiver));
-                    if let Some(receiver) = extension_receiver {
-                        c.set_this_ty(Some(receiver));
-                        c.this_labels.push((bp.name.clone(), receiver, false));
-                        let label_index = c.this_labels.len() - 1;
-                        let receiver_span =
-                            bp.receiver.as_ref().expect("receiver was resolved").span;
-                        c.extension_receiver_labels
-                            .push((label_index, receiver_span));
-                        c.this_extension_receiver = Some(receiver_span);
-                        c.symbolic_signature_inference = true;
-                    }
-                    // Cached class properties would bypass the extension receiver. Hide them while
-                    // the accessor resolves the ordered implicit receiver chain.
-                    let hidden_dispatch_bindings = if extension_receiver.is_some() {
-                        let names = props
-                            .iter()
-                            .map(|property| property.name.clone())
-                            .chain(cl.props.iter().map(|property| property.name.clone()))
-                            .collect::<Vec<_>>();
-                        let scope = c.scopes.last_mut().expect("class body scope");
-                        names
-                            .into_iter()
-                            .filter_map(|name| scope.remove(&name).map(|local| (name, local)))
-                            .collect::<Vec<_>>()
-                    } else {
-                        Vec::new()
-                    };
-                    let prop_ty = bp
-                        .ty
-                        .as_ref()
-                        .map(|r| c.resolve_ty(r))
-                        .or_else(|| declared_property.map(|(property_ty, _)| property_ty))
-                        .or_else(|| {
-                            c.same_package_class(&cl.name).and_then(|class| {
-                                extension_receiver
-                                    .and_then(|_| {
-                                        class
-                                            .member_ext_props(&bp.name)
-                                            .get(member_extension_index)
-                                            .map(|sig| sig.ret)
-                                    })
-                                    .or_else(|| {
-                                        class.props.iter().find_map(|(name, ty, _)| {
-                                            (name == &bp.name).then_some(*ty)
-                                        })
-                                    })
-                                    .or_else(|| {
-                                        class
-                                            .declared_props
-                                            .get(&bp.name)
-                                            .map(|property| property.ty)
-                                    })
-                            })
-                        })
-                        .unwrap_or(Ty::Error);
-                    c.push_scope();
-                    for parameter in &bp.context_params {
-                        if parameter.name == "_" {
-                            continue;
-                        }
-                        let parameter_type = c.resolve_ty(&parameter.ty);
-                        c.declare(&parameter.name, parameter_type, false);
-                    }
-                    let field_ty = (bp.receiver.is_none() && bp.context_params.is_empty())
-                        .then_some(
-                            declared_property
-                                .and_then(|(_, field_ty)| field_ty)
-                                .unwrap_or(prop_ty),
-                        );
-                    if let Some(getter) = &bp.getter {
-                        c.with_ret_field(prop_ty, field_ty, |c| match getter {
-                            FunBody::Expr(g) => {
-                                let gt = c.expr_expected(*g, prop_ty);
-                                c.expect_assignable(prop_ty, gt, c.span(*g), "getter body");
-                            }
-                            FunBody::Block(g) => {
-                                let _ = c.expr_statement(*g);
-                            }
-                            FunBody::None => {}
-                        });
-                    }
-                    if let Some(setter) = &bp.setter {
-                        if let Some(body) = &setter.body {
-                            c.with_ret_field(Ty::Unit, field_ty, |c| {
-                                c.push_scope();
-                                let pname =
-                                    crate::ast::setter_param_or_value(setter.param.as_ref());
-                                c.declare(&pname, prop_ty, true);
-                                match body {
-                                    FunBody::Expr(g) | FunBody::Block(g) => {
-                                        let _ = c.expr_statement(*g);
-                                    }
-                                    FunBody::None => {}
-                                }
-                                c.pop_scope();
-                            });
-                        }
-                    }
-                    c.pop_scope();
-                    c.scopes
-                        .last_mut()
-                        .expect("class body scope")
-                        .extend(hidden_dispatch_bindings);
-                    if extension_receiver.is_some() {
-                        c.extension_receiver_labels.pop();
-                        c.this_labels.pop();
-                    }
-                    c.this_ty = dispatch_this;
-                    c.this_gen = dispatch_this_gen;
-                    c.this_extension_receiver = dispatch_extension_receiver;
-                    c.symbolic_signature_inference = outer_symbolic_signature_inference;
-                    c.tparams = outer_tparams;
-                }
-                for step in &cl.init_order {
-                    if let ClassInit::Block(b) = step {
-                        c.expr_statement(*b);
-                    }
-                }
-                c.pop_scope();
-                for _ in 0..label_depth {
-                    c.this_labels.pop();
-                }
-                c.set_this_ty(None);
-                // Enum entry constructor arguments (e.g. `RED(0xff0000)`) are type-checked in a
-                // fresh scope — they're emitted in the static `<clinit>` and cannot access `this`.
-                if cl.is_enum() {
-                    let ctor_tys: Vec<Ty> = cl.props.iter().map(|p| c.resolve_ty(&p.ty)).collect();
-                    for entry in &cl.enum_entries {
-                        // A NAMED argument (`C(b = "b")`) is checked against the type of the parameter it
-                        // names, not the one at its textual position; positional arguments keep order.
-                        let mut next_pos = 0usize;
-                        for (j, a) in entry.args.iter().enumerate() {
-                            let idx = match entry.arg_names.get(j).and_then(|n| n.as_ref()) {
-                                Some(name) => cl.props.iter().position(|p| &p.name == name),
-                                None => {
-                                    let p = next_pos;
-                                    next_pos += 1;
-                                    Some(p)
-                                }
-                            };
-                            let expected = idx.and_then(|i| ctor_tys.get(i)).copied();
-                            // A lambda passed to a function-typed enum-ctor parameter (`plus("+",
-                            // { x, y -> x + y })`) binds its parameter types from that parameter's
-                            // `Ty::Fun` — like a constructor/function call — so the body sees real types.
-                            let at = match expected {
-                                Some(Ty::Fun(s))
-                                    if matches!(c.file.expr(*a), Expr::Lambda { .. }) =>
-                                {
-                                    let pts = s.params.clone();
-                                    c.check_lambda_with_types(*a, &pts)
-                                }
-                                _ => c.expr(*a),
-                            };
-                            if let Some(expected_ty) = expected {
-                                c.expect_assignable(
-                                    expected_ty,
-                                    at,
-                                    c.span(*a),
-                                    "enum entry argument",
-                                );
-                            }
-                        }
-                    }
-                }
-                // `companion object` members are checked statically, with companion props/methods in
-                // scope unqualified.
-                if !cl.companion_methods.is_empty() || !cl.companion_props.is_empty() {
-                    // A plain companion property hoists to a static field on the outer class, so a
-                    // companion PROPERTY whose name collides with an instance member would duplicate
-                    // a field (kotlinc separates them via the nested Companion class). Reject (skip).
-                    // Companion METHODS are emitted on `C$Companion`, so a same-NAME method on the
-                    // outer instance is physically legal. The remaining guard is semantic: the
-                    // checker currently consults the unqualified companion fallback before its
-                    // implicit instance receiver, so the two families must not accept the same call
-                    // arity or it could bind the wrong owner. Compare the complete callable arity
-                    // RANGE (defaults/varargs included), not raw parameter-vector length.
-                    let inst_names: std::collections::HashSet<&str> = cl
-                        .props
-                        .iter()
-                        .filter(|p| p.is_property)
-                        .map(|p| p.name.as_str())
-                        .chain(cl.body_props.iter().map(|p| p.name.as_str()))
-                        .chain(cl.methods.iter().map(|m| m.name.as_str()))
-                        .collect();
-                    for cp in &cl.companion_props {
-                        if inst_names.contains(cp.name.as_str()) {
-                            c.diags.error(cl.span, format!("krusty: companion member '{}' collides with an instance member (unsupported)", cp.name));
-                        }
-                    }
-                    for cm in &cl.companion_methods {
-                        let overlapping_instance = cl
-                            .methods
-                            .iter()
-                            .any(|m| m.name == cm.name && source_callable_arities_overlap(m, cm));
-                        if overlapping_instance {
-                            c.diags.error(cl.span, format!("krusty: companion member '{}' collides with an instance member (unsupported)", cm.name));
-                        }
-                    }
-                    c.companion_of = Some(cl.name.clone());
-                    for p in &cl.companion_props {
-                        if let Some(init) = p.init {
-                            let declared = p.ty.as_ref().map(|r| c.resolve_ty(r));
-                            let it = match declared {
-                                Some(expected) => c.expr_expected(init, expected),
-                                None => c.expr(init),
-                            };
-                            if let Some(declared) = declared {
-                                c.expect_assignable(
-                                    declared,
-                                    it,
-                                    c.span(init),
-                                    "companion property",
-                                );
-                            }
-                        }
-                        // A field-less custom-accessor companion property lowers to accessor METHODS
-                        // on the companion, so their bodies need checking like any other body — the
-                        // initializer-only walk above left the setter's parameter untyped, which the
-                        // lowerer then had no type for.
-                        let prop_ty = c
-                            .same_package_class(&cl.name)
-                            .and_then(|class| class.static_props.get(&p.name))
-                            .map(|&(ty, _, _)| ty)
-                            .unwrap_or(Ty::Error);
-                        if let Some(getter) = &p.getter {
-                            match getter {
-                                FunBody::Expr(g) => {
-                                    let gt = c.expr_expected(*g, prop_ty);
-                                    c.expect_assignable(prop_ty, gt, c.span(*g), "getter body");
-                                }
-                                FunBody::Block(g) => {
-                                    c.with_ret(prop_ty, |c| {
-                                        let _ = c.expr_statement(*g);
-                                    });
-                                }
-                                FunBody::None => {}
-                            }
-                        }
-                        if let Some(body) = p.setter.as_ref().and_then(|s| s.body.as_ref()) {
-                            c.push_scope();
-                            let pname = crate::ast::setter_param_or_value(
-                                p.setter.as_ref().and_then(|s| s.param.as_ref()),
-                            );
-                            c.declare(&pname, prop_ty, true);
-                            c.with_ret(Ty::Unit, |c| match body {
-                                FunBody::Expr(g) | FunBody::Block(g) => {
-                                    let _ = c.expr_statement(*g);
-                                }
-                                FunBody::None => {}
-                            });
-                            c.pop_scope();
-                        }
-                    }
-                    for (method_index, m) in cl.companion_methods.iter().enumerate() {
-                        if capture_scope
-                            .as_ref()
-                            .and_then(|scope| scope.class_plans.get(&d))
-                            // A missing plan means completeness fell back to the full semantic walk;
-                            // an unexpected length mismatch must fail conservative for the same reason.
-                            .is_none_or(|plan| {
-                                plan.companion_methods
-                                    .get(method_index)
-                                    .copied()
-                                    .unwrap_or(true)
-                            })
-                        {
-                            c.check_fun(m, None);
-                        }
-                    }
-                    c.companion_of = None;
-                }
-                c.tparams.clear();
+                c.check_class(scope, cl, d);
             }
             Decl::Property(p) => {
-                // An extension property's own generic type parameters (`val <T> Array<T>.length: Int`)
-                // scope over its receiver, declared type, and accessor bodies — bind them (erased) so
-                // `T` resolves rather than reading as an unresolved reference.
-                let resolve = class_internal_resolver(c.syms);
-                c.tparams = TParams::from_decl_with(&p.type_params, &p.type_param_bounds, &resolve);
-                c.check_duplicate_param_names(&p.context_params, p.context_params.len(), p.span);
-                c.push_scope();
-                for parameter in &p.context_params {
-                    if parameter.name == "_" {
-                        continue;
-                    }
-                    let parameter_type = c.resolve_ty(&parameter.ty);
-                    c.declare(&parameter.name, parameter_type, false);
-                }
-                // For an extension property (`val Recv.name: T get() = …`), `this` inside the
-                // accessors is the receiver.
-                let prev_this = c.this_ty;
-                let prev_this_gen = c.this_gen;
-                let prev_extension_receiver = c.this_extension_receiver;
-                let recv_ty = p.receiver.as_ref().map(|r| c.resolve_ty(r));
-                if let Some(rt) = recv_ty {
-                    c.set_this_ty(Some(rt));
-                    c.this_labels.push((p.name.clone(), rt, false));
-                    let label_index = c.this_labels.len() - 1;
-                    let receiver_span = p.receiver.as_ref().expect("receiver was resolved").span;
-                    c.extension_receiver_labels
-                        .push((label_index, receiver_span));
-                    c.this_extension_receiver = Some(receiver_span);
-                }
-                let prop_ty =
-                    p.ty.as_ref()
-                        .map(|r| c.resolve_ty(r))
-                        .or_else(|| {
-                            c.syms
-                                .source_extension_property((c.file_index, d.0))
-                                .map(|signature| signature.ty)
-                        })
-                        .or_else(|| {
-                            c.syms
-                                .context_props
-                                .get(&(c.file_index, d.0))
-                                .map(|property| property.ty)
-                        })
-                        .unwrap_or(Ty::Error);
-                // A top-level computed property (`val g: T get() = …`) emits a `getG()` static method
-                // (Phase: top-level computed). Type-check the getter body against the declared type. A
-                // top-level backing-field property (`val x = init get() = field`) binds `field` to the
-                // property type for the accessor body (like a member accessor).
-                let has_backing_field =
-                    p.receiver.is_none() && p.context_params.is_empty() && p.init.is_some();
-                if let Some(g) = &p.getter {
-                    let field_ty = has_backing_field.then_some(prop_ty);
-                    c.with_ret_field(prop_ty, field_ty, |c| match g {
-                        FunBody::Expr(e) => {
-                            let gt = c.expr_expected(*e, prop_ty);
-                            c.expect_assignable(prop_ty, gt, c.span(*e), "getter body");
-                        }
-                        FunBody::Block(b) => {
-                            let _ = c.expr_statement(*b);
-                        }
-                        FunBody::None => {}
-                    });
-                }
-                // A setter body: an extension property's is checked with `this` = receiver; a top-level
-                // backing-field property's binds `field` to the property type. Both bind the value param.
-                if p.receiver.is_some() || has_backing_field {
-                    if let Some(setter) = &p.setter {
-                        if let Some(body) = &setter.body {
-                            let field_ty = has_backing_field.then_some(prop_ty);
-                            c.with_ret_field(Ty::Unit, field_ty, |c| {
-                                c.push_scope();
-                                let pname =
-                                    crate::ast::setter_param_or_value(setter.param.as_ref());
-                                c.declare(&pname, prop_ty, true);
-                                match body {
-                                    FunBody::Expr(g) | FunBody::Block(g) => {
-                                        let _ = c.expr_statement(*g);
-                                    }
-                                    FunBody::None => {}
-                                }
-                                c.pop_scope();
-                            });
-                        }
-                    }
-                }
-                if recv_ty.is_some() {
-                    c.extension_receiver_labels.pop();
-                    c.this_labels.pop();
-                }
-                c.this_ty = prev_this;
-                c.this_gen = prev_this_gen;
-                c.this_extension_receiver = prev_extension_receiver;
-                // A delegated property's delegate expression (`by Del()`) must be type-checked so its
-                // (and its sub-expressions') types are recorded for the lowering of `x$delegate`.
-                if let Some(de) = p.delegate {
-                    let dt = c.expr(de);
-                    c.record_delegate_getvalue(de, dt);
-                }
-                if let Some(init) = p.init {
-                    let declared = syms
-                        .props
-                        .get(&p.name)
-                        .copied()
-                        .filter(|(t, _, _)| *t != Ty::Error)
-                        .map(|(ty, _, _)| ty);
-                    let it = match declared.filter(|_| p.ty.is_some()) {
-                        Some(expected) => c.expr_expected(init, expected),
-                        None => c.expr(init),
-                    };
-                    if let Some(declared) = declared {
-                        if p.ty.is_some() {
-                            c.expect_assignable(
-                                declared,
-                                it,
-                                c.value_diagnostic_span(init, it),
-                                "property initializer",
-                            );
-                        }
-                    }
-                }
-                c.pop_scope();
-                c.tparams.clear();
+                c.check_property(scope, p, d);
             }
         }
     }
     if let Some(body) = file.script_body.filter(|_| {
         !capture_discovery
-            || capture_scope
+            || c.capture_scope
                 .as_ref()
                 .is_some_and(|scope| scope.script_body)
     }) {
-        c.scopes.truncate(base_scope_depth);
         c.reset_body_mutations(Some(body));
-        c.push_local_funs();
         c.in_script_body = true;
         c.with_ret_allowed(Ty::Unit, false, |c| {
-            c.expr_statement(body);
+            c.expr_statement(scope, body);
         });
         c.in_script_body = false;
-        c.pop_local_funs();
     }
     if !capture_discovery {
         for reference in &file.detached_type_refs {
-            c.resolve_ty(reference);
+            c.resolve_ty(scope, reference);
         }
     }
     let Checker {
@@ -13494,6 +13225,7 @@ fn check_file_at_impl_mode(
         resolved_call_type_args,
         narrowed_this_member,
         resolved_calls,
+        implicit_receiver_selections,
         resolved_source_calls,
         source_extension_properties,
         source_extension_property_writes,
@@ -13514,6 +13246,7 @@ fn check_file_at_impl_mode(
         resolved_default_member_calls,
         resolved_library_companion_consts,
         resolved_enum_entries,
+        resolved_enum_statics,
         resolved_call_arg_slots,
         resolved_whole_array_vararg_args,
         synthetic_ext_calls,
@@ -13521,6 +13254,7 @@ fn check_file_at_impl_mode(
         context_args,
         super_ctor_params,
         discovered_anonymous_captures,
+        discovered_local_class_captures,
         source_contracts,
         ..
     } = c;
@@ -13640,6 +13374,7 @@ fn check_file_at_impl_mode(
         resolved_type_refs,
         anonymous_object_captures_by_class,
         anonymous_object_captures_by_construction,
+        local_class_captures_by_class: discovered_local_class_captures,
         anonymous_object_types,
         expr_lowers,
         stmt_lowers,
@@ -13648,6 +13383,7 @@ fn check_file_at_impl_mode(
         resolved_call_type_args,
         narrowed_this_member,
         resolved_calls,
+        implicit_receiver_selections,
         resolved_source_calls,
         source_extension_properties,
         source_extension_property_writes,
@@ -13667,6 +13403,7 @@ fn check_file_at_impl_mode(
         resolved_default_member_calls,
         resolved_library_companion_consts,
         resolved_enum_entries,
+        resolved_enum_statics,
         resolved_call_arg_slots,
         resolved_whole_array_vararg_args,
         synthetic_ext_calls,
@@ -13901,14 +13638,6 @@ struct Checker<'a> {
     diags: &'a mut DiagSink,
     expr_types: Vec<Ty>,
     resolved_type_refs: HashMap<(u32, u32), TypeName>,
-    scopes: Vec<HashMap<String, Local>>,
-    /// Active PROPERTY-PATH narrowings (`a.b` proven non-null / `is T` by an enclosing condition),
-    /// one frame per scope — pushed/popped in lockstep with [`Self::scopes`] so a branch's
-    /// narrowings never leak past its end, exactly like the `declare`-based root narrowings.
-    /// Unlike `Local::narrowed` (straight-line `var` flow) these survive into nested closures and
-    /// loops: every step of a [`NarrowPath`] is immutable, so the proof holds wherever the path is
-    /// re-read. Root-only narrowings are NOT stored here (they shadow the binding via `declare`).
-    path_narrows: Vec<HashMap<NarrowPath, PathNarrowing>>,
     ret_ty: Ty,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
     /// propagation must re-arm it through [`Self::expr_expected`].
@@ -13922,17 +13651,6 @@ struct Checker<'a> {
     /// a function whose facade is in this set (kotlinc), passed to the [`SymbolResolver`].
     fn_scope: Vec<TypeName>,
     function_import_scope: crate::symbol_resolver::FunctionImportScope,
-    /// Generic type parameters in scope (erased to `java/lang/Object`).
-    tparams: TParams,
-    /// The `reified` type parameters in scope (a subset of `tparams`, from the enclosing `inline fun`).
-    /// A class literal `T::class` is only valid on a reified `T` (kotlinc rejects it otherwise).
-    reified_tparams: std::collections::HashSet<String>,
-    /// The type of `this` when checking class members (`None` at top level).
-    this_ty: Option<Ty>,
-    /// Bumped on EVERY `this` rebind ([`Self::set_this_ty`]) — identifies the receiver OBJECT
-    /// epoch for `this`-rooted property-path narrowings (a same-type receiver lambda is still a
-    /// different object). Save/restore sites restore it together with `this_ty`.
-    this_gen: u64,
     /// `true` while checking expressions where implicit `this` is unavailable or uninitialized — a class's
     /// `super(…)`/delegation-call arguments and constructor-parameter defaults (the latter are
     /// evaluated in the CALLER's context). Every implicit-`this` callable-reference shape uses this
@@ -13950,8 +13668,9 @@ struct Checker<'a> {
     /// a class body pushes `(ClassName, ty, true)`; a receiver lambda / scope function pushes
     /// `(fnName, receiverTy, false)`. Resolves `this@Label`. The innermost entry is the current `this`
     /// (lowered as a bare `this`); a `this@Label` matching the IMMEDIATE outer CLASS (one class level up,
-    /// nothing but classes between) lowers via the inner class's `this$0`. Anything else type-checks but
-    /// the lowerer skips it (it can't yet reach a captured / multi-level outer receiver).
+    /// nothing but classes between) lowers through the current class's captured enclosing-instance
+    /// field. Anything else type-checks but the lowerer skips it (it can't yet reach a captured /
+    /// multi-level outer receiver).
     this_labels: Vec<(String, Ty, bool)>,
     /// Source class owners of a hoisted anonymous-object declaration, nearest first. They contribute
     /// lexical classifier scope but are not implicit runtime receivers (captures remain a separate ABI).
@@ -13966,10 +13685,6 @@ struct Checker<'a> {
     /// When checking a `companion object` member, the enclosing class name — its companion
     /// methods/properties are then in scope unqualified.
     companion_of: Option<String>,
-    /// Stack of frames for local-function scopes; each frame maps name → (StmtId, Signature).
-    /// Pushed when entering a function, popped on exit; each `Stmt::LocalFun` registers into the
-    /// innermost frame so that sibling local-function calls resolve correctly.
-    local_funs: Vec<HashMap<String, Vec<(StmtId, Signature)>>>,
     /// Whether executable Kotlin-script statements are being checked.
     in_script_body: bool,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
@@ -13997,6 +13712,10 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Checker-selected receiver for a bare call or property read. The receiver stack is semantic scope
+    /// state, so this decision must cross the frontend/backend boundary rather than being guessed from
+    /// JVM slot names.
+    implicit_receiver_selections: HashMap<ExprId, Ty>,
     /// Decoded `contract { … }` effects of the current file's top-level functions, keyed by
     /// `DeclId`. Filled before the decl walk (decode is AST-only) so call sites see contracts
     /// irrespective of function declaration order.
@@ -14021,6 +13740,7 @@ struct Checker<'a> {
     resolved_default_member_calls: HashMap<ExprId, ResolvedDefaultMemberCall>,
     resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
     resolved_enum_entries: HashMap<ExprId, TypeName>,
+    resolved_enum_statics: HashMap<ExprId, TypeName>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
@@ -14033,11 +13753,8 @@ struct Checker<'a> {
     fn_reassigned: std::collections::HashSet<String>,
     /// Names reassigned INSIDE a closure (lambda) within the function body. A `var` in here can be set
     /// (e.g. to null) by a closure invoked between a narrowing assignment and a later read, so it is
-    /// never flow-narrowed after an assignment (soundness for [`Local::narrowed`]).
+    /// never flow-narrowed after an assignment (soundness for [`scope::Flow`] straight-line reads).
     fn_closure_reassigned: std::collections::HashSet<String>,
-    /// True while any [`Local::narrowed`] flow-narrowing is set — a cheap guard so the common (no
-    /// narrowing) path skips the scope walk in [`Self::clear_local_narrows`] on every push/pop.
-    narrow_active: bool,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -14050,11 +13767,44 @@ struct Checker<'a> {
     symbolic_signature_inference: bool,
     discover_anonymous_captures: bool,
     discovered_anonymous_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+    discovered_local_class_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+    /// The file's anonymous-object ownership graph and (in capture-discovery mode) the narrowed set
+    /// of declarations to walk. Both are per-FILE facts every classifier check needs, and a local
+    /// class is entered from a statement deep inside a body — threading them down as parameters
+    /// would mean carrying them through every `stmt`/`expr` frame.
+    anonymous_lexical_scope: AnonymousLexicalClassScope,
+    capture_scope: Option<CaptureDiscoveryScope>,
     /// In-scope loop labels (`l@ for …`), innermost last. A `break@l`/`continue@l` must name one of
     /// these — an unknown label is rejected (the file skips) rather than silently retargeting a loop.
     loop_labels: Vec<String>,
     loop_depth: usize,
     return_allowed: bool,
+}
+
+/// What a local class reads from its enclosing scope, split by whether the reference is modelled.
+#[derive(Default)]
+struct LocalClassCaptures {
+    /// Enclosing bindings read from ordinary member bodies: the enclosing instance first (lowering
+    /// identifies it by position), then the captured values sorted by name.
+    values: Vec<AnonymousObjectCapture>,
+    /// The first reference that is NOT modelled, if any. Its presence rejects the class.
+    unsupported: Option<String>,
+}
+
+/// The checker state scoped to ONE function/property body, saved across a nested classifier check.
+struct BodyState {
+    ret_ty: Ty,
+    return_allowed: bool,
+    loop_labels: Vec<String>,
+    loop_depth: usize,
+    this_extension_receiver: Option<Span>,
+    companion_of: Option<String>,
+    allow_lambda_mutation: bool,
+    symbolic_signature_inference: bool,
+    fn_reassigned: std::collections::HashSet<String>,
+    fn_closure_reassigned: std::collections::HashSet<String>,
+    lexical_class_context: Vec<TypeName>,
+    exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
 }
 
 enum ClasspathMemberSlotCall {
@@ -14261,6 +14011,224 @@ fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
 }
 
 impl<'a> Checker<'a> {
+    /// Take the checker state that belongs to the BODY currently being checked, leaving the checker
+    /// as if no body were open. Checking a local class enters a fresh set of bodies part-way through
+    /// an enclosing one; without this, the class's last member would leave its expected return, its
+    /// receiver and its mutation summary behind for the rest of the enclosing body.
+    fn take_body_state(&mut self) -> BodyState {
+        BodyState {
+            ret_ty: std::mem::replace(&mut self.ret_ty, Ty::Unit),
+            return_allowed: std::mem::replace(&mut self.return_allowed, true),
+            // A `break`/`continue` inside a local class's member cannot target an enclosing loop.
+            loop_labels: std::mem::take(&mut self.loop_labels),
+            loop_depth: std::mem::replace(&mut self.loop_depth, 0),
+            this_extension_receiver: self.this_extension_receiver.take(),
+            companion_of: self.companion_of.take(),
+            allow_lambda_mutation: std::mem::replace(&mut self.allow_lambda_mutation, false),
+            symbolic_signature_inference: std::mem::replace(
+                &mut self.symbolic_signature_inference,
+                false,
+            ),
+            fn_reassigned: std::mem::take(&mut self.fn_reassigned),
+            fn_closure_reassigned: std::mem::take(&mut self.fn_closure_reassigned),
+            lexical_class_context: std::mem::take(&mut self.lexical_class_context),
+            exact_anonymous_class_roots: std::mem::take(&mut self.exact_anonymous_class_roots),
+        }
+    }
+
+    fn restore_body_state(&mut self, saved: BodyState) {
+        self.ret_ty = saved.ret_ty;
+        self.return_allowed = saved.return_allowed;
+        self.loop_labels = saved.loop_labels;
+        self.loop_depth = saved.loop_depth;
+        self.this_extension_receiver = saved.this_extension_receiver;
+        self.companion_of = saved.companion_of;
+        self.allow_lambda_mutation = saved.allow_lambda_mutation;
+        self.symbolic_signature_inference = saved.symbolic_signature_inference;
+        self.fn_reassigned = saved.fn_reassigned;
+        self.fn_closure_reassigned = saved.fn_closure_reassigned;
+        self.lexical_class_context = saved.lexical_class_context;
+        self.exact_anonymous_class_roots = saved.exact_anonymous_class_roots;
+    }
+
+    /// What a statement-position local class reads from its enclosing scope.
+    ///
+    /// Deliberately syntactic and conservative: a name the class also declares is not a capture, but
+    /// a name that merely *looks* like one is treated as such. Over-reporting costs an unused
+    /// constructor parameter (or a skipped file, when the name is one of the unmodelled kinds);
+    /// under-reporting emits a class without the constructor parameter its capture needs.
+    fn local_class_captures(&self, scope: &CheckerScope<'_>, cl: &ClassDecl) -> LocalClassCaptures {
+        let mut result = LocalClassCaptures::default();
+        let mut outer: std::collections::HashSet<String> = std::collections::HashSet::new();
+        scope.visit_bindings(Ns::Value, |name, _| {
+            outer.insert(name.to_string());
+        });
+        // A local FUNCTION carries captures of its own; reaching one from a local class would have
+        // to compose the two, which is not modelled.
+        let mut unsupported: std::collections::HashSet<String> = std::collections::HashSet::new();
+        scope.visit_bindings(Ns::Function, |name, _| {
+            unsupported.insert(name.to_string());
+        });
+        // Reaching the enclosing INSTANCE is the second capture kind: the receiver itself, not a
+        // binding in the chain. It is carried as ONE capture however many of its members are read,
+        // so only the INNERMOST receiver contributes names — that is the object lowering supplies,
+        // and reading a member of a further-out receiver would need a CHAIN of captures that is not
+        // modelled.
+        //
+        // It contributes nothing unless that receiver is the DISPATCH receiver, which is what the
+        // innermost label being a CLASS label says: lowering supplies the capture from `$dispatch`,
+        // so with an extension receiver or a receiver lambda nearer than the enclosing class the
+        // checker's `this` and the object handed to the constructor are two different values. Every
+        // name then falls through to the value channel, finds no binding, and the class is rejected.
+        let innermost_label = self.this_labels.last();
+        let enclosing_instance = scope
+            .this_ty()
+            .filter(|_| innermost_label.is_some_and(|label| label.2));
+        let mut through_outer: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(internal) = enclosing_instance.and_then(Ty::obj_internal) {
+            if let Some(class) = self.syms.class_by_type_name(internal) {
+                through_outer.extend(class.props.iter().map(|(name, _, _)| name.clone()));
+                through_outer.extend(class.methods.keys().cloned());
+            }
+            if let Some(label) = innermost_label {
+                through_outer.insert(format!("this@{}", class_declaration_label(&label.0)));
+            }
+        }
+        // Anything the class declares itself shadows the outer name.
+        for name in cl
+            .props
+            .iter()
+            .map(|p| &p.name)
+            .chain(cl.body_props.iter().map(|p| &p.name))
+            .chain(cl.methods.iter().map(|m| &m.name))
+            .chain(cl.companion_methods.iter().map(|m| &m.name))
+        {
+            outer.remove(name);
+            unsupported.remove(name);
+            through_outer.remove(name);
+        }
+        // Each name belongs to exactly one channel; the nearer binding wins.
+        for name in unsupported.iter().chain(&through_outer) {
+            outer.remove(name);
+        }
+        for name in &unsupported {
+            through_outer.remove(name);
+        }
+        // A capture read during CONSTRUCTION (an initializer, an `init` block, a base-constructor
+        // argument, a parameter default, a secondary constructor) is not modelled yet: it is live
+        // before the object exists, which is a different problem from a member body reading it.
+        let mut construction_bodies: Vec<ExprId> = Vec::new();
+        for p in &cl.body_props {
+            construction_bodies.extend(p.init);
+        }
+        for step in &cl.init_order {
+            if let ClassInit::Block(b) = step {
+                construction_bodies.push(*b);
+            }
+        }
+        construction_bodies.extend(cl.base_args.iter().copied());
+        construction_bodies.extend(cl.props.iter().filter_map(|p| p.default));
+        construction_bodies.extend(cl.companion_base_args.iter().copied());
+        let mut everything = outer.clone();
+        everything.extend(unsupported.iter().cloned());
+        everything.extend(through_outer.iter().cloned());
+        for ctor in &cl.secondary_ctors {
+            let mut visible = everything.clone();
+            for p in &ctor.params {
+                visible.remove(&p.name);
+            }
+            let delegation_args = match &ctor.delegation {
+                CtorDelegation::None => &[][..],
+                CtorDelegation::This(call) | CtorDelegation::Super(call) => call.args.as_slice(),
+            };
+            for body in ctor
+                .body
+                .into_iter()
+                .chain(ctor.params.iter().filter_map(|p| p.default))
+                .chain(delegation_args.iter().copied())
+            {
+                if let Some(name) = first_used_name(self.file, body, &visible) {
+                    result.unsupported.get_or_insert(name);
+                }
+            }
+        }
+        for body in construction_bodies {
+            if let Some(name) = first_used_name(self.file, body, &everything) {
+                result.unsupported.get_or_insert(name);
+            }
+        }
+        // Member bodies (including a computed property's accessors, which are methods) may capture.
+        let mut member_bodies: Vec<(Vec<String>, ExprId)> = Vec::new();
+        for m in cl.methods.iter().chain(&cl.companion_methods) {
+            if let FunBody::Expr(e) | FunBody::Block(e) = m.body {
+                member_bodies.push((m.params.iter().map(|p| p.name.clone()).collect(), e));
+            }
+        }
+        for p in &cl.body_props {
+            if let Some(FunBody::Expr(e) | FunBody::Block(e)) = p.getter {
+                member_bodies.push((Vec::new(), e));
+            }
+        }
+        let narrows = scope.local_narrowings();
+        let mut captured: Vec<String> = Vec::new();
+        let mut needs_outer = false;
+        for (params, body) in member_bodies {
+            let mut visible = everything.clone();
+            for p in &params {
+                visible.remove(p);
+            }
+            for name in used_names(self.file, body, &visible) {
+                if unsupported.contains(&name) {
+                    result.unsupported.get_or_insert(name);
+                } else if through_outer.contains(&name) {
+                    needs_outer = true;
+                } else if !captured.contains(&name) {
+                    captured.push(name);
+                }
+            }
+        }
+        // The enclosing instance goes FIRST: lowering identifies it by POSITION (field 0), which is
+        // what both an outer member read and a `this@Outer` go through.
+        if needs_outer {
+            // A `@JvmInline value class` has no instance to capture: inside its constructor `this`
+            // is the bare underlying value, so a field typed as the class would hold something else
+            // entirely (`codegen/box/inlineClasses/initBlock.kt` fails verification).
+            let unboxed_receiver = enclosing_instance
+                .and_then(Ty::obj_internal)
+                .and_then(|internal| self.syms.class_by_type_name(internal))
+                .is_some_and(|class| class.value_field.is_some());
+            match enclosing_instance.filter(|_| !unboxed_receiver) {
+                Some(outer) => result.values.push(AnonymousObjectCapture {
+                    name: "this$0".to_string(),
+                    ty: outer,
+                    source: AnonymousObjectCaptureSource::EnclosingInstance,
+                }),
+                None => {
+                    result.unsupported.get_or_insert("this".to_string());
+                }
+            }
+        }
+        captured.sort();
+        for name in captured {
+            let Some(local) = self.lookup(scope, &name) else {
+                result.unsupported.get_or_insert(name);
+                continue;
+            };
+            // A captured `var` that is reassigned anywhere is shared MUTABLE state; only an
+            // effectively-immutable binding can be captured by value.
+            if local.is_var && self.fn_reassigned.contains(&name) {
+                result.unsupported.get_or_insert(name);
+                continue;
+            }
+            result.values.push(AnonymousObjectCapture {
+                ty: narrows.get(&name).copied().unwrap_or(local.ty),
+                name,
+                source: AnonymousObjectCaptureSource::LexicalValue,
+            });
+        }
+        result
+    }
+
     fn reset_body_mutations(&mut self, body: Option<ExprId>) {
         self.fn_reassigned.clear();
         self.fn_closure_reassigned.clear();
@@ -14278,17 +14246,18 @@ impl<'a> Checker<'a> {
     /// selected class region reads these checker-wide sets while discovering mutable captures.
     fn check_method_in_capture_plan(
         &mut self,
+        scope: &CheckerScope<'_>,
         function: &FunDecl,
         properties: &[ScopedProperty],
         plan: Option<&ClassCapturePlan>,
         method_index: usize,
     ) {
         let Some(plan) = plan else {
-            self.check_method(function, properties);
+            self.check_method(scope, function, properties);
             return;
         };
         match plan.methods.get(method_index) {
-            Some(true) => self.check_method(function, properties),
+            Some(true) => self.check_method(scope, function, properties),
             Some(false) => self.reset_body_mutations(fun_body_expr(&function.body)),
             None => {}
         }
@@ -14354,12 +14323,12 @@ impl<'a> Checker<'a> {
         r
     }
 
-    fn check_loop_body(&mut self, body: ExprId, label: &Option<String>) {
+    fn check_loop_body(&mut self, scope: &CheckerScope<'_>, body: ExprId, label: &Option<String>) {
         if let Some(label) = label {
             self.loop_labels.push(label.clone());
         }
         self.loop_depth += 1;
-        self.expr_statement(body);
+        self.expr_statement(scope, body);
         self.loop_depth -= 1;
         if label.is_some() {
             self.loop_labels.pop();
@@ -14398,25 +14367,31 @@ impl<'a> Checker<'a> {
     }
 
     /// Current smart-cast type of the implicit receiver.
-    fn effective_this_narrow(&self) -> Option<Ty> {
+    fn effective_this_narrow(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
         self.this_narrow.or_else(|| {
-            self.lookup("this")
-                .map(|local| local.narrowed.unwrap_or(local.ty))
+            self.lookup(scope, "this")
+                .map(|local| self.local_narrowing(scope, "this").unwrap_or(local.ty))
         })
     }
 
-    fn check_default_arg(&mut self, ty_ref: &TypeRef, default: ExprId, pty: Ty) {
+    fn check_default_arg(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        ty_ref: &TypeRef,
+        default: ExprId,
+        pty: Ty,
+    ) {
         let dty = if matches!(self.file.expr(default), Expr::Lambda { .. })
             && (!ty_ref.fun_params.is_empty() || ty_ref.name == "<fun>")
         {
             let lam_pts: Vec<Ty> = ty_ref
                 .fun_params
                 .iter()
-                .map(|r| self.resolve_ty(r))
+                .map(|r| self.resolve_ty(scope, r))
                 .collect();
-            self.check_lambda_with_types(default, &lam_pts)
+            self.check_lambda_with_types(scope, default, &lam_pts)
         } else {
-            self.expr(default)
+            self.expr(scope, default)
         };
         self.expect_assignable(
             pty,
@@ -14494,13 +14469,17 @@ impl<'a> Checker<'a> {
 
     fn check_source_extension_call_args(
         &mut self,
-        call: ExprId,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
         name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
         selected: &crate::libraries::FunctionInfo,
         params: &[Ty],
     ) -> bool {
+        let CallArgs {
+            call,
+            args,
+            arg_tys,
+        } = call_args;
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         if arg_names.is_some()
             || selected.call_sig.vararg
@@ -14591,7 +14570,7 @@ impl<'a> Checker<'a> {
             );
             false
         } else {
-            self.expect_call_args(params, false, args, arg_tys);
+            self.expect_call_args(scope, params, false, args, arg_tys);
             true
         }
     }
@@ -14910,7 +14889,9 @@ impl<'a> Checker<'a> {
         message
     }
 
-    fn toplevel_source_ref_candidate(
+    /// Render a receiver-less callable directly from its semantic record. This fallback is stable
+    /// across source/module/provider origins and is therefore suitable for ambiguity diagnostics.
+    fn top_level_candidate_display(
         name: &str,
         function: &crate::libraries::FunctionInfo,
     ) -> String {
@@ -15070,10 +15051,7 @@ impl<'a> Checker<'a> {
             let mut message = "overload resolution ambiguity between candidates:".to_string();
             for index in maximal {
                 message.push('\n');
-                message.push_str(&Self::toplevel_source_ref_candidate(
-                    name,
-                    &candidates[index],
-                ));
+                message.push_str(&Self::top_level_candidate_display(name, &candidates[index]));
             }
             self.diags
                 .error(self.member_name_span(expression, name), message);
@@ -15215,8 +15193,16 @@ impl<'a> Checker<'a> {
         arg_tys: &[Option<Ty>],
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
+        type_args: &[Ty],
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
-        self.top_level_lambda_shape_in_scope(name, arg_tys, arg_names, trailing_lambda, None)
+        self.top_level_lambda_shape_in_scope(
+            name,
+            arg_tys,
+            arg_names,
+            trailing_lambda,
+            None,
+            type_args,
+        )
     }
 
     fn lambda_overload_partially_applicable(
@@ -15225,13 +15211,14 @@ impl<'a> Checker<'a> {
         receiver: Option<Ty>,
         arg_tys: &[Option<Ty>],
         argument_map: &[usize],
+        type_args: &[Ty],
     ) -> bool {
         let semantic = overload.semantic_signature();
         let generic_params = argument_map
             .iter()
             .all(|&parameter| parameter < semantic.params.len())
             .then(|| {
-                let mut bindings = std::collections::HashMap::new();
+                let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
                 if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
                     crate::symbol_resolver::unify_ty(receiver_shape, receiver, &mut bindings);
                 }
@@ -15281,10 +15268,11 @@ impl<'a> Checker<'a> {
         receiver: Option<Ty>,
         arg_tys: &[Option<Ty>],
         argument_map: &[usize],
+        type_args: &[Ty],
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let mut shape = crate::symbol_resolver::LambdaCallShape::default();
         let semantic = overload.semantic_signature();
-        let mut binds = std::collections::HashMap::new();
+        let mut binds = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
         if let (Some(receiver), Some(receiver_sig)) = (receiver, semantic.receiver) {
             crate::symbol_resolver::unify_ty(receiver_sig, receiver, &mut binds);
         }
@@ -15430,6 +15418,7 @@ impl<'a> Checker<'a> {
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
         scope: Option<&[TypeName]>,
+        type_args: &[Ty],
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let resolver = match scope {
             Some(scope) => self.resolver_in_scope(scope),
@@ -15477,14 +15466,75 @@ impl<'a> Checker<'a> {
                 };
                 map
             };
-            if !self.lambda_overload_partially_applicable(o, None, arg_tys, &argument_map) {
+            // EXPLICIT type arguments must match the overload's formal count exactly (kotlinc
+            // rejects a partial list), so a mismatching overload cannot be the called one.
+            if !type_args.is_empty() && o.semantic_signature().formals.len() != type_args.len() {
                 continue;
             }
-            let Some(shape) = self.lambda_shape_for_overload(o, None, arg_tys, &argument_map)
+            if !self.lambda_overload_partially_applicable(
+                o,
+                None,
+                arg_tys,
+                &argument_map,
+                type_args,
+            ) {
+                continue;
+            }
+            let Some(shape) =
+                self.lambda_shape_for_overload(o, None, arg_tys, &argument_map, type_args)
             else {
                 continue;
             };
             return Some(shape);
+        }
+        None
+    }
+
+    /// Lambda shape for a `Type(args) { … }` factory call answered by a semantic companion's
+    /// `operator fun invoke`. The companion's callable metadata enters the same mapping,
+    /// applicability, binding, and shape operations as every other provider overload.
+    fn companion_invoke_lambda_shape(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
+        type_args: &[Ty],
+    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let overloads = self.companion_invoke_overloads(scope, name);
+        for overload in &overloads {
+            if overload.is_extension() {
+                continue;
+            }
+            let Some(argument_map) = call_argument_parameter_indices(
+                arg_tys.len(),
+                overload.semantic_params().len(),
+                arg_names,
+                trailing_lambda,
+                &overload.call_sig,
+            ) else {
+                continue;
+            };
+            if !type_args.is_empty()
+                && overload.semantic_signature().formals.len() != type_args.len()
+            {
+                continue;
+            }
+            if !self.lambda_overload_partially_applicable(
+                overload,
+                None,
+                arg_tys,
+                &argument_map,
+                type_args,
+            ) {
+                continue;
+            }
+            if let Some(shape) =
+                self.lambda_shape_for_overload(overload, None, arg_tys, &argument_map, type_args)
+            {
+                return Some(shape);
+            }
         }
         None
     }
@@ -15541,6 +15591,7 @@ impl<'a> Checker<'a> {
                     Some(binding_receiver),
                     arg_tys,
                     &argument_map,
+                    &[],
                 );
                 if !partial {
                     continue;
@@ -15550,6 +15601,7 @@ impl<'a> Checker<'a> {
                     Some(binding_receiver),
                     arg_tys,
                     &argument_map,
+                    &[],
                 ) {
                     return Some(shape);
                 }
@@ -15604,17 +15656,23 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[CallArgKind],
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
-        self.resolve_instance_member_with_literal_and_lambda_args(recv, name, args)
+        self.resolve_instance_member_with_literal_and_lambda_args(recv, name, args, &[])
     }
     fn resolve_instance_member_with_literal_and_lambda_args(
         &self,
         recv: Ty,
         name: &str,
         args: &[CallArgKind],
+        type_args: &[Ty],
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol_with_literal_and_lambda_args(SymRecv::Value(recv), name, args, &[])
+            .resolve_symbol_with_literal_and_lambda_args(
+                SymRecv::Value(recv),
+                name,
+                args,
+                type_args,
+            )
             .and_then(Symbol::call)
     }
 
@@ -15905,11 +15963,11 @@ impl<'a> Checker<'a> {
     fn resolve_constructor_name(
         &self,
         internal: TypeName,
-        args: &[Ty],
+        args: &[CallArgKind],
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::TypeName(internal), "", args, &[])
+            .resolve_symbol_with_literal_args(SymRecv::TypeName(internal), "", args, &[])
             .and_then(Symbol::constructor)
     }
     fn resolve_synthetic_constructor_name(
@@ -15928,9 +15986,9 @@ impl<'a> Checker<'a> {
         crate::module_symbols::ModuleSymbols::new(self.syms).declares_top_level(name)
     }
 
-    fn implicit_receivers(&self) -> Vec<ImplicitReceiver> {
+    fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
         let mut receivers = Vec::new();
-        if let Some(receiver) = self.this_ty {
+        if let Some(receiver) = scope.this_ty() {
             receivers.push(ImplicitReceiver {
                 ty: receiver,
                 extension_receiver: self.this_extension_receiver,
@@ -15954,8 +16012,8 @@ impl<'a> Checker<'a> {
         receivers
     }
 
-    fn implicit_receiver_types(&self) -> Vec<Ty> {
-        self.implicit_receivers()
+    fn implicit_receiver_types(&self, scope: &CheckerScope<'_>) -> Vec<Ty> {
+        self.implicit_receivers(scope)
             .into_iter()
             .map(|receiver| receiver.ty)
             .collect()
@@ -15967,8 +16025,8 @@ impl<'a> Checker<'a> {
     /// to a sibling companion function (`apply2 { … }` from inside the companion) has no implicit
     /// receiver carrying that member. Member-shape lookups still need one: without it a lambda
     /// argument gets no expectation and `it` binds as `Any`.
-    fn implicit_member_receiver_types(&self) -> Vec<Ty> {
-        let mut receivers = self.implicit_receiver_types();
+    fn implicit_member_receiver_types(&self, scope: &CheckerScope<'_>) -> Vec<Ty> {
+        let mut receivers = self.implicit_receiver_types(scope);
         if let Some(companion) = self
             .companion_of
             .as_deref()
@@ -15983,10 +16041,42 @@ impl<'a> Checker<'a> {
         receivers
     }
 
+    /// Receiver labels for the enclosing-class chain of a hoisted anonymous-object declaration —
+    /// the anonymous analogue of the `inner_of` walk in [`class_receiver_labels`]. The structural
+    /// owners sit in `lexical_class_context` nearest-first (installed by
+    /// [`Self::set_anonymous_lexical_class_context`]); each owner's own `inner_of` chain continues
+    /// outward. Returned outermost-first, matching [`class_receiver_labels`].
+    fn anonymous_outer_receiver_labels(&self) -> Vec<(String, Ty, bool)> {
+        enclosing_receiver_labels(self.syms, self.lexical_class_context.iter().copied())
+    }
+
+    /// The enclosing instance an anonymous-object construction captures: the innermost CLASS receiver
+    /// on the label stack, with its source label. The dispatch instance lowering supplies the value at
+    /// the construction site (an extension receiver is not a capturable enclosing instance), while the
+    /// label lets capture discovery recognize `this@Label` without parsing a generated class name.
+    fn anonymous_construction_outer_receiver(&self) -> Option<(&str, Ty)> {
+        self.this_labels
+            .iter()
+            .rev()
+            .find(|(_, _, is_class)| *is_class)
+            .map(|(label, receiver, _)| (label.as_str(), *receiver))
+    }
+
     fn mark_extension_receiver_used(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
         if let Some(span) = receiver.extension_receiver {
             self.mark_extension_receiver_span_used(expression, span);
         }
+    }
+
+    /// Preserve the receiver selected while resolving a BARE member access and account for a
+    /// receiver-lambda capture in one operation. Lowering cannot safely repeat this lookup: an enclosing
+    /// class receiver may be represented by a synthetic field rather than a local `this` slot, and
+    /// provider-backed inheritance can make the declaration owner differ from the receiver's concrete
+    /// type.
+    fn mark_implicit_receiver_selection(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
+        self.implicit_receiver_selections
+            .insert(expression, receiver.ty);
+        self.mark_extension_receiver_used(expression, receiver);
     }
 
     fn mark_extension_receiver_stmt_used(&mut self, statement: StmtId, receiver: ImplicitReceiver) {
@@ -16036,7 +16126,7 @@ impl<'a> Checker<'a> {
     /// same import-scoped, module-federated identity query used by inline-facade eligibility, so an
     /// alias, source shadow, or unrelated same-named declaration cannot make checking and emission
     /// disagree about whether the DSL lambda exists at runtime.
-    fn is_contract_call(&self, e: ExprId) -> bool {
+    fn is_contract_call(&self, scope: &CheckerScope<'_>, e: ExprId) -> bool {
         let Expr::Call { callee, .. } = self.file.expr(e) else {
             return false;
         };
@@ -16046,7 +16136,7 @@ impl<'a> Checker<'a> {
         // Lexical values/local functions outrank every top-level import. They are intentionally kept
         // outside SymbolResolver's package federation, so close that final precedence rung here
         // before asking the shared top-level identity classifier.
-        if self.lexical_value_declares(name) {
+        if self.lexical_value_declares(scope, name) {
             return false;
         }
         resolved_call_is_erased_contract(self.file, e, &self.resolver(), &*self.syms.libraries)
@@ -16054,11 +16144,11 @@ impl<'a> Checker<'a> {
 
     /// Decode every top-level function's `contract { … }` block up front (see the call site in
     /// `check_file_at_impl_mode`).
-    fn collect_source_contracts(&mut self) {
+    fn collect_source_contracts(&mut self, scope: &CheckerScope<'_>) {
         let file = self.file;
         for &d in &file.decls {
             let Decl::Fun(f) = file.decl(d) else { continue };
-            if let Some(contract) = self.decode_fun_contract(f) {
+            if let Some(contract) = self.decode_fun_contract(scope, f) {
                 self.source_contracts
                     .insert(d, std::sync::Arc::new(contract));
             }
@@ -16067,7 +16157,11 @@ impl<'a> Checker<'a> {
 
     /// The decoded contract of a source function, or `None` when its body has no (confirmed)
     /// `kotlin.contracts.contract { … }` statement.
-    fn decode_fun_contract(&self, f: &FunDecl) -> Option<crate::contracts::Contract> {
+    fn decode_fun_contract(
+        &self,
+        scope: &CheckerScope<'_>,
+        f: &FunDecl,
+    ) -> Option<crate::contracts::Contract> {
         let crate::ast::FunBody::Block(block) = f.body else {
             return None;
         };
@@ -16078,7 +16172,7 @@ impl<'a> Checker<'a> {
             let Stmt::Expr(e) = self.file.stmt(*s) else {
                 continue;
             };
-            if self.is_contract_call(*e) {
+            if self.is_contract_call(scope, *e) {
                 let params: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
                 return crate::contracts::decode_source(
                     self.file,
@@ -16171,6 +16265,7 @@ impl<'a> Checker<'a> {
     /// machinery), and `&&` compounds. `x == null`, `!is`, `||`, and constants yield nothing.
     fn conclusion_narrowings(
         &self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         conclusion: &crate::contracts::Condition,
         out: &mut Vec<(NarrowPath, Ty)>,
@@ -16186,7 +16281,7 @@ impl<'a> Checker<'a> {
                 };
                 // Shared with the flow smart-cast paths (`stable_path_ty`): `this`,
                 // `var`-rejection, and the nullable unwrap must not drift by condition shape.
-                if let Some(Ty::Nullable(inner)) = self.stable_path_ty(&path) {
+                if let Some(Ty::Nullable(inner)) = self.stable_path_ty(scope, &path) {
                     out.push((path, *inner));
                 }
             }
@@ -16198,10 +16293,10 @@ impl<'a> Checker<'a> {
                 let Some(path) = self.contract_stable_arg_path(call, *param) else {
                     return;
                 };
-                if !self.path_is_stable(&path) {
+                if !self.path_is_stable(scope, &path) {
                     return;
                 }
-                let tt = self.resolve_ty_no_diag(tyref);
+                let tt = self.resolve_ty_no_diag(scope, tyref);
                 if tt != Ty::Error && tt.is_reference() {
                     out.push((path, tt));
                 }
@@ -16217,7 +16312,7 @@ impl<'a> Checker<'a> {
                 let Some(path) = self.contract_stable_arg_path(call, *param) else {
                     return;
                 };
-                if !self.path_is_stable(&path) {
+                if !self.path_is_stable(scope, &path) {
                     return;
                 }
                 let tt = self.subst_contract_metadata_ty(call, *ty);
@@ -16227,12 +16322,12 @@ impl<'a> Checker<'a> {
             }
             Condition::BoolParam(param) => {
                 if let Some(arg) = self.contract_arg_expr(call, *param) {
-                    self.collect_condition_narrowings(arg, true, out);
+                    self.collect_condition_narrowings(scope, arg, true, out);
                 }
             }
             Condition::And(l, r) => {
-                self.conclusion_narrowings(call, l, out);
-                self.conclusion_narrowings(call, r, out);
+                self.conclusion_narrowings(scope, call, l, out);
+                self.conclusion_narrowings(scope, call, r, out);
             }
             _ => {}
         }
@@ -16307,6 +16402,7 @@ impl<'a> Checker<'a> {
     /// through the deserialized kotlin.text contract — no per-function special cases).
     fn contract_condition_narrowings(
         &self,
+        scope: &CheckerScope<'_>,
         cond: ExprId,
         truth: bool,
         out: &mut Vec<(NarrowPath, Ty)>,
@@ -16324,7 +16420,7 @@ impl<'a> Checker<'a> {
             };
             let applies = matches!(returns, crate::contracts::ReturnsValue::Bool(b) if *b == truth);
             if applies {
-                self.conclusion_narrowings(cond, conclusion, out);
+                self.conclusion_narrowings(scope, cond, conclusion, out);
             }
         }
     }
@@ -16355,6 +16451,7 @@ impl<'a> Checker<'a> {
     /// after the whole desugaring is valid.
     fn operator_call_ret(
         &mut self,
+        scope: &CheckerScope<'_>,
         receiver: Ty,
         name: &str,
         arg_tys: &[Ty],
@@ -16392,7 +16489,7 @@ impl<'a> Checker<'a> {
                             },
                         ));
                     }
-                    self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
+                    self.expect_call_args(scope, &sig.params, false, arg_exprs, arg_tys);
                     let interface = self
                         .syms
                         .class_by_type_name(owner)
@@ -16416,14 +16513,14 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let arg_kinds = self.call_arg_kinds(arg_exprs);
+        let arg_kinds = self.call_arg_kinds(scope, arg_exprs);
         if let Some((selected, sig)) = self
             .selected_source_extension(receiver, name, &arg_kinds)
             .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
         {
             let inline = selected.flags.inline;
             let suspend = selected.flags.suspend;
-            self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
+            self.expect_call_args(scope, &sig.params, false, arg_exprs, arg_tys);
             let owner = sig
                 .source_file
                 .zip(sig.source_decl)
@@ -16464,7 +16561,11 @@ impl<'a> Checker<'a> {
     /// subtype, else an in-scope local / enclosing context parameter of a matching type (innermost
     /// first). `None` if any context parameter has no satisfying source (the call then falls back to the
     /// normal arity path and skips). The returned names are what the lowerer loads and prepends.
-    fn resolve_context_args(&self, ctx_types: &[Ty]) -> Option<Vec<String>> {
+    fn resolve_context_args(
+        &self,
+        scope: &CheckerScope<'_>,
+        ctx_types: &[Ty],
+    ) -> Option<Vec<String>> {
         let matches = |have: Ty, want: Ty| -> bool {
             if have == want {
                 return true;
@@ -16476,17 +16577,18 @@ impl<'a> Checker<'a> {
         };
         let mut out = Vec::with_capacity(ctx_types.len());
         for &want in ctx_types {
-            if let Some(this_t) = self.this_ty {
+            if let Some(this_t) = scope.this_ty() {
                 if matches(this_t, want) {
                     out.push("this".to_string());
                     continue;
                 }
             }
             // Innermost scope first, matching Kotlin's context resolution preferring the nearest binding.
-            let local = self.scopes.iter().rev().find_map(|s| {
-                s.iter()
-                    .find_map(|(n, l)| matches(l.ty, want).then(|| n.clone()))
-            });
+            let local = scope
+                .find_binding(Ns::Value, |binding| {
+                    binding.value().is_some_and(|local| matches(local.ty, want))
+                })
+                .map(|(name, _)| name);
             out.push(local?);
         }
         // Two context parameters resolving to the SAME source is ambiguous (kotlinc rejects duplicate
@@ -16500,6 +16602,7 @@ impl<'a> Checker<'a> {
     }
     fn module_top_level_return(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         selected: &crate::libraries::FunctionInfo,
         arg_tys: &[Ty],
@@ -16522,7 +16625,7 @@ impl<'a> Checker<'a> {
             {
                 ret_ty = r;
             }
-            if let Some(r) = self.explicit_generic_return(call, function) {
+            if let Some(r) = self.explicit_generic_return(scope, call, function) {
                 ret_ty = r;
             }
         }
@@ -16543,6 +16646,7 @@ impl<'a> Checker<'a> {
 
     fn resolve_context_module_top_level(
         &self,
+        scope: &CheckerScope<'_>,
         name: &str,
         args: &[ExprId],
         argument_names: Option<&[Option<String>]>,
@@ -16574,7 +16678,8 @@ impl<'a> Checker<'a> {
             ) else {
                 continue;
             };
-            let Some(sources) = self.resolve_context_args(&fi.callable.params[..ctx_count]) else {
+            let Some(sources) = self.resolve_context_args(scope, &fi.callable.params[..ctx_count])
+            else {
                 continue;
             };
             let mut score = 0;
@@ -16792,27 +16897,8 @@ impl<'a> Checker<'a> {
         self.call_argument_list_span(call, args)
     }
 
-    fn push_scope(&mut self) {
-        // A flow-narrowing (`Local::narrowed`) is only sound along a straight-line statement sequence
-        // in one scope; crossing INTO a nested scope (a branch/loop/block/lambda body) or back OUT of
-        // one can invalidate it, so drop all narrowings at every scope boundary.
-        self.clear_local_narrows();
-        self.scopes.push(HashMap::new());
-        self.path_narrows.push(HashMap::new());
-    }
-    fn pop_scope(&mut self) {
-        self.scopes.pop();
-        self.path_narrows.pop();
-        self.clear_local_narrows();
-    }
     /// Rebind `this` (receiver lambda, inner class, extension receiver, class-member scope). EVERY
     /// rebind bumps the receiver generation — a same-type receiver is still a different object —
-    /// invalidating `this`-rooted property-path narrowings recorded against the previous receiver.
-    /// Save/restore sites restore `this_gen` together with `this_ty` (write both fields directly).
-    fn set_this_ty(&mut self, ty: Option<Ty>) {
-        self.this_gen = self.this_gen.wrapping_add(1);
-        self.this_ty = ty;
-    }
     fn update_lambda_info(&mut self, e: ExprId, update: impl FnOnce(&mut LambdaInfo)) {
         let mut info = match self.expr_lowers.remove(&e) {
             Some(ExprLowering::Lambda(info)) => info,
@@ -17338,6 +17424,7 @@ impl<'a> Checker<'a> {
 
     fn source_generic_argument_expectations(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         selected: &crate::libraries::FunctionInfo,
         args: &[ExprId],
@@ -17393,7 +17480,7 @@ impl<'a> Checker<'a> {
                 let Some(name) = function.type_params.get(index) else {
                     break;
                 };
-                bindings.insert(name.clone(), self.resolve_ty_no_diag(type_ref));
+                bindings.insert(name.clone(), self.resolve_ty_no_diag(scope, type_ref));
                 explicitly_bound.insert(name.clone());
             }
         }
@@ -17539,6 +17626,7 @@ impl<'a> Checker<'a> {
 
     fn source_member_operator_display(
         &self,
+        scope: &CheckerScope<'_>,
         internal: TypeName,
         name: &str,
         signature: &Signature,
@@ -17560,7 +17648,7 @@ impl<'a> Checker<'a> {
                         && method
                             .params
                             .iter()
-                            .map(|parameter| self.resolve_ty_no_diag(&parameter.ty))
+                            .map(|parameter| self.resolve_ty_no_diag(scope, &parameter.ty))
                             .eq(signature.params.iter().copied())
                 })?;
                 Some((
@@ -17573,6 +17661,7 @@ impl<'a> Checker<'a> {
 
     fn report_required_operator_modifier(
         &mut self,
+        scope: &CheckerScope<'_>,
         receiver: Ty,
         name: &str,
         arg_tys: &[Ty],
@@ -17591,7 +17680,7 @@ impl<'a> Checker<'a> {
             return false;
         }
         let Some((function, owner_name)) =
-            self.source_member_operator_display(owner, name, &signature)
+            self.source_member_operator_display(scope, owner, name, &signature)
         else {
             return false;
         };
@@ -17608,13 +17697,17 @@ impl<'a> Checker<'a> {
     /// `None` only when the receiver is neither (the caller reports its own "not callable" error).
     fn record_invoke(
         &mut self,
-        call: ExprId,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
         receiver: ExprId,
         receiver_ty: Ty,
-        args: &[ExprId],
-        arg_tys: &[Ty],
         span: Span,
     ) -> Option<Ty> {
+        let CallArgs {
+            call,
+            args,
+            arg_tys,
+        } = call_args;
         let (params, ret, kind) = match receiver_ty {
             Ty::Fun(sig) => (
                 sig.params.clone(),
@@ -17680,11 +17773,14 @@ impl<'a> Checker<'a> {
                         },
                     )
                 } else if let Some(ret) = self.check_member_extension_function_call_mode(
-                    call,
+                    scope,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys,
+                    },
                     receiver_ty,
                     CALLABLE_INVOKE_OPERATOR,
-                    args,
-                    arg_tys,
                     MemberExtensionSelection::Operators,
                 ) {
                     // A member EXTENSION `operator fun Recv.invoke(...)` on an implicit receiver
@@ -17759,12 +17855,20 @@ impl<'a> Checker<'a> {
             .count();
         refs + calls
     }
-    fn declare(&mut self, name: &str, ty: Ty, is_var: bool) {
-        self.declare_with_origin(name, ty, is_var, ReceiverFnValueOrigin::Local);
+    fn declare(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty, is_var: bool) {
+        self.declare_with_origin(scope, name, ty, is_var, ReceiverFnValueOrigin::Local);
     }
 
-    fn declare_dispatch_property(&mut self, name: &str, ty: Ty, is_var: bool, owner: TypeName) {
+    fn declare_dispatch_property(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        ty: Ty,
+        is_var: bool,
+        owner: TypeName,
+    ) {
         self.declare_with_origin(
+            scope,
             name,
             ty,
             is_var,
@@ -17774,6 +17878,7 @@ impl<'a> Checker<'a> {
 
     fn declare_with_origin(
         &mut self,
+        scope: &CheckerScope<'_>,
         name: &str,
         ty: Ty,
         is_var: bool,
@@ -17782,36 +17887,30 @@ impl<'a> Checker<'a> {
         // A NEW binding under an existing name invalidates the property-path narrowings rooted at
         // the old one (`if (a.p == null) return; val a = …` — the proof was about the OLD `a`).
         // Narrowing shadows are exempt (`declare_narrowing_shadow`): they re-bind the SAME value.
-        if let Some(frame) = self.path_narrows.last_mut() {
-            frame.retain(|path, _| path.root != name);
-        }
-        self.scopes.last_mut().unwrap().insert(
-            name.to_string(),
-            Local {
-                ty,
-                is_var,
-                origin,
-                narrowed: None,
-            },
+        scope.invalidate_paths_rooted_at(name);
+        scope.rebind(
+            name,
+            Ns::Value,
+            ScopeBinding::Value(Local { ty, is_var, origin }),
         );
     }
 
     /// Shadow a binding with its flow-narrowed type (`if (x != null) …`). Unlike a fresh
     /// declaration this re-binds the SAME runtime value, so property-path narrowings rooted at it
     /// stay valid.
-    fn declare_narrowing_shadow(&mut self, name: &str, ty: Ty) {
-        self.scopes.last_mut().unwrap().insert(
-            name.to_string(),
-            Local {
+    fn declare_narrowing_shadow(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty) {
+        scope.rebind(
+            name,
+            Ns::Value,
+            ScopeBinding::Value(Local {
                 ty,
                 is_var: false,
                 origin: ReceiverFnValueOrigin::Local,
-                narrowed: None,
-            },
+            }),
         );
     }
 
-    fn scoped_properties(&self, owner: TypeName) -> Vec<ScopedProperty> {
+    fn scoped_properties(&self, scope: &CheckerScope<'_>, owner: TypeName) -> Vec<ScopedProperty> {
         fn collect(
             syms: &SymbolTable,
             owner: TypeName,
@@ -17853,7 +17952,7 @@ impl<'a> Checker<'a> {
         collect(
             self.syms,
             owner,
-            self.this_ty.and_then(Ty::obj_internal) == Some(owner),
+            scope.this_ty().and_then(Ty::obj_internal) == Some(owner),
             &mut std::collections::HashSet::new(),
             &mut properties,
         );
@@ -17862,20 +17961,21 @@ impl<'a> Checker<'a> {
 
     fn receiver_function_value(
         &self,
+        scope: &CheckerScope<'_>,
         name: &str,
     ) -> Option<(&'static crate::types::FnSig, ReceiverFnValueOrigin)> {
-        if let Some(local) = self.lookup(name) {
-            return match local.narrowed.unwrap_or(local.ty) {
+        if let Some(local) = self.lookup(scope, name) {
+            return match self.local_narrowing(scope, name).unwrap_or(local.ty) {
                 Ty::Fun(signature) if signature.has_receiver => Some((signature, local.origin)),
                 _ => None,
             };
         }
-        for receiver in self.implicit_receiver_types() {
+        for receiver in self.implicit_receiver_types(scope) {
             let Some(owner) = receiver.obj_internal() else {
                 continue;
             };
             if let Some(property) = self
-                .scoped_properties(owner)
+                .scoped_properties(scope, owner)
                 .into_iter()
                 .rev()
                 .find(|property| property.name == name)
@@ -17913,6 +18013,7 @@ impl<'a> Checker<'a> {
 
     fn receiver_function_implicit_receiver(
         &self,
+        scope: &CheckerScope<'_>,
         expected: Ty,
         value_parameter_count: usize,
         actual_argument_count: usize,
@@ -17920,72 +18021,61 @@ impl<'a> Checker<'a> {
         if value_parameter_count != actual_argument_count {
             return None;
         }
-        self.implicit_receivers()
+        self.implicit_receivers(scope)
             .into_iter()
             .find(|actual| self.receiver_is_assignable(actual.ty, expected))
     }
 
-    fn lookup(&self, name: &str) -> Option<&Local> {
-        self.scopes.iter().rev().find_map(|s| s.get(name))
+    fn lookup(&self, scope: &CheckerScope<'_>, name: &str) -> Option<Local> {
+        scope
+            .ancestors()
+            .find_map(|rung| rung.own_binding(name, Ns::Value)?.value())
     }
     /// Record (or clear, with `None`) the flow-narrowed read type of the innermost `name` binding.
-    fn set_local_narrow(&mut self, name: &str, narrowed: Option<Ty>) {
-        if narrowed.is_some() {
-            self.narrow_active = true;
-        }
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(l) = scope.get_mut(name) {
-                l.narrowed = narrowed;
-                return;
-            }
-        }
+    fn set_local_narrow(&self, scope: &CheckerScope<'_>, name: &str, narrowed: Option<Ty>) {
+        scope.narrow_local(name, narrowed);
     }
-    /// Drop ALL flow-narrowings. Called at scope boundaries (branch/loop/block/lambda): a narrowing
-    /// established on a straight-line path is not guaranteed to hold once control can branch, loop, or
-    /// defer into a closure, so it is conservatively discarded (sound; only linear narrowings survive).
-    fn clear_local_narrows(&mut self) {
-        if !self.narrow_active {
-            return;
-        }
-        for scope in self.scopes.iter_mut() {
-            for l in scope.values_mut() {
-                l.narrowed = None;
-            }
-        }
-        self.narrow_active = false;
+
+    /// The flow-narrowed read type of `name`, if one was proven in the current scope. Deliberately
+    /// does NOT walk outward: a narrowing proven before a branch does not hold inside it.
+    fn local_narrowing(&self, scope: &CheckerScope<'_>, name: &str) -> Option<Ty> {
+        scope.local_narrowing(name)
     }
     /// Whether `name` is already declared in the *innermost* (current) scope — a conflicting
     /// redeclaration (kotlinc rejects it). A declaration in an *outer* scope is legal shadowing.
-    fn declared_in_current_scope(&self, name: &str) -> bool {
-        self.scopes.last().map_or(false, |s| s.contains_key(name))
+    fn declared_in_current_scope(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
+        scope.declared_here(name, Ns::Value)
     }
 
-    fn push_local_funs(&mut self) {
-        self.local_funs.push(HashMap::new());
+    /// The innermost local function named `name` — its LAST overload, the most recent declaration.
+    fn lookup_local_fun(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> Option<(StmtId, Signature)> {
+        self.lookup_local_fun_overloads(scope, name)?
+            .last()
+            .cloned()
     }
-    fn pop_local_funs(&mut self) {
-        self.local_funs.pop();
+
+    /// Every overload of the innermost local function named `name`. Stops at the first scope that
+    /// declares it: an outer scope's same-named local function is shadowed, not merged.
+    fn lookup_local_fun_overloads(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> Option<Vec<(StmtId, Signature)>> {
+        scope
+            .ancestors()
+            .find_map(|rung| rung.own_binding(name, Ns::Function))
+            .map(|binding| binding.funs().to_vec())
     }
-    fn lookup_local_fun(&self, name: &str) -> Option<(StmtId, Signature)> {
-        self.local_funs.iter().rev().find_map(|functions| {
-            functions
-                .get(name)
-                .and_then(|entries| entries.last())
-                .cloned()
-        })
+    fn lexical_value_declares(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
+        self.lookup(scope, name).is_some() || self.lookup_local_fun(scope, name).is_some()
     }
-    fn lookup_local_fun_overloads(&self, name: &str) -> Option<&[(StmtId, Signature)]> {
-        self.local_funs
-            .iter()
-            .rev()
-            .find_map(|functions| functions.get(name).map(Vec::as_slice))
-    }
-    fn lexical_value_declares(&self, name: &str) -> bool {
-        self.lookup(name).is_some() || self.lookup_local_fun(name).is_some()
-    }
-    fn script_host_may_declare_call(&self, name: &str) -> bool {
+    fn script_host_may_declare_call(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
         self.in_script_body
-            && !self.lexical_value_declares(name)
+            && !self.lexical_value_declares(scope, name)
             && !self
                 .file
                 .decls
@@ -18014,28 +18104,64 @@ impl<'a> Checker<'a> {
         }
         ty
     }
-    fn value_root_shadows_classifier(&self, name: &str) -> bool {
-        self.lexical_value_declares(name)
+    /// Whether the leftmost segment of a dotted reference is a VALUE, so the reference is a member
+    /// chain rather than a qualified name. kotlinc resolves the root as an expression FIRST: a value
+    /// of that spelling shadows both a classifier and a package (verified against the reference
+    /// compiler for a local, a member property, and a property reached by explicit or wildcard import
+    /// — see `docs/SPEC.md`, "Fully-qualified name references").
+    ///
+    /// The IMPORTED rungs matter as much as the lexical ones: `import other.plib` (or `import other.*`)
+    /// binding a property named like a package makes `plib.Cls` a read of `plib`'s `Cls` member, not a
+    /// reference to the class `plib.Cls`.
+    fn value_root_shadows_classifier(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
+        self.lexical_value_declares(scope, name)
             || self.syms.props.contains_key(name)
             || self.syms.context_prop_names.contains(name)
             || self.syms.prop_facades.contains_key(name)
-            || self.implicit_receiver_types().into_iter().any(|receiver| {
-                receiver
-                    .obj_internal()
-                    .is_some_and(|internal| self.lookup_prop_name(internal, name).is_some())
-                    || self.resolve_property_member(receiver, name).is_some()
-            })
+            || self
+                .implicit_receiver_types(scope)
+                .into_iter()
+                .any(|receiver| {
+                    receiver
+                        .obj_internal()
+                        .is_some_and(|internal| self.lookup_prop_name(internal, name).is_some())
+                        || self.resolve_property_member(receiver, name).is_some()
+                })
+            || self.imported_source_companion_property(name).is_some()
+            || self
+                .imports
+                .get(name)
+                .and_then(|full| {
+                    let (package, member) = full.rsplit_once('/')?;
+                    self.syms
+                        .libraries
+                        .top_level_static_field(type_name(package), member)
+                })
+                .is_some()
+            || self.top_level_property(name).is_some()
     }
-    fn register_local_fun(&mut self, name: &str, stmt_id: StmtId, sig: Signature) {
-        if let Some(frame) = self.local_funs.last_mut() {
-            frame
-                .entry(name.to_string())
-                .or_default()
-                .push((stmt_id, sig));
-        }
+    /// Declare a local function in the CURRENT scope, appending to its overload set.
+    fn register_local_fun(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        stmt_id: StmtId,
+        sig: Signature,
+    ) {
+        let mut entries = scope
+            .own_binding(name, Ns::Function)
+            .map(|binding| binding.funs().to_vec())
+            .unwrap_or_default();
+        entries.push((stmt_id, sig));
+        scope.rebind(name, Ns::Function, ScopeBinding::Funs(entries));
     }
 
-    fn local_capture_needs_shared_cell(&self, body: ExprId, name: &str) -> bool {
+    fn local_capture_needs_shared_cell(
+        &self,
+        scope: &CheckerScope<'_>,
+        body: ExprId,
+        name: &str,
+    ) -> bool {
         let single: std::collections::HashSet<String> = std::iter::once(name.to_string()).collect();
         let written = {
             let mut out = std::collections::HashSet::new();
@@ -18044,7 +18170,7 @@ impl<'a> Checker<'a> {
         };
         written
             || (self.fn_reassigned.contains(name)
-                && self.lookup(name).map_or(false, |l| l.is_var)
+                && self.lookup(scope, name).map_or(false, |l| l.is_var)
                 && local_fun_body_uses_any(self.file, body, &single))
     }
 
@@ -18088,13 +18214,28 @@ impl<'a> Checker<'a> {
 
     fn qualified_nested_ctor_internal_name(
         &self,
+        scope: &CheckerScope<'_>,
         receiver: ExprId,
         name: &str,
     ) -> Option<TypeName> {
         // The receiver's leftmost segment must be a TYPE/PACKAGE, not a value in scope.
         let root = self.dotted_root(receiver)?;
-        if self.value_root_shadows_classifier(&root) {
+        if self.value_root_shadows_classifier(scope, &root) {
             return None;
+        }
+        // A FULLY-QUALIFIED constructor (`pkg.Cls(…)`, `pkg.Cls.Nested(…)`, `pkg.sub.Cls(…)`): walk the
+        // receiver from its package root and take `name` in whatever namespace that prefix denotes.
+        // The walk is the general rule, so a deep path and a nested classifier need no separate arm.
+        // Fall THROUGH when the walk does not reach a classifier: a Kotlin `typealias` on the classpath
+        // is metadata on a file facade rather than a class file, so the package walk cannot see it and
+        // the arms below (which consult the alias table) still can. Returning early here hid every
+        // spelling those arms answer.
+        if let Some(prefix) = self.package_rooted_prefix(scope, receiver) {
+            if let Some(QualifiedPrefix::Classifier(internal)) =
+                self.step_qualified_prefix(prefix, name)
+            {
+                return Some(internal);
+            }
         }
         match self.file.expr(receiver) {
             // `Outer.Nested(…)` — a nested type under an in-scope/imported outer type.
@@ -18180,8 +18321,8 @@ impl<'a> Checker<'a> {
         find(self.file)
     }
 
-    fn secondary_ctor_param_ty(&mut self, parameter: &Param) -> Ty {
-        self.resolve_ty(&parameter.ty)
+    fn secondary_ctor_param_ty(&mut self, scope: &CheckerScope<'_>, parameter: &Param) -> Ty {
+        self.resolve_ty(scope, &parameter.ty)
     }
 
     fn semantic_lambda_receiver_flags(params: &[Ty]) -> Vec<bool> {
@@ -18195,6 +18336,7 @@ impl<'a> Checker<'a> {
 
     fn this_ctor_delegation_candidates(
         &mut self,
+        scope: &CheckerScope<'_>,
         class: &ClassDecl,
         secondary: usize,
         primary_params: &[Ty],
@@ -18238,7 +18380,7 @@ impl<'a> Checker<'a> {
             let params = constructor
                 .params
                 .iter()
-                .map(|parameter| self.secondary_ctor_param_ty(parameter))
+                .map(|parameter| self.secondary_ctor_param_ty(scope, parameter))
                 .collect();
             candidates.push(CtorDelegationCandidate {
                 target: ResolvedCtorDelegationTarget::ThisSecondary { index, params },
@@ -18899,6 +19041,7 @@ impl<'a> Checker<'a> {
 
     fn select_ctor_delegation(
         &mut self,
+        scope: &CheckerScope<'_>,
         site: CtorDelegationSite<'_>,
         arguments: &CtorDelegationCall,
         candidates: Vec<CtorDelegationCandidate>,
@@ -18992,7 +19135,7 @@ impl<'a> Checker<'a> {
                     .get(index)
                     .copied()
                     .unwrap_or(false);
-                self.check_argument_expected(argument, expected, has_receiver, None);
+                self.check_argument_expected(scope, argument, expected, has_receiver, None);
                 continue;
             }
             let constraint = selected
@@ -19100,12 +19243,36 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// [`Self::module_class_named`], consulting the lexical chain first — a classifier declared in
+    /// statement position is the nearest binding and is registered under a name no simple-name
+    /// lookup can reach.
+    fn module_class_named_in(&self, scope: &CheckerScope<'_>, name: &str) -> Option<&ClassSig> {
+        match scope.local_classifier(name) {
+            Some(internal) => self.syms.class_by_type_name(internal),
+            None => self.module_class_named(name),
+        }
+    }
+
     /// The module classifier bound by `name`, narrowed to a singleton object. This keeps lookup and
     /// classification on the same resolved `ClassSig`; a parallel simple-name set cannot preserve
     /// identity across packages.
     fn module_object_named(&self, name: &str) -> Option<&ClassSig> {
         self.module_class_named(name)
             .filter(|class| class.is_object())
+    }
+
+    /// [`Self::scoped_classifier_name`], consulting the lexical chain first: a classifier declared
+    /// in statement position is visible only where it was written, so it is the NEAREST binding and
+    /// wins over every file-level and classpath namespace below.
+    fn scoped_classifier_name_in(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> InheritedNestedClassifier {
+        match scope.local_classifier(name) {
+            Some(internal) => InheritedNestedClassifier::Found(internal),
+            None => self.scoped_classifier_name(name),
+        }
     }
 
     fn scoped_classifier_name(&self, name: &str) -> InheritedNestedClassifier {
@@ -19228,9 +19395,10 @@ impl<'a> Checker<'a> {
 
     fn enum_entries_target(
         &self,
+        scope: &CheckerScope<'_>,
         receiver: ExprId,
     ) -> Option<(TypeName, Option<Box<crate::libraries::LibraryMember>>)> {
-        let owner = self.classifier_receiver_internal(receiver)?;
+        let owner = self.classifier_receiver_internal(scope, receiver)?;
         let classifier = self.resolved_type_name(owner)?;
         if !classifier.is_enum() {
             return None;
@@ -19284,14 +19452,22 @@ impl<'a> Checker<'a> {
     /// Install the source-class ownership chain for a hoisted anonymous-object declaration. The AST
     /// relation is acyclic, but retain explicit cycle detection so malformed/recovered trees cannot
     /// spin forever without imposing an arbitrary nesting limit on valid generated Kotlin.
-    fn set_anonymous_lexical_class_context(
-        &mut self,
-        declaration: DeclId,
-        scope: &AnonymousLexicalClassScope,
-    ) {
+    fn set_anonymous_lexical_class_context(&mut self, declaration: DeclId) {
         self.lexical_class_context.clear();
         self.exact_anonymous_class_roots.clear();
-        for (index, candidate) in scope.declaration_chain(declaration).into_iter().enumerate() {
+        let chain: Vec<(DeclId, bool)> = self
+            .anonymous_lexical_scope
+            .declaration_chain(declaration)
+            .into_iter()
+            .map(|candidate| {
+                let anonymous = self
+                    .anonymous_lexical_scope
+                    .declarations
+                    .contains(&candidate);
+                (candidate, anonymous)
+            })
+            .collect();
+        for (index, (candidate, anonymous)) in chain.into_iter().enumerate() {
             if let Decl::Class(class) = self.file.decl(candidate) {
                 if let Some(internal) = self
                     .same_package_class(&class.name)
@@ -19303,7 +19479,7 @@ impl<'a> Checker<'a> {
                     if index > 0 {
                         self.lexical_class_context.push(internal);
                     }
-                    if scope.declarations.contains(&candidate) {
+                    if anonymous {
                         self.exact_anonymous_class_roots.insert(internal);
                     }
                 }
@@ -19325,14 +19501,14 @@ impl<'a> Checker<'a> {
     /// If a bare type name `n` denotes a reference type usable as an unbound class literal `n::class`,
     /// its `Ty`. Checks built-ins, user classes, enclosing nested types, and imports, but not the global
     /// simple-name index because it collides with built-in names. Primitive or unknown names return `None`.
-    fn class_literal_unbound_ty(&self, n: &str) -> Option<Ty> {
-        if self.tparams.contains(n) {
+    fn class_literal_unbound_ty(&self, scope: &CheckerScope<'_>, n: &str) -> Option<Ty> {
+        if scope.tparam_contains(n) {
             return None;
         }
-        if self.lookup(n).is_some() {
+        if self.lookup(scope, n).is_some() {
             return None;
         }
-        let scoped = self.scoped_classifier_name(n);
+        let scoped = self.scoped_classifier_name_in(scope, n);
         if scoped == InheritedNestedClassifier::Ambiguous {
             return None;
         }
@@ -19363,24 +19539,29 @@ impl<'a> Checker<'a> {
         ty.boxed_ref()
     }
 
-    fn obj_with_targs_name(&mut self, internal: TypeName, r: &TypeRef) -> Ty {
+    fn obj_with_targs_name(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        internal: TypeName,
+        r: &TypeRef,
+    ) -> Ty {
         if r.targs.is_empty() {
             Ty::obj_name(internal)
         } else {
-            let args: Vec<Ty> = r.targs.iter().map(|a| self.resolve_ty(a)).collect();
+            let args: Vec<Ty> = r.targs.iter().map(|a| self.resolve_ty(scope, a)).collect();
             Ty::obj_args_name(internal, &args)
         }
     }
 
     /// Resolve a syntactic type without erasing source nullability.
-    fn resolve_ty(&mut self, r: &TypeRef) -> Ty {
-        let scoped = if self.tparams.contains(&r.name) {
-            Some(self.tparams.erase(&r.name))
+    fn resolve_ty(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
+        let scoped = if scope.tparam_contains(&r.name) {
+            Some(scope.tparam_bound(&r.name))
         } else {
-            match self.scoped_classifier_name(&r.name) {
+            match self.scoped_classifier_name_in(scope, &r.name) {
                 InheritedNestedClassifier::Found(internal) => {
                     classifier_over_default(&r.name, Some(internal))
-                        .map(|internal| self.obj_with_targs_name(internal, r))
+                        .map(|internal| self.obj_with_targs_name(scope, internal, r))
                 }
                 InheritedNestedClassifier::Ambiguous => Some(Ty::Error),
                 InheritedNestedClassifier::NotFound => None,
@@ -19388,12 +19569,12 @@ impl<'a> Checker<'a> {
         };
         let base = if let Some(t) = scoped {
             t
-        } else if let Some(t) = typeref_leaf(r, &mut |x| self.resolve_ty(x)) {
+        } else if let Some(t) = typeref_leaf(r, &mut |x| self.resolve_ty(scope, x)) {
             t
         } else if r.name == "Array" {
             match &r.arg {
                 Some(a) => {
-                    let e = self.resolve_ty(a);
+                    let e = self.resolve_ty(scope, a);
                     if e.is_reference() {
                         Ty::array(e)
                     } else if e.jvm_boxed_ref().is_some() {
@@ -19411,9 +19592,9 @@ impl<'a> Checker<'a> {
             // nested types SHADOWS a same-named top-level/imported type — so resolve the nested form FIRST
             // (before the global `syms.classes`/import lookups). Drives both this type position AND, via
             // `info.ty`, the construction-expression lowering, keeping them consistent.
-            self.obj_with_targs_name(internal, r)
+            self.obj_with_targs_name(scope, internal, r)
         } else if let Some(cs) = self.module_class_named(&r.name) {
-            self.obj_with_targs_name(cs.internal_name(), r)
+            self.obj_with_targs_name(scope, cs.internal_name(), r)
         } else if let Some(internal) = self.syms.class_names.get(&r.name) {
             // Built-in mapped types (`Number`, `Comparable`, `List`, …), classpath classes, and
             // type aliases — the *same* map emit resolves against, so the checker and codegen agree
@@ -19421,16 +19602,16 @@ impl<'a> Checker<'a> {
             // `"__ty/<Prim>"` encodes an alias to a primitive/builtin.
             match internal.strip_prefix("__ty/") {
                 Some(prim) => Ty::from_name(&prim).unwrap_or(Ty::Error),
-                None => self.obj_with_targs_name(internal, r),
+                None => self.obj_with_targs_name(scope, internal, r),
             }
         } else if let Some(internal) = self.imported_type_name(&r.name) {
             // An explicit/wildcard import resolves a name whose simple form is ABSENT from the global
             // index — either never registered or pruned because it's ambiguous across the whole classpath
             // (`Continuation` collides with `jdk/internal/vm/Continuation`). The import names the package.
-            self.obj_with_targs_name(internal, r)
+            self.obj_with_targs_name(scope, internal, r)
         } else if let Some(internal) = self.resolve_qualified_nested_name(&r.name) {
             // A dotted CLASSPATH nested type (`Subject.User`, `SlugValidation.Ok`) → `Outer$Nested`.
-            self.obj_with_targs_name(internal, r)
+            self.obj_with_targs_name(scope, internal, r)
         } else {
             Ty::Error
         };
@@ -19439,7 +19620,7 @@ impl<'a> Checker<'a> {
         } else {
             base
         };
-        if !self.tparams.contains(&r.name) {
+        if !scope.tparam_contains(&r.name) {
             if let Some(internal) = resolved.non_null().kotlin_class_internal() {
                 if !r.is_import() {
                     if let Some(access) = self.resolver().inaccessible_classifier_access(internal) {
@@ -19460,19 +19641,20 @@ impl<'a> Checker<'a> {
         resolved
     }
 
-    /// The erased signature key of a function, using the type parameters currently in `self.tparams`
-    /// plus the function's own. This is a semantic key, not a JVM descriptor string; JVM descriptor
+    /// The erased signature key of a function, using the type parameters visible in `scope` plus the
+    /// function's own. This is a semantic key, not a JVM descriptor string; JVM descriptor
     /// formatting belongs in the backend.
-    fn erased_sig_key(&self, f: &FunDecl) -> ErasedSigKey {
+    fn erased_sig_key(&self, scope: &CheckerScope<'_>, f: &FunDecl) -> ErasedSigKey {
         let resolve = class_internal_resolver(self.syms);
-        let tparams = self
-            .tparams
-            .extended_with(&f.type_params, &f.type_param_bounds, &resolve);
+        let tparams =
+            scope
+                .visible_tparams()
+                .extended_with(&f.type_params, &f.type_param_bounds, &resolve);
         let key = |name: &str| -> ErasedTypeKey {
             if tparams.contains(name) {
-                erased_type_key(tparams.erase(name))
+                erased_type_key(tparams.bound(name))
             } else {
-                let internal = self.scoped_classifier_name(name);
+                let internal = self.scoped_classifier_name_in(scope, name);
                 if internal == InheritedNestedClassifier::Ambiguous {
                     ErasedTypeKey::Unresolved(name.to_string())
                 } else if let Some(internal) = classifier_over_default(name, internal.found()) {
@@ -19493,9 +19675,31 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// True if `t` is a `@JvmInline value class` reference type (carries a `value_field`).
+    /// True if `t` names a `@JvmInline value class`, independent of which symbol provider owns it.
+    ///
+    /// Keep this as the single checker-level semantic query. The module provider exports its
+    /// `value_field` through the same `LibraryType::value_underlying` shape as decoded dependencies,
+    /// so callers must not pair a source-table lookup with a separate classpath fallback. Besides
+    /// duplicating policy, that split would fail to recognize value classes supplied by any future
+    /// provider added to the federated resolver.
     fn ty_is_value_class(&self, t: Ty) -> bool {
-        matches!(t, Ty::Obj(n, _) if self.syms.class_by_type_name(n).is_some_and(|c| c.value_field.is_some()))
+        t.non_null()
+            .kotlin_class_internal()
+            .is_some_and(|name| self.resolver().is_value_name(name))
+    }
+
+    /// True if `t` is an operand kotlinc forbids on either side of `===`/`!==`: an unsigned type or a
+    /// `@JvmInline value` class (both inline classes, whose boxed identity is not stable). Nullability
+    /// makes no difference — kotlinc rejects `VC? === VC?` too.
+    ///
+    /// The value-class query goes through the federated resolver, whose source already composes the
+    /// current module and dependencies. This rule must not reconstruct separate source/classpath
+    /// probes: provider origin does not change identity semantics, and a new provider must inherit the
+    /// rejection automatically. Without the federated query an external inline class can reach the
+    /// backend as its unboxed carrier and be compared or boxed as the unrelated signed JVM scalar.
+    fn identity_prohibited_operand(&self, t: Ty) -> bool {
+        let t = t.non_null();
+        t.is_unsigned() || self.ty_is_value_class(t)
     }
 
     fn value_class_uses_type_parameter_storage(&self, ty: Ty) -> bool {
@@ -19584,12 +19788,12 @@ impl<'a> Checker<'a> {
     /// DIFFERENT erased signatures are legal overloads — top-level AND class members — dispatched
     /// at the call site by argument types ([`pick_overload`] / `ClassSig::method_matching`, with
     /// the member overload lists flowing through `module_symbols` into the `SymbolResolver`).
-    fn check_no_erased_clash(&mut self, funs: &[&FunDecl]) {
+    fn check_no_erased_clash(&mut self, scope: &CheckerScope<'_>, funs: &[&FunDecl]) {
         let mut seen: HashMap<ErasedSigKey, Span> = HashMap::new();
         for f in funs {
             // `erased_sig_key` includes the name and (for extensions) the receiver, so distinct names and
             // same-named extensions on different receivers don't collide.
-            let key = self.erased_sig_key(f);
+            let key = self.erased_sig_key(scope, f);
             if seen.contains_key(&key) {
                 self.diags.error(
                     f.span,
@@ -19619,6 +19823,7 @@ impl<'a> Checker<'a> {
 
     fn when_sealed_missing_branches(
         &self,
+        scope: &CheckerScope<'_>,
         subject_ty: Option<Ty>,
         arms: &[WhenArm],
     ) -> Option<Vec<String>> {
@@ -19642,7 +19847,7 @@ impl<'a> Checker<'a> {
                 Expr::Is {
                     ty, negated: false, ..
                 } => {
-                    if let Ty::Obj(internal, _) = self.resolve_ty_no_diag(ty) {
+                    if let Ty::Obj(internal, _) = self.resolve_ty_no_diag(scope, ty) {
                         covered.insert(internal);
                     }
                 }
@@ -19886,17 +20091,17 @@ impl<'a> Checker<'a> {
     }
 
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
-    fn resolve_ty_no_diag(&self, r: &TypeRef) -> Ty {
+    fn resolve_ty_no_diag(&self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
         if !r.fun_params.is_empty() || r.name == "<fun>" {
             let params: Vec<Ty> = r
                 .fun_params
                 .iter()
-                .map(|p| self.resolve_ty_no_diag(p))
+                .map(|p| self.resolve_ty_no_diag(scope, p))
                 .collect();
             let ret = r
                 .arg
                 .as_ref()
-                .map(|a| self.resolve_ty_no_diag(a))
+                .map(|a| self.resolve_ty_no_diag(scope, a))
                 .unwrap_or(Ty::Unit);
             let base = Ty::fun_with_shape(
                 params,
@@ -19911,9 +20116,9 @@ impl<'a> Checker<'a> {
                 base
             };
         }
-        let internal = self.scoped_classifier_name(&r.name);
-        let base = if self.tparams.contains(&r.name) {
-            self.tparams.erase(&r.name)
+        let internal = self.scoped_classifier_name_in(scope, &r.name);
+        let base = if scope.tparam_contains(&r.name) {
+            scope.tparam_bound(&r.name)
         } else if internal == InheritedNestedClassifier::Ambiguous {
             Ty::Error
         } else if let Some(internal) = classifier_over_default(&r.name, internal.found()) {
@@ -19959,7 +20164,12 @@ impl<'a> Checker<'a> {
     /// else-branch): `this` is a subtype `B` of the declared receiver. `this` is immutable, so the
     /// narrowing is sound across nested scopes. Only a KNOWN reference subtype narrows (a primitive /
     /// nullable / unresolved target is left un-narrowed, so the file skips rather than miscompiles).
-    fn this_is_narrowing(&self, cond: ExprId, for_else: bool) -> Option<Ty> {
+    fn this_is_narrowing(
+        &self,
+        scope: &CheckerScope<'_>,
+        cond: ExprId,
+        for_else: bool,
+    ) -> Option<Ty> {
         let Expr::Is {
             operand,
             ty,
@@ -19977,7 +20187,7 @@ impl<'a> Checker<'a> {
         if ty.nullable() {
             return None;
         }
-        let tt = self.resolve_ty_no_diag(&ty);
+        let tt = self.resolve_ty_no_diag(scope, &ty);
         tt.is_reference().then_some(tt)
     }
 
@@ -20012,11 +20222,11 @@ impl<'a> Checker<'a> {
     ///   read can return a different value per call), and cannot be overridden on the receiver's
     ///   statically possible runtime types. A final property on an open class is stable; an open
     ///   property is stable only when the receiver type itself is final.
-    fn stable_path_ty(&self, path: &NarrowPath) -> Option<Ty> {
+    fn stable_path_ty(&self, scope: &CheckerScope<'_>, path: &NarrowPath) -> Option<Ty> {
         let mut ty = if path.root == "this" {
-            self.this_ty?
+            scope.this_ty()?
         } else {
-            let local = self.lookup(&path.root)?;
+            let local = self.lookup(scope, &path.root)?;
             if local.is_var {
                 return None;
             }
@@ -20028,10 +20238,13 @@ impl<'a> Checker<'a> {
             if path.segments.is_empty()
                 && matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty(_))
             {
-                return self.stable_path_ty(&NarrowPath {
-                    root: "this".to_string(),
-                    segments: vec![path.root.clone()],
-                });
+                return self.stable_path_ty(
+                    scope,
+                    &NarrowPath {
+                        root: "this".to_string(),
+                        segments: vec![path.root.clone()],
+                    },
+                );
             }
             // A member/top-level property as the ROOT of a longer path re-reads through its
             // accessor each time; only a plain local/`val` slot is a stable root there. (For a
@@ -20067,15 +20280,20 @@ impl<'a> Checker<'a> {
     /// uses the same full stability check as a segmented path. In particular, a bare own member is
     /// normalized to `this.<name>` by [`Self::stable_path_ty`] so it cannot bypass getter/modality
     /// checks merely because member properties are installed in the lexical scope.
-    fn path_is_stable(&self, path: &NarrowPath) -> bool {
-        self.stable_path_ty(path).is_some()
+    fn path_is_stable(&self, scope: &CheckerScope<'_>, path: &NarrowPath) -> bool {
+        self.stable_path_ty(scope, path).is_some()
     }
 
     /// Narrowings from a `!= null`/`== null` proof on `operand`: the operand's whole ACCESS PATH
     /// (`a.b != null` proves `a.b` non-null) — and, for a SAFE-CALL chain (`a?.b?.c != null`),
     /// every prefix too, since a non-null safe-call result means every link held (kotlinc narrows
     /// the root receiver in the branch). Only stable paths narrow soundly.
-    fn null_check_narrowings(&self, operand: ExprId, out: &mut Vec<(NarrowPath, Ty)>) {
+    fn null_check_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        operand: ExprId,
+        out: &mut Vec<(NarrowPath, Ty)>,
+    ) {
         let Some(path) = self.expr_access_path(operand) else {
             // Not a property path. A SAFE-CALL chain ending in a method (`u?.f() != null`,
             // `u?.f() ?: return`) is no property read, but a non-null result still proves the
@@ -20086,7 +20304,7 @@ impl<'a> Checker<'a> {
             }
             if let Expr::Name(n) = self.file.expr(root).clone() {
                 let root_path = NarrowPath::root_only(&n);
-                if let Some(Ty::Nullable(inner)) = self.stable_path_ty(&root_path) {
+                if let Some(Ty::Nullable(inner)) = self.stable_path_ty(scope, &root_path) {
                     out.push((root_path, *inner));
                 }
             }
@@ -20103,7 +20321,7 @@ impl<'a> Checker<'a> {
                 root: path.root.clone(),
                 segments: path.segments[..len].to_vec(),
             };
-            if let Some(Ty::Nullable(inner)) = self.stable_path_ty(&prefix) {
+            if let Some(Ty::Nullable(inner)) = self.stable_path_ty(scope, &prefix) {
                 out.push((prefix, *inner));
             }
         }
@@ -20112,7 +20330,12 @@ impl<'a> Checker<'a> {
     /// The flow narrowings a condition establishes for the branch where it holds (`for_else` =
     /// the FALSE branch): `x != null`, `x is T`, and their safe-call/property-path forms. Each
     /// entry is a stable [`NarrowPath`] and the type it is proven to have.
-    fn smartcast_narrowings(&self, cond: ExprId, for_else: bool) -> Vec<(NarrowPath, Ty)> {
+    fn smartcast_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        cond: ExprId,
+        for_else: bool,
+    ) -> Vec<(NarrowPath, Ty)> {
         let mut out = Vec::new();
         // `x != null` (then-branch) / `x == null` (else-branch) narrows `T?` to `T`.
         if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
@@ -20125,7 +20348,7 @@ impl<'a> Checker<'a> {
                         _ => None,
                     };
                     if let Some(operand) = operand {
-                        self.null_check_narrowings(operand, &mut out);
+                        self.null_check_narrowings(scope, operand, &mut out);
                     }
                 }
             }
@@ -20147,10 +20370,10 @@ impl<'a> Checker<'a> {
             return out;
         };
         // Only stable values smart-cast soundly — a `var`/computed property could change.
-        if !self.path_is_stable(&path) {
+        if !self.path_is_stable(scope, &path) {
             return out;
         }
-        let tt = self.resolve_ty_no_diag(&ty);
+        let tt = self.resolve_ty_no_diag(scope, &ty);
         // `is T?` accepts null, so its narrowing remains nullable.
         let narrowed = if ty.nullable() {
             (tt != Ty::Error).then_some(tt)
@@ -20170,9 +20393,14 @@ impl<'a> Checker<'a> {
         out
     }
 
-    fn condition_narrowings(&self, cond: ExprId, truth: bool) -> Vec<(NarrowPath, Ty)> {
+    fn condition_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        cond: ExprId,
+        truth: bool,
+    ) -> Vec<(NarrowPath, Ty)> {
         let mut candidates = Vec::new();
-        self.collect_condition_narrowings(cond, truth, &mut candidates);
+        self.collect_condition_narrowings(scope, cond, truth, &mut candidates);
         let nonnull: std::collections::HashSet<NarrowPath> = candidates
             .iter()
             .filter_map(|(path, ty)| (!ty.is_nullable()).then_some(path.clone()))
@@ -20205,6 +20433,7 @@ impl<'a> Checker<'a> {
 
     fn collect_condition_narrowings(
         &self,
+        scope: &CheckerScope<'_>,
         cond: ExprId,
         truth: bool,
         out: &mut Vec<(NarrowPath, Ty)>,
@@ -20217,34 +20446,40 @@ impl<'a> Checker<'a> {
             operand,
         } = self.file.expr(cond).clone()
         {
-            self.collect_condition_narrowings(operand, !truth, out);
+            self.collect_condition_narrowings(scope, operand, !truth, out);
             return;
         }
         if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
             let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
             if combines {
-                self.collect_condition_narrowings(lhs, truth, out);
-                self.collect_condition_narrowings(rhs, truth, out);
+                self.collect_condition_narrowings(scope, lhs, truth, out);
+                self.collect_condition_narrowings(scope, rhs, truth, out);
                 return;
             }
         }
-        self.contract_condition_narrowings(cond, truth, out);
-        out.extend(self.smartcast_narrowings(cond, !truth));
+        self.contract_condition_narrowings(scope, cond, truth, out);
+        out.extend(self.smartcast_narrowings(scope, cond, !truth));
     }
 
-    fn narrowing_is_supported(&self, path: &NarrowPath, ty: Ty, compound: bool) -> bool {
+    fn narrowing_is_supported(
+        &self,
+        scope: &CheckerScope<'_>,
+        path: &NarrowPath,
+        ty: Ty,
+        compound: bool,
+    ) -> bool {
         let is_value = ty
             .obj_internal()
             .and_then(|internal| self.syms.class_by_type_name(internal))
             .is_some_and(|class| class.value_field.is_some());
         let source_ty = if path.segments.is_empty() {
             if path.root == "this" {
-                self.this_ty
+                scope.this_ty()
             } else {
-                self.lookup(&path.root).map(|local| local.ty)
+                self.lookup(scope, &path.root).map(|local| local.ty)
             }
         } else {
-            self.stable_path_ty(path)
+            self.stable_path_ty(scope, path)
         };
         let unboxes_nullable = matches!(source_ty, Some(Ty::Nullable(inner)) if *inner == ty);
         (!is_value || unboxes_nullable) && (!compound || ty != Ty::Boolean)
@@ -20254,10 +20489,15 @@ impl<'a> Checker<'a> {
     /// application point for every site (`if`/`while` branches, `&&`/`||` right operands,
     /// early-return guards, contract statements): each narrowing is gated by
     /// [`Self::narrowing_is_supported`], then applied.
-    fn apply_narrowings(&mut self, casts: &[(NarrowPath, Ty)], compound: bool) {
+    fn apply_narrowings(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        casts: &[(NarrowPath, Ty)],
+        compound: bool,
+    ) {
         for (path, ty) in casts {
-            if self.narrowing_is_supported(path, *ty, compound) {
-                self.apply_narrowing_unchecked(path, *ty);
+            if self.narrowing_is_supported(scope, path, *ty, compound) {
+                self.apply_narrowing_unchecked(scope, path, *ty);
             }
         }
     }
@@ -20265,16 +20505,17 @@ impl<'a> Checker<'a> {
     /// Apply one narrowing without the support gate: a root-only path shadows the binding in the
     /// current scope (the classic mechanism — reads resolve to the narrowed `Local`), a property
     /// path is recorded in the current [`Self::path_narrows`] frame for the read-time hook.
-    fn apply_narrowing_unchecked(&mut self, path: &NarrowPath, ty: Ty) {
+    fn apply_narrowing_unchecked(&mut self, scope: &CheckerScope<'_>, path: &NarrowPath, ty: Ty) {
         if path.segments.is_empty() {
             let root = path.root.clone();
             // Alias: a proof on the BARE name of an own member `val` (`if (p != null)`) also
             // narrows the qualified `this.p` read form — same immutable property.
             if matches!(
-                self.lookup(&root).map(|local| local.origin),
+                self.lookup(scope, &root).map(|local| local.origin),
                 Some(ReceiverFnValueOrigin::DispatchProperty(_))
             ) {
                 self.record_path_narrowing(
+                    scope,
                     NarrowPath {
                         root: "this".to_string(),
                         segments: vec![root.clone()],
@@ -20282,57 +20523,55 @@ impl<'a> Checker<'a> {
                     ty,
                 );
             }
-            self.declare_narrowing_shadow(&root, ty);
+            self.declare_narrowing_shadow(scope, &root, ty);
         } else {
-            self.record_path_narrowing(path.clone(), ty);
+            self.record_path_narrowing(scope, path.clone(), ty);
             // Alias: a proof on `this.p` also narrows the BARE `p` read form (same property).
             if path.root == "this" && path.segments.len() == 1 {
                 let name = path.segments[0].clone();
                 if matches!(
-                    self.lookup(&name).map(|local| local.origin),
+                    self.lookup(scope, &name).map(|local| local.origin),
                     Some(ReceiverFnValueOrigin::DispatchProperty(_))
                 ) {
-                    self.declare_narrowing_shadow(&name, ty);
+                    self.declare_narrowing_shadow(scope, &name, ty);
                 }
             }
         }
     }
 
-    /// Record a property-path narrowing in the current frame, snapshotting the receiver epoch it
-    /// was proven in (see [`PathNarrowing`]).
-    fn record_path_narrowing(&mut self, path: NarrowPath, ty: Ty) {
-        if let Some(frame) = self.path_narrows.last_mut() {
-            frame.insert(
-                path,
-                PathNarrowing {
-                    ty,
-                    this_gen: self.this_gen,
-                },
-            );
-        }
+    /// Record a property-path narrowing in the scope that proved it.
+    fn record_path_narrowing(&mut self, scope: &CheckerScope<'_>, path: NarrowPath, ty: Ty) {
+        scope.narrow_path(path, ty);
     }
 
-    /// The active narrowing for a property path, if any. Narrowings recorded BELOW the frame
-    /// holding the root's innermost binding refer to an outer, now-shadowed binding — skip them;
-    /// a `this`-rooted narrowing applies only while `this` is still the receiver it was proven
-    /// against (not inside a receiver lambda / inner class).
-    fn lookup_path_narrowing(&self, path: &NarrowPath) -> Option<Ty> {
+    /// The active narrowing for a property path, if any. A proof recorded OUTSIDE the rung holding
+    /// the root's innermost binding describes an outer, now-shadowed binding; a `this`-rooted proof
+    /// was made against the receiver of the rung that established it, and crossing out of that rung
+    /// means `this` is a different object (a receiver lambda of the same type is still a different
+    /// object). Both are expressed by where the walk stops.
+    fn lookup_path_narrowing(&self, scope: &CheckerScope<'_>, path: &NarrowPath) -> Option<Ty> {
         if path.segments.is_empty() {
             return None;
         }
-        let root_frame = if path.root == "this" {
-            0
-        } else {
-            self.scopes
-                .iter()
-                .rposition(|scope| scope.contains_key(&path.root))?
-        };
-        self.path_narrows[root_frame..]
-            .iter()
-            .rev()
-            .filter_map(|frame| frame.get(path))
-            .find(|narrowing| path.root != "this" || narrowing.this_gen == self.this_gen)
-            .map(|narrowing| narrowing.ty)
+        let rooted_at_this = path.root == "this";
+        for rung in scope.ancestors() {
+            if let Some(ty) = rung.path_narrowing(path) {
+                return Some(ty);
+            }
+            if rooted_at_this {
+                if matches!(
+                    rung.kind(),
+                    ScopeKind::Class { .. } | ScopeKind::Function { receiver: Some(_) }
+                ) {
+                    return None;
+                }
+            } else if rung.declared_here(&path.root, Ns::Value) {
+                // The rung declaring the root was just consulted; a proof recorded further out
+                // describes the binding this one shadows.
+                return None;
+            }
+        }
+        None
     }
 
     /// The flow-narrowed type of a stable property READ (`a.b`, `a?.b`, `this.b`): when an
@@ -20340,16 +20579,22 @@ impl<'a> Checker<'a> {
     /// narrowed type, and the lowerer emits the `checkcast`/unbox from its generic per-expression
     /// coercion (`info.ty(e)` against the property's physical type). Re-validated against the
     /// CURRENT scope state — a changed binding or an unstable step drops the narrowing.
-    fn path_narrowed_read_ty(&self, receiver: ExprId, name: &str, declared: Ty) -> Ty {
+    fn path_narrowed_read_ty(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+        name: &str,
+        declared: Ty,
+    ) -> Ty {
         let Some(mut path) = self.expr_access_path(receiver) else {
             return declared;
         };
         path.segments.push(name.to_string());
-        let Some(narrowed) = self.lookup_path_narrowing(&path) else {
+        let Some(narrowed) = self.lookup_path_narrowing(scope, &path) else {
             return declared;
         };
         let still_valid = self
-            .stable_path_ty(&path)
+            .stable_path_ty(scope, &path)
             .is_some_and(|current| current.non_null() == declared.non_null());
         if narrowed != declared && still_valid {
             narrowed
@@ -20381,7 +20626,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_fun(&mut self, f: &FunDecl, source_decl: Option<DeclId>) {
+    fn check_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, source_decl: Option<DeclId>) {
         self.check_duplicate_param_names(&f.params, f.context_count, f.span);
         // Duplicate type-parameter names (`fun <T, T> f()`) are illegal (conflicting declaration).
         {
@@ -20421,15 +20666,14 @@ impl<'a> Checker<'a> {
             self.allow_lambda_mutation = true;
         }
         if let Some(ret) = &f.ret {
-            self.resolve_ty(ret);
+            self.resolve_ty(scope, ret);
         }
         // Extension function: look up in ext_funs table; set this_ty to the receiver type.
-        let prev_this = self.this_ty;
-        let prev_this_gen = self.this_gen;
         let prev_extension_receiver = self.this_extension_receiver;
+        // `this` inside the body and inside every parameter default is the extension receiver.
+        let extension_receiver = f.receiver.as_ref().map(|r| self.resolve_ty(scope, r));
         if let Some(recv_ref) = &f.receiver {
-            let recv_ty = self.resolve_ty(recv_ref);
-            self.set_this_ty(Some(recv_ty));
+            let recv_ty = extension_receiver.expect("receiver was resolved");
             self.this_labels.push((f.name.clone(), recv_ty, false));
             let label_index = self.this_labels.len() - 1;
             self.extension_receiver_labels
@@ -20441,7 +20685,7 @@ impl<'a> Checker<'a> {
                 .params
                 .iter()
                 .map(|p| {
-                    let t = self.resolve_ty(&p.ty);
+                    let t = self.resolve_ty(scope, &p.ty);
                     if p.is_vararg {
                         Ty::array(t)
                     } else {
@@ -20466,7 +20710,7 @@ impl<'a> Checker<'a> {
                         .find(|signature| signature.params == want)
                 })
                 .map(|s| s.ret)
-                .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
+                .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(scope, r)))
                 .unwrap_or(Ty::Unit);
         } else {
             // Use this declaration's own collected return type; companion methods fall back to the
@@ -20474,7 +20718,7 @@ impl<'a> Checker<'a> {
             let want: Vec<ErasedTypeKey> = f
                 .params
                 .iter()
-                .map(|p| erased_type_key(self.resolve_ty(&p.ty)))
+                .map(|p| erased_type_key(self.resolve_ty(scope, &p.ty)))
                 .collect();
             let own_ret = source_decl
                 .and_then(|declaration| {
@@ -20482,7 +20726,7 @@ impl<'a> Checker<'a> {
                         .source_function_signature(&f.name, self.file_index, declaration)
                 })
                 .map(|signature| signature.ret)
-                .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
+                .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(scope, r)))
                 .or_else(|| self.syms.fun_ret_by_erased_params(&f.name, &want));
             self.ret_ty = own_ret.unwrap_or(Ty::Unit);
         }
@@ -20493,81 +20737,1175 @@ impl<'a> Checker<'a> {
             f.ret.is_none() && self.ret_ty == Ty::Unit && matches!(&f.body, FunBody::Expr(_));
         // Default arguments are evaluated in the caller's context (they may not read other params —
         // enforced in collect_signatures), so check each in a fresh scope and populate its types.
-        self.push_scope();
-        for p in &f.params {
-            let pty = self.resolve_ty(&p.ty);
-            if let Some(dx) = p.default {
-                self.check_default_arg(&p.ty, dx, pty);
+        {
+            // A default argument is evaluated in the CALLER's context, so no sibling parameter is
+            // visible — but `f$default` DOES receive the extension receiver, so `this` stays in
+            // scope (`fun String.f(n: Int = this.length)` is legal).
+            let defaults_scope = scope.child(ScopeKind::Function {
+                receiver: extension_receiver,
+            });
+            let scope = &defaults_scope;
+            for p in &f.params {
+                let pty = self.resolve_ty(scope, &p.ty);
+                if let Some(dx) = p.default {
+                    self.check_default_arg(scope, &p.ty, dx, pty);
+                }
+                // Declare each parameter as we go, so a LATER parameter's default may reference an EARLIER one
+                // (`fun f(a: Int, c: Int = a + 1)`) — Kotlin evaluates defaults left-to-right with preceding
+                // parameters in scope. The default is realized inside the `$default` synthetic.
+                let decl_ty = if p.is_vararg { Ty::array(pty) } else { pty };
+                self.declare(scope, &p.name, decl_ty, false);
             }
-            // Declare each parameter as we go, so a LATER parameter's default may reference an EARLIER one
-            // (`fun f(a: Int, c: Int = a + 1)`) — Kotlin evaluates defaults left-to-right with preceding
-            // parameters in scope. The default is realized inside the `$default` synthetic.
-            let decl_ty = if p.is_vararg { Ty::array(pty) } else { pty };
-            self.declare(&p.name, decl_ty, false);
         }
-        self.pop_scope();
-        self.push_local_funs();
-        self.push_scope();
-        let mut ptys: Vec<Ty> = Vec::with_capacity(f.params.len());
-        for p in &f.params {
-            let ty = self.resolve_ty(&p.ty);
-            let ty = if p.is_vararg { Ty::array(ty) } else { ty };
-            ptys.push(ty);
-            self.declare(&p.name, ty, false);
-        }
-        if infer_ret {
-            if let FunBody::Expr(e) = &f.body {
-                let inferred = self.expr(*e);
-                if inferred != Ty::Unit && inferred != Ty::Error {
-                    self.ret_ty = inferred;
-                    if f.receiver.is_some() {
-                        if let Some(declaration) = source_decl {
-                            self.inferred_ext_fun_rets
-                                .insert((self.file_index, declaration.0, f.name.clone()), inferred);
-                        }
-                    } else {
-                        if let Some(decl) = source_decl {
-                            self.inferred_fun_rets
-                                .insert((self.file_index, decl.0), inferred);
+        {
+            let params_scope = scope.child(ScopeKind::Function {
+                receiver: extension_receiver,
+            });
+            let scope = &params_scope;
+            let mut ptys: Vec<Ty> = Vec::with_capacity(f.params.len());
+            for p in &f.params {
+                let ty = self.resolve_ty(scope, &p.ty);
+                let ty = if p.is_vararg { Ty::array(ty) } else { ty };
+                ptys.push(ty);
+                self.declare(scope, &p.name, ty, false);
+            }
+            if infer_ret {
+                if let FunBody::Expr(e) = &f.body {
+                    let inferred = self.expr(scope, *e);
+                    if inferred != Ty::Unit && inferred != Ty::Error {
+                        self.ret_ty = inferred;
+                        if f.receiver.is_some() {
+                            if let Some(declaration) = source_decl {
+                                self.inferred_ext_fun_rets.insert(
+                                    (self.file_index, declaration.0, f.name.clone()),
+                                    inferred,
+                                );
+                            }
+                        } else {
+                            if let Some(decl) = source_decl {
+                                self.inferred_fun_rets
+                                    .insert((self.file_index, decl.0), inferred);
+                            }
                         }
                     }
                 }
+            } else {
+                self.check_fun_body(scope, f);
             }
-        } else {
-            self.check_fun_body(f);
         }
-        self.pop_scope();
-        self.pop_local_funs();
         if f.receiver.is_some() {
             self.extension_receiver_labels.pop();
             self.this_labels.pop();
         }
-        self.this_ty = prev_this;
-        self.this_gen = prev_this_gen;
         self.this_extension_receiver = prev_extension_receiver;
         self.allow_lambda_mutation = prev_allow;
     }
 
     /// Check an instance method: the class properties are visible (implicit `this`), then the
     /// method's own parameters shadow them.
-    fn check_method(&mut self, f: &FunDecl, props: &[ScopedProperty]) {
+    /// Check one top-level function declaration, in a rung of its own.
+    ///
+    /// The rung is what retires the declaration's type parameters: declaring them into the
+    /// CALLER's scope would leave them visible to every later declaration in the file.
+    fn check_top_level_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, d: DeclId) {
+        let resolve = class_internal_resolver(self.syms);
+        let decl_scope = scope.child(ScopeKind::Function { receiver: None });
+        let scope = &decl_scope;
+        scope.declare_tparams(
+            &f.type_params,
+            &TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve),
+            |name| f.reified_type_params.contains(name),
+        );
+        self.check_fun(scope, f, Some(d));
+    }
+
+    /// Check one top-level property declaration in `scope`.
+    ///
+    /// Mirrors [`Self::check_class`]: the file walk delegates rather than inlining, so every
+    /// declaration kind is reachable from any scope.
+    fn check_property(&mut self, scope: &CheckerScope<'_>, p: &PropDecl, d: DeclId) {
+        // An extension property's own generic type parameters (`val <T> Array<T>.length: Int`)
+        // scope over its receiver, declared type, and accessor bodies — bind them (erased) so
+        // `T` resolves rather than reading as an unresolved reference.
+        let resolve = class_internal_resolver(self.syms);
+        let decl_scope = scope.child(ScopeKind::Function { receiver: None });
+        let scope = &decl_scope;
+        scope.declare_tparams(
+            &p.type_params,
+            &TParams::from_decl_with(&p.type_params, &p.type_param_bounds, &resolve),
+            |_| false,
+        );
+        self.check_duplicate_param_names(&p.context_params, p.context_params.len(), p.span);
+        let prev_extension_receiver = self.this_extension_receiver;
+        // For an extension property (`val Recv.name: T get() = …`), `this` inside the
+        // accessors is the receiver — carried by this rung, which ends before the delegate
+        // and the initializer (both evaluated receiver-less at file initialization).
+        let recv_ty = p.receiver.as_ref().map(|r| self.resolve_ty(scope, r));
+        {
+            let context_scope = scope.child(ScopeKind::Function { receiver: recv_ty });
+            let scope = &context_scope;
+            for parameter in &p.context_params {
+                if parameter.name == "_" {
+                    continue;
+                }
+                let parameter_type = self.resolve_ty(scope, &parameter.ty);
+                self.declare(scope, &parameter.name, parameter_type, false);
+            }
+            if let Some(rt) = recv_ty {
+                self.this_labels.push((p.name.clone(), rt, false));
+                let label_index = self.this_labels.len() - 1;
+                let receiver_span = p.receiver.as_ref().expect("receiver was resolved").span;
+                self.extension_receiver_labels
+                    .push((label_index, receiver_span));
+                self.this_extension_receiver = Some(receiver_span);
+            }
+            let prop_ty =
+                p.ty.as_ref()
+                    .map(|r| self.resolve_ty(scope, r))
+                    .or_else(|| {
+                        self.syms
+                            .source_extension_property((self.file_index, d.0))
+                            .map(|signature| signature.ty)
+                    })
+                    .or_else(|| {
+                        self.syms
+                            .context_props
+                            .get(&(self.file_index, d.0))
+                            .map(|property| property.ty)
+                    })
+                    .unwrap_or(Ty::Error);
+            // A top-level computed property (`val g: T get() = …`) emits a `getG()` static method
+            // (Phase: top-level computed). Type-check the getter body against the declared type. A
+            // top-level backing-field property (`val x = init get() = field`) binds `field` to the
+            // property type for the accessor body (like a member accessor).
+            let has_backing_field =
+                p.receiver.is_none() && p.context_params.is_empty() && p.init.is_some();
+            if let Some(g) = &p.getter {
+                let field_ty = has_backing_field.then_some(prop_ty);
+                self.with_ret_field(prop_ty, field_ty, |c| match g {
+                    FunBody::Expr(e) => {
+                        let gt = c.expr_expected(scope, *e, prop_ty);
+                        c.expect_assignable(prop_ty, gt, c.span(*e), "getter body");
+                    }
+                    FunBody::Block(b) => {
+                        let _ = c.expr_statement(scope, *b);
+                    }
+                    FunBody::None => {}
+                });
+            }
+            // A setter body: an extension property's is checked with `this` = receiver; a top-level
+            // backing-field property's binds `field` to the property type. Both bind the value param.
+            if p.receiver.is_some() || has_backing_field {
+                if let Some(setter) = &p.setter {
+                    if let Some(body) = &setter.body {
+                        let field_ty = has_backing_field.then_some(prop_ty);
+                        self.with_ret_field(Ty::Unit, field_ty, |c| {
+                            let setter_scope = scope.child(ScopeKind::Function { receiver: None });
+                            let scope = &setter_scope;
+                            let pname = crate::ast::setter_param_or_value(setter.param.as_ref());
+                            c.declare(scope, &pname, prop_ty, true);
+                            match body {
+                                FunBody::Expr(g) | FunBody::Block(g) => {
+                                    let _ = c.expr_statement(scope, *g);
+                                }
+                                FunBody::None => {}
+                            }
+                        });
+                    }
+                }
+            }
+            if recv_ty.is_some() {
+                self.extension_receiver_labels.pop();
+                self.this_labels.pop();
+            }
+        }
+        self.this_extension_receiver = prev_extension_receiver;
+        // A delegated property's delegate expression (`by Del()`) must be type-checked so its
+        // (and its sub-expressions') types are recorded for the lowering of `x$delegate`.
+        if let Some(de) = p.delegate {
+            let dt = self.expr(scope, de);
+            self.record_delegate_getvalue(de, dt);
+        }
+        if let Some(init) = p.init {
+            let declared = self
+                .syms
+                .props
+                .get(&p.name)
+                .copied()
+                .filter(|(t, _, _)| *t != Ty::Error)
+                .map(|(ty, _, _)| ty);
+            let it = match declared.filter(|_| p.ty.is_some()) {
+                Some(expected) => self.expr_expected(scope, init, expected),
+                None => self.expr(scope, init),
+            };
+            if let Some(declared) = declared {
+                if p.ty.is_some() {
+                    self.expect_assignable(
+                        declared,
+                        it,
+                        self.value_diagnostic_span(init, it),
+                        "property initializer",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Check one class declaration in `scope`.
+    ///
+    /// Takes the scope rather than assuming file level, so a local class — declared inside a
+    /// function body and able to see the bindings around it — can be checked through the same path.
+    fn check_class(&mut self, scope: &CheckerScope<'_>, cl: &ClassDecl, d: DeclId) {
+        // Read once: `capture_scope` and `anonymous_lexical_scope` live on the checker, and the
+        // member walks below take `&mut self`.
+        let class_capture_plan = self
+            .capture_scope
+            .as_ref()
+            .and_then(|scope| scope.class_plans.get(&d))
+            .cloned();
+        let is_anonymous_object = self.anonymous_lexical_scope.declarations.contains(&d);
+        // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
+        // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
+        // and plain) in order.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for pp in &cl.props {
+                if !seen.insert(pp.name.as_str()) {
+                    self.diags.error(
+                        cl.span,
+                        format!("conflicting declaration: constructor parameter '{}' is declared more than once", pp.name),
+                    );
+                }
+            }
+        }
+        // A `data class`'s primary-constructor parameters must all be `val`/`var` (kotlinc:
+        // "data class primary constructor must have only property (val / var) parameters").
+        if cl.is_data {
+            for pp in &cl.props {
+                if !pp.is_property {
+                    self.diags.error(
+                        cl.span,
+                        format!(
+                            "data class primary-constructor parameter '{}' must be 'val' or 'var'",
+                            pp.name
+                        ),
+                    );
+                }
+            }
+        }
+        // Duplicate class type-parameter names (`class C<T, T>`) are illegal.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for tp in &cl.type_params {
+                if !seen.insert(tp.as_str()) {
+                    self.diags.error(
+                        cl.span,
+                        format!("conflicting declaration: type parameter '{tp}' is declared more than once"),
+                    );
+                }
+            }
+        }
+        // Duplicate enum entry names (`enum class E { A, B, A }`) are illegal.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for entry in &cl.enum_entries {
+                if !seen.insert(entry.name.as_str()) {
+                    self.diags.error(
+                        cl.span,
+                        format!(
+                            "conflicting declaration: enum entry '{}' is declared more than once",
+                            entry.name
+                        ),
+                    );
+                }
+            }
+        }
+        // An `abstract` member is only allowed in an abstract class, an interface, or an enum
+        // class (whose entries override the abstract member per-entry) — kotlinc rejects it in a
+        // final class: "modifier 'abstract' is not applicable inside a final class".
+        if !cl.is_abstract() && !cl.is_interface() && !cl.is_enum() {
+            for m in &cl.methods {
+                if m.is_abstract() {
+                    self.diags.error(
+                        m.span,
+                        format!(
+                            "abstract member '{}' is not allowed in a non-abstract class",
+                            m.name
+                        ),
+                    );
+                }
+            }
+        }
+        // `abstract` modifier consistency (illegal in any class kind): an abstract member has no
+        // body, and cannot also be `final` (kotlinc rejects each).
+        for m in &cl.methods {
+            if m.is_abstract() && !matches!(m.body, FunBody::None) {
+                self.diags.error(
+                    m.span,
+                    format!("abstract member '{}' cannot have a body", m.name),
+                );
+            }
+            if m.is_abstract() && m.is_final() {
+                self.diags.error(
+                    m.span,
+                    format!("member '{}' cannot be both 'abstract' and 'final'", m.name),
+                );
+            }
+        }
+        // In a class WITH a primary constructor every secondary must delegate to it (`this(…)`);
+        // `super(…)`/implicit delegation isn't emitted there, so reject it. A class with NO
+        // primary constructor admits `this(…)`/`super(…)`/implicit delegation (each becomes its
+        // own `<init>`).
+        if cl.has_primary_ctor {
+            for sc in &cl.secondary_ctors {
+                if !matches!(sc.delegation, CtorDelegation::This(_)) {
+                    self.diags.error(
+                        sc.span,
+                        "krusty: a secondary constructor must delegate to the primary (this(…))"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        // `@JvmInline value class` compiles UNBOXED (a value is its underlying type; `X.class`
+        // carries the static `-impl` members). The lowering handles construction + sole-property
+        // access; uses it can't represent unboxed yet (a value-class-typed local/param/field/
+        // return, boxing, equality) make `lower_file` bail so the file skips rather than
+        // miscompile. No blanket rejection here.
+        // An annotation class emits as a JVM annotation interface + a synthetic impl whose
+        // `equals`/`hashCode` are CONTENT-based (`Arrays.equals`/`Arrays.hashCode` for array
+        // members) per the `java.lang.annotation.Annotation` contract — so an array member is
+        // supported (no krusty-synthesized reference-equality member to miscompile).
+        // Class type parameters are in scope for all members (erased; only function params
+        // specialize — see `TParams::erased`). An `inner class` also captures the enclosing
+        // instance, so the outer class's type parameters are visible in its members
+        // (kotlinc); walk the `inner_of` chain and include each enclosing class's parameters.
+        let mut tparam_names = cl.type_params.clone();
+        {
+            let mut outer = cl.inner_of.as_deref().and_then(|o| {
+                self.same_package_class(o)
+                    .map(ClassSig::internal_name)
+                    .or_else(|| existing_type_name(o))
+            });
+            let mut guard = 0;
+            while let Some(o) = outer {
+                guard += 1;
+                if guard > 32 {
+                    break;
+                }
+                if let Some(s) = self.syms.class_by_type_name(o) {
+                    tparam_names.extend(s.tparam_names.iter().cloned());
+                    outer = s.inner_of_name();
+                } else {
+                    break;
+                }
+            }
+        }
+        let current_owner = self
+            .same_package_class(&cl.name)
+            .map(ClassSig::internal_name);
+        let mut props = cl
+            .inner_of
+            .as_deref()
+            .and_then(|outer| {
+                self.same_package_class(outer)
+                    .map(ClassSig::internal_name)
+                    .or_else(|| existing_type_name(outer))
+            })
+            .map(|owner| self.scoped_properties(scope, owner))
+            .unwrap_or_default();
+        if let Some(owner) = current_owner {
+            props.extend(self.scoped_properties(scope, owner));
+        }
+        // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
+        // does a LOCAL class — it is entered from the body it was written in and captures the
+        // enclosing instance, so the outer receivers and type parameters stay reachable.
+        let carries_outer = cl.inner_of.is_some() || self.file.is_local_declaration(d);
+        {
+            let class_scope = match current_owner {
+                Some(owner) => scope.child(ScopeKind::Class {
+                    ty: owner,
+                    carries_outer,
+                }),
+                None => scope.child(ScopeKind::Block),
+            };
+            let scope = &class_scope;
+            // The class's type parameters belong to the CLASS rung, so they retire with it rather
+            // than staying visible to the next declaration checked from the same enclosing scope.
+            scope.declare_tparams(&tparam_names, &TParams::erased(&tparam_names), |_| false);
+            // Push the enclosing-class labels for the duration of this class's member checks: the
+            // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
+            // class's own label (`this@C`) innermost. Walk `inner_of` outward. An anonymous object
+            // has no `inner_of` edge; its outer chain is the structural ownership chain.
+            let mut labels = class_receiver_labels(cl, self.syms, scope.this_ty());
+            if is_anonymous_object {
+                let mut outer = self.anonymous_outer_receiver_labels();
+                outer.append(&mut labels);
+                labels = outer;
+            }
+            let label_depth = labels.len();
+            self.this_labels.extend(labels);
+            let methods: Vec<&FunDecl> = cl.methods.iter().collect();
+            self.check_no_erased_clash(scope, &methods);
+            if let Some(internal) = self
+                .same_package_class(&cl.name)
+                .map(ClassSig::internal_name)
+            {
+                // An `override` member must MATCH a supertype member (same name + arity) —
+                // kotlinc rejects an `override` that overrides nothing. With member overloads a
+                // same-name sibling of a different arity no longer pairs, so check explicitly.
+                // Only when the hierarchy is MODULE-closed: a classpath supertype's members are
+                // invisible to this walk, so absence there proves nothing (properties and
+                // property-overrides are likewise out of scope — this checks methods only).
+                if self.syms.hierarchy_is_module_closed(internal) {
+                    let supers = self.syms.supertype_methods_name(internal);
+                    let super_member_extensions =
+                        self.syms.supertype_member_ext_funs_name(internal);
+                    // `kotlin/Any`'s universal members are overridable in every class but never
+                    // appear in the module supertype walk.
+                    let is_any_member = |m: &FunDecl| {
+                        matches!(
+                            (m.name.as_str(), m.params.len()),
+                            ("toString", 0) | ("hashCode", 0) | ("equals", 1)
+                        )
+                    };
+                    for m in &cl.methods {
+                        let overrides_super = if let Some(receiver_ref) = &m.receiver {
+                            let class = self
+                                .syms
+                                .class_by_type_name(internal)
+                                .expect("checked class has a collected signature");
+                            let class_bindings =
+                                class.type_parameter_bindings(Ty::obj_name(class.internal_name()));
+                            let method_tparams = TParams::from_bindings(class_bindings)
+                                .extended_with(
+                                    &m.type_params,
+                                    &m.type_param_bounds,
+                                    &class_internal_resolver(self.syms),
+                                );
+                            let mut scratch = DiagSink::new();
+                            let receiver = ty_of_ref(
+                                receiver_ref,
+                                &self.syms.class_names,
+                                &method_tparams,
+                                &mut scratch,
+                            );
+                            let params = m
+                                .params
+                                .iter()
+                                .map(|parameter| {
+                                    let ty = ty_of_ref(
+                                        &parameter.ty,
+                                        &self.syms.class_names,
+                                        &method_tparams,
+                                        &mut scratch,
+                                    );
+                                    if parameter.is_vararg {
+                                        Ty::array(ty)
+                                    } else {
+                                        ty
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+                            super_member_extensions.iter().any(|signature| {
+                                signature.name == m.name
+                                    && signature.receiver == receiver
+                                    && signature.params == params
+                                    && signature.visibility != Visibility::Private
+                                    && !signature.is_final
+                            })
+                        } else {
+                            supers.iter().any(|(name, signature)| {
+                                *name == m.name && signature.params.len() == m.params.len()
+                            })
+                        };
+                        if m.is_override() && !is_any_member(m) && !overrides_super {
+                            self.diags
+                                .error(m.span, format!("'{}' overrides nothing", m.name));
+                        }
+                    }
+                }
+                self.check_no_bridge_needed(internal, cl.span);
+                // A `data class` implementing an interface that declares `copy`/`componentN` would
+                // need bridges for its *synthesized* members (which return the class itself, not
+                // the supertype) — krusty doesn't emit those, so reject (cleanly skip).
+                if cl.is_data {
+                    let supers = self.syms.supertype_methods_name(internal);
+                    if let Some((sn, _)) = supers
+                        .iter()
+                        .find(|(sn, _)| sn == "copy" || sn.starts_with("component"))
+                    {
+                        self.diags.error(cl.span, format!("krusty: data class overriding synthesized member '{sn}' needs a bridge method (unsupported)"));
+                    }
+                }
+            }
+            let method_capture_plan = class_capture_plan.as_ref();
+            let mut method_check_index = 0;
+            for m in &cl.methods {
+                self.check_method_in_capture_plan(
+                    scope,
+                    m,
+                    &props,
+                    method_capture_plan,
+                    method_check_index,
+                );
+                method_check_index += 1;
+            }
+            // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
+            // checked like a method of the enum — `this` is the enum type, the enum's properties AND
+            // the entry's own body properties are in scope, and the return type comes from the
+            // abstract member it overrides.
+            for entry in &cl.enum_entries {
+                // Type each entry-body property's initializer, then make it visible (as a member) to
+                // that entry's override methods.
+                let mut entry_props = props.clone();
+                if !entry.props.is_empty() {
+                    // The entry's own body properties, over the enum class's members.
+                    let entry_scope = scope.child(ScopeKind::Block);
+                    let scope = &entry_scope;
+                    for property in &props {
+                        self.declare_dispatch_property(
+                            scope,
+                            &property.name,
+                            property.ty,
+                            property.is_var,
+                            property.owner,
+                        );
+                    }
+                    for bp in &entry.props {
+                        let ty = match (&bp.ty, bp.init) {
+                            (Some(r), _) => self.resolve_ty(scope, r),
+                            (None, Some(init)) => self.expr(scope, init),
+                            _ => Ty::Error,
+                        };
+                        if let (Some(r), Some(init)) = (&bp.ty, bp.init) {
+                            let declared = self.resolve_ty(scope, r);
+                            let it = self.expr_expected(scope, init, declared);
+                            let sp = self.value_diagnostic_span(init, it);
+                            self.expect_assignable(declared, it, sp, "property initializer");
+                        }
+                        let owner = current_owner.expect("enum class must have a source owner");
+                        self.declare_dispatch_property(scope, &bp.name, ty, bp.is_var, owner);
+                        entry_props.push(ScopedProperty {
+                            name: bp.name.clone(),
+                            ty,
+                            is_var: bp.is_var,
+                            owner,
+                        });
+                    }
+                }
+                for bm in &entry.methods {
+                    self.check_method_in_capture_plan(
+                        scope,
+                        bm,
+                        &entry_props,
+                        method_capture_plan,
+                        method_check_index,
+                    );
+                    method_check_index += 1;
+                }
+            }
+            // Secondary constructors: check and record one delegation target before the body.
+            let primary_params = self
+                .same_package_class(&cl.name)
+                .map(|s| s.ctor_params.clone())
+                .unwrap_or_default();
+            // A *deferred* `val` (no initializer/getter/setter) is definitely-assigned once in a
+            // constructor body, so it is assignable WITHIN a secondary constructor (kotlinc allows
+            // it) — same relaxation the primary-ctor body uses below.
+            let sc_deferred_val: std::collections::HashSet<&str> = cl
+                .body_props
+                .iter()
+                .filter(|bp| {
+                    !bp.is_var
+                        && bp.init.is_none()
+                        && (bp.getter.is_none() || bp.getter_reads_field)
+                        && bp.ty.is_some()
+                })
+                .map(|bp| bp.name.as_str())
+                .collect();
+            for (sc_index, sc) in cl.secondary_ctors.iter().enumerate() {
+                let ctor_scope = scope.child(ScopeKind::Block);
+                let scope = &ctor_scope;
+                for property in &props {
+                    self.declare_dispatch_property(
+                        scope,
+                        &property.name,
+                        property.ty,
+                        property.is_var || sc_deferred_val.contains(property.name.as_str()),
+                        property.owner,
+                    );
+                }
+                for p in &sc.params {
+                    let ty = self.secondary_ctor_param_ty(scope, p);
+                    self.declare(scope, &p.name, ty, false);
+                }
+                for p in &sc.params {
+                    if let Some(default) = p.default {
+                        let ty = self.secondary_ctor_param_ty(scope, p);
+                        // A ctor-param default is evaluated in the CALLER's context — no `this`.
+                        self.with_this_unavailable(|c| {
+                            c.check_default_arg(scope, &p.ty, default, ty);
+                        });
+                    }
+                }
+                // Delegation-call args (`this(…)`/`super(…)`) run before the delegated
+                // constructor — `this` is UNINITIALIZED there (same guard as the primary
+                // `super(…)` clause below).
+                self.with_this_unavailable(|c| match &sc.delegation {
+                    CtorDelegation::This(delegation) => {
+                        for &argument in &delegation.args {
+                            // A delegation lambda is contextual: leave its initial `Error`
+                            // placeholder until the shared constructor selector maps it to a
+                            // parameter slot, just like a primary class-header base argument.
+                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                                c.expr(scope, argument);
+                            }
+                        }
+                        let candidates =
+                            c.this_ctor_delegation_candidates(scope, cl, sc_index, &primary_params);
+                        c.select_ctor_delegation(
+                            scope,
+                            CtorDelegationSite {
+                                class: d,
+                                secondary: sc_index,
+                                span: sc.span,
+                                label: "this",
+                                value_class: cl.is_value,
+                            },
+                            delegation,
+                            candidates,
+                        );
+                    }
+                    CtorDelegation::Super(delegation) => {
+                        for &argument in &delegation.args {
+                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                                c.expr(scope, argument);
+                            }
+                        }
+                        let candidates = c.super_ctor_delegation_candidates(cl);
+                        c.select_ctor_delegation(
+                            scope,
+                            CtorDelegationSite {
+                                class: d,
+                                secondary: sc_index,
+                                span: sc.span,
+                                label: "super",
+                                value_class: cl.is_value,
+                            },
+                            delegation,
+                            candidates,
+                        );
+                    }
+                    CtorDelegation::None if !cl.has_primary_ctor => {
+                        let arguments = CtorDelegationCall {
+                            args: Vec::new(),
+                            names: Vec::new(),
+                            trailing_lambda: false,
+                        };
+                        let candidates = c.super_ctor_delegation_candidates(cl);
+                        c.select_ctor_delegation(
+                            scope,
+                            CtorDelegationSite {
+                                class: d,
+                                secondary: sc_index,
+                                span: sc.span,
+                                label: "super",
+                                value_class: cl.is_value,
+                            },
+                            &arguments,
+                            candidates,
+                        );
+                    }
+                    CtorDelegation::None => {}
+                });
+                if let Some(body) = sc.body {
+                    self.with_ret(Ty::Unit, |c| {
+                        c.expr_statement(scope, body);
+                    });
+                }
+            }
+            self.validate_ctor_delegation_graph(d, cl);
+            // Primary-constructor parameter defaults (`class A(val ctx: CoroutineContext =
+            // EmptyCoroutineContext)`) are evaluated in the CALLER's context — they may not read other
+            // ctor params (enforced in collect) and have no `this` — so check each in a fresh scope.
+            // This records each default's sub-expression types and object-value references, which the
+            // default-fill lowering needs (a call-site `A()` fill, and the `super(<defaults>)` synthesized
+            // for a subclass or a typed `companion object : A()`). Mirrors `check_fun`'s param-default
+            // pass so a function-typed parameter's lambda default types concretely.
+            {
+                // A ctor-param default is evaluated in the CALLER's context: no `this`, and no
+                // sibling constructor parameter.
+                let defaults_scope = scope.child(ScopeKind::Block);
+                let scope = &defaults_scope;
+                for p in &cl.props {
+                    if let Some(dx) = p.default {
+                        let pty = self.resolve_ty(scope, &p.ty);
+                        self.with_this_unavailable(|c| c.check_default_arg(scope, &p.ty, dx, pty));
+                    }
+                }
+            }
+            // Body-property initializers and `init` blocks see the properties (implicit `this`)
+            // and the primary-constructor parameters (including non-property ones).
+            // A *deferred* `val` (declared with no initializer/getter — `val a: Int`) is assigned
+            // exactly once in an `init` block, so it is treated as assignable WITHIN the constructor
+            // body (kotlinc's definite-assignment allows it; a normal `val` stays immutable).
+            let deferred_val: std::collections::HashSet<&str> = cl
+                .body_props
+                .iter()
+                .filter(|bp| {
+                    !bp.is_var
+                        && bp.init.is_none()
+                        && (bp.getter.is_none() || bp.getter_reads_field)
+                        && bp.ty.is_some()
+                })
+                .map(|bp| bp.name.as_str())
+                .collect();
+            {
+                let body_scope = scope.child(ScopeKind::Block);
+                let scope = &body_scope;
+                for property in &props {
+                    self.declare_dispatch_property(
+                        scope,
+                        &property.name,
+                        property.ty,
+                        property.is_var || deferred_val.contains(property.name.as_str()),
+                        property.owner,
+                    );
+                }
+                for p in &cl.props {
+                    let ty = self.resolve_ty(scope, &p.ty);
+                    self.declare(scope, &p.name, ty, p.is_var);
+                }
+                // Base class constructor args are evaluated before the body and may reference ctor params.
+                // A LAMBDA arg is typed against the selected super ctor's parameter type (a receiver
+                // lambda's `this` scope comes from that expected type), so it is deferred here and
+                // checked below once the ctor is resolved; anything else is typed up front.
+                let file = self.file;
+                let is_lambda = |arg: ExprId| matches!(file.expr(arg), Expr::Lambda { .. });
+                // `this` is UNINITIALIZED inside `super(…)` args — an implicit-`this` callable ref
+                // there must not resolve (see `this_unavailable`).
+                self.with_this_unavailable(|c| {
+                    for &arg in &cl.base_args {
+                        if !is_lambda(arg) {
+                            c.expr(scope, arg);
+                        }
+                    }
+                    // Resolve the primary constructor's `Base(args)` clause through the SAME delegation
+                    // candidates and argument-slot mapper used by secondary `super(args)` calls. Besides
+                    // keeping same-file, sibling-module, and classpath bases on one path, the resulting
+                    // source-order `argument_types` are essential for named/vararg arguments: zipping the
+                    // source arguments with parameter order would contextually type the wrong lambda.
+                    if !cl.base_args.is_empty() {
+                        let internal = class_internal(c.file, &cl.name);
+                        let names = cl
+                            .base_args
+                            .first()
+                            .and_then(|argument| c.file.base_arg_names.get(&argument.0))
+                            .cloned()
+                            .unwrap_or_else(|| vec![None; cl.base_args.len()]);
+                        let arguments = CtorDelegationCall {
+                            args: cl.base_args.clone(),
+                            names,
+                            trailing_lambda: false,
+                        };
+                        let candidates = c.super_ctor_delegation_candidates(cl);
+                        if let Some(selected) = c.select_source_constructor(&arguments, &candidates)
+                        {
+                            // A receiver lambda's implicit label is the source-level base class's SIMPLE
+                            // name. Split every internal/nested separator so `Outer.Base` and `Outer$Base`
+                            // both expose `Base`, rather than exposing a JVM-internal spelling as a label.
+                            let label = cl.base_class.as_deref().map(|base| {
+                                base.rsplit(['/', '.', '$'])
+                                    .next()
+                                    .unwrap_or(base)
+                                    .to_string()
+                            });
+                            for ((&arg, &expected), &has_receiver) in cl
+                                .base_args
+                                .iter()
+                                .zip(&selected.argument_types)
+                                .zip(&selected.argument_lambda_receivers)
+                            {
+                                if is_lambda(arg) {
+                                    c.check_argument_expected(
+                                        scope,
+                                        arg,
+                                        expected,
+                                        has_receiver,
+                                        label.as_deref(),
+                                    );
+                                }
+                            }
+                            c.super_ctor_params
+                                .insert(internal, selected.target.params().to_vec());
+                        } else {
+                            // No unique ctor match: type the deferred lambda args without an expected type.
+                            for &arg in &cl.base_args {
+                                if is_lambda(arg) {
+                                    c.expr(scope, arg);
+                                }
+                            }
+                        }
+                    }
+                });
+                // Interface-delegation expressions (`: I by mk(x)`) are evaluated in the constructor too,
+                // so they're typed here — with the ctor params and `this` in scope.
+                for (_iface, e) in &cl.delegation_exprs {
+                    self.expr(scope, *e);
+                }
+                for (bp_index, bp) in cl.body_props.iter().enumerate() {
+                    let member_extension_index = cl.body_props[..bp_index]
+                        .iter()
+                        .filter(|previous| previous.receiver.is_some() && previous.name == bp.name)
+                        .count();
+                    // The property's own type parameters get a rung of their own, so they retire
+                    // with the iteration. The hidden-binding restore below must still land in
+                    // `body_scope` (it has to outlive this property), so that rung is named.
+                    let body_scope = scope;
+                    let property_scope = scope.child(ScopeKind::Function { receiver: None });
+                    let scope = &property_scope;
+                    scope.declare_tparams(
+                        &bp.type_params,
+                        &scope.visible_tparams().extended_with(
+                            &bp.type_params,
+                            &bp.type_param_bounds,
+                            &class_internal_resolver(self.syms),
+                        ),
+                        |_| false,
+                    );
+                    self.check_duplicate_param_names(
+                        &bp.context_params,
+                        bp.context_params.len(),
+                        bp.span,
+                    );
+                    let declared_property = self
+                        .same_package_class(&cl.name)
+                        .and_then(|class| class.declared_props.get(&bp.name))
+                        .map(|property| (property.ty, property.storage_ty));
+                    if let Some(init) = bp.init {
+                        let declared = declared_property
+                            .map(|(property_ty, field_ty)| field_ty.unwrap_or(property_ty))
+                            .or_else(|| bp.ty.as_ref().map(|r| self.resolve_ty(scope, r)));
+                        let it = match declared {
+                            Some(expected) => self.expr_expected(scope, init, expected),
+                            None => self.expr(scope, init),
+                        };
+                        if let Some(declared) = declared {
+                            self.expect_assignable(
+                                declared,
+                                it,
+                                self.value_diagnostic_span(init, it),
+                                "property initializer",
+                            );
+                        }
+                    }
+                    // A delegated member property's delegate expression (`by Del()`) — type-check it so
+                    // its (and its sub-expressions') types are recorded for the `x$delegate` field lowering.
+                    if let Some(de) = bp.delegate {
+                        let dt = self.expr(scope, de);
+                        self.record_delegate_getvalue(de, dt);
+                    }
+                    // A property's accessor bodies are checked like methods, with `field` bound to
+                    // the backing-field type (the implicit-`this` scope of props is already active).
+                    // A member extension accessor uses the extension receiver as `this`.
+                    let dispatch_extension_receiver = self.this_extension_receiver;
+                    let outer_symbolic_signature_inference = self.symbolic_signature_inference;
+                    let extension_receiver = bp
+                        .receiver
+                        .as_ref()
+                        .map(|receiver| self.resolve_ty(scope, receiver));
+                    if let Some(receiver) = extension_receiver {
+                        self.this_labels.push((bp.name.clone(), receiver, false));
+                        let label_index = self.this_labels.len() - 1;
+                        let receiver_span =
+                            bp.receiver.as_ref().expect("receiver was resolved").span;
+                        self.extension_receiver_labels
+                            .push((label_index, receiver_span));
+                        self.this_extension_receiver = Some(receiver_span);
+                        self.symbolic_signature_inference = true;
+                    }
+                    // Cached class properties would bypass the extension receiver. Hide them while
+                    // the accessor resolves the ordered implicit receiver chain. Taken from
+                    // `body_scope`, the rung that declared them and the rung the restore below puts
+                    // them back on — the two must name the same scope or a binding changes rung.
+                    let hidden_dispatch_bindings = if extension_receiver.is_some() {
+                        let names = props
+                            .iter()
+                            .map(|property| property.name.clone())
+                            .chain(cl.props.iter().map(|property| property.name.clone()))
+                            .collect::<Vec<_>>();
+                        names
+                            .into_iter()
+                            .filter_map(|name| {
+                                body_scope
+                                    .take_own_binding(&name, Ns::Value)
+                                    .map(|binding| (name, binding))
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+                    let prop_ty = bp
+                        .ty
+                        .as_ref()
+                        .map(|r| self.resolve_ty(scope, r))
+                        .or_else(|| declared_property.map(|(property_ty, _)| property_ty))
+                        .or_else(|| {
+                            self.same_package_class(&cl.name).and_then(|class| {
+                                extension_receiver
+                                    .and_then(|_| {
+                                        class
+                                            .member_ext_props(&bp.name)
+                                            .get(member_extension_index)
+                                            .map(|sig| sig.ret)
+                                    })
+                                    .or_else(|| {
+                                        class.props.iter().find_map(|(name, ty, _)| {
+                                            (name == &bp.name).then_some(*ty)
+                                        })
+                                    })
+                                    .or_else(|| {
+                                        class
+                                            .declared_props
+                                            .get(&bp.name)
+                                            .map(|property| property.ty)
+                                    })
+                            })
+                        })
+                        .unwrap_or(Ty::Error);
+                    {
+                        let accessor_scope = scope.child(ScopeKind::Function {
+                            receiver: extension_receiver,
+                        });
+                        let scope = &accessor_scope;
+                        for parameter in &bp.context_params {
+                            if parameter.name == "_" {
+                                continue;
+                            }
+                            let parameter_type = self.resolve_ty(scope, &parameter.ty);
+                            self.declare(scope, &parameter.name, parameter_type, false);
+                        }
+                        let field_ty = (bp.receiver.is_none() && bp.context_params.is_empty())
+                            .then_some(
+                                declared_property
+                                    .and_then(|(_, field_ty)| field_ty)
+                                    .unwrap_or(prop_ty),
+                            );
+                        if let Some(getter) = &bp.getter {
+                            self.with_ret_field(prop_ty, field_ty, |c| match getter {
+                                FunBody::Expr(g) => {
+                                    let gt = c.expr_expected(scope, *g, prop_ty);
+                                    c.expect_assignable(prop_ty, gt, c.span(*g), "getter body");
+                                }
+                                FunBody::Block(g) => {
+                                    let _ = c.expr_statement(scope, *g);
+                                }
+                                FunBody::None => {}
+                            });
+                        }
+                        if let Some(setter) = &bp.setter {
+                            if let Some(body) = &setter.body {
+                                self.with_ret_field(Ty::Unit, field_ty, |c| {
+                                    let setter_scope =
+                                        scope.child(ScopeKind::Function { receiver: None });
+                                    let scope = &setter_scope;
+                                    let pname =
+                                        crate::ast::setter_param_or_value(setter.param.as_ref());
+                                    c.declare(scope, &pname, prop_ty, true);
+                                    match body {
+                                        FunBody::Expr(g) | FunBody::Block(g) => {
+                                            let _ = c.expr_statement(scope, *g);
+                                        }
+                                        FunBody::None => {}
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    for (name, binding) in hidden_dispatch_bindings {
+                        body_scope.rebind(&name, Ns::Value, binding);
+                    }
+                    if extension_receiver.is_some() {
+                        self.extension_receiver_labels.pop();
+                        self.this_labels.pop();
+                    }
+                    self.this_extension_receiver = dispatch_extension_receiver;
+                    self.symbolic_signature_inference = outer_symbolic_signature_inference;
+                }
+                for step in &cl.init_order {
+                    if let ClassInit::Block(b) = step {
+                        self.expr_statement(scope, *b);
+                    }
+                }
+            }
+            for _ in 0..label_depth {
+                self.this_labels.pop();
+            }
+        }
+        // Enum entry constructor arguments (e.g. `RED(0xff0000)`) are type-checked in a
+        // fresh scope — they're emitted in the static `<clinit>` and cannot access `this`.
+        if cl.is_enum() {
+            let ctor_tys: Vec<Ty> = cl
+                .props
+                .iter()
+                .map(|p| self.resolve_ty(scope, &p.ty))
+                .collect();
+            for entry in &cl.enum_entries {
+                // A NAMED argument (`C(b = "b")`) is checked against the type of the parameter it
+                // names, not the one at its textual position; positional arguments keep order.
+                let mut next_pos = 0usize;
+                for (j, a) in entry.args.iter().enumerate() {
+                    let idx = match entry.arg_names.get(j).and_then(|n| n.as_ref()) {
+                        Some(name) => cl.props.iter().position(|p| &p.name == name),
+                        None => {
+                            let p = next_pos;
+                            next_pos += 1;
+                            Some(p)
+                        }
+                    };
+                    let expected = idx.and_then(|i| ctor_tys.get(i)).copied();
+                    // A lambda passed to a function-typed enum-ctor parameter (`plus("+",
+                    // { x, y -> x + y })`) binds its parameter types from that parameter's
+                    // `Ty::Fun` — like a constructor/function call — so the body sees real types.
+                    let at = match expected {
+                        Some(Ty::Fun(s)) if matches!(self.file.expr(*a), Expr::Lambda { .. }) => {
+                            let pts = s.params.clone();
+                            self.check_lambda_with_types(scope, *a, &pts)
+                        }
+                        _ => self.expr(scope, *a),
+                    };
+                    if let Some(expected_ty) = expected {
+                        self.expect_assignable(
+                            expected_ty,
+                            at,
+                            self.span(*a),
+                            "enum entry argument",
+                        );
+                    }
+                }
+            }
+        }
+        // `companion object` members are checked statically, with companion props/methods in
+        // scope unqualified.
+        if !cl.companion_methods.is_empty() || !cl.companion_props.is_empty() {
+            // A plain companion property hoists to a static field on the outer class, so a
+            // companion PROPERTY whose name collides with an instance member would duplicate
+            // a field (kotlinc separates them via the nested Companion class). Reject (skip).
+            // Companion METHODS are emitted on `C$Companion`, so a same-NAME method on the
+            // outer instance is physically legal. The remaining guard is semantic: the
+            // checker currently consults the unqualified companion fallback before its
+            // implicit instance receiver, so the two families must not accept the same call
+            // arity or it could bind the wrong owner. Compare the complete callable arity
+            // RANGE (defaults/varargs included), not raw parameter-vector length.
+            let inst_names: std::collections::HashSet<&str> = cl
+                .props
+                .iter()
+                .filter(|p| p.is_property)
+                .map(|p| p.name.as_str())
+                .chain(cl.body_props.iter().map(|p| p.name.as_str()))
+                .chain(cl.methods.iter().map(|m| m.name.as_str()))
+                .collect();
+            for cp in &cl.companion_props {
+                if inst_names.contains(cp.name.as_str()) {
+                    self.diags.error(cl.span, format!("krusty: companion member '{}' collides with an instance member (unsupported)", cp.name));
+                }
+            }
+            for cm in &cl.companion_methods {
+                let overlapping_instance = cl
+                    .methods
+                    .iter()
+                    .any(|m| m.name == cm.name && source_callable_arities_overlap(m, cm));
+                if overlapping_instance {
+                    self.diags.error(cl.span, format!("krusty: companion member '{}' collides with an instance member (unsupported)", cm.name));
+                }
+            }
+            self.companion_of = Some(cl.name.clone());
+            for p in &cl.companion_props {
+                if let Some(init) = p.init {
+                    let declared = p.ty.as_ref().map(|r| self.resolve_ty(scope, r));
+                    let it = match declared {
+                        Some(expected) => self.expr_expected(scope, init, expected),
+                        None => self.expr(scope, init),
+                    };
+                    if let Some(declared) = declared {
+                        self.expect_assignable(declared, it, self.span(init), "companion property");
+                    }
+                }
+                // A field-less custom-accessor companion property lowers to accessor METHODS
+                // on the companion, so their bodies need checking like any other body — the
+                // initializer-only walk above left the setter's parameter untyped, which the
+                // lowerer then had no type for.
+                let prop_ty = self
+                    .same_package_class(&cl.name)
+                    .and_then(|class| class.static_props.get(&p.name))
+                    .map(|property| property.ty)
+                    .unwrap_or(Ty::Error);
+                if let Some(getter) = &p.getter {
+                    match getter {
+                        FunBody::Expr(g) => {
+                            let gt = self.expr_expected(scope, *g, prop_ty);
+                            self.expect_assignable(prop_ty, gt, self.span(*g), "getter body");
+                        }
+                        FunBody::Block(g) => {
+                            self.with_ret(prop_ty, |c| {
+                                let _ = c.expr_statement(scope, *g);
+                            });
+                        }
+                        FunBody::None => {}
+                    }
+                }
+                if let Some(body) = p.setter.as_ref().and_then(|s| s.body.as_ref()) {
+                    let setter_scope = scope.child(ScopeKind::Function { receiver: None });
+                    let scope = &setter_scope;
+                    let pname = crate::ast::setter_param_or_value(
+                        p.setter.as_ref().and_then(|s| s.param.as_ref()),
+                    );
+                    self.declare(scope, &pname, prop_ty, true);
+                    self.with_ret(Ty::Unit, |c| match body {
+                        FunBody::Expr(g) | FunBody::Block(g) => {
+                            let _ = c.expr_statement(scope, *g);
+                        }
+                        FunBody::None => {}
+                    });
+                }
+            }
+            for (method_index, m) in cl.companion_methods.iter().enumerate() {
+                if class_capture_plan
+                    .as_ref()
+                    // A missing plan means completeness fell back to the full semantic walk;
+                    // an unexpected length mismatch must fail conservative for the same reason.
+                    .is_none_or(|plan| {
+                        plan.companion_methods
+                            .get(method_index)
+                            .copied()
+                            .unwrap_or(true)
+                    })
+                {
+                    self.check_fun(scope, m, None);
+                }
+            }
+            self.companion_of = None;
+        }
+    }
+
+    fn check_method(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, props: &[ScopedProperty]) {
         self.reset_body_mutations(fun_body_expr(&f.body));
         let resolve = class_internal_resolver(self.syms);
-        let added = self
-            .tparams
-            .insert_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
-        let reified_added: Vec<String> = f
-            .reified_type_params
-            .iter()
-            .filter(|t| self.reified_tparams.insert((*t).clone()))
-            .cloned()
-            .collect();
-        let dispatch_this = self.this_ty;
-        let dispatch_this_gen = self.this_gen;
+        // The method's own type parameters (and its `reified` marks) belong to a rung of its own:
+        // the caller's scope is the CLASS rung, shared with every sibling member.
+        let method_scope = scope.child(ScopeKind::Function { receiver: None });
+        let scope = &method_scope;
+        scope.declare_tparams(
+            &f.type_params,
+            &TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve),
+            |name| f.reified_type_params.contains(name),
+        );
+        let dispatch_this = scope.this_ty();
         let dispatch_extension_receiver = self.this_extension_receiver;
+        let extension_receiver = f.receiver.as_ref().map(|r| self.resolve_ty(scope, r));
         if let Some(recv_ref) = &f.receiver {
-            let receiver = self.resolve_ty(recv_ref);
-            self.set_this_ty(Some(receiver));
+            let receiver = extension_receiver.expect("receiver was resolved");
             self.this_labels.push((f.name.clone(), receiver, false));
             let label_index = self.this_labels.len() - 1;
             self.extension_receiver_labels
@@ -20578,7 +21916,7 @@ impl<'a> Checker<'a> {
         self.ret_ty = f
             .ret
             .as_ref()
-            .map(|r| self.resolve_ty(r))
+            .map(|r| self.resolve_ty(scope, r))
             .unwrap_or_else(|| {
                 if let Some(ret) = object_contract_ret {
                     return ret;
@@ -20606,88 +21944,85 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Unit
             });
-        self.push_local_funs();
-        self.push_scope(); // implicit-this scope (properties)
-        if f.receiver.is_none() {
-            for property in props {
-                self.declare_dispatch_property(
-                    &property.name,
-                    property.ty,
-                    property.is_var,
-                    property.owner,
-                );
+        {
+            // Implicit-`this` scope: an extension member resolves `this` to its extension receiver,
+            // a plain member to the dispatch receiver.
+            let members_scope = scope.child(ScopeKind::Function {
+                receiver: extension_receiver.or(dispatch_this),
+            });
+            let scope = &members_scope;
+            if f.receiver.is_none() {
+                for property in props {
+                    self.declare_dispatch_property(
+                        scope,
+                        &property.name,
+                        property.ty,
+                        property.is_var,
+                        property.owner,
+                    );
+                }
             }
-        }
-        self.push_scope(); // parameter scope
-        for p in &f.params {
-            let ty = self.resolve_ty(&p.ty);
-            let ty = if p.is_vararg { Ty::array(ty) } else { ty };
-            self.declare(&p.name, ty, false);
-        }
-        // Type each parameter's DEFAULT value so its type info is recorded — the `$default` stub lowering
-        // needs it to resolve a NON-literal default (a ctor call `f: Filt = Filt()`, an object read); a
-        // method's defaults were previously left unchecked (only `check_fun` did top-level ones), so a
-        // non-literal member default typed `Error` and the stub bailed ("call Filt"). A default may read
-        // `this`/members but not other parameters (the latter is rejected in `collect_signatures`).
-        for p in &f.params {
-            if let Some(dx) = p.default {
-                let pty = self.resolve_ty(&p.ty);
-                self.check_default_arg(&p.ty, dx, pty);
+            let params_scope = scope.child(ScopeKind::Block);
+            let scope = &params_scope;
+            for p in &f.params {
+                let ty = self.resolve_ty(scope, &p.ty);
+                let ty = if p.is_vararg { Ty::array(ty) } else { ty };
+                self.declare(scope, &p.name, ty, false);
             }
-        }
-        let infer_ret =
-            f.ret.is_none() && object_contract_ret.is_none() && matches!(&f.body, FunBody::Expr(_));
-        if infer_ret {
-            if let FunBody::Expr(e) = &f.body {
-                let inferred = self.expr(*e);
-                if inferred != Ty::Unit && inferred != Ty::Error {
-                    self.ret_ty = inferred;
-                    if let Some(Ty::Obj(internal, _)) = dispatch_this {
-                        let params: Vec<Ty> = f
-                            .params
-                            .iter()
-                            .map(|p| {
-                                let ty = self.resolve_ty(&p.ty);
-                                if p.is_vararg {
-                                    Ty::array(ty)
-                                } else {
-                                    ty
-                                }
-                            })
-                            .collect();
-                        if let Some(receiver) = f.receiver.as_ref() {
-                            let receiver = self.resolve_ty(receiver);
-                            self.inferred_member_ext_fun_rets
-                                .insert((internal, f.name.clone(), receiver, params), inferred);
-                        } else {
-                            self.inferred_method_rets
-                                .insert((internal, f.name.clone(), params), inferred);
+            // Type each parameter's DEFAULT value so its type info is recorded — the `$default` stub lowering
+            // needs it to resolve a NON-literal default (a ctor call `f: Filt = Filt()`, an object read);
+            // untyped, such a default is `Error` and the stub bails ("call Filt"). A default may read
+            // `this`/members but not other parameters (the latter is rejected in `collect_signatures`).
+            for p in &f.params {
+                if let Some(dx) = p.default {
+                    let pty = self.resolve_ty(scope, &p.ty);
+                    self.check_default_arg(scope, &p.ty, dx, pty);
+                }
+            }
+            let infer_ret = f.ret.is_none()
+                && object_contract_ret.is_none()
+                && matches!(&f.body, FunBody::Expr(_));
+            if infer_ret {
+                if let FunBody::Expr(e) = &f.body {
+                    let inferred = self.expr(scope, *e);
+                    if inferred != Ty::Unit && inferred != Ty::Error {
+                        self.ret_ty = inferred;
+                        if let Some(Ty::Obj(internal, _)) = dispatch_this {
+                            let params: Vec<Ty> = f
+                                .params
+                                .iter()
+                                .map(|p| {
+                                    let ty = self.resolve_ty(scope, &p.ty);
+                                    if p.is_vararg {
+                                        Ty::array(ty)
+                                    } else {
+                                        ty
+                                    }
+                                })
+                                .collect();
+                            if let Some(receiver) = f.receiver.as_ref() {
+                                let receiver = self.resolve_ty(scope, receiver);
+                                self.inferred_member_ext_fun_rets
+                                    .insert((internal, f.name.clone(), receiver, params), inferred);
+                            } else {
+                                self.inferred_method_rets
+                                    .insert((internal, f.name.clone(), params), inferred);
+                            }
                         }
                     }
                 }
+            } else {
+                self.check_fun_body(scope, f);
             }
-        } else {
-            self.check_fun_body(f);
-        }
-        self.pop_scope();
-        self.pop_scope();
-        self.pop_local_funs();
-        for t in added {
-            self.tparams.remove(&t);
-        }
-        for t in reified_added {
-            self.reified_tparams.remove(&t);
         }
         if f.receiver.is_some() {
             self.extension_receiver_labels.pop();
             self.this_labels.pop();
         }
-        self.this_ty = dispatch_this;
-        self.this_gen = dispatch_this_gen;
         self.this_extension_receiver = dispatch_extension_receiver;
     }
 
-    fn check_fun_body(&mut self, f: &FunDecl) {
+    fn check_fun_body(&mut self, scope: &CheckerScope<'_>, f: &FunDecl) {
         if let FunBody::Expr(e) | FunBody::Block(e) = &f.body {
             if bc_complex_e(self.file, *e, false, false) {
                 self.diags.error(f.span, "krusty: 'break'/'continue' in value position, inside 'try', or inside a lambda is not supported".to_string());
@@ -20696,11 +22031,11 @@ impl<'a> Checker<'a> {
         }
         match &f.body {
             FunBody::Expr(e) => {
-                let t = self.expr_expected(*e, self.ret_ty);
+                let t = self.expr_expected(scope, *e, self.ret_ty);
                 self.expect_assignable(self.ret_ty, t, self.span(*e), "function body");
             }
             FunBody::Block(e) => {
-                let _ = self.expr_statement(*e);
+                let _ = self.expr_statement(scope, *e);
                 if !matches!(self.ret_ty, Ty::Unit | Ty::Nothing | Ty::Error)
                     && !self.body_terminates(*e)
                 {
@@ -20810,8 +22145,12 @@ impl<'a> Checker<'a> {
     /// expose mutability directly; classpath properties are writable only when their setter resolves.
     /// A read-only property on a nearer receiver is terminal and must not fall through to a farther
     /// writable receiver.
-    fn implicit_property_write(&self, name: &str) -> Option<ImplicitPropertyWriteResolution> {
-        for implicit_receiver in self.implicit_receivers() {
+    fn implicit_property_write(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> Option<ImplicitPropertyWriteResolution> {
+        for implicit_receiver in self.implicit_receivers(scope) {
             let receiver = implicit_receiver.ty;
             if let Some((owner, ty, is_var, _)) = receiver
                 .obj_internal()
@@ -20887,18 +22226,16 @@ impl<'a> Checker<'a> {
         //    former types the `set` argument as a zero-parameter function (box
         //    `callableReference/property/extensionPropertyWithExtensionType.kt`).
         //  * A VALUE-class-typed property has a `@JvmName`-mangled accessor (`getZ-<hash>`) that the
-        //    reference class does not spell. BOTH flavours must be tested: `ty_is_value_class` sees
-        //    only a SOURCE value class, so a CLASSPATH one — `UInt`, and every other stdlib
-        //    `@JvmInline` — needs the provider's `value_underlying` probe. Without that second arm
-        //    `class H(val u: UInt)` typed `(h::u).get()` as `UInt` while the reference still returned
-        //    an erased `Integer`, and the read threw `ClassCastException` instead of skipping.
+        //    reference class does not spell. `ty_is_value_class` uses the federated symbol shape, so
+        //    this one test covers source declarations, stdlib types such as `UInt`, dependency
+        //    metadata, and future providers. Without it, `(h::u).get()` can be typed as `UInt` while
+        //    the reference still returns an erased `Integer`, causing `ClassCastException`.
         //  * A property typed as a function WITH a receiver (or context parameters) is not realized
         //    as a plain `FunctionN` there.
         let realizable = |&t: &Ty| {
             let t = t.non_null();
             !t.mentions_ty_param()
                 && !self.ty_is_value_class(t)
-                && self.syms.libraries.value_underlying(t).is_none()
                 && !matches!(t, Ty::Fun(sig) if sig.has_receiver || sig.context_count > 0)
         };
         let args: &[Ty] = if args.iter().all(realizable) {
@@ -20917,12 +22254,12 @@ impl<'a> Checker<'a> {
     /// a `__ty/` alias, or a class without a companion.
     /// The first explicit type argument of `call` (`decodeFromString<Foo>(…)` → `Foo`), resolved to a
     /// `Ty`, or `None` if the call carries none. Used to type a reified `<T> T` member's return.
-    fn reified_type_arg(&self, call: ExprId) -> Option<Ty> {
+    fn reified_type_arg(&self, scope: &CheckerScope<'_>, call: ExprId) -> Option<Ty> {
         self.file
             .call_type_args
             .get(&call.0)
             .and_then(|ts| ts.first())
-            .map(|r| self.resolve_ty_no_diag(r))
+            .map(|r| self.resolve_ty_no_diag(scope, r))
     }
 
     fn is_enum_type(&self, ty: Ty) -> bool {
@@ -20937,7 +22274,47 @@ impl<'a> Checker<'a> {
                 .is_some_and(|t| t.is_enum())
     }
 
-    fn classpath_companion_ty(&self, name: &str) -> Option<Ty> {
+    /// Resolve the companion `invoke` overload family once for both lambda shaping and constructor
+    /// arbitration. This prevents those consumers from growing separate origin/name lookup rules.
+    fn companion_invoke_overloads(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> Vec<crate::libraries::FunctionInfo> {
+        if self.value_root_shadows_classifier(scope, name) {
+            return Vec::new();
+        }
+        let Some(companion) = self.semantic_companion_ty(name) else {
+            return Vec::new();
+        };
+        self.resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(companion),
+                CALLABLE_INVOKE_OPERATOR,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+    }
+
+    /// Whether the semantic companion can answer a trailing-lambda factory call. Constructor
+    /// diagnostics defer only when the same overload family consumed by lambda shaping contains a
+    /// non-suspend callable with a function-typed final parameter.
+    fn companion_declares_lambda_invoke(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
+        self.companion_invoke_overloads(scope, name)
+            .iter()
+            .any(|overload| {
+                !overload.is_extension()
+                    && !overload.flags.suspend
+                    && overload
+                        .semantic_params()
+                        .last()
+                        .is_some_and(|parameter| matches!(parameter.non_null(), Ty::Fun(_)))
+            })
+    }
+
+    fn semantic_companion_ty(&self, name: &str) -> Option<Ty> {
         let internal = self.syms.class_names.get(name)?;
         if internal.starts_with("__ty/") {
             return None;
@@ -21110,8 +22487,16 @@ impl<'a> Checker<'a> {
     /// positionally and every trailing argument matches the vararg array's ELEMENT type (`f(vararg s:
     /// T)` accepts `f(a, b)` with `a, b: T`); a single array argument is also accepted (a spread). For a
     /// non-`vararg` list the arguments match positionally.
-    fn expect_call_args(&mut self, params: &[Ty], vararg: bool, args: &[ExprId], arg_tys: &[Ty]) {
+    fn expect_call_args(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        params: &[Ty],
+        vararg: bool,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+    ) {
         self.expect_call_args_at(
+            scope,
             params,
             vararg.then(|| params.len().saturating_sub(1)),
             args,
@@ -21124,6 +22509,7 @@ impl<'a> Checker<'a> {
     /// argument from the slot on, so the trailing parameters must not be matched positionally.
     fn expect_call_args_at(
         &mut self,
+        scope: &CheckerScope<'_>,
         params: &[Ty],
         vararg_index: Option<usize>,
         args: &[ExprId],
@@ -21147,11 +22533,11 @@ impl<'a> Checker<'a> {
                 } else {
                     elem
                 };
-                self.expect_call_arg(expected, args[i], *a);
+                self.expect_call_arg(scope, expected, args[i], *a);
             }
         } else {
             for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
-                self.expect_call_arg(*p, args[i], *a);
+                self.expect_call_arg(scope, *p, args[i], *a);
             }
         }
     }
@@ -21192,13 +22578,32 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn expect_call_arg(&mut self, expected: Ty, argument: ExprId, actual: Ty) {
+    fn expect_call_arg(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expected: Ty,
+        argument: ExprId,
+        actual: Ty,
+    ) {
         if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
             if let Some(sam) =
-                crate::symbol_resolver::classpath_sam_signature(&*self.syms.libraries, expected)
+                crate::symbol_resolver::semantic_sam_signature(&*self.syms.libraries, expected)
             {
-                self.check_lambda_with_types(argument, &sam.params);
-                return;
+                // A lambda already checked against THIS SAM shape during candidate-guided argument
+                // typing is accepted as the selection admitted it —
+                // but only when its checked type actually fits the SAM method: a lambda typed
+                // expectation-free (no candidate supplied its shape) must NOT silently bind, or an
+                // inapplicable call would lower to a bootstrap crash instead of a compile error.
+                // An UNCHECKED lambda (the deferred method/constructor shapes) binds the SAM
+                // parameters now.
+                if self.expr_types[argument.0 as usize] == Ty::Error {
+                    self.check_lambda_with_types(scope, argument, &sam.params);
+                    return;
+                }
+                if crate::symbol_resolver::sam_arg_matches(&*self.syms.libraries, expected, actual)
+                {
+                    return;
+                }
             }
         }
         self.expect_assignable(expected, actual, self.span(argument), "argument");
@@ -21206,18 +22611,22 @@ impl<'a> Checker<'a> {
 
     fn expect_source_constructor_args(
         &mut self,
-        call: ExprId,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
         class: &ClassSig,
         params: &[Ty],
-        args: &[ExprId],
-        arg_tys: &[Ty],
         slots: Option<&[Option<ExprId>]>,
     ) -> Vec<Ty> {
+        let CallArgs {
+            call,
+            args,
+            arg_tys,
+        } = call_args;
         let explicit_refs = self.file.call_type_args.get(&call.0).cloned();
         let mut bindings = vec![Ty::Error; class.tparam_names.len()];
         if let Some(refs) = &explicit_refs {
             for (index, type_ref) in refs.iter().enumerate().take(bindings.len()) {
-                bindings[index] = self.resolve_ty_no_diag(type_ref);
+                bindings[index] = self.resolve_ty_no_diag(scope, type_ref);
             }
         }
         let explicit_count = explicit_refs
@@ -21654,16 +23063,21 @@ impl<'a> Checker<'a> {
         self.diags.error(span, msg);
     }
 
-    fn expr(&mut self, e: ExprId) -> Ty {
-        self.expr_with_context(e, true)
+    fn expr(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> Ty {
+        self.expr_with_context(scope, e, true)
     }
 
-    fn expr_statement(&mut self, e: ExprId) -> Ty {
+    fn expr_statement(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> Ty {
         self.discarded_exprs.insert(e);
-        self.expr_with_context(e, false)
+        self.expr_with_context(scope, e, false)
     }
 
-    fn expr_with_context(&mut self, e: ExprId, value_required: bool) -> Ty {
+    fn expr_with_context(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        value_required: bool,
+    ) -> Ty {
         // Guard against a stack overflow on a pathologically deep expression: past the limit the
         // expression types as `Error` (the file is skipped, never crashed).
         self.expr_depth += 1;
@@ -21680,27 +23094,35 @@ impl<'a> Checker<'a> {
         // a `&&`-chain level), so 500 levels overrun any single grown segment. The per-call check
         // is a stack-pointer read; `stacker` chains further segments only when the current one
         // runs low (see [`crate::wide_stack`]).
-        let t = crate::wide_stack::on_wide_stack(|| self.expr_inner(e, expected, value_required));
+        let t = crate::wide_stack::on_wide_stack(|| {
+            self.expr_inner(scope, e, expected, value_required)
+        });
         self.expr_depth -= 1;
         t
     }
 
     /// Check `e` with an EXPECTED type propagated in (see [`Self::expected`]).
-    fn expr_expected(&mut self, e: ExprId, expected: Ty) -> Ty {
+    fn expr_expected(&mut self, scope: &CheckerScope<'_>, e: ExprId, expected: Ty) -> Ty {
         self.expected = Some(expected);
-        self.expr(e)
+        self.expr(scope, e)
     }
 
-    fn expr_result(&mut self, e: ExprId, expected: Option<Ty>, value_required: bool) -> Ty {
+    fn expr_result(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        expected: Option<Ty>,
+        value_required: bool,
+    ) -> Ty {
         match expected {
-            Some(expected) => self.expr_expected(e, expected),
-            None if value_required => self.expr(e),
-            None => self.expr_statement(e),
+            Some(expected) => self.expr_expected(scope, e, expected),
+            None if value_required => self.expr(scope, e),
+            None => self.expr_statement(scope, e),
         }
     }
 
-    fn arg_tys(&mut self, args: &[ExprId]) -> Vec<Ty> {
-        args.iter().map(|&a| self.expr(a)).collect()
+    fn arg_tys(&mut self, scope: &CheckerScope<'_>, args: &[ExprId]) -> Vec<Ty> {
+        args.iter().map(|&a| self.expr(scope, a)).collect()
     }
 
     /// Argument types for `receiver(args)` — the invoke-operator convention. A lambda argument is
@@ -21711,7 +23133,12 @@ impl<'a> Checker<'a> {
     /// receiver supplies its own parameters the same way — it goes through the identical convention.
     /// Only the arity-free lookup is available: this runs BEFORE the arguments are typed, so there are
     /// no argument types yet to select an overload with.
-    fn invoke_operator_arg_tys(&mut self, receiver_ty: Ty, args: &[ExprId]) -> Vec<Ty> {
+    fn invoke_operator_arg_tys(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        receiver_ty: Ty,
+        args: &[ExprId],
+    ) -> Vec<Ty> {
         let params = match receiver_ty {
             Ty::Fun(signature) => Some(signature.params.clone()),
             _ => receiver_ty
@@ -21721,16 +23148,21 @@ impl<'a> Checker<'a> {
         }
         .filter(|params| params.len() == args.len());
         let Some(params) = params else {
-            return self.arg_tys(args);
+            return self.arg_tys(scope, args);
         };
         args.iter()
             .zip(params)
-            .map(|(&a, param)| self.expr_result(a, Some(param), true))
+            .map(|(&a, param)| self.expr_result(scope, a, Some(param), true))
             .collect()
     }
 
     /// Whether an argument call can be revisited with an expected type.
-    fn postponable_generic_call(&self, expression: ExprId, actual: Ty) -> bool {
+    fn postponable_generic_call(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        actual: Ty,
+    ) -> bool {
         let Expr::Call { callee, .. } = self.file.expr(expression) else {
             return false;
         };
@@ -21745,7 +23177,7 @@ impl<'a> Checker<'a> {
         let Expr::Name(name) = self.file.expr(*callee) else {
             return false;
         };
-        !self.lexical_value_declares(name)
+        !self.lexical_value_declares(scope, name)
             && !self.module_declares(name)
             && !actual.type_args().is_empty()
             && actual
@@ -21754,9 +23186,186 @@ impl<'a> Checker<'a> {
                 .any(|argument| argument.is_erased_top())
     }
 
+    /// Whether `expression` is a generic call whose type can only come from the OUTSIDE — the
+    /// A bare-name generic call with no explicit type arguments whose first-pass type collapsed to
+    /// its formal's erased bound, carrying no type arguments to refine. The postponable predicate
+    /// covers erased type ARGUMENTS; this adds a bare-`T` return erased to the TOP type itself.
+    fn expected_retypable_generic_argument(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        actual: Ty,
+    ) -> bool {
+        if self.postponable_generic_call(scope, expression, actual) {
+            return true;
+        }
+        if !actual.is_erased_top() {
+            return false;
+        }
+        let Expr::Call { callee, .. } = self.file.expr(expression) else {
+            return false;
+        };
+        if self
+            .file
+            .call_type_args
+            .get(&expression.0)
+            .is_some_and(|arguments| !arguments.is_empty())
+        {
+            return false;
+        }
+        let callee_shape_admits = match self.file.expr(*callee) {
+            Expr::Name(name) => {
+                !self.lexical_value_declares(scope, name) && !self.module_declares(name)
+            }
+            // A qualified matcher (`m.any()`): the member's provenance is the receiver's, so no
+            // shadowing concern applies.
+            Expr::Member { .. } => true,
+            _ => false,
+        };
+        // The erased-top result must come from an UNBOUND bare-`T` return — a non-generic callee
+        // that really returns `Any`/`Object` keeps its type; overriding it would accept programs
+        // kotlinc rejects and record a type the runtime value does not have.
+        callee_shape_admits && self.argument_callee_returns_bare_type_param(expression)
+    }
+
+    /// Whether `argument`'s RESOLVED callee declares a generic signature whose return is a bare
+    /// type parameter (`fun <T : Any> any(): T`). Only that shape erases to the top type while
+    /// remaining bindable by an expected type; an unresolved argument declines conservatively.
+    fn argument_callee_returns_bare_type_param(&self, argument: ExprId) -> bool {
+        self.resolved_calls
+            .get(&argument)
+            .and_then(ResolvedCall::generic_sig)
+            .is_some_and(|generic| matches!(generic.ret.non_null(), Ty::TyParam(..)))
+    }
+
+    /// Last-resort MEMBER retry for `recv.name(args)` after every resolution path declined: when
+    /// an argument is a generic call with nothing to bind its type parameter from (see
+    /// [`Self::expected_retypable_generic_argument`]), the enclosing member's own parameter type
+    /// IS its expected type — kotlinc's expected-type inference. Re-type those arguments against
+    /// the parameter every mappable member overload agrees on, then run member resolution once
+    /// more. `None` (fall through to the inapplicable diagnostic) when nothing was re-typed or
+    /// the retry still finds no member.
+    fn retry_member_call_with_expected_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &mut [Ty],
+    ) -> Option<Ty> {
+        let overloads: Vec<crate::libraries::FunctionInfo> = self
+            .resolver()
+            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|overload| !overload.is_extension())
+            .collect();
+        if overloads.is_empty() {
+            return None;
+        }
+        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let mut changed = false;
+        for (index, &argument) in args.iter().enumerate() {
+            if !self.expected_retypable_generic_argument(scope, argument, arg_tys[index]) {
+                continue;
+            }
+            // The expected type must be one EVERY mappable overload agrees on — a divergent set
+            // can't tell this pass which parameter the argument lands in.
+            let mut expected: Option<Ty> = None;
+            let mut agree = true;
+            let mut mapped_any = false;
+            for overload in &overloads {
+                let Some(map) = call_argument_parameter_indices(
+                    args.len(),
+                    overload.semantic_params().len(),
+                    arg_names.as_deref(),
+                    trailing_lambda,
+                    &overload.call_sig,
+                ) else {
+                    continue;
+                };
+                let Some(parameter) = map
+                    .get(index)
+                    .and_then(|&parameter| overload.semantic_params().get(parameter))
+                    .copied()
+                else {
+                    agree = false;
+                    break;
+                };
+                if parameter.mentions_ty_param() {
+                    agree = false;
+                    break;
+                }
+                mapped_any = true;
+                match expected {
+                    None => expected = Some(parameter),
+                    Some(previous) if previous == parameter => {}
+                    Some(_) => {
+                        agree = false;
+                        break;
+                    }
+                }
+            }
+            if !agree || !mapped_any {
+                continue;
+            }
+            if let Some(expected) = expected {
+                // NOTE: this re-types (and may force) `expr_types` even when the retry below
+                // still fails — sound only because a failing retry always falls through to the
+                // inapplicable/unresolved diagnostic. An arm added AFTER the retry hook must not
+                // consume these forced types as evidence of a resolution.
+                let retyped = self.expr_expected(scope, argument, expected);
+                // A generic call whose return REMAINS the erased top even under the expectation
+                // (`provide(): T` erases to `Object` and nothing else binds `T`): the expected
+                // parameter type IS kotlinc's inference result — record it as the argument's
+                // type so the retried selection and the lowering both see the bound type.
+                arg_tys[index] = if retyped.is_erased_top() && !expected.is_erased_top() {
+                    // The producer's selected callable kept its erased return; set the bound type
+                    // as its LOGICAL return — the same channel a resolver-side recovery fills — so
+                    // lowering's `coerce_to_static` checkcasts the `Object` result to the type the
+                    // enclosing parameter's descriptor expects (else: VerifyError).
+                    if let Some(selected) = self.resolved_calls.get_mut(&argument) {
+                        selected.refine_logical_return(expected);
+                    }
+                    self.set(argument, expected)
+                } else {
+                    retyped
+                };
+                changed = true;
+            }
+        }
+        if !changed {
+            return None;
+        }
+        match self.record_classpath_member_call_with_slots(scope, call, rt, name, args, false) {
+            ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
+            ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
+                return Some(Ty::Error)
+            }
+            ClasspathMemberSlotCall::NoMatch => {}
+        }
+        let arg_kinds: Vec<CallArgKind> = args
+            .iter()
+            .zip(arg_tys.iter())
+            .map(|(&argument, &ty)| call_arg_kind(self.file, argument, ty))
+            .collect();
+        let type_args = self.resolved_explicit_type_args(scope, call);
+        self.resolve_instance_member_with_literal_and_lambda_args(rt, name, &arg_kinds, &type_args)
+            .map(|member| {
+                let ret = member.ret;
+                self.resolved_calls
+                    .insert(call, ResolvedCall::Member(member));
+                ret
+            })
+    }
+
     /// Recheck postponed arguments after the outer call establishes their expected types.
     fn retarget_postponable_extension_arguments(
         &mut self,
+        scope: &CheckerScope<'_>,
         receiver: Ty,
         name: &str,
         arguments: &[ExprId],
@@ -21782,18 +23391,18 @@ impl<'a> Checker<'a> {
             else {
                 continue;
             };
-            if self.postponable_generic_call(argument, *actual) {
-                *actual = self.expr_expected(argument, expected_argument);
+            if self.postponable_generic_call(scope, argument, *actual) {
+                *actual = self.expr_expected(scope, argument, expected_argument);
             }
         }
     }
 
-    fn lambda_probe_ty(&self, arg: ExprId) -> Option<Ty> {
+    fn lambda_probe_ty(&self, scope: &CheckerScope<'_>, arg: ExprId) -> Option<Ty> {
         match self.file.expr(arg) {
             Expr::Lambda { params, .. } if !params.is_empty() => {
                 Some(Ty::fun(vec![Ty::Error; params.len()], Ty::Error))
             }
-            Expr::Lambda { body, .. } if self.untyped_lambda_binds_implicit_it(*body) => {
+            Expr::Lambda { body, .. } if self.untyped_lambda_binds_implicit_it(scope, *body) => {
                 Some(Ty::fun(vec![Ty::Error], Ty::Error))
             }
             Expr::Lambda { .. } => Some(Ty::Error),
@@ -21806,8 +23415,8 @@ impl<'a> Checker<'a> {
     /// Merely finding the token in the body is insufficient: when a lexical value named `it` already
     /// exists, the inner lambda CAPTURES that value and remains `Function0`. Keep this decision in one
     /// helper because both overload probing and fallback lambda typing must infer the same arity.
-    fn untyped_lambda_binds_implicit_it(&self, body: ExprId) -> bool {
-        self.file.expr_uses_name(body, "it") && self.lookup("it").is_none()
+    fn untyped_lambda_binds_implicit_it(&self, scope: &CheckerScope<'_>, body: ExprId) -> bool {
+        self.file.expr_uses_name(body, "it") && self.lookup(scope, "it").is_none()
     }
 
     /// A lambda argument's expected shape at one parameter position of a semantic-provider
@@ -21817,18 +23426,105 @@ impl<'a> Checker<'a> {
     /// bind exactly as kotlinc binds them.
     fn provider_member_lambda_expectations(
         &self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         receiver: crate::symbol_resolver::SymRecv<'_>,
         name: &str,
-        args: &[ExprId],
-        partial: &[Option<Ty>],
+        args_and_partial: (&[ExprId], &[Option<Ty>]),
         type_args: &[Ty],
     ) -> Option<Vec<Option<LambdaExpectation>>> {
+        let (args, partial) = args_and_partial;
+        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+
+        // A named call's source argument order is not its declaration parameter order. Selecting a
+        // provider callable positionally before consulting `CallSig` can therefore reject the only
+        // candidate while its lambdas are still postponed: an untyped receiver lambda has no useful
+        // probe type until that very candidate supplies its receiver. Reuse the same semantic slot
+        // mapper and partial-applicability predicate as top-level and extension lambda shaping. This
+        // is provider-neutral—the candidate family comes from the federated resolver—and it keeps
+        // named/default/trailing-lambda syntax from acquiring separate module/library policies.
+        if arg_names.is_some() {
+            let mut mapped = self
+                .resolver()
+                .resolve_symbol(receiver, name, &[], type_args)
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
+                .filter_map(|candidate| {
+                    let parameter_count = candidate.semantic_params().len();
+                    let argument_parameters = call_argument_parameter_indices(
+                        args.len(),
+                        parameter_count,
+                        arg_names,
+                        trailing_lambda,
+                        &candidate.call_sig,
+                    )?;
+                    self.lambda_overload_partially_applicable(
+                        &candidate,
+                        None,
+                        partial,
+                        &argument_parameters,
+                        type_args,
+                    )
+                    .then_some((candidate, argument_parameters))
+                })
+                .collect::<Vec<_>>();
+            // Member precedence is semantic receiver distance, not provider iteration order. Drop
+            // inherited candidates when a nearer declaration is applicable before deciding whether
+            // the postponed call is genuinely ambiguous.
+            if let Some(nearest) = mapped
+                .iter()
+                .map(|(candidate, _)| candidate.receiver_rank)
+                .min()
+            {
+                mapped.retain(|(candidate, _)| candidate.receiver_rank == nearest);
+            }
+            // Until lambda bodies are typed, two mapped candidates can legitimately remain
+            // indistinguishable. The exact-one pattern declines an expectation in that case;
+            // choosing the first would leak provider iteration order into overload resolution.
+            if let [(candidate, argument_parameters)] = mapped.as_slice() {
+                let semantic = candidate.semantic_signature();
+                let mut binds = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
+                for (&parameter, actual) in argument_parameters.iter().zip(partial) {
+                    if let (Some(&declared), Some(actual)) =
+                        (semantic.params.get(parameter), actual)
+                    {
+                        crate::symbol_resolver::unify_ty(declared, *actual, &mut binds);
+                    }
+                }
+                return Some(
+                    argument_parameters
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(source_index, parameter_index)| {
+                            if !matches!(self.file.expr(args[source_index]), Expr::Lambda { .. }) {
+                                return None;
+                            }
+                            let param = semantic
+                                .params
+                                .get(parameter_index)
+                                .copied()
+                                .map(|param| crate::symbol_resolver::ty_subst(param, &binds))?;
+                            lambda_expectation(
+                                &*self.syms.libraries,
+                                &candidate.call_sig,
+                                parameter_index,
+                                param,
+                            )
+                        })
+                        .collect(),
+                );
+            }
+        }
+
         let provisional: Vec<Ty> = args
             .iter()
             .enumerate()
             .map(|(index, &arg)| {
-                self.lambda_probe_ty(arg)
+                self.lambda_probe_ty(scope, arg)
                     .or_else(|| partial.get(index).copied().flatten())
                     .unwrap_or(Ty::Error)
             })
@@ -21876,8 +23572,6 @@ impl<'a> Checker<'a> {
         // same CallSig slot mapper used by call recording instead of adding a provider-specific
         // positional assumption. A metadata-less Java member has no names/defaults to reorder, so
         // its only valid shape is the positional identity map.
-        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let argument_parameters = if candidate.call_sig.has_param_names() {
             call_argument_parameter_indices(
                 args.len(),
@@ -21920,25 +23614,30 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                     let param = specialized_params.get(parameter_index).copied()?;
-                    lambda_expectation(&*self.syms.libraries, &candidate, parameter_index, param)
+                    lambda_expectation(
+                        &*self.syms.libraries,
+                        &candidate.call_sig,
+                        parameter_index,
+                        param,
+                    )
                 })
                 .collect(),
         )
     }
 
     /// The [`CallArgKind`] for an already-checked argument — pure, no checking side effects.
-    fn call_arg_kind(&self, argument: ExprId) -> CallArgKind {
+    fn call_arg_kind(&self, scope: &CheckerScope<'_>, argument: ExprId) -> CallArgKind {
         let ty = if matches!(self.file.expr(argument), Expr::Lambda { .. })
             && self.expr_types[argument.0 as usize] == Ty::Error
         {
-            self.lambda_probe_ty(argument).unwrap_or(Ty::Error)
+            self.lambda_probe_ty(scope, argument).unwrap_or(Ty::Error)
         } else {
             self.expr_types[argument.0 as usize]
         };
         call_arg_kind(self.file, argument, ty)
     }
 
-    fn call_arg_kinds(&mut self, args: &[ExprId]) -> Vec<CallArgKind> {
+    fn call_arg_kinds(&mut self, scope: &CheckerScope<'_>, args: &[ExprId]) -> Vec<CallArgKind> {
         // Ensure each NON-lambda argument has been type-checked so the lowerer sees real types.
         // A lambda argument is NOT checked here: its parameter types come from the selected
         // overload's (SAM) parameter, applied by the call paths via `check_lambda_with_types`.
@@ -21949,28 +23648,36 @@ impl<'a> Checker<'a> {
             if !matches!(self.file.expr(arg), Expr::Lambda { .. })
                 && self.expr_types[arg.0 as usize] == Ty::Error
             {
-                self.expr(arg);
+                self.expr(scope, arg);
             }
         }
-        args.iter().map(|&arg| self.call_arg_kind(arg)).collect()
+        args.iter()
+            .map(|&arg| self.call_arg_kind(scope, arg))
+            .collect()
     }
 
     /// Kinds for arguments that are all known to be checked already (no re-check, so no duplicate
     /// diagnostics from re-walking an erroneous argument).
-    fn checked_call_arg_kinds(&self, args: &[ExprId]) -> Vec<CallArgKind> {
-        args.iter().map(|&arg| self.call_arg_kind(arg)).collect()
+    fn checked_call_arg_kinds(
+        &self,
+        scope: &CheckerScope<'_>,
+        args: &[ExprId],
+    ) -> Vec<CallArgKind> {
+        args.iter()
+            .map(|&arg| self.call_arg_kind(scope, arg))
+            .collect()
     }
 
     /// Explicit call-site type arguments (`create<String, Int>(…)`), resolved to `Ty`s.
     /// Empty when the call spells none.
-    fn explicit_call_type_args(&mut self, call: ExprId) -> Vec<Ty> {
+    fn explicit_call_type_args(&mut self, scope: &CheckerScope<'_>, call: ExprId) -> Vec<Ty> {
         self.file
             .call_type_args
             .get(&call.0)
             .cloned()
             .unwrap_or_default()
             .iter()
-            .map(|argument| self.resolve_ty(argument))
+            .map(|argument| self.resolve_ty(scope, argument))
             .collect()
     }
 
@@ -21981,6 +23688,7 @@ impl<'a> Checker<'a> {
     /// back to a plain check when no expectation applies.
     fn provider_member_lambda_arg_kinds(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         receiver: crate::symbol_resolver::SymRecv<'_>,
         name: &str,
@@ -21989,10 +23697,16 @@ impl<'a> Checker<'a> {
     ) -> Vec<CallArgKind> {
         let partial: Vec<Option<Ty>> = args
             .iter()
-            .map(|&arg| (self.lambda_probe_ty(arg).is_none()).then(|| self.expr(arg)))
+            .map(|&arg| (self.lambda_probe_ty(scope, arg).is_none()).then(|| self.expr(scope, arg)))
             .collect();
-        let lambda_params = self
-            .provider_member_lambda_expectations(call, receiver, name, args, &partial, type_args);
+        let lambda_params = self.provider_member_lambda_expectations(
+            scope,
+            call,
+            receiver,
+            name,
+            (args, &partial),
+            type_args,
+        );
         args.iter()
             .enumerate()
             .map(|(index, &arg)| {
@@ -22003,9 +23717,9 @@ impl<'a> Checker<'a> {
                         .and_then(Option::as_ref)
                     {
                         Some(expectation) => {
-                            self.check_lambda_with_expectation(arg, expectation, None)
+                            self.check_lambda_with_expectation(scope, arg, expectation, None)
                         }
-                        None => partial[index].unwrap_or_else(|| self.expr(arg)),
+                        None => partial[index].unwrap_or_else(|| self.expr(scope, arg)),
                     }
                 } else {
                     partial[index].unwrap_or(Ty::Error)
@@ -22019,14 +23733,21 @@ impl<'a> Checker<'a> {
     /// (`this`) for a `Recv.() -> R` parameter, else against plain value parameter types.
     fn check_lambda_with_expectation(
         &mut self,
+        scope: &CheckerScope<'_>,
         arg: ExprId,
         expectation: &LambdaExpectation,
         label: Option<&str>,
     ) -> Ty {
         if let Some(receiver) = expectation.receiver {
-            self.check_lambda_with_receiver_labeled(arg, receiver, &expectation.value_params, label)
+            self.check_lambda_with_receiver_labeled(
+                scope,
+                arg,
+                receiver,
+                &expectation.value_params,
+                label,
+            )
         } else {
-            self.check_lambda_with_types(arg, &expectation.value_params)
+            self.check_lambda_with_types(scope, arg, &expectation.value_params)
         }
     }
 
@@ -22036,18 +23757,19 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn resolved_explicit_type_args(&mut self, call: ExprId) -> Vec<Ty> {
+    fn resolved_explicit_type_args(&mut self, scope: &CheckerScope<'_>, call: ExprId) -> Vec<Ty> {
         self.file
             .call_type_args
             .get(&call.0)
             .cloned()
-            .map(|args| args.iter().map(|arg| self.resolve_ty(arg)).collect())
+            .map(|args| args.iter().map(|arg| self.resolve_ty(scope, arg)).collect())
             .unwrap_or_default()
     }
 
     /// Type safe-call lambda arguments from the selected receiver callable.
     fn ext_arg_tys(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         receiver: Ty,
         name: &str,
@@ -22056,12 +23778,15 @@ impl<'a> Checker<'a> {
     ) -> Vec<Ty> {
         let partial: Vec<Option<Ty>> = args
             .iter()
-            .map(|&x| (!matches!(self.file.expr(x), Expr::Lambda { .. })).then(|| self.expr(x)))
+            .map(|&x| {
+                (!matches!(self.file.expr(x), Expr::Lambda { .. })).then(|| self.expr(scope, x))
+            })
             .collect();
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         let members =
             crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(receiver, name);
         let method_sig = self.best_module_member_candidate(
+            scope,
             &members,
             args,
             &partial,
@@ -22077,20 +23802,24 @@ impl<'a> Checker<'a> {
             arg_names.as_deref(),
         );
         let member_extension_plan = method_sig.is_none().then(|| {
-            self.member_extension_lambda_param_types(MemberExtensionCall {
-                extension_receiver: receiver,
-                name,
-                args,
-                partial_arg_tys: &partial,
-                arg_names: arg_names.as_deref(),
-                explicit_type_args,
-                trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
-            })
+            self.member_extension_lambda_param_types(
+                scope,
+                MemberExtensionCall {
+                    extension_receiver: receiver,
+                    name,
+                    args,
+                    partial_arg_tys: &partial,
+                    arg_names: arg_names.as_deref(),
+                    explicit_type_args,
+                    trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+                },
+            )
         });
         let member_extension_plan = member_extension_plan.flatten();
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let module_shape = method_sig.and_then(|member| {
             module_member_lambda_shape(
+                &*self.syms.libraries,
                 member,
                 generic_member.as_ref(),
                 args,
@@ -22131,11 +23860,11 @@ impl<'a> Checker<'a> {
         // expectations belonging to callables that cannot both be selected.
         let provider_member_expectations = (module_shape.is_none() && shape.is_none()).then(|| {
             self.provider_member_lambda_expectations(
+                scope,
                 call,
                 crate::symbol_resolver::SymRecv::Value(receiver),
                 name,
-                args,
-                &partial,
+                (args, &partial),
                 explicit_type_args,
             )
         });
@@ -22174,6 +23903,7 @@ impl<'a> Checker<'a> {
                                     module_shape.as_ref().is_some_and(|shape| shape.is_inline);
                                 return self.with_lambda_mutation(is_inline, |checker| {
                                     checker.check_lambda_with_function_type_and_params_labeled(
+                                        scope,
                                         x,
                                         signature,
                                         pt,
@@ -22185,13 +23915,14 @@ impl<'a> Checker<'a> {
                         }
                         if let Some(lambda_receiver) = lambda_receiver {
                             self.check_lambda_with_receiver_labeled(
+                                scope,
                                 x,
                                 lambda_receiver,
                                 pt.get(1..).unwrap_or_default(),
                                 Some(name),
                             )
                         } else {
-                            self.check_lambda_with_types(x, pt)
+                            self.check_lambda_with_types(scope, x, pt)
                         }
                     }
                     _ => {
@@ -22202,9 +23933,14 @@ impl<'a> Checker<'a> {
                         {
                             Some(expectation) => {
                                 let expectation = expectation.clone();
-                                self.check_lambda_with_expectation(x, &expectation, Some(name))
+                                self.check_lambda_with_expectation(
+                                    scope,
+                                    x,
+                                    &expectation,
+                                    Some(name),
+                                )
                             }
-                            None => partial[i].unwrap_or_else(|| self.expr(x)),
+                            None => partial[i].unwrap_or_else(|| self.expr(scope, x)),
                         }
                     }
                 }
@@ -22459,6 +24195,7 @@ impl<'a> Checker<'a> {
 
     fn adapted_outer_call_signature(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         name: &str,
         args: &[ExprId],
@@ -22473,7 +24210,7 @@ impl<'a> Checker<'a> {
             .cloned()
             .unwrap_or_default()
             .iter()
-            .map(|argument| self.resolve_ty(argument))
+            .map(|argument| self.resolve_ty(scope, argument))
             .collect::<Vec<_>>();
         let outer_functions = self
             .resolver()
@@ -22800,7 +24537,13 @@ impl<'a> Checker<'a> {
         Some(resolved_type)
     }
 
-    fn expr_inner(&mut self, e: ExprId, expected: Option<Ty>, value_required: bool) -> Ty {
+    fn expr_inner(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        expected: Option<Ty>,
+        value_required: bool,
+    ) -> Ty {
         self.extension_receiver_expr_uses[e.0 as usize].clear();
         self.resolved_source_calls.remove(&e);
         let t = match self.file.expr(e).clone() {
@@ -22816,7 +24559,7 @@ impl<'a> Checker<'a> {
             Expr::NullLit => Ty::Null,
             Expr::NotNull { operand } => {
                 // The value with its non-null type; `T?!!` narrows to `T`.
-                let t = self.expr(operand);
+                let t = self.expr(scope, operand);
                 // `null!!` (a statically-null operand) ALWAYS throws — its type is `Nothing`, so code
                 // after it is dead (otherwise the dead path emits an unframed `aload`/store → VerifyError).
                 if t == Ty::Null {
@@ -22825,7 +24568,7 @@ impl<'a> Checker<'a> {
                 t.non_null()
             }
             Expr::Throw { operand } => {
-                self.expr(operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
+                self.expr(scope, operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
                 Ty::Nothing
             }
             Expr::Return { value, .. } => {
@@ -22834,7 +24577,7 @@ impl<'a> Checker<'a> {
                         .error(self.span(e), "'return' is not allowed here");
                 }
                 if let Some(v) = value {
-                    self.expr_expected(v, self.ret_ty);
+                    self.expr_expected(scope, v, self.ret_ty);
                 }
                 Ty::Nothing
             }
@@ -22843,30 +24586,44 @@ impl<'a> Checker<'a> {
             // the non-null LHS).
             Expr::Break { .. } | Expr::Continue { .. } => Ty::Nothing,
             Expr::Lambda { params, body } => {
-                return self.expr_inner_lambda(e, expected, params, body)
+                return self.expr_inner_lambda(scope, e, expected, params, body)
             }
-            Expr::Index { array, indices } => return self.expr_inner_index(e, array, indices),
+            Expr::Index { array, indices } => {
+                return self.expr_inner_index(scope, e, array, indices)
+            }
             Expr::Try {
                 body,
                 catches,
                 finally,
-            } => return self.expr_inner_try(e, expected, value_required, body, catches, finally),
+            } => {
+                return self.expr_inner_try(
+                    scope,
+                    e,
+                    Wanted {
+                        expected,
+                        value_required,
+                    },
+                    body,
+                    catches,
+                    finally,
+                )
+            }
             Expr::Is {
                 operand,
                 ty,
                 negated: _,
-            } => return self.expr_inner_is(e, operand, ty),
+            } => return self.expr_inner_is(scope, e, operand, ty),
             Expr::As {
                 operand,
                 ty,
                 nullable,
-            } => return self.expr_inner_as(e, operand, ty, nullable),
+            } => return self.expr_inner_as(scope, e, operand, ty, nullable),
             Expr::InRange {
                 value, start, end, ..
-            } => return self.expr_inner_in_range(e, value, start, end),
+            } => return self.expr_inner_in_range(scope, e, value, start, end),
             Expr::RangeTo { lo, hi, kind } => {
-                let lt = self.expr(lo);
-                let rt = self.expr(hi);
+                let lt = self.expr(scope, lo);
+                let rt = self.expr(scope, hi);
                 // `a..b` / `a..<b` constructs the matching stdlib range object. `Char..Char` is a
                 // `CharRange`; the integer family widens like kotlinc's `rangeTo` overloads — any of
                 // `Byte`/`Short`/`Int` yields an `IntRange`, and if either operand is `Long` a
@@ -22877,7 +24634,7 @@ impl<'a> Checker<'a> {
                     // Non-primitive inclusive ranges dispatch through `rangeTo`.
                     if matches!(kind, crate::ast::RangeKind::Through) {
                         if let Some((range_ty, range_call)) =
-                            self.operator_call_ret(lt, "rangeTo", &[rt], &[hi], self.span(e))
+                            self.operator_call_ret(scope, lt, "rangeTo", &[rt], &[hi], self.span(e))
                         {
                             self.resolved_operator_calls
                                 .insert((e, SyntheticOperatorCall::RangeTo), range_call);
@@ -22896,12 +24653,12 @@ impl<'a> Checker<'a> {
                 target,
                 dec,
                 prefix,
-            } => return self.expr_inner_inc_dec(e, target, dec, prefix),
-            Expr::Elvis { lhs, rhs } => return self.expr_inner_elvis(e, expected, lhs, rhs),
+            } => return self.expr_inner_inc_dec(scope, e, target, dec, prefix),
+            Expr::Elvis { lhs, rhs } => return self.expr_inner_elvis(scope, e, expected, lhs, rhs),
             Expr::Template(parts) => {
                 for p in &parts {
                     if let TemplatePart::Expr(pe) = p {
-                        self.expr(*pe);
+                        self.expr(scope, *pe);
                     }
                 }
                 Ty::String
@@ -22910,16 +24667,16 @@ impl<'a> Checker<'a> {
                 receiver,
                 name,
                 args,
-            } => return self.expr_inner_safe_call(e, receiver, name, args),
+            } => return self.expr_inner_safe_call(scope, e, receiver, name, args),
             Expr::Name(n) if n == "this" => {
                 // A smart-cast narrowing (`this != null` in a nullable-prim-receiver extension)
                 // declares a `"this"` scope entry; it wins over the declared receiver type. `this`
                 // is otherwise never a scope local.
                 self.mark_current_extension_receiver_used(e);
-                if let Some(l) = self.lookup("this") {
+                if let Some(l) = self.lookup(scope, "this") {
                     l.ty
                 } else {
-                    match self.this_ty {
+                    match scope.this_ty() {
                         Some(t) => t,
                         None => {
                             self.diags.error(
@@ -22934,7 +24691,8 @@ impl<'a> Checker<'a> {
             // `this@Label` — a labeled receiver. Resolve from the receiver-label stack (innermost last):
             // the matching entry's type is the result. The INNERMOST match (the current `this`) records
             // `LabeledThisInner` (lowered as a bare `this`); a match exactly ONE class level up, with
-            // both ends classes, records `LabeledThisOuter` (lowered via the inner class's `this$0`).
+            // both ends classes, records `LabeledThisOuter` (lowered via the class's captured `this$0`
+            // — synthesized for `inner class`es and for anonymous objects that reach the outer instance).
             // Any other (captured / multi-level / cross-lambda) match type-checks but the lowerer skips.
             Expr::Name(n) if n.starts_with("this@") => {
                 let label = &n["this@".len()..];
@@ -22960,20 +24718,22 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::Name(n) => return self.expr_inner_name(e, n),
+            Expr::Name(n) => return self.expr_inner_name(scope, e, n),
             Expr::Unary { op, operand } => {
-                let ot = self.expr(operand);
-                self.check_unary(e, op, ot, self.span(e))
+                let ot = self.expr(scope, operand);
+                self.check_unary(scope, e, op, ot, self.span(e))
             }
             Expr::Binary {
                 op,
                 lhs,
                 rhs,
                 operator_span,
-            } => return self.expr_inner_binary(e, op, lhs, rhs, operator_span),
-            Expr::Member { receiver, name } => return self.expr_inner_member(e, receiver, name),
+            } => return self.expr_inner_binary(scope, e, op, lhs, rhs, operator_span),
+            Expr::Member { receiver, name } => {
+                return self.expr_inner_member(scope, e, receiver, name)
+            }
             Expr::Call { callee, args } => {
-                self.check_call(e, callee, &args, self.span(e), expected)
+                self.check_call(scope, e, callee, &args, self.span(e), expected)
             }
             Expr::If {
                 cond,
@@ -22981,22 +24741,25 @@ impl<'a> Checker<'a> {
                 else_branch,
             } => {
                 return self.expr_inner_if(
+                    scope,
                     e,
-                    expected,
-                    value_required,
+                    Wanted {
+                        expected,
+                        value_required,
+                    },
                     cond,
                     then_branch,
                     else_branch,
                 )
             }
             Expr::Block { stmts, trailing } => {
-                return self.expr_inner_block(e, expected, value_required, stmts, trailing)
+                return self.expr_inner_block(scope, e, expected, value_required, stmts, trailing)
             }
             Expr::When { subject, arms } => {
-                return self.expr_inner_when(e, expected, value_required, subject, arms)
+                return self.expr_inner_when(scope, e, expected, value_required, subject, arms)
             }
             Expr::CallableRef { receiver, name } => {
-                return self.expr_inner_callable_ref(e, expected, receiver, name)
+                return self.expr_inner_callable_ref(scope, e, expected, receiver, name)
             }
         };
         self.set(e, t)
@@ -23004,6 +24767,7 @@ impl<'a> Checker<'a> {
 
     fn expr_inner_lambda(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         expected: Option<Ty>,
         params: Vec<String>,
@@ -23020,14 +24784,16 @@ impl<'a> Checker<'a> {
             // lambda fell through to the erased path and its parameters read as `Any`.
             if let Some(expected_ty) = expected {
                 if let Ty::Fun(signature) = expected_ty.non_null() {
-                    return self.check_lambda_with_function_type_labeled(e, signature, false, None);
+                    return self.check_lambda_with_function_type_labeled(
+                        scope, e, signature, false, None,
+                    );
                 }
             }
             // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. With no explicit
             // parameters but a body referencing `it`, bind the implicit single parameter.
             let bind_names: Vec<String> = if !params.is_empty() {
                 params.clone()
-            } else if self.untyped_lambda_binds_implicit_it(body) {
+            } else if self.untyped_lambda_binds_implicit_it(scope, body) {
                 vec!["it".to_string()]
             } else {
                 vec![]
@@ -23042,32 +24808,35 @@ impl<'a> Checker<'a> {
                 .get(&e.0)
                 .cloned()
                 .unwrap_or_default();
-            self.push_scope();
-            for (i, name) in bind_names.iter().enumerate() {
-                let pty = decl_types
-                    .get(i)
-                    .and_then(|t| t.as_ref())
-                    .map(|r| self.resolve_ty(r))
-                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                self.declare(name, pty, false);
-            }
-            // `field` does not propagate into a (non-inlined) lambda closure — krusty can't
-            // emit a backing-field read from the lambda class. Clear it so `field` inside a
-            // lambda body is unresolved (→ the property skips) rather than miscompiled.
-            let saved_field = self.field_ty.take();
-            let lc_before = self.local_function_use_count();
-            let bret = self.with_anon_fun_return(e, |c| c.expr(body));
-            // A non-inlined lambda that calls a local function would dispatch it on the lambda
-            // class (the local fun lives on the enclosing facade/class) — reject rather than
-            // miscompile (the recursive nested-closure case).
-            if self.local_function_use_count() > lc_before {
-                self.diags.error(
-                    self.file.expr_spans[e.0 as usize],
-                    "krusty: a lambda that calls a local function is not supported".to_string(),
-                );
-            }
-            self.field_ty = saved_field;
-            self.pop_scope();
+            let bret = {
+                let lambda_scope = scope.child(ScopeKind::Function { receiver: None });
+                let scope = &lambda_scope;
+                for (i, name) in bind_names.iter().enumerate() {
+                    let pty = decl_types
+                        .get(i)
+                        .and_then(|t| t.as_ref())
+                        .map(|r| self.resolve_ty(scope, r))
+                        .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                    self.declare(scope, name, pty, false);
+                }
+                // `field` does not propagate into a (non-inlined) lambda closure — krusty can't
+                // emit a backing-field read from the lambda class. Clear it so `field` inside a
+                // lambda body is unresolved (→ the property skips) rather than miscompiled.
+                let saved_field = self.field_ty.take();
+                let lc_before = self.local_function_use_count();
+                let bret = self.with_anon_fun_return(scope, e, |c| c.expr(scope, body));
+                // A non-inlined lambda that calls a local function would dispatch it on the lambda
+                // class (the local fun lives on the enclosing facade/class) — reject rather than
+                // miscompile (the recursive nested-closure case).
+                if self.local_function_use_count() > lc_before {
+                    self.diags.error(
+                        self.file.expr_spans[e.0 as usize],
+                        "krusty: a lambda that calls a local function is not supported".to_string(),
+                    );
+                }
+                self.field_ty = saved_field;
+                bret
+            };
             // Parameter types: an explicit annotation (`{ x: Int -> … }`) drives the function type so a
             // direct call (`f(3)`) type-checks; an unannotated parameter erases to `Object`. The return
             // type comes from the body.
@@ -23076,11 +24845,11 @@ impl<'a> Checker<'a> {
                     decl_types
                         .get(i)
                         .and_then(|t| t.as_ref())
-                        .map(|r| self.resolve_ty(r))
+                        .map(|r| self.resolve_ty(scope, r))
                         .unwrap_or_else(|| Ty::obj("kotlin/Any"))
                 })
                 .collect();
-            let ret = self.lambda_ret_ty(e, bret);
+            let ret = self.lambda_ret_ty(scope, e, bret);
             // A `suspend { … }` literal (the parser marked it) is a suspend function type —
             // `suspend () -> Unit` erases to `Function1` at runtime (trailing `Continuation`),
             // exactly like a declared `suspend (…) -> …` type.
@@ -23093,13 +24862,19 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    fn expr_inner_index(&mut self, e: ExprId, array: ExprId, indices: Vec<ExprId>) -> Ty {
+    fn expr_inner_index(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        array: ExprId,
+        indices: Vec<ExprId>,
+    ) -> Ty {
         let t = {
             // `a[i]` / `recv[i, j, …]` — a subscript. A SINGLE index over an array is element access
             // (or `String.get`); otherwise (and for two-or-more indices) it is a `get(i, j, …)`
             // operator — a user member, a same-module extension, or a library member.
-            let at = self.expr(array);
-            let its: Vec<Ty> = indices.iter().map(|&i| self.expr(i)).collect();
+            let at = self.expr(scope, array);
+            let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
             if let [index] = indices.as_slice() {
                 if let Some(elem) = at.array_elem() {
                     self.expect_assignable(Ty::Int, its[0], self.span(*index), "array index");
@@ -23151,7 +24926,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            let index_kinds = self.checked_call_arg_kinds(&indices);
+            let index_kinds = self.checked_call_arg_kinds(scope, &indices);
             if let Some((selected, sig)) = self
                 .selected_source_extension(at, "get", &index_kinds)
                 .filter(|(_, signature)| signature.is_operator())
@@ -23223,9 +24998,9 @@ impl<'a> Checker<'a> {
 
     fn expr_inner_try(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
-        expected: Option<Ty>,
-        value_required: bool,
+        wanted: Wanted,
         body: ExprId,
         catches: Vec<CatchClause>,
         finally: Option<ExprId>,
@@ -23257,9 +25032,9 @@ impl<'a> Checker<'a> {
                     "krusty: a nested try combined with a finally is not supported".to_string(),
                 );
             }
-            let bt = self.expr_result(body, expected, value_required);
+            let bt = self.expr_result(scope, body, wanted.expected, wanted.value_required);
             if let Some(f) = finally {
-                self.expr_statement(f);
+                self.expr_statement(scope, f);
             }
             let mut result = bt;
             for c in &catches {
@@ -23277,10 +25052,12 @@ impl<'a> Checker<'a> {
                         Ty::Error
                     }
                 };
-                self.push_scope();
-                self.declare(&c.name, cty, false);
-                let ht = self.expr_result(c.body, expected, value_required);
-                self.pop_scope();
+                let ht = {
+                    let catch_scope = scope.child(ScopeKind::Block);
+                    let scope = &catch_scope;
+                    self.declare(scope, &c.name, cty, false);
+                    self.expr_result(scope, c.body, wanted.expected, wanted.value_required)
+                };
                 // A `try` used as a statement needn't have body/catch agree; merge leniently
                 // (mismatch → `Unit`) so only an expression use that needs a value is constrained. A
                 // diverging (`Nothing`) branch drops out. Two values of the SAME class with differing
@@ -23297,7 +25074,7 @@ impl<'a> Checker<'a> {
                 // represented soundly and retains the lenient statement-style fallback below.
                 let reference_like =
                     |ty: Ty| ty.is_reference() || matches!(ty, Ty::Nothing | Ty::Error);
-                result = if value_required && reference_like(result) && reference_like(ht) {
+                result = if wanted.value_required && reference_like(result) && reference_like(ht) {
                     self.join(result, ht, self.span(e))
                 } else if result == ht {
                     result
@@ -23320,10 +25097,16 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    fn expr_inner_is(&mut self, e: ExprId, operand: ExprId, ty: TypeRef) -> Ty {
+    fn expr_inner_is(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        operand: ExprId,
+        ty: TypeRef,
+    ) -> Ty {
         let t = {
-            let ot = self.expr(operand);
-            let tt = self.resolve_ty(&ty);
+            let ot = self.expr(scope, operand);
+            let tt = self.resolve_ty(scope, &ty);
             // A function target with concrete parameter/return types carries information that JVM
             // `instanceof FunctionN` cannot test. Kotlin rejects that ERASED check before any
             // unresolved nested classifier (whereas `as (Missing) -> R` still reports `Missing`).
@@ -23345,7 +25128,7 @@ impl<'a> Checker<'a> {
             // An UNRESOLVED target reads exactly as kotlinc reports it — `unresolved reference
             // 'T'.` at the failing type's span — never as a compiler-specific "not supported"
             // rejection (the operand check below already exempts an Error operand the same way).
-            if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
+            if tt.contains_error() && self.report_unresolved_type_ref(scope, &ty) {
                 return Ty::Error;
             }
             // `instanceof` needs a reference operand and a *known* target. An unresolved target
@@ -23396,7 +25179,7 @@ impl<'a> Checker<'a> {
     /// `Array<Nothing>`), and that must fall through to the existing supported-shape diagnostic.
     /// Re-resolving a nested type here records only resolved-classifier facts; the Error path itself
     /// emits nothing, so this cannot double-report.
-    fn report_unresolved_type_ref(&mut self, r: &TypeRef) -> bool {
+    fn report_unresolved_type_ref(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> bool {
         // Probe the leaf WITHOUT its nested types. `Array` is exempt from the probe: its element
         // lives in `arg`, so stripping it would hit the raw-Array Error arm even though the
         // builtin name resolves.
@@ -23405,7 +25188,7 @@ impl<'a> Checker<'a> {
             leaf.arg = None;
             leaf.targs = Vec::new();
             leaf.fun_params = Vec::new();
-            self.resolve_ty(&leaf) != Ty::Error
+            self.resolve_ty(scope, &leaf) != Ty::Error
         };
         if !leaf_resolves {
             self.diags
@@ -23421,20 +25204,29 @@ impl<'a> Checker<'a> {
             .chain(r.arg.iter().map(|arg| &**arg))
             .chain(r.targs.iter());
         for part in nested {
-            if self.resolve_ty(part).contains_error() && self.report_unresolved_type_ref(part) {
+            if self.resolve_ty(scope, part).contains_error()
+                && self.report_unresolved_type_ref(scope, part)
+            {
                 return true;
             }
         }
         false
     }
 
-    fn expr_inner_as(&mut self, e: ExprId, operand: ExprId, ty: TypeRef, nullable: bool) -> Ty {
+    fn expr_inner_as(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        operand: ExprId,
+        ty: TypeRef,
+        nullable: bool,
+    ) -> Ty {
         let t = {
-            let ot = self.expr(operand);
-            let tt = self.resolve_ty(&ty);
+            let ot = self.expr(scope, operand);
+            let tt = self.resolve_ty(scope, &ty);
             // Same kotlinc parity as `is`: an unresolved cast target is `unresolved reference
             // 'T'.`, never a compiler-specific "not supported" rejection.
-            if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
+            if tt.contains_error() && self.report_unresolved_type_ref(scope, &ty) {
                 return Ty::Error;
             }
             if ty.nullable()
@@ -23442,7 +25234,7 @@ impl<'a> Checker<'a> {
                 && ty
                     .targs
                     .iter()
-                    .any(|argument| self.tparams.contains(&argument.name))
+                    .any(|argument| scope.tparam_contains(&argument.name))
                 && tt.non_null().obj_internal().is_some_and(|internal| {
                     self.syms.class_by_type_name(internal).is_some_and(|class| {
                         class.value_field.as_ref().is_some_and(|(name, _)| {
@@ -23476,7 +25268,7 @@ impl<'a> Checker<'a> {
             // an erased/bridged generic slot krusty doesn't reconcile.
             let prim_box = ot.boxed_ref().is_some()
                     && tt.is_reference()
-                    && !self.tparams.contains(&ty.name)
+                    && !scope.tparam_contains(&ty.name)
                     // `'a' as Char?` / `42 as Int?` — box to the operand's own nullable form …
                     && (tt.nullable_primitive() == Some(ot)
                         // … or `42 as Any` / `42 as Number` — box to a supertype of the operand's boxed
@@ -23517,8 +25309,7 @@ impl<'a> Checker<'a> {
             // (`as? Int`) that nullable form is the boxed wrapper (`Int?`). A plain `x as T` keeps `T`.
             // A value/inline-class target keeps `T` (non-null): its nullable boxed form isn't modeled,
             // and a member access on the cast result must see the unboxed value-class type.
-            let is_value =
-                self.ty_is_value_class(tt) || self.syms.libraries.value_underlying(tt).is_some();
+            let is_value = self.ty_is_value_class(tt);
             if nullable && !is_value {
                 Ty::nullable(tt)
             } else {
@@ -23548,11 +25339,18 @@ impl<'a> Checker<'a> {
         value.is_reference() && self.when_objs_comparable(value.non_null(), boxed)
     }
 
-    fn expr_inner_in_range(&mut self, e: ExprId, value: ExprId, start: ExprId, end: ExprId) -> Ty {
+    fn expr_inner_in_range(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        value: ExprId,
+        start: ExprId,
+        end: ExprId,
+    ) -> Ty {
         let t = {
-            let vt = self.expr(value);
-            let st = self.expr(start);
-            let et = self.expr(end);
+            let vt = self.expr(scope, value);
+            let st = self.expr(scope, start);
+            let et = self.expr(scope, end);
             // Only primitive numeric/char ranges are lowered (to a comparison chain). Any other
             // operand type (a range over user/reference types) is rejected so the file is skipped.
             let prim = |t: &Ty| {
@@ -23584,11 +25382,16 @@ impl<'a> Checker<'a> {
                 // desugars to `a.rangeTo(b).contains(x)`. Resolve and record both selected
                 // operators here; lowering consumes those exact targets instead of re-resolving.
                 if let Some((range_ty, range_call)) =
-                    self.operator_call_ret(st, "rangeTo", &[et], &[end], self.span(e))
+                    self.operator_call_ret(scope, st, "rangeTo", &[et], &[end], self.span(e))
                 {
-                    if let Some((Ty::Boolean, contains_call)) =
-                        self.operator_call_ret(range_ty, "contains", &[vt], &[value], self.span(e))
-                    {
+                    if let Some((Ty::Boolean, contains_call)) = self.operator_call_ret(
+                        scope,
+                        range_ty,
+                        "contains",
+                        &[vt],
+                        &[value],
+                        self.span(e),
+                    ) {
                         self.resolved_operator_calls
                             .insert((e, SyntheticOperatorCall::RangeTo), range_call);
                         self.resolved_operator_calls
@@ -23612,15 +25415,22 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    fn expr_inner_inc_dec(&mut self, e: ExprId, target: ExprId, dec: bool, prefix: bool) -> Ty {
+    fn expr_inner_inc_dec(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        target: ExprId,
+        dec: bool,
+        prefix: bool,
+    ) -> Ty {
         let t = {
             // `target++`/`++target` as a value: a simple mutable numeric/Char variable (the built-in
             // `inc`/`dec`), or a variable whose type has a user `inc`/`dec` operator. The result type
             // is the variable's type.
-            let mut tt = self.expr(target);
+            let mut tt = self.expr(scope, target);
             if let Expr::Name(name) = self.file.expr(target).clone() {
                 match self
-                    .lookup(&name)
+                    .lookup(scope, &name)
                     .map(|l| (l.ty, l.is_var))
                     .or_else(|| self.syms.props.get(&name).map(|&(t, v, _)| (t, v)))
                 {
@@ -23639,9 +25449,14 @@ impl<'a> Checker<'a> {
                         // binding type for the same reason.
                         if !vt.is_numeric_or_char() {
                             let operator_name = if dec { "dec" } else { "inc" };
-                            if let Some((ret, target)) =
-                                self.operator_call_ret(vt, operator_name, &[], &[], self.span(e))
-                            {
+                            if let Some((ret, target)) = self.operator_call_ret(
+                                scope,
+                                vt,
+                                operator_name,
+                                &[],
+                                &[],
+                                self.span(e),
+                            ) {
                                 self.expect_assignable(vt, ret, self.span(e), "operator result");
                                 self.resolved_operator_calls.insert(
                                     (
@@ -23665,6 +25480,7 @@ impl<'a> Checker<'a> {
                                     )
                                 };
                                 if !self.report_required_operator_modifier(
+                                    scope,
                                     vt,
                                     operator_name,
                                     &[],
@@ -23698,6 +25514,7 @@ impl<'a> Checker<'a> {
 
     fn expr_inner_elvis(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         expected: Option<Ty>,
         lhs: ExprId,
@@ -23705,18 +25522,19 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let t = {
             let lt0 = match expected {
-                Some(ty) => self.expr_expected(lhs, ty),
-                None => self.expr(lhs),
+                Some(ty) => self.expr_expected(scope, lhs, ty),
+                None => self.expr(scope, lhs),
             };
             let rt = match expected {
-                Some(ty) => self.expr_expected(rhs, ty),
-                None => self.expr(rhs),
+                Some(ty) => self.expr_expected(scope, rhs, ty),
+                None => self.expr(scope, rhs),
             };
             // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
             // unboxed primitive, while an ordinary nullable reference `T?` unwraps to `T`.
-            let lt = lt0
-                .nullable_primitive()
-                .or_else(|| self.syms.libraries.boxed_primitive(lt0))
+            let lt = self
+                .syms
+                .libraries
+                .reference_primitive(lt0)
                 .unwrap_or_else(|| lt0.non_null());
             // A `Unit`-coerced elvis (`x ?: someUnitExpr`) trips a StackMapTable mismatch in
             // codegen (the branches push incompatible stack shapes) — skip rather than VerifyError.
@@ -23735,9 +25553,9 @@ impl<'a> Checker<'a> {
                 // Unsigned stays unnarrowed because its value-box unbox to `kotlin.UInt` is
                 // not modeled.
                 let mut proven = Vec::new();
-                self.null_check_narrowings(lhs, &mut proven);
+                self.null_check_narrowings(scope, lhs, &mut proven);
                 proven.retain(|(_, ty)| !ty.is_unsigned());
-                self.apply_narrowings(&proven, false);
+                self.apply_narrowings(scope, &proven, false);
                 match lt0 {
                     Ty::Nullable(inner) => *inner,
                     _ => lt,
@@ -23754,13 +25572,14 @@ impl<'a> Checker<'a> {
 
     fn expr_inner_safe_call(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         receiver: ExprId,
         name: String,
         args: Option<Vec<ExprId>>,
     ) -> Ty {
         let t = {
-            let rt = self.expr(receiver);
+            let rt = self.expr(scope, receiver);
             if rt == Ty::Error {
                 return Ty::Error;
             }
@@ -23769,10 +25588,17 @@ impl<'a> Checker<'a> {
             let checkpoint = self.diags.diags.len();
             // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): the receiver is non-null
             // inside; type it like the non-safe form, then wrap the result nullable below.
-            let result = if let Some(t) = self.safe_scope_call_result(rt, &name, &args) {
-                let type_args = self.resolved_explicit_type_args(e);
+            let result = if let Some(t) = self.safe_scope_call_result(scope, rt, &name, &args) {
+                let type_args = self.resolved_explicit_type_args(scope, e);
                 match args.as_deref().and_then(|args| {
-                    self.record_extension_call_with_slots(e, &name, rt.non_null(), args, &type_args)
+                    self.record_extension_call_with_slots(
+                        scope,
+                        e,
+                        &name,
+                        rt.non_null(),
+                        args,
+                        &type_args,
+                    )
                 }) {
                     Some(Ty::Error) => Ty::Error,
                     _ => t,
@@ -23785,7 +25611,7 @@ impl<'a> Checker<'a> {
                     // here as `Nullable(Obj(..))`, and `check_member` doesn't peel the nullable for a
                     // user class, so a member read on it failed ("unresolved member … on 'C'"). A
                     // smart-cast local (`val c: C? = C(); c?.x`) already arrived non-null, which hid this.
-                    None => self.check_member(rt.non_null(), &name, self.span(e), Some(e)),
+                    None => self.check_member(scope, rt.non_null(), &name, self.span(e), Some(e)),
                     Some(a) => {
                         // A safe call to a lambda-taking extension (`c?.takeIf { it.at > 0 }`) types its
                         // lambda argument against the extension's block parameter (bound by the NON-NULL
@@ -23799,8 +25625,8 @@ impl<'a> Checker<'a> {
                         // call), dropping to the naive `arg_tys` fallback below that re-typed the lambda's
                         // `it` as `Any`. `recv` restores parity with the non-safe call path.
                         let recv = rt.non_null();
-                        let type_args = self.resolved_explicit_type_args(e);
-                        let arg_tys = self.ext_arg_tys(e, recv, &name, a, &type_args);
+                        let type_args = self.resolved_explicit_type_args(scope, e);
+                        let arg_tys = self.ext_arg_tys(scope, e, recv, &name, a, &type_args);
                         // A LABELLED call cannot be answered by a resolution that binds arguments
                         // positionally: `s?.replace(newValue = …, oldValue = …)` names the stdlib
                         // EXTENSION's parameters, and letting the label-blind member lookup claim it
@@ -23835,9 +25661,9 @@ impl<'a> Checker<'a> {
                                 Ty::Int // wrapped to `Int?` with every other safe-call scalar result
                             }
                         } else if recv == Ty::String {
-                            let member = match self
-                                .record_classpath_member_call_with_slots(e, recv, &name, a, false)
-                            {
+                            let member = match self.record_classpath_member_call_with_slots(
+                                scope, e, recv, &name, a, false,
+                            ) {
                                 ClasspathMemberSlotCall::Resolved(ret) => Some(ret),
                                 ClasspathMemberSlotCall::Ambiguous
                                 | ClasspathMemberSlotCall::Rejected => Some(Ty::Error),
@@ -23857,7 +25683,7 @@ impl<'a> Checker<'a> {
                                 })
                                 .or_else(|| {
                                     self.check_member_extension_function_call(
-                                        e, recv, &name, a, &arg_tys,
+                                        scope, e, recv, &name, a, &arg_tys,
                                     )
                                 })
                                 // Mirrors the qualified arm: a NAMED call to a library extension
@@ -23866,12 +25692,20 @@ impl<'a> Checker<'a> {
                                 // unlabelled call, so the ordering below is unchanged.
                                 .or_else(|| {
                                     self.record_extension_call_with_slots(
-                                        e, &name, recv, a, &type_args,
+                                        scope, e, &name, recv, a, &type_args,
                                     )
                                 })
                                 .or_else(|| {
                                     self.record_extension_call_from_args(
-                                        e, &name, recv, a, &arg_tys, &type_args,
+                                        scope,
+                                        CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys: &arg_tys,
+                                        },
+                                        &name,
+                                        recv,
+                                        &type_args,
                                     )
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
@@ -23885,17 +25719,25 @@ impl<'a> Checker<'a> {
                                 crate::module_symbols::ModuleSymbols::new(self.syms)
                                     .instance_members(recv, &name);
                             let applicable_module_member = module_members.iter().any(|member| {
-                                self.module_member_candidate_score(
-                                    member,
-                                    a,
-                                    &full_arg_tys,
-                                    arg_names.as_deref(),
-                                    self.file.call_has_trailing_lambda.contains(&e.0),
+                                self.call_candidate_score(
+                                    scope,
+                                    &member.params,
+                                    &member.call_sig,
+                                    ArgSlots {
+                                        args: a,
+                                        partial_arg_tys: &full_arg_tys,
+                                        arg_names: arg_names.as_deref(),
+                                        trailing_lambda: self
+                                            .file
+                                            .call_has_trailing_lambda
+                                            .contains(&e.0),
+                                    },
                                 )
                                 .is_some()
                             });
                             let applicable_member_extension = self
                                 .member_extension_function(
+                                    scope,
                                     MemberExtensionFunctionCall {
                                         extension_receiver: recv,
                                         name: &name,
@@ -23914,13 +25756,13 @@ impl<'a> Checker<'a> {
                             (applicable_module_member || !applicable_member_extension)
                                 .then(|| {
                                     self.check_applicable_module_member_call(
-                                        e, recv, &name, a, &arg_tys,
+                                        scope, e, recv, &name, a, &arg_tys,
                                     )
                                 })
                                 .flatten()
                                 .or_else(|| {
                                     match self.record_classpath_member_call_with_slots(
-                                        e, recv, &name, a, false,
+                                        scope, e, recv, &name, a, false,
                                     ) {
                                         ClasspathMemberSlotCall::Resolved(ret) => Some(ret),
                                         ClasspathMemberSlotCall::Ambiguous
@@ -23944,7 +25786,7 @@ impl<'a> Checker<'a> {
                                         .map(|(&x, &ty)| call_arg_kind(self.file, x, ty))
                                         .collect();
                                     self.resolve_instance_member_with_literal_and_lambda_args(
-                                        recv, &name, &arg_kinds,
+                                        recv, &name, &arg_kinds, &type_args,
                                     )
                                     .map(|member| {
                                         let ret = member.ret;
@@ -23954,17 +25796,25 @@ impl<'a> Checker<'a> {
                                 })
                                 .or_else(|| {
                                     self.check_member_extension_function_call(
-                                        e, recv, &name, a, &arg_tys,
+                                        scope, e, recv, &name, a, &arg_tys,
                                     )
                                 })
                                 .or_else(|| {
                                     self.record_extension_call_with_slots(
-                                        e, &name, recv, a, &type_args,
+                                        scope, e, &name, recv, a, &type_args,
                                     )
                                 })
                                 .or_else(|| {
                                     self.record_extension_call_from_args(
-                                        e, &name, recv, a, &arg_tys, &type_args,
+                                        scope,
+                                        CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys: &arg_tys,
+                                        },
+                                        &name,
+                                        recv,
+                                        &type_args,
                                     )
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
@@ -23983,16 +25833,24 @@ impl<'a> Checker<'a> {
                                 ret
                             } else {
                                 self.check_member_extension_function_call(
-                                    e, recv, &name, a, &arg_tys,
+                                    scope, e, recv, &name, a, &arg_tys,
                                 )
                                 .or_else(|| {
                                     self.record_extension_call_with_slots(
-                                        e, &name, recv, a, &type_args,
+                                        scope, e, &name, recv, a, &type_args,
                                     )
                                 })
                                 .or_else(|| {
                                     self.record_extension_call_from_args(
-                                        e, &name, recv, a, &arg_tys, &type_args,
+                                        scope,
+                                        CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys: &arg_tys,
+                                        },
+                                        &name,
+                                        recv,
+                                        &type_args,
                                     )
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
@@ -24004,14 +25862,17 @@ impl<'a> Checker<'a> {
             };
             let result = if result == Ty::Error && !self.file.call_arg_names.contains_key(&e.0) {
                 let arg_exprs = args.as_deref().unwrap_or_default();
-                let arg_tys = self.arg_tys(arg_exprs);
-                let arg_kinds = self.checked_call_arg_kinds(arg_exprs);
+                let arg_tys = self.arg_tys(scope, arg_exprs);
+                let arg_kinds = self.checked_call_arg_kinds(scope, arg_exprs);
                 self.record_source_extension_call(
-                    e,
+                    scope,
+                    CallArgs {
+                        call: e,
+                        args: arg_exprs,
+                        arg_tys: &arg_tys,
+                    },
                     rt.non_null(),
                     &name,
-                    arg_exprs,
-                    &arg_tys,
                     &arg_kinds,
                 )
                 .unwrap_or(Ty::Error)
@@ -24019,8 +25880,10 @@ impl<'a> Checker<'a> {
                 result
             };
             let result = if result == Ty::Error {
-                let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
-                self.receiver_function_value(&name)
+                let arg_tys = args
+                    .as_deref()
+                    .map_or_else(Vec::new, |a| self.arg_tys(scope, a));
+                self.receiver_function_value(scope, &name)
                     .and_then(|(signature, origin)| {
                         let (expected_receiver, params) = Self::receiver_function_parts(signature)?;
                         (params.len() == arg_tys.len()
@@ -24085,7 +25948,7 @@ impl<'a> Checker<'a> {
             // stay a silent `Ty::Error` so the backend bail reports the gap honestly.
             if result == Ty::Error
                 && self.diags.diags.len() == checkpoint
-                && !self.member_name_exists_on(rt.non_null(), &name)
+                && !self.member_name_exists_on(scope, rt.non_null(), &name)
             {
                 self.diags.error(
                     self.member_name_span(e, &name),
@@ -24155,62 +26018,69 @@ impl<'a> Checker<'a> {
         // A property READ (`a?.b`, not a call) proven non-null by an enclosing condition
         // (`a?.b != null`, a contract) reads as the narrowed type in the guarded region.
         let t = if args.is_none() && t != Ty::Error {
-            self.path_narrowed_read_ty(receiver, &name, t)
+            self.path_narrowed_read_ty(scope, receiver, &name, t)
         } else {
             t
         };
         self.set(e, t)
     }
 
-    fn expr_inner_name(&mut self, e: ExprId, n: String) -> Ty {
-        let t = match self.lookup(&n) {
-            Some(l) => l.narrowed.unwrap_or(l.ty),
+    fn expr_inner_name(&mut self, scope: &CheckerScope<'_>, e: ExprId, n: String) -> Ty {
+        let t = match self.lookup(scope, &n) {
+            Some(l) => self.local_narrowing(scope, &n).unwrap_or(l.ty),
             // `field` inside an accessor body → the property's backing field. `field` is a soft
             // keyword: it only has this meaning when an accessor is being checked (and a real
             // local named `field` would have been found by `lookup` above).
             None if n == "field" && self.field_ty.is_some() => self.field_ty.unwrap(),
             None => {
-                if let Some(bt) = self.effective_this_narrow() {
+                if let Some(bt) = self.effective_this_narrow(scope) {
                     if let Some(bi) = bt.obj_internal() {
                         if let Some((ty, _)) = self.lookup_prop_name(bi, &n) {
                             self.narrowed_this_member.insert(e, bi);
                             self.mark_current_extension_receiver_used(e);
                             return self.set(e, ty);
                         }
-                        if let Some(ty) = self.try_member_read(bt, &n, self.span(e), Some(e)) {
+                        if let Some(ty) = self.try_member_read(scope, bt, &n, self.span(e), Some(e))
+                        {
                             self.narrowed_this_member.insert(e, bi);
                             self.mark_current_extension_receiver_used(e);
                             return self.set(e, ty);
                         }
                     }
                 }
-                let implicit_receivers = self.implicit_receivers();
+                let implicit_receivers = self.implicit_receivers(scope);
                 for implicit_receiver in implicit_receivers.iter().copied() {
                     let receiver = implicit_receiver.ty;
                     if let Ty::Obj(internal, _) = receiver {
                         if self.lookup_prop_name(internal, &n).is_some() {
                             if self.symbolic_signature_inference {
-                                if let Some(ty) =
-                                    self.resolve_property_read(receiver, &n, self.span(e), Some(e))
-                                {
-                                    self.mark_extension_receiver_used(e, implicit_receiver);
+                                if let Some(ty) = self.resolve_property_read(
+                                    scope,
+                                    receiver,
+                                    &n,
+                                    self.span(e),
+                                    Some(e),
+                                ) {
+                                    self.mark_implicit_receiver_selection(e, implicit_receiver);
                                     return self.set(e, ty);
                                 }
                             } else if let Some((ty, _)) = self.lookup_prop_name(internal, &n) {
-                                self.mark_extension_receiver_used(e, implicit_receiver);
+                                self.mark_implicit_receiver_selection(e, implicit_receiver);
                                 return self.set(e, ty);
                             }
                         }
                     }
-                    if let Some(ty) = self.try_member_read(receiver, &n, self.span(e), Some(e)) {
-                        self.mark_extension_receiver_used(e, implicit_receiver);
+                    if let Some(ty) =
+                        self.try_member_read(scope, receiver, &n, self.span(e), Some(e))
+                    {
+                        self.mark_implicit_receiver_selection(e, implicit_receiver);
                         return self.set(e, ty);
                     }
                 }
                 // The bare name is not a member of the DECLARED receiver — try the flow-narrowed
                 // receiver from an enclosing `if (this is B)`. A member found only on `B` records
                 // the narrowing so the lowerer inserts a `checkcast` on `this` before the read.
-                if let Some(bt) = self.effective_this_narrow() {
+                if let Some(bt) = self.effective_this_narrow(scope) {
                     if let Some((ty, _)) =
                         bt.obj_internal().and_then(|i| self.lookup_prop_name(i, &n))
                     {
@@ -24271,19 +26141,11 @@ impl<'a> Checker<'a> {
                         "context property access is not supported".to_string(),
                     );
                     Ty::Error
-                } else if let Some((owner, property, ty, visibility)) =
+                } else if let Some((owner, property, signature)) =
                     self.imported_source_companion_property(&n)
                 {
-                    self.reject_if_inaccessible(visibility, &n, owner, self.span(e));
-                    self.expr_lowers.insert(
-                        e,
-                        ExprLowering::StaticFieldRead {
-                            owner,
-                            name: property,
-                            descriptor: None,
-                        },
-                    );
-                    ty
+                    self.reject_if_inaccessible(signature.visibility, &n, owner, self.span(e));
+                    self.record_static_property_read(e, owner, property, signature)
                 } else if let Some(&(ty, _, _)) = self.syms.props.get(&n) {
                     ty // top-level property
                 } else if let Some(field) = self.imports.get(&n).and_then(|full| {
@@ -24309,7 +26171,7 @@ impl<'a> Checker<'a> {
                     // The `Unit` singleton used as a value (`foo(Unit)`, `val x = Unit`, `return
                     // Unit`). Lowering materializes the JVM singleton when a value is needed.
                     Ty::Unit
-                } else if let Some(ct) = self.classpath_companion_ty(&n) {
+                } else if let Some(ct) = self.semantic_companion_ty(&n) {
                     // A bare reference to a CLASSPATH class with a companion object (`Json` →
                     // `Json.Default`): its value is the companion instance, typed as the companion's
                     // type, so `Json.encodeToString(…)` resolves as an instance method on it.
@@ -24330,7 +26192,7 @@ impl<'a> Checker<'a> {
                     })
                 {
                     let ret = member.ret;
-                    self.mark_extension_receiver_used(e, implicit_receiver);
+                    self.mark_implicit_receiver_selection(e, implicit_receiver);
                     self.expr_lowers
                         .insert(e, ExprLowering::IntrinsicProperty(Box::new(member)));
                     ret
@@ -24358,6 +26220,7 @@ impl<'a> Checker<'a> {
 
     fn expr_inner_binary(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         op: BinOp,
         lhs: ExprId,
@@ -24366,19 +26229,21 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let t = {
             if matches!(op, BinOp::And | BinOp::Or) {
-                let lt = self.expr(lhs);
-                let casts = self.condition_narrowings(lhs, op == BinOp::And);
-                self.push_scope();
-                self.apply_narrowings(&casts, true);
-                let rt = self.expr(rhs);
-                self.pop_scope();
+                let lt = self.expr(scope, lhs);
+                let casts = self.condition_narrowings(scope, lhs, op == BinOp::And);
+                let rt = {
+                    let rhs_scope = scope.child(ScopeKind::Block);
+                    let scope = &rhs_scope;
+                    self.apply_narrowings(scope, &casts, true);
+                    self.expr(scope, rhs)
+                };
                 // `check_binary` enforces both operands are `Boolean` (and reports the same
                 // "operator cannot be applied" error as the non-`&&` path otherwise).
                 let bt = self.check_binary(op, lt, rt, self.span(e));
                 return self.set(e, bt);
             }
-            let lt = self.expr(lhs);
-            let rt = self.expr(rhs);
+            let lt = self.expr(scope, lhs);
+            let rt = self.expr(scope, rhs);
             // User-defined extension operator on a primitive receiver overrides built-in arithmetic.
             // Only applies to primitive receivers (reference receivers can't distinguish nullable vs
             // non-null at the krusty type level, risking infinite self-recursion in the body).
@@ -24429,7 +26294,7 @@ impl<'a> Checker<'a> {
                 let op_name = op.arith_operator_name();
                 if let Some(fname) = op_name {
                     if let Some((ret, target)) =
-                        self.operator_call_ret(lt, fname, &[rt], &[rhs], self.span(e))
+                        self.operator_call_ret(scope, lt, fname, &[rt], &[rhs], self.span(e))
                     {
                         self.resolved_operator_calls.insert(
                             (
@@ -24441,7 +26306,13 @@ impl<'a> Checker<'a> {
                         );
                         return self.set(e, ret);
                     }
-                    if self.report_required_operator_modifier(lt, fname, &[rt], operator_span) {
+                    if self.report_required_operator_modifier(
+                        scope,
+                        lt,
+                        fname,
+                        &[rt],
+                        operator_span,
+                    ) {
                         return self.set(e, Ty::Error);
                     }
                 }
@@ -24454,7 +26325,7 @@ impl<'a> Checker<'a> {
                 // `list + element` → the element overload), so a reference right operand is fine.
                 if let Some(fname) = op_name {
                     if rt != Ty::Error {
-                        let rhs_kind = self.checked_call_arg_kinds(&[rhs]);
+                        let rhs_kind = self.checked_call_arg_kinds(scope, &[rhs]);
                         if let Some(ret) = self.record_library_extension_call_with_arg_kinds(
                             Some(e),
                             fname,
@@ -24489,7 +26360,7 @@ impl<'a> Checker<'a> {
                 && rt != Ty::Error
             {
                 if let Some((ret, target)) =
-                    self.operator_call_ret(lt, "compareTo", &[rt], &[rhs], self.span(e))
+                    self.operator_call_ret(scope, lt, "compareTo", &[rt], &[rhs], self.span(e))
                 {
                     if ret == Ty::Int {
                         self.resolved_operator_calls
@@ -24542,7 +26413,13 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    fn expr_inner_member(&mut self, e: ExprId, receiver: ExprId, name: String) -> Ty {
+    fn expr_inner_member(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        receiver: ExprId,
+        name: String,
+    ) -> Ty {
         let t = {
             // `::prop.isInitialized` — the `lateinit` initialization test. It reads as a property of a
             // property REFERENCE, but kotlinc compiles it to a null check on the backing field (a
@@ -24554,8 +26431,8 @@ impl<'a> Checker<'a> {
                     name: property,
                 } = self.file.expr(receiver).clone()
                 {
-                    if let Some(owner) = self
-                        .this_ty
+                    if let Some(owner) = scope
+                        .this_ty()
                         .and_then(|receiver| receiver.obj_internal())
                         .filter(|internal| {
                             self.syms
@@ -24576,7 +26453,7 @@ impl<'a> Checker<'a> {
             }
             // Library companion constants: `Int.MAX_VALUE`, `Double.NaN`, etc.
             if let Expr::Name(type_name) = self.file.expr(receiver).clone() {
-                if !self.value_root_shadows_classifier(&type_name) {
+                if !self.value_root_shadows_classifier(scope, &type_name) {
                     let source = self.fed_source();
                     if let Some(c) = self
                         .syms
@@ -24593,7 +26470,7 @@ impl<'a> Checker<'a> {
             // Recognize the classifier receiver directly, even when its provider has no direct accessor;
             // this also handles `Outer.Mode.entries` without evaluating `Outer.Mode` as a value.
             if name == "entries" {
-                if let Some((owner, accessor)) = self.enum_entries_target(receiver) {
+                if let Some((owner, accessor)) = self.enum_entries_target(scope, receiver) {
                     if let Some(access) = self.resolver().inaccessible_classifier_access(owner) {
                         let reference = self.span(receiver);
                         let display = self
@@ -24618,11 +26495,36 @@ impl<'a> Checker<'a> {
                 }
             }
             if let Some(field) = self
-                .classifier_receiver_internal(receiver)
+                .classifier_receiver_internal(scope, receiver)
                 .and_then(|internal| self.resolver().static_field(internal, &name))
             {
                 let ty = self.record_external_static_field(Some(e), field);
                 return self.set(e, ty);
+            }
+            // The WHOLE chain is a fully-qualified classifier path (`pkg.Obj`, `pkg.Cls.NestObj`,
+            // `pkg.Cls.Companion`). An `object`/companion is a VALUE here; any other classifier is only
+            // a qualifier, and the position enclosing this one consumes it.
+            if let Some(internal) = self.package_qualified_classifier(scope, e) {
+                if let Some(ty) = self.classifier_value_ty(e, internal) {
+                    return self.set(e, ty);
+                }
+            }
+            // The member after a fully-qualified prefix, resolved in the namespace that prefix denotes:
+            // a package's top-level properties, or a classifier's companion/static members and enum
+            // entries. An `object` classifier is left to the rung above — it resolves as a value, and
+            // its members then resolve by ordinary member checking on the singleton.
+            match self.package_rooted_prefix(scope, receiver) {
+                Some(QualifiedPrefix::Package(package)) => {
+                    if let Some(ty) = self.package_qualified_property_read(e, package, &name) {
+                        return self.set(e, ty);
+                    }
+                }
+                Some(QualifiedPrefix::Classifier(owner)) => {
+                    if let Some(ty) = self.qualified_classifier_member_read(e, owner, &name) {
+                        return self.set(e, ty);
+                    }
+                }
+                None => {}
             }
             // `Outer.NestedEnum.ENTRY` — a nested enum accessed through its enclosing type name.
             // The receiver `Outer.NestedEnum` is a `Member` chain (not a bare `Name`); flatten it
@@ -24631,7 +26533,7 @@ impl<'a> Checker<'a> {
                 if let Some(path) = self.dotted_full_path(receiver) {
                     if self
                         .dotted_root(receiver)
-                        .is_some_and(|r| !self.value_root_shadows_classifier(&r))
+                        .is_some_and(|r| !self.value_root_shadows_classifier(scope, &r))
                     {
                         if let Some(internal) =
                             self.module_class_named(&path).map(ClassSig::internal_name)
@@ -24648,7 +26550,7 @@ impl<'a> Checker<'a> {
             }
             // `EnumName.ENTRY` — a static enum entry access (receiver is the enum type name).
             if let Expr::Name(en) = self.file.expr(receiver).clone() {
-                if !self.value_root_shadows_classifier(&en) {
+                if !self.value_root_shadows_classifier(scope, &en) {
                     let inherited_classifier = self.inherited_nested_type_name(&en);
                     if inherited_classifier == InheritedNestedClassifier::Ambiguous {
                         return self.set(e, Ty::Error);
@@ -24691,14 +26593,15 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // `ClassName.PROP` — a companion (static) property read.
-                    if let Some(cs) = self.module_class_named(&en) {
-                        if let Some(&(ty, visibility, _)) = cs.static_props.get(&name) {
-                            self.reject_if_inaccessible(
-                                visibility,
-                                &name,
-                                cs.internal_name(),
-                                self.span(e),
-                            );
+                    let source_static = self.module_class_named(&en).and_then(|class| {
+                        class
+                            .static_props
+                            .get(&name)
+                            .map(|property| (class.internal_name(), property.visibility))
+                    });
+                    if let Some((owner, visibility)) = source_static {
+                        self.reject_if_inaccessible(visibility, &name, owner, self.span(e));
+                        if let Some(ty) = self.record_class_static_property_read(e, owner, &name) {
                             return self.set(e, ty);
                         }
                     }
@@ -24752,46 +26655,50 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            let rt = self.expr(receiver);
-            let declared = self.check_member(rt, &name, self.span(e), Some(e));
+            let rt = self.expr(scope, receiver);
+            let declared = self.check_member(scope, rt, &name, self.span(e), Some(e));
             // A proof from an enclosing condition (`a.b != null`, `a.b is T`) narrows this read.
-            self.path_narrowed_read_ty(receiver, &name, declared)
+            self.path_narrowed_read_ty(scope, receiver, &name, declared)
         };
         self.set(e, t)
     }
 
     fn expr_inner_if(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
-        expected: Option<Ty>,
-        value_required: bool,
+        wanted: Wanted,
         cond: ExprId,
         then_branch: ExprId,
         else_branch: Option<ExprId>,
     ) -> Ty {
         let t = {
-            let ct = self.expr(cond);
+            let ct = self.expr(scope, cond);
             self.expect_assignable(Ty::Boolean, ct, self.span(cond), "if condition");
-            let then_casts = self.condition_narrowings(cond, true);
+            let then_casts = self.condition_narrowings(scope, cond, true);
             let then_compound = matches!(self.file.expr(cond), Expr::Binary { op: BinOp::And, .. });
-            self.push_scope();
-            self.apply_narrowings(&then_casts, then_compound);
-            // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
-            let tt = self.with_this_narrow(self.this_is_narrowing(cond, false), |c| {
-                c.expr_result(then_branch, expected, value_required)
-            });
-            self.pop_scope();
+            let tt = {
+                let branch_scope = scope.child(ScopeKind::Block);
+                let scope = &branch_scope;
+                self.apply_narrowings(scope, &then_casts, then_compound);
+                // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
+                self.with_this_narrow(self.this_is_narrowing(scope, cond, false), |c| {
+                    c.expr_result(scope, then_branch, wanted.expected, wanted.value_required)
+                })
+            };
             match else_branch {
                 Some(eb) => {
-                    let else_casts = self.condition_narrowings(cond, false);
+                    let else_casts = self.condition_narrowings(scope, cond, false);
                     let else_compound =
                         matches!(self.file.expr(cond), Expr::Binary { op: BinOp::Or, .. });
-                    self.push_scope();
-                    self.apply_narrowings(&else_casts, else_compound);
-                    let et = self.with_this_narrow(self.this_is_narrowing(cond, true), |c| {
-                        c.expr_result(eb, expected, value_required)
-                    });
-                    self.pop_scope();
+                    let et = {
+                        let branch_scope = scope.child(ScopeKind::Block);
+                        let scope = &branch_scope;
+                        self.apply_narrowings(scope, &else_casts, else_compound);
+                        self.with_this_narrow(self.this_is_narrowing(scope, cond, true), |c| {
+                            c.expr_result(scope, eb, wanted.expected, wanted.value_required)
+                        })
+                    };
                     self.join(tt, et, self.span(e))
                 }
                 None => Ty::Unit,
@@ -24802,6 +26709,7 @@ impl<'a> Checker<'a> {
 
     fn expr_inner_block(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         expected: Option<Ty>,
         value_required: bool,
@@ -24809,7 +26717,8 @@ impl<'a> Checker<'a> {
         trailing: Option<ExprId>,
     ) -> Ty {
         let t = {
-            self.push_scope();
+            let block_scope = scope.child(ScopeKind::Block);
+            let scope = &block_scope;
             // True once a statement always transfers control (`throw`/`return`/break/continue/a
             // `Nothing` call): everything after it — including the trailing value — is unreachable,
             // so the block's type is `Nothing` (it never falls through). Without this, a `try` whose
@@ -24817,7 +26726,7 @@ impl<'a> Checker<'a> {
             // would emit that dead code (an unframed branch target → VerifyError).
             let mut diverged = false;
             for s in &stmts {
-                self.stmt(*s);
+                self.stmt(scope, *s);
                 diverged = diverged || self.stmt_diverges(*s);
                 // Early-return guard: `if (x !is T) return …` (a diverging then) narrows a
                 // stable `x` to `T` for the remaining statements of this block. An `else if`
@@ -24837,10 +26746,10 @@ impl<'a> Checker<'a> {
                         if !self.expr_diverges(then_branch) {
                             break;
                         }
-                        let casts = self.condition_narrowings(cond, false);
+                        let casts = self.condition_narrowings(scope, cond, false);
                         let compound =
                             matches!(self.file.expr(cond), Expr::Binary { op: BinOp::Or, .. });
-                        self.apply_narrowings(&casts, compound);
+                        self.apply_narrowings(scope, &casts, compound);
                         match else_branch {
                             Some(eb) => level = eb,
                             None => break,
@@ -24859,10 +26768,10 @@ impl<'a> Checker<'a> {
                                 } = effect
                                 {
                                     let mut casts = Vec::new();
-                                    self.conclusion_narrowings(ie, conclusion, &mut casts);
+                                    self.conclusion_narrowings(scope, ie, conclusion, &mut casts);
                                     let compound =
                                         matches!(conclusion, crate::contracts::Condition::And(..));
-                                    self.apply_narrowings(&casts, compound);
+                                    self.apply_narrowings(scope, &casts, compound);
                                 }
                             }
                         }
@@ -24873,12 +26782,12 @@ impl<'a> Checker<'a> {
                 // A trailing after a diverging statement is dead — type the block `Nothing` (still
                 // visit the trailing so its sub-expressions are checked).
                 Some(te) if diverged => {
-                    self.expr_result(te, expected, value_required);
+                    self.expr_result(scope, te, expected, value_required);
                     Ty::Nothing
                 }
                 // Propagate an expected type into the block's trailing value (a typed context
                 // reaching a `{ … ; lambda }` result).
-                Some(te) => self.expr_result(te, expected, value_required),
+                Some(te) => self.expr_result(scope, te, expected, value_required),
                 None if diverged => Ty::Nothing,
                 None => {
                     // A block whose last statement always transfers control (break/continue/return)
@@ -24897,7 +26806,6 @@ impl<'a> Checker<'a> {
                     }
                 }
             };
-            self.pop_scope();
             t
         };
         self.set(e, t)
@@ -24905,6 +26813,7 @@ impl<'a> Checker<'a> {
 
     fn expr_inner_when(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         expected: Option<Ty>,
         value_required: bool,
@@ -24912,7 +26821,7 @@ impl<'a> Checker<'a> {
         arms: Vec<WhenArm>,
     ) -> Ty {
         let t = {
-            let subj_ty = subject.map(|s| self.expr(s));
+            let subj_ty = subject.map(|s| self.expr(scope, s));
             let mut result: Option<Ty> = None;
             let mut has_else = false;
             // A `when` may have at most one `else` branch (kotlinc rejects a second one).
@@ -24932,7 +26841,7 @@ impl<'a> Checker<'a> {
                     // to compare with `==`, so it carries no comparability constraint with the subject.
                     let is_type_test =
                         matches!(self.file.expr(cnd), Expr::Is { .. } | Expr::InRange { .. });
-                    let ct = self.expr(cnd);
+                    let ct = self.expr(scope, cnd);
                     match subj_ty {
                         // A type-test arm (`is T`) compares by `instanceof`, not `==` — no
                         // comparability constraint (it already validated its own operand/target).
@@ -24970,21 +26879,23 @@ impl<'a> Checker<'a> {
                 // extending the historical root-only behavior to member reads must not bypass
                 // backend representation limits such as an `Any` property narrowed to a value class.
                 let arm_casts = match arm.conditions.as_slice() {
-                    [cnd] => self.smartcast_narrowings(*cnd, false),
+                    [cnd] => self.smartcast_narrowings(scope, *cnd, false),
                     _ => Vec::new(),
                 };
                 // `when (this) { is B -> … }` narrows the implicit receiver to `B` in that arm's
                 // body (the `when`-subject analog of `if (this is B)`).
                 let arm_this_narrow = match arm.conditions.as_slice() {
-                    [cnd] => self.this_is_narrowing(*cnd, false),
+                    [cnd] => self.this_is_narrowing(scope, *cnd, false),
                     _ => None,
                 };
-                self.push_scope();
-                self.apply_narrowings(&arm_casts, false);
-                let bt = self.with_this_narrow(arm_this_narrow, |c| {
-                    c.expr_result(arm.body, expected, value_required)
-                });
-                self.pop_scope();
+                let bt = {
+                    let arm_scope = scope.child(ScopeKind::Block);
+                    let scope = &arm_scope;
+                    self.apply_narrowings(scope, &arm_casts, false);
+                    self.with_this_narrow(arm_this_narrow, |c| {
+                        c.expr_result(scope, arm.body, expected, value_required)
+                    })
+                };
                 result = Some(match result {
                     Some(r) => self.join(r, bt, self.span(arm.body)),
                     None => bt,
@@ -24993,7 +26904,7 @@ impl<'a> Checker<'a> {
             let missing = if has_else {
                 None
             } else {
-                self.when_sealed_missing_branches(subj_ty, &arms)
+                self.when_sealed_missing_branches(scope, subj_ty, &arms)
                     .or_else(|| self.when_enum_missing_branches(subj_ty, &arms))
             };
             let exhaustive =
@@ -25025,12 +26936,13 @@ impl<'a> Checker<'a> {
     /// reference dispatch broadly (indy lambdas where a `FunctionReferenceImpl` was required).
     fn expr_inner_callable_ref(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         expected: Option<Ty>,
         receiver: Option<ExprId>,
         name: String,
     ) -> Ty {
-        let function_type = self.callable_ref_function_type(e, expected, receiver, name);
+        let function_type = self.callable_ref_function_type(scope, e, expected, receiver, name);
         let Some(reflect) = expected_callable_reference_reflect_type(function_type, expected)
         else {
             return function_type;
@@ -25038,8 +26950,79 @@ impl<'a> Checker<'a> {
         self.set(e, reflect)
     }
 
+    /// An UNBOUND callable/property reference on a classifier named by its FULLY-QUALIFIED path
+    /// (`pkg.Cls::method`). The reference's first parameter is the receiver, exactly as for the simple
+    /// name an import would bind — this differs only in how the classifier is named, so it resolves
+    /// the path to ONE identity and then runs the same member/property rungs against it.
+    ///
+    /// An `object` is deliberately excluded: `pkg.Obj::m` is BOUND to the singleton, which emit does
+    /// not model, and typing it as unbound would miscompile rather than reject.
+    fn qualified_unbound_ref(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        expected: Option<Ty>,
+        receiver: ExprId,
+        name: &str,
+    ) -> Option<Ty> {
+        let internal = self.package_qualified_classifier(scope, receiver)?;
+        if self.classifier_is_object(internal) {
+            return None;
+        }
+        let receiver_ty = Ty::obj_name(internal);
+        // A MODULE class answers from its own signature (source methods and backing-field properties).
+        if let Some(class) = self.syms.class_by_type_name(internal).cloned() {
+            if let Some(signature) = class.method(name).cloned() {
+                if signature.requires_all_args() {
+                    let mut params = vec![receiver_ty];
+                    params.extend(signature.params.iter().copied());
+                    return Some(Ty::fun(params, signature.ret));
+                }
+            }
+            if let Some((property_ty, is_var)) = class
+                .props
+                .iter()
+                .find_map(|(candidate, ty, is_var)| (candidate == name).then_some((*ty, *is_var)))
+            {
+                return self.property_ref_ty(1, is_var, &[receiver_ty, property_ty]);
+            }
+        }
+        // A CLASSPATH classifier answers through the same resolved-reference seams the bare-name rung
+        // uses; the recorded lowering carries the selected member/property verbatim.
+        if let Some(property) = self.resolve_property_ref(receiver_ty, name) {
+            let ty =
+                self.property_ref_ty(1, property.setter.is_some(), EXTENSION_PROPERTY_REF_ARGS)?;
+            self.expr_lowers.insert(
+                expression,
+                ExprLowering::ClasspathUnboundPropertyRef(Box::new(property)),
+            );
+            return Some(ty);
+        }
+        if let Some(member) = self.resolve_instance_ref(receiver_ty, name) {
+            if !member.suspend() && member.ret != Ty::Nothing {
+                let mut params = vec![receiver_ty];
+                params.extend(member.params.iter().copied());
+                let ret = member.ret;
+                self.expr_lowers.insert(
+                    expression,
+                    ExprLowering::ClasspathUnboundMemberRef {
+                        receiver: receiver_ty,
+                        member: Box::new(member),
+                    },
+                );
+                return Some(Ty::fun(params, ret));
+            }
+        }
+        let expected_function = match expected {
+            Some(Ty::Fun(function)) => Some(function),
+            _ => None,
+        };
+        self.source_extension_ref(expression, receiver_ty, name, expected_function)
+    }
+
     fn callable_ref_function_type(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         expected: Option<Ty>,
         receiver: Option<ExprId>,
@@ -25070,14 +27053,18 @@ impl<'a> Checker<'a> {
                     // substitutes `T` to the call-site type (`reified_subst`) when it expands the inline
                     // body. Recorded as `Obj(T)`, a marker the lowerer resolves by name. Only a REIFIED
                     // `T` is accepted — kotlinc rejects a class literal on a non-reified type parameter.
-                    self.class_literal_unbound_ty(&n)
-                        .or_else(|| self.reified_tparams.contains(&n).then(|| Ty::obj(&n)))
+                    self.class_literal_unbound_ty(scope, &n)
+                        .or_else(|| scope.is_reified(&n).then(|| Ty::obj(&n)))
                 } else {
-                    None
+                    // A QUALIFIED type name (`pkg.Cls::class`, `java.util.ArrayList::class`,
+                    // `Outer.Nested::class`) is an unbound literal exactly like the simple name an
+                    // import would bind — the receiver is a classifier, not a value to evaluate.
+                    self.classifier_receiver_internal(scope, recv)
+                        .map(Ty::obj_name)
                 };
                 if unbound.is_none() {
                     // Bound: a reference receiver, or a boxable primitive (boxed then `getClass`).
-                    let rt = self.expr(recv);
+                    let rt = self.expr(scope, recv);
                     let boxable = rt.jvm_boxed_ref().is_some();
                     if !rt.is_reference() && !boxable {
                         return unsupported(self);
@@ -25100,13 +27087,13 @@ impl<'a> Checker<'a> {
             if matches!(name.as_str(), "equals" | "hashCode" | "toString") {
                 let bound = match receiver {
                     Some(r) => {
-                        matches!(self.file.expr(r), Expr::Name(n) if self.lookup(n).is_some())
+                        matches!(self.file.expr(r), Expr::Name(n) if self.lookup(scope, n).is_some())
                     }
                     None => false,
                 };
                 if let Some(r) = receiver {
                     if bound {
-                        self.expr(r);
+                        self.expr(scope, r);
                     } // type-check the captured receiver
                 }
                 let (margs, ret): (u8, Ty) = match name.as_str() {
@@ -25122,7 +27109,7 @@ impl<'a> Checker<'a> {
                 // Local function reference `::localFun` (shadows a same-named top-level fn). Map the
                 // ref to the local fun's decl — the SAME map a local-fun CALL uses — so lowering can
                 // find the lifted static method and prepend its captures.
-                if let Some((stmt_id, sig)) = self.lookup_local_fun(&name) {
+                if let Some((stmt_id, sig)) = self.lookup_local_fun(scope, &name) {
                     if sig.requires_all_args() {
                         self.mark_local_function_ref(e, stmt_id);
                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
@@ -25133,7 +27120,7 @@ impl<'a> Checker<'a> {
                 // precedence over a same-named top-level decl), exactly matching the lowerer's
                 // `lower_implicit_this_method_ref` (member functions only, non-`Nothing` return); the
                 // member-PROPERTY case (`::p`) follows, matching `lower_implicit_this_prop_ref`.
-                if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                if let Some(Ty::Obj(internal, _)) = scope.this_ty() {
                     if let Some((owner, sig)) = self.syms.method_of_with_owner_name(internal, &name)
                     {
                         if sig.requires_all_args() && sig.ret != Ty::Nothing {
@@ -25207,7 +27194,7 @@ impl<'a> Checker<'a> {
                         return self.set(e, Ty::Error);
                     }
                 }
-                if let Some(receiver) = self.this_ty {
+                if let Some(receiver) = scope.this_ty() {
                     if let Some(member) = self.resolve_instance_ref(receiver, &name) {
                         if !member.suspend() && member.ret != Ty::Nothing {
                             let ty = Ty::fun(member.params.clone(), member.ret);
@@ -25258,7 +27245,9 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if self.module_class_named(&name).is_none() && !self.lexical_value_declares(&name) {
+                if self.module_class_named(&name).is_none()
+                    && !self.lexical_value_declares(scope, &name)
+                {
                     let overload = crate::libraries::FunctionSet {
                         overloads: self
                             .resolver()
@@ -25285,7 +27274,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Constructor reference `::ClassName` → `Fun(ctor_params, ClassName)`.
-                let scoped_classifier = self.scoped_classifier_name(&name);
+                let scoped_classifier = self.scoped_classifier_name_in(scope, &name);
                 if scoped_classifier == InheritedNestedClassifier::Ambiguous {
                     return self.set(e, Ty::Error);
                 }
@@ -25306,6 +27295,15 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // An UNBOUND method/property reference whose receiver is a FULLY-QUALIFIED classifier
+            // (`pkg.Cls::method`, `pkg.Outer.Nested::prop`). The rungs below are the same ones the
+            // simple-name receiver uses; only the way the classifier is named differs, so this arm
+            // resolves the path to one identity and hands that over.
+            if let Some(r) = receiver {
+                if let Some(ty) = self.qualified_unbound_ref(scope, e, expected, r, &name) {
+                    return self.set(e, ty);
+                }
+            }
             // Method references on a user class: bound `obj::m` (receiver is a value, captured →
             // arity = method args) or unbound `Type::m` (receiver is the class → first parameter).
             if let Some(r) = receiver {
@@ -25314,7 +27312,7 @@ impl<'a> Checker<'a> {
                     // `this` isn't a scope local, so resolve via `this_ty` (the lowering already
                     // captures `this` = value 0 in `lower_method_ref`/`lower_prop_ref`).
                     if rn == "this" {
-                        if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                        if let Some(Ty::Obj(internal, _)) = scope.this_ty() {
                             if let Some(sig) = self.syms.method_of_name(internal, &name) {
                                 if sig.requires_all_args() {
                                     self.mark_current_extension_receiver_used(e);
@@ -25331,11 +27329,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // bound: `obj::m` where `obj` is an in-scope value
-                    if let Some(loc) = self.lookup(&rn) {
+                    if let Some(loc) = self.lookup(scope, &rn) {
                         if let Some(internal) = loc.ty.obj_internal() {
                             if let Some(sig) = self.syms.method_of_name(internal, &name) {
                                 if sig.requires_all_args() {
-                                    self.expr(r); // capture the receiver
+                                    self.expr(scope, r); // capture the receiver
                                     return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                 }
                             }
@@ -25347,7 +27345,7 @@ impl<'a> Checker<'a> {
                                         .find_map(|(n, t, v)| (*n == name).then_some((*t, *v)))
                                 })
                             {
-                                self.expr(r); // capture the receiver
+                                self.expr(scope, r); // capture the receiver
                                 if let Some(ty) = self.property_ref_ty(0, is_var, &[prop_ty]) {
                                     return self.set(e, ty);
                                 }
@@ -25358,7 +27356,7 @@ impl<'a> Checker<'a> {
                             if let Ok(Some(property)) = self
                                 .visible_source_extension_property(Ty::obj_name(internal), &name)
                             {
-                                self.expr(r); // capture the receiver
+                                self.expr(scope, r); // capture the receiver
                                 if let Some(ty) = self.property_ref_ty(
                                     0,
                                     property.setter.is_some(),
@@ -25372,10 +27370,10 @@ impl<'a> Checker<'a> {
                     }
                     // unbound `Type::m` (skip objects: `O::m` is bound to the singleton, which
                     // emit doesn't model — it would be miscompiled as unbound).
-                    if !self.value_root_shadows_classifier(&rn)
+                    if !self.value_root_shadows_classifier(scope, &rn)
                         && self.module_object_named(&rn).is_none()
                     {
-                        if let Some(cls) = self.module_class_named(&rn).cloned() {
+                        if let Some(cls) = self.module_class_named_in(scope, &rn).cloned() {
                             if let Some(sig) = cls.method(&name).cloned() {
                                 if sig.requires_all_args() {
                                     let cls_internal = cls.internal();
@@ -25409,7 +27407,7 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        if let Some(recv_ty) = self.class_literal_unbound_ty(&rn) {
+                        if let Some(recv_ty) = self.class_literal_unbound_ty(scope, &rn) {
                             if let Some(property) = self.resolve_property_ref(recv_ty, &name) {
                                 if let Some(ty) = self.property_ref_ty(
                                     1,
@@ -25482,7 +27480,7 @@ impl<'a> Checker<'a> {
                     // Object/singleton method reference `O::m` → BOUND to the singleton instance,
                     // so its arity is the method's own args (the receiver is captured, not a param).
                     // The lowering captures `O.INSTANCE`.
-                    if !self.value_root_shadows_classifier(&rn)
+                    if !self.value_root_shadows_classifier(scope, &rn)
                         && self.module_object_named(&rn).is_some()
                     {
                         if let Some(cls) = self.module_class_named(&rn).cloned() {
@@ -25510,7 +27508,7 @@ impl<'a> Checker<'a> {
                                     property.setter.is_some(),
                                     &[property.ty],
                                 ) {
-                                    self.expr(r);
+                                    self.expr(scope, r);
                                     self.source_extension_properties.insert(e, property.clone());
                                     return self.set(e, ty);
                                 }
@@ -25524,7 +27522,7 @@ impl<'a> Checker<'a> {
             // method or an extension function (keyed by the receiver's erased descriptor). Typed as
             // `(method/ext args) -> ret` — the receiver is bound, not a parameter.
             if let Some(r) = receiver {
-                let rty = self.expr(r);
+                let rty = self.expr(scope, r);
                 if let Some(internal) = rty.obj_internal() {
                     if let Some(sig) = self.syms.method_of_name(internal, &name) {
                         if sig.requires_all_args() {
@@ -25668,7 +27666,14 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    fn check_unary(&mut self, expression: ExprId, op: UnOp, ot: Ty, span: Span) -> Ty {
+    fn check_unary(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        op: UnOp,
+        ot: Ty,
+        span: Span,
+    ) -> Ty {
         let name = op.operator_name();
         let target_key = SyntheticOperatorCall::from_name(name)
             .expect("unary operator has a synthetic-call key");
@@ -25688,13 +27693,14 @@ impl<'a> Checker<'a> {
             UnOp::Not if builtin_ty == Ty::Boolean => Ty::Boolean,
             _ if ot == Ty::Error => Ty::Error,
             _ => {
-                if let Some((ret, target)) = self.operator_call_ret(ot, name, &[], &[], span) {
+                if let Some((ret, target)) = self.operator_call_ret(scope, ot, name, &[], &[], span)
+                {
                     self.resolved_operator_calls
                         .insert((expression, target_key), target);
                     return ret;
                 }
                 let operator_span = Span::new(span.lo, span.lo.saturating_add(1));
-                if self.report_required_operator_modifier(ot, name, &[], operator_span) {
+                if self.report_required_operator_modifier(scope, ot, name, &[], operator_span) {
                     return Ty::Error;
                 }
                 self.diags.error(
@@ -25797,13 +27803,17 @@ impl<'a> Checker<'a> {
     /// the same semantic target instead of maintaining origin-specific module-extension handoffs.
     fn record_source_extension_call(
         &mut self,
-        e: ExprId,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
         rt: Ty,
         name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
         arg_kinds: &[CallArgKind],
     ) -> Option<Ty> {
+        let CallArgs {
+            call: e,
+            args,
+            arg_tys,
+        } = call_args;
         let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
         let inline = selected.flags.inline;
         let suspend = selected.flags.suspend;
@@ -25813,10 +27823,13 @@ impl<'a> Checker<'a> {
         // overload but whose concrete argument types do not fit that selection.
         let logical_params = selected.extension_value_params().to_vec();
         if !self.check_source_extension_call_args(
-            e,
+            scope,
+            CallArgs {
+                call: e,
+                args,
+                arg_tys,
+            },
             name,
-            args,
-            arg_tys,
             &selected,
             &logical_params,
         ) {
@@ -25947,8 +27960,12 @@ impl<'a> Checker<'a> {
                 // A nullable-primitive wrapper (`Int?`/`Double?`) compares with its primitive (`a == 5.0`):
                 // the lowerer null-checks the wrapper, then UNBOXES it and does a primitive `==` (`dcmp`/
                 // `fcmp` for Float/Double — IEEE-754, so `-0.0 == 0.0`, `NaN != NaN`), never boxed `equals`.
-                let wrapper_vs_prim =
-                    |w: Ty, p: Ty| w.nullable_primitive().map_or(false, |pw| pw == p);
+                // Both source-nullable primitives and provider-supplied wrapper references use the
+                // semantic platform's one wrapper query. The checker therefore admits the same
+                // reference/value equality without naming or pattern-matching a runtime class.
+                let wrapper_vs_prim = |wrapper: Ty, primitive: Ty| {
+                    self.syms.libraries.reference_primitive(wrapper) == Some(primitive)
+                };
                 let is_unit = |t: Ty| t.non_null() == Ty::Unit;
                 let has_boxable_value_equality = |t: Ty| {
                     matches!(
@@ -25989,6 +28006,31 @@ impl<'a> Checker<'a> {
                 let is_prim_wrapper = |t: Ty| t.nullable_primitive().is_some();
                 if lt == Ty::String || rt == Ty::String {
                     self.diags.error(span, "krusty: referential equality (=== / !==) on String operands is not supported".to_string());
+                    Ty::Error
+                } else if self.identity_prohibited_operand(lt)
+                    || self.identity_prohibited_operand(rt)
+                    // Two plain scalar operands use value comparison, but Kotlin permits that form
+                    // only when their semantic types agree. Letting unlike scalars through would make
+                    // the backend select its JVM comparison family from the left operand alone: e.g.
+                    // `Int === Long` could emit an int-category branch over an int and a two-slot long.
+                    // Reject at the semantic boundary, matching the reference compiler, while leaving
+                    // mixed reference/scalar identity to the object path that boxes the scalar.
+                    || (lt.is_jvm_scalar() && rt.is_jvm_scalar() && lt != rt)
+                {
+                    // kotlinc: "identity equality for arguments of types 'X' and 'Y' is prohibited."
+                    // An unsigned/value-class operand has no stable boxed identity, and two unlike
+                    // scalar types do not share an identity-comparison domain. kotlinc makes either a
+                    // hard ERROR (not the "unstable because of implicit boxing" warning a compatible
+                    // plain primitive gets). Reject before lowering so the backend never compares an
+                    // unboxed value-class carrier or mismatched JVM scalar categories.
+                    self.diags.error(
+                        span,
+                        format!(
+                            "identity equality for arguments of types '{}' and '{}' is prohibited.",
+                            lt.source_name(),
+                            rt.source_name()
+                        ),
+                    );
                     Ty::Error
                 } else if is_prim_wrapper(lt) || is_prim_wrapper(rt) {
                     // A nullable-primitive wrapper (`Int?`/`Double?`) compared with `===`/`!==`: boxed
@@ -26033,6 +28075,7 @@ impl<'a> Checker<'a> {
     /// `IntArray(n)`/`CharArray(n)`/… Returns the array `Ty`, or `None` if `fname` isn't one of these.
     fn check_array_builtin(
         &mut self,
+        scope: &CheckerScope<'_>,
         fname: &str,
         args: &[ExprId],
         arg_tys: &[Ty],
@@ -26120,7 +28163,7 @@ impl<'a> Checker<'a> {
             if arg_tys.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. }) {
                 // `IntArray(n) { i -> … }` — index lambda inlined into a fill loop by the backend.
                 self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
-                let _ = self.check_lambda_with_types(args[1], &[Ty::Int]); // `it`/index : Int
+                let _ = self.check_lambda_with_types(scope, args[1], &[Ty::Int]); // `it`/index : Int
                 return Some(Ty::array(elem));
             }
         }
@@ -26131,7 +28174,7 @@ impl<'a> Checker<'a> {
             && matches!(self.file.expr(args[1]), Expr::Lambda { .. })
         {
             self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
-            let lam = self.check_lambda_with_types(args[1], &[Ty::Int]);
+            let lam = self.check_lambda_with_types(scope, args[1], &[Ty::Int]);
             let elem = lam.fun_ret().unwrap_or_else(|| Ty::obj("kotlin/Any"));
             // `Array(n) { … }` is always the reference `Array<T>` (`Obj("kotlin/Array", [T])`), distinct
             // from a primitive array. The element stays LOGICAL `T` (a primitive `Int` reads as `Int`,
@@ -26148,24 +28191,25 @@ impl<'a> Checker<'a> {
     /// is `recv`, and the receiver's properties resolve unqualified. `label` (the callee's name, e.g.
     /// `run`/`apply`/`with` or a user HOF) is pushed onto the receiver-label stack so `this@label`
     /// resolves inside the body. Returns the body's type.
-    fn check_with_receiver_labeled(&mut self, recv: Ty, body: ExprId, label: Option<&str>) -> Ty {
+    fn check_with_receiver_labeled(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        recv: Ty,
+        body: ExprId,
+        label: Option<&str>,
+    ) -> Ty {
         if recv == Ty::Error {
             return Ty::Error;
         }
-        let prev_this = self.this_ty;
-        let prev_this_gen = self.this_gen;
         let prev_extension_receiver = self.this_extension_receiver;
-        self.set_this_ty(Some(recv));
         self.this_extension_receiver = None;
         let pushed = label.map(|l| {
             self.this_labels.push((l.to_string(), recv, false));
         });
-        let r = self.check_with_receiver_body(recv, body);
+        let r = self.check_with_receiver_body(scope, recv, body);
         if pushed.is_some() {
             self.this_labels.pop();
         }
-        self.this_ty = prev_this;
-        self.this_gen = prev_this_gen;
         self.this_extension_receiver = prev_extension_receiver;
         r
     }
@@ -26187,11 +28231,15 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn check_with_receiver_body(&mut self, recv: Ty, body: ExprId) -> Ty {
-        self.push_scope();
+    fn check_with_receiver_body(&mut self, scope: &CheckerScope<'_>, recv: Ty, body: ExprId) -> Ty {
+        let receiver_scope = scope.child(ScopeKind::Function {
+            receiver: Some(recv),
+        });
+        let scope = &receiver_scope;
         if let Some(internal) = recv.obj_internal() {
-            for property in self.scoped_properties(internal) {
+            for property in self.scoped_properties(scope, internal) {
                 self.declare_dispatch_property(
+                    scope,
                     &property.name,
                     property.ty,
                     property.is_var,
@@ -26199,9 +28247,7 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        let bt = self.expr(body);
-        self.pop_scope();
-        bt
+        self.expr(scope, body)
     }
 
     /// Type a SAFE-CALL scope function `recv?.name { … }` (`let`/`run`/`also`/`apply`): inside, the
@@ -26210,6 +28256,7 @@ impl<'a> Checker<'a> {
     /// the caller wraps it nullable. `None` when it isn't a recognized lambda-bearing scope call.
     fn safe_scope_call_result(
         &mut self,
+        scope: &CheckerScope<'_>,
         rt: Ty,
         name: &str,
         args: &Option<Vec<ExprId>>,
@@ -26229,11 +28276,11 @@ impl<'a> Checker<'a> {
         let rt = rt.nullable_primitive().unwrap_or_else(|| rt.non_null());
         match name {
             "run" | "apply" if params.is_empty() => {
-                let bt = self.check_with_receiver_labeled(rt, body, Some(name));
+                let bt = self.check_with_receiver_labeled(scope, rt, body, Some(name));
                 Some(if name == "apply" { rt } else { bt })
             }
             "let" | "also" => {
-                let lt = self.check_lambda_with_types(*arg, &[rt]);
+                let lt = self.check_lambda_with_types(scope, *arg, &[rt]);
                 Some(if name == "also" {
                     rt
                 } else if let Ty::Fun(s) = lt {
@@ -26294,6 +28341,7 @@ impl<'a> Checker<'a> {
 
     fn this_member_call_ret(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         rt: Ty,
         name: &str,
@@ -26312,14 +28360,14 @@ impl<'a> Checker<'a> {
             return Some(Ty::String);
         }
         if rt == Ty::String {
-            match self.record_classpath_member_call_with_slots(call, rt, name, args, true) {
+            match self.record_classpath_member_call_with_slots(scope, call, rt, name, args, true) {
                 ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
                 ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
                     return Some(Ty::Error);
                 }
                 ClasspathMemberSlotCall::NoMatch => {}
             }
-            let arg_kinds = self.checked_call_arg_kinds(args);
+            let arg_kinds = self.checked_call_arg_kinds(scope, args);
             if let Some(m) =
                 self.resolve_implicit_instance_member_with_arg_kinds(rt, name, &arg_kinds)
             {
@@ -26329,14 +28377,14 @@ impl<'a> Checker<'a> {
             }
         }
         if let Ty::Obj(_, _) = rt {
-            match self.record_classpath_member_call_with_slots(call, rt, name, args, true) {
+            match self.record_classpath_member_call_with_slots(scope, call, rt, name, args, true) {
                 ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
                 ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
                     return Some(Ty::Error);
                 }
                 ClasspathMemberSlotCall::NoMatch => {}
             }
-            let arg_kinds = self.checked_call_arg_kinds(args);
+            let arg_kinds = self.checked_call_arg_kinds(scope, args);
             if let Some(m) =
                 self.resolve_implicit_instance_member_with_arg_kinds(rt, name, &arg_kinds)
             {
@@ -26351,7 +28399,7 @@ impl<'a> Checker<'a> {
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) — keyed
         // by the receiver's erased key, exactly as a qualified `recv.name(args)` extension call
         // resolves. Lets a bare call inside a receiver lambda reach a same-module extension on `this`.
-        let arg_kinds = self.call_arg_kinds(args);
+        let arg_kinds = self.call_arg_kinds(scope, args);
         if let Some((selected, sig)) = self
             .selected_source_extension(rt, name, &arg_kinds)
             .filter(|(_, signature)| !signature.vararg())
@@ -26368,11 +28416,20 @@ impl<'a> Checker<'a> {
         // (keyed by the call `ExprId`) — not just its return type — so the lowerer emits it through the
         // ordinary extension path instead of bailing (`lower_ext_call_on` reads `resolved_extension`).
         // Mirrors the qualified `recv.name(args)` extension typing + recording.
-        if let Some(ret) = self.record_extension_call_with_slots(call, name, rt, args, &[]) {
+        if let Some(ret) = self.record_extension_call_with_slots(scope, call, name, rt, args, &[]) {
             return Some(ret);
         }
-        if let Some(ret) = self.record_extension_call_from_args(call, name, rt, args, arg_tys, &[])
-        {
+        if let Some(ret) = self.record_extension_call_from_args(
+            scope,
+            CallArgs {
+                call,
+                args,
+                arg_tys,
+            },
+            name,
+            rt,
+            &[],
+        ) {
             return Some(ret);
         }
         if let Some(ret) = self.library_extension_inline_return(name, rt, arg_tys) {
@@ -26394,7 +28451,12 @@ impl<'a> Checker<'a> {
     /// types AND the call's specialized return type — both type-param-substituted. So `twice(1) { it+10 }`
     /// types `it` as `Int` and the call as `Int`, not the erased `Any`. `None` when no matching user
     /// function or it isn't generic. `partial[i]` is `Some(ty)` for a non-lambda arg, `None` for a lambda.
-    fn user_generic_call(&mut self, fname: &str, partial: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
+    fn user_generic_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        fname: &str,
+        partial: &[Option<Ty>],
+    ) -> Option<Vec<Vec<Ty>>> {
         let f = self
             .file
             .decls
@@ -26456,7 +28518,7 @@ impl<'a> Checker<'a> {
                             binds
                                 .get(fp.name.as_str())
                                 .copied()
-                                .unwrap_or_else(|| self.resolve_ty(fp))
+                                .unwrap_or_else(|| self.resolve_ty(scope, fp))
                         })
                         .collect()
                 }
@@ -26747,7 +28809,12 @@ impl<'a> Checker<'a> {
     /// whose declared return is a bare type parameter (`fun <T> asSeq(...): T`): the call's result
     /// type is the supplied argument (`String`), so members of the result resolve (`…length`). `None`
     /// when there's no explicit type argument or the return isn't one of the function's type params.
-    fn explicit_generic_return(&self, call: ExprId, f: &FunDecl) -> Option<Ty> {
+    fn explicit_generic_return(
+        &self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        f: &FunDecl,
+    ) -> Option<Ty> {
         let targs = self.file.call_type_args.get(&call.0)?;
         if f.receiver.is_some() || f.type_params.is_empty() {
             return None;
@@ -26761,7 +28828,7 @@ impl<'a> Checker<'a> {
         // phys.is_erased_top()`) unboxes the call result once, matching the inferred-binding path
         // in `user_generic_return`.
         let arg = targs.get(idx)?;
-        let t = self.resolve_ty_no_diag(arg);
+        let t = self.resolve_ty_no_diag(scope, arg);
         let t = if ret.definitely_non_null() {
             t.non_null()
         } else if ret.nullable() || arg.nullable() {
@@ -26872,22 +28939,27 @@ impl<'a> Checker<'a> {
 
     fn record_extension_call_from_args(
         &mut self,
-        call: ExprId,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
         name: &str,
         receiver: Ty,
-        args: &[ExprId],
-        _arg_tys: &[Ty],
         type_args: &[Ty],
     ) -> Option<Ty> {
+        let CallArgs {
+            call,
+            args,
+            arg_tys: _,
+        } = call_args;
         if self.file.call_arg_names.contains_key(&call.0) {
             // A labelled extension probe may legitimately find no extension: this same helper is used
             // while walking implicit receivers, before a receiver-less top-level callable gets its turn.
             // `record_extension_call_with_slots` already reports mapping/applicability errors when an
             // extension family exists; preserve `None` when the family is absent so this generic probe
             // cannot poison a later resolution rung with a fabricated overload diagnostic.
-            return self.record_extension_call_with_slots(call, name, receiver, args, type_args);
+            return self
+                .record_extension_call_with_slots(scope, call, name, receiver, args, type_args);
         }
-        let arg_kinds = self.checked_call_arg_kinds(args);
+        let arg_kinds = self.checked_call_arg_kinds(scope, args);
         let resolved = self.record_library_extension_call_with_arg_kinds(
             Some(call),
             name,
@@ -26929,6 +29001,7 @@ impl<'a> Checker<'a> {
     /// must get to the ordinary fallback where its resolution/diagnostic is recorded once.
     fn select_extension_call_with_slots(
         &self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         name: &str,
         receiver: Ty,
@@ -27071,7 +29144,7 @@ impl<'a> Checker<'a> {
             // JVM platform here would make the labelled form reject a call that the positional form
             // accepts, and would reintroduce an origin-specific module/classpath branch.
             let source = self.fed_source();
-            let arg_kinds = self.checked_call_arg_kinds(args);
+            let arg_kinds = self.checked_call_arg_kinds(scope, args);
             match crate::symbol_resolver::best_by_args(
                 &*self.syms.libraries,
                 &source,
@@ -27121,6 +29194,7 @@ impl<'a> Checker<'a> {
 
     fn record_extension_call_with_slots(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         name: &str,
         receiver: Ty,
@@ -27132,7 +29206,7 @@ impl<'a> Checker<'a> {
             mut mapped,
             mut mapping_errors,
             ambiguous,
-        } = self.select_extension_call_with_slots(call, name, receiver, args, type_args)?;
+        } = self.select_extension_call_with_slots(scope, call, name, receiver, args, type_args)?;
         if ambiguous {
             self.diags.error(
                 self.call_callee_name_span(call),
@@ -27393,6 +29467,7 @@ impl<'a> Checker<'a> {
 
     fn destructure_component_target(
         &mut self,
+        scope: &CheckerScope<'_>,
         statement: StmtId,
         recv: Ty,
         name: &str,
@@ -27409,7 +29484,9 @@ impl<'a> Checker<'a> {
         {
             return Ok(Some(target));
         }
-        if let Some(target) = self.member_extension_component_target(statement, recv, name, span)? {
+        if let Some(target) =
+            self.member_extension_component_target(scope, statement, recv, name, span)?
+        {
             return Ok(Some(target));
         }
         Ok(self
@@ -27420,12 +29497,14 @@ impl<'a> Checker<'a> {
 
     fn member_extension_component_target(
         &mut self,
+        scope: &CheckerScope<'_>,
         statement: StmtId,
         recv: Ty,
         name: &str,
         span: Span,
     ) -> Result<Option<DestructureComponentTarget>, ()> {
         let candidate = match self.member_extension_function(
+            scope,
             MemberExtensionFunctionCall {
                 extension_receiver: recv,
                 name,
@@ -27589,16 +29668,20 @@ impl<'a> Checker<'a> {
     /// resolves to this lambda's receiver inside the body.
     fn check_lambda_with_receiver_labeled(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         recv: Ty,
         value_types: &[Ty],
         label: Option<&str>,
     ) -> Ty {
         self.check_lambda_with_implicit_receivers_labeled(
+            scope,
             e,
-            &[],
-            Some(recv),
-            value_types,
+            LambdaShape {
+                context_types: &[],
+                extension_receiver: Some(recv),
+                value_types,
+            },
             false,
             label,
         )
@@ -27606,12 +29689,14 @@ impl<'a> Checker<'a> {
 
     fn check_lambda_with_function_type_labeled(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         signature: &'static crate::types::FnSig,
         has_receiver: bool,
         label: Option<&str>,
     ) -> Ty {
         self.check_lambda_with_function_type_and_params_labeled(
+            scope,
             e,
             signature,
             &signature.params,
@@ -27622,6 +29707,7 @@ impl<'a> Checker<'a> {
 
     fn check_lambda_with_function_type_and_params_labeled(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         signature: &'static crate::types::FnSig,
         specialized_params: &[Ty],
@@ -27641,10 +29727,13 @@ impl<'a> Checker<'a> {
         };
         if !context_types.is_empty() || receiver.is_some() {
             return self.check_lambda_with_implicit_receivers_and_return_labeled(
+                scope,
                 e,
-                context_types,
-                receiver,
-                value_types,
+                LambdaShape {
+                    context_types,
+                    extension_receiver: receiver,
+                    value_types,
+                },
                 label,
                 LambdaCheckMode {
                     suspend: signature.suspend,
@@ -27652,7 +29741,12 @@ impl<'a> Checker<'a> {
                 },
             );
         }
-        let ty = self.check_lambda_with_types_and_return(e, value_types, signature.ret == Ty::Unit);
+        let ty = self.check_lambda_with_types_and_return(
+            scope,
+            e,
+            value_types,
+            signature.ret == Ty::Unit,
+        );
         if !signature.suspend {
             return ty;
         }
@@ -27673,6 +29767,7 @@ impl<'a> Checker<'a> {
 
     fn check_argument_expected(
         &mut self,
+        scope: &CheckerScope<'_>,
         expression: ExprId,
         expected: Ty,
         has_receiver: bool,
@@ -27681,6 +29776,7 @@ impl<'a> Checker<'a> {
         if matches!(self.file.expr(expression), Expr::Lambda { .. }) {
             if let Ty::Fun(signature) = expected {
                 return self.check_lambda_with_function_type_labeled(
+                    scope,
                     expression,
                     signature,
                     has_receiver,
@@ -27688,7 +29784,7 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        self.expr_expected(expression, expected)
+        self.expr_expected(scope, expression, expected)
     }
 
     /// Run `check` with the anonymous function `e`'s own return target installed. Unlike a lambda, a
@@ -27697,13 +29793,18 @@ impl<'a> Checker<'a> {
     /// undeclared, the type a block-bodied anonymous function returns — never against the enclosing
     /// function's. A plain lambda is left untouched: its bare `return` IS a non-local return from the
     /// enclosing function, which is exactly what `ret_ty` already holds.
-    fn with_anon_fun_return<R>(&mut self, e: ExprId, check: impl FnOnce(&mut Self) -> R) -> R {
+    fn with_anon_fun_return<R>(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        check: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         if !self.file.anon_fun_lambdas.contains(&e.0) {
             return check(self);
         }
         let declared = self.file.anon_fun_ret.get(&e.0).cloned();
         let ret = match declared {
-            Some(r) => self.resolve_ty(&r),
+            Some(r) => self.resolve_ty(scope, &r),
             None => Ty::Unit,
         };
         let saved = (self.ret_ty, self.return_allowed);
@@ -27718,18 +29819,23 @@ impl<'a> Checker<'a> {
     /// return type (`fun (…): T`) wins over the body type: a block body ending in `return` types as
     /// `Nothing`, which would otherwise erase the result (and make the lowered closure emit a void
     /// `return` where its caller expects a value). Falls back to the body type when undeclared.
-    fn lambda_ret_ty(&mut self, e: ExprId, bret: Ty) -> Ty {
+    fn lambda_ret_ty(&mut self, scope: &CheckerScope<'_>, e: ExprId, bret: Ty) -> Ty {
         match self.file.anon_fun_ret.get(&e.0).cloned() {
-            Some(declared) => self.resolve_ty(&declared),
+            Some(declared) => self.resolve_ty(scope, &declared),
             None => bret,
         }
     }
 
-    fn check_lambda_body(&mut self, body: ExprId, coerce_return_to_unit: bool) -> Ty {
+    fn check_lambda_body(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        body: ExprId,
+        coerce_return_to_unit: bool,
+    ) -> Ty {
         if !coerce_return_to_unit {
-            return self.expr(body);
+            return self.expr(scope, body);
         }
-        match self.expr_statement(body) {
+        match self.expr_statement(scope, body) {
             Ty::Nothing => Ty::Nothing,
             Ty::Error => Ty::Error,
             _ => Ty::Unit,
@@ -27738,18 +29844,16 @@ impl<'a> Checker<'a> {
 
     fn check_lambda_with_implicit_receivers_labeled(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
-        context_types: &[Ty],
-        extension_receiver: Option<Ty>,
-        value_types: &[Ty],
+        shape: LambdaShape<'_>,
         suspend: bool,
         label: Option<&str>,
     ) -> Ty {
         self.check_lambda_with_implicit_receivers_and_return_labeled(
+            scope,
             e,
-            context_types,
-            extension_receiver,
-            value_types,
+            shape,
             label,
             LambdaCheckMode {
                 suspend,
@@ -27760,13 +29864,17 @@ impl<'a> Checker<'a> {
 
     fn check_lambda_with_implicit_receivers_and_return_labeled(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
-        context_types: &[Ty],
-        extension_receiver: Option<Ty>,
-        value_types: &[Ty],
+        shape: LambdaShape<'_>,
         label: Option<&str>,
         mode: LambdaCheckMode,
     ) -> Ty {
+        let LambdaShape {
+            context_types,
+            extension_receiver,
+            value_types,
+        } = shape;
         if self.allow_lambda_mutation {
             self.mark_inline_lambda(e);
         }
@@ -27781,8 +29889,6 @@ impl<'a> Checker<'a> {
             if let Some(receiver) = extension_receiver {
                 self.mark_receiver_lambda(e, receiver);
             }
-            let prev_this = self.this_ty;
-            let prev_this_gen = self.this_gen;
             let prev_extension_receiver = self.this_extension_receiver;
             let labels_depth = self.this_labels.len();
             let mut implicit_types = context_types.to_vec();
@@ -27792,44 +29898,48 @@ impl<'a> Checker<'a> {
                     self.this_labels
                         .push((format!("$context{index}"), *receiver, false));
                 }
-                self.set_this_ty(Some(current));
                 self.this_extension_receiver = None;
                 if let Some(label) = label {
                     self.this_labels.push((label.to_string(), current, false));
                 }
             }
-            self.push_scope();
-            for receiver in implicit_types.iter().rev() {
-                if let Some(internal) = receiver.obj_internal() {
-                    for property in self.scoped_properties(internal) {
-                        if self.lookup(&property.name).is_none() {
-                            self.declare_dispatch_property(
-                                &property.name,
-                                property.ty,
-                                property.is_var,
-                                property.owner,
-                            );
+            let bret = {
+                let lambda_scope = scope.child(ScopeKind::Function {
+                    receiver: implicit_types.last().copied(),
+                });
+                let scope = &lambda_scope;
+                for receiver in implicit_types.iter().rev() {
+                    if let Some(internal) = receiver.obj_internal() {
+                        for property in self.scoped_properties(scope, internal) {
+                            if self.lookup(scope, &property.name).is_none() {
+                                self.declare_dispatch_property(
+                                    scope,
+                                    &property.name,
+                                    property.ty,
+                                    property.is_var,
+                                    property.owner,
+                                );
+                            }
                         }
                     }
                 }
-            }
-            for (i, name) in bind_names.iter().enumerate() {
-                let pty = value_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
-                self.declare(name, pty, false);
-            }
-            let saved_field = self.field_ty.take();
-            let coerce = mode.coerce_return_to_unit;
-            let bret = self.with_anon_fun_return(e, |c| c.check_lambda_body(body, coerce));
-            self.field_ty = saved_field;
-            self.pop_scope();
+                for (i, name) in bind_names.iter().enumerate() {
+                    let pty = value_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
+                    self.declare(scope, name, pty, false);
+                }
+                let saved_field = self.field_ty.take();
+                let coerce = mode.coerce_return_to_unit;
+                let bret = self
+                    .with_anon_fun_return(scope, e, |c| c.check_lambda_body(scope, body, coerce));
+                self.field_ty = saved_field;
+                bret
+            };
             self.this_labels.truncate(labels_depth);
-            self.this_ty = prev_this;
-            self.this_gen = prev_this_gen;
             self.this_extension_receiver = prev_extension_receiver;
             let mut pts = context_types.to_vec();
             pts.extend(extension_receiver);
             pts.extend_from_slice(value_types);
-            let ret = self.lambda_ret_ty(e, bret);
+            let ret = self.lambda_ret_ty(scope, e, bret);
             let ty = Ty::fun_with_shape(
                 pts,
                 ret,
@@ -27839,15 +29949,21 @@ impl<'a> Checker<'a> {
             );
             return self.set(e, ty);
         }
-        self.expr(e)
+        self.expr(scope, e)
     }
 
-    fn check_lambda_with_types(&mut self, e: ExprId, param_types: &[Ty]) -> Ty {
-        self.check_lambda_with_types_and_return(e, param_types, false)
+    fn check_lambda_with_types(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        param_types: &[Ty],
+    ) -> Ty {
+        self.check_lambda_with_types_and_return(scope, e, param_types, false)
     }
 
     fn check_lambda_with_types_and_return(
         &mut self,
+        scope: &CheckerScope<'_>,
         e: ExprId,
         param_types: &[Ty],
         coerce_return_to_unit: bool,
@@ -27863,23 +29979,27 @@ impl<'a> Checker<'a> {
             } else {
                 vec![]
             };
-            self.push_scope();
-            for (i, name) in bind_names.iter().enumerate() {
-                let pty = param_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
-                self.declare(name, pty, false);
-            }
-            // `field` cannot be read from inside a lambda closure (see the `Expr::Lambda` arm).
-            let saved_field = self.field_ty.take();
-            let bret =
-                self.with_anon_fun_return(e, |c| c.check_lambda_body(body, coerce_return_to_unit));
-            self.field_ty = saved_field;
-            self.pop_scope();
+            let bret = {
+                let lambda_scope = scope.child(ScopeKind::Function { receiver: None });
+                let scope = &lambda_scope;
+                for (i, name) in bind_names.iter().enumerate() {
+                    let pty = param_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
+                    self.declare(scope, name, pty, false);
+                }
+                // `field` cannot be read from inside a lambda closure (see the `Expr::Lambda` arm).
+                let saved_field = self.field_ty.take();
+                let bret = self.with_anon_fun_return(scope, e, |c| {
+                    c.check_lambda_body(scope, body, coerce_return_to_unit)
+                });
+                self.field_ty = saved_field;
+                bret
+            };
             // Carry the declared parameter types and the inferred body return type.
-            let ret = self.lambda_ret_ty(e, bret);
+            let ret = self.lambda_ret_ty(scope, e, bret);
             let ty = Ty::fun(param_types.to_vec(), ret);
             return self.set(e, ty);
         }
-        self.expr(e)
+        self.expr(scope, e)
     }
 
     /// For a generic higher-order member call (`box.map { it.length }` where `box: Box<String>`),
@@ -28039,18 +30159,29 @@ impl<'a> Checker<'a> {
         crate::symbol_resolver::ty_subst(gm.ret_shape, &binds)
     }
 
-    /// The result type of a constructor call `Name<A,…>(…)`: the class instantiated with the call's
-    /// explicit type arguments (`ArrayList<Int>()` → `ArrayList<Int>`), so member/element types
-    /// resolve. Falls back to the raw class type when there are no explicit type arguments.
-    /// Select and record the classpath/library constructor target for `call`. The checker owns overload,
-    /// named/default, value-class, and marker-constructor selection; lowering only emits this target.
+    /// Preserve syntax-only argument provenance for constructor selection. The semantic provider may
+    /// expose source, dependency, or runtime declarations; none of those origins changes how a lambda
+    /// literal participates in selection.
+    fn constructor_arg_kinds(&self, args: &[ExprId], arg_tys: &[Ty]) -> Vec<CallArgKind> {
+        args.iter()
+            .zip(arg_tys)
+            .map(|(&argument, &ty)| call_arg_kind(self.file, argument, ty))
+            .collect()
+    }
+
+    /// Select a semantic-provider constructor target. The checker owns overload, named/default,
+    /// value-class, and marker-constructor selection; lowering only emits the recorded target.
     fn select_library_constructor_name(
         &self,
         internal: TypeName,
         args: Vec<ExprId>,
         arg_tys: &[Ty],
     ) -> Option<ResolvedConstructor> {
-        if let Some(member) = self.resolve_constructor_name(internal, arg_tys) {
+        // Lambda arguments keep their literal provenance (as method-call overload selection does) so
+        // a provider SAM-interface parameter admits them through the shared SAM signature operation;
+        // every other argument stays a typed value with any independent literal provenance intact.
+        let arg_kinds = self.constructor_arg_kinds(&args, arg_tys);
+        if let Some(member) = self.resolve_constructor_name(internal, &arg_kinds) {
             // A value-class ctor has an EMPTY descriptor (the marker krusty uses); resolve it like any
             // class — `Plain` carrying its parameter types. ir_lower emits a uniform `New` from those, and
             // the value-class JVM pass realizes `constructor-impl`. No value-class handling in the resolver.
@@ -28062,30 +30193,98 @@ impl<'a> Checker<'a> {
 
     fn record_library_constructor_name(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         internal: TypeName,
         args: Vec<ExprId>,
         arg_tys: &[Ty],
     ) -> Option<ResolvedConstructor> {
         let target = self.select_library_constructor_name(internal, args, arg_tys)?;
+        self.check_selected_constructor_lambdas(scope, &target);
         self.resolved_constructors.insert(call, target.clone());
         Some(target)
     }
 
+    /// Check lambda arguments that deliberately remained probes until constructor selection.
+    ///
+    /// Both bare and qualified/named construction reach this operation with the same selected target;
+    /// source spelling and symbol origin are irrelevant. The selected parameter supplies the first
+    /// real expectation, including a provider SAM method's parameter types. Arguments checked earlier
+    /// are left untouched so their bodies and diagnostics are never duplicated.
+    fn check_selected_constructor_lambdas(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        target: &ResolvedConstructor,
+    ) {
+        // A lambda argument whose checking the argument pass DEFERRED (still unchecked now) gets its
+        // first check here, against the selected constructor's parameter: a SAM-interface parameter
+        // contributes its method's parameter types — the conversion `expect_call_arg` applies after
+        // method-call selection — any other parameter is the expectation. An already-checked
+        // argument (every non-deferred call shape) is left as it is.
+        let recheck = |c: &mut Self, parameter: Ty, argument: ExprId| {
+            if matches!(c.file.expr(argument), Expr::Lambda { .. })
+                && c.expr_types[argument.0 as usize] == Ty::Error
+            {
+                if crate::symbol_resolver::semantic_sam_signature(&*c.syms.libraries, parameter)
+                    .is_some()
+                {
+                    // `expect_call_arg` ignores the provisional actual for a selected SAM and checks
+                    // the body against the SAM method. Pass the current slot only to preserve that
+                    // shared call-argument boundary.
+                    let actual = c.expr_types[argument.0 as usize];
+                    c.expect_call_arg(scope, parameter, argument, actual);
+                } else {
+                    c.check_argument_expected(scope, argument, parameter, false, None);
+                }
+            }
+        };
+        match target {
+            ResolvedConstructor::Plain { member, args } => {
+                for (&argument, &parameter) in args.iter().zip(&member.params) {
+                    recheck(self, parameter, argument);
+                }
+            }
+            ResolvedConstructor::Synthetic { ctor, args } => {
+                for (&argument, &parameter) in args.iter().zip(&ctor.real_params) {
+                    recheck(self, parameter, argument);
+                }
+            }
+            ResolvedConstructor::PlainSlots { member, slots } => {
+                for (argument, &parameter) in slots.iter().zip(&member.params) {
+                    if let Some(argument) = argument {
+                        recheck(self, parameter, *argument);
+                    }
+                }
+            }
+            ResolvedConstructor::NamedDefault {
+                real_params, slots, ..
+            } => {
+                for (argument, &parameter) in slots.iter().zip(real_params) {
+                    if let Some(argument) = argument {
+                        recheck(self, parameter, *argument);
+                    }
+                }
+            }
+            ResolvedConstructor::Source { .. } => {}
+        }
+    }
+
     fn record_inherited_library_constructor_name(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         internal: TypeName,
         classifier: &crate::libraries::LibraryType,
         args: Vec<ExprId>,
         arg_tys: &[Ty],
     ) -> Option<ResolvedConstructor> {
+        let arg_kinds = self.constructor_arg_kinds(&args, arg_tys);
         let target = if let Some(member) = crate::symbol_resolver::resolve_constructor_from_type(
             &*self.syms.libraries,
             &*self.syms.libraries,
             internal,
             classifier,
-            arg_tys,
+            &arg_kinds,
         ) {
             if !self.member_accessible(member.visibility, internal) {
                 return None;
@@ -28122,12 +30321,14 @@ impl<'a> Checker<'a> {
             slots.resize(member.params.len(), None);
             ResolvedConstructor::PlainSlots { member, slots }
         };
+        self.check_selected_constructor_lambdas(scope, &target);
         self.resolved_constructors.insert(call, target.clone());
         Some(target)
     }
 
     fn record_named_inherited_library_constructor_name(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         internal: TypeName,
         classifier: &crate::libraries::LibraryType,
@@ -28143,20 +30344,26 @@ impl<'a> Checker<'a> {
             &ctor_params,
             self.file.call_has_trailing_lambda.contains(&call.0),
         )?;
+        // Preserve unchecked lambdas through mapping just as the ordinary named-constructor path
+        // does. The inherited classifier is a different metadata view, not a different call model.
         for &argument in slots.iter().flatten() {
-            self.expr(argument);
+            if !matches!(self.file.expr(argument), Expr::Lambda { .. })
+                && self.expr_types[argument.0 as usize] == Ty::Error
+            {
+                self.expr(scope, argument);
+            }
         }
         let target = if let Some(ordered) = slots.iter().copied().collect::<Option<Vec<ExprId>>>() {
-            let types = ordered
+            let arg_kinds = ordered
                 .iter()
-                .map(|argument| self.expr_types[argument.0 as usize])
+                .map(|&argument| self.call_arg_kind(scope, argument))
                 .collect::<Vec<_>>();
             let Some(member) = crate::symbol_resolver::resolve_constructor_from_type(
                 &*self.syms.libraries,
                 &*self.syms.libraries,
                 internal,
                 classifier,
-                &types,
+                &arg_kinds,
             ) else {
                 return Ok(None);
             };
@@ -28218,12 +30425,14 @@ impl<'a> Checker<'a> {
                 ResolvedConstructor::PlainSlots { member, slots }
             }
         };
+        self.check_selected_constructor_lambdas(scope, &target);
         self.resolved_constructors.insert(call, target.clone());
         Ok(Some(target))
     }
 
     fn record_named_library_constructor_name(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         internal: TypeName,
         args: &[ExprId],
@@ -28241,24 +30450,35 @@ impl<'a> Checker<'a> {
             &ctor_params,
             self.file.call_has_trailing_lambda.contains(&call.0),
         )?;
-        // Type only arguments this call has not typed yet. This constructor is one CANDIDATE for a
+        // Type only NON-LAMBDA arguments this call has not typed yet. This constructor is one CANDIDATE for a
         // `Name(args)` whose name may also be a top-level function; re-checking an argument that already
         // has a type would overwrite it with the expected-type-free one — a trailing lambda already shaped
         // against the function's receiver parameter (`Cfg.() -> Unit`) would fall back to `() -> Unit`,
         // after which neither this constructor nor the function accepts the call.
         for &a in slots.iter().flatten() {
-            if self.expr_types[a.0 as usize] == Ty::Error {
-                self.expr(a);
+            if self.expr_types[a.0 as usize] == Ty::Error
+                && !matches!(self.file.expr(a), Expr::Lambda { .. })
+            {
+                self.expr(scope, a);
             }
         }
         if let Some(ordered) = slots.iter().copied().collect::<Option<Vec<ExprId>>>() {
             let tys: Vec<Ty> = ordered
                 .iter()
-                .map(|a| self.expr_types[a.0 as usize])
+                .map(|&a| {
+                    if matches!(self.file.expr(a), Expr::Lambda { .. })
+                        && self.expr_types[a.0 as usize] == Ty::Error
+                    {
+                        self.lambda_probe_ty(scope, a).unwrap_or(Ty::Error)
+                    } else {
+                        self.expr_types[a.0 as usize]
+                    }
+                })
                 .collect();
             let Some(target) = self.select_library_constructor_name(internal, ordered, &tys) else {
                 return Ok(None);
             };
+            self.check_selected_constructor_lambdas(scope, &target);
             let target = match target {
                 ResolvedConstructor::Plain { member, .. } => {
                     ResolvedConstructor::PlainSlots { member, slots }
@@ -28289,6 +30509,7 @@ impl<'a> Checker<'a> {
             slots,
             mask,
         };
+        self.check_selected_constructor_lambdas(scope, &target);
         self.resolved_constructors.insert(call, target.clone());
         Ok(Some(target))
     }
@@ -28341,10 +30562,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn ctor_result_name(&mut self, call: ExprId, internal: TypeName) -> Ty {
+    fn ctor_result_name(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        internal: TypeName,
+    ) -> Ty {
         self.reject_abstract_construction(internal, self.span(call));
         if let Some(targs) = self.file.call_type_args.get(&call.0).cloned() {
-            let args: Vec<Ty> = targs.iter().map(|r| self.resolve_ty(r)).collect();
+            let args: Vec<Ty> = targs.iter().map(|r| self.resolve_ty(scope, r)).collect();
             if !args.is_empty() {
                 return Ty::obj_args_name(internal, &args);
             }
@@ -28422,11 +30648,12 @@ impl<'a> Checker<'a> {
     /// Attach inferred source type arguments to a constructor result.
     fn ctor_result_name_with_inferred(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         internal: TypeName,
         inferred: Vec<Ty>,
     ) -> Ty {
-        let result = self.ctor_result_name(call, internal);
+        let result = self.ctor_result_name(scope, call, internal);
         if inferred.is_empty()
             || self
                 .file
@@ -28443,7 +30670,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a member of `owner` with visibility `vis` is accessible from the CURRENT site (the class
-    /// being checked, `self.this_ty`), by Kotlin's rules. `public` and `internal` are always accessible
+    /// being checked, `scope.this_ty()`), by Kotlin's rules. `public` and `internal` are always accessible
     /// (a resolved user member is in-module; cross-module `internal` is a separate, later concern).
     /// `private` reaches the declaring class and classes lexically nested inside it (an inner/nested
     /// class or the companion, whose JVM internal name is `<owner>$…`), plus — in the other direction
@@ -28581,11 +30808,13 @@ impl<'a> Checker<'a> {
 
     fn member_extension_property(
         &self,
+        scope: &CheckerScope<'_>,
         extension_receiver: Ty,
         name: &str,
     ) -> Result<Option<MemberExtensionProperty>, ()> {
         let mut candidates = Vec::new();
-        for (dispatch_rank, dispatch_receiver) in self.implicit_receivers().into_iter().enumerate()
+        for (dispatch_rank, dispatch_receiver) in
+            self.implicit_receivers(scope).into_iter().enumerate()
         {
             for (owner, owner_ty, dispatch_depth) in
                 self.syms.applied_type_hierarchy(dispatch_receiver.ty)
@@ -28790,11 +31019,13 @@ impl<'a> Checker<'a> {
 
     fn member_extension_function_shapes(
         &self,
+        scope: &CheckerScope<'_>,
         extension_receiver: Ty,
         name: &str,
     ) -> Vec<MemberExtensionFunctionShape> {
         let mut shapes = Vec::new();
-        for (dispatch_rank, dispatch_receiver) in self.implicit_receivers().into_iter().enumerate()
+        for (dispatch_rank, dispatch_receiver) in
+            self.implicit_receivers(scope).into_iter().enumerate()
         {
             for (owner, owner_ty, dispatch_depth) in
                 self.syms.applied_hierarchy(dispatch_receiver.ty)
@@ -28896,6 +31127,7 @@ impl<'a> Checker<'a> {
 
     fn instantiate_member_extension(
         &self,
+        scope: &CheckerScope<'_>,
         shape: &MemberExtensionFunctionShape,
         call: MemberExtensionCall<'_>,
     ) -> Option<InstantiatedMemberExtension> {
@@ -29019,13 +31251,19 @@ impl<'a> Checker<'a> {
             String::new(),
         );
         member.call_sig = call_sig.clone();
-        let score = self.module_member_candidate_score(
-            &member,
-            args,
-            &applicability_arg_tys,
-            arg_names,
-            trailing_lambda,
-        )?;
+        let score = self
+            .call_candidate_score(
+                scope,
+                &member.params,
+                &member.call_sig,
+                ArgSlots {
+                    args,
+                    partial_arg_tys: &applicability_arg_tys,
+                    arg_names,
+                    trailing_lambda,
+                },
+            )?
+            .rank;
         let ret = crate::symbol_resolver::ty_subst(
             generic.map_or(function.signature.ret, |signature| signature.ret),
             &bindings,
@@ -29065,14 +31303,20 @@ impl<'a> Checker<'a> {
             })
     }
 
-    fn member_extension_supports_named(&self, extension_receiver: Ty, name: &str) -> bool {
-        self.member_extension_function_shapes(extension_receiver, name)
+    fn member_extension_supports_named(
+        &self,
+        scope: &CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+    ) -> bool {
+        self.member_extension_function_shapes(scope, extension_receiver, name)
             .iter()
             .any(|shape| shape.function.signature.call_sig().has_param_names())
     }
 
     fn member_extension_lambda_param_types(
         &self,
+        scope: &CheckerScope<'_>,
         call: MemberExtensionCall<'_>,
     ) -> Option<MemberExtensionLambdaPlan> {
         let MemberExtensionCall {
@@ -29085,8 +31329,9 @@ impl<'a> Checker<'a> {
             trailing_lambda,
         } = call;
         let mut plans = Vec::new();
-        for shape in self.member_extension_function_shapes(extension_receiver, name) {
+        for shape in self.member_extension_function_shapes(scope, extension_receiver, name) {
             let Some(instantiated) = self.instantiate_member_extension(
+                scope,
                 &shape,
                 MemberExtensionCall {
                     extension_receiver,
@@ -29140,6 +31385,7 @@ impl<'a> Checker<'a> {
 
     fn member_extension_function(
         &self,
+        scope: &CheckerScope<'_>,
         call: MemberExtensionFunctionCall<'_>,
         selection: MemberExtensionSelection,
     ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
@@ -29154,8 +31400,9 @@ impl<'a> Checker<'a> {
         } = call;
         let mut candidates = Vec::new();
         let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
-        for shape in self.member_extension_function_shapes(extension_receiver, name) {
+        for shape in self.member_extension_function_shapes(scope, extension_receiver, name) {
             let Some(instantiated) = self.instantiate_member_extension(
+                scope,
                 &shape,
                 MemberExtensionCall {
                     extension_receiver,
@@ -29213,6 +31460,7 @@ impl<'a> Checker<'a> {
 
     fn check_member_extension_function_call(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         extension_receiver: Ty,
         name: &str,
@@ -29220,24 +31468,31 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
     ) -> Option<Ty> {
         self.check_member_extension_function_call_mode(
-            call,
+            scope,
+            CallArgs {
+                call,
+                args,
+                arg_tys,
+            },
             extension_receiver,
             name,
-            args,
-            arg_tys,
             MemberExtensionSelection::All,
         )
     }
 
     fn check_member_extension_function_call_mode(
         &mut self,
-        call: ExprId,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
         extension_receiver: Ty,
         name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
         selection: MemberExtensionSelection,
     ) -> Option<Ty> {
+        let CallArgs {
+            call,
+            args,
+            arg_tys,
+        } = call_args;
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         let explicit_type_args = self
             .file
@@ -29246,7 +31501,7 @@ impl<'a> Checker<'a> {
             .cloned()
             .unwrap_or_default()
             .iter()
-            .map(|argument| self.resolve_ty(argument))
+            .map(|argument| self.resolve_ty(scope, argument))
             .collect::<Vec<_>>();
         let request = MemberExtensionFunctionCall {
             extension_receiver,
@@ -29261,7 +31516,7 @@ impl<'a> Checker<'a> {
         // declarations. Keep that language rule at the invoke boundary instead of storing a mode
         // in the general member-extension request: explicit `recv.invoke(args)` and every other
         // member-extension consumer must continue to see ordinary declarations.
-        let selected = self.member_extension_function(request, selection);
+        let selected = self.member_extension_function(scope, request, selection);
         match selected {
             Ok(Some(candidate)) => {
                 for &(parameter, source) in &candidate.argument_parameters {
@@ -29333,6 +31588,7 @@ impl<'a> Checker<'a> {
     /// Resolve a property read without reporting a diagnostic on a miss.
     fn resolve_property_read(
         &mut self,
+        scope: &CheckerScope<'_>,
         rt: Ty,
         name: &str,
         span: Span,
@@ -29448,7 +31704,7 @@ impl<'a> Checker<'a> {
                 return Some(ty);
             }
         }
-        match self.member_extension_property(rt, name) {
+        match self.member_extension_property(scope, rt, name) {
             Ok(Some(property)) => {
                 if property.visibility != Visibility::Public {
                     self.reject_if_inaccessible(property.visibility, name, property.owner, span);
@@ -29521,7 +31777,7 @@ impl<'a> Checker<'a> {
     ///
     /// Shared by the qualified arm's nullable-receiver probe and the safe-call arm's unresolved-member
     /// report so both agree about what exists. Side-effect free: it reports nothing itself.
-    fn member_name_exists_on(&self, recv: Ty, name: &str) -> bool {
+    fn member_name_exists_on(&self, scope: &CheckerScope<'_>, recv: Ty, name: &str) -> bool {
         self.resolver()
             .resolve_symbol(
                 crate::symbol_resolver::SymRecv::Value(recv),
@@ -29541,10 +31797,15 @@ impl<'a> Checker<'a> {
             // select a wrong-arity spelling; applicability must not leak back into typo detection.
             || matches!(name, "toString" | "hashCode" | "equals")
             // A callable PROPERTY (`val f: () -> Int`) is invoked with the same spelling.
-            || self.probe_property_read(recv, name).is_some()
+            || self.probe_property_read(scope, recv, name).is_some()
     }
 
-    fn probe_property_read(&self, rt: Ty, name: &str) -> Option<PropertyReadProbe> {
+    fn probe_property_read(
+        &self,
+        scope: &CheckerScope<'_>,
+        rt: Ty,
+        name: &str,
+    ) -> Option<PropertyReadProbe> {
         if let Ty::Obj(internal_name, _) = rt {
             if let Some((owner, ty, _, _)) = self.lookup_prop_with_owner_name(internal_name, name) {
                 let ty = self
@@ -29576,7 +31837,7 @@ impl<'a> Checker<'a> {
                 return Some(PropertyReadProbe::Found { ty, access: None });
             }
         }
-        match self.member_extension_property(rt, name) {
+        match self.member_extension_property(scope, rt, name) {
             Ok(Some(property)) => {
                 return Some(PropertyReadProbe::Found {
                     ty: property.ty,
@@ -29649,7 +31910,14 @@ impl<'a> Checker<'a> {
         None
     }
 
-    fn check_member(&mut self, rt: Ty, name: &str, span: Span, mexpr: Option<ExprId>) -> Ty {
+    fn check_member(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        rt: Ty,
+        name: &str,
+        span: Span,
+        mexpr: Option<ExprId>,
+    ) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
         }
@@ -29668,7 +31936,7 @@ impl<'a> Checker<'a> {
             }
             return ty;
         }
-        if let Some(ty) = self.resolve_property_read(rt, name, span, mexpr) {
+        if let Some(ty) = self.resolve_property_read(scope, rt, name, span, mexpr) {
             return ty;
         }
         if !rt.is_nullable() {
@@ -29701,7 +31969,7 @@ impl<'a> Checker<'a> {
             let exists_on_non_null = matches!((non_null, name), (Ty::String, "length"))
                 || (name == "size" && non_null.array_elem().is_some())
                 || self
-                    .resolve_property_read(non_null, name, span, None)
+                    .resolve_property_read(scope, non_null, name, span, None)
                     .is_some()
                 || self.resolve_instance_member(non_null, name, &[]).is_some()
                 || self
@@ -29728,8 +31996,8 @@ impl<'a> Checker<'a> {
         // (`x.name` on `T : Comparable<T>, T : Named`) resolved against `Comparable` and reported as
         // unresolved. Retry against the remaining bounds before giving up; the ERASURE is untouched, so
         // the descriptor still uses the first bound exactly as kotlinc emits it.
-        for bound in self.tparams.extra_bounds_for_erasure(rt.non_null()) {
-            let recovered = self.check_member_quietly(bound, name, span, mexpr);
+        for bound in scope.tparam_extra_bounds(rt.non_null()) {
+            let recovered = self.check_member_quietly(scope, bound, name, span, mexpr);
             if recovered != Ty::Error {
                 return recovered;
             }
@@ -29743,13 +32011,14 @@ impl<'a> Checker<'a> {
     /// the user's error, because another candidate may still answer.
     fn check_member_quietly(
         &mut self,
+        scope: &CheckerScope<'_>,
         rt: Ty,
         name: &str,
         span: Span,
         mexpr: Option<ExprId>,
     ) -> Ty {
         let mark = self.diags.diags.len();
-        let ty = self.check_member(rt, name, span, mexpr);
+        let ty = self.check_member(scope, rt, name, span, mexpr);
         self.diags.diags.truncate(mark);
         ty
     }
@@ -29776,52 +32045,65 @@ impl<'a> Checker<'a> {
             }
             self.expr_lowers.insert(
                 expr,
-                ExprLowering::StaticFieldRead {
+                ExprLowering::StaticPropertyRead {
                     owner: field.owner,
                     name: field.name,
-                    descriptor: Some(field.descriptor),
+                    descriptor: field.descriptor,
+                    storage: StaticPropertyStorage::OuterStaticField,
                 },
             );
         }
         field.ty
     }
 
-    /// Select a property stored on a class as a static field and hand its semantic owner to lowering.
+    /// Select a companion property and hand its semantic owner plus storage capability to lowering.
     ///
     /// Lexical companion lookup belongs here in the checker: it already has source nesting and
     /// shadowing information, whereas lowering must not infer an owner from a generated class name.
-    /// Recording the existing origin-neutral `StaticFieldRead` also gives source/module properties
-    /// the same backend path as provider-resolved static fields. The descriptor remains absent so the
-    /// backend derives it from the checked expression type, exactly as it does for imported source
-    /// companion properties.
+    /// Recording the origin-neutral `StaticPropertyRead` gives source fields the same backend path as
+    /// provider-resolved static fields and routes field-less declarations through their accessors. A
+    /// source field descriptor remains absent so the backend derives it from the checked expression
+    /// type; the storage choice itself is never re-derived.
     ///
     /// A private property is still returned for frontend type propagation, but deliberately receives
     /// no direct-field lowering. Krusty does not yet synthesize the JVM access bridge required when a
     /// nested class reads that field, and recording `getstatic` here would turn a conservative skip
     /// into `IllegalAccessError`. This decision is based on declaration visibility, not on a guessed
     /// physical class relationship.
+    fn record_static_property_read(
+        &mut self,
+        expression: ExprId,
+        owner: TypeName,
+        name: String,
+        property: StaticPropertySig,
+    ) -> Ty {
+        if !property.visibility.is_private() {
+            self.expr_lowers.insert(
+                expression,
+                ExprLowering::StaticPropertyRead {
+                    owner,
+                    name,
+                    descriptor: None,
+                    storage: property.storage,
+                },
+            );
+        }
+        property.ty
+    }
+
     fn record_class_static_property_read(
         &mut self,
         expression: ExprId,
         owner: TypeName,
         name: &str,
     ) -> Option<Ty> {
-        let (ty, visibility, _) = *self
+        let property = self
             .syms
             .class_by_type_name(owner)?
             .static_props
-            .get(name)?;
-        if !visibility.is_private() {
-            self.expr_lowers.insert(
-                expression,
-                ExprLowering::StaticFieldRead {
-                    owner,
-                    name: name.to_string(),
-                    descriptor: None,
-                },
-            );
-        }
-        Some(ty)
+            .get(name)?
+            .clone();
+        Some(self.record_static_property_read(expression, owner, name.to_string(), property))
     }
 
     /// Probe a member read without emitting a diagnostic: returns `Some(ty)` if `recv.name` resolves,
@@ -29829,13 +32111,14 @@ impl<'a> Checker<'a> {
     /// bare name `length` inside a receiver-lambda body (`this`-relative) for an arbitrary receiver type.
     fn try_member_read(
         &mut self,
+        scope: &CheckerScope<'_>,
         rt: Ty,
         name: &str,
         span: Span,
         mexpr: Option<ExprId>,
     ) -> Option<Ty> {
         let n = self.diags.diags.len();
-        let t = self.check_member(rt, name, span, mexpr);
+        let t = self.check_member(scope, rt, name, span, mexpr);
         if self.diags.diags.len() > n || t == Ty::Error {
             self.diags.diags.truncate(n);
             if let Some(e) = mexpr {
@@ -29849,6 +32132,7 @@ impl<'a> Checker<'a> {
 
     fn record_classpath_member_call_with_slots(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         rt: Ty,
         name: &str,
@@ -29929,6 +32213,7 @@ impl<'a> Checker<'a> {
         if candidates.is_empty() {
             if !mapping_errors.is_empty()
                 && self.applicable_extension_for_member_fallback(
+                    scope,
                     call,
                     rt,
                     name,
@@ -29990,6 +32275,7 @@ impl<'a> Checker<'a> {
             // mismatches and ambiguity for the classpath-member origin while every other origin reported
             // them.
             if self.applicable_extension_for_member_fallback(
+                scope,
                 call,
                 rt,
                 name,
@@ -30002,12 +32288,7 @@ impl<'a> Checker<'a> {
                 let (_, _, params, slots) = candidates.pop().unwrap();
                 for (parameter, argument) in params.iter().zip(&slots) {
                     if let Some(argument) = argument {
-                        self.expect_assignable(
-                            *parameter,
-                            self.expr_types[argument.0 as usize],
-                            self.span(*argument),
-                            "argument",
-                        );
+                        self.commit_mapped_argument_type(*argument, *parameter);
                     }
                 }
             } else {
@@ -30039,8 +32320,7 @@ impl<'a> Checker<'a> {
         };
         for (i, slot) in slots.iter().enumerate() {
             if let Some(a) = slot {
-                let aty = self.expr_types[a.0 as usize];
-                self.expect_assignable(params[i], aty, self.span(*a), "argument");
+                self.commit_mapped_argument_type(*a, params[i]);
             }
         }
         let ret = if matches!(fi.callable.origin, Origin::Module { .. }) {
@@ -30099,21 +32379,22 @@ impl<'a> Checker<'a> {
     /// source-only lookup—the selected `FunctionInfo` is already the shared applicability contract.
     fn applicable_extension_for_member_fallback(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         receiver: Ty,
         name: &str,
         args: &[ExprId],
         implicit_receiver: bool,
     ) -> bool {
-        let arg_kinds = self.call_arg_kinds(args);
-        let type_args = self.resolved_explicit_type_args(call);
+        let arg_kinds = self.call_arg_kinds(scope, args);
+        let type_args = self.resolved_explicit_type_args(scope, call);
         let labelled = self
             .file
             .call_arg_names
             .get(&call.0)
             .is_some_and(|names| names.iter().any(Option::is_some));
         let top_level = if labelled {
-            self.select_extension_call_with_slots(call, name, receiver, args, &type_args)
+            self.select_extension_call_with_slots(scope, call, name, receiver, args, &type_args)
                 .is_some_and(|selection| {
                     selection.ambiguous
                         || selection.selected.is_some_and(|extension| {
@@ -30147,6 +32428,7 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         let arg_names = self.file.call_arg_names.get(&call.0);
         match self.member_extension_function(
+            scope,
             MemberExtensionFunctionCall {
                 extension_receiver: receiver,
                 name,
@@ -30190,6 +32472,15 @@ impl<'a> Checker<'a> {
             } else {
                 params[i]
             };
+            // Kotlin contextually discards a lambda literal's value when the selected parameter
+            // returns `Unit`. Mapped calls used to miss the shared adaptation and happened to pass
+            // only while provider parameters stayed erased `FunctionN` objects; publishing a
+            // concrete `(T) -> Unit` correctly exposed the drift. Score the same coerced semantic
+            // type used by member-extension and source-call planning, irrespective of where the
+            // candidate was declared or whether this slot came from a name, default, or vararg.
+            let aty = self
+                .unit_coerced_lambda_type(*arg, expected, aty)
+                .unwrap_or(aty);
             if aty != Ty::Error
                 && !self.receiver_is_assignable(aty, expected)
                 && !argument.adapts_integer_literal_to(expected)
@@ -30202,17 +32493,83 @@ impl<'a> Checker<'a> {
         Some(score)
     }
 
+    /// Commit the contextual type of one already-mapped argument. Applicability and diagnostics must
+    /// observe the same Unit-coerced lambda shape: otherwise selection accepts `(T) -> R` for a
+    /// `(T) -> Unit` slot and the subsequent generic assignment check reports that same legal call.
+    fn commit_mapped_argument_type(&mut self, argument: ExprId, expected: Ty) {
+        let actual = self.expr_types[argument.0 as usize];
+        if let Some(coerced) = self.unit_coerced_lambda_type(argument, expected, actual) {
+            self.set(argument, coerced);
+        } else {
+            self.expect_assignable(expected, actual, self.span(argument), "argument");
+        }
+    }
+
     fn same_named_callable_exists(&self, name: &str) -> bool {
-        self.module_declares(name)
-            || self
-                .resolver()
-                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
-                .map(crate::symbol_resolver::Symbol::overloads)
-                .is_some_and(|overloads| {
-                    overloads
-                        .iter()
-                        .any(|o| o.kind == crate::libraries::FnKind::TopLevel)
-                })
+        // `top_level_candidates` is already the import/scope-aware federation of module and provider
+        // callables. Asking it directly avoids a source-module shortcut whose answer could drift from
+        // the classpath side of constructor/factory arbitration.
+        !self.resolver().top_level_candidates(name).is_empty()
+    }
+
+    /// Whether a receiver-less callable with `name` can consume THIS call shape.
+    ///
+    /// A classifier and a top-level factory intentionally share a namespace in Kotlin. Resolution
+    /// therefore cannot use mere declaration existence to decide whether `Name(args)` is a factory:
+    /// an inapplicable factory must not hide an applicable companion `invoke`, while an applicable
+    /// factory does take precedence over that operator. Every provider contributes `FunctionInfo`
+    /// through the federated resolver, and every source spelling is mapped through `CallSig`, so this
+    /// one probe covers source/dependency functions, positional/named/default arguments, varargs, and
+    /// trailing lambdas without branching on file, module, or classpath origin.
+    fn same_named_callable_is_applicable(
+        &self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        type_args: &[Ty],
+    ) -> bool {
+        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let partial_types = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
+
+        self.resolver()
+            .top_level_candidates(name)
+            .iter()
+            .any(|candidate| {
+                let parameters = candidate.semantic_params();
+                let context_count = candidate.context_count;
+                if context_count > parameters.len()
+                    || (context_count > 0
+                        && self
+                            .resolve_context_args(scope, &parameters[..context_count])
+                            .is_none())
+                {
+                    return false;
+                }
+                let value_signature = call_sig_without_context(&candidate.call_sig, context_count);
+                let Some(argument_parameters) = call_argument_parameter_indices(
+                    args.len(),
+                    parameters.len() - context_count,
+                    argument_names,
+                    trailing_lambda,
+                    &value_signature,
+                ) else {
+                    return false;
+                };
+                let argument_parameters = argument_parameters
+                    .into_iter()
+                    .map(|parameter| parameter + context_count)
+                    .collect::<Vec<_>>();
+                self.lambda_overload_partially_applicable(
+                    candidate,
+                    None,
+                    &partial_types,
+                    &argument_parameters,
+                    type_args,
+                )
+            })
     }
 
     /// The semantic internal name a bare classifier resolves to — an explicit import first, then the
@@ -30234,18 +32591,262 @@ impl<'a> Checker<'a> {
             .or_else(|| self.syms.class_names.get(name))
     }
 
-    fn classifier_receiver_internal(&self, receiver: ExprId) -> Option<TypeName> {
+    /// The classifier identity a resolvable name denotes, following a `typealias` to its target — the
+    /// one step of the qualifier walk that consults the federated module + classpath source.
+    fn qualifier_classifier_identity(&self, candidate: TypeName) -> Option<TypeName> {
+        let classifier = self.fed_source().resolve_type_name(candidate)?;
+        Some(classifier.alias_target.unwrap_or(candidate))
+    }
+
+    /// Step the qualifier walk across ONE segment. This is the whole of Kotlin's qualified-name rule:
+    /// under a package, a segment is a classifier of that package or a subpackage; under a classifier,
+    /// it is a nested classifier. Anything else ends the walk — the segment is a MEMBER (a property, a
+    /// callable, an enum entry), which the position that owns the reference resolves.
+    fn step_qualified_prefix(
+        &self,
+        prefix: QualifiedPrefix,
+        segment: &str,
+    ) -> Option<QualifiedPrefix> {
+        match prefix {
+            QualifiedPrefix::Package(package) => {
+                let candidate = crate::types::type_name_child(package, segment);
+                if let Some(classifier) = self.qualifier_classifier_identity(candidate) {
+                    return Some(QualifiedPrefix::Classifier(classifier));
+                }
+                self.fed_source()
+                    .package_exists(candidate)
+                    .then_some(QualifiedPrefix::Package(candidate))
+            }
+            QualifiedPrefix::Classifier(owner) => {
+                let nested = type_name(&format!("{}${segment}", owner.render()));
+                self.qualifier_classifier_identity(nested)
+                    .map(QualifiedPrefix::Classifier)
+            }
+        }
+    }
+
+    /// What a FULLY-QUALIFIED dotted path denotes, resolved SEGMENT BY SEGMENT from a package root.
+    ///
+    /// Kotlin admits such a path with no import wherever a simple name is legal, and the only way to
+    /// tell `a.b.C.D` apart from `a.b.C` + member `D` — or from package `a` + class `b`, for that
+    /// matter — is to walk it: each prefix denotes a package, a classifier, or nothing, and the walk
+    /// stops at the first segment that is neither. Resolution therefore ends at the SAME identity the
+    /// imported spelling reaches through `scoped_classifier_name`, and a bogus path stays unresolved
+    /// rather than becoming a phantom classifier.
+    ///
+    /// The root must be a PACKAGE: a name that is a value or a classifier in scope shadows a package of
+    /// the same spelling (kotlinc resolves the in-scope name first), and those spellings already
+    /// resolve through the in-scope chain.
+    fn package_rooted_prefix(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+    ) -> Option<QualifiedPrefix> {
+        let path = self.dotted_full_path(expression)?;
+        let mut segments = path.split('.');
+        let root = segments.next()?;
+        if self.value_root_shadows_classifier(scope, root)
+            || self
+                .scoped_classifier_name_in(scope, root)
+                .found()
+                .is_some()
+        {
+            return None;
+        }
+        let root = type_name(root);
+        if !self.fed_source().package_exists(root) {
+            crate::trace_compiler!(
+                "resolve",
+                "qualified prefix: '{path}' root is not a package"
+            );
+            return None;
+        }
+        segments.try_fold(QualifiedPrefix::Package(root), |prefix, segment| {
+            self.step_qualified_prefix(prefix, segment)
+        })
+    }
+
+    /// The classifier a fully-qualified path names, when the whole path is one.
+    fn package_qualified_classifier(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+    ) -> Option<TypeName> {
+        match self.package_rooted_prefix(scope, expression)? {
+            QualifiedPrefix::Classifier(internal) => Some(internal),
+            QualifiedPrefix::Package(_) => None,
+        }
+    }
+
+    /// Whether a resolved classifier identity is an `object`, from either origin.
+    fn classifier_is_object(&self, internal: TypeName) -> bool {
+        self.syms
+            .class_by_type_name(internal)
+            .map(ClassSig::is_object)
+            .or_else(|| {
+                self.resolved_type_name(internal)
+                    .map(|classifier| classifier.is_object())
+            })
+            .unwrap_or(false)
+    }
+
+    /// The VALUE a resolved classifier identity denotes in an expression position: an `object` is its
+    /// singleton, a class with a companion is that companion instance. Keyed on the IDENTITY rather
+    /// than on a source name, so a fully-qualified spelling produces exactly the value the simple name
+    /// an import would bind. `None` means the classifier is only a QUALIFIER — the enclosing position
+    /// (a member read, a call, a class literal) consumes it.
+    fn classifier_value_ty(&mut self, expression: ExprId, internal: TypeName) -> Option<Ty> {
+        if self.classifier_is_object(internal) {
+            self.expr_lowers
+                .insert(expression, ExprLowering::ObjectValue { internal });
+            return Some(Ty::obj_name(internal));
+        }
+        // A MODULE class whose companion declares a supertype is registered as `C$Companion`; a plain
+        // companion is not a first-class value, exactly as in the bare-name rung.
+        let companion = type_name(&format!("{}$Companion", internal.render()));
+        if self.syms.class_by_type_name(companion).is_some() {
+            self.expr_lowers.insert(
+                expression,
+                ExprLowering::CompanionValue {
+                    owner: internal,
+                    field: COMPANION_OBJECT_NAME.to_string(),
+                    companion,
+                },
+            );
+            return Some(Ty::obj_name(companion));
+        }
+        // A CLASSPATH class with a companion object: the value is the companion instance, typed as the
+        // companion's own type so its members resolve as ordinary instance members.
+        let (field, companion) = self
+            .resolved_type_name(internal)?
+            .companion_object
+            .clone()?;
+        self.expr_lowers.insert(
+            expression,
+            ExprLowering::CompanionValue {
+                owner: internal,
+                field,
+                companion,
+            },
+        );
+        Some(Ty::obj_name(companion))
+    }
+
+    /// A member read off a classifier named by its FULLY-QUALIFIED path (`pkg.Cls.CONST`,
+    /// `pkg.E.ENTRY`). The owner is already one resolved identity, so these are the origin-agnostic
+    /// rungs the simple-name cascade ends at: an enum entry, a companion/static property, a classpath
+    /// static field. An `object` owner is deliberately NOT answered here — it is a VALUE, so its
+    /// members resolve through ordinary member checking on the singleton.
+    fn qualified_classifier_member_read(
+        &mut self,
+        expression: ExprId,
+        owner: TypeName,
+        name: &str,
+    ) -> Option<Ty> {
+        if self.classifier_is_object(owner) {
+            return None;
+        }
+        let is_entry = self
+            .syms
+            .enum_entries_of(owner)
+            .is_some_and(|entries| entries.iter().any(|entry| entry == name))
+            || self
+                .resolved_type_name(owner)
+                .is_some_and(|classifier| classifier.is_enum_entry(name));
+        if is_entry {
+            self.resolved_enum_entries.insert(expression, owner);
+            return Some(Ty::obj_name(owner));
+        }
+        // `pkg.Cls.Companion` — the companion singleton named EXPLICITLY. Every companion is emitted
+        // as an `Outer$Companion` class held in an `Outer.Companion` static field, but only one that
+        // declares a supertype gets a registered `ClassSig`; the rest are known solely through their
+        // OWNER's companion members. So decide from the owner and hand lowering the field triple,
+        // rather than requiring a classifier identity that was never registered.
+        if name == COMPANION_OBJECT_NAME {
+            if let Some(class) = self.syms.class_by_type_name(owner) {
+                if !class.companion_fun_names.is_empty() || !class.static_props.is_empty() {
+                    let companion =
+                        type_name(&format!("{}${COMPANION_OBJECT_NAME}", owner.render()));
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::CompanionValue {
+                            owner,
+                            field: COMPANION_OBJECT_NAME.to_string(),
+                            companion,
+                        },
+                    );
+                    return Some(Ty::obj_name(companion));
+                }
+            }
+        }
+        if let Some(visibility) = self
+            .syms
+            .class_by_type_name(owner)
+            .and_then(|class| class.static_props.get(name))
+            .map(|property| property.visibility)
+        {
+            self.reject_if_inaccessible(visibility, name, owner, self.span(expression));
+            if let Some(ty) = self.record_class_static_property_read(expression, owner, name) {
+                return Some(ty);
+            }
+        }
+        let field = self.resolver().static_field(owner, name)?;
+        Some(self.record_external_static_field(Some(expression), field))
+    }
+
+    /// A read of a TOP-LEVEL property named through its package (`pkg.topLevelProp`, `pkg.TOP_CONST`).
+    /// The package is the only scope consulted — a fully-qualified reference names one declaration, so
+    /// nothing about the file's imports may shadow or widen it. A `const val` has no accessor, so the
+    /// platform's field storage answers it; everything else reads through its getter, exactly as the
+    /// imported spelling does.
+    fn package_qualified_property_read(
+        &mut self,
+        expression: ExprId,
+        package: TypeName,
+        name: &str,
+    ) -> Option<Ty> {
+        if let Some(field) = self.syms.libraries.top_level_static_field(package, name) {
+            return Some(self.record_external_static_field(Some(expression), field));
+        }
+        let property = self
+            .resolver_in_scope(std::slice::from_ref(&package))
+            .resolve_top_level_property(name)
+            .filter(|property| property.getter.ret.is_read_value_result())?;
+        let ty = property.ty;
+        // A `const val` has NO accessor — the value lives in a field on the declaring facade, and
+        // calling the getter that its property shape nominally carries throws `NoSuchMethodError`.
+        let lowering = if property.is_const {
+            ExprLowering::StaticPropertyRead {
+                owner: property.owner,
+                name: name.to_string(),
+                descriptor: None,
+                storage: StaticPropertyStorage::OuterStaticField,
+            }
+        } else {
+            ExprLowering::TopLevelPropertyGet {
+                getter: Box::new(property.getter),
+            }
+        };
+        self.expr_lowers.insert(expression, lowering);
+        Some(ty)
+    }
+
+    fn classifier_receiver_internal(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+    ) -> Option<TypeName> {
         match self.file.expr(receiver) {
-            Expr::Name(name) if !self.value_root_shadows_classifier(name) => {
+            Expr::Name(name) if !self.value_root_shadows_classifier(scope, name) => {
                 self.classifier_internal_name(name)
             }
             Expr::Member { .. } => {
                 let path = qualified_path(self.file, receiver)?;
                 let root = path.split('/').next()?;
-                if self.value_root_shadows_classifier(root) {
+                if self.value_root_shadows_classifier(scope, root) {
                     return None;
                 }
-                let fq = match self.scoped_classifier_name(root) {
+                let fq = match self.scoped_classifier_name_in(scope, root) {
                     InheritedNestedClassifier::Found(outer) => {
                         format!("{}{}", outer.render(), &path[root.len()..])
                     }
@@ -30282,24 +32883,21 @@ impl<'a> Checker<'a> {
     }
 
     /// A PROPERTY reached by name through an import of an object-like owner — either a companion
-    /// (`import p.C.Companion.PROP`, whose field lives on the outer class `C`) or a plain `object`
-    /// (`import p.Obj.PROP`, whose field lives on `Obj` itself).
-    ///
-    /// Both spell the same static read; only the owner differs, so they share one lookup. Without the
-    /// plain-object case an `import Config.NAME` bound nothing while `import Config.greeting` — the
-    /// same import form on a FUNCTION — already worked, and `Config.NAME` qualified worked too.
+    /// (`import p.C.Companion.PROP`, physically on `C` or `C$Companion`) or a plain `object`
+    /// (`import p.Obj.PROP`, whose const field lives on `Obj` itself). The declaration signature
+    /// carries the realization, so importing does not collapse computed properties into field reads.
     fn imported_source_companion_property(
         &self,
         name: &str,
-    ) -> Option<(TypeName, String, Ty, Visibility)> {
+    ) -> Option<(TypeName, String, StaticPropertySig)> {
         let full = self.imports.get(name)?;
         let (owner_path, member) = full.rsplit_once('/')?;
         // A companion's statics are hoisted onto the OUTER class; a plain object owns its own.
         let owner_path = owner_path.strip_suffix("/Companion").unwrap_or(owner_path);
         let owner = self.nested_internal_name(owner_path)?;
         let class = self.syms.class_by_type_name(owner)?;
-        if let Some(&(ty, visibility, _)) = class.static_props.get(member) {
-            return Some((owner, member.to_string(), ty, visibility));
+        if let Some(property) = class.static_props.get(member) {
+            return Some((owner, member.to_string(), property.clone()));
         }
         // A `const val` declared directly in an `object` is a real `public static final` field on the
         // object class (that is the JVM realization of `const`, not a convention), so an imported read
@@ -30307,9 +32905,18 @@ impl<'a> Checker<'a> {
         // is deliberately not matched here — it needs the singleton receiver, which this hook cannot
         // express.
         let declared = class.declared_props.get(member)?;
-        declared
-            .is_const
-            .then(|| (owner, member.to_string(), declared.ty, declared.visibility))
+        declared.is_const.then(|| {
+            (
+                owner,
+                member.to_string(),
+                StaticPropertySig {
+                    ty: declared.ty,
+                    visibility: declared.visibility,
+                    is_var: false,
+                    storage: StaticPropertyStorage::OuterStaticField,
+                },
+            )
+        })
     }
 
     /// The constructor parameter shapes a lambda argument of `Name(args)` is typed against: per
@@ -30439,11 +33046,34 @@ impl<'a> Checker<'a> {
 
     /// The INTERNAL name (`pkg/Outer$Inner`) for a nested class construction `Outer.Inner(args)`
     /// whose `Outer` binds a module class in this file.
-    fn same_file_nested_class_internal(&self, receiver: ExprId, name: &str) -> Option<TypeName> {
+    /// The MODULE class a qualified construction `qualifier.Name(args)` names, so the call routes to
+    /// SOURCE constructor selection (defaults, varargs, secondaries, generic inference) rather than the
+    /// metadata path a compiled classifier uses.
+    ///
+    /// Both spellings that can name one are accepted: a nested class under an in-scope outer type
+    /// (`Outer.Inner`), and a fully-qualified path (`pkg.Cls`, `pkg.Outer.Inner`, `pkg.sub.Cls`). The
+    /// qualified form resolves through the origin-agnostic segment walk and is then filtered to a
+    /// module declaration here — the classpath half of the same walk is handled by the caller's
+    /// library-constructor arm.
+    fn module_qualified_class_internal(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+        name: &str,
+    ) -> Option<TypeName> {
+        if let Some(prefix) = self.package_rooted_prefix(scope, receiver) {
+            if let Some(QualifiedPrefix::Classifier(internal)) =
+                self.step_qualified_prefix(prefix, name)
+            {
+                if self.syms.classes.contains_key(&internal) {
+                    return Some(internal);
+                }
+            }
+        }
         let Expr::Name(root) = self.file.expr(receiver) else {
             return None;
         };
-        if self.value_root_shadows_classifier(root) {
+        if self.value_root_shadows_classifier(scope, root) {
             return None;
         }
         let outer = self.module_class_named(root)?;
@@ -30488,6 +33118,142 @@ impl<'a> Checker<'a> {
         self.erased_function_param_fits(expected, actual)
             .then_some(1)
     }
+}
+
+/// The overload-pick outcome for a receiver-less semantic call whose lambda binding depends on
+/// functional-interface adaptation.
+enum TopLevelSamSelection {
+    /// The unique best candidate, with the SAM parameter types its lambda arguments bind (all
+    /// `None` when the winner needs no conversion — it still outranks a conversion rival). Boxed:
+    /// `FunctionInfo` dwarfs the `Ambiguous` payload.
+    Picked(Box<crate::libraries::FunctionInfo>, Vec<Option<Vec<Ty>>>),
+    /// A tie for the best candidate involving at least one SAM-converted lambda — kotlinc's
+    /// overload resolution ambiguity; silently picking one would wrap the lambda into an arbitrary
+    /// interface (a bootstrap crash at runtime).
+    Ambiguous(Vec<crate::libraries::FunctionInfo>),
+}
+
+/// Applicability facts shared by member and receiver-less calls. `rank` is deliberately independent
+/// of declaration origin; `sam_parameter_types` preserves only the syntax-sensitive adaptation needed
+/// to perform the selected lambda's first real type check.
+struct CallCandidateScore {
+    rank: (usize, std::cmp::Reverse<usize>, bool),
+    sam_parameter_types: Vec<Option<Vec<Ty>>>,
+}
+
+impl CallCandidateScore {
+    fn uses_sam_conversion(&self) -> bool {
+        self.sam_parameter_types.iter().any(Option::is_some)
+    }
+}
+
+impl<'a> Checker<'a> {
+    /// Select a receiver-less overload when a postponed lambda may require functional-interface
+    /// adaptation. Every candidate comes from the federated resolver and enters the same call-shape
+    /// scorer as a member; source files, sibling modules, and dependency metadata therefore cannot
+    /// acquire different preference or ambiguity rules.
+    ///
+    /// The ordinary post-typing resolver is intentionally left in charge when no candidate uses SAM
+    /// adaptation. Once adaptation participates, however, the pre-typing decision is authoritative:
+    /// a conversion-free function/`Any` parameter outranks an adapted one, while equally ranked SAM
+    /// targets are ambiguous because selecting either would generate a different runtime wrapper.
+    fn top_level_sam_selection(
+        &self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        partial_arg_tys: Option<&[Option<Ty>]>,
+        type_args: &[Ty],
+    ) -> Option<TopLevelSamSelection> {
+        let partial = partial_arg_tys?;
+        let overloads = self.resolver().top_level_candidates(name);
+        if overloads.is_empty() {
+            return None;
+        }
+        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let mut fitted: Vec<(CallCandidateScore, usize)> = Vec::new();
+        for (overload_index, candidate) in overloads.iter().enumerate() {
+            // Context arguments are supplied by a different scope search. Keep them on that path;
+            // value-argument varargs are safe because the shared scorer uses the semantic slot map.
+            if candidate.context_count > 0 {
+                continue;
+            }
+            let signature = candidate.semantic_signature();
+            if !type_args.is_empty() && signature.formals.len() != type_args.len() {
+                continue;
+            }
+            let Some(indices) = call_argument_parameter_indices(
+                args.len(),
+                signature.params.len(),
+                arg_names,
+                trailing_lambda,
+                &candidate.call_sig,
+            ) else {
+                continue;
+            };
+            let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&signature, type_args);
+            for (&parameter, actual) in indices.iter().zip(partial) {
+                if let (Some(parameter), Some(actual)) = (signature.params.get(parameter), actual) {
+                    crate::symbol_resolver::unify_ty(*parameter, *actual, &mut bindings);
+                }
+            }
+            let params = signature
+                .params
+                .iter()
+                .map(|parameter| crate::symbol_resolver::ty_subst(*parameter, &bindings))
+                .collect::<Vec<_>>();
+            let Some(score) = self.call_candidate_score(
+                scope,
+                &params,
+                &candidate.call_sig,
+                ArgSlots {
+                    args,
+                    partial_arg_tys: partial,
+                    arg_names,
+                    trailing_lambda,
+                },
+            ) else {
+                continue;
+            };
+            fitted.push((score, overload_index));
+        }
+        let best_rank = fitted.iter().map(|(score, _)| score.rank).max()?;
+        let maximal = fitted
+            .iter()
+            .filter(|(score, _)| score.rank == best_rank)
+            .collect::<Vec<_>>();
+        let [best] = maximal.as_slice() else {
+            return maximal
+                .iter()
+                .any(|(score, _)| score.uses_sam_conversion())
+                .then(|| {
+                    TopLevelSamSelection::Ambiguous(
+                        maximal
+                            .iter()
+                            .map(|(_, index)| overloads[*index].clone())
+                            .collect(),
+                    )
+                });
+        };
+        let (score, index) = best;
+        if score.uses_sam_conversion() {
+            return Some(TopLevelSamSelection::Picked(
+                Box::new(overloads[*index].clone()),
+                score.sam_parameter_types.clone(),
+            ));
+        }
+        fitted
+            .iter()
+            .any(|(candidate, other)| candidate.uses_sam_conversion() && other != index)
+            .then(|| {
+                TopLevelSamSelection::Picked(
+                    Box::new(overloads[*index].clone()),
+                    vec![None; args.len()],
+                )
+            })
+    }
 
     /// Whether `actual` fits a FUNCTION-typed parameter whose signature reached the checker ERASED.
     /// A classpath `(StringBuilder) -> Unit` parameter is a bare `Function1` — `(Any) -> Any` — and a
@@ -30510,25 +33276,85 @@ impl<'a> Checker<'a> {
             && component(expected.ret, actual.ret)
     }
 
-    fn module_member_candidate_score(
+    /// Score one semantic call shape against syntax-aware partial arguments.
+    ///
+    /// This is the sole applicability primitive for source/module member planning and receiver-less
+    /// SAM arbitration. It accepts only parameter and [`CallSig`] facts, so adding another declaration
+    /// provider cannot produce another scoring implementation. Lambda literal and spread provenance
+    /// remain explicit because those are properties of the call syntax, not of the provider.
+    fn call_candidate_score(
         &self,
-        member: &crate::libraries::LibraryMember,
-        args: &[ExprId],
-        partial_arg_tys: &[Option<Ty>],
-        arg_names: Option<&[Option<String>]>,
-        trailing_lambda: bool,
-    ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
+        scope: &CheckerScope<'_>,
+        params: &[Ty],
+        call_sig: &CallSig,
+        slots: ArgSlots<'_>,
+    ) -> Option<CallCandidateScore> {
+        let ArgSlots {
+            args,
+            partial_arg_tys,
+            arg_names,
+            trailing_lambda,
+        } = slots;
+        let sam_parameter_types = std::cell::RefCell::new(vec![None; args.len()]);
+        let record_sam = |source: usize, expected: Ty| {
+            let parameters =
+                crate::symbol_resolver::semantic_sam_signature(&*self.syms.libraries, expected)?
+                    .params;
+            *sam_parameter_types.borrow_mut().get_mut(source)? = Some(parameters);
+            Some(())
+        };
         // Candidate scoring receives the expression as well as its runtime type so every module
         // call shape (positional, named, defaulted, and vararg) consults the same literal adaptation
         // carried by `CallArgKind`.
-        let score = |expected: Ty, actual: Ty, argument: ExprId| {
-            self.member_argument_score(expected, actual).or_else(|| {
-                call_arg_kind(self.file, argument, actual)
-                    .adapts_integer_literal_to(expected)
-                    .then_some(1)
-            })
+        let score = |expected: Ty, actual: Ty, argument: ExprId, source: usize| {
+            self.member_argument_score(expected, actual)
+                .or_else(|| {
+                    call_arg_kind(self.file, argument, actual)
+                        .adapts_integer_literal_to(expected)
+                        .then_some(1)
+                })
+                .or_else(|| {
+                    // A lambda literal reaches a JAVA functional-interface parameter only through
+                    // SAM conversion — ranked BELOW a plain assignable fit (score 1), so an
+                    // `Any`/function-type overload still wins over the conversion (kotlinc's rule).
+                    // The PROBE (the lambda's own declared arity) drives the fit, not the checked
+                    // type: a plan may have typed the lambda against an arbitrary candidate, and
+                    // kotlinc's arity rule (`{ s -> }` never fits a 0-parameter SAM) must hold
+                    // regardless.
+                    let arg = call_arg_kind(self.file, argument, actual);
+                    let probe = self.lambda_probe_ty(scope, argument).unwrap_or(actual);
+                    (arg.is_lambda_literal()
+                        && expected.fun_arity().is_none()
+                        && crate::symbol_resolver::sam_arg_matches(
+                            &*self.syms.libraries,
+                            expected,
+                            probe,
+                        ))
+                    .then(|| record_sam(source, expected).map(|()| 0))
+                    .flatten()
+                })
         };
-        if member.call_sig.vararg {
+        // A not-yet-checked lambda slot (a plan's partial pass leaves it untyped): a function-type
+        // or erased-top parameter binds the lambda without conversion; a JAVA SAM parameter only
+        // through the conversion (ranked lower, and only when the probe arity fits the SAM method);
+        // anything else cannot take the lambda at all.
+        let lambda_slot = |expected: Ty, argument: ExprId, source: usize| -> Option<usize> {
+            if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+                // An untyped non-lambda (a callable reference): no signal either way.
+                return Some(0);
+            }
+            if expected.fun_arity().is_some() || expected.is_erased_top() {
+                return Some(2);
+            }
+            let probe = self.lambda_probe_ty(scope, argument).unwrap_or(Ty::Error);
+            if crate::symbol_resolver::sam_arg_matches(&*self.syms.libraries, expected, probe) {
+                record_sam(source, expected)?;
+                Some(1)
+            } else {
+                None
+            }
+        };
+        if call_sig.vararg {
             // A vararg is not necessarily the last declaration slot (`vararg xs, block`) and one
             // slot may represent several source expressions. Map every SOURCE index through the
             // common call-shape mapper, then score it against the declared vararg index. The former
@@ -30536,22 +33362,21 @@ impl<'a> Checker<'a> {
             // the first packed element, so valid non-last varargs depended on which syntax selected
             // the overload.
             let slots =
-                map_call_sig_args_with_trailing(args, arg_names, &member.call_sig, trailing_lambda)
-                    .ok()?;
+                map_call_sig_args_with_trailing(args, arg_names, call_sig, trailing_lambda).ok()?;
             let parameters = call_argument_parameter_indices(
                 args.len(),
-                member.params.len(),
+                params.len(),
                 arg_names,
                 trailing_lambda,
-                &member.call_sig,
+                call_sig,
             )?;
-            let vararg = member.call_sig.vararg_index?;
+            let vararg = call_sig.vararg_index?;
             let mut type_score = 0;
             for (source, (&argument, parameter)) in args.iter().zip(parameters).enumerate() {
                 let Some(actual) = partial_arg_tys.get(source).copied().flatten() else {
                     continue;
                 };
-                let declared = *member.params.get(parameter)?;
+                let declared = *params.get(parameter)?;
                 let spread = self.file.is_spread_arg(argument);
                 if spread && parameter != vararg {
                     return None;
@@ -30561,53 +33386,55 @@ impl<'a> Checker<'a> {
                 } else {
                     declared
                 };
-                type_score += score(expected, actual, argument)?;
+                type_score += score(expected, actual, argument, source)?;
             }
-            return Some((
-                type_score,
-                std::cmp::Reverse(slots.iter().filter(|slot| slot.is_none()).count()),
-                false,
-            ));
+            return Some(CallCandidateScore {
+                rank: (
+                    type_score,
+                    std::cmp::Reverse(slots.iter().filter(|slot| slot.is_none()).count()),
+                    false,
+                ),
+                sam_parameter_types: sam_parameter_types.into_inner(),
+            });
         }
         if arg_names.is_none() && !trailing_lambda {
             if args
                 .iter()
                 .any(|argument| self.file.is_spread_arg(*argument))
-                || args.len() > member.params.len()
-                || (args.len() < member.params.len()
-                    && (args.len()..member.params.len())
-                        .any(|index| !member.call_sig.param_has_default(index)))
+                || args.len() > params.len()
+                || (args.len() < params.len()
+                    && (args.len()..params.len()).any(|index| !call_sig.param_has_default(index)))
             {
                 return None;
             }
             let mut type_score = 0;
-            for (index, (expected, actual)) in member.params.iter().zip(partial_arg_tys).enumerate()
-            {
-                if let Some(actual) = actual {
-                    type_score += score(*expected, *actual, args[index])?;
+            for (index, (expected, actual)) in params.iter().zip(partial_arg_tys).enumerate() {
+                match actual {
+                    Some(actual) => type_score += score(*expected, *actual, args[index], index)?,
+                    // A plan's untyped slot: fit the lambda by its probe so the plan types it
+                    // against the RIGHT candidate's parameter, not an arbitrary tied one.
+                    None => type_score += lambda_slot(*expected, args[index], index)?,
                 }
             }
-            return Some((
-                type_score,
-                std::cmp::Reverse(member.params.len().saturating_sub(args.len())),
-                true,
-            ));
+            return Some(CallCandidateScore {
+                rank: (
+                    type_score,
+                    std::cmp::Reverse(params.len().saturating_sub(args.len())),
+                    true,
+                ),
+                sam_parameter_types: sam_parameter_types.into_inner(),
+            });
         }
         let slots =
-            map_call_sig_args_with_trailing(args, arg_names, &member.call_sig, trailing_lambda)
-                .ok()?;
+            map_call_sig_args_with_trailing(args, arg_names, call_sig, trailing_lambda).ok()?;
         let mut type_score = 0;
         for (parameter_index, argument) in slots.iter().enumerate() {
             let Some(argument) = argument else {
                 continue;
             };
             let source_index = args.iter().position(|candidate| candidate == argument)?;
-            let Some(Some(actual)) = partial_arg_tys.get(source_index) else {
-                continue;
-            };
-            let parameter = member.params.get(parameter_index)?;
-            let is_vararg_slot =
-                member.call_sig.vararg && parameter_index + 1 == member.params.len();
+            let parameter = params.get(parameter_index)?;
+            let is_vararg_slot = call_sig.vararg && Some(parameter_index) == call_sig.vararg_index;
             let spread = self.file.is_spread_arg(*argument);
             if spread && !is_vararg_slot {
                 return None;
@@ -30617,17 +33444,24 @@ impl<'a> Checker<'a> {
             } else {
                 *parameter
             };
-            type_score += score(expected, *actual, *argument)?;
+            match partial_arg_tys.get(source_index).copied().flatten() {
+                Some(actual) => type_score += score(expected, actual, *argument, source_index)?,
+                None => type_score += lambda_slot(expected, *argument, source_index)?,
+            }
         }
-        Some((
-            type_score,
-            std::cmp::Reverse(slots.iter().filter(|slot| slot.is_none()).count()),
-            !member.call_sig.vararg,
-        ))
+        Some(CallCandidateScore {
+            rank: (
+                type_score,
+                std::cmp::Reverse(slots.iter().filter(|slot| slot.is_none()).count()),
+                !call_sig.vararg,
+            ),
+            sam_parameter_types: sam_parameter_types.into_inner(),
+        })
     }
 
     fn best_module_member_candidate<'m>(
         &self,
+        scope: &CheckerScope<'_>,
         members: &'m [crate::libraries::LibraryMember],
         args: &[ExprId],
         partial_arg_tys: &[Option<Ty>],
@@ -30637,16 +33471,20 @@ impl<'a> Checker<'a> {
         members
             .iter()
             .filter_map(|member| {
-                self.module_member_candidate_score(
-                    member,
-                    args,
-                    partial_arg_tys,
-                    arg_names,
-                    trailing_lambda,
+                self.call_candidate_score(
+                    scope,
+                    &member.params,
+                    &member.call_sig,
+                    ArgSlots {
+                        args,
+                        partial_arg_tys,
+                        arg_names,
+                        trailing_lambda,
+                    },
                 )
                 .map(|score| (score, member))
             })
-            .max_by_key(|(score, _)| *score)
+            .max_by_key(|(score, _)| score.rank)
             .map(|(_, member)| member)
     }
 
@@ -30658,6 +33496,7 @@ impl<'a> Checker<'a> {
     /// those call paths from acquiring subtly different named/default/trailing-lambda behavior.
     fn module_member_lambda_plan(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         receiver: Ty,
         name: &str,
@@ -30672,6 +33511,7 @@ impl<'a> Checker<'a> {
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let member = self
             .best_module_member_candidate(
+                scope,
                 &crate::module_symbols::ModuleSymbols::new(self.syms)
                     .instance_members(receiver, name),
                 args,
@@ -30692,6 +33532,7 @@ impl<'a> Checker<'a> {
         });
         let lambda = member.as_ref().and_then(|member| {
             module_member_lambda_shape(
+                &*self.syms.libraries,
                 member,
                 generic.as_ref(),
                 args,
@@ -30705,13 +33546,24 @@ impl<'a> Checker<'a> {
 
     fn check_applicable_module_member_call(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         rt: Ty,
         name: &str,
         args: &[ExprId],
         arg_tys: &[Ty],
     ) -> Option<Ty> {
-        self.check_module_member_call_mode(call, rt, name, args, arg_tys, true)
+        self.check_module_member_call_mode(
+            scope,
+            CallArgs {
+                call,
+                args,
+                arg_tys,
+            },
+            rt,
+            name,
+            true,
+        )
     }
 
     /// Argument types for a MODULE member call whose receiver is a *classifier* — an `object`
@@ -30724,6 +33576,7 @@ impl<'a> Checker<'a> {
     /// lambda against that candidate's function-type parameter.
     fn classifier_member_arg_tys(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         rt: Ty,
         name: &str,
@@ -30733,7 +33586,7 @@ impl<'a> Checker<'a> {
             .iter()
             .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
         {
-            return self.arg_tys(args);
+            return self.arg_tys(scope, args);
         }
         // Lambda positions stay `None` until the candidate supplies their parameter types.
         let partial: Vec<Option<Ty>> = args
@@ -30742,18 +33595,18 @@ impl<'a> Checker<'a> {
                 if matches!(self.file.expr(a), Expr::Lambda { .. }) {
                     None
                 } else {
-                    Some(self.expr(a))
+                    Some(self.expr(scope, a))
                 }
             })
             .collect();
-        let (_, _, shape) = self.module_member_lambda_plan(call, rt, name, args, &partial);
+        let (_, _, shape) = self.module_member_lambda_plan(scope, call, rt, name, args, &partial);
         // Non-lambda arguments keep the type from the pass above; re-typing them would duplicate
         // whatever diagnostics that pass reported.
         let Some(shape) = shape else {
             return args
                 .iter()
                 .zip(&partial)
-                .map(|(&a, &typed)| typed.unwrap_or_else(|| self.expr(a)))
+                .map(|(&a, &typed)| typed.unwrap_or_else(|| self.expr(scope, a)))
                 .collect::<Vec<_>>();
         };
         // A `Recv.() -> R` lambda argument binds `this@<name>` to the called member's name.
@@ -30770,6 +33623,7 @@ impl<'a> Checker<'a> {
                             let receiver = shape.receivers.get(i).copied().flatten();
                             if let Some(signature) = shape.signatures.get(i).copied().flatten() {
                                 return c.check_lambda_with_function_type_and_params_labeled(
+                                    scope,
                                     a,
                                     signature,
                                     pt,
@@ -30779,16 +33633,17 @@ impl<'a> Checker<'a> {
                             }
                             if let Some(receiver) = receiver {
                                 return c.check_lambda_with_receiver_labeled(
+                                    scope,
                                     a,
                                     receiver,
                                     pt.get(1..).unwrap_or_default(),
                                     Some(&call_fn_name),
                                 );
                             }
-                            return c.check_lambda_with_types(a, pt);
+                            return c.check_lambda_with_types(scope, a, pt);
                         }
                     }
-                    c.expr(a)
+                    c.expr(scope, a)
                 })
                 .collect()
         })
@@ -30811,14 +33666,24 @@ impl<'a> Checker<'a> {
     /// is precisely the provisional pass this would then erase, leaving the call silent.
     fn take_source_companion_invoke(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         class: &ClassSig,
         args: &[ExprId],
         first_arg_diag: usize,
     ) -> Option<Ty> {
         let before = self.diags.diags.len();
-        let ret =
-            self.check_source_companion_call(call, class, CALLABLE_INVOKE_OPERATOR, args, true);
+        let ret = self.check_source_companion_call(
+            scope,
+            call,
+            class,
+            CALLABLE_INVOKE_OPERATOR,
+            args,
+            CompanionCallMode {
+                require_operator: true,
+                applicable_only: true,
+            },
+        );
         let resolved = ret.filter(|ret| *ret != Ty::Error || self.diags.diags.len() != before);
         let Some(ret) = resolved else {
             self.diags.diags.truncate(before);
@@ -30830,12 +33695,17 @@ impl<'a> Checker<'a> {
 
     fn check_source_companion_call(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         class: &ClassSig,
         name: &str,
         args: &[ExprId],
-        require_operator: bool,
+        mode: CompanionCallMode,
     ) -> Option<Ty> {
+        let CompanionCallMode {
+            require_operator,
+            applicable_only,
+        } = mode;
         let signature = class.static_methods.get(name)?;
         if !class.companion_fun_names.contains(name) || require_operator && !signature.is_operator()
         {
@@ -30844,8 +33714,18 @@ impl<'a> Checker<'a> {
         let owner = type_name(&format!("{}$Companion", class.internal()));
         // Type the arguments against the COMPANION's signature, not the enclosing call's eager pass:
         // a lambda argument to a companion function needs the companion member's parameter types.
-        let arg_tys = self.classifier_member_arg_tys(call, Ty::obj_name(owner), name, args);
-        let ret = self.check_module_member_call(call, Ty::obj_name(owner), name, args, &arg_tys)?;
+        let arg_tys = self.classifier_member_arg_tys(scope, call, Ty::obj_name(owner), name, args);
+        let ret = self.check_module_member_call_mode(
+            scope,
+            CallArgs {
+                call,
+                args,
+                arg_tys: &arg_tys,
+            },
+            Ty::obj_name(owner),
+            name,
+            applicable_only,
+        )?;
         self.expr_lowers.insert(
             call,
             ExprLowering::ObjectMemberCall {
@@ -30858,24 +33738,39 @@ impl<'a> Checker<'a> {
 
     fn check_module_member_call(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         rt: Ty,
         name: &str,
         args: &[ExprId],
         arg_tys: &[Ty],
     ) -> Option<Ty> {
-        self.check_module_member_call_mode(call, rt, name, args, arg_tys, false)
+        self.check_module_member_call_mode(
+            scope,
+            CallArgs {
+                call,
+                args,
+                arg_tys,
+            },
+            rt,
+            name,
+            false,
+        )
     }
 
     fn check_module_member_call_mode(
         &mut self,
-        call: ExprId,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
         rt: Ty,
         name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
         applicable_only: bool,
     ) -> Option<Ty> {
+        let CallArgs {
+            call,
+            args,
+            arg_tys,
+        } = call_args;
         let Ty::Obj(internal_name, _) = rt else {
             return None;
         };
@@ -30897,19 +33792,64 @@ impl<'a> Checker<'a> {
                 .any(|other| member.owner == other.owner && member.params != other.params)
         });
         let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
-        let applicable_members = all_members
+        let scored_members = all_members
             .iter()
-            .filter(|member| {
-                self.module_member_candidate_score(
-                    member,
-                    args,
-                    &full_arg_tys,
-                    arg_names,
-                    self.file.call_has_trailing_lambda.contains(&call.0),
+            .filter_map(|member| {
+                self.call_candidate_score(
+                    scope,
+                    &member.params,
+                    &member.call_sig,
+                    ArgSlots {
+                        args,
+                        partial_arg_tys: &full_arg_tys,
+                        arg_names,
+                        trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+                    },
                 )
-                .is_some()
+                .map(|score| (score.uses_sam_conversion(), member.clone()))
             })
-            .cloned()
+            .collect::<Vec<_>>();
+        // Conversion-free preference (kotlinc's rule): when any applicable candidate fits every
+        // argument WITHOUT the Java SAM conversion (`f {}` binds `f(Any)`), the candidates that
+        // reach the call only through the conversion (`f(Runnable)`) drop out.
+        let conversion_free = scored_members.iter().any(|(used_sam, _)| !used_sam);
+        let applicable_scored: Vec<(bool, crate::libraries::LibraryMember)> = scored_members
+            .into_iter()
+            .filter(|(used_sam, _)| !conversion_free || !used_sam)
+            .collect();
+        // Two DISTINCT-parameter candidates the call reaches only through the SAM conversion are
+        // kotlinc's overload resolution ambiguity — picking either would type (and wrap) the
+        // lambda against an arbitrary interface's method. An applicability PROBE declines instead
+        // of reporting: another receiver or namespace may still bind the call.
+        let mut sam_tied: Vec<&crate::libraries::LibraryMember> = Vec::new();
+        for (used_sam, member) in &applicable_scored {
+            if *used_sam && !sam_tied.iter().any(|tied| tied.params == member.params) {
+                sam_tied.push(member);
+            }
+        }
+        if sam_tied.len() > 1 {
+            if applicable_only {
+                return None;
+            }
+            let mut message = "overload resolution ambiguity between candidates:".to_string();
+            for member in &sam_tied {
+                message.push('\n');
+                // Render from the selected semantic record itself. Looking back into a source AST
+                // would make diagnostics depend on declaration origin and can match the wrong sibling
+                // overload when return types coincide.
+                let parameters =
+                    Self::callable_ref_parameters(&member.params, &member.call_sig.param_names);
+                message.push_str(&format!(
+                    "fun {name}({parameters}): {}",
+                    member.ret.source_name()
+                ));
+            }
+            self.diags.error(self.call_callee_name_span(call), message);
+            return Some(Ty::Error);
+        }
+        let applicable_members = applicable_scored
+            .into_iter()
+            .map(|(_, member)| member)
             .collect::<Vec<_>>();
         if applicable_only && applicable_members.is_empty() {
             return None;
@@ -30990,11 +33930,11 @@ impl<'a> Checker<'a> {
                                 } else {
                                     params[i]
                                 };
-                            self.expect_assignable(
+                            self.expect_call_arg(
+                                scope,
                                 expected,
+                                *a,
                                 self.expr_types[a.0 as usize],
-                                self.span(*a),
-                                "argument",
                             );
                         }
                     }
@@ -31023,7 +33963,7 @@ impl<'a> Checker<'a> {
         } else {
             // A `vararg` member (`fun f(vararg s: T)`) accepts trailing `T` args packed into the array
             // param — element-type them, don't match the array positionally.
-            self.expect_call_args(&params, cs.vararg, args, arg_tys);
+            self.expect_call_args(scope, &params, cs.vararg, args, arg_tys);
         }
         // A generic higher-order member: the result is the method's `<R>` inferred from the lambda body
         // (`box.map { it.length }` → `Int`), not the erased `Object`.
@@ -31096,8 +34036,85 @@ impl<'a> Checker<'a> {
         Some(ret)
     }
 
+    /// Commit a source-constructor selection after overload arbitration has finished.
+    ///
+    /// Keeping this bookkeeping in one exit makes constructor-vs-factory resolution a small ordering
+    /// decision instead of duplicating (or deeply nesting) argument validation, generic inference,
+    /// default masks, and lowering metadata. The selected delegation is already provider-neutral
+    /// semantic data; this function only records that data for the checker and lowerer.
+    fn finish_source_constructor_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        class: &ClassSig,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        selected: ResolvedCtorDelegation,
+    ) -> Ty {
+        // Candidate matching already checked the concrete shell of a generic function parameter. Do
+        // not then re-check its erased type here: `(Int) -> T` may have become `(Int) -> Any`, and that
+        // erasure would reject a nullable return that is precisely the evidence used to infer `T`.
+        // Fully concrete parameters still use the ordinary assignability diagnostic below.
+        for (index, (&argument, &expected)) in args.iter().zip(&selected.argument_types).enumerate()
+        {
+            let constraint = selected
+                .argument_slots
+                .get(index)
+                .and_then(|&slot| selected.parameter_constraints.get(slot))
+                .copied()
+                .unwrap_or_default();
+            if constraint != ConstructorParameterConstraint::Concrete {
+                continue;
+            }
+            self.expect_assignable(
+                expected,
+                self.expr_types[argument.0 as usize],
+                self.span(argument),
+                "constructor argument",
+            );
+        }
+        let primary = matches!(
+            &selected.target,
+            ResolvedCtorDelegationTarget::ThisPrimary { .. }
+        );
+        let params = selected.target.params().to_vec();
+        let inferred = if primary && selected.vararg.is_none() {
+            let mut slots = vec![None; params.len()];
+            for (&argument, &slot) in args.iter().zip(&selected.argument_slots) {
+                slots[slot] = Some(argument);
+            }
+            self.expect_source_constructor_args(
+                scope,
+                CallArgs {
+                    call,
+                    args,
+                    arg_tys,
+                },
+                class,
+                &params,
+                Some(&slots),
+            )
+        } else {
+            Vec::new()
+        };
+        self.resolved_constructors.insert(
+            call,
+            ResolvedConstructor::Source {
+                primary,
+                params,
+                argument_slots: selected.argument_slots,
+                argument_types: selected.argument_types,
+                omitted: selected.omitted,
+                vararg: selected.vararg,
+                default_masks: selected.default_masks,
+            },
+        );
+        self.ctor_result_name_with_inferred(scope, call, class.internal_name(), inferred)
+    }
+
     fn check_call(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         callee: ExprId,
         args: &[ExprId],
@@ -31106,19 +34123,48 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         if let Some(declaration) = self.file.anonymous_object_classes.get(&call).copied() {
             if self.discover_anonymous_captures {
-                let mut candidates = self
-                    .scopes
-                    .iter()
-                    .flat_map(|scope| scope.iter())
-                    .filter(|(name, local)| {
-                        !local.is_var || !self.fn_reassigned.contains(name.as_str())
-                    })
-                    .map(|(name, local)| AnonymousCaptureCandidate {
-                        name: name.clone(),
-                        ty: local.narrowed.unwrap_or(local.ty),
-                    })
-                    .collect::<Vec<_>>();
+                let narrows = scope.local_narrowings();
+                let mut candidates = Vec::new();
+                scope.visit_bindings(Ns::Value, |name, binding| {
+                    let Some(local) = binding.value() else { return };
+                    if local.is_var && self.fn_reassigned.contains(name) {
+                        return;
+                    }
+                    candidates.push(AnonymousCaptureCandidate {
+                        name: name.to_string(),
+                        ty: narrows.get(name).copied().unwrap_or(local.ty),
+                        source: AnonymousObjectCaptureSource::LexicalValue,
+                    });
+                });
                 candidates.sort_by(|left, right| left.name.cmp(&right.name));
+                // A body reaching the enclosing instance (`this@Outer` or an outer member access)
+                // needs the instance itself, supplied FIRST so it lands at field 0 — the slot
+                // `captured_outer_method` and `LabeledThisOuter` lowering read as `this$0`.
+                if let Some((outer_label, outer)) = self
+                    .anonymous_construction_outer_receiver()
+                    .map(|(label, ty)| (label.to_string(), ty))
+                {
+                    let needs_outer = {
+                        let resolver = self.resolver();
+                        anonymous_body_needs_outer_this(
+                            self.file,
+                            declaration,
+                            &resolver,
+                            &outer_label,
+                            outer,
+                        )
+                    };
+                    if needs_outer {
+                        candidates.insert(
+                            0,
+                            AnonymousCaptureCandidate {
+                                name: "this$0".to_string(),
+                                ty: outer,
+                                source: AnonymousObjectCaptureSource::EnclosingInstance,
+                            },
+                        );
+                    }
+                }
                 record_anonymous_construction_captures(
                     self.file,
                     call,
@@ -31141,10 +34187,22 @@ impl<'a> Checker<'a> {
                 .unwrap_or_default();
             if !captures.is_empty() {
                 for capture in captures {
-                    let actual = self
-                        .lookup(&capture.name)
-                        .map(|local| local.narrowed.unwrap_or(local.ty))
-                        .unwrap_or(Ty::Error);
+                    let actual = match capture.source {
+                        AnonymousObjectCaptureSource::EnclosingInstance => {
+                            // The outer-instance capture is not a scope local; the construction site's
+                            // dispatch instance supplies it.
+                            self.anonymous_construction_outer_receiver()
+                                .map(|(_, ty)| ty)
+                                .unwrap_or(Ty::Error)
+                        }
+                        AnonymousObjectCaptureSource::LexicalValue => self
+                            .lookup(scope, &capture.name)
+                            .map(|local| {
+                                self.local_narrowing(scope, &capture.name)
+                                    .unwrap_or(local.ty)
+                            })
+                            .unwrap_or(Ty::Error),
+                    };
                     self.expect_assignable(capture.ty, actual, span, "anonymous object capture");
                 }
                 return self
@@ -31174,10 +34232,10 @@ impl<'a> Checker<'a> {
                 // A top-level function, or a same-file class CONSTRUCTOR (`C(b = 9)`) — the primary
                 // ctor's parameter names map the labels onto positions, just like a function's.
                 Expr::Name(n) => {
-                    self.script_host_may_declare_call(n)
+                    self.script_host_may_declare_call(scope, n)
                         || self.module_declares(n)
                         || self
-                            .lookup_local_fun(n)
+                            .lookup_local_fun(scope, n)
                             .is_some_and(|(_, signature)| !signature.param_names.is_empty())
                         // A CLASSPATH top-level function whose `@Metadata` records parameter names
                         // (`foo(b = …, a = …)` against a function from a jar/dependency module). Module
@@ -31187,7 +34245,7 @@ impl<'a> Checker<'a> {
                             .resolver().resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, n, &[], &[]).map(crate::symbol_resolver::Symbol::overloads).unwrap_or_default() }
                             .top_level()
                             .any(|o| o.call_sig.has_param_names())
-                        || self.implicit_receiver_types().into_iter().any(|rt| {
+                        || self.implicit_receiver_types(scope).into_iter().any(|rt| {
                             self.resolver()
                                 .resolve_symbol(
                                     crate::symbol_resolver::SymRecv::Value(rt),
@@ -31206,8 +34264,8 @@ impl<'a> Checker<'a> {
                                     ) && o.call_sig.has_param_names()
                                 })
                         })
-                        || self.implicit_receiver_types().into_iter().any(|rt| {
-                            self.member_extension_supports_named(rt, n)
+                        || self.implicit_receiver_types(scope).into_iter().any(|rt| {
+                            self.member_extension_supports_named(scope, rt, n)
                         })
                         // A member reached through a SMART-CAST `this`: in
                         // `fun Op.f(p: String) = when (this) { is Create -> copy(path = p) }` the call
@@ -31218,8 +34276,8 @@ impl<'a> Checker<'a> {
                         // `effective_this_narrow` seam that resolution itself uses, rather than widening
                         // what counts as an implicit receiver for every other lookup.
                         || self
-                            .effective_this_narrow()
-                            .filter(|narrowed| self.this_ty != Some(*narrowed))
+                            .effective_this_narrow(scope)
+                            .filter(|narrowed| scope.this_ty() != Some(*narrowed))
                             // Deliberately MODULE MEMBERS only, matching what the narrowed-this
                             // resolution records and what lowering can emit. Admitting member
                             // EXTENSIONS here would accept named arguments the narrowed-this lowering
@@ -31237,15 +34295,17 @@ impl<'a> Checker<'a> {
                     // semantic constructor metadata contract. Resolve it once here; otherwise this is
                     // a qualified top-level/member call and follows the callable paths below.
                     if let Some(internal) =
-                        self.qualified_nested_ctor_internal_name(*receiver, name)
+                        self.qualified_nested_ctor_internal_name(scope, *receiver, name)
                     {
                         self.resolved_type_name(internal)
                             .and_then(|t| t.constructor_named_params(args.len()))
                             .is_some()
                     } else {
                         let qualified_top_level = if let Some(root) = self.dotted_root(*receiver) {
-                            if !self.value_root_shadows_classifier(&root)
-                                && self.classifier_receiver_internal(*receiver).is_none()
+                            if !self.value_root_shadows_classifier(scope, &root)
+                                && self
+                                    .classifier_receiver_internal(scope, *receiver)
+                                    .is_none()
                             {
                                 if let Some(package) = qualified_path(self.file, *receiver) {
                                     let scope = [type_name(&package)];
@@ -31263,7 +34323,7 @@ impl<'a> Checker<'a> {
                             false
                         };
                         qualified_top_level || {
-                            let rt = self.expr(*receiver);
+                            let rt = self.expr(scope, *receiver);
                             self.resolver()
                                 .resolve_symbol(
                                     crate::symbol_resolver::SymRecv::Value(rt),
@@ -31275,7 +34335,7 @@ impl<'a> Checker<'a> {
                                 .unwrap_or_default()
                                 .iter()
                                 .any(|o| o.call_sig.has_param_names())
-                                || self.member_extension_supports_named(rt, name)
+                                || self.member_extension_supports_named(scope, rt, name)
                         }
                     }
                 }
@@ -31283,7 +34343,7 @@ impl<'a> Checker<'a> {
             };
             if !supports_named {
                 for &a in args {
-                    self.expr(a);
+                    self.expr(scope, a);
                 }
                 self.diags.error(span, "krusty: named arguments are only supported for top-level functions and methods with named parameters".to_string());
                 return Ty::Error;
@@ -31295,14 +34355,14 @@ impl<'a> Checker<'a> {
                 // Qualified-name instantiation of a **classpath annotation**: `kotlin.SinceKotlin(…)`.
                 // The whole callee is a dotted path naming an `@interface` on the classpath.
                 if let Expr::Name(root) = self.file.expr(receiver).clone() {
-                    if !self.value_root_shadows_classifier(&root) {
+                    if !self.value_root_shadows_classifier(scope, &root) {
                         if let Some(internal) = qualified_path(self.file, callee) {
                             if let Some(members) = self
                                 .resolved_type(&internal)
                                 .and_then(|t| t.annotation_members())
                             {
                                 for (i, a) in args.iter().enumerate() {
-                                    let at = self.expr(*a);
+                                    let at = self.expr(scope, *a);
                                     if let Some((_, pt)) = members.get(i) {
                                         self.expect_assignable(*pt, at, self.span(*a), "argument");
                                     }
@@ -31317,16 +34377,28 @@ impl<'a> Checker<'a> {
                 // of that package (compiled to `a/b/<File>Kt`). Resolve it by name among the classpath
                 // top-level overloads and confirm the owning facade sits in the receiver's package.
                 if let Some(root) = self.dotted_root(receiver) {
-                    if !self.value_root_shadows_classifier(&root)
-                        && self.classifier_receiver_internal(receiver).is_none()
+                    if !self.value_root_shadows_classifier(scope, &root)
+                        && self.classifier_receiver_internal(scope, receiver).is_none()
                     {
-                        if let Some(pkg) = qualified_path(self.file, receiver) {
-                            let arg_tys = self.arg_tys(args);
+                        if let Some(pkg) = qualified_path(self.file, receiver).filter(|pkg| {
+                            let scope = [type_name(pkg)];
+                            // A dotted package path is only a TOP-LEVEL-FUNCTION candidate when the
+                            // semantic provider actually exposes that name in the package. Do this
+                            // symbol-kind test before touching arguments: the same syntax also spells
+                            // a fully-qualified constructor, and speculatively checking its lambda
+                            // here would bind `it`/declared parameters without the constructor's SAM
+                            // expectation. The selected callable path owns the first body check.
+                            !self
+                                .resolver_in_scope(&scope)
+                                .top_level_candidates(&name)
+                                .is_empty()
+                        }) {
+                            let arg_tys = self.arg_tys(scope, args);
                             let targs: Vec<Ty> = self
                                 .file
                                 .call_type_args
                                 .get(&call.0)
-                                .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
+                                .map(|ts| ts.iter().map(|r| self.resolve_ty(scope, r)).collect())
                                 .unwrap_or_default();
                             let pkg_scope = [type_name(&pkg)];
                             let mut selected_arg_tys = arg_tys.clone();
@@ -31462,12 +34534,15 @@ impl<'a> Checker<'a> {
                                 let mut partial: Vec<Option<Ty>> =
                                     arg_tys.iter().map(|t| Some(*t)).collect();
                                 partial[last] = None;
+                                let explicit_type_args =
+                                    self.resolved_explicit_type_args(scope, call);
                                 let shape = self.top_level_lambda_shape_in_scope(
                                     &name,
                                     &partial,
                                     arg_names.as_deref(),
                                     true,
                                     Some(&pkg_scope),
+                                    &explicit_type_args,
                                 );
                                 if let Some(pt) = shape
                                     .as_ref()
@@ -31484,13 +34559,14 @@ impl<'a> Checker<'a> {
                                         .and_then(|r| r.get(last).copied().flatten());
                                     let lam_ty = if let Some(recv) = recv {
                                         self.check_lambda_with_receiver_labeled(
+                                            scope,
                                             args[last],
                                             recv,
                                             if !pt.is_empty() { &pt[1..] } else { &[] },
                                             None,
                                         )
                                     } else {
-                                        self.check_lambda_with_types(args[last], &pt)
+                                        self.check_lambda_with_types(scope, args[last], &pt)
                                     };
                                     let mut full = arg_tys.clone();
                                     full[last] = lam_ty;
@@ -31544,7 +34620,8 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Nested-class construction `Outer.Inner(args)`.
-                if let Some(internal) = self.same_file_nested_class_internal(receiver, &name) {
+                if let Some(internal) = self.module_qualified_class_internal(scope, receiver, &name)
+                {
                     if let Some(cls) = self.syms.classes.get(&internal).cloned() {
                         // The hoisted source spelling (`Outer.Inner`) for param-list lookup and
                         // diagnostics.
@@ -31559,7 +34636,7 @@ impl<'a> Checker<'a> {
                         if let Some(declaration) =
                             self.source_class_decl_by_internal(cls.internal_name())
                         {
-                            let arg_tys = self.arg_tys(args);
+                            let arg_tys = self.arg_tys(scope, args);
                             let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
                             let arguments = CtorDelegationCall {
                                 args: args.to_vec(),
@@ -31604,11 +34681,14 @@ impl<'a> Checker<'a> {
                                         slots[slot] = Some(argument);
                                     }
                                     self.expect_source_constructor_args(
-                                        call,
+                                        scope,
+                                        CallArgs {
+                                            call,
+                                            args,
+                                            arg_tys: &arg_tys,
+                                        },
                                         &cls,
                                         &params,
-                                        args,
-                                        &arg_tys,
                                         Some(&slots),
                                     )
                                 } else {
@@ -31627,6 +34707,7 @@ impl<'a> Checker<'a> {
                                     },
                                 );
                                 return self.ctor_result_name_with_inferred(
+                                    scope,
                                     call,
                                     cls.internal_name(),
                                     inferred,
@@ -31645,7 +34726,7 @@ impl<'a> Checker<'a> {
                                 ) {
                                     Ok(slots) => {
                                         for &a in slots.iter().flatten() {
-                                            self.expr(a);
+                                            self.expr(scope, a);
                                         }
                                         for (i, slot) in slots.iter().enumerate() {
                                             if let (Some(a), Some(pt)) =
@@ -31664,10 +34745,10 @@ impl<'a> Checker<'a> {
                                         self.report_call_arg_mapping_error(call, args, error);
                                     }
                                 }
-                                return self.ctor_result_name(call, cls.internal_name());
+                                return self.ctor_result_name(scope, call, cls.internal_name());
                             }
                         }
-                        let arg_tys = self.arg_tys(args);
+                        let arg_tys = self.arg_tys(scope, args);
                         // A trailing parameter with a default may be omitted positionally (the
                         // default fills at the call site, like a top-level constructor call).
                         let required = cls
@@ -31687,7 +34768,7 @@ impl<'a> Checker<'a> {
                         };
                         match params {
                             Some(ps) => {
-                                self.expect_call_args(&ps, false, args, &arg_tys);
+                                self.expect_call_args(scope, &ps, false, args, &arg_tys);
                             }
                             None => self.diags.error(
                                 span,
@@ -31698,12 +34779,12 @@ impl<'a> Checker<'a> {
                                 ),
                             ),
                         }
-                        return self.ctor_result_name(call, cls.internal_name());
+                        return self.ctor_result_name(scope, call, cls.internal_name());
                     }
                 }
                 // `EnumName.values()` / `EnumName.valueOf(s)` — synthetic static enum methods.
                 if let Expr::Name(en) = self.file.expr(receiver).clone() {
-                    let source_enum = (!self.value_root_shadows_classifier(&en))
+                    let source_enum = (!self.value_root_shadows_classifier(scope, &en))
                         .then(|| {
                             self.module_class_named(&en)
                                 .map(ClassSig::internal_name)
@@ -31715,7 +34796,7 @@ impl<'a> Checker<'a> {
                             return Ty::array(Ty::obj_name(internal));
                         }
                         if let ("valueOf", [arg]) = (name.as_str(), args) {
-                            let at = self.expr(*arg);
+                            let at = self.expr(scope, *arg);
                             self.expect_assignable(Ty::String, at, self.span(*arg), "argument");
                             return Ty::obj_name(internal);
                         }
@@ -31723,7 +34804,7 @@ impl<'a> Checker<'a> {
                 }
                 // Nested-class constructor `Outer.Inner(args)` (when `Outer` isn't a local).
                 if let Expr::Name(outer) = self.file.expr(receiver).clone() {
-                    if !self.value_root_shadows_classifier(&outer) {
+                    if !self.value_root_shadows_classifier(scope, &outer) {
                         let qualified = format!("{outer}.{name}");
                         let nested_cls = self.module_class_named(&outer).and_then(|outer_sig| {
                             let candidate = type_name(&format!(
@@ -31733,7 +34814,7 @@ impl<'a> Checker<'a> {
                             self.syms.classes.get(&candidate).cloned()
                         });
                         if let Some(cls) = nested_cls {
-                            let arg_tys = self.arg_tys(args);
+                            let arg_tys = self.arg_tys(scope, args);
                             // A trailing parameter with a default may be omitted positionally
                             // (`S.E(Exception())` — the default fills at the call site, exactly
                             // like a top-level constructor call).
@@ -31753,14 +34834,18 @@ impl<'a> Checker<'a> {
                                 );
                             } else {
                                 let inferred = self.expect_source_constructor_args(
-                                    call,
+                                    scope,
+                                    CallArgs {
+                                        call,
+                                        args,
+                                        arg_tys: &arg_tys,
+                                    },
                                     &cls,
                                     &cls.ctor_params,
-                                    args,
-                                    &arg_tys,
                                     None,
                                 );
                                 return self.ctor_result_name_with_inferred(
+                                    scope,
                                     call,
                                     cls.internal_name(),
                                     inferred,
@@ -31776,7 +34861,7 @@ impl<'a> Checker<'a> {
                 // classpath internal and match a constructor. Lowering emits `new …; invokespecial`.
                 {
                     if let Some(internal) =
-                        self.qualified_nested_ctor_internal_name(receiver, &name)
+                        self.qualified_nested_ctor_internal_name(scope, receiver, &name)
                     {
                         let qualified = internal.render();
                         // Named classpath constructors use metadata names/defaults; lowering selects
@@ -31785,6 +34870,7 @@ impl<'a> Checker<'a> {
                             || self.file.call_has_trailing_lambda.contains(&call.0)
                         {
                             match self.record_named_library_constructor_name(
+                                scope,
                                 call,
                                 internal,
                                 args,
@@ -31798,35 +34884,36 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        let arg_tys = self.arg_tys(args);
+                        // Constructor selection consumes the same literal-aware argument facts as
+                        // every other provider call. In particular, leave a lambda body unchecked
+                        // until the selected constructor supplies its SAM/function expectation;
+                        // `arg_tys` alone would erase that provenance and bind parameters as `Any`.
+                        let arg_tys = self
+                            .call_arg_kinds(scope, args)
+                            .into_iter()
+                            .map(|argument| argument.ty())
+                            .collect::<Vec<_>>();
                         // POSITIONAL — a plain constructor, a value-class-param/omitted-default
                         // synthetic. Type-check the provided
                         // arguments against the plain constructor's params when it matches.
-                        if let Some(target) = self.record_library_constructor_name(
-                            call,
-                            internal,
-                            args.to_vec(),
-                            &arg_tys,
-                        ) {
+                        if self
+                            .record_library_constructor_name(
+                                scope,
+                                call,
+                                internal,
+                                args.to_vec(),
+                                &arg_tys,
+                            )
+                            .is_some()
+                        {
                             crate::trace_compiler!(
                                 "resolve",
                                 "classpath nested constructor {qualified} -> {internal}"
                             );
-                            if let ResolvedConstructor::Plain { member, .. } = target {
-                                let params =
-                                    crate::symbol_resolver::apply_platform_call_parameter_nullability(
-                                        member.params.clone(),
-                                        &member.call_sig.platform_nullable_params,
-                                        &arg_tys,
-                                        member.call_sig.vararg,
-                                    );
-                                self.expect_call_args(
-                                    &params,
-                                    member.call_sig.vararg,
-                                    args,
-                                    &arg_tys,
-                                );
-                            }
+                            // `record_library_constructor_name` performs the selected lambda check.
+                            // Re-running `expect_call_args` here would walk the body twice and duplicate
+                            // diagnostics; non-lambda compatibility was already established by the
+                            // constructor selector, including platform nullability and vararg shape.
                             return Ty::obj_name(internal);
                         }
                     }
@@ -31836,7 +34923,7 @@ impl<'a> Checker<'a> {
                 // public per `@Metadata`). Resolve metadata-first; lowering emits the companion `getstatic`
                 // receiver + an inline-splice of the companion method.
                 if let Expr::Name(root) = self.file.expr(receiver).clone() {
-                    if !self.value_root_shadows_classifier(&root) {
+                    if !self.value_root_shadows_classifier(scope, &root) {
                         if let Some(internal) = self.imported_type_name(&root) {
                             if let Some(cf) = self.resolved_type_name(internal).and_then(|t| {
                                 t.value_companion_fns
@@ -31848,7 +34935,7 @@ impl<'a> Checker<'a> {
                                     .cloned()
                             }) {
                                 for &a in args {
-                                    self.expr(a);
+                                    self.expr(scope, a);
                                 }
                                 let ret = cf.callable.ret;
                                 self.expr_lowers.insert(
@@ -31866,9 +34953,13 @@ impl<'a> Checker<'a> {
                 if let ("run" | "apply", [arg]) = (name.as_str(), args) {
                     if let Expr::Lambda { params, body } = self.file.expr(*arg).clone() {
                         if params.is_empty() {
-                            let rt = self.expr(receiver);
-                            let bt =
-                                self.check_with_receiver_labeled(rt, body, call_fn_name.as_deref());
+                            let rt = self.expr(scope, receiver);
+                            let bt = self.check_with_receiver_labeled(
+                                scope,
+                                rt,
+                                body,
+                                call_fn_name.as_deref(),
+                            );
                             let returns_receiver = name == "apply";
                             self.mark_receiver_lambda_call(call, receiver, body, returns_receiver);
                             return self.set(call, if returns_receiver { rt } else { bt });
@@ -31898,15 +34989,15 @@ impl<'a> Checker<'a> {
                         );
                         return Ty::Error;
                     }
-                    let arg_tys = self.arg_tys(args);
-                    let arg_kinds = self.call_arg_kinds(args);
+                    let arg_tys = self.arg_tys(scope, args);
+                    let arg_kinds = self.call_arg_kinds(scope, args);
                     // A `super<T>` qualifier matches a supertype by its simple name.
                     let matches_qual = |internal: TypeName| {
                         super_ty
                             .as_deref()
                             .is_none_or(|t| internal.qualifier_matches(t))
                     };
-                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                    if let Some(Ty::Obj(internal, _)) = scope.this_ty() {
                         let declared = self.syms.class_by_type_name(internal);
                         let sup = declared.and_then(|c| c.super_internal);
                         // The base spelled WITH its declared type arguments (`ArrayList<Int>`) — a
@@ -31929,7 +35020,7 @@ impl<'a> Checker<'a> {
                                 .method_matching_with_owner_name(sup, &name, &arg_tys)
                                 .filter(|_| !self.class_method_is_abstract_name(sup, &name))
                             {
-                                self.expect_call_args(&sig.params, false, args, &arg_tys);
+                                self.expect_call_args(scope, &sig.params, false, args, &arg_tys);
                                 self.resolved_super_calls.insert(
                                     call,
                                     ResolvedSuperCall::Source {
@@ -31967,7 +35058,7 @@ impl<'a> Checker<'a> {
                             })
                             .collect();
                         if let [(iface, sig)] = matches.as_slice() {
-                            self.expect_call_args(&sig.params, false, args, &arg_tys);
+                            self.expect_call_args(scope, &sig.params, false, args, &arg_tys);
                             self.resolved_super_calls.insert(
                                 call,
                                 ResolvedSuperCall::Source {
@@ -31985,10 +35076,11 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 if let Expr::Member { .. } = self.file.expr(receiver) {
-                    if let Some(internal) = self.classifier_receiver_internal(receiver) {
+                    if let Some(internal) = self.classifier_receiver_internal(scope, receiver) {
                         let fq = internal.render();
-                        let explicit_type_args = self.explicit_call_type_args(call);
+                        let explicit_type_args = self.explicit_call_type_args(scope, call);
                         let arg_kinds = self.provider_member_lambda_arg_kinds(
+                            scope,
                             call,
                             crate::symbol_resolver::SymRecv::Type(&fq),
                             &name,
@@ -32008,14 +35100,72 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // A call through a FULLY-QUALIFIED classifier prefix (`pkg.Cls.cfn()`,
+                // `pkg.sub.Outer.Nested.fn()`). The prefix walk yields one classifier identity, and the
+                // rungs below it are the same ones a simple-name receiver uses — a qualified spelling
+                // must not grow its own notion of what a companion or a static call is. An `object`
+                // prefix is absent here on purpose: it resolves as a VALUE, so its members are found by
+                // ordinary member checking on the singleton.
+                if let Some(QualifiedPrefix::Classifier(owner)) =
+                    self.package_rooted_prefix(scope, receiver)
+                {
+                    // `pkg.E.values()` / `pkg.E.valueOf(s)` — an enum's synthetic statics. They are
+                    // declarations of the classifier, not of any file, so the qualified spelling
+                    // reaches them exactly as the imported simple name does.
+                    if self.syms.enum_entries_of(owner).is_some() {
+                        if name == "values" && args.is_empty() {
+                            self.resolved_enum_statics.insert(call, owner);
+                            return Ty::array(Ty::obj_name(owner));
+                        }
+                        if let ("valueOf", [argument]) = (name.as_str(), args) {
+                            let argument_ty = self.expr(scope, *argument);
+                            self.expect_assignable(
+                                Ty::String,
+                                argument_ty,
+                                self.span(*argument),
+                                "argument",
+                            );
+                            self.resolved_enum_statics.insert(call, owner);
+                            return Ty::obj_name(owner);
+                        }
+                    }
+                    if let Some(class) = self.syms.class_by_type_name(owner).cloned() {
+                        if class.companion_fun_names.contains(&name) {
+                            if let Some(ret) = self.check_source_companion_call(
+                                scope,
+                                call,
+                                &class,
+                                &name,
+                                args,
+                                CompanionCallMode {
+                                    require_operator: false,
+                                    applicable_only: false,
+                                },
+                            ) {
+                                return ret;
+                            }
+                        }
+                        if let Some(signature) = class.static_methods.get(&name).cloned() {
+                            let arg_tys = self.arg_tys(scope, args);
+                            self.expect_call_args(
+                                scope,
+                                &signature.params,
+                                signature.vararg(),
+                                args,
+                                &arg_tys,
+                            );
+                            return signature.ret;
+                        }
+                    }
+                }
                 // Java static call: `ClassName.method(args)` where ClassName is an imported class
                 // (not a local/param) resolvable on the classpath. A top-level PROPERTY of the same name
                 // shadows the type/import in value position (`private val sink = sink {}; sink.read()`
                 // — `sink` is the EventSink value, not the imported `sink` symbol), so skip the static
                 // path and let the receiver resolve as that property value below.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
-                    if !self.value_root_shadows_classifier(&cls) {
-                        let scoped_classifier = self.scoped_classifier_name(&cls);
+                    if !self.value_root_shadows_classifier(scope, &cls) {
+                        let scoped_classifier = self.scoped_classifier_name_in(scope, &cls);
                         if scoped_classifier == InheritedNestedClassifier::Ambiguous {
                             return Ty::Error;
                         }
@@ -32032,8 +35182,13 @@ impl<'a> Checker<'a> {
                                 .map(ClassSig::internal_name)
                                 .expect("source object has a signature");
                             let receiver_ty = Ty::obj_name(internal);
-                            let arg_tys =
-                                self.classifier_member_arg_tys(call, receiver_ty, &name, args);
+                            let arg_tys = self.classifier_member_arg_tys(
+                                scope,
+                                call,
+                                receiver_ty,
+                                &name,
+                                args,
+                            );
                             let arg_names = self.file.call_arg_names.get(&call.0).cloned();
                             let full_arg_tys =
                                 arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
@@ -32041,17 +35196,25 @@ impl<'a> Checker<'a> {
                                 .instance_members(receiver_ty, &name)
                                 .iter()
                                 .any(|member| {
-                                    self.module_member_candidate_score(
-                                        member,
-                                        args,
-                                        &full_arg_tys,
-                                        arg_names.as_deref(),
-                                        self.file.call_has_trailing_lambda.contains(&call.0),
+                                    self.call_candidate_score(
+                                        scope,
+                                        &member.params,
+                                        &member.call_sig,
+                                        ArgSlots {
+                                            args,
+                                            partial_arg_tys: &full_arg_tys,
+                                            arg_names: arg_names.as_deref(),
+                                            trailing_lambda: self
+                                                .file
+                                                .call_has_trailing_lambda
+                                                .contains(&call.0),
+                                        },
                                     )
                                     .is_some()
                                 });
                             if applicable {
                                 if let Some(ret) = self.check_module_member_call(
+                                    scope,
                                     call,
                                     receiver_ty,
                                     &name,
@@ -32075,7 +35238,17 @@ impl<'a> Checker<'a> {
                             .is_some_and(|class| class.companion_fun_names.contains(&name));
                         if source_companion {
                             if let Some(ret) = source_class.as_ref().and_then(|class| {
-                                self.check_source_companion_call(call, class, &name, args, false)
+                                self.check_source_companion_call(
+                                    scope,
+                                    call,
+                                    class,
+                                    &name,
+                                    args,
+                                    CompanionCallMode {
+                                        require_operator: false,
+                                        applicable_only: false,
+                                    },
+                                )
                             }) {
                                 return ret;
                             }
@@ -32086,8 +35259,8 @@ impl<'a> Checker<'a> {
                             .and_then(|class| class.static_methods.get(&name))
                             .cloned()
                         {
-                            let arg_tys = self.arg_tys(args);
-                            self.expect_call_args(&sig.params, sig.vararg(), args, &arg_tys);
+                            let arg_tys = self.arg_tys(scope, args);
+                            self.expect_call_args(scope, &sig.params, sig.vararg(), args, &arg_tys);
                             return sig.ret;
                         }
                         if is_object {
@@ -32096,12 +35269,14 @@ impl<'a> Checker<'a> {
                                 .map(ClassSig::internal_name)
                                 .expect("source object has a signature");
                             let arg_tys = self.classifier_member_arg_tys(
+                                scope,
                                 call,
                                 Ty::obj_name(internal),
                                 &name,
                                 args,
                             );
                             if let Some(ret) = self.check_module_member_call(
+                                scope,
                                 call,
                                 Ty::obj_name(internal),
                                 &name,
@@ -32123,8 +35298,9 @@ impl<'a> Checker<'a> {
                             .imported_type_internal(&cls)
                             .or_else(|| self.imports.get(&cls).cloned());
                         if let Some(internal) = receiver_class {
-                            let explicit_type_args = self.explicit_call_type_args(call);
+                            let explicit_type_args = self.explicit_call_type_args(scope, call);
                             let arg_kinds = self.provider_member_lambda_arg_kinds(
+                                scope,
                                 call,
                                 crate::symbol_resolver::SymRecv::Type(&internal),
                                 &name,
@@ -32152,6 +35328,7 @@ impl<'a> Checker<'a> {
                                 // (`Json.encodeToString(…)`/`Random.nextInt(…)` = `<Class>.Default.m(…)`):
                                 // resolve `m` as an instance method on the companion's type.
                                 None => {
+                                    let call_targs = self.resolved_explicit_type_args(scope, call);
                                     let inst = self
                                         .resolved_type(&internal)
                                         .and_then(|lt| lt.companion_object)
@@ -32160,6 +35337,7 @@ impl<'a> Checker<'a> {
                                                 Ty::obj_name(cty),
                                                 &name,
                                                 &arg_kinds,
+                                                &call_targs,
                                             )
                                             .map(|m| (cty, m))
                                         });
@@ -32179,7 +35357,7 @@ impl<'a> Checker<'a> {
                                                 // A reified member (`<T> T decodeFromString(…)`) called
                                                 // with an explicit type argument (`decodeFromString<C>`)
                                                 // returns that type; else recover it from the arguments.
-                                                self.reified_type_arg(call).unwrap_or(m.ret)
+                                                self.reified_type_arg(scope, call).unwrap_or(m.ret)
                                             } else {
                                                 m.ret
                                             };
@@ -32202,6 +35380,7 @@ impl<'a> Checker<'a> {
                                                         Ty::obj(&internal),
                                                         &name,
                                                         &arg_kinds,
+                                                        &call_targs,
                                                     )
                                                 {
                                                     crate::trace_compiler!(
@@ -32230,7 +35409,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let rt = self.expr(receiver);
+                let rt = self.expr(scope, receiver);
                 // For a class method with function-type parameters, type lambda arguments against the
                 // method's `lambda_param_types` (so `it` resolves), mirroring the free-function path.
                 // A MODULE (user-declared) class method only: a classpath receiver leaves this `None` so
@@ -32242,15 +35421,22 @@ impl<'a> Checker<'a> {
                         if matches!(self.file.expr(*argument), Expr::Lambda { .. }) {
                             None
                         } else {
-                            Some(self.expr(*argument))
+                            Some(self.expr(scope, *argument))
                         }
                     })
                     .collect::<Vec<_>>();
                 // Selection and contextual lambda typing depend on the receiver's semantic members,
                 // not on whether lowering later obtains that receiver from an expression, an object
                 // singleton, or a companion field. Classifier receivers use this same planner above.
-                let (method_sig, generic_member, module_lambda_shape) =
-                    self.module_member_lambda_plan(call, rt, &name, args, &generic_member_partial);
+                let (method_sig, generic_member, module_lambda_shape) = self
+                    .module_member_lambda_plan(
+                        scope,
+                        call,
+                        rt,
+                        &name,
+                        args,
+                        &generic_member_partial,
+                    );
                 crate::trace_compiler!(
                     "resolve",
                     "MCALL name={name} rt={rt:?} nargs={} generic_member={}",
@@ -32274,7 +35460,7 @@ impl<'a> Checker<'a> {
                                 if matches!(self.file.expr(a), Expr::Lambda { .. }) {
                                     None
                                 } else {
-                                    Some(self.expr(a))
+                                    Some(self.expr(scope, a))
                                 }
                             })
                             .collect(),
@@ -32289,19 +35475,25 @@ impl<'a> Checker<'a> {
                     .cloned()
                     .unwrap_or_default()
                     .iter()
-                    .map(|argument| self.resolve_ty(argument))
+                    .map(|argument| self.resolve_ty(scope, argument))
                     .collect::<Vec<_>>();
                 let member_ext_lambda_plan: Option<MemberExtensionLambdaPlan> =
                     ext_lambda_partial.as_ref().and_then(|partial| {
-                        self.member_extension_lambda_param_types(MemberExtensionCall {
-                            extension_receiver: rt,
-                            name: &name,
-                            args,
-                            partial_arg_tys: partial,
-                            arg_names: arg_names.as_deref(),
-                            explicit_type_args: &member_extension_type_args,
-                            trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
-                        })
+                        self.member_extension_lambda_param_types(
+                            scope,
+                            MemberExtensionCall {
+                                extension_receiver: rt,
+                                name: &name,
+                                args,
+                                partial_arg_tys: partial,
+                                arg_names: arg_names.as_deref(),
+                                explicit_type_args: &member_extension_type_args,
+                                trailing_lambda: self
+                                    .file
+                                    .call_has_trailing_lambda
+                                    .contains(&call.0),
+                            },
+                        )
                     });
                 let ext_lambda_shape = if member_ext_lambda_plan.is_none() {
                     ext_lambda_partial.as_ref().and_then(|partial| {
@@ -32369,13 +35561,13 @@ impl<'a> Checker<'a> {
                     )
                 });
                 let provider_member_lambda_pts = if ext_lambda_pts.is_none() {
-                    let explicit_type_args = self.explicit_call_type_args(call);
+                    let explicit_type_args = self.explicit_call_type_args(scope, call);
                     self.provider_member_lambda_expectations(
+                        scope,
                         call,
                         crate::symbol_resolver::SymRecv::Value(rt),
                         &name,
-                        args,
-                        &generic_member_partial,
+                        (args, &generic_member_partial),
                         &explicit_type_args,
                     )
                 } else {
@@ -32424,6 +35616,7 @@ impl<'a> Checker<'a> {
                                     {
                                         return c
                                             .check_lambda_with_function_type_and_params_labeled(
+                                                scope,
                                                 a,
                                                 signature,
                                                 pt,
@@ -32433,18 +35626,20 @@ impl<'a> Checker<'a> {
                                     }
                                     if let Some(receiver) = receiver {
                                         return c.check_lambda_with_receiver_labeled(
+                                            scope,
                                             a,
                                             receiver,
                                             pt.get(1..).unwrap_or_default(),
                                             call_fn_name.as_deref(),
                                         );
                                     }
-                                    return c.check_lambda_with_types(a, pt);
+                                    return c.check_lambda_with_types(scope, a, pt);
                                 }
                             }
                             if let Some(ref pts) = provider_member_lambda_pts {
                                 if let Some(expectation) = pts.get(i).and_then(Option::as_ref) {
                                     return c.check_lambda_with_expectation(
+                                        scope,
                                         a,
                                         expectation,
                                         call_fn_name.as_deref(),
@@ -32464,6 +35659,7 @@ impl<'a> Checker<'a> {
                                         let pt = &pts[i];
                                         let value_types = pt.get(1..).unwrap_or(&[]);
                                         return c.check_lambda_with_receiver_labeled(
+                                            scope,
                                             a,
                                             recv,
                                             value_types,
@@ -32471,14 +35667,14 @@ impl<'a> Checker<'a> {
                                         );
                                     }
                                     let pt = pts[i].clone();
-                                    return c.check_lambda_with_types(a, &pt);
+                                    return c.check_lambda_with_types(scope, a, &pt);
                                 }
                             }
-                            c.expr(a)
+                            c.expr(scope, a)
                         })
                         .collect()
                 });
-                let arg_kinds = self.call_arg_kinds(args);
+                let arg_kinds = self.call_arg_kinds(scope, args);
                 let has_lambda_expectation = provider_member_lambda_pts
                     .as_ref()
                     .is_some_and(|params| params.iter().any(Option::is_some));
@@ -32509,18 +35705,22 @@ impl<'a> Checker<'a> {
                 };
                 let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
                 let applicable_module_member = module_members.iter().any(|member| {
-                    self.module_member_candidate_score(
-                        member,
-                        args,
-                        &full_arg_tys,
-                        arg_names.as_deref(),
-                        self.file.call_has_trailing_lambda.contains(&call.0),
+                    self.call_candidate_score(
+                        scope,
+                        &member.params,
+                        &member.call_sig,
+                        ArgSlots {
+                            args,
+                            partial_arg_tys: &full_arg_tys,
+                            arg_names: arg_names.as_deref(),
+                            trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+                        },
                     )
                     .is_some()
                 });
                 if applicable_module_member || generic_member.is_some() {
                     if let Some(ret) =
-                        self.check_module_member_call(call, rt, &name, args, &arg_tys)
+                        self.check_module_member_call(scope, call, rt, &name, args, &arg_tys)
                     {
                         return ret;
                     }
@@ -32555,7 +35755,7 @@ impl<'a> Checker<'a> {
                     && rt.is_numeric_or_char()
                     && is_builtin_operator_method(&name)
                 {
-                    let call_targs = self.resolved_explicit_type_args(call);
+                    let call_targs = self.resolved_explicit_type_args(scope, call);
                     if let Some(ret) = self.record_library_extension_call_with_arg_kinds(
                         Some(call),
                         &name,
@@ -32567,8 +35767,9 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if !infix_shadows_builtin {
-                    match self.record_classpath_member_call_with_slots(call, rt, &name, args, false)
-                    {
+                    match self.record_classpath_member_call_with_slots(
+                        scope, call, rt, &name, args, false,
+                    ) {
                         ClasspathMemberSlotCall::Resolved(ret) => return ret,
                         ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
                             return Ty::Error;
@@ -32580,11 +35781,13 @@ impl<'a> Checker<'a> {
                 // `known(x)` would otherwise resolve as `known(1)` here and the unknown name would
                 // compile silently — the deferred error below is what makes it a diagnostic.
                 let unknown_named_arg = self.pending_unknown_named_arg.contains_key(&call);
+                let member_call_targs = self.resolved_explicit_type_args(scope, call);
                 if rt == Ty::String && !unknown_named_arg {
                     if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
                         &provider_member_arg_kinds,
+                        &member_call_targs,
                     ) {
                         let ret = m.ret;
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
@@ -32602,6 +35805,7 @@ impl<'a> Checker<'a> {
                         rt,
                         &name,
                         &provider_member_arg_kinds,
+                        &member_call_targs,
                     ) {
                         crate::trace_compiler!(
                             "resolve",
@@ -32636,7 +35840,7 @@ impl<'a> Checker<'a> {
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).
-                let call_targs = self.resolved_explicit_type_args(call);
+                let call_targs = self.resolved_explicit_type_args(scope, call);
                 crate::trace_compiler!(
                     "resolve",
                     "EXT-SECTION name={name} rt={rt:?} call_targs={call_targs:?}"
@@ -32655,6 +35859,7 @@ impl<'a> Checker<'a> {
                         .insert(call, call_targs.iter().copied().map(Some).collect());
                 }
                 self.retarget_postponable_extension_arguments(
+                    scope,
                     rt,
                     &name,
                     args,
@@ -32664,15 +35869,15 @@ impl<'a> Checker<'a> {
                 // Re-derive the argument kinds: the retarget re-checks postponed generic arguments
                 // (`mutableSetOf()` → `MutableSet<Module>`), and the resolutions below must see the
                 // RETARGETED types, exactly as they saw the mutated `arg_tys` before `CallArgKind`.
-                let arg_kinds = self.checked_call_arg_kinds(args);
+                let arg_kinds = self.checked_call_arg_kinds(scope, args);
                 // Member extensions precede imported extensions.
-                if let Some(ret) =
-                    self.check_member_extension_function_call(call, rt, &name, args, &arg_tys)
+                if let Some(ret) = self
+                    .check_member_extension_function_call(scope, call, rt, &name, args, &arg_tys)
                 {
                     return ret;
                 }
                 if let Some(ret) =
-                    self.record_extension_call_with_slots(call, &name, rt, args, &call_targs)
+                    self.record_extension_call_with_slots(scope, call, &name, rt, args, &call_targs)
                 {
                     return ret;
                 }
@@ -32736,17 +35941,34 @@ impl<'a> Checker<'a> {
                 // Explicit `f.invoke(args)` on a function VALUE — the same invoke convention as `f(args)`.
                 // A non-function receiver's explicit `.invoke(...)` stays on the normal member path.
                 if name == CALLABLE_INVOKE_OPERATOR && matches!(rt, Ty::Fun(_)) {
-                    if let Some(ret) = self.record_invoke(call, receiver, rt, args, &arg_tys, span)
-                    {
+                    if let Some(ret) = self.record_invoke(
+                        scope,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
+                        receiver,
+                        rt,
+                        span,
+                    ) {
                         return ret;
                     }
                 }
                 // (`@InlineOnly` extensions — scope fns `takeIf`/`let`/… — are resolved and recorded by
                 // `record_library_extension_call_with_arg_kinds` above: one extension resolution admits
                 // inline, and the lowerer splices via the callable's `inline` flag. No separate inline path here.)
-                if let Some(ret) =
-                    self.record_source_extension_call(call, rt, &name, args, &arg_tys, &arg_kinds)
-                {
+                if let Some(ret) = self.record_source_extension_call(
+                    scope,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys: &arg_tys,
+                    },
+                    rt,
+                    &name,
+                    &arg_kinds,
+                ) {
                     return ret;
                 }
                 if let Some(sig) = self.unique_visible_source_extension(rt, &name) {
@@ -32811,14 +36033,18 @@ impl<'a> Checker<'a> {
                     {
                         if inner.ctor_params.len() == arg_tys.len() {
                             let inferred = self.expect_source_constructor_args(
-                                call,
+                                scope,
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
                                 &inner,
                                 &inner.ctor_params,
-                                args,
-                                &arg_tys,
                                 None,
                             );
                             return self.ctor_result_name_with_inferred(
+                                scope,
                                 call,
                                 inner.internal_name(),
                                 inferred,
@@ -32846,7 +36072,7 @@ impl<'a> Checker<'a> {
                         // miscompile the calling convention.
                         .filter(|m| !m.suspend())
                     {
-                        self.expect_call_args(&m.params, m.call_sig.vararg, args, &arg_tys);
+                        self.expect_call_args(scope, &m.params, m.call_sig.vararg, args, &arg_tys);
                         // Record the resolved static member so the lowerer emits it without
                         // re-resolving (see [`TypeInfo::resolved_companions`]).
                         let ret = m.ret;
@@ -32855,8 +36081,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let local_extensions = self
-                    .lookup_local_fun_overloads(&name)
-                    .map(<[_]>::to_vec)
+                    .lookup_local_fun_overloads(scope, &name)
                     .unwrap_or_default();
                 let mut applicable_local_extensions = Vec::new();
                 for (stmt_id, signature) in local_extensions {
@@ -32866,7 +36091,7 @@ impl<'a> Checker<'a> {
                     let Some(receiver_ref) = function.receiver.as_ref() else {
                         continue;
                     };
-                    let expected_receiver = self.resolve_ty(receiver_ref);
+                    let expected_receiver = self.resolve_ty(scope, receiver_ref);
                     if !self.receiver_is_assignable(rt, expected_receiver)
                         || signature.context_count != 0
                     {
@@ -32892,7 +36117,7 @@ impl<'a> Checker<'a> {
                         .filter(|(score, _, _)| Some(*score) == best);
                     match (selected.next(), selected.next()) {
                         (Some((_, stmt_id, signature)), None) => {
-                            self.expect_call_args(&signature.params, false, args, &arg_tys);
+                            self.expect_call_args(scope, &signature.params, false, args, &arg_tys);
                             let ret = signature.ret;
                             self.mark_local_function_call(
                                 call,
@@ -32913,14 +36138,14 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if let Some((signature, origin)) = self.receiver_function_value(&name) {
+                if let Some((signature, origin)) = self.receiver_function_value(scope, &name) {
                     if let Some((expected_receiver, params)) =
                         Self::receiver_function_parts(signature)
                     {
                         if params.len() == arg_tys.len()
                             && self.receiver_is_assignable(rt, expected_receiver)
                         {
-                            self.expect_call_args(params, false, args, &arg_tys);
+                            self.expect_call_args(scope, params, false, args, &arg_tys);
                             self.expr_lowers.insert(
                                 call,
                                 ExprLowering::ReceiverFnInvoke {
@@ -32941,58 +36166,77 @@ impl<'a> Checker<'a> {
                 // read the property (its type is `Ty::Fun`) and invoke it through the one invoke
                 // convention, exactly like a local/top-level function-typed value.
                 let prop_fun_ty = self
-                    .resolve_property_read(rt, &name, span, Some(callee))
+                    .resolve_property_read(scope, rt, &name, span, Some(callee))
                     .filter(|t| matches!(t, Ty::Fun(_)));
                 if let Some(fun_ty) = prop_fun_ty {
-                    if let Some(ret) =
-                        self.record_invoke(call, callee, fun_ty, args, &arg_tys, span)
-                    {
+                    if let Some(ret) = self.record_invoke(
+                        scope,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
+                        callee,
+                        fun_ty,
+                        span,
+                    ) {
                         return ret;
                     }
                 }
                 if !module_members.is_empty() {
                     if let Some(ret) =
-                        self.check_module_member_call(call, rt, &name, args, &arg_tys)
+                        self.check_module_member_call(scope, call, rt, &name, args, &arg_tys)
                     {
                         return ret;
                     }
                 }
                 if rt.is_nullable() {
                     let non_null = rt.non_null();
-                    let callable_property_exists = match self.probe_property_read(non_null, &name) {
-                        Some(PropertyReadProbe::Found { ty, access })
-                            if is_function_property_shape(ty) =>
-                        {
-                            if let Some((visibility, owner)) = access {
-                                if visibility != Visibility::Public
-                                    && !self.member_accessible(visibility, owner)
-                                {
-                                    self.reject_if_inaccessible(
-                                        visibility,
-                                        &name,
-                                        owner,
-                                        self.call_callee_name_span(call),
-                                    );
-                                    return Ty::Error;
+                    let callable_property_exists =
+                        match self.probe_property_read(scope, non_null, &name) {
+                            Some(PropertyReadProbe::Found { ty, access })
+                                if is_function_property_shape(ty) =>
+                            {
+                                if let Some((visibility, owner)) = access {
+                                    if visibility != Visibility::Public
+                                        && !self.member_accessible(visibility, owner)
+                                    {
+                                        self.reject_if_inaccessible(
+                                            visibility,
+                                            &name,
+                                            owner,
+                                            self.call_callee_name_span(call),
+                                        );
+                                        return Ty::Error;
+                                    }
                                 }
+                                true
                             }
-                            true
-                        }
-                        Some(PropertyReadProbe::Ambiguous) => {
-                            self.diags.error(
-                                self.call_callee_name_span(call),
-                                format!("overload resolution ambiguity for member '{name}'"),
-                            );
-                            return Ty::Error;
-                        }
-                        _ => false,
-                    };
-                    let exists_on_non_null =
-                        self.member_name_exists_on(non_null, &name) || callable_property_exists;
+                            Some(PropertyReadProbe::Ambiguous) => {
+                                self.diags.error(
+                                    self.call_callee_name_span(call),
+                                    format!("overload resolution ambiguity for member '{name}'"),
+                                );
+                                return Ty::Error;
+                            }
+                            _ => false,
+                        };
+                    let exists_on_non_null = self.member_name_exists_on(scope, non_null, &name)
+                        || callable_property_exists;
                     if exists_on_non_null {
                         self.report_nullable_receiver_call(call, rt);
                         return Ty::Error;
                     }
+                }
+                if let Some(ret) = self.retry_member_call_with_expected_arguments(
+                    scope,
+                    call,
+                    rt,
+                    &name,
+                    args,
+                    &mut arg_tys,
+                ) {
+                    return ret;
                 }
                 let inapplicable_candidates = self
                     .resolver()
@@ -33011,23 +36255,28 @@ impl<'a> Checker<'a> {
             }
             // free function call: name(args)
             Expr::Name(fname) => {
-                let local_value = self.lookup(&fname).map(|local| (local.ty, local.origin));
+                let local_value = self
+                    .lookup(scope, &fname)
+                    .map(|local| (local.ty, local.origin));
                 let local_value_ty = local_value.map(|(ty, _)| ty);
                 if let Some((receiver_ty, origin)) = local_value {
-                    let arg_tys = self.invoke_operator_arg_tys(receiver_ty, args);
+                    let arg_tys = self.invoke_operator_arg_tys(scope, receiver_ty, args);
                     if origin == ReceiverFnValueOrigin::Local {
-                        if let Some((signature, origin)) = self.receiver_function_value(&fname) {
+                        if let Some((signature, origin)) =
+                            self.receiver_function_value(scope, &fname)
+                        {
                             if let Some((expected_receiver, params)) =
                                 Self::receiver_function_parts(signature)
                             {
                                 if let Some(implicit_receiver) = self
                                     .receiver_function_implicit_receiver(
+                                        scope,
                                         expected_receiver,
                                         params.len(),
                                         arg_tys.len(),
                                     )
                                 {
-                                    self.expect_call_args(params, false, args, &arg_tys);
+                                    self.expect_call_args(scope, params, false, args, &arg_tys);
                                     self.mark_extension_receiver_used(call, implicit_receiver);
                                     self.expr_lowers.insert(
                                         call,
@@ -33048,20 +36297,27 @@ impl<'a> Checker<'a> {
                     if origin == ReceiverFnValueOrigin::Local
                         || !matches!(receiver_ty, Ty::Fun(signature) if signature.has_receiver)
                     {
-                        if let Some(ret) =
-                            self.record_invoke(call, callee, receiver_ty, args, &arg_tys, span)
-                        {
+                        if let Some(ret) = self.record_invoke(
+                            scope,
+                            CallArgs {
+                                call,
+                                args,
+                                arg_tys: &arg_tys,
+                            },
+                            callee,
+                            receiver_ty,
+                            span,
+                        ) {
                             return ret;
                         }
                     }
                 }
                 let local_overloads = self
-                    .lookup_local_fun_overloads(&fname)
-                    .map(<[_]>::to_vec)
+                    .lookup_local_fun_overloads(scope, &fname)
                     .unwrap_or_default();
                 let receiver_function_value = local_value_ty
                     .is_none()
-                    .then(|| self.receiver_function_value(&fname))
+                    .then(|| self.receiver_function_value(scope, &fname))
                     .flatten();
                 let property_fun_ty = if local_value_ty.is_none() {
                     self.syms.props.get(&fname).map(|(ty, _, _)| *ty)
@@ -33072,7 +36328,7 @@ impl<'a> Checker<'a> {
                 let candidate_arg_tys = (property_fun_ty.is_some()
                     || receiver_function_value.is_some()
                     || local_overloads.len() > 1)
-                    .then(|| self.arg_tys(args));
+                    .then(|| self.arg_tys(scope, args));
                 let applicable_local = candidate_arg_tys
                     .as_ref()
                     .map(|arg_tys| {
@@ -33089,7 +36345,7 @@ impl<'a> Checker<'a> {
                                 )?;
                                 let context_count =
                                     signature.context_count.min(signature.params.len());
-                                self.resolve_context_args(&signature.params[..context_count])
+                                self.resolve_context_args(scope, &signature.params[..context_count])
                                     .map(|_| (score, candidate.clone()))
                             })
                             .collect::<Vec<_>>()
@@ -33107,12 +36363,13 @@ impl<'a> Checker<'a> {
                             {
                                 if let Some(implicit_receiver) = self
                                     .receiver_function_implicit_receiver(
+                                        scope,
                                         expected_receiver,
                                         params.len(),
                                         arg_tys.len(),
                                     )
                                 {
-                                    self.expect_call_args(params, false, args, arg_tys);
+                                    self.expect_call_args(scope, params, false, args, arg_tys);
                                     self.mark_extension_receiver_used(call, implicit_receiver);
                                     self.expr_lowers.insert(
                                         call,
@@ -33130,9 +36387,17 @@ impl<'a> Checker<'a> {
                             }
                         }
                         if let Some(rt) = property_fun_ty {
-                            if let Some(ret) =
-                                self.record_invoke(call, callee, rt, args, arg_tys, span)
-                            {
+                            if let Some(ret) = self.record_invoke(
+                                scope,
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys,
+                                },
+                                callee,
+                                rt,
+                                span,
+                            ) {
                                 return ret;
                             }
                         }
@@ -33172,7 +36437,7 @@ impl<'a> Checker<'a> {
                     };
                     if ctx_count > 0 && ctx_count <= sig.params.len() {
                         let ctx_types = &sig.params[..ctx_count];
-                        if let Some(sources) = self.resolve_context_args(ctx_types) {
+                        if let Some(sources) = self.resolve_context_args(scope, ctx_types) {
                             let value_count = sig.params.len() - ctx_count;
                             let required_end =
                                 sig.params.len().saturating_sub(usize::from(sig.vararg()));
@@ -33184,7 +36449,7 @@ impl<'a> Checker<'a> {
                                         .map_or(i < sig.required, |has_default| !*has_default)
                                 });
                             if (!sig.vararg() && args.len() > value_count) || missing_required {
-                                self.arg_tys(args);
+                                self.arg_tys(scope, args);
                                 let source_display = match self.file.stmt(stmt_id) {
                                     Stmt::LocalFun(function) => {
                                         Some(source_function_display(self.file, function, sig.ret))
@@ -33270,6 +36535,7 @@ impl<'a> Checker<'a> {
                                         let parameter_index = ctx_count + i;
                                         let p = sig.params[parameter_index];
                                         let aty = self.check_argument_expected(
+                                            scope,
                                             *argument,
                                             p,
                                             sig.lambda_recv
@@ -33297,6 +36563,7 @@ impl<'a> Checker<'a> {
                                     };
                                     let parameter_index = ctx_count + i;
                                     let aty = self.check_argument_expected(
+                                        scope,
                                         *a,
                                         p,
                                         sig.lambda_recv
@@ -33371,6 +36638,7 @@ impl<'a> Checker<'a> {
                                 if let Some(argument) = argument {
                                     let parameter = sig.params[index];
                                     let actual = self.check_argument_expected(
+                                        scope,
                                         *argument,
                                         parameter,
                                         sig.lambda_recv.get(index).copied().unwrap_or(false),
@@ -33420,7 +36688,7 @@ impl<'a> Checker<'a> {
                     if args.len() > sig.params.len()
                         || (args.len() < sig.params.len() && !omitted_all_default)
                     {
-                        self.arg_tys(args); // still record types for lowering
+                        self.arg_tys(scope, args); // still record types for lowering
                         let source_display = match self.file.stmt(stmt_id) {
                             Stmt::LocalFun(function) => {
                                 Some(source_function_display(self.file, function, sig.ret))
@@ -33451,6 +36719,7 @@ impl<'a> Checker<'a> {
                         for (i, &a) in args.iter().enumerate() {
                             let p = sig.params[i];
                             let aty = self.check_argument_expected(
+                                scope,
                                 a,
                                 p,
                                 sig.lambda_recv.get(i).copied().unwrap_or(false),
@@ -33468,9 +36737,13 @@ impl<'a> Checker<'a> {
                 {
                     if let Expr::Lambda { params, body } = self.file.expr(*lambda).clone() {
                         if params.is_empty() {
-                            let rt = self.expr(*receiver);
-                            let bt =
-                                self.check_with_receiver_labeled(rt, body, call_fn_name.as_deref());
+                            let rt = self.expr(scope, *receiver);
+                            let bt = self.check_with_receiver_labeled(
+                                scope,
+                                rt,
+                                body,
+                                call_fn_name.as_deref(),
+                            );
                             self.mark_receiver_lambda_call(call, *receiver, body, false);
                             return self.set(call, bt);
                         }
@@ -33482,7 +36755,7 @@ impl<'a> Checker<'a> {
                     [arg] if matches!(self.file.expr(*arg), Expr::Lambda { .. }) => Some(*arg),
                     _ => None,
                 };
-                let unshadowed_name = !self.lexical_value_declares(&fname);
+                let unshadowed_name = !self.lexical_value_declares(scope, &fname);
                 let suspend_coroutine = matches!(
                     crate::libraries::coroutine_intrinsic(&fname),
                     Some(
@@ -33496,7 +36769,7 @@ impl<'a> Checker<'a> {
                     !self.module_declares(&fname) && suspend_coroutine,
                 ) {
                     let cont = Ty::obj("kotlin/coroutines/Continuation");
-                    self.check_lambda_with_types(lambda, &[cont]);
+                    self.check_lambda_with_types(scope, lambda, &[cont]);
                     // The call's type is the intrinsic's `T`: an explicit type argument
                     // (`suspendCoroutineUninterceptedOrReturn<Unit> { … }`) when present, else
                     // the enclosing suspend function's return type — but NEVER `Nothing`: the
@@ -33508,7 +36781,7 @@ impl<'a> Checker<'a> {
                         .call_type_args
                         .get(&call.0)
                         .and_then(|args| args.first())
-                        .map(|r| self.resolve_ty_no_diag(r))
+                        .map(|r| self.resolve_ty_no_diag(scope, r))
                         .filter(|t| *t != Ty::Error);
                     let r = explicit.unwrap_or(self.ret_ty);
                     let r = if r == Ty::Nothing { Ty::Unit } else { r };
@@ -33519,7 +36792,7 @@ impl<'a> Checker<'a> {
                     if let Some(cls) = self.module_class_named(&fname).cloned() {
                         if let Some(sig) = cls.single_method().filter(|_| cls.is_interface()) {
                             let pts = sig.params.clone();
-                            self.check_lambda_with_types(lambda, &pts);
+                            self.check_lambda_with_types(scope, lambda, &pts);
                             return self.set(call, Ty::obj(&cls.internal()));
                         }
                     }
@@ -33529,7 +36802,7 @@ impl<'a> Checker<'a> {
                             .resolved_type_name(internal)
                             .and_then(|t| t.sam_method.clone())
                         {
-                            self.check_lambda_with_types(lambda, &sam.params);
+                            self.check_lambda_with_types(scope, lambda, &sam.params);
                             return self.set(call, Ty::obj_name(internal));
                         }
                     }
@@ -33547,7 +36820,7 @@ impl<'a> Checker<'a> {
                     && args.len() == 2
                     && matches!(self.file.expr(args[1]), Expr::Lambda { .. });
                 let toplevel_partial: Option<Vec<Option<Ty>>> = if !self
-                    .lexical_value_declares(&fname)
+                    .lexical_value_declares(scope, &fname)
                     && !array_init_lambda
                     && (has_lambda_argument || has_callable_ref_argument)
                 {
@@ -33560,7 +36833,7 @@ impl<'a> Checker<'a> {
                                 ) {
                                     None
                                 } else {
-                                    Some(self.expr(a))
+                                    Some(self.expr(scope, a))
                                 }
                             })
                             .collect(),
@@ -33571,6 +36844,7 @@ impl<'a> Checker<'a> {
                 let adapted_outer = has_callable_ref_argument
                     .then(|| {
                         self.adapted_outer_call_signature(
+                            scope,
                             call,
                             &fname,
                             args,
@@ -33597,7 +36871,11 @@ impl<'a> Checker<'a> {
                 let user_generic: Option<Vec<Vec<Ty>>> = toplevel_partial
                     .as_ref()
                     .filter(|_| has_lambda_argument)
-                    .and_then(|partial| self.user_generic_call(&fname, partial));
+                    .and_then(|partial| self.user_generic_call(scope, &fname, partial));
+                // EXPLICIT type arguments (`build<C> { … }`): they bind the callee's formals ahead
+                // of any argument unification, so the lambda shape's receiver/params substitute to
+                // the written types instead of the formals' bounds.
+                let explicit_type_args = self.resolved_explicit_type_args(scope, call);
                 let toplevel_lambda_shape = toplevel_partial
                     .as_ref()
                     .filter(|_| has_lambda_argument)
@@ -33609,7 +36887,23 @@ impl<'a> Checker<'a> {
                             partial,
                             arg_names.as_deref(),
                             self.file.call_has_trailing_lambda.contains(&call.0),
+                            &explicit_type_args,
                         )
+                        // A semantic `Type(args) { … }` FACTORY: the companion's `operator fun
+                        // invoke` is the callee, so its
+                        // parameter — a (suspend) receiver function type — shapes the lambda the
+                        // same way a top-level overload's would. Without it the block types
+                        // receiver-less and every member inside is "unresolved".
+                        .or_else(|| {
+                            self.companion_invoke_lambda_shape(
+                                scope,
+                                &fname,
+                                partial,
+                                arg_names.as_deref(),
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                                &explicit_type_args,
+                            )
+                        })
                     });
                 let mut known_generic_bindings = if let Some((_, bindings)) = adapted_outer {
                     bindings
@@ -33619,7 +36913,7 @@ impl<'a> Checker<'a> {
                     let mut bindings = crate::symbol_resolver::GSigBinds::new();
                     if let Some(type_arguments) = self.file.call_type_args.get(&call.0).cloned() {
                         for (formal, argument) in generic.formals.iter().zip(type_arguments) {
-                            bindings.insert(formal.clone(), self.resolve_ty(&argument));
+                            bindings.insert(formal.clone(), self.resolve_ty(scope, &argument));
                         }
                     }
                     if let Some(partial) = toplevel_partial.as_ref() {
@@ -33664,6 +36958,22 @@ impl<'a> Checker<'a> {
                 let toplevel_lambda_materialized: Option<Vec<bool>> = toplevel_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.materialized.clone());
+                // Functional-interface adaptation must be selected before a lambda receives its
+                // first expected type. Query the same federated top-level candidate set used for
+                // final resolution; declaration origin never participates in this decision.
+                let top_level_sam =
+                    if has_lambda_argument && !self.lexical_value_declares(scope, &fname) {
+                        self.top_level_sam_selection(
+                            scope,
+                            call,
+                            &fname,
+                            args,
+                            toplevel_partial.as_deref(),
+                            &explicit_type_args,
+                        )
+                    } else {
+                        None
+                    };
                 // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
@@ -33678,7 +36988,7 @@ impl<'a> Checker<'a> {
                     && top_level_functions
                         .top_level()
                         .any(|o| o.flags.inline.can_inline());
-                let toplevel_must_inline = !self.lexical_value_declares(&fname)
+                let toplevel_must_inline = !self.lexical_value_declares(scope, &fname)
                     && !self.module_declares(&fname)
                     && args
                         .iter()
@@ -33696,7 +37006,7 @@ impl<'a> Checker<'a> {
                                 if matches!(self.file.expr(*argument), Expr::Lambda { .. }) {
                                     None
                                 } else {
-                                    Some(self.expr(*argument))
+                                    Some(self.expr(scope, *argument))
                                 }
                             })
                             .collect::<Vec<_>>(),
@@ -33704,7 +37014,7 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let implicit_member_lambda_enabled = !self.lexical_value_declares(&fname)
+                let implicit_member_lambda_enabled = !self.lexical_value_declares(scope, &fname)
                     && known_sig.is_none()
                     && args
                         .iter()
@@ -33712,12 +37022,13 @@ impl<'a> Checker<'a> {
                 let ordinary_this_member_lambda_shape: Option<ModuleMemberLambdaShape> =
                     if implicit_member_lambda_enabled {
                         let partial = this_member_partial.as_deref().unwrap_or_default();
-                        self.implicit_member_receiver_types()
+                        self.implicit_member_receiver_types(scope)
                             .into_iter()
                             .find_map(|receiver| {
                                 let members = crate::module_symbols::ModuleSymbols::new(self.syms)
                                     .instance_members(receiver, &fname);
                                 let member = self.best_module_member_candidate(
+                                    scope,
                                     &members,
                                     args,
                                     partial,
@@ -33733,6 +37044,7 @@ impl<'a> Checker<'a> {
                                     arg_names.as_deref(),
                                 );
                                 module_member_lambda_shape(
+                                    &*self.syms.libraries,
                                     member,
                                     generic_member.as_ref(),
                                     args,
@@ -33754,23 +37066,28 @@ impl<'a> Checker<'a> {
                         .cloned()
                         .unwrap_or_default()
                         .iter()
-                        .map(|argument| self.resolve_ty(argument))
+                        .map(|argument| self.resolve_ty(scope, argument))
                         .collect::<Vec<_>>();
-                    self.implicit_receiver_types()
+                    self.implicit_receiver_types(scope)
                         .into_iter()
                         .find_map(|receiver| {
-                            self.member_extension_lambda_param_types(MemberExtensionCall {
-                                extension_receiver: receiver,
-                                name: &fname,
-                                args,
-                                partial_arg_tys: this_member_partial.as_deref().unwrap_or_default(),
-                                arg_names: arg_names.as_deref(),
-                                explicit_type_args: &explicit_type_args,
-                                trailing_lambda: self
-                                    .file
-                                    .call_has_trailing_lambda
-                                    .contains(&call.0),
-                            })
+                            self.member_extension_lambda_param_types(
+                                scope,
+                                MemberExtensionCall {
+                                    extension_receiver: receiver,
+                                    name: &fname,
+                                    args,
+                                    partial_arg_tys: this_member_partial
+                                        .as_deref()
+                                        .unwrap_or_default(),
+                                    arg_names: arg_names.as_deref(),
+                                    explicit_type_args: &explicit_type_args,
+                                    trailing_lambda: self
+                                        .file
+                                        .call_has_trailing_lambda
+                                        .contains(&call.0),
+                                },
+                            )
                         })
                 } else {
                     None
@@ -33779,7 +37096,7 @@ impl<'a> Checker<'a> {
                     && ordinary_this_member_lambda_shape.is_none()
                     && this_member_ext_lambda_plan.is_none()
                 {
-                    self.implicit_receiver_types()
+                    self.implicit_receiver_types(scope)
                         .into_iter()
                         .find_map(|receiver| {
                             let shape = self.extension_lambda_shape(
@@ -33805,17 +37122,17 @@ impl<'a> Checker<'a> {
                     && this_member_ext_lambda_plan.is_none()
                     && implicit_library_ext_lambda_shape.is_none()
                 {
-                    let explicit_type_args = self.explicit_call_type_args(call);
+                    let explicit_type_args = self.explicit_call_type_args(scope, call);
                     let partial = this_member_partial.as_deref().unwrap_or_default();
-                    self.implicit_receiver_types()
+                    self.implicit_receiver_types(scope)
                         .into_iter()
                         .find_map(|receiver| {
                             self.provider_member_lambda_expectations(
+                                scope,
                                 call,
                                 crate::symbol_resolver::SymRecv::Value(receiver),
                                 &fname,
-                                args,
-                                partial,
+                                (args, partial),
                                 &explicit_type_args,
                             )
                         })
@@ -33870,7 +37187,7 @@ impl<'a> Checker<'a> {
                         })
                     });
                 let ctor_lambda_types: Option<Vec<(Ty, bool)>> = if !self
-                    .lexical_value_declares(&fname)
+                    .lexical_value_declares(scope, &fname)
                     && args
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
@@ -33879,6 +37196,21 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // An otherwise UN-SHAPED lambda is postponed only when this bare name semantically
+                // denotes a constructible classifier and no top-level callable competes for it. The
+                // classifier lookup is federated, so source/module/dependency origin does not enter
+                // the rule. Ordinary functions and extensions keep their established eager fallback
+                // (notably zero-parameter lambdas whose empty parameter vector is a real shape).
+                let defer_unshaped_constructor_lambdas = has_lambda_argument
+                    && !self.lexical_value_declares(scope, &fname)
+                    && !self.same_named_callable_exists(&fname)
+                    && self
+                        .classifier_internal_name(&fname)
+                        .and_then(|internal| self.resolved_type_name(internal))
+                        .is_some_and(|classifier| {
+                            !classifier.constructors.is_empty()
+                                || classifier.value_underlying.is_some()
+                        });
                 // Diagnostics from typing the arguments below are provisional while `fname` may name a
                 // class: if no constructor accepts them, a companion `operator fun invoke` re-types
                 // them against ITS signature and this pass's complaints never applied.
@@ -33888,13 +37220,14 @@ impl<'a> Checker<'a> {
                     .enumerate()
                     .map(|(i, &a)| {
                         if array_init_lambda && i == 1 {
-                            return self.check_lambda_with_types(a, &[Ty::Int]);
+                            return self.check_lambda_with_types(scope, a, &[Ty::Int]);
                         }
                         if let Some((Ty::Fun(signature), has_receiver)) =
                             ctor_lambda_types.as_ref().and_then(|types| types.get(i))
                         {
                             if matches!(self.file.expr(a), Expr::Lambda { .. }) {
                                 return self.check_lambda_with_function_type_labeled(
+                                    scope,
                                     a,
                                     signature,
                                     *has_receiver,
@@ -33922,6 +37255,7 @@ impl<'a> Checker<'a> {
                                 if let Some(signature) = signature {
                                     return self.with_lambda_mutation(is_inline, |checker| {
                                         checker.check_lambda_with_function_type_and_params_labeled(
+                                            scope,
                                             a,
                                             signature,
                                             &pt,
@@ -33933,6 +37267,7 @@ impl<'a> Checker<'a> {
                                 if let Some(receiver) = receiver {
                                     return self.with_lambda_mutation(is_inline, |checker| {
                                         checker.check_lambda_with_receiver_labeled(
+                                            scope,
                                             a,
                                             receiver,
                                             pt.get(1..).unwrap_or_default(),
@@ -33941,7 +37276,7 @@ impl<'a> Checker<'a> {
                                     });
                                 }
                                 return self.with_lambda_mutation(is_inline, |checker| {
-                                    checker.check_lambda_with_types(a, &pt)
+                                    checker.check_lambda_with_types(scope, a, &pt)
                                 });
                             }
                         }
@@ -33957,13 +37292,14 @@ impl<'a> Checker<'a> {
                                     .flatten()
                                 {
                                     return self.check_lambda_with_receiver_labeled(
+                                        scope,
                                         a,
                                         receiver,
                                         pt.get(1..).unwrap_or_default(),
                                         call_fn_name.as_deref(),
                                     );
                                 }
-                                return self.check_lambda_with_types(a, &pt);
+                                return self.check_lambda_with_types(scope, a, &pt);
                             }
                         }
                         // The receiver type for a RECEIVER function-type param (from `@Metadata`), if any.
@@ -34003,15 +37339,18 @@ impl<'a> Checker<'a> {
                                         let values = pts[i].get(value_start..).unwrap_or_default();
                                         if !contexts.is_empty() || recv_i.is_some() {
                                             c.check_lambda_with_implicit_receivers_labeled(
+                                                scope,
                                                 a,
-                                                contexts,
-                                                recv_i,
-                                                values,
+                                                LambdaShape {
+                                                    context_types: contexts,
+                                                    extension_receiver: recv_i,
+                                                    value_types: values,
+                                                },
                                                 false,
                                                 call_fn_name.as_deref(),
                                             )
                                         } else {
-                                            c.check_lambda_with_types(a, &pts[i])
+                                            c.check_lambda_with_types(scope, a, &pts[i])
                                         }
                                     },
                                 );
@@ -34023,6 +37362,7 @@ impl<'a> Checker<'a> {
                         if let Some(recv) = recv_i {
                             if matches!(self.file.expr(a), Expr::Lambda { .. }) {
                                 return self.check_lambda_with_receiver_labeled(
+                                    scope,
                                     a,
                                     recv,
                                     &[],
@@ -34040,12 +37380,25 @@ impl<'a> Checker<'a> {
                                 .and_then(|pts| pts.get(i))
                                 .cloned()
                                 .unwrap_or_default();
-                            return self
-                                .with_lambda_mutation(true, |c| c.check_lambda_with_types(a, &pt));
+                            return self.with_lambda_mutation(true, |c| {
+                                c.check_lambda_with_types(scope, a, &pt)
+                            });
                         }
                         // Reuse the already-computed non-lambda argument type (avoid re-typing).
                         if let Some(Some(t)) = toplevel_partial.as_ref().and_then(|p| p.get(i)) {
                             return *t;
+                        }
+                        // A selected functional-interface target supplies the lambda's first real
+                        // parameter types. This precedes declaration-specific fallback shaping.
+                        if let Some(TopLevelSamSelection::Picked(_, sam_pts)) =
+                            top_level_sam.as_ref()
+                        {
+                            if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                                if let Some(Some(pt)) = sam_pts.get(i) {
+                                    let pt = pt.clone();
+                                    return self.check_lambda_with_types(scope, a, &pt);
+                                }
+                            }
                         }
                         if let Some(ref sig) = known_sig {
                             // The PARAMETER index this argument binds — not always the positional `i`:
@@ -34112,6 +37465,7 @@ impl<'a> Checker<'a> {
                                     sig.lambda_recv.get(pi).copied().unwrap_or(false);
                                 return self.with_lambda_mutation(sig.is_inline(), |c| {
                                     c.check_lambda_with_function_type_labeled(
+                                        scope,
                                         a,
                                         expected_function,
                                         has_receiver,
@@ -34144,12 +37498,12 @@ impl<'a> Checker<'a> {
                                         if let Some(params) = self
                                             .specialized_sam_lambda_param_types(sig, pi, &actuals)
                                         {
-                                            return self.check_lambda_with_types(a, &params);
+                                            return self.check_lambda_with_types(scope, a, &params);
                                         }
                                         if let Some(params) =
                                             self.fun_interface_sam_params(sig.params[pi])
                                         {
-                                            return self.check_lambda_with_types(a, &params);
+                                            return self.check_lambda_with_types(scope, a, &params);
                                         }
                                     }
                                 }
@@ -34161,7 +37515,7 @@ impl<'a> Checker<'a> {
                                     } else {
                                         parameter
                                     };
-                                    return self.expr_expected(a, expected);
+                                    return self.expr_expected(scope, a, expected);
                                 }
                             }
                         }
@@ -34170,15 +37524,24 @@ impl<'a> Checker<'a> {
                         // `E`-typed varargs; only the lowering differs (the array is passed through). A
                         // mixed/unsupported spread shape still type-checks here but the lowering skips it.
                         if self.file.is_spread_arg(a) {
-                            let t = self.expr(a);
+                            let t = self.expr(scope, a);
                             if let Some(elem) = t.array_elem() {
                                 return elem;
                             }
                         }
-                        self.expr(a)
+                        // A constructor lambda that no earlier semantic shape supplied remains a
+                        // PROBE until selection. The classifier decision above is provider-neutral;
+                        // other callables retain their established argument checking and lowering.
+                        if defer_unshaped_constructor_lambdas
+                            && matches!(self.file.expr(a), Expr::Lambda { .. })
+                            && self.expr_types[a.0 as usize] == Ty::Error
+                        {
+                            return self.lambda_probe_ty(scope, a).unwrap_or(Ty::Error);
+                        }
+                        self.expr(scope, a)
                     })
                     .collect();
-                if !self.lexical_value_declares(&fname) {
+                if !self.lexical_value_declares(scope, &fname) {
                     // The array creators are compiler intrinsics keyed on the resolved stdlib symbol; a
                     // user-defined function of the same name shadows them (as in kotlinc), so only treat
                     // the name as the intrinsic when it isn't a user-declared top-level function.
@@ -34199,7 +37562,7 @@ impl<'a> Checker<'a> {
                                 .call_type_args
                                 .get(&call.0)
                                 .and_then(|ts| ts.first())
-                                .map(|r| self.resolve_ty(r))
+                                .map(|r| self.resolve_ty(scope, r))
                                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                             if elem.is_reference() {
                                 return Ty::array(elem);
@@ -34219,7 +37582,7 @@ impl<'a> Checker<'a> {
                                 "enum name",
                             );
                             if let Some(enum_ty) = self
-                                .reified_type_arg(call)
+                                .reified_type_arg(scope, call)
                                 .filter(|ty| self.is_enum_type(*ty))
                             {
                                 return enum_ty;
@@ -34227,7 +37590,7 @@ impl<'a> Checker<'a> {
                         }
                         if fname == "enumValues" && args.is_empty() {
                             if let Some(enum_ty) = self
-                                .reified_type_arg(call)
+                                .reified_type_arg(scope, call)
                                 .filter(|ty| self.is_enum_type(*ty))
                             {
                                 return Ty::array(enum_ty);
@@ -34238,11 +37601,16 @@ impl<'a> Checker<'a> {
                             .call_type_args
                             .get(&call.0)
                             .and_then(|ts| ts.first())
-                            .map(|r| self.resolve_ty(r))
+                            .map(|r| self.resolve_ty(scope, r))
                             .or_else(|| expected.and_then(Ty::array_elem));
-                        if let Some(t) =
-                            self.check_array_builtin(&fname, args, &arg_tys, span, element_hint)
-                        {
+                        if let Some(t) = self.check_array_builtin(
+                            scope,
+                            &fname,
+                            args,
+                            &arg_tys,
+                            span,
+                            element_hint,
+                        ) {
                             return t;
                         }
                     }
@@ -34261,7 +37629,7 @@ impl<'a> Checker<'a> {
                         .companion_of
                         .as_deref()
                         .and_then(|name| self.same_package_class(name).map(ClassSig::internal_name))
-                        .or_else(|| self.this_ty.and_then(|receiver| receiver.obj_internal()));
+                        .or_else(|| scope.this_ty().and_then(|receiver| receiver.obj_internal()));
                     if let Some(owner) = companion_owner {
                         if let Some(sig) = self
                             .syms
@@ -34271,7 +37639,13 @@ impl<'a> Checker<'a> {
                             .cloned()
                         {
                             if sig.accepts_arity(args.len()) {
-                                self.expect_call_args(&sig.params, sig.vararg(), args, &arg_tys);
+                                self.expect_call_args(
+                                    scope,
+                                    &sig.params,
+                                    sig.vararg(),
+                                    args,
+                                    &arg_tys,
+                                );
                                 return sig.ret;
                             }
                         }
@@ -34281,7 +37655,7 @@ impl<'a> Checker<'a> {
                 // that is one of the ENCLOSING class's own nested types resolves to the NESTED class
                 // (Kotlin nested-type scoping), preferred over a same-named top-level — consistent with
                 // `resolve_type`, so the construction's type matches the field/return-position type.
-                if !self.value_root_shadows_classifier(&fname) {
+                if !self.value_root_shadows_classifier(scope, &fname) {
                     let (inherited, inherited_owner) =
                         self.inherited_nested_type_with_owner(&fname);
                     if inherited == InheritedNestedClassifier::Ambiguous {
@@ -34293,8 +37667,11 @@ impl<'a> Checker<'a> {
                         );
                         return Ty::Error;
                     }
-                    let scoped_nested_internal = self
-                        .enclosing_nested_type_name(&fname)
+                    // A statement-position classifier is the NEAREST binding — it wins over an
+                    // enclosing class's nested type and over anything at file level.
+                    let scoped_nested_internal = scope
+                        .local_classifier(&fname)
+                        .or_else(|| self.enclosing_nested_type_name(&fname))
                         .or_else(|| inherited.found());
                     let inherited_shape = self
                         .enclosing_nested_type_name(&fname)
@@ -34319,111 +37696,75 @@ impl<'a> Checker<'a> {
                         })
                     };
                     if let Some(cls) = ctor_cls {
-                        if cls.is_interface() {
-                            if let Some(ret) =
-                                self.take_source_companion_invoke(call, &cls, args, pre_arg_diags)
-                            {
-                                return ret;
-                            }
-                        }
-                        let Some(declaration) =
+                        if let Some(declaration) =
                             self.source_class_decl_by_internal(cls.internal_name())
-                        else {
-                            return self.ctor_result_name(call, cls.internal_name());
-                        };
-                        let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
-                        let arguments = CtorDelegationCall {
-                            args: args.to_vec(),
-                            names,
-                            trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
-                        };
-                        let candidates = self.source_constructor_candidates(&declaration, &cls);
-                        let Some(selected) =
-                            self.select_source_constructor(&arguments, &candidates)
-                        else {
-                            // `Type { … }` / `Type(x)` where no constructor is applicable but the
-                            // COMPANION declares `operator fun invoke`: kotlinc picks the operator, so
-                            // the call is a factory, not a construction.
-                            if let Some(ret) =
-                                self.take_source_companion_invoke(call, &cls, args, pre_arg_diags)
-                            {
-                                return ret;
-                            }
-                            if !self.report_source_constructor_mapping_error(
-                                call,
-                                args,
-                                &arguments,
-                                &candidates,
-                                &declaration.name,
-                            ) && !self.call_already_has_argument_diagnostic(call, args)
-                            {
-                                self.diags
-                                    .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
-                            }
-                            return self.ctor_result_name(call, cls.internal_name());
-                        };
-                        // Candidate matching already checked the concrete shell of a generic function
-                        // parameter. Do not then re-check its erased type here: `(Int) -> T` may have
-                        // become `(Int) -> Any`, and that erasure would reject a nullable return that is
-                        // precisely the evidence used to infer `T`. Fully concrete parameters still use
-                        // the ordinary assignability diagnostic below.
-                        for (index, (&argument, &expected)) in
-                            args.iter().zip(&selected.argument_types).enumerate()
                         {
-                            let constraint = selected
-                                .argument_slots
-                                .get(index)
-                                .and_then(|&slot| selected.parameter_constraints.get(slot))
-                                .copied()
-                                .unwrap_or_default();
-                            if constraint != ConstructorParameterConstraint::Concrete {
-                                continue;
+                            let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
+                            let arguments = CtorDelegationCall {
+                                args: args.to_vec(),
+                                names,
+                                trailing_lambda: self
+                                    .file
+                                    .call_has_trailing_lambda
+                                    .contains(&call.0),
+                            };
+                            let candidates = self.source_constructor_candidates(&declaration, &cls);
+
+                            // A real applicable constructor wins even when a same-named factory is
+                            // available. Interfaces deliberately contribute no constructible candidate;
+                            // their synthetic source shape exists for diagnostics, not as a callable.
+                            let selected = (!cls.is_interface())
+                                .then(|| self.select_source_constructor(&arguments, &candidates))
+                                .flatten();
+                            if let Some(selected) = selected {
+                                return self.finish_source_constructor_call(
+                                    scope, call, &cls, args, &arg_tys, selected,
+                                );
                             }
-                            self.expect_assignable(
-                                expected,
-                                self.expr_types[argument.0 as usize],
-                                self.span(argument),
-                                "constructor argument",
+
+                            // With no constructor selected, an applicable top-level factory precedes a
+                            // companion `invoke`. We do not resolve the factory here: declining this
+                            // constructor branch lets the ordinary top-level path below perform the one
+                            // authoritative selection and recording pass. An inapplicable declaration,
+                            // however, must not hide an applicable companion operator.
+                            let type_args = self.resolved_explicit_type_args(scope, call);
+                            let factory_applies = self.same_named_callable_is_applicable(
+                                scope, call, &fname, args, &arg_tys, &type_args,
                             );
-                        }
-                        let primary = matches!(
-                            &selected.target,
-                            ResolvedCtorDelegationTarget::ThisPrimary { .. }
-                        );
-                        let params = selected.target.params().to_vec();
-                        let inferred = if primary && selected.vararg.is_none() {
-                            let mut slots = vec![None; params.len()];
-                            for (&argument, &slot) in args.iter().zip(&selected.argument_slots) {
-                                slots[slot] = Some(argument);
+                            if !factory_applies {
+                                if let Some(ret) = self.take_source_companion_invoke(
+                                    scope,
+                                    call,
+                                    &cls,
+                                    args,
+                                    pre_arg_diags,
+                                ) {
+                                    return ret;
+                                }
                             }
-                            self.expect_source_constructor_args(
-                                call,
-                                &cls,
-                                &params,
-                                args,
-                                &arg_tys,
-                                Some(&slots),
-                            )
-                        } else {
-                            Vec::new()
-                        };
-                        self.resolved_constructors.insert(
-                            call,
-                            ResolvedConstructor::Source {
-                                primary,
-                                params,
-                                argument_slots: selected.argument_slots,
-                                argument_types: selected.argument_types,
-                                omitted: selected.omitted,
-                                vararg: selected.vararg,
-                                default_masks: selected.default_masks,
-                            },
-                        );
-                        return self.ctor_result_name_with_inferred(
-                            call,
-                            cls.internal_name(),
-                            inferred,
-                        );
+                            if !self.same_named_callable_exists(&fname) {
+                                if !self.report_source_constructor_mapping_error(
+                                    call,
+                                    args,
+                                    &arguments,
+                                    &candidates,
+                                    &declaration.name,
+                                ) && !self.call_already_has_argument_diagnostic(call, args)
+                                {
+                                    self.diags
+                                        .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                                }
+                                return self.ctor_result_name(scope, call, cls.internal_name());
+                            }
+                        } else if !cls.is_interface() {
+                            // A semantic class signature without a source AST has already supplied
+                            // the construction result through this classifier rung. Preserve that
+                            // stable exit: sending it through provider selection changes dependency
+                            // scheduling during multi-file return inference. Interfaces are the sole
+                            // exception because they cannot denote a construction; declining them lets
+                            // the ordinary provider-neutral callable path select a same-named factory.
+                            return self.ctor_result_name(scope, call, cls.internal_name());
+                        }
                     }
                     if let Some(internal) = scoped_nested_internal
                         .filter(|internal| self.syms.class_by_type_name(*internal).is_none())
@@ -34433,6 +37774,7 @@ impl<'a> Checker<'a> {
                         {
                             let resolved = if let Some(classifier) = inherited_shape.as_deref() {
                                 self.record_named_inherited_library_constructor_name(
+                                    scope,
                                     call,
                                     internal,
                                     classifier,
@@ -34441,6 +37783,7 @@ impl<'a> Checker<'a> {
                                 )
                             } else {
                                 self.record_named_library_constructor_name(
+                                    scope,
                                     call,
                                     internal,
                                     args,
@@ -34448,7 +37791,7 @@ impl<'a> Checker<'a> {
                                 )
                             };
                             match resolved {
-                                Ok(Some(_)) => return self.ctor_result_name(call, internal),
+                                Ok(Some(_)) => return self.ctor_result_name(scope, call, internal),
                                 Ok(None) => {}
                                 Err(error) => {
                                     self.report_call_arg_mapping_error(call, args, error);
@@ -34458,6 +37801,7 @@ impl<'a> Checker<'a> {
                         }
                         let resolved = if let Some(classifier) = inherited_shape.as_deref() {
                             self.record_inherited_library_constructor_name(
+                                scope,
                                 call,
                                 internal,
                                 classifier,
@@ -34466,6 +37810,7 @@ impl<'a> Checker<'a> {
                             )
                         } else {
                             self.record_library_constructor_name(
+                                scope,
                                 call,
                                 internal,
                                 args.to_vec(),
@@ -34473,7 +37818,7 @@ impl<'a> Checker<'a> {
                             )
                         };
                         if resolved.is_some() {
-                            return self.ctor_result_name(call, internal);
+                            return self.ctor_result_name(scope, call, internal);
                         }
                     }
                     // Named classpath constructors use metadata names/defaults; lowering selects
@@ -34481,6 +37826,7 @@ impl<'a> Checker<'a> {
                     if arg_names.is_some() || self.file.call_has_trailing_lambda.contains(&call.0) {
                         if let Some(internal) = self.classifier_internal_name(&fname) {
                             match self.record_named_library_constructor_name(
+                                scope,
                                 call,
                                 internal,
                                 args,
@@ -34497,11 +37843,20 @@ impl<'a> Checker<'a> {
                                             );
                                         }
                                     }
-                                    return self.ctor_result_name(call, internal);
+                                    return self.ctor_result_name(scope, call, internal);
                                 }
                                 Ok(None) => {}
                                 Err(error) => {
-                                    if !self.same_named_callable_exists(&fname) {
+                                    // A companion `operator fun invoke` makes `Type { … }` a
+                                    // factory candidate: the
+                                    // constructor's mapping failure must not claim the call
+                                    // before the invoke arm below has had its chance. Only the
+                                    // trailing-lambda form defers — a named-argument-only call
+                                    // is never the factory sugar, so it keeps this diagnostic.
+                                    if !(self.same_named_callable_exists(&fname)
+                                        || self.file.call_has_trailing_lambda.contains(&call.0)
+                                            && self.companion_declares_lambda_invoke(scope, &fname))
+                                    {
                                         self.report_call_arg_mapping_error(call, args, error);
                                     }
                                 }
@@ -34521,6 +37876,7 @@ impl<'a> Checker<'a> {
                     {
                         if self
                             .record_library_constructor_name(
+                                scope,
                                 call,
                                 internal,
                                 args.to_vec(),
@@ -34528,7 +37884,7 @@ impl<'a> Checker<'a> {
                             )
                             .is_some()
                         {
-                            return self.ctor_result_name(call, internal);
+                            return self.ctor_result_name(scope, call, internal);
                         }
                     }
                     // A library type by simple name (`throw RuntimeException("msg")`, a mapped/aliased
@@ -34538,6 +37894,7 @@ impl<'a> Checker<'a> {
                     if let Some(internal) = self.syms.class_names.get(&fname) {
                         if self
                             .record_library_constructor_name(
+                                scope,
                                 call,
                                 internal,
                                 args.to_vec(),
@@ -34545,7 +37902,7 @@ impl<'a> Checker<'a> {
                             )
                             .is_some()
                         {
-                            return self.ctor_result_name(call, internal);
+                            return self.ctor_result_name(scope, call, internal);
                         }
                     }
                     // `Any()` constructs java.lang.Object (Kotlin's root type).
@@ -34553,48 +37910,27 @@ impl<'a> Checker<'a> {
                         return Ty::obj("kotlin/Any");
                     }
                 }
-                let implicit_receivers = self.implicit_receivers();
+                let implicit_receivers = self.implicit_receivers(scope);
                 for implicit_receiver in implicit_receivers.iter().copied() {
                     let receiver = implicit_receiver.ty;
-                    if let Some(ret) = self
-                        .check_applicable_module_member_call(call, receiver, &fname, args, &arg_tys)
-                    {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                    if let Some(ret) = self.check_applicable_module_member_call(
+                        scope, call, receiver, &fname, args, &arg_tys,
+                    ) {
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                     if let Some(ret) = self.check_member_extension_function_call(
-                        call, receiver, &fname, args, &arg_tys,
+                        scope, call, receiver, &fname, args, &arg_tys,
                     ) {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                 }
                 if !self.module_declares(&fname) {
-                    if let Some(outer) = self.this_ty.and_then(|receiver| {
-                        receiver
-                            .obj_internal()
-                            .and_then(|internal| {
-                                self.syms
-                                    .class_by_type_name(internal)
-                                    .and_then(ClassSig::inner_of_name)
-                            })
-                            .map(Ty::obj_name)
-                    }) {
-                        if !implicit_receivers
-                            .iter()
-                            .any(|receiver| receiver.ty == outer)
-                        {
-                            if let Some(ret) = self.check_applicable_module_member_call(
-                                call, outer, &fname, args, &arg_tys,
-                            ) {
-                                return ret;
-                            }
-                        }
-                    }
-                    if let Some(bt) = self.effective_this_narrow() {
+                    if let Some(bt) = self.effective_this_narrow(scope) {
                         if let Some(bi) = bt.obj_internal() {
                             if let Some(ret) = self.check_applicable_module_member_call(
-                                call, bt, &fname, args, &arg_tys,
+                                scope, call, bt, &fname, args, &arg_tys,
                             ) {
                                 self.narrowed_this_member.insert(call, bi);
                                 self.mark_current_extension_receiver_used(call);
@@ -34611,16 +37947,23 @@ impl<'a> Checker<'a> {
                 let user_shadows = self.module_declares(&fname);
                 let module =
                     crate::module_symbols::ModuleSymbols::for_file(self.syms, self.file_index);
-                let module_top = self
-                    .imports
-                    .get(&fname)
-                    .and_then(|target| target.rsplit_once('/'))
-                    .and_then(|(package, declared_name)| {
-                        module.resolve_top_level_in_scope(
-                            declared_name,
-                            &arg_tys,
-                            &[type_name(package)],
-                        )
+                let (top_level_sam_pick, top_level_sam_ambiguous) = match top_level_sam {
+                    Some(TopLevelSamSelection::Picked(candidate, _)) => (Some(*candidate), None),
+                    Some(TopLevelSamSelection::Ambiguous(candidates)) => (None, Some(candidates)),
+                    None => (None, None),
+                };
+                let module_top = top_level_sam_pick
+                    .or_else(|| {
+                        self.imports
+                            .get(&fname)
+                            .and_then(|target| target.rsplit_once('/'))
+                            .and_then(|(package, declared_name)| {
+                                module.resolve_top_level_in_scope(
+                                    declared_name,
+                                    &arg_tys,
+                                    &[type_name(package)],
+                                )
+                            })
                     })
                     .or_else(|| {
                         module.resolve_top_level_in_scope(&fname, &arg_tys, &self.fn_scope)
@@ -34630,31 +37973,33 @@ impl<'a> Checker<'a> {
                 // the same name: the receiver is a closer scope, so kotlinc binds the member. Attempt it
                 // FIRST — `this_member_call_ret` returns `None` when no member matches the arguments, so a
                 // genuine top-level call (no such member) still falls through to `module_top` below.
-                for implicit_receiver in self.implicit_receivers() {
+                for implicit_receiver in self.implicit_receivers(scope) {
                     if let Some(ret) = self.this_member_call_ret(
+                        scope,
                         call,
                         implicit_receiver.ty,
                         &fname,
                         &arg_tys,
                         args,
                     ) {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                 }
-                if let Some((signature, origin)) = self.receiver_function_value(&fname) {
+                if let Some((signature, origin)) = self.receiver_function_value(scope, &fname) {
                     if matches!(origin, ReceiverFnValueOrigin::DispatchProperty(_)) {
                         if let Some((expected_receiver, params)) =
                             Self::receiver_function_parts(signature)
                         {
                             if let Some(implicit_receiver) = self
                                 .receiver_function_implicit_receiver(
+                                    scope,
                                     expected_receiver,
                                     params.len(),
                                     arg_tys.len(),
                                 )
                             {
-                                self.expect_call_args(params, false, args, &arg_tys);
+                                self.expect_call_args(scope, params, false, args, &arg_tys);
                                 self.mark_extension_receiver_used(call, implicit_receiver);
                                 self.expr_lowers.insert(
                                     call,
@@ -34672,7 +38017,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let shadowed_by_member = self.this_ty.is_some_and(|t| {
+                let shadowed_by_member = scope.this_ty().is_some_and(|t| {
                     // A user-class member, OR a member on a classpath/builtin receiver type — either
                     // takes precedence over a context-parameter function, so decline context resolution
                     // rather than risk a wrong binding.
@@ -34682,6 +38027,7 @@ impl<'a> Checker<'a> {
                 });
                 if module_top.is_none() && !shadowed_by_member {
                     if let Some((fi, sources)) = self.resolve_context_module_top_level(
+                        scope,
                         &fname,
                         args,
                         arg_names.as_deref(),
@@ -34689,8 +38035,10 @@ impl<'a> Checker<'a> {
                     ) {
                         let params = &fi.callable.params;
                         let ctx_count = fi.context_count;
-                        let ret_ty = self.module_top_level_return(call, &fi, &arg_tys, expected);
+                        let ret_ty =
+                            self.module_top_level_return(scope, call, &fi, &arg_tys, expected);
                         let generic_expectations = self.source_generic_argument_expectations(
+                            scope,
                             call,
                             &fi,
                             args,
@@ -34748,16 +38096,30 @@ impl<'a> Checker<'a> {
                         return ret_ty;
                     }
                 }
+                // Report only after closer implicit-receiver and context callables had their turn.
+                // The candidate list itself is provider-neutral and therefore uses the same
+                // ambiguity rule for source, sibling-module, and dependency declarations.
+                if let Some(candidates) = top_level_sam_ambiguous {
+                    let mut message =
+                        "overload resolution ambiguity between candidates:".to_string();
+                    for candidate in &candidates {
+                        message.push('\n');
+                        message.push_str(&Self::top_level_candidate_display(&fname, candidate));
+                    }
+                    self.diags.error(self.call_callee_name_span(call), message);
+                    return Ty::Error;
+                }
                 if let Some(fi) = module_top {
-                    let host_checkpoint = (self.script_host_may_declare_call(&fname)
+                    let host_checkpoint = (self.script_host_may_declare_call(scope, &fname)
                         && fi
                             .source_key
                             .is_some_and(|(source_file, _)| source_file != self.file_index))
                     .then_some(self.diags.diags.len());
                     let params = &fi.callable.params;
                     let cs = &fi.call_sig;
-                    let ret_ty = self.module_top_level_return(call, &fi, &arg_tys, expected);
+                    let ret_ty = self.module_top_level_return(scope, call, &fi, &arg_tys, expected);
                     let generic_expectations = self.source_generic_argument_expectations(
+                        scope,
                         call,
                         &fi,
                         args,
@@ -34777,7 +38139,7 @@ impl<'a> Checker<'a> {
                     let value_count = params.len().saturating_sub(ctx_count);
                     if ctx_count > 0 && !shadowed_by_member && ctx_count <= params.len() {
                         let ctx_types = &params[..ctx_count];
-                        if let Some(sources) = self.resolve_context_args(ctx_types) {
+                        if let Some(sources) = self.resolve_context_args(scope, ctx_types) {
                             let required_end = params.len().saturating_sub(usize::from(cs.vararg));
                             let missing_required = arg_names.is_none()
                                 && arg_tys.len() < value_count
@@ -35054,11 +38416,11 @@ impl<'a> Checker<'a> {
                         for (i, slot) in slots.iter().enumerate() {
                             if let Some(a) = slot {
                                 let aty = self.expr_types[a.0 as usize];
-                                self.expect_assignable(
+                                self.expect_call_arg(
+                                    scope,
                                     generic_expectations.get(a).copied().unwrap_or(params[i]),
+                                    *a,
                                     aty,
-                                    self.span(*a),
-                                    "argument",
                                 );
                             }
                         }
@@ -35084,14 +38446,14 @@ impl<'a> Checker<'a> {
                         );
                     } else {
                         for (i, a) in arg_tys.iter().enumerate() {
-                            self.expect_assignable(
+                            self.expect_call_arg(
+                                scope,
                                 generic_expectations
                                     .get(&args[i])
                                     .copied()
                                     .unwrap_or(params[i]),
+                                args[i],
                                 *a,
-                                self.span(args[i]),
-                                "argument",
                             );
                         }
                     }
@@ -35101,7 +38463,7 @@ impl<'a> Checker<'a> {
                 // A receiver-less top-level library function (`listOf(…)`): resolve it through the
                 // library set (vararg-aware), checking each argument against the resolved parameters.
                 if !user_shadows {
-                    let call_targs = self.resolved_explicit_type_args(call);
+                    let call_targs = self.resolved_explicit_type_args(scope, call);
                     let (sel_args, arg_tys, resolved_slots): (
                         Vec<ExprId>,
                         Vec<Ty>,
@@ -35131,7 +38493,7 @@ impl<'a> Checker<'a> {
                         }
                         None => (args.to_vec(), arg_tys.clone(), None),
                     };
-                    let arg_kinds = self.call_arg_kinds(&sel_args);
+                    let arg_kinds = self.call_arg_kinds(scope, &sel_args);
                     // A labelled call that OMITS a parameter (`mockk(relaxed = true)`) is not a
                     // positional call: `sel_args` is compacted to the arguments actually written, so
                     // matching it against the leading parameters checks each argument against the
@@ -35183,7 +38545,7 @@ impl<'a> Checker<'a> {
                         // source for every context parameter the call is not applicable here.
                         if c.context_count > 0 && c.context_count <= c.params.len() {
                             let Some(sources) =
-                                self.resolve_context_args(&c.params[..c.context_count])
+                                self.resolve_context_args(scope, &c.params[..c.context_count])
                             else {
                                 return Ty::Error;
                             };
@@ -35373,8 +38735,8 @@ impl<'a> Checker<'a> {
                 // `getstatic Type.Companion` value) and dispatch as an invoke-operator on it — exactly
                 // kotlinc's `Type.Companion.invoke(args)`. An interface has no constructor, so a factory
                 // `invoke` is the only way to "construct" it (`Wrapped(uuid)` in production code).
-                if !self.value_root_shadows_classifier(&fname) {
-                    if let Some(ct) = self.classpath_companion_ty(&fname) {
+                if !self.value_root_shadows_classifier(scope, &fname) {
+                    if let Some(ct) = self.semantic_companion_ty(&fname) {
                         let has_invoke = self
                             .resolve_instance_member(ct, CALLABLE_INVOKE_OPERATOR, &arg_tys)
                             .is_some_and(|m| !m.member.suspend());
@@ -35382,9 +38744,17 @@ impl<'a> Checker<'a> {
                             // Type the callee name as the companion instance so lowering reads it as the
                             // `getstatic Type.Companion` receiver; `record_invoke` selects the operator.
                             self.set(callee, ct);
-                            if let Some(t) =
-                                self.record_invoke(call, callee, ct, args, &arg_tys, span)
-                            {
+                            if let Some(t) = self.record_invoke(
+                                scope,
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
+                                callee,
+                                ct,
+                                span,
+                            ) {
                                 return t;
                             }
                         }
@@ -35400,8 +38770,8 @@ impl<'a> Checker<'a> {
                             // { … }`): as plain typed `FunctionN` args the Java SAM-interface parameter
                             // (`Executable`, `Runnable`) never matches and the imported static is
                             // reported unresolved.
-                            let arg_kinds = self.call_arg_kinds(args);
-                            let call_targs = self.resolved_explicit_type_args(call);
+                            let arg_kinds = self.call_arg_kinds(scope, args);
+                            let call_targs = self.resolved_explicit_type_args(scope, call);
                             if let Some(m) = self.resolve_companion_with_literal_args(
                                 &owner_internal,
                                 &member,
@@ -35429,7 +38799,13 @@ impl<'a> Checker<'a> {
                                 if let Some(elem) = vararg {
                                     callable.vararg_elem = Some(elem);
                                 }
-                                self.expect_call_args(&m.params, m.call_sig.vararg, args, &arg_tys);
+                                self.expect_call_args(
+                                    scope,
+                                    &m.params,
+                                    m.call_sig.vararg,
+                                    args,
+                                    &arg_tys,
+                                );
                                 self.resolved_calls
                                     .insert(call, ResolvedCall::TopLevel(callable));
                                 return ret;
@@ -35445,17 +38821,18 @@ impl<'a> Checker<'a> {
                     })
                 {
                     if let Some(ret) = self.check_module_member_call(
+                        scope,
                         call,
                         implicit_receiver.ty,
                         &fname,
                         args,
                         &arg_tys,
                     ) {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                 }
-                if self.script_host_may_declare_call(&fname) {
+                if self.script_host_may_declare_call(scope, &fname) {
                     return Ty::Error;
                 }
                 let candidates = self.resolver().top_level_candidates(&fname);
@@ -35478,12 +38855,12 @@ impl<'a> Checker<'a> {
                     .is_empty()
                     || implicit_receivers.iter().copied().any(|receiver| {
                         !self
-                            .member_extension_function_shapes(receiver.ty, &fname)
+                            .member_extension_function_shapes(scope, receiver.ty, &fname)
                             .is_empty()
                     });
                 let (message, identity) = if has_inapplicable_candidate {
                     (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None)
-                } else if self.value_root_shadows_classifier(&fname) {
+                } else if self.value_root_shadows_classifier(scope, &fname) {
                     (format!("unresolved function '{fname}'"), None)
                 } else if let Some((internal, access)) = self.inaccessible_classifier(&fname) {
                     (
@@ -35506,10 +38883,19 @@ impl<'a> Checker<'a> {
             _ => {
                 // An arbitrary callee expression (e.g. `make()(x)`): invoke it if it is a function
                 // value or carries a member `operator fun invoke`.
-                let callee_ty = self.expr(callee);
-                let arg_tys = self.invoke_operator_arg_tys(callee_ty, args);
-                if let Some(ret) = self.record_invoke(call, callee, callee_ty, args, &arg_tys, span)
-                {
+                let callee_ty = self.expr(scope, callee);
+                let arg_tys = self.invoke_operator_arg_tys(scope, callee_ty, args);
+                if let Some(ret) = self.record_invoke(
+                    scope,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys: &arg_tys,
+                    },
+                    callee,
+                    callee_ty,
+                    span,
+                ) {
                     return ret;
                 }
                 if callee_ty != Ty::Error {
@@ -35598,20 +38984,26 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    fn try_in_place_assignment(&mut self, s: StmtId, value: ExprId) -> bool {
+    fn try_in_place_assignment(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        s: StmtId,
+        value: ExprId,
+    ) -> bool {
         let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(value).clone() else {
             return false;
         };
         let Some(aname) = assign_op_name(op) else {
             return false;
         };
-        let recv = self.expr(lhs);
+        let recv = self.expr(scope, lhs);
         if recv == Ty::Error {
             return false;
         }
-        let rt = self.expr(rhs);
+        let rt = self.expr(scope, rhs);
         let span = self.file.stmt_spans[s.0 as usize];
-        let Some((ret, call)) = self.operator_call_ret(recv, aname, &[rt], &[rhs], span) else {
+        let Some((ret, call)) = self.operator_call_ret(scope, recv, aname, &[rt], &[rhs], span)
+        else {
             return false;
         };
         if ret == Ty::Error {
@@ -35669,7 +39061,7 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn stmt(&mut self, s: StmtId) {
+    fn stmt(&mut self, scope: &CheckerScope<'_>, s: StmtId) {
         self.extension_receiver_stmt_uses[s.0 as usize].clear();
         match self.file.stmt(s).clone() {
             Stmt::Local {
@@ -35677,15 +39069,15 @@ impl<'a> Checker<'a> {
                 name,
                 ty,
                 init,
-            } => self.stmt_local(s, is_var, name, ty, init),
+            } => self.stmt_local(scope, s, is_var, name, ty, init),
             Stmt::LocalDelegate {
                 is_var,
                 name,
                 ty,
                 delegate,
-            } => self.stmt_local_delegate(s, is_var, name, ty, delegate),
+            } => self.stmt_local_delegate(scope, s, is_var, name, ty, delegate),
             Stmt::LocalLateinit { name, ty } => {
-                if self.declared_in_current_scope(&name) {
+                if self.declared_in_current_scope(scope, &name) {
                     self.diags.error(
                         self.file.stmt_spans[s.0 as usize],
                         format!("krusty: conflicting local declaration '{name}'"),
@@ -35693,28 +39085,28 @@ impl<'a> Checker<'a> {
                 }
                 // A `lateinit var`: a mutable local of the (non-null) annotation type, initialized later.
                 // No initializer to check; reads before assignment are allowed (they throw at runtime).
-                let prop_ty = self.resolve_ty(&ty);
+                let prop_ty = self.resolve_ty(scope, &ty);
                 // Same rule as `Stmt::Local`: an unresolved annotation errors, never a silent `Error`.
                 if prop_ty == Ty::Error {
                     self.diags
                         .error(ty.span, format!("unresolved reference '{}'.", ty.name));
                 }
                 self.local_decl_types.insert(s, prop_ty);
-                self.declare(&name, prop_ty, true);
+                self.declare(scope, &name, prop_ty, true);
             }
-            Stmt::Destructure { entries, init } => self.stmt_destructure(s, entries, init),
-            Stmt::IncDec { name, dec, prefix } => self.stmt_inc_dec(s, name, dec, prefix),
-            Stmt::Assign { name, value } => self.stmt_assign(s, name, value),
+            Stmt::Destructure { entries, init } => self.stmt_destructure(scope, s, entries, init),
+            Stmt::IncDec { name, dec, prefix } => self.stmt_inc_dec(scope, s, name, dec, prefix),
+            Stmt::Assign { name, value } => self.stmt_assign(scope, s, name, value),
             Stmt::AssignMember {
                 receiver,
                 name,
                 value,
-            } => self.stmt_assign_member(s, receiver, name, value),
+            } => self.stmt_assign_member(scope, s, receiver, name, value),
             Stmt::AssignIndex {
                 array,
                 indices,
                 value,
-            } => self.stmt_assign_index(s, array, indices, value),
+            } => self.stmt_assign_index(scope, s, array, indices, value),
             Stmt::Break(label) | Stmt::Continue(label) => {
                 // A labeled `break@l`/`continue@l` must name an enclosing loop's label (kotlinc rejects
                 // an unknown label; krusty must too, else codegen would silently retarget a loop).
@@ -35732,22 +39124,24 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            Stmt::Return(e, label) => self.stmt_return(s, e, label),
+            Stmt::Return(e, label) => self.stmt_return(scope, s, e, label),
             Stmt::While { cond, body, label } => {
-                let ct = self.expr(cond);
+                let ct = self.expr(scope, cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 // `while (x != null) …` — the condition holds on body entry, so narrow stable
                 // bindings exactly like an `if` then-branch (kotlinc does the same).
-                let casts = self.condition_narrowings(cond, true);
+                let casts = self.condition_narrowings(scope, cond, true);
                 let compound = matches!(self.file.expr(cond), Expr::Binary { op: BinOp::And, .. });
-                self.push_scope();
-                self.apply_narrowings(&casts, compound);
-                self.check_loop_body(body, &label);
-                self.pop_scope();
+                {
+                    let body_scope = scope.child(ScopeKind::Block);
+                    let scope = &body_scope;
+                    self.apply_narrowings(scope, &casts, compound);
+                    self.check_loop_body(scope, body, &label);
+                }
             }
             Stmt::DoWhile { body, cond, label } => {
-                self.check_loop_body(body, &label);
-                let ct = self.expr(cond);
+                self.check_loop_body(scope, body, &label);
+                let ct = self.expr(scope, cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "do-while condition");
             }
             Stmt::For {
@@ -35755,37 +39149,90 @@ impl<'a> Checker<'a> {
                 range,
                 body,
                 label,
-            } => self.stmt_for(name, range, body, label),
+            } => self.stmt_for(scope, name, range, body, label),
             Stmt::ForEach {
                 name,
                 iterable,
                 body,
                 label,
-            } => self.stmt_for_each(name, iterable, body, label),
+            } => self.stmt_for_each(scope, name, iterable, body, label),
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
                 // executed and produces no bytecode (kotlinc drops it). Its lambda body uses the
                 // `ContractBuilder` DSL (`callsInPlace`/`returns`/`implies`) which isn't ordinary
                 // executable code — skip type-checking it and mark the statement for the lowerer to
                 // drop, instead of resolving the DSL members as if they were real calls.
-                if self.is_contract_call(e) {
+                if self.is_contract_call(scope, e) {
                     self.stmt_lowers.insert(s, StmtLowering::Erased);
                 } else {
-                    self.expr_statement(e);
+                    self.expr_statement(scope, e);
                 }
             }
             Stmt::LocalFun(f) => {
-                self.check_local_fun(&f.clone(), s);
+                self.check_local_fun(scope, &f.clone(), s);
             }
-            // A local class is hoisted to a top-level `Decl::Class` (see `hoist_local_classes`) and
-            // checked there — nothing to do for the in-body statement.
-            Stmt::LocalClass(_) => {}
+            // A local class is checked HERE, from the scope it was written in — the enclosing
+            // function's parameters and locals are visible to it, so a capture resolves instead of
+            // reporting an unresolved reference.
+            Stmt::LocalClass(_) => {
+                let Some(&d) = self.file.local_class_decls.get(&s) else {
+                    // Not hoisted (a local class with super-constructor arguments): no declaration
+                    // to check against, so the reference stays unresolved and the file skips.
+                    return;
+                };
+                let Decl::Class(cl) = self.file.decl(d) else {
+                    return;
+                };
+                let cl = cl.clone();
+                // Bind the SOURCE name to the internal name the hoisted declaration was registered
+                // under, in the scope holding this statement — so it stays visible to the rest of
+                // the block AND to the class's own body (a member may name its own class).
+                if let Stmt::LocalClass(source) = self.file.stmt(s) {
+                    if let Some(internal) = self
+                        .same_package_class(&cl.name)
+                        .map(ClassSig::internal_name)
+                    {
+                        scope.rebind(
+                            &source.name,
+                            Ns::Classifier,
+                            ScopeBinding::LocalClass(internal),
+                        );
+                    }
+                }
+                // A local class captures its enclosing instance, so its rung carries the outer
+                // `this` — and with it the enclosing class's type parameters (kotlinc 2.4.10
+                // accepts `class A<T>(val t: T) { fun m() { class L { fun k(): T = t } } }`).
+                //
+                // Checking a classifier mid-body rewrites the checker's per-BODY state (the
+                // expected return, the loop labels a `break` may name, the mutation summary), so
+                // the enclosing body's is saved across it.
+                // What the class reads from here is decided in THIS scope — the only place the
+                // enclosing bindings exist. A reference the pipeline cannot represent is rejected,
+                // so the file skips with a diagnostic naming the capture rather than emitting a
+                // class without what it needs.
+                let captures = self.local_class_captures(scope, &cl);
+                if let Some(captured) = &captures.unsupported {
+                    self.diags.error(
+                        cl.span,
+                        format!(
+                            "krusty: local class '{}' captures '{captured}' from its enclosing scope (unsupported)",
+                            class_declaration_label(&cl.name)
+                        ),
+                    );
+                } else if !captures.values.is_empty() {
+                    self.discovered_local_class_captures
+                        .insert(d, captures.values);
+                }
+                let saved = self.take_body_state();
+                self.check_class(scope, &cl, d);
+                self.restore_body_state(saved);
+            }
         }
     }
 
     /// Whether `e` is an UNBOUND callable reference — `::foo`, or `Type::member` on a classifier name
     /// (as opposed to `value::member`, which captures a receiver).
-    fn unbound_callable_reference(&self, e: ExprId) -> bool {
+    fn unbound_callable_reference(&self, scope: &CheckerScope<'_>, e: ExprId) -> bool {
         let Expr::CallableRef { receiver, name } = self.file.expr(e) else {
             return false;
         };
@@ -35795,7 +39242,7 @@ impl<'a> Checker<'a> {
         match receiver {
             None => true,
             Some(receiver) => match self.file.expr(*receiver) {
-                Expr::Name(n) => self.class_literal_unbound_ty(n).is_some(),
+                Expr::Name(n) => self.class_literal_unbound_ty(scope, n).is_some(),
                 _ => false,
             },
         }
@@ -35803,6 +39250,7 @@ impl<'a> Checker<'a> {
 
     fn stmt_local(
         &mut self,
+        scope: &CheckerScope<'_>,
         s: StmtId,
         is_var: bool,
         name: String,
@@ -35813,13 +39261,13 @@ impl<'a> Checker<'a> {
         // fine — each declaration gets a fresh slot and the lowering's scope is truncated at block
         // exit, restoring the outer mapping (verified). Only a same-scope *redeclaration* is
         // rejected (kotlinc errors on it too — conflicting declarations).
-        if self.declared_in_current_scope(&name) {
+        if self.declared_in_current_scope(scope, &name) {
             self.diags.error(
                 self.file.stmt_spans[s.0 as usize],
                 format!("krusty: conflicting local declaration '{name}'"),
             );
         }
-        let declared = ty.as_ref().map(|r| self.resolve_ty(r));
+        let declared = ty.as_ref().map(|r| self.resolve_ty(scope, r));
         // An UNRESOLVED annotation must fail the file, not silently bind `Error`: the local
         // would otherwise take its initializer's shape while every use site's checks are
         // Error-suppressed — a cross-module `val b: Bar<String> = { "OK" }` (alias declared in
@@ -35833,8 +39281,8 @@ impl<'a> Checker<'a> {
         let deferred = ty.is_some() && !self.file.value_operator_spans.contains_key(&init.0);
         // Propagate an annotation's expected type through the initializer.
         let it = match declared {
-            Some(d) => self.expr_expected(init, d),
-            _ => self.expr(init),
+            Some(d) => self.expr_expected(scope, init, d),
+            _ => self.expr(scope, init),
         };
         let bind = match declared {
             Some(d) => {
@@ -35876,12 +39324,12 @@ impl<'a> Checker<'a> {
         // (`E.A::foo`) can still lower to an `invokedynamic` lambda, which implements `Function{N}` and
         // nothing else; typing its binding as a `KFunction` would `ClassCastException` on the first
         // store. Widening those needs the backend to realize EVERY reference as a reference class.
-        let bound_ty = if declared.is_none() && self.unbound_callable_reference(init) {
+        let bound_ty = if declared.is_none() && self.unbound_callable_reference(scope, init) {
             callable_reference_reflect_type(bound_ty).unwrap_or(bound_ty)
         } else {
             bound_ty
         };
-        self.declare(&name, bound_ty, is_var);
+        self.declare(scope, &name, bound_ty, is_var);
         // Flow-narrow a nullable `var` whose initializer is a non-null value (`var x: Int? = 10`
         // reads as `Int`), matching kotlinc's smart-cast, but only when the var is not written
         // inside a closure that could reset it to null on a deferred path.
@@ -35892,19 +39340,20 @@ impl<'a> Checker<'a> {
             && is_var
             && !self.fn_closure_reassigned.contains(&name)
         {
-            self.set_local_narrow(&name, Some(it));
+            self.set_local_narrow(scope, &name, Some(it));
         }
     }
 
     fn stmt_local_delegate(
         &mut self,
+        scope: &CheckerScope<'_>,
         s: StmtId,
         is_var: bool,
         name: String,
         ty: Option<TypeRef>,
         delegate: ExprId,
     ) {
-        if self.declared_in_current_scope(&name) {
+        if self.declared_in_current_scope(scope, &name) {
             self.diags.error(
                 self.file.stmt_spans[s.0 as usize],
                 format!("krusty: conflicting local declaration '{name}'"),
@@ -35912,11 +39361,11 @@ impl<'a> Checker<'a> {
         }
         // Type-check the delegate; the property's type is the annotation, else the delegate's
         // `getValue` return type.
-        let dt = self.expr(delegate);
+        let dt = self.expr(scope, delegate);
         let delegate_ret = self.record_delegate_getvalue(delegate, dt);
         let prop_ty = match ty.as_ref() {
             Some(r) => {
-                let t = self.resolve_ty(r);
+                let t = self.resolve_ty(scope, r);
                 // Same rule as `Stmt::Local`: an unresolved annotation errors instead of
                 // silently binding `Error` (every use-site check would be suppressed).
                 if t == Ty::Error {
@@ -35927,11 +39376,17 @@ impl<'a> Checker<'a> {
             }
             None => delegate_ret.unwrap_or(Ty::Error),
         };
-        self.declare(&name, prop_ty, is_var);
+        self.declare(scope, &name, prop_ty, is_var);
     }
 
-    fn stmt_destructure(&mut self, s: StmtId, entries: Vec<(String, bool)>, init: ExprId) {
-        let it = self.expr(init);
+    fn stmt_destructure(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        s: StmtId,
+        entries: Vec<(String, bool)>,
+        init: ExprId,
+    ) {
+        let it = self.expr(scope, init);
         let span = self.file.stmt_spans[s.0 as usize];
         // Destructuring requires the initializer to be a known reference type whose class
         // declares `component1..N` (e.g. a krusty `data class`). Anything else is rejected,
@@ -35942,7 +39397,7 @@ impl<'a> Checker<'a> {
             if name == "_" {
                 continue;
             } // `_` skips this component (no binding, no call)
-            if self.declared_in_current_scope(name) {
+            if self.declared_in_current_scope(scope, name) {
                 self.diags.error(
                     span,
                     format!("krusty: conflicting local declaration '{name}'"),
@@ -35967,24 +39422,24 @@ impl<'a> Checker<'a> {
                         let t = target.ret();
                         self.resolved_destructure_components
                             .insert((s, idx), target);
-                        self.declare(name, t, *is_var);
+                        self.declare(scope, name, t, *is_var);
                     }
                     None => {
                         self.diags.error(
                             span,
                             format!("krusty: unresolved property '{prop}' in destructuring"),
                         );
-                        self.declare(name, Ty::Error, *is_var);
+                        self.declare(scope, name, Ty::Error, *is_var);
                     }
                 }
                 continue;
             }
             let comp = format!("component{}", idx + 1);
-            let target = match self.destructure_component_target(s, it, &comp, &[], span) {
+            let target = match self.destructure_component_target(scope, s, it, &comp, &[], span) {
                 Ok(target) => target
                     .or_else(|| internal.and_then(|_| self.destructure_indexed_get_target(it))),
                 Err(()) => {
-                    self.declare(name, Ty::Error, *is_var);
+                    self.declare(scope, name, Ty::Error, *is_var);
                     continue;
                 }
             };
@@ -35993,29 +39448,38 @@ impl<'a> Checker<'a> {
                     let t = target.ret();
                     self.resolved_destructure_components
                         .insert((s, idx), target);
-                    self.declare(name, t, *is_var);
+                    self.declare(scope, name, t, *is_var);
                 }
                 None => {
                     self.diags.error(
                         span,
                         format!("krusty: cannot destructure this type (no operator '{comp}')"),
                     );
-                    self.declare(name, Ty::Error, *is_var);
+                    self.declare(scope, name, Ty::Error, *is_var);
                 }
             }
         }
     }
 
-    fn stmt_inc_dec(&mut self, s: StmtId, name: String, dec: bool, prefix: bool) {
+    fn stmt_inc_dec(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        s: StmtId,
+        name: String,
+        dec: bool,
+        prefix: bool,
+    ) {
         // `inc`/`dec` are overloadable operators: the built-in numeric ones, or a user
         // `inc`/`dec` operator on the variable's type. Anything else is rejected (never
         // miscompiled).
         let span = self.file.stmt_spans[s.0 as usize];
         let target_span = self.assignment_target_span(s);
-        let local = self.lookup(&name).map(|local| (local.ty, local.is_var));
+        let local = self
+            .lookup(scope, &name)
+            .map(|local| (local.ty, local.is_var));
         let implicit_property = local
             .is_none()
-            .then(|| self.implicit_property_write(&name))
+            .then(|| self.implicit_property_write(scope, &name))
             .flatten();
         if let Some(resolution) = &implicit_property {
             if let Some(span) = resolution.extension_receiver {
@@ -36039,7 +39503,7 @@ impl<'a> Checker<'a> {
                 if !ty.is_numeric_or_char() {
                     let operator_name = if dec { "dec" } else { "inc" };
                     if let Some((ret, target)) =
-                        self.operator_call_ret(ty, operator_name, &[], &[], span)
+                        self.operator_call_ret(scope, ty, operator_name, &[], &[], span)
                     {
                         self.expect_assignable(ty, ret, span, "operator result");
                         self.resolved_stmt_operator_calls.insert(
@@ -36057,6 +39521,7 @@ impl<'a> Checker<'a> {
                             Span::new(span.hi.saturating_sub(2), span.hi)
                         };
                         if !self.report_required_operator_modifier(
+                            scope,
                             ty,
                             operator_name,
                             &[],
@@ -36077,15 +39542,17 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn stmt_assign(&mut self, s: StmtId, name: String, value: ExprId) {
+    fn stmt_assign(&mut self, scope: &CheckerScope<'_>, s: StmtId, name: String, value: ExprId) {
         // `name op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
-        if self.try_in_place_assignment(s, value) {
+        if self.try_in_place_assignment(scope, s, value) {
             return;
         }
-        let local = self.lookup(&name).map(|local| (local.ty, local.is_var));
+        let local = self
+            .lookup(scope, &name)
+            .map(|local| (local.ty, local.is_var));
         let implicit_property = local
             .is_none()
-            .then(|| self.implicit_property_write(&name))
+            .then(|| self.implicit_property_write(scope, &name))
             .flatten();
         let assignment_expected = if name == "field" && local.is_none() && self.field_ty.is_some() {
             self.field_ty
@@ -36107,8 +39574,8 @@ impl<'a> Checker<'a> {
                 .or_else(|| self.syms.props.get(&name).map(|&(ty, _, _)| ty))
         };
         let vt = match assignment_expected {
-            Some(expected) => self.expr_expected(value, expected),
-            None => self.expr(value),
+            Some(expected) => self.expr_expected(scope, value, expected),
+            None => self.expr(scope, value),
         };
         let target_span = self.assignment_target_span(s);
         // `field = …` inside a setter writes the backing field.
@@ -36140,7 +39607,7 @@ impl<'a> Checker<'a> {
                             && !matches!(vt, Ty::Null | Ty::Error)
                             && vt != Ty::Nothing
                             && !self.fn_closure_reassigned.contains(&name);
-                        self.set_local_narrow(&name, narrow.then_some(vt));
+                        self.set_local_narrow(scope, &name, narrow.then_some(vt));
                     }
                 }
                 None if self.companion_own_static_property(&name)
@@ -36205,26 +39672,78 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn stmt_assign_member(&mut self, s: StmtId, receiver: ExprId, name: String, value: ExprId) {
+    fn stmt_assign_member(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        s: StmtId,
+        receiver: ExprId,
+        name: String,
+        value: ExprId,
+    ) {
         // `recv.prop op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
-        if self.try_in_place_assignment(s, value) {
+        if self.try_in_place_assignment(scope, s, value) {
             return;
         }
         // `C.prop = value` where `prop` is a companion (static) property: the receiver is a CLASS
         // NAME, not a value, so it must NOT be typed as an expression — a class without a
         // first-class companion instance would be reported as an unresolved reference. The read
         // (`getstatic C.prop`) already resolves through the same `static_props`.
-        if let Expr::Name(class_name) = self.file.expr(receiver).clone() {
-            if !self.value_root_shadows_classifier(&class_name) {
-                let static_write = self.module_class_named(&class_name).and_then(|class| {
-                    let owner = class.internal_name();
-                    class
-                        .static_props
-                        .get(&name)
-                        .copied()
-                        .map(|(ty, visibility, is_var)| (ty, visibility, is_var, owner))
+        // `pkg.topLevelVar = v` — a top-level `var` named through its PACKAGE. The receiver is a
+        // package, so there is no value to evaluate: the write is the declaring facade's `setX`
+        // accessor, selected in that package's scope alone (a fully-qualified reference names one
+        // declaration, so this file's imports must neither shadow nor widen it).
+        if let Some(QualifiedPrefix::Package(package)) = self.package_rooted_prefix(scope, receiver)
+        {
+            if let Some(property) = self
+                .resolver_in_scope(std::slice::from_ref(&package))
+                .resolve_top_level_property(&name)
+            {
+                let Some(setter) = property.setter.clone() else {
+                    self.diags.error(
+                        self.file.stmt_spans[s.0 as usize],
+                        format!("val cannot be reassigned: '{name}'"),
+                    );
+                    return;
+                };
+                let value_ty = self.expr(scope, value);
+                self.expect_assignable(property.ty, value_ty, self.span(value), "assignment");
+                self.stmt_lowers.insert(
+                    s,
+                    StmtLowering::TopLevelPropertySet {
+                        setter: Box::new(setter),
+                        ty: property.ty,
+                    },
+                );
+                return;
+            }
+        }
+        // The classifier is named either by a simple name in scope or by a fully-qualified path
+        // (`pkg.Cls.PROP = v`); both end at one identity, and the write below is keyed on that.
+        let static_owner = match self.file.expr(receiver).clone() {
+            Expr::Name(class_name) if !self.value_root_shadows_classifier(scope, &class_name) => {
+                self.module_class_named(&class_name)
+                    .map(ClassSig::internal_name)
+            }
+            _ => match self.package_rooted_prefix(scope, receiver) {
+                Some(QualifiedPrefix::Classifier(owner)) => Some(owner),
+                Some(QualifiedPrefix::Package(_)) | None => None,
+            },
+        };
+        {
+            {
+                let static_write = static_owner.and_then(|owner| {
+                    let class = self.syms.class_by_type_name(owner)?;
+                    class.static_props.get(&name).map(|property| {
+                        (
+                            property.ty,
+                            property.visibility,
+                            property.is_var,
+                            property.storage,
+                            owner,
+                        )
+                    })
                 });
-                if let Some((property_ty, visibility, is_var, owner)) = static_write {
+                if let Some((property_ty, visibility, is_var, storage, owner)) = static_write {
                     self.reject_if_inaccessible(visibility, &name, owner, self.span(receiver));
                     if !is_var {
                         self.diags.error(
@@ -36232,7 +39751,7 @@ impl<'a> Checker<'a> {
                             format!("val cannot be reassigned: '{name}'"),
                         );
                     }
-                    let value_ty = self.expr(value);
+                    let value_ty = self.expr(scope, value);
                     self.expect_assignable(property_ty, value_ty, self.span(value), "assignment");
                     self.stmt_lowers.insert(
                         s,
@@ -36240,13 +39759,14 @@ impl<'a> Checker<'a> {
                             owner,
                             name,
                             ty: property_ty,
+                            storage,
                         },
                     );
                     return;
                 }
             }
         }
-        let rt = self.expr(receiver);
+        let rt = self.expr(scope, receiver);
         let source_property = if rt.is_nullable() {
             None
         } else {
@@ -36268,7 +39788,7 @@ impl<'a> Checker<'a> {
             && property_setter.is_none()
             && classpath_property.is_none()
         {
-            self.member_extension_property(rt, &name)
+            self.member_extension_property(scope, rt, &name)
         } else {
             Ok(None)
         };
@@ -36298,8 +39818,8 @@ impl<'a> Checker<'a> {
                     .and_then(|property| property.as_ref().map(|property| property.ty))
             });
         let vt = match assignment_expected {
-            Some(expected) => self.expr_expected(value, expected),
-            None => self.expr(value),
+            Some(expected) => self.expr_expected(scope, value, expected),
+            None => self.expr(scope, value),
         };
         let span = self.file.stmt_spans[s.0 as usize];
         let target_span = self.assignment_target_span(s);
@@ -36423,17 +39943,24 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn stmt_assign_index(&mut self, s: StmtId, array: ExprId, indices: Vec<ExprId>, value: ExprId) {
+    fn stmt_assign_index(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        s: StmtId,
+        array: ExprId,
+        indices: Vec<ExprId>,
+        value: ExprId,
+    ) {
         // Try `opAssign` on the value returned by `get` before requiring `set`.
-        if self.try_in_place_assignment(s, value) {
+        if self.try_in_place_assignment(scope, s, value) {
             return;
         }
         // `a[i] = v` stores an array element; `recv[i, j, …] = v` calls `set` (or Map `put`).
-        let at = self.expr(array);
-        let its: Vec<Ty> = indices.iter().map(|&i| self.expr(i)).collect();
+        let at = self.expr(scope, array);
+        let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
         let vt = match at.array_elem() {
-            Some(expected) => self.expr_expected(value, expected),
-            None => self.expr(value),
+            Some(expected) => self.expr_expected(scope, value, expected),
+            None => self.expr(scope, value),
         };
         let span = self.file.stmt_spans[s.0 as usize];
         let single_index = matches!(indices.as_slice(), [_]);
@@ -36454,11 +39981,11 @@ impl<'a> Checker<'a> {
         // Resolve `set` as a member, same-module extension, or library member. A single-index Map
         // store may resolve to `put`. Record the selected target so lowering does not choose again.
         let selected = self
-            .operator_call_ret(at, "set", &set_args, &set_exprs, span)
+            .operator_call_ret(scope, at, "set", &set_args, &set_exprs, span)
             .map(|(_, call)| (SyntheticOperatorCall::Set, call))
             .or_else(|| {
                 single_index
-                    .then(|| self.operator_call_ret(at, "put", &set_args, &set_exprs, span))
+                    .then(|| self.operator_call_ret(scope, at, "put", &set_args, &set_exprs, span))
                     .flatten()
                     .map(|(_, call)| (SyntheticOperatorCall::Put, call))
             });
@@ -36492,13 +40019,19 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn stmt_return(&mut self, s: StmtId, e: Option<ExprId>, label: Option<String>) {
+    fn stmt_return(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        s: StmtId,
+        e: Option<ExprId>,
+        label: Option<String>,
+    ) {
         // A labeled `return@lbl [expr]` is a *local* return from the lambda carrying `lbl`, not the
         // enclosing function — its value flows to that lambda's call, so it isn't validated against
         // the function's return type. Type-check the expression for its own errors and move on.
         if label.is_some() {
             if let Some(ex) = e {
-                let ty = self.expr(ex);
+                let ty = self.expr(scope, ex);
                 if self.ty_is_value_class(ty.non_null()) {
                     self.diags.error(
                         self.span(ex),
@@ -36517,7 +40050,7 @@ impl<'a> Checker<'a> {
         let rt = self.ret_ty;
         match e {
             Some(ex) => {
-                let t = self.expr_expected(ex, rt);
+                let t = self.expr_expected(scope, ex, rt);
                 self.expect_assignable(rt, t, self.span(ex), "return");
             }
             None => {
@@ -36533,9 +40066,16 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn stmt_for(&mut self, name: String, range: ForRange, body: ExprId, label: Option<String>) {
-        let st = self.expr(range.start);
-        let et = self.expr(range.end);
+    fn stmt_for(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: String,
+        range: ForRange,
+        body: ExprId,
+        label: Option<String>,
+    ) {
+        let st = self.expr(scope, range.start);
+        let et = self.expr(scope, range.end);
         // The counter type is the (uniform) bound type — `Int`, but also `Long` and the
         // unsigned `UInt`/`ULong` (whose loop the backend emits with unsigned comparison).
         // A `Byte`/`Short` range widens to an `IntRange` (kotlinc's `Short.rangeTo(Short): IntRange`),
@@ -36550,20 +40090,23 @@ impl<'a> Checker<'a> {
             self.expect_assignable(Ty::Int, et, self.span(range.end), "range end");
             Ty::Int
         });
-        self.push_scope();
-        self.declare(&name, elem, true); // loop variable (mutated by the lowering)
-        self.check_loop_body(body, &label);
-        self.pop_scope();
+        {
+            let body_scope = scope.child(ScopeKind::Block);
+            let scope = &body_scope;
+            self.declare(scope, &name, elem, true); // loop variable (mutated by the lowering)
+            self.check_loop_body(scope, body, &label);
+        }
     }
 
     fn stmt_for_each(
         &mut self,
+        scope: &CheckerScope<'_>,
         name: String,
         iterable: ExprId,
         body: ExprId,
         label: Option<String>,
     ) {
-        let it = self.expr(iterable);
+        let it = self.expr(scope, iterable);
         // An array element type covers primitive arrays and a boxed `Array<T>`
         // (`Obj("kotlin/Array", [T])`) — iterate either as an array.
         let elem = if let Some(e) = it.array_elem() {
@@ -36585,15 +40128,17 @@ impl<'a> Checker<'a> {
                 }
             }
         };
-        self.push_scope();
-        self.declare(&name, elem, false);
-        self.check_loop_body(body, &label);
-        self.pop_scope();
+        {
+            let body_scope = scope.child(ScopeKind::Block);
+            let scope = &body_scope;
+            self.declare(scope, &name, elem, false);
+            self.check_loop_body(scope, body, &label);
+        }
     }
 
     /// Type-check a local function declaration (`fun` inside a function body). Non-capturing local
     /// functions are lifted to private static methods; captures become leading parameters.
-    fn check_local_fun(&mut self, f: &FunDecl, stmt_id: StmtId) {
+    fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
         let span = f.span;
         if !f.type_params.is_empty() {
             self.diags.error(
@@ -36605,13 +40150,12 @@ impl<'a> Checker<'a> {
         // Collect outer local names (everything currently in scope that isn't one of f's params).
         let own_params: std::collections::HashSet<String> =
             f.params.iter().map(|p| p.name.clone()).collect();
-        let outer_names: std::collections::HashSet<String> = self
-            .scopes
-            .iter()
-            .flat_map(|s| s.keys())
-            .filter(|n| !own_params.contains(*n))
-            .cloned()
-            .collect();
+        let mut outer_names: std::collections::HashSet<String> = Default::default();
+        scope.visit_bindings(Ns::Value, |name, _| {
+            if !own_params.contains(name) {
+                outer_names.insert(name.to_string());
+            }
+        });
 
         // Captured outer locals: lifted to extra leading parameters. A captured var whose cell must be
         // shared is marked explicitly; later lowering/backend code chooses the holder representation.
@@ -36622,7 +40166,7 @@ impl<'a> Checker<'a> {
                     let single: std::collections::HashSet<String> =
                         std::iter::once(n.clone()).collect();
                     if local_fun_body_uses_any(self.file, *e, &single) {
-                        let ty = self.lookup(n).map(|l| l.ty).unwrap_or(Ty::Error);
+                        let ty = self.lookup(scope, n).map(|l| l.ty).unwrap_or(Ty::Error);
                         captured_locals.push((n.clone(), ty));
                     }
                 }
@@ -36634,7 +40178,7 @@ impl<'a> Checker<'a> {
             .map(|(name, ty)| {
                 let shared_cell = match &f.body {
                     FunBody::Expr(e) | FunBody::Block(e) => {
-                        self.local_capture_needs_shared_cell(*e, &name)
+                        self.local_capture_needs_shared_cell(scope, *e, &name)
                     }
                     FunBody::None => false,
                 };
@@ -36646,18 +40190,15 @@ impl<'a> Checker<'a> {
             })
             .collect();
 
-        // Add the local function's own type parameters (a primitive/reference bound carries through).
-        let resolve = class_internal_resolver(self.syms);
-        let added_tparams =
-            self.tparams
-                .insert_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
+        // A local function declares no type parameters of its own — `f.type_params` non-empty was
+        // rejected above — so there is nothing to bind here.
 
         // Resolve parameter types.
         let params: Vec<Ty> = f
             .params
             .iter()
             .map(|p| {
-                let t = self.resolve_ty(&p.ty);
+                let t = self.resolve_ty(scope, &p.ty);
                 if p.is_vararg {
                     Ty::array(t)
                 } else {
@@ -36668,40 +40209,37 @@ impl<'a> Checker<'a> {
         let receiver = f
             .receiver
             .as_ref()
-            .map(|receiver| self.resolve_ty(receiver));
+            .map(|receiver| self.resolve_ty(scope, receiver));
 
         // Resolve return type: explicit annotation, else infer from expression body.
         let ret_ty = if let Some(r) = &f.ret {
-            self.resolve_ty(r)
+            self.resolve_ty(scope, r)
         } else {
             match &f.body {
                 FunBody::Expr(e) => {
                     // Check expression in isolation to infer return type (before registering sig).
-                    let previous_this = self.this_ty;
-                    let previous_this_gen = self.this_gen;
                     let previous_extension_receiver = self.this_extension_receiver;
                     if let (Some(receiver), Some(receiver_ref)) = (receiver, f.receiver.as_ref()) {
-                        self.set_this_ty(Some(receiver));
                         self.this_labels.push((f.name.clone(), receiver, false));
                         let label_index = self.this_labels.len() - 1;
                         self.extension_receiver_labels
                             .push((label_index, receiver_ref.span));
                         self.this_extension_receiver = Some(receiver_ref.span);
                     }
-                    self.push_local_funs();
-                    self.push_scope();
-                    for (p, &ty) in f.params.iter().zip(&params) {
-                        self.declare(&p.name, ty, false);
-                    }
-                    let inferred = self.expr(*e);
-                    self.pop_scope();
-                    self.pop_local_funs();
+                    let inferred = {
+                        let params_scope = scope.child(ScopeKind::Function {
+                            receiver: receiver.filter(|_| f.receiver.is_some()),
+                        });
+                        let scope = &params_scope;
+                        for (p, &ty) in f.params.iter().zip(&params) {
+                            self.declare(scope, &p.name, ty, false);
+                        }
+                        self.expr(scope, *e)
+                    };
                     if receiver.is_some() {
                         self.extension_receiver_labels.pop();
                         self.this_labels.pop();
                     }
-                    self.this_ty = previous_this;
-                    self.this_gen = previous_this_gen;
                     self.this_extension_receiver = previous_extension_receiver;
                     inferred
                 }
@@ -36740,7 +40278,7 @@ impl<'a> Checker<'a> {
         };
 
         // Register in current local-funs frame and in the TypeInfo maps.
-        self.register_local_fun(&f.name, stmt_id, sig.clone());
+        self.register_local_fun(scope, &f.name, stmt_id, sig.clone());
         self.stmt_lowers.insert(
             stmt_id,
             StmtLowering::LocalFunction(Box::new(LocalFunInfo {
@@ -36753,46 +40291,38 @@ impl<'a> Checker<'a> {
 
         // Check the body (for a block body or when return type was already inferred above for expr).
         self.with_ret(ret_ty, |c| {
-            let previous_this = c.this_ty;
-            let previous_this_gen = c.this_gen;
             let previous_extension_receiver = c.this_extension_receiver;
             if let (Some(receiver), Some(receiver_ref)) = (receiver, f.receiver.as_ref()) {
-                c.set_this_ty(Some(receiver));
                 c.this_labels.push((f.name.clone(), receiver, false));
                 let label_index = c.this_labels.len() - 1;
                 c.extension_receiver_labels
                     .push((label_index, receiver_ref.span));
                 c.this_extension_receiver = Some(receiver_ref.span);
             }
-            c.push_local_funs();
-            c.push_scope();
+            let params_scope = scope.child(ScopeKind::Function {
+                receiver: receiver.filter(|_| f.receiver.is_some()),
+            });
+            let scope = &params_scope;
             for (p, &ty) in f.params.iter().zip(&params) {
-                c.declare(&p.name, ty, false);
+                c.declare(scope, &p.name, ty, false);
             }
             match &f.body.clone() {
                 FunBody::Expr(e) => {
                     // Already checked above for inference; re-check to fill in expr_types.
-                    let t = c.expr(*e);
+                    let t = c.expr(scope, *e);
                     c.expect_assignable(ret_ty, t, c.span(*e), "local function body");
                 }
                 FunBody::Block(b) => {
-                    let _ = c.expr_statement(*b);
+                    let _ = c.expr_statement(scope, *b);
                 }
                 FunBody::None => {}
             }
-            c.pop_scope();
-            c.pop_local_funs();
             if receiver.is_some() {
                 c.extension_receiver_labels.pop();
                 c.this_labels.pop();
             }
-            c.this_ty = previous_this;
-            c.this_gen = previous_this_gen;
             c.this_extension_receiver = previous_extension_receiver;
         });
-        for t in added_tparams {
-            self.tparams.remove(&t);
-        }
     }
 }
 
@@ -36891,7 +40421,7 @@ mod tests {
 
         let expectation = lambda_expectation(
             &crate::libraries::EmptySymbolSource,
-            &candidate,
+            &candidate.call_sig,
             0,
             erased_callable,
         )
@@ -41938,8 +45468,8 @@ fun box(): String {
             "no value passed for parameter 'x'.",
         );
         err_contains(
-            "fun f(p: Widget): Int = 0",
-            "unresolved reference 'Widget'.",
+            "fun f(p: TextOnly): Int = 0",
+            "unresolved reference 'TextOnly'.",
         );
     }
 

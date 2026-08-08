@@ -26,6 +26,9 @@ pub struct ModuleSymbols<'a> {
     /// Positive and negative queries against the immutable symbol table.
     shapes: std::cell::RefCell<HashMap<TypeName, Option<std::rc::Rc<LibraryType>>>>,
     symbols: std::cell::RefCell<HashMap<TypeName, std::rc::Rc<crate::libraries::ResolvedSymbols>>>,
+    /// The module's package namespace, derived once from the declarations themselves (see
+    /// [`ModuleSymbols::packages`]).
+    packages: std::cell::RefCell<Option<std::rc::Rc<std::collections::HashSet<TypeName>>>>,
 }
 
 impl<'a> ModuleSymbols<'a> {
@@ -35,6 +38,7 @@ impl<'a> ModuleSymbols<'a> {
             source_file: None,
             shapes: Default::default(),
             symbols: Default::default(),
+            packages: Default::default(),
         }
     }
 
@@ -44,7 +48,40 @@ impl<'a> ModuleSymbols<'a> {
             source_file: Some(source_file),
             shapes: Default::default(),
             symbols: Default::default(),
+            packages: Default::default(),
         }
+    }
+
+    /// The module's package namespace: the package of every declared classifier and of every top-level
+    /// facade, plus each of their ancestors. There is no separate package table in the symbol table —
+    /// a package exists exactly because something is declared in it — so it is derived here once and
+    /// memoized. Ancestors are included because a qualifier walk steps through them
+    /// (`a` then `a.b` then `a.b.C`) even when only the leaf owns declarations.
+    fn packages(&self) -> std::rc::Rc<std::collections::HashSet<TypeName>> {
+        if let Some(packages) = self.packages.borrow().as_ref() {
+            return packages.clone();
+        }
+        let mut packages = std::collections::HashSet::new();
+        let owners = self
+            .syms
+            .classes
+            .keys()
+            .copied()
+            .chain(self.syms.fn_facades.values().copied());
+        for owner in owners {
+            // A nested classifier's package is the package of its outermost owner: the `$` segments are
+            // nesting, not path.
+            let mut package = owner.parent();
+            while let Some(current) = package {
+                if current == crate::types::type_name("") || !packages.insert(current) {
+                    break;
+                }
+                package = current.parent();
+            }
+        }
+        let packages = std::rc::Rc::new(packages);
+        *self.packages.borrow_mut() = Some(packages.clone());
+        packages
     }
 
     /// The declaring facade of a top-level `name`, if the multi-file driver recorded one. `None` means
@@ -198,7 +235,11 @@ impl<'a> ModuleSymbols<'a> {
             // (`companion_class`/`companion_methods`); the classpath fallback isn't used for them.
             companion_object: None,
             value_companion_fns: Vec::new(),
-            value_underlying: None,
+            // `LibraryType` is the provider-neutral classifier shape consumed by the federated
+            // resolver. Preserve source value-class metadata here just as a classpath provider
+            // does, so every downstream query (identity diagnostics included) can use the common
+            // `SymbolSource::is_value_name` contract instead of branching on symbol provenance.
+            value_underlying: c.value_field.as_ref().map(|(_, ty)| *ty),
             alias_target: None,
             // Preserve the classifier's formals on the common type shape. Receiver-coupled queries can
             // then bind `Scope<String>` before selecting a member extension declared on `Scope<T>`, in
@@ -717,6 +758,10 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn package_exists(&self, package: TypeName) -> bool {
+        self.packages().contains(&package)
+    }
+
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
         let Some(internal) = ty.obj_internal() else {
             return Vec::new();
@@ -838,6 +883,46 @@ impl SymbolSource for ModuleSymbols<'_> {
                 });
             }
         }
+        // A TOP-LEVEL property the module declares, surfaced under its DECLARING package's fqn — the
+        // same namespace every other callable is resolved through. Without it the module has no
+        // package-scoped property namespace at all, so a fully-qualified read (`pkg.topLevelProp`) has
+        // nothing to resolve against even though the declaration is right there. The facade carries
+        // both the package (its parent) and the accessor owner; a `const val` has no accessor and is
+        // read from its field, which `is_const` tells the consumer.
+        if let Some(&(facade, ty, is_var, is_const)) = self.syms.prop_facades.get(&name) {
+            if facade.parent() == Some(pkg) {
+                let getter = source_property_getter(
+                    facade,
+                    crate::names::property_getter_name(&name),
+                    Vec::new(),
+                    ty,
+                    false,
+                );
+                let setter = is_var.then(|| {
+                    source_callable(
+                        facade,
+                        crate::names::property_setter_name(&name),
+                        vec![stored_value_ty(ty)],
+                        Ty::Unit,
+                        false,
+                    )
+                });
+                properties.push(PropertyInfo {
+                    kind: PropKind::TopLevel,
+                    receiver: None,
+                    formals: Vec::new(),
+                    ty,
+                    context_count: 0,
+                    getter,
+                    setter,
+                    is_const,
+                    visibility: Visibility::Public,
+                    owner: facade,
+                    receiver_rank: 0,
+                    source_key: None,
+                });
+            }
+        }
         let callables = match (overloads.is_empty(), properties.is_empty()) {
             (false, false) => Callables::Both {
                 functions: FunctionSet { overloads },
@@ -901,7 +986,17 @@ impl SymbolSource for ModuleSymbols<'_> {
         }
         let shape = self
             .class_by_type_name(internal)
-            .map(|c| std::rc::Rc::new(self.type_shape_for(c)));
+            .map(|c| std::rc::Rc::new(self.type_shape_for(c)))
+            .or_else(|| {
+                // A module `typealias` named by its FULLY-QUALIFIED spelling. An alias is a
+                // name-resolution edge, not a declaration, so it answers with the TARGET's shape
+                // carrying `alias_target` — the same contract a classpath alias uses, which is what
+                // lets one qualifier walk follow either without knowing the origin.
+                let target = *self.syms.source_alias_fqns.get(&internal)?;
+                let mut shape = self.type_shape_for(self.class_by_type_name(target)?);
+                shape.alias_target = Some(target);
+                Some(std::rc::Rc::new(shape))
+            });
         self.shapes.borrow_mut().insert(internal, shape.clone());
         shape
     }
@@ -1054,6 +1149,22 @@ mod tests {
             .expect("source enum shape should retain its synthetic entries accessor");
         assert_eq!(entries.name, "<enum-entries-accessor>");
         assert_eq!(entries.descriptor, "()Lkotlin/enums/EnumEntries;");
+    }
+
+    #[test]
+    fn type_shapes_include_value_class_metadata() {
+        let mut symbols = FrontendSymbols::default();
+        let mut id = class("sample/Id");
+        id.value_field = Some(("raw".to_string(), Ty::Int));
+        symbols.classes.insert(type_name("sample/Id"), id);
+
+        let source = ModuleSymbols::new(&symbols);
+        let shape = source.resolve_type_name(type_name("sample/Id")).unwrap();
+        assert_eq!(shape.value_underlying, Some(Ty::Int));
+        assert!(
+            source.is_value_name(type_name("sample/Id")),
+            "the common SymbolSource query must recognize source value classes without a provider-specific fallback"
+        );
     }
 
     #[test]
@@ -1309,6 +1420,7 @@ mod tests {
             receiver: Some(receiver),
             params: vec![Ty::fun(vec![parameter], parameter)],
             ret: receiver,
+            return_policy: Default::default(),
         };
         let mut signature = sig(
             vec![Ty::fun(vec![Ty::obj("kotlin/Any")], Ty::obj("kotlin/Any"))],

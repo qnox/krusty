@@ -214,29 +214,34 @@ fun box(): String {\n\
 
 /// An unsigned VALUE PARAMETER mangles the `suspend` function's JVM name (`libU` → `libU-OzbTU-A`),
 /// and the `$default` synthetic is named from the mangled form. krusty looks suspend-ness up under
-/// that JVM name, `@Metadata` records the SOURCE name, and the callable comes back marked
-/// non-suspend — so the coroutine pass never threads the `Continuation` its descriptor still spells,
-/// and the emitted `invokestatic` is one argument short. That links and fails verification, which is
-/// the outcome this whole file exists to rule out.
+/// that JVM name. Suspend-ness therefore has to come from the metadata declaration selected by JVM
+/// name AND descriptor shape, alongside the call facts already projected from that declaration.
+/// Keyed on the source name alone it missed the mangled method, while indexing every suspend source
+/// name would leak the flag to an ordinary overload. On the miss, the callable came back non-suspend,
+/// the coroutine pass never threaded the `Continuation` the descriptor still spells, and the emitted
+/// `invokestatic` was one argument short — a class that links and fails verification, which is the
+/// outcome this whole file exists to rule out.
 ///
-/// The unfilled continuation slot is visible at the call site, so the file is declined instead. BOTH
-/// call forms are covered: the `$default` synthetic (an argument omitted) and the plain mangled
-/// method (every argument supplied) fail the same way, so the decline cannot key on `$default`.
-///
-/// The underlying gap is the mangled-name suspend lookup, not the argument shape — recovering it
-/// would make these shapes EMIT, which the contract here already allows.
+/// BOTH call forms are covered: the `$default` synthetic (an argument omitted) and the plain mangled
+/// method (every argument supplied) missed the same way, so the fix cannot key on `$default`. Both
+/// must EMIT and produce the callee's real answer — a decline would hide a silent regression back to
+/// the name-keyed miss.
 #[test]
-fn suspend_call_with_an_unthreaded_continuation_declines() {
+fn mangled_suspend_classpath_call_threads_its_continuation() {
     let stdlib = common::stdlib_jar();
     let Some(lib) = common::compile_libs(
         "UMangledSuspendLib",
         &[(
             "Lib.kt",
             "package lib\n\
+import kotlin.coroutines.Continuation\n\
 fun mark(): String = \"!\"\n\
+fun libU(c: Continuation<Unit>): String = \"plain\"\n\
 suspend fun libU(t: UInt, s: String = mark()): String = \"$t$s\"\n",
         )],
     ) else {
+        // kotlinc unavailable: the fixture cannot be built, and no stdlib declaration has this shape.
+        // A fixture kotlinc REJECTS panics inside the helper rather than skipping.
         return;
     };
     let cp = [lib, stdlib];
@@ -250,7 +255,12 @@ fun box(): String {{\n\
     var out = \"\"\n\
     val body: suspend () -> Unit = {{ out = {call} }}\n\
     body.startCoroutine(Continuation(EmptyCoroutineContext) {{ it.getOrThrow() }})\n\
-    return if (out == \"7!\") \"OK\" else \"bad: $out\"\n\
+    // The source-name sibling is NOT suspend. A name-wide flag would incorrectly classify it from\n\
+    // the mangled declaration above and strip its ordinary trailing Continuation parameter, making\n\
+    // this legal call unresolvable. The metadata fact must follow the selected JVM name and\n\
+    // descriptor rather than leak across an overload family.\n\
+    val plain = libU(Continuation(EmptyCoroutineContext) {{ _ -> }})\n\
+    return if (out == \"7!\" && plain == \"plain\") \"OK\" else \"bad: $out/$plain\"\n\
 }}\n"
         )
     };
@@ -261,20 +271,18 @@ fun box(): String {{\n\
         ("UMangledSuspendPlain", "libU(7u, \"!\")"),
     ] {
         let src = body(call);
-        // Name the decline exhaustively: any OTHER outcome means this shape is being skipped by an
-        // unrelated gate and the unthreaded continuation is back to reaching the backend unnoticed.
-        match common::backend_outcome_in_process(&src, stem, &cp, Some(&jdk)) {
-            Some(BackendOutcome::LowerBail(reason)) => assert_eq!(
-                reason, "gate:unthreaded-continuation-slot",
-                "{stem}: the unfilled continuation slot is what must decline this call"
-            ),
-            // Recovering the mangled-name suspend lookup makes the call correct; then it must run.
-            Some(BackendOutcome::Emitted) => {}
-            other => {
-                panic!("{stem}: expected the continuation decline or a correct emit, got {other:?}")
-            }
-        }
-        expect_emitted_box_verifies_on(&src, stem, &cp);
+        assert_eq!(
+            common::backend_outcome_in_process(&src, stem, &cp, Some(&jdk)),
+            Some(BackendOutcome::Emitted),
+            "{stem}: the mangled JVM name names a suspend function; thread its continuation"
+        );
+        // Not just verifiable: the coroutine has to actually run and hand back the callee's string,
+        // which is what proves the continuation reached the callee rather than merely filling a slot.
+        assert_eq!(
+            common::compile_and_run_box(&src, stem, &cp, Some(&jdk)),
+            Some("OK".to_string()),
+            "{stem}"
+        );
     }
 }
 
@@ -487,5 +495,37 @@ fn unsigned_member_calls_on_a_reference_carried_receiver_verify() {
     return if (!u!!.equals(s)) \"OK\" else \"bad\"\n\
 }\n",
         "ULongNullableBangEquals",
+    );
+}
+
+/// An unsigned RECEIVER of an inline scope function is the function's first argument, even though
+/// source syntax puts it before the dot. That argument crosses an erased reference boundary and must
+/// therefore carry the semantic value-class box (`kotlin/UInt`, etc.), not the box of its primitive
+/// carrier (`java/lang/Integer`, etc.). The latter survives verification but fails the spliced
+/// lambda's entry cast at run time.
+///
+/// This is strict because receiver lowering now routes the value through the same argument-coercion
+/// operation as explicit arguments before either the ordinary call or inline splicer sees it. A
+/// backend decline would evade the representation contract this regression exists to exercise.
+/// Cover a literal, a local, and a call result so the fix cannot accidentally depend on one IR
+/// expression shape; the high-bit value also distinguishes unsigned semantics from a signed carrier.
+#[test]
+fn unsigned_receiver_of_an_inline_scope_function_uses_its_semantic_box() {
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String = if (5u.let { it.toString() } == \"5\") \"OK\" else \"bad\"\n",
+        "UIntLetReceiver",
+    );
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String {\n\
+    val d: ULong = 5uL\n\
+    return if (d.let { it.toString() } == \"5\") \"OK\" else \"bad\"\n\
+}\n",
+        "ULongLetReceiver",
+    );
+    common::expect_box_ok_with_stdlib(
+        "fun f(): UInt = 4294967295u\n\
+         fun box(): String =\n\
+    if (f().let { it.toString() } == \"4294967295\") \"OK\" else \"bad\"\n",
+        "UIntLetCallReceiver",
     );
 }

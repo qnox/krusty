@@ -93,8 +93,7 @@ fn parse_with_features_and_script(
         src.hash(&mut hasher);
         hasher.finish()
     });
-    scope_local_classes(&mut p.file, script_scope);
-    hoist_local_classes(&mut p.file);
+    hoist_local_classes(&mut p.file, script_scope);
     fixup_parenless_base_classes(&mut p.file);
     fill_class_decl_lines(&mut p.file, src);
     expand_fun_type_aliases(&mut p.file);
@@ -322,192 +321,148 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
 }
 
 /// Hoist every local class (`class`/`interface`/… declared inside a function body, parsed as
-/// `Stmt::LocalClass`) to a top-level `Decl::Class`, so signature collection, checking, and lowering
-/// treat it like any other class — zero changes to those passes. The `Stmt::LocalClass` stays in the
-/// body as a no-op. A local class that captures outer locals is checked with no enclosing scope, so its
-/// outer references fail to resolve and the file cleanly skips (never miscompiles). Two same-named local
-/// classes (or a clash with a top-level name) become a "conflicting declarations" skip — also sound.
-/// Give each LOCAL class a globally-unique name so same-named local classes in DIFFERENT functions do
-/// not collide once hoisted to top-level declarations (`fun f() { class A … }; fun g() { class A … }`
-/// registered `A` twice → the second shadowed the first, mis-resolving the first's construction). For
-/// each function/method body, a local class whose name is unique within that body is renamed and its
-/// construction references (`Expr::Name`) in that body are rewritten to match; a name USED as a type
-/// annotation that isn't rewritten then resolves to nothing (the file skips — never a miscompile).
-fn scope_local_classes(file: &mut File, script_scope: Option<u64>) {
-    use crate::ast::{Decl, Expr, FunBody, Stmt};
-    // Every function/method body root, with the enclosing declaration's parameter names (a param that
-    // shadows a local class name makes the syntactic `Name` rewrite unsafe).
-    let mut roots: Vec<(ExprId, Vec<String>, bool)> = Vec::new();
-    let push_body =
-        |b: &FunBody, params: Vec<String>, roots: &mut Vec<(ExprId, Vec<String>, bool)>| {
-            if let FunBody::Expr(e) | FunBody::Block(e) = b {
-                roots.push((*e, params, false));
-            }
+/// `Stmt::LocalClass`) to a top-level `Decl::Class`, so signature collection and lowering treat it
+/// like any other class. The `Stmt::LocalClass` stays in the body and is where the CHECKER enters
+/// the class (`File::local_class_decls` links the two), so it is checked in the lexical scope it
+/// was written in.
+///
+/// The hoisted declaration is named after the declaration it was written in, as a DOTTED path
+/// (`box.Local`, `Outer.m.Local`) — the same spelling a nested class uses, so `class_internal` turns
+/// it into `Outer$m$Local` and every lexical-prefix walk already in the compiler finds it without
+/// being taught anything new. It is also how kotlinc names a local class. Nothing in the source is
+/// rewritten to match: the SOURCE name is what the checker binds in `Ns::Classifier`, so a reference
+/// resolves where it was written.
+fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
+    use crate::ast::{Decl, FunBody, Stmt, StmtId};
+    let mut owners: Vec<(StmtId, String)> = Vec::new();
+    let record = |file: &File, body: &FunBody, owner: String, out: &mut Vec<(StmtId, String)>| {
+        let (FunBody::Expr(root) | FunBody::Block(root)) = body else {
+            return;
         };
-    // Top-level declaration names: a local class sharing a top-level name can't be safely rewritten (an
-    // un-rewritten reference would resolve to the top-level declaration → miscompile).
-    let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for d in &file.decl_arena {
-        match d {
-            Decl::Fun(f) => {
-                top_names.insert(f.name.clone());
-                push_body(
-                    &f.body,
-                    f.params.iter().map(|p| p.name.clone()).collect(),
-                    &mut roots,
-                );
-            }
+        for stmt in local_class_stmts(file, *root) {
+            out.push((stmt, owner.clone()));
+        }
+    };
+    for &d in &file.decls {
+        match file.decl(d) {
+            Decl::Fun(f) => record(file, &f.body, f.name.clone(), &mut owners),
             Decl::Class(c) => {
-                top_names.insert(c.name.clone());
                 for m in c.methods.iter().chain(&c.companion_methods) {
-                    push_body(
-                        &m.body,
-                        m.params.iter().map(|p| p.name.clone()).collect(),
-                        &mut roots,
-                    );
+                    record(file, &m.body, format!("{}.{}", c.name, m.name), &mut owners);
+                }
+                // A class body's `init` blocks and property initializers run in the constructor;
+                // kotlinc names a local class declared there after the CLASS.
+                for step in &c.init_order {
+                    if let crate::ast::ClassInit::Block(b) = step {
+                        record(file, &FunBody::Block(*b), c.name.clone(), &mut owners);
+                    }
+                }
+                for p in &c.body_props {
+                    if let Some(init) = p.init {
+                        record(file, &FunBody::Expr(init), c.name.clone(), &mut owners);
+                    }
+                }
+                // A primary-constructor parameter default is evaluated in the constructor too.
+                for d in c.props.iter().filter_map(|p| p.default) {
+                    record(file, &FunBody::Expr(d), c.name.clone(), &mut owners);
                 }
             }
-            _ => {}
+            Decl::Property(p) => {
+                if let Some(init) = p.init {
+                    record(file, &FunBody::Expr(init), p.name.clone(), &mut owners);
+                }
+            }
         }
     }
     if let Some(root) = file.script_body {
-        roots.push((root, Vec::new(), true));
+        // A script re-parses each snippet into the same facade, so the snippet identity separates
+        // two local classes that would otherwise share a name and an (empty) owner.
+        let owner = format!("script${:x}", script_scope.unwrap_or_default());
+        for stmt in local_class_stmts(file, root) {
+            owners.push((stmt, owner.clone()));
+        }
     }
-    // File-wide local-class name counts: a name declared in only ONE body has no collision and is left
-    // untouched (so its type-annotation references keep resolving). Only a name declared more than once
-    // (across bodies) collides — those were already rejected ("conflicting declarations"), so renaming
-    // them is safe: a construction-only use now compiles, a type-annotation use still skips.
-    type BodySubtree = (Vec<String>, Vec<ExprId>, Vec<StmtId>, bool);
-    let mut body_subtrees: Vec<BodySubtree> = Vec::new();
-    let mut file_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for (root, params, force_unique) in roots {
-        let mut exprs: Vec<ExprId> = Vec::new();
-        let mut stmts: Vec<StmtId> = Vec::new();
-        collect_subtree(file, root, &mut exprs, &mut stmts);
-        for &s in &stmts {
-            if let Stmt::LocalClass(c) = file.stmt(s) {
-                *file_counts.entry(c.name.clone()).or_default() += 1;
-            }
+    let owner_of: std::collections::HashMap<StmtId, String> = owners.into_iter().collect();
+    let hoisted: Vec<(StmtId, crate::ast::ClassDecl)> = file
+        .stmt_arena
+        .iter()
+        .enumerate()
+        .filter_map(|(index, s)| match s {
+            Stmt::LocalClass(c) => Some((StmtId(index as u32), c.clone())),
+            _ => None,
+        })
+        .collect();
+    // Two local classes of the same name under the same owner (declared in sibling blocks) still
+    // need telling apart; the statement index is unique by construction.
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (stmt, mut c) in hoisted {
+        let mut name = match owner_of.get(&stmt) {
+            Some(owner) => format!("{owner}.{}", c.name),
+            None => format!("loc{}.{}", stmt.0, c.name),
+        };
+        if !taken.insert(name.clone()) {
+            name = format!("{name}{}", stmt.0);
+            taken.insert(name.clone());
         }
-        body_subtrees.push((params, exprs, stmts, force_unique));
-    }
-    let mut counter = 0u32;
-    for (params, exprs, stmts, force_unique) in &body_subtrees {
-        // Names BOUND in this body (a local `val`/`var`, a `Stmt::LocalFun`/lambda parameter, or an
-        // enclosing parameter) shadow a local class of the same name — rewriting `Name` for such a name
-        // would clobber the shadowing binding's reads, so those names are excluded from renaming.
-        let mut bound: std::collections::HashSet<String> = params.iter().cloned().collect();
-        for &s in stmts {
-            match file.stmt(s) {
-                Stmt::Local { name, .. }
-                | Stmt::LocalLateinit { name, .. }
-                | Stmt::LocalDelegate { name, .. }
-                | Stmt::For { name, .. }
-                | Stmt::ForEach { name, .. } => {
-                    bound.insert(name.clone());
-                }
-                Stmt::Destructure { entries, .. } => {
-                    bound.extend(entries.iter().map(|(n, _)| n.clone()));
-                }
-                Stmt::LocalFun(f) => {
-                    bound.extend(f.params.iter().map(|p| p.name.clone()));
-                }
-                _ => {}
-            }
-        }
-        for &e in exprs {
-            match file.expr(e) {
-                Expr::Lambda { params, .. } => bound.extend(params.iter().cloned()),
-                Expr::Try { catches, .. } => bound.extend(catches.iter().map(|c| c.name.clone())),
-                _ => {}
-            }
-        }
-        // Per-body local-class name → the declaring stmt(s). Only a COLLIDING name (file-wide > 1) that
-        // is declared exactly ONCE in this body, is not a top-level name, and is not shadowed by a bound
-        // name is renamable (any other case is left to skip — never a miscompile).
-        let mut here: std::collections::HashMap<String, Vec<StmtId>> =
-            std::collections::HashMap::new();
-        for &s in stmts {
-            if let Stmt::LocalClass(c) = file.stmt(s) {
-                here.entry(c.name.clone()).or_default().push(s);
-            }
-        }
-        let mut rename: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        for (name, decls) in &here {
-            if *force_unique {
-                let new = format!(
-                    "{name}$script${:x}$loc${counter}",
-                    script_scope.unwrap_or_default()
-                );
-                counter += 1;
-                for declaration in decls {
-                    if let Stmt::LocalClass(c) = &mut file.stmt_arena[declaration.0 as usize] {
-                        c.name = new.clone();
+        // A nested type hoisted out of this local class was named from the local class's SOURCE
+        // name (`Local.Inner`); requalifying the outer without it would orphan the nested one.
+        let qualifier = name.strip_suffix(&c.name).map(str::to_string);
+        if let (Some(qualifier), Some(nested)) =
+            (qualifier, file.local_class_nested.get(&stmt).cloned())
+        {
+            let source = c.name.clone();
+            for did in nested {
+                if let Decl::Class(nc) = file.decl_mut(did) {
+                    nc.name = format!("{qualifier}{}", nc.name);
+                    // An `inner class` names its enclosing class by the same path, and its
+                    // synthetic outer-instance field is typed from it.
+                    if let Some(outer) = nc.inner_of.as_deref() {
+                        if outer == source || outer.starts_with(&format!("{source}.")) {
+                            nc.inner_of = Some(format!("{qualifier}{outer}"));
+                        }
                     }
                 }
-                if !top_names.contains(name) && !bound.contains(name) {
-                    rename.insert(name.clone(), new);
-                }
-            } else if file_counts.get(name).copied().unwrap_or(0) > 1
-                && decls.len() == 1
-                && !top_names.contains(name)
-                && !bound.contains(name)
-            {
-                let new = format!("{name}$loc${counter}");
-                counter += 1;
-                if let Stmt::LocalClass(c) = &mut file.stmt_arena[decls[0].0 as usize] {
-                    c.name = new.clone();
-                }
-                rename.insert(name.clone(), new);
             }
         }
-        if rename.is_empty() {
-            continue;
-        }
-        for &e in exprs {
-            if let Expr::Name(n) = &file.expr_arena[e.0 as usize] {
-                if let Some(new) = rename.get(n) {
-                    let new = new.clone();
-                    file.expr_arena[e.0 as usize] = Expr::Name(new);
-                }
-            }
-        }
+        c.name = name;
+        let id = file.add_decl(Decl::Class(c));
+        file.decls.push(id);
+        file.mark_local_declaration(id);
+        file.local_class_decls.insert(stmt, id);
     }
 }
 
-/// Collect every `ExprId`/`StmtId` reachable from `root` (used by `scope_local_classes`). A worklist
-/// (not recursion) so the two `any_child_expr` closures push to SEPARATE vectors — no borrow conflict.
-fn collect_subtree(file: &File, root: ExprId, exprs: &mut Vec<ExprId>, stmts: &mut Vec<StmtId>) {
-    let mut we: Vec<ExprId> = vec![root];
-    let mut ws: Vec<StmtId> = Vec::new();
+/// The `Stmt::LocalClass` statements reachable from `root`, including those inside the member bodies
+/// of a local class declared there (`any_child_stmt` stops at the local class, but its members are
+/// written in the same lexical scope).
+fn local_class_stmts(file: &File, root: ExprId) -> Vec<StmtId> {
+    use crate::ast::{FunBody, Stmt};
+    let mut exprs: Vec<ExprId> = vec![root];
+    let mut stmts: Vec<StmtId> = Vec::new();
+    let mut out: Vec<StmtId> = Vec::new();
     loop {
-        if let Some(e) = we.pop() {
-            exprs.push(e);
+        if let Some(e) = exprs.pop() {
             file.any_child_expr(
                 e,
-                &mut |c| {
-                    we.push(c);
+                &mut |child| {
+                    exprs.push(child);
                     false
                 },
-                &mut |s| {
-                    ws.push(s);
+                &mut |child| {
+                    stmts.push(child);
                     false
                 },
             );
-        } else if let Some(s) = ws.pop() {
-            stmts.push(s);
-            file.any_child_stmt(s, &mut |c| {
-                we.push(c);
+        } else if let Some(s) = stmts.pop() {
+            file.any_child_stmt(s, &mut |child| {
+                exprs.push(child);
                 false
             });
-            // `any_child_stmt` does not descend into a local class's own member bodies — add them so a
-            // construction reference INSIDE a local class method is rewritten too.
-            if let crate::ast::Stmt::LocalClass(c) = file.stmt(s) {
+            if let Stmt::LocalClass(c) = file.stmt(s) {
+                out.push(s);
                 for m in c.methods.iter().chain(&c.companion_methods) {
                     if let FunBody::Expr(e) | FunBody::Block(e) = m.body {
-                        we.push(e);
+                        exprs.push(e);
                     }
                 }
             }
@@ -515,27 +470,7 @@ fn collect_subtree(file: &File, root: ExprId, exprs: &mut Vec<ExprId>, stmts: &m
             break;
         }
     }
-}
-
-fn hoist_local_classes(file: &mut File) {
-    use crate::ast::{Decl, Stmt};
-    let hoisted: Vec<crate::ast::ClassDecl> = file
-        .stmt_arena
-        .iter()
-        .filter_map(|s| match s {
-            // A local class with super-CONSTRUCTOR arguments (`class Z : C(s)`) can capture an outer
-            // local through that call, which the hoisted (outer-scope-free) check doesn't currently
-            // reject — so it would miscompile. Don't hoist those; the reference stays unresolved and the
-            // file skips (sound). Local-class INHERITANCE is a later slice. Everything else hoists.
-            Stmt::LocalClass(c) if c.base_args.is_empty() => Some(c.clone()),
-            _ => None,
-        })
-        .collect();
-    for c in hoisted {
-        let id = file.add_decl(Decl::Class(c));
-        file.decls.push(id);
-        file.mark_local_declaration(id);
-    }
+    out
 }
 
 /// A class with NO primary constructor names its base class WITHOUT parentheses (`class A : B { …
@@ -1655,15 +1590,11 @@ impl<'a> Parser<'a> {
     /// Hoist nested interfaces and supported interface subclasses.
     fn register_interface_nested(&mut self, iface: &str, modifiers: &[String]) {
         let start = self.file.decls.len();
-        let mut nested = self.parse_nested_type_decl();
+        let nested = self.parse_nested_type_decl();
         let implements = nested.supertypes.iter().any(|s| s.name == iface)
             || nested.base_class.as_deref() == Some(iface);
         if nested.is_interface() || implements {
-            self.reprefix_hoisted(iface, start);
-            nested.visibility = visibility_of(modifiers);
-            nested.name = format!("{iface}.{}", nested.name);
-            let id = self.file.add_decl(Decl::Class(nested));
-            self.file.decls.push(id);
+            self.register_hoisted_nested_classifier(iface, start, nested, modifiers);
         }
     }
 
@@ -3054,6 +2985,96 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Publish one already-parsed nested classifier and every descendant it hoisted while parsing.
+    /// This is the single owner-identity boundary for class-like declarations: syntax-specific parsers
+    /// may set class flags first, but visibility, lexical prefixing, and declaration-list registration
+    /// must remain identical for class, object, interface, enum, and interface-member entry points.
+    fn register_hoisted_nested_classifier(
+        &mut self,
+        outer: &str,
+        start: usize,
+        mut nested: ClassDecl,
+        modifiers: &[String],
+    ) {
+        self.reprefix_hoisted(outer, start);
+        nested.visibility = visibility_of(modifiers);
+        nested.name = format!("{outer}.{}", nested.name);
+        let id = self.file.add_decl(Decl::Class(nested));
+        self.file.decls.push(id);
+    }
+
+    /// Parse and register any class-like declaration that this parser can represent as a hoisted
+    /// nested classifier. Class and object bodies deliberately share this funnel: the declaration's
+    /// lexical owner, not the kind of its enclosing declaration, determines its source/JVM identity.
+    ///
+    /// `start` must precede the child parse because that parse may itself hoist descendants. Prefixing
+    /// that complete suffix before registering the child preserves paths such as `A.B.C`; doing this in
+    /// individual enum/class/object arms previously let otherwise-equivalent branches drift apart.
+    fn parse_and_register_nested_classifier(
+        &mut self,
+        outer: &str,
+        modifiers: &[String],
+        enclosing_instance_exists: bool,
+    ) -> bool {
+        let is_inner = modifiers.iter().any(|modifier| modifier == "inner");
+        let start = self.file.decls.len();
+        let (mut nested, supports_inner) = match self.kind() {
+            TokenKind::KwClass => {
+                let nested = self.parse_class();
+                (nested, true)
+            }
+            TokenKind::Ident
+                if self.text() == "data"
+                    && self.t.get(self.i + 1).is_some_and(|token| {
+                        token.kind == TokenKind::KwClass
+                            || (token.kind == TokenKind::Ident && token.text(self.src) == "object")
+                    }) =>
+            {
+                self.bump(); // `data`
+                let (mut nested, supports_inner) =
+                    if self.at(TokenKind::Ident) && self.text() == "object" {
+                        (self.parse_object(), false)
+                    } else {
+                        (self.parse_class(), true)
+                    };
+                nested.is_data = true;
+                (nested, supports_inner)
+            }
+            TokenKind::Ident if self.text() == "interface" => (self.parse_interface(), false),
+            TokenKind::Ident
+                if self.text() == "enum"
+                    && self
+                        .t
+                        .get(self.i + 1)
+                        .is_some_and(|token| token.kind == TokenKind::KwClass) =>
+            {
+                (self.parse_enum(), false)
+            }
+            TokenKind::Ident if self.text() == "object" => (self.parse_object(), false),
+            _ => return false,
+        };
+
+        if is_inner && supports_inner && !enclosing_instance_exists {
+            // An object is a singleton, so it cannot provide the per-instance receiver an `inner
+            // class` requires. Consume the unsupported declaration without publishing a falsely
+            // constructible classifier. The child parse may have tentatively hoisted descendants,
+            // so remove that declaration-list suffix with the unsupported owner as one atomic unit.
+            // Other classifier kinds ignore an inapplicable `inner` modifier rather than acquiring
+            // class-only capture metadata.
+            self.file.decls.truncate(start);
+            return true;
+        }
+
+        if nested.kind == ClassKind::Class {
+            nested.modality = modality_from_modifiers(modifiers);
+        }
+        if is_inner && supports_inner {
+            nested.inner_of = Some(outer.to_string());
+        }
+        self.register_hoisted_nested_classifier(outer, start, nested, modifiers);
+        true
+    }
+
     /// Depth-guarded entries for the class-like declaration parsers. Nested type declarations
     /// (`class A { class B { … } }`, nested interfaces/objects/enums, and mixed chains) recurse
     /// through these without ever passing through `parse_bp` or `parse_stmt`, so they share their
@@ -3232,6 +3253,12 @@ impl<'a> Parser<'a> {
                 let fun_final = mods.iter().any(|m| m == "final");
                 let fun_suspend = mods.iter().any(|m| m == "suspend");
                 let is_abstract = mods.iter().any(|m| m == "abstract");
+                // All representable nested classifier kinds share one registration path. Keeping
+                // this outside the member-kind match prevents class/object/enum syntax branches from
+                // acquiring subtly different visibility or lexical-name behavior.
+                if self.parse_and_register_nested_classifier(&name, &mods, true) {
+                    continue;
+                }
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
@@ -3292,106 +3319,6 @@ impl<'a> Parser<'a> {
                             &mut companion_supertypes,
                             &mut companion_decl_line,
                         );
-                    }
-                    // Silently skip nested type declarations (inner/nested class, object,
-                    // interface, typealias) and secondary constructors.  Parsing them properly
-                    // requires nesting the full resolver/emitter; for now we drop them and the
-                    // file compiles so tests that don't exercise the nested type still pass.
-                    TokenKind::KwClass => {
-                        // A nested class `Outer { class Inner … }` is hoisted to the file top level as a
-                        // separate class (internal `Outer$Inner`, source `Outer.Inner`). An `inner class`
-                        // additionally captures the enclosing instance (`inner_of` → a synthetic `this$0`
-                        // field + outer-as-first-constructor-parameter).
-                        let is_inner = mods.iter().any(|m| m == "inner");
-                        let start = self.file.decls.len();
-                        let mut nested = self.parse_class();
-                        self.reprefix_hoisted(&name, start);
-                        nested.modality = modality_from_modifiers(&mods);
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        if is_inner {
-                            nested.inner_of = Some(name.clone());
-                        }
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
-                    }
-                    // Nested `data class Inner(…)` → hoist like a plain nested class (`Outer.Inner`),
-                    // constructed as `Outer.Inner(…)`; its data members emit normally. `data object Inner`
-                    // hoists the same way — `data` is just a modifier on either, exactly as at the file top
-                    // level, and a sealed hierarchy's singleton cases
-                    // (`sealed class S { data object A : S() }`) are that shape.
-                    TokenKind::Ident
-                        if self.text() == "data"
-                            && self.t.get(self.i + 1).is_some_and(|t| {
-                                t.kind == TokenKind::KwClass
-                                    || (t.kind == TokenKind::Ident && t.text(self.src) == "object")
-                            }) =>
-                    {
-                        self.bump(); // 'data'
-                        let start = self.file.decls.len();
-                        let mut nested = if self.at(TokenKind::Ident) && self.text() == "object" {
-                            self.parse_object()
-                        } else {
-                            self.parse_class()
-                        };
-                        self.reprefix_hoisted(&name, start);
-                        nested.is_data = true;
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
-                    }
-                    // A nested `interface` (optionally `sealed`) in a class body hoists to the file top
-                    // level as `Outer.Foo` (internal `Outer$Foo`), like a nested class — a sibling or child
-                    // can implement it by simple name. Objects/enums/annotations still drop (their
-                    // instance/entry shapes need more than a rename).
-                    TokenKind::Ident
-                        if self.text() == "interface"
-                            || (self.text() == "sealed"
-                                && self.t.get(self.i + 1).map_or(false, |t| {
-                                    t.kind == TokenKind::Ident && t.text(self.src) == "interface"
-                                })) =>
-                    {
-                        if self.text() == "sealed" {
-                            self.bump();
-                        }
-                        let start = self.file.decls.len();
-                        let mut nested = self.parse_interface();
-                        self.reprefix_hoisted(&name, start);
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
-                    }
-                    // A nested `enum class Inner { A, B }` hoists to the file top level as `Outer.Inner`
-                    // (internal `Outer$Inner`), like a nested class; its entries register under the
-                    // hoisted name and read as `Outer.Inner.ENTRY`.
-                    TokenKind::Ident
-                        if self.text() == "enum"
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .map_or(false, |t| t.kind == TokenKind::KwClass) =>
-                    {
-                        let start = self.file.decls.len();
-                        let mut nested = self.parse_enum();
-                        self.reprefix_hoisted(&name, start);
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
-                    }
-                    // A nested `object Foo(: Base())?` hoists to the file top level as `Outer.Foo`
-                    // (internal `Outer$Foo`), like a nested class — a sealed class's case objects
-                    // (`sealed class V { object Ok : V() }`) are exactly this shape.
-                    TokenKind::Ident if self.text() == "object" => {
-                        let start = self.file.decls.len();
-                        let mut nested = self.parse_object();
-                        self.reprefix_hoisted(&name, start);
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
                     }
                     TokenKind::Ident
                         if self.text() == "annotation"
@@ -4029,6 +3956,13 @@ impl<'a> Parser<'a> {
                 let fun_inline = mods.iter().any(|m| m == "inline");
                 let fun_final = mods.iter().any(|m| m == "final");
                 let fun_suspend = mods.iter().any(|m| m == "suspend");
+                // Named singleton owners use the same classifier-registration invariant as class
+                // owners. The flag only excludes `inner` classes, whose semantics require an
+                // enclosing instance that a singleton cannot supply. Anonymous-object bodies use
+                // `parse_object_body` instead and have no stable owner identity to publish here.
+                if self.parse_and_register_nested_classifier(&name, &mods, false) {
+                    continue;
+                }
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
@@ -4072,50 +4006,12 @@ impl<'a> Parser<'a> {
                         let block = self.parse_block_expr(false);
                         init_order.push(ClassInit::Block(block));
                     }
-                    // A plain nested class in an object body (`object Foo { class Bar … }`) hoists to the
-                    // file top level as `Foo.Bar` (internal `Foo$Bar`) — exactly like a class-body nested
-                    // type. `inner class` inside an object captures no valid enclosing instance (an object
-                    // is a singleton), so keep dropping those (unsupported → skip, not miscompile).
-                    TokenKind::KwClass if !mods.iter().any(|m| m == "inner") => {
-                        let mut nested = self.parse_class();
-                        nested.modality = modality_from_modifiers(&mods);
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
-                    }
-                    TokenKind::KwClass => {
-                        let _ = self.parse_nested_type_decl();
-                    }
-                    // A nested `data class Bar(…)` in an object body → hoist like a plain nested class.
-                    // An `inner data class` captures no enclosing instance in an object (singleton) — drop
-                    // it (unsupported → skip) exactly as the plain-`class` arm drops `inner class`.
                     TokenKind::Ident
-                        if self.text() == "data"
+                        if self.text() == "annotation"
                             && self
                                 .t
                                 .get(self.i + 1)
                                 .map_or(false, |t| t.kind == TokenKind::KwClass) =>
-                    {
-                        self.bump(); // 'data'
-                        if mods.iter().any(|m| m == "inner") {
-                            let _ = self.parse_nested_type_decl();
-                        } else {
-                            let mut nested = self.parse_class();
-                            nested.is_data = true;
-                            nested.visibility = visibility_of(&mods);
-                            nested.name = format!("{}.{}", name, nested.name);
-                            let id = self.file.add_decl(Decl::Class(nested));
-                            self.file.decls.push(id);
-                        }
-                    }
-                    TokenKind::Ident
-                        if matches!(self.text(), "object" | "interface")
-                            || (matches!(self.text(), "enum" | "annotation")
-                                && self
-                                    .t
-                                    .get(self.i + 1)
-                                    .map_or(false, |t| t.kind == TokenKind::KwClass)) =>
                     {
                         let _ = self.parse_nested_type_decl();
                     }
@@ -5602,11 +5498,21 @@ impl<'a> Parser<'a> {
                 let is_sealed = mods.iter().any(|m| m == "sealed");
                 let is_open = is_sealed || mods.iter().any(|m| m == "open");
                 let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
+                // A nested type inside this local class is hoisted to `file.decls` DURING the parse
+                // below, named by the path from the local class (`Local.Inner`). `hoist_local_classes`
+                // later qualifies the local class itself, and these have to move with it — so record
+                // exactly which declarations belong to it rather than guessing from a name prefix.
+                let nested_start = self.file.decls.len();
                 let mut d = self.parse_nested_type_decl();
                 // Preserves the prior behavior: this path applied open/abstract but left `is_sealed`
                 // at its default `false` (so a local `sealed` class never reported `is_sealed`).
                 d.modality = modality_of(is_open, is_abstract, false);
-                self.finish_stmt(Stmt::LocalClass(d), start)
+                let nested: Vec<crate::ast::DeclId> = self.file.decls[nested_start..].to_vec();
+                let stmt = self.finish_stmt(Stmt::LocalClass(d), start);
+                if !nested.is_empty() {
+                    self.file.local_class_nested.insert(stmt, nested);
+                }
+                stmt
             }
             // Full-form destructuring (`+NameBasedDestructuring`): `(val a, val b) = e` /
             // `[val a, val b] = e`, where each component carries its OWN `val`/`var` (unlike the

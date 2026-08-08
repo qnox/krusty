@@ -549,6 +549,18 @@ pub fn type_name_maps_to_jvm_collection_interface(internal: TypeName) -> bool {
         || internal.starts_with("java/util/")
 }
 
+/// Whether `internal` is a KOTLIN semantic face of a collection erasure group, as opposed to the
+/// group's JVM `java/util/*` face. Derive this from the shared builtin mapping table rather than a
+/// package-prefix test: adding or renaming a mapped collection then updates every consumer through the
+/// one erasure policy, and metadata cannot replace a semantic Kotlin name with an emit-only JVM name.
+pub fn is_kotlin_collection_type_name(internal: TypeName) -> bool {
+    type_name_maps_to_jvm_collection_interface(internal)
+        && builtin_ids()
+            .jvm_builtin
+            .get(&internal)
+            .is_some_and(|(_, jvm_name)| *jvm_name != internal)
+}
+
 pub fn jvm_collection_to_kotlin_type_name(internal: TypeName) -> Option<TypeName> {
     builtin_ids().coll_to_kotlin.get(&internal).copied()
 }
@@ -592,9 +604,10 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_name,
-        kotlin_prim_to_wrapper, mapped_builtin_has_authoritative_kotlin_scope, to_jvm_internal,
-        to_jvm_type_name, wrapper_internal, wrapper_to_kotlin_prim_name,
+        is_kotlin_collection_type_name, jvm_collection_to_kotlin_type_name,
+        jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
+        mapped_builtin_has_authoritative_kotlin_scope, to_jvm_internal, to_jvm_type_name,
+        wrapper_internal, wrapper_to_kotlin_prim_name,
     };
     use crate::types::{type_name, Ty};
 
@@ -665,6 +678,18 @@ mod tests {
             jvm_collection_to_kotlin_type_name(type_name("demo/Foo")),
             None
         );
+        assert!(is_kotlin_collection_type_name(type_name(
+            "kotlin/collections/List"
+        )));
+        assert!(is_kotlin_collection_type_name(type_name(
+            "kotlin/collections/MutableMap"
+        )));
+        assert!(is_kotlin_collection_type_name(type_name(
+            "kotlin/collections/Map.Entry"
+        )));
+        assert!(!is_kotlin_collection_type_name(type_name("java/util/List")));
+        assert!(!is_kotlin_collection_type_name(type_name("kotlin/String")));
+        assert!(!is_kotlin_collection_type_name(type_name("demo/Foo")));
     }
 
     #[test]

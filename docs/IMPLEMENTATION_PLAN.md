@@ -4073,3 +4073,97 @@ property references, and the harness does supply `kotlin-reflect.jar`); what was
   CLASSPATH target had its value-class mangle applied twice (`decode-X4E9McA-X4E9McA` — a method that
   exists nowhere), and a generic function's `@Metadata` recorded an INFERRED type-parameter return as
   `Any` with no JVM signature handle, which left reflection unable to identify the method.
+
+## Phase — local classifiers and type parameters in the lexical scope chain  ◐
+
+Removing the parser's local-class hoisting hack in favour of proper lexical scoping. Two of the five
+steps have landed; the remaining three are blocked on lowering, not on the front end.
+
+- ✅ **Type parameters are classifier bindings.** `Scope` no longer carries a `RefCell<TParams>`
+  replaced wholesale per declaration, nor a parallel `reified` set. Both live in the binding list as
+  `ScopeBinding::TypeParam { bound, extra_bounds, reified }` under `Ns::Classifier`, declared on the
+  rung of the declaration that introduces them. The lookup walk stops at a class rung with
+  `carries_outer == false` — the same cut `implicit_receivers` makes. See `docs/SPEC.md`.
+- ✅ **A local class is checked from its `Stmt::LocalClass`**, in the scope it was written in, on a
+  rung with `carries_outer == true`. `File::local_class_decls` links the statement to the hoisted
+  declaration; the file walk skips that declaration so it is not checked twice. Signature collection
+  still sees only the hoisted declaration, so the enclosing declaration's type parameters are handed
+  to it explicitly (`local_class_enclosing_tparams`).
+- ✅ **A local class captures enclosing bindings.** The checker decides WHAT is captured (it is the
+  only place the enclosing bindings exist); lowering decides what that costs — a leading constructor
+  parameter and field per capture, supplied by `Lower::emit_new`, the single seam every construction
+  goes through, so no argument-mapping arm can forget them. `emit_new` returns `Option` for that
+  reason. `ClassSig::ctor_params` stays the source signature; a latent off-by-captures index into it
+  (harmless while only anonymous objects had captures, since those have no source arguments) is
+  fixed. Box corpus: 3540 → 3544 compiled, 0 FAIL.
+- ✅ **The enclosing INSTANCE is captured too** — one capture however many members are read, placed
+  first, which is where `captured_outer_method` and `LabeledThisOuter` already look. Two lowering
+  arms supplied an outer instance of their own for `inner class` construction and had to stop doing
+  so for a class whose captures `emit_new` supplies. Rejected for a `@JvmInline value class`
+  receiver: there is no instance there, only the underlying value.
+- ⛔ **Three capture shapes stay rejected**: a local function, a reassigned `var`, and a capture read
+  during construction (initializer, `init`, base-constructor argument, secondary constructor,
+  parameter default). Two box-corpus cases proved the last one is a miscompile if admitted
+  (`NoSuchMethodError` on construction).
+
+- ✅ **The parser's rename/rewrite pass is gone.** A hoisted local class is named after the
+  declaration it was written in; the SOURCE name is a `ScopeBinding::LocalClass` in `Ns::Classifier`
+  and the checker's classifier chains consult the scope first. Signature collection and lowering
+  have no chain, so they take the checker's recorded answers: `TypeInfo::resolved_type_ref` for a
+  type reference, the reference's own first parameter for an unbound `Type::m`, `ClassSig` for a
+  supertype, and an explicit sibling map for collection.
+
+Remaining, in order:
+
+1. **The three unmodelled capture shapes.** A capture read during construction needs a `$default`
+   synthetic constructor that carries the captures (it does not today); the capture fields are
+   already stored before the initializers run. A reassigned `var` needs the shared-cell
+   representation local functions already use.
+2. **The Kotlin-metadata local-class marking.** `StringTableTypes.localName` names the string
+   indices that denote local classifiers; reflection reads it to decide whether `simpleName` is the
+   last `$` segment or the whole qualified name. Without it a class literal on a local class is
+   skipped, which costs `localClasses/localGenericWithTypeParameters.kt` as collateral (it takes a
+   local class literal but never reads its name). Two encodings of the field were tried and neither
+   changed the reported name, so the reader's expectation needs establishing first — decode a
+   kotlinc-produced local class's metadata and compare.
+3. **`hoist_local_classes` itself.** The hoisted `Decl::Class` is still what signature collection and
+   lowering consume; removing it means teaching both to read a classifier out of `stmt_arena`.
+
+## Fully-qualified name references
+
+A dotted reference is resolved by SEGMENT ITERATION over two namespaces (`QualifiedPrefix::Package`
+/ `Classifier`), not by matching spellings against shape-keyed arms. The half that was missing is the
+package namespace: `SymbolSource::package_exists`, answered by the classpath package catalog
+(`PackageTree::has_package` — jars, class dirs, the JDK jimage, plus intermediate packages) and by the
+module's own declarations. Both shadowing rules are the reference compiler's: a VALUE root (including
+one bound by an explicit or wildcard import) shadows a classifier and a package; an in-scope
+classifier shadows a package path. See `docs/SPEC.md`, "Fully-qualified name references".
+
+Removing the old special cases surfaced four latent miscompiles that a skipping file had hidden, all
+fixed rather than re-gated: the `InnerClasses` outer/inner split (textual last-`$`, wrong for a
+backticked name containing `$`), a class not declaring its own nest members (the JVM cross-checks and
+throws `IncompatibleClassChangeError`), the classpath MEMBER vararg packer ignoring the spread flag,
+and unsigned→floating conversion emitting a signed `i2f`.
+
+Every position is now covered for BOTH origins, with no test left ignored. Closing the last of them
+meant fixing five things that were never about qualified names, only reached through one:
+
+- A module `typealias` had no fully-qualified classifier identity (`SymbolTable::source_alias_fqns`
+  keys the alias edge by fqn; a per-file key cannot answer a reference from another file), and the
+  LOWERING-side qualified resolver returned the alias spelling instead of its target, so the internal
+  disagreed with the checker's recorded result type and the construction was dropped.
+- A cross-file enum's synthetic `values()`/`valueOf()` had no home: the `EnumValues`/`EnumValueOf`
+  nodes index this file's own IR classes. The checker now records the owner and lowering emits the
+  static call by name.
+- A plain `companion object` (one declaring no supertype) gets no registered signature even though it
+  is always emitted as `Outer$Companion` in an `Outer.Companion` field, so `pkg.Cls.Companion` is
+  decided from the OWNER's companion members instead of from an identity that was never registered.
+- A cross-file companion-static WRITE had no IR node (`ExternalStaticField` was a read only); added
+  `SetExternalStaticField`, typed `Unit` so statement position does not `pop` an empty stack.
+- An unbound method reference needed a same-file `FunId`; cross-file it now invokes by owner and name,
+  the shape the `java/lang/Object` methods already used.
+
+One trap worth recording: the qualifier walk must FALL THROUGH when a step fails, never `return`. The
+first version returned `None` from the constructor path as soon as the walk did not reach a
+classifier, which silently pre-empted the older arms that resolve spellings the walk cannot see (a
+classpath `typealias` being exactly one of them).
