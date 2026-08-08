@@ -17218,22 +17218,32 @@ impl<'a> Checker<'a> {
                 &value_signature,
                 trailing_lambda,
             ) {
-                Ok(slots) => mapped.push((
-                    self.call_slot_score_vararg(
+                Ok(slots) => {
+                    // The stored params are descriptor-erased (`String?` reads as `String`); the
+                    // metadata nullability rides `platform_nullable_params`. The positional channel
+                    // widens through `apply_platform_call_parameter_nullability`, which zips
+                    // params with args POSITIONALLY — named slots are param-indexed, so widen
+                    // slot-driven here or `f(message = null)` on `message: String?` scores as
+                    // null-into-`String` and the call is rejected.
+                    let widened = self.widen_platform_nullable_slot_params(
                         value_params,
+                        &value_signature.platform_nullable_params,
+                        &slots,
+                    );
+                    let score = self.call_slot_score_vararg(
+                        &widened,
                         &slots,
                         candidate.call_sig.vararg_index,
-                    ),
-                    slots,
-                    candidate,
-                )),
+                    );
+                    mapped.push((score, slots, candidate, widened));
+                }
                 Err(error) => failures.push((error, candidate)),
             }
         }
-        if !mapped.is_empty() && mapped.iter().all(|(score, _, _)| score.is_none()) {
+        if !mapped.is_empty() && mapped.iter().all(|(score, _, _, _)| score.is_none()) {
             if mapped.len() == 1 {
-                let (_, slots, candidate) = mapped.pop().unwrap();
-                for (parameter, argument) in candidate.callable.params.iter().zip(&slots) {
+                let (_, slots, _, widened) = mapped.pop().unwrap();
+                for (parameter, argument) in widened.iter().zip(&slots) {
                     if let Some(argument) = argument {
                         self.expect_assignable(
                             *parameter,
@@ -17253,9 +17263,9 @@ impl<'a> Checker<'a> {
             }
             return Err(());
         }
-        mapped.retain(|(score, _, _)| score.is_some());
-        mapped.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
-        if let Some((_, slots, _)) = mapped.into_iter().next() {
+        mapped.retain(|(score, _, _, _)| score.is_some());
+        mapped.sort_by_key(|(score, _, _, _)| std::cmp::Reverse(*score));
+        if let Some((_, slots, _, _)) = mapped.into_iter().next() {
             let selected_args = slots.iter().copied().flatten().collect::<Vec<_>>();
             let selected_types = selected_args
                 .iter()
@@ -32438,6 +32448,36 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Slot-driven form of `apply_platform_call_parameter_nullability`: widen a metadata-nullable
+    /// reference parameter to `T?` when the argument MAPPED TO ITS SLOT is null/nullable. The
+    /// positional helper zips params with args by position, which is wrong once named arguments
+    /// reorder or skip slots. Metadata never marks a Kotlin vararg's array type nullable, so the
+    /// vararg slot needs no element-form special case here.
+    fn widen_platform_nullable_slot_params(
+        &self,
+        params: &[Ty],
+        nullable: &[bool],
+        slots: &[Option<ExprId>],
+    ) -> Vec<Ty> {
+        params
+            .iter()
+            .enumerate()
+            .map(|(i, &parameter)| {
+                let accepts_null = nullable.get(i).copied().unwrap_or(false)
+                    && parameter.is_reference()
+                    && slots.get(i).copied().flatten().is_some_and(|argument| {
+                        let aty = self.expr_types[argument.0 as usize];
+                        aty.is_nullable() || aty == Ty::Null
+                    });
+                if accepts_null {
+                    Ty::nullable(parameter)
+                } else {
+                    parameter
+                }
+            })
+            .collect()
+    }
+
     /// Score a mapped call's slots against the candidate's parameters. At the vararg slot the
     /// ELEMENT form (a positional first element) and the ARRAY form (a spread, or the named
     /// whole-array assignment) both score — the slot map keeps element-form arguments.
@@ -34421,16 +34461,41 @@ impl<'a> Checker<'a> {
                                     Err(()) => return Ty::Error,
                                 }
                             }
-                            if let Some(mut c) = self
-                                .resolver_in_scope(&pkg_scope)
-                                .resolve_symbol(
-                                    crate::symbol_resolver::SymRecv::TopLevel,
-                                    &name,
-                                    &selected_arg_tys,
-                                    &targs,
-                                )
-                                .and_then(crate::symbol_resolver::Symbol::top_level_call)
-                            {
+                            // A labelled call that OMITS a parameter (`pkg.fw(message = null) { … }`
+                            // with `tag` defaulting) is not positional: `selected_arg_tys` is
+                            // compacted to the arguments actually written, so the positional
+                            // resolution below would measure them against the wrong declarations.
+                            // Route it through the named `$default` resolution the bare-name
+                            // (`import`ed) channel already uses, slots deciding what each argument
+                            // is checked against.
+                            let named_omitting_slots = resolved_slots.as_ref().and_then(|slots| {
+                                let filled: Vec<usize> = slots
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(parameter, argument)| argument.map(|_| parameter))
+                                    .collect();
+                                (filled.len() < slots.len()).then_some(filled)
+                            });
+                            let named_resolved = named_omitting_slots.as_ref().and_then(|slots| {
+                                self.resolver_in_scope(&pkg_scope)
+                                    .resolve_top_level_named_default_callable(
+                                        &name,
+                                        &selected_arg_tys,
+                                        slots,
+                                        &targs,
+                                        expected,
+                                    )
+                            });
+                            if let Some(mut c) = named_resolved.or_else(|| {
+                                self.resolver_in_scope(&pkg_scope)
+                                    .resolve_symbol(
+                                        crate::symbol_resolver::SymRecv::TopLevel,
+                                        &name,
+                                        &selected_arg_tys,
+                                        &targs,
+                                    )
+                                    .and_then(crate::symbol_resolver::Symbol::top_level_call)
+                            }) {
                                 if c.owner_package_matches_name(pkg_scope[0]) {
                                     crate::trace_compiler!(
                                         "resolve",
