@@ -6,6 +6,9 @@
 
 use super::common;
 
+// The member and extension controls deliberately use distinct source names. Sharing `eqd` would
+// create an unrelated same-named overload family and let fixture lookup order, rather than the call
+// origin under test, decide which default-call candidate is observed.
 const LIB: &str = "package lib\n\
      class Tag(val name: String)\n\
      fun <T> eq(expected: T, actual: T): String = if (expected == actual) \"eq\" else \"ne\"\n\
@@ -16,10 +19,10 @@ const LIB: &str = "package lib\n\
      fun <T> tld(expected: T, actual: T, message: String? = null, render: () -> String): String =\n\
      \x20 render() + (if (expected == actual) \"eq\" else \"ne\")\n\
      class Judge {\n\
-     \x20 fun <T> eqd(expected: T, actual: T, message: String? = null): String =\n\
+     \x20 fun <T> memberEqd(expected: T, actual: T, message: String? = null): String =\n\
      \x20   (message ?: \"\") + (if (expected == actual) \"eq\" else \"ne\")\n\
      }\n\
-     fun <T> String.eqd(expected: T, actual: T, message: String? = null): String =\n\
+     fun <T> String.extEqd(expected: T, actual: T, message: String? = null): String =\n\
      \x20 (message ?: \"\") + (if (expected == actual) \"eq\" else \"ne\")\n\
      fun maybe(flag: Boolean): String? = if (flag) \"x\" else null\n\
      fun maybeInt(flag: Boolean): Int? = if (flag) 7 else null\n\
@@ -152,7 +155,7 @@ fn named_member_omitting_call_uses_semantic_generic_slots() {
         import lib.maybe\n\
         fun box(): String {\n\
         \x20 val judge = Judge()\n\
-        \x20 return if (judge.eqd(expected = \"x\", actual = maybe(false)) == \"ne\") \"OK\" else \"fail\"\n\
+        \x20 return if (judge.memberEqd(expected = \"x\", actual = maybe(false)) == \"ne\") \"OK\" else \"fail\"\n\
         }\n";
     common::expect_box_ok_against("cpgenericnullnamedmember", LIB, main);
 }
@@ -161,10 +164,10 @@ fn named_member_omitting_call_uses_semantic_generic_slots() {
 fn named_extension_omitting_call_uses_semantic_generic_slots() {
     // The same mapped-slot rule applies to an extension candidate: declaration origin and receiver
     // syntax do not decide whether a semantic type-parameter slot may reach inference.
-    let main = "import lib.eqd\n\
+    let main = "import lib.extEqd\n\
         import lib.maybe\n\
         fun box(): String {\n\
-        \x20 return if (\"receiver\".eqd(expected = \"x\", actual = maybe(false)) == \"ne\") \"OK\" else \"fail\"\n\
+        \x20 return if (\"receiver\".extEqd(expected = \"x\", actual = maybe(false)) == \"ne\") \"OK\" else \"fail\"\n\
         }\n";
     common::expect_box_ok_against("cpgenericnullnamedextension", LIB, main);
 }

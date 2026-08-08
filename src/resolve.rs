@@ -23768,8 +23768,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Logical parameter expectations for one already-selected receiver-less callable, independent
-    /// of provider origin or source spelling. `callable.params` remain physical/erased emit handles;
+    /// Logical parameter expectations for one already-selected callable, independent of provider
+    /// origin, receiver spelling, or argument spelling. `physical_params` remain erased emit handles;
     /// when a semantic generic signature is available, join the actual types by their PARAMETER slots
     /// and overlay the fully-bound substitutions. Explicit type arguments win over inference.
     ///
@@ -23780,17 +23780,19 @@ impl<'a> Checker<'a> {
     /// nullable binding merely because `<T>` without that bound would join `String` and `String?`.
     fn selected_call_param_expectations(
         &self,
-        callable: &crate::libraries::LibraryCallable,
+        physical_params: &[Ty],
+        generic_signature: Option<&crate::libraries::GenericSig>,
+        context_count: usize,
         actuals: &[(usize, Ty)],
         type_args: &[Ty],
     ) -> Vec<Ty> {
-        let mut expectations = callable.params.clone();
-        let Some(gsig) = callable.generic_sig.as_deref() else {
+        let mut expectations = physical_params.to_vec();
+        let Some(gsig) = generic_signature else {
             return expectations;
         };
         if gsig.formals.is_empty()
-            || callable.context_count > 0
-            || gsig.params.len() != callable.params.len()
+            || context_count > 0
+            || gsig.params.len() != physical_params.len()
         {
             return expectations;
         }
@@ -29361,7 +29363,50 @@ impl<'a> Checker<'a> {
             }
             return Some(Ty::Error);
         }
-        let (fi, _params, slots, callable, selection_params) = selected?;
+        let (fi, physical_params, slots, callable, selection_params) = selected?;
+        // `selection_params` made the candidate applicable, but it may still contain the provider's
+        // erased `Any` slots. Rebuild only the CHECKING view from the selected semantic signature and
+        // the authoritative named/default slot map. Physical parameters remain untouched in `fi` and
+        // `callable`, so this generic rule cannot change descriptors or lowering ownership.
+        let expectation_actuals = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(parameter, argument)| {
+                let argument = (*argument)?;
+                (!matches!(self.file.expr(argument), Expr::Lambda { .. }))
+                    .then_some((parameter, self.expr_types[argument.0 as usize]))
+            })
+            .collect::<Vec<_>>();
+        let expected_params = self.selected_call_param_expectations(
+            &physical_params,
+            fi.generic_sig.as_ref(),
+            fi.context_count,
+            &expectation_actuals,
+            type_args,
+        );
+        let selection_params = args
+            .iter()
+            .map(|argument| {
+                let slot = slots
+                    .iter()
+                    .position(|candidate| candidate.as_ref() == Some(argument))
+                    .or(fi.call_sig.vararg_index)?;
+                let parameter = *expected_params.get(slot)?;
+                let actual = self.expr_types[argument.0 as usize];
+                if fi.call_sig.vararg_index == Some(slot)
+                    && !self.file.is_spread_arg(*argument)
+                    && actual != parameter
+                {
+                    parameter.array_elem()
+                } else {
+                    Some(parameter)
+                }
+            })
+            // A malformed provider shape must not erase an already-valid selection. Keeping the
+            // selector's complete vector is the conservative fallback and mirrors the helper's
+            // physical-slot fallback for incomplete or bound-violating generic substitutions.
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or(selection_params);
         let call_names = self.file.call_arg_names.get(&call.0).cloned();
         let vararg_array = fi
             .call_sig
@@ -32236,6 +32281,12 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         implicit_receiver: bool,
     ) -> ClasspathMemberSlotCall {
+        // Resolve source type arguments once before the provider query. Named/default member calls
+        // used to ask for an untyped candidate and later validate its mapped arguments against erased
+        // parameters, so `<String>` and inferred nullable joins disappeared specifically on this call
+        // spelling. The selected callable still owns emission; these types affect only semantic
+        // selection and the provider-neutral post-selection expectation overlay below.
+        let type_args = self.resolved_explicit_type_args(scope, call);
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         let needs_slot_map = arg_names.is_some();
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
@@ -32248,7 +32299,7 @@ impl<'a> Checker<'a> {
         };
         let mut candidates: Vec<_> = self
             .resolver()
-            .resolve_symbol(receiver, name, &[], &[])
+            .resolve_symbol(receiver, name, &[], &type_args)
             .map(crate::symbol_resolver::Symbol::overloads)
             .unwrap_or_default()
             .into_iter()
@@ -32422,9 +32473,29 @@ impl<'a> Checker<'a> {
         let Some((_, fi, params, slots)) = candidates.into_iter().next() else {
             return ClasspathMemberSlotCall::NoMatch;
         };
+        // Selection deliberately keeps `params` physical: lowering needs the exact provider method
+        // shape. Checking instead consumes a complete logical overlay inferred from the semantic slot
+        // map. This is the same contract used by receiver-less calls and prevents a member-only branch
+        // from reintroducing the erased `Any` mismatch after generic applicability already succeeded.
+        let expectation_actuals = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(parameter, argument)| {
+                let argument = (*argument)?;
+                (!matches!(self.file.expr(argument), Expr::Lambda { .. }))
+                    .then_some((parameter, self.expr_types[argument.0 as usize]))
+            })
+            .collect::<Vec<_>>();
+        let expected_params = self.selected_call_param_expectations(
+            &params,
+            fi.generic_sig.as_ref(),
+            fi.context_count,
+            &expectation_actuals,
+            &type_args,
+        );
         for (i, slot) in slots.iter().enumerate() {
             if let Some(a) = slot {
-                self.commit_mapped_argument_type(*a, params[i]);
+                self.commit_mapped_argument_type(*a, expected_params[i]);
             }
         }
         let ret = if matches!(fi.callable.origin, Origin::Module { .. }) {
@@ -38738,7 +38809,9 @@ impl<'a> Checker<'a> {
                             })
                             .collect();
                         let expected_params = self.selected_call_param_expectations(
-                            &c,
+                            &c.params,
+                            c.generic_sig.as_deref(),
+                            c.context_count,
                             &expectation_actuals,
                             &call_targs,
                         );
