@@ -2274,19 +2274,22 @@ fn suspend_return_from_gsig(
     }
 }
 
-/// Project a metadata-declared semantic type over a JVM-signature/descriptor-derived carrier. A
-/// complete concrete structured shape replaces the base only under an identical-erasure guard. When
-/// metadata is intentionally incomplete (for example a raw outer collection around a free type
-/// parameter), the conservative fallback overlays only matching Kotlin collection classifier names,
-/// level by level. Thus every caller gets one policy without sacrificing already-substituted base
-/// arguments or trusting metadata that names a different JVM carrier.
-fn overlay_metadata_type_shape(base: Ty, meta: Ty) -> Ty {
-    // A complete metadata shape owns source semantics (receiver/suspend function identity,
-    // nullability, generic arguments, and collection mutability), but never representation. Require
-    // the same erased descriptor before replacing the signature/descriptor-derived base, so corrupt
-    // or stale metadata cannot redirect emission to another JVM carrier.
-    if concrete_metadata_shape(meta)
-        && type_descriptor(base.non_null()) == type_descriptor(meta.non_null())
+/// Project a metadata-declared semantic type over a JVM-signature/descriptor-derived logical base.
+/// `physical` is the actual descriptor carrier and can differ in spelling from that logical fallback
+/// (`kotlin/FunctionN` versus `kotlin/jvm/functions/FunctionN`). A concrete function shape replaces
+/// the base only when metadata erases to `physical`: receiver/suspend function identity is exactly the
+/// structure a JVM `Signature` cannot express. Parameterized objects keep the signature-derived base
+/// and use the conservative collection fallback below; granting metadata general class-name authority
+/// here would expose metadata-only nested spellings to consumers that still require JVM internals.
+/// Thus every caller gets one policy without sacrificing already-substituted base arguments or
+/// trusting metadata that names a different JVM carrier.
+fn overlay_metadata_type_shape(base: Ty, physical: Ty, meta: Ty) -> Ty {
+    // A metadata function shape owns source semantics (receiver/suspend identity and nullability),
+    // but never representation. Require the same erased descriptor before replacing the logical
+    // base, so corrupt or stale metadata cannot redirect emission to another JVM carrier.
+    if matches!(meta.non_null(), Ty::Fun(_))
+        && !has_free_ty_params(meta)
+        && type_descriptor(physical.non_null()) == type_descriptor(meta.non_null())
     {
         return canonicalize_jvm_collections(meta);
     }
@@ -2307,7 +2310,7 @@ fn overlay_metadata_type_shape(base: Ty, meta: Ty) -> Ty {
         let merged: Vec<Ty> = base_args
             .iter()
             .zip(meta_args.iter())
-            .map(|(&base_arg, &meta_arg)| overlay_metadata_type_shape(base_arg, meta_arg))
+            .map(|(&base_arg, &meta_arg)| overlay_metadata_type_shape(base_arg, base_arg, meta_arg))
             .collect();
         Ty::obj_args_name(name, &merged)
     } else {
@@ -2818,6 +2821,10 @@ impl SymbolSource for JvmLibraries {
                     let Some(getter) = mp.getter.clone() else {
                         continue;
                     };
+                    let Some((mut getter_params, getter_ret)) = parse_method_desc(&getter.desc)
+                    else {
+                        continue;
+                    };
                     let ret_ty = mp
                         .ret_class
                         .map_or(Ty::obj("kotlin/Any"), kotlin_type_name_to_ty);
@@ -2836,12 +2843,8 @@ impl SymbolSource for JvmLibraries {
                     // erases to the accessor's carrier; free generic shapes retain the conservative
                     // class-name fallback until receiver/call-site substitution can make them exact.
                     let ty = mp.generic_sig.as_ref().map_or(erased_semantic_ty, |gsig| {
-                        overlay_metadata_type_shape(erased_semantic_ty, gsig.ret)
+                        overlay_metadata_type_shape(erased_semantic_ty, getter_ret, gsig.ret)
                     });
-                    let Some((mut getter_params, getter_ret)) = parse_method_desc(&getter.desc)
-                    else {
-                        continue;
-                    };
                     // On a `@JvmInline value class` every member is realized as a STATIC `-impl` whose
                     // FIRST parameter is the CARRIER — the receiver, not a value parameter
                     // (`kotlin/Result.isSuccess` is `isSuccess-impl(Ljava/lang/Object;)Z`). Dropping it
@@ -3591,7 +3594,7 @@ impl SymbolSource for JvmLibraries {
                             // the way each obtains `base` differs (Continuation generic argument
                             // here, ordinary generic signature below).
                             let base = metadata_ret
-                                .map_or(base, |meta| overlay_metadata_type_shape(base, meta));
+                                .map_or(base, |meta| overlay_metadata_type_shape(base, base, meta));
                             crate::trace_compiler!(
                                 "suspend",
                                 "suspend return {cn}.{}: gsig={:?} base={:?} nullable={}",
@@ -3638,7 +3641,7 @@ impl SymbolSource for JvmLibraries {
                             // the same projection the suspend arm applies.
                             let base = recovered.unwrap_or(m.ret);
                             metadata_ret
-                                .map_or(base, |meta| overlay_metadata_type_shape(base, meta))
+                                .map_or(base, |meta| overlay_metadata_type_shape(base, base, meta))
                         };
                         let call_sig = member_facts
                             .as_ref()
@@ -4831,17 +4834,25 @@ mod tests {
         let recovered = Ty::obj_args("kotlin/collections/List", &[element]);
 
         assert_eq!(
-            overlay_metadata_type_shape(recovered, Ty::obj("kotlin/collections/MutableList"),),
+            overlay_metadata_type_shape(
+                recovered,
+                recovered,
+                Ty::obj("kotlin/collections/MutableList"),
+            ),
             Ty::obj_args("kotlin/collections/MutableList", &[element]),
             "metadata owns mutability while the recovered signature keeps its generic argument",
         );
         assert_eq!(
-            overlay_metadata_type_shape(recovered, Ty::obj("kotlin/collections/MutableSet")),
+            overlay_metadata_type_shape(
+                recovered,
+                recovered,
+                Ty::obj("kotlin/collections/MutableSet"),
+            ),
             recovered,
             "a classifier from another erased collection family must not replace the return",
         );
         assert_eq!(
-            overlay_metadata_type_shape(recovered, Ty::obj("fixture/MutableList")),
+            overlay_metadata_type_shape(recovered, recovered, Ty::obj("fixture/MutableList")),
             recovered,
             "a similarly named application class must not trigger the Kotlin collection rule",
         );
@@ -4857,7 +4868,7 @@ mod tests {
         );
 
         assert_eq!(
-            overlay_metadata_type_shape(recovered, meta),
+            overlay_metadata_type_shape(recovered, recovered, meta),
             Ty::obj_args(
                 "kotlin/collections/MutableList",
                 &[Ty::obj_args("kotlin/collections/MutableSet", &[Ty::String])],
@@ -4867,8 +4878,9 @@ mod tests {
     }
 
     #[test]
-    fn metadata_projection_restores_any_concrete_shape_with_the_same_erasure() {
-        let erased = Ty::obj("kotlin/jvm/functions/Function2");
+    fn metadata_projection_restores_function_shape_only_when_erasure_agrees() {
+        let logical_erased = Ty::obj("kotlin/Function2");
+        let physical_erased = Ty::obj("kotlin/jvm/functions/Function2");
         let receiver_fun = Ty::nullable(Ty::fun_with_shape(
             vec![Ty::obj("fixture/Scope"), Ty::obj("fixture/Request")],
             Ty::obj("fixture/Response"),
@@ -4878,7 +4890,7 @@ mod tests {
         ));
 
         assert_eq!(
-            overlay_metadata_type_shape(erased, receiver_fun),
+            overlay_metadata_type_shape(logical_erased, physical_erased, receiver_fun),
             receiver_fun,
             "metadata owns receiver/function/nullability semantics when the JVM carrier agrees",
         );
@@ -4889,9 +4901,20 @@ mod tests {
         );
         let concrete_base = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
         assert_eq!(
-            overlay_metadata_type_shape(concrete_base, free),
+            overlay_metadata_type_shape(concrete_base, concrete_base, free),
             concrete_base,
             "an unbound metadata variable must not replace an already-concrete base argument",
+        );
+
+        let nested_base = Ty::obj("kotlin/reflect/KProperty1$Getter");
+        let nested_meta = Ty::obj_args(
+            "kotlin/reflect/KProperty1.Getter",
+            &[Ty::String, Ty::String],
+        );
+        assert_eq!(
+            overlay_metadata_type_shape(nested_base, nested_base, nested_meta),
+            nested_base,
+            "metadata object spellings must not replace JVM-internal class identity",
         );
 
         let wrong_erasure = Ty::fun_with_shape(
@@ -4902,8 +4925,12 @@ mod tests {
             false,
         );
         assert_eq!(
-            overlay_metadata_type_shape(Ty::obj("kotlin/jvm/functions/Function2"), wrong_erasure),
-            Ty::obj("kotlin/jvm/functions/Function2"),
+            overlay_metadata_type_shape(
+                Ty::obj("kotlin/Function2"),
+                Ty::obj("kotlin/jvm/functions/Function2"),
+                wrong_erasure,
+            ),
+            Ty::obj("kotlin/Function2"),
             "a structured declaration cannot replace a different physical function arity",
         );
     }

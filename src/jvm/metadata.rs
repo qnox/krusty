@@ -132,9 +132,6 @@ struct ParsedTypeNode<'a> {
     metadata_type_parameter_id: Option<u64>,
     type_parameter_name_id: Option<u64>,
     nullable: bool,
-    /// `Type.flags & SUSPEND_TYPE`. Keep it beside nullability because both describe this exact
-    /// type node; consumers must not re-walk the protobuf and risk reading a different carrier.
-    suspend_fun: bool,
     arguments: Vec<ParsedTypeArgument<'a>>,
     annotation_ids: Vec<u64>,
 }
@@ -157,14 +154,12 @@ fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
         metadata_type_parameter_id: None,
         type_parameter_name_id: None,
         nullable: false,
-        suspend_fun: false,
         arguments: Vec::new(),
         annotation_ids: Vec::new(),
     };
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
-            (1, 0) => node.suspend_fun = pb.varint()? & 1 != 0,
             (3, 0) => node.nullable = pb.varint()? != 0,
             (6, 0) => node.class_id = Some(pb.varint()?),
             (7, 0) => {
@@ -250,7 +245,7 @@ fn parse_type_gsig_node(
     });
     let ty = if let Some(id) = node.class_id {
         let internal = resolve_class_name(records, d2, id as usize)?;
-        gsig_from_kotlin_class(&internal, args, receiver_fun, node.suspend_fun)
+        gsig_from_kotlin_class(&internal, args, receiver_fun)
     } else if let Some(id) = node.metadata_type_parameter_id {
         tparams.get(&id).map(|n| {
             let bound = bounds
@@ -285,41 +280,12 @@ fn parse_type_gsig_node(
 /// `receiver_fun` is the type's `@kotlin.ExtensionFunctionType` mark: a receiver function type carries
 /// its receiver as the FIRST type argument, which [`Ty::Fun`] models as the first parameter binding
 /// `this` (`has_receiver`).
-fn gsig_from_kotlin_class(
-    internal: &str,
-    mut args: Vec<Ty>,
-    receiver_fun: bool,
-    suspend_type_flag: bool,
-) -> Ty {
-    let function_arity = internal
-        .strip_prefix("kotlin/Function")
-        .map(|arity| (arity, false))
-        .or_else(|| {
-            internal
-                .strip_prefix("kotlin/SuspendFunction")
-                .map(|arity| (arity, true))
-        });
-    if let Some((arity, suspend_classifier)) = function_arity {
+fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>, receiver_fun: bool) -> Ty {
+    if let Some(arity) = internal.strip_prefix("kotlin/Function") {
         if arity.parse::<u8>().is_ok() {
-            let mut ret = args.pop().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            let suspend = suspend_type_flag || suspend_classifier;
-            // Older JVM metadata can expose the physical continuation-tailed function arguments
-            // even though `SUSPEND_TYPE` says the declaration is source-level suspend. Normalize it
-            // here, at the common type decoder: every property/parameter/return consumer then sees
-            // `(P) -> R` with `suspend=true`, never a provider-specific `(P, Continuation<R>) -> Any`.
-            if suspend {
-                if let Some(Ty::Obj(continuation, continuation_args)) = args.last().copied() {
-                    if continuation.matches("kotlin/coroutines/Continuation") {
-                        args.pop();
-                        ret = continuation_args
-                            .first()
-                            .copied()
-                            .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                    }
-                }
-            }
+            let ret = args.pop().unwrap_or_else(|| Ty::obj("kotlin/Any"));
             let has_receiver = receiver_fun && !args.is_empty();
-            return Ty::fun_with_shape(args, ret, 0, has_receiver, suspend);
+            return Ty::fun_with_shape(args, ret, 0, has_receiver, false);
         }
     }
     // Arrays are `Obj` types. A boxed `Array<T>` carries its element as a type argument — built directly
@@ -1387,13 +1353,24 @@ struct ParsedTypeFacts {
 }
 
 fn parse_type_facts(body: &[u8]) -> ParsedTypeFacts {
-    // Nullability and suspend identity are fields of the same Type node already decoded for generic
-    // shape. Reuse that carrier parser so inline and type-table users cannot grow subtly different
-    // flag handling as the metadata schema evolves.
-    parse_type_node(body).map_or_else(ParsedTypeFacts::default, |node| ParsedTypeFacts {
-        nullable: node.nullable,
-        suspend_fun: node.suspend_fun,
-    })
+    let mut pb = Pb { b: body, i: 0 };
+    let mut facts = ParsedTypeFacts::default();
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            // `Type.flags` bit zero is `SUSPEND_TYPE`. A suspend function type otherwise has the
+            // same CPS-erased `FunctionN+1<..., Continuation<R>, Any?>` signature as an ordinary
+            // continuation-taking function, so this bit is the semantic discriminator.
+            (1, 0) => facts.suspend_fun = pb.varint().is_some_and(|v| v & 1 != 0),
+            (3, 0) => facts.nullable = pb.varint().is_some_and(|v| v != 0),
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    facts
 }
 
 /// Whether a `Type` message is nullable (`Type.nullable = 3`, a varint bool). Kept as the small
@@ -3836,38 +3813,13 @@ mod builtin_class_access_tests {
 #[cfg(test)]
 mod module_reader_tests {
     use super::{
-        decode_properties, gsig_from_kotlin_class, parse_function, parse_receiver_type_gsig,
-        parse_type_alias, parse_type_facts, parse_type_gsig, parse_type_gsig_node,
-        parse_type_recv_fun, primary_erasure_bounds, read_kotlin_module, value_parameter_type,
-        MetaCtx, ParsedValueParam,
+        decode_properties, parse_function, parse_receiver_type_gsig, parse_type_alias,
+        parse_type_facts, parse_type_gsig, parse_type_gsig_node, parse_type_recv_fun,
+        primary_erasure_bounds, read_kotlin_module, value_parameter_type, MetaCtx,
+        ParsedValueParam,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
-
-    #[test]
-    fn suspend_type_flag_normalizes_source_and_continuation_tailed_function_shapes() {
-        let request = Ty::obj("fixture/Request");
-        let response = Ty::obj("fixture/Response");
-        let source_shaped =
-            gsig_from_kotlin_class("kotlin/Function1", vec![request, response], false, true);
-        assert_eq!(
-            source_shaped,
-            Ty::fun_with_shape(vec![request], response, 0, false, true),
-            "the type-level flag must survive when metadata already carries source arguments",
-        );
-
-        let continuation = Ty::obj_args("kotlin/coroutines/Continuation", &[response]);
-        let cps_shaped = gsig_from_kotlin_class(
-            "kotlin/Function2",
-            vec![request, continuation, Ty::obj("kotlin/Any")],
-            false,
-            true,
-        );
-        assert_eq!(
-            cps_shaped, source_shaped,
-            "older continuation-tailed metadata must publish the same logical suspend type",
-        );
-    }
     use std::collections::HashMap;
 
     /// The decoded contract of a stdlib function, or `None` when the stdlib jar is not
