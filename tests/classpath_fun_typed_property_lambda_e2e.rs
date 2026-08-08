@@ -3,9 +3,11 @@
 //! property's type came from the erased JVM descriptor (raw `FunctionN`, all-`Any`), so the
 //! lambda body's bare member/extension calls on the receiver and its parameter types were
 //! unresolved ("unresolved reference 'tag'"), while kotlinc is clean. The property type is now
-//! recovered from the accessor's generic `Signature`/`@Metadata` shape — the same publish a
-//! member value parameter gets — so the lambda binds its receiver and parameter. Verified
-//! end-to-end on a real JVM against a kotlinc-compiled dependency.
+//! recovered through the shared metadata type projection used by properties and member returns.
+//! The projection verifies that the logical type and physical accessor have the same JVM erasure,
+//! then publishes one type to the property/getter/setter while leaving the invocation descriptor
+//! opaque. The lambda therefore binds its receiver and parameter without an accessor-name or
+//! function-property special case. Verified end-to-end against a kotlinc-compiled dependency.
 use super::common;
 
 const LIB: &str = "package lib\n\
@@ -38,7 +40,7 @@ fn a_lambda_assigned_to_a_classpath_receiver_fun_typed_property_binds_shape() {
 /// the nullable wrapper (else the elvis is meaningless) and the RECEIVER mark, so the local can be
 /// invoked receiver-style (`Scope().h(Req("T"))`). The getter's JVM `Signature` recovers the
 /// parameter/return classes but cannot spell the receiver mark; that comes from the `@Metadata`
-/// property type overlaid on the accessor.
+/// property type selected by the shared same-erasure projection.
 #[test]
 fn a_read_classpath_receiver_fun_typed_property_invokes_receiver_style() {
     let main = "import lib.Config\n\

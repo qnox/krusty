@@ -24784,9 +24784,8 @@ impl<'a> Checker<'a> {
             // lambda fell through to the erased path and its parameters read as `Any`.
             if let Some(expected_ty) = expected {
                 if let Ty::Fun(signature) = expected_ty.non_null() {
-                    return self.check_lambda_with_function_type_labeled(
-                        scope, e, signature, false, None,
-                    );
+                    return self
+                        .check_lambda_with_function_type_labeled(scope, e, signature, false, None);
                 }
             }
             // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. With no explicit

@@ -2668,27 +2668,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   accessor descriptors spell the raw `FunctionN` (all-`Any`), and even the accessor's generic
   `Signature` cannot spell a receiver mark (`Cfg.(A) -> B` and `(Cfg, A) -> B` share the `Function1`/
   `Function2` erasure). The `@Metadata` property type is the semantic authority; its decoded
-  `generic_sig.ret` (a `Ty::Fun` with the `@ExtensionFunctionType` receiver mark and the nullable
-  wrapper) is published at three seams: (1) the `PropertySet` member property's `ty` and its setter's
-  logical `params[0]` (the type an assignment checks the written value against — the emitted `setX`
-  still uses the erased descriptor), (2) the accessor member's `generic_sig` in the classpath member
-  build, so a property READ (`val h = c.handler`) recovers the full shape through the member walk —
-  which also required `concrete_generic_ret` to accept a `Ty::Fun` return (it only recovered
-  parameterized `Ty::Obj` returns before, so a shaped fun-typed accessor return was discarded for the
-  erased descriptor) — canonicalizing it exactly as the parameterized-`Obj` arm does, since a
-  raw-`Signature` fun type (any classpath member returning a function type, not just an accessor)
-  spells collections/boxed primitives in Java form (`List<Integer>`) and members on the invoked
-  result (`.sum()`) would be unresolved — and (3) nothing else: every non-fun-typed property keeps
-  its previous class-name/descriptor reading; a member EXTENSION property is excluded from the
-  accessor overlay (its metadata gsig models the receiver as `receiver`, not a parameter, so a
-  wholesale replace would desync `params` from the JVM method's). A SUSPEND fun-typed property
-  (`(suspend (Req) -> Resp)?`) checks clean against kotlinc today (pinned by test); its metadata
-  type decodes Continuation-tailed (the Type-level suspend flag — `Type.flags` bit 0 — is not yet
-  read), which is a known follow-up. Additionally, a lambda literal in a context whose EXPECTED type is a
-  NULLABLE function type (`c.handler = { req -> … }` against `F?`) now shapes against the non-null
-  `F`, as kotlinc does — before, only a bare `Ty::Fun` expectation shaped the lambda, so the body's
-  parameters read as `Any` and bare receiver calls were unresolved. Verified end-to-end against a
-  kotlinc-compiled dependency (assignment, plain fun type, and receiver-style read/invoke).
+  `generic_sig.ret` is projected through the same provider-boundary policy used for every structured
+  member return. A concrete metadata type replaces a descriptor/`Signature` type only when both erase
+  to the same JVM descriptor; free type parameters retain the already-substituted base, and incomplete
+  collection metadata uses the existing same-family classifier overlay. This is deliberately not an
+  accessor-name scan or a function-property exception: the `PropertySet` publishes one logical type to
+  its property, getter and setter, while each opaque accessor keeps the physical descriptor used for
+  emission; the ordinary member walk obtains a getter's declaration type through
+  `metadata_property_ret_ty_name` and applies the identical guarded projection used for metadata
+  functions and suspend returns. `concrete_generic_ret` likewise uses one complete-structured-shape
+  rule for function and parameterized-object returns, including recursive JVM-to-Kotlin collection
+  canonicalization (`List<Integer>` → `List<Int>`).
+
+  The shared metadata `Type` decoder also consumes `SUSPEND_TYPE` (`Type.flags` bit 0). Whether the
+  carrier is already source-shaped or uses the older continuation-tailed representation, it publishes
+  the same logical `suspend (P) -> R`; property and parameter consumers therefore do not infer suspend
+  identity from a class name or continuation shape. Additionally, a lambda literal in a context whose
+  EXPECTED type is a NULLABLE function type (`c.handler = { req -> … }` against `F?`) shapes against
+  the non-null `F`, as kotlinc does — before, only a bare `Ty::Fun` expectation shaped the lambda, so
+  the body's parameters read as `Any` and bare receiver calls were unresolved. Verified end-to-end
+  against a kotlinc-compiled dependency (assignment, plain/suspend function types, receiver-style
+  read/invoke, and a non-property function return containing collection types).
   Test: `tests/classpath_fun_typed_property_lambda_e2e.rs`.
 
 - **Aliased imports (`import a.b.Member as Alias`).** The import map binds the alias directly to the

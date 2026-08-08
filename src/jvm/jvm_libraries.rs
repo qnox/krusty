@@ -1173,10 +1173,6 @@ impl JvmLibraries {
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
             let meta_fns = metadata::class_functions(&ci);
-            // The class's `@Metadata` PROPERTY records — the only carrier of a fun-typed property's
-            // full Kotlin shape (receiver mark, nullability), which both the field descriptor and the
-            // accessor `Signature` erase.
-            let meta_props = metadata::class_properties(&ci);
             // The class's `@Metadata` CONSTRUCTOR records — the only place a constructor parameter's
             // source-level shape survives (a receiver function type erases to `FunctionN` in both the
             // descriptor and the `Signature`).
@@ -1264,28 +1260,6 @@ impl JvmLibraries {
                             .collect::<Vec<_>>(),
                         metadata.is_suspend(),
                     );
-                }
-                // The same limitation applies to a FUNCTION-typed PROPERTY's accessor: its `Signature`
-                // spells the raw `FunctionN` (no receiver mark), so `var handler: (Scope.(Req) -> Resp)?`
-                // read back as an ordinary `(Scope, Req) -> Resp` and a lambda assigned to the property
-                // bound no `this`. The property's `@Metadata` type keeps the full Kotlin shape; publish
-                // it as the getter's logical return. Only a fun-typed property is overlaid — every other
-                // accessor keeps its descriptor/`Signature` reading.
-                if let Some(property_gsig) = meta_props
-                    .iter()
-                    .filter(|property| {
-                        // A member EXTENSION property's getter takes the extension receiver as a JVM
-                        // parameter its metadata gsig models as `receiver` instead — replacing the
-                        // whole gsig would desync `params` from the method's. It has its own path.
-                        !property.is_extension
-                            && property.getter.as_ref().is_some_and(|getter| {
-                                getter.name == m.name && getter.desc == m.descriptor
-                            })
-                    })
-                    .find_map(|property| property.generic_sig.as_ref())
-                    .filter(|gsig| matches!(gsig.ret.non_null(), Ty::Fun(_)))
-                {
-                    member.generic_sig = Some(property_gsig.clone());
                 }
                 // A member EXTENSION is deliberately excluded from `aligned_member_metadata`: its
                 // metadata parameter list omits the receiver the JVM method leads with, so the shared
@@ -2240,30 +2214,24 @@ fn field_type_parameter_erasure(
 }
 
 fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
-    match gsig.ret {
-        // A FUNCTION-typed return (`getHandler(): Function2<Scope, Req, Resp>` — a fun-typed
-        // property's accessor) already parsed to the shaped `Ty::Fun`; the erased descriptor
-        // return is the all-`Any` `FunctionN`, so failing to recover here strips a lambda
-        // assigned to the property of its parameter types and receiver. A raw-`Signature` fun
-        // type spells collections/boxed primitives in Java form (`List<Integer>`) — canonicalize
-        // exactly as the parameterized-`Obj` arm below does (the helper recurses into `Fun` and
-        // `Nullable`, preserving the receiver/suspend shape); a metadata-decoded ret is already
-        // Kotlin-spelled, so this is a no-op for it.
-        ty if matches!(ty.non_null(), Ty::Fun(_)) && !has_free_ty_params(ty) => {
-            Some(canonicalize_jvm_collections(ty))
+    // A generic signature is authoritative only when it carries a complete structured return. This
+    // single predicate covers both parameterized classes (`List<Int>`) and function types, rather
+    // than growing a classpath-property branch for each erased JVM shape. A free owner/method type
+    // parameter still needs call-site substitution and therefore cannot be published as concrete.
+    concrete_metadata_shape(gsig.ret).then(|| canonicalize_jvm_collections(gsig.ret))
+}
+
+/// Whether metadata/signature type information is concrete enough to replace an erased carrier.
+/// Scalars and bare classes add no structure over their descriptor; parameterized objects and
+/// function types do. Keeping this decision in one helper makes property accessors, ordinary member
+/// returns, and suspend returns follow the same authority rule.
+fn concrete_metadata_shape(ty: Ty) -> bool {
+    !has_free_ty_params(ty)
+        && match ty.non_null() {
+            Ty::Fun(_) => true,
+            Ty::Obj(_, args) => !args.is_empty(),
+            _ => false,
         }
-        Ty::Obj(_, args) if !args.is_empty() && !has_free_ty_params(gsig.ret) => {
-            // Canonicalize the recovered type to Kotlin form (`java/util/List<java/lang/Integer>` →
-            // `kotlin/collections/List<kotlin/Int>`), so a member/`for`/extension keyed on the Kotlin
-            // collection + a primitive element resolves and unboxes — mirroring the suspend path. Without
-            // it, a classpath property `items: List<Int>` reads as raw `java/util/List<Integer>`:
-            // `xs.sum()` is unresolved and `for (x in xs) { s += x }` compares `Int` vs `java/lang/Integer`.
-            Some(canonicalize_jvm_collections(
-                crate::symbol_resolver::ty_subst(gsig.ret, &std::collections::HashMap::new()),
-            ))
-        }
-        _ => None,
-    }
 }
 
 /// The LOGICAL return of a `suspend` method, recovered from its generic signature: the last parameter is
@@ -2306,17 +2274,23 @@ fn suspend_return_from_gsig(
     }
 }
 
-/// Overlay the `@Metadata`-declared collection classifiers onto a JVM-signature-derived type, level
-/// by level. The signature erases read-only vs mutable (`List`/`MutableList` both spell
-/// `java/util/List`) at EVERY nesting depth; the metadata type preserves it. At each level the
-/// metadata classifier replaces the signature's name ONLY when the shared builtin-erasure table says
-/// it is a Kotlin collection sibling mapping to the same JVM internal — guaranteeing the same
-/// collection family and arity —
-/// and the walk descends into type arguments only when the two classifiers agree (sibling or
-/// identical) with matching arity, so a divergent classifier (stale metadata) never forms an
-/// arity-mismatched or misaligned type. The base keeps its structure, primitives, and nullability;
-/// only names are taken from metadata.
-fn overlay_metadata_collection_names(base: Ty, meta: Ty) -> Ty {
+/// Project a metadata-declared semantic type over a JVM-signature/descriptor-derived carrier. A
+/// complete concrete structured shape replaces the base only under an identical-erasure guard. When
+/// metadata is intentionally incomplete (for example a raw outer collection around a free type
+/// parameter), the conservative fallback overlays only matching Kotlin collection classifier names,
+/// level by level. Thus every caller gets one policy without sacrificing already-substituted base
+/// arguments or trusting metadata that names a different JVM carrier.
+fn overlay_metadata_type_shape(base: Ty, meta: Ty) -> Ty {
+    // A complete metadata shape owns source semantics (receiver/suspend function identity,
+    // nullability, generic arguments, and collection mutability), but never representation. Require
+    // the same erased descriptor before replacing the signature/descriptor-derived base, so corrupt
+    // or stale metadata cannot redirect emission to another JVM carrier.
+    if concrete_metadata_shape(meta)
+        && type_descriptor(base.non_null()) == type_descriptor(meta.non_null())
+    {
+        return canonicalize_jvm_collections(meta);
+    }
+
     // Nullability lives on the base (the resolution pipeline applies it separately); look through a
     // metadata `T?` to its classifier.
     let meta = meta.non_null();
@@ -2333,7 +2307,7 @@ fn overlay_metadata_collection_names(base: Ty, meta: Ty) -> Ty {
         let merged: Vec<Ty> = base_args
             .iter()
             .zip(meta_args.iter())
-            .map(|(&base_arg, &meta_arg)| overlay_metadata_collection_names(base_arg, meta_arg))
+            .map(|(&base_arg, &meta_arg)| overlay_metadata_type_shape(base_arg, meta_arg))
             .collect();
         Ty::obj_args_name(name, &merged)
     } else {
@@ -2852,24 +2826,18 @@ impl SymbolSource for JvmLibraries {
                     // keeps as the boxed class while the getter returns the unboxed form — the property's
                     // declared type and its getter's return then disagreed ("return type mismatch:
                     // expected 'Boolean', actual 'Boolean'").
-                    // A FUNCTION-typed property's descriptor erases to a raw `FunctionN` (all-`Any`,
-                    // no receiver mark), which gives a lambda assigned to it no expected shape — its
-                    // body's bare receiver calls and parameter types were unresolved. `@Metadata`'s
-                    // property type keeps the full shape (`(Scope.(Req) -> Resp)?`), decoded into
-                    // `generic_sig.ret`; prefer it for exactly that case. Every other property keeps
-                    // the class-name reading below (the value-class/primitive reasoning applies).
-                    let meta_fun_ty = mp
-                        .generic_sig
-                        .as_ref()
-                        .map(|gsig| gsig.ret)
-                        .filter(|ret| matches!(ret.non_null(), Ty::Fun(_)));
-                    let ty = if let Some(fun_ty) = meta_fun_ty {
-                        fun_ty
-                    } else if ret_ty.is_jvm_scalar() {
+                    let erased_semantic_ty = if ret_ty.is_jvm_scalar() {
                         ret_ty
                     } else {
                         mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
                     };
+                    // Metadata owns every concrete structured property type, not a hand-picked
+                    // function-property subset. The shared projection verifies that its descriptor
+                    // erases to the accessor's carrier; free generic shapes retain the conservative
+                    // class-name fallback until receiver/call-site substitution can make them exact.
+                    let ty = mp.generic_sig.as_ref().map_or(erased_semantic_ty, |gsig| {
+                        overlay_metadata_type_shape(erased_semantic_ty, gsig.ret)
+                    });
                     let Some((mut getter_params, getter_ret)) = parse_method_desc(&getter.desc)
                     else {
                         continue;
@@ -2898,7 +2866,7 @@ impl SymbolSource for JvmLibraries {
                         cn,
                         getter.name,
                         getter_params,
-                        ret_ty,
+                        ty,
                         getter_ret,
                         getter.desc,
                     );
@@ -2907,15 +2875,11 @@ impl SymbolSource for JvmLibraries {
                         if params.len() != 1 || physical_ret != Ty::Unit {
                             return None;
                         }
-                        // The setter's descriptor erases a fun-typed property's value parameter to
-                        // the raw `FunctionN`; assignment checks the written value against
-                        // `params[0]`, so a lambda written to the property would get no shape.
-                        // Publish the metadata-recovered property type as the LOGICAL parameter —
-                        // the descriptor keeps driving the emitted `setX` call.
-                        let params = match meta_fun_ty {
-                            Some(fun_ty) => vec![fun_ty],
-                            None => params,
-                        };
+                        // A getter, setter, and PropertyInfo describe one source declaration. Publish
+                        // the same logical type to all three consumers while the physical descriptor
+                        // continues to drive invocation; this prevents assignment and read resolution
+                        // from acquiring provider- or type-shape-specific branches.
+                        let params = vec![ty];
                         Some(LibraryCallable::library(
                             cn,
                             s.name,
@@ -3627,7 +3591,7 @@ impl SymbolSource for JvmLibraries {
                             // the way each obtains `base` differs (Continuation generic argument
                             // here, ordinary generic signature below).
                             let base = metadata_ret
-                                .map_or(base, |meta| overlay_metadata_collection_names(base, meta));
+                                .map_or(base, |meta| overlay_metadata_type_shape(base, meta));
                             crate::trace_compiler!(
                                 "suspend",
                                 "suspend return {cn}.{}: gsig={:?} base={:?} nullable={}",
@@ -3674,7 +3638,7 @@ impl SymbolSource for JvmLibraries {
                             // the same projection the suspend arm applies.
                             let base = recovered.unwrap_or(m.ret);
                             metadata_ret
-                                .map_or(base, |meta| overlay_metadata_collection_names(base, meta))
+                                .map_or(base, |meta| overlay_metadata_type_shape(base, meta))
                         };
                         let call_sig = member_facts
                             .as_ref()
@@ -4658,7 +4622,7 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, method_layout, overlay_metadata_collection_names, parse_class_gsig,
+        desc_to_ty, method_layout, overlay_metadata_type_shape, parse_class_gsig,
         parse_concrete_field_gsig, parse_field_gsig, parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
@@ -4867,17 +4831,17 @@ mod tests {
         let recovered = Ty::obj_args("kotlin/collections/List", &[element]);
 
         assert_eq!(
-            overlay_metadata_collection_names(recovered, Ty::obj("kotlin/collections/MutableList"),),
+            overlay_metadata_type_shape(recovered, Ty::obj("kotlin/collections/MutableList"),),
             Ty::obj_args("kotlin/collections/MutableList", &[element]),
             "metadata owns mutability while the recovered signature keeps its generic argument",
         );
         assert_eq!(
-            overlay_metadata_collection_names(recovered, Ty::obj("kotlin/collections/MutableSet")),
+            overlay_metadata_type_shape(recovered, Ty::obj("kotlin/collections/MutableSet")),
             recovered,
             "a classifier from another erased collection family must not replace the return",
         );
         assert_eq!(
-            overlay_metadata_collection_names(recovered, Ty::obj("fixture/MutableList")),
+            overlay_metadata_type_shape(recovered, Ty::obj("fixture/MutableList")),
             recovered,
             "a similarly named application class must not trigger the Kotlin collection rule",
         );
@@ -4893,12 +4857,54 @@ mod tests {
         );
 
         assert_eq!(
-            overlay_metadata_collection_names(recovered, meta),
+            overlay_metadata_type_shape(recovered, meta),
             Ty::obj_args(
                 "kotlin/collections/MutableList",
                 &[Ty::obj_args("kotlin/collections/MutableSet", &[Ty::String])],
             ),
             "each nesting level recovers its declared mutability under the same guard",
+        );
+    }
+
+    #[test]
+    fn metadata_projection_restores_any_concrete_shape_with_the_same_erasure() {
+        let erased = Ty::obj("kotlin/jvm/functions/Function2");
+        let receiver_fun = Ty::nullable(Ty::fun_with_shape(
+            vec![Ty::obj("fixture/Scope"), Ty::obj("fixture/Request")],
+            Ty::obj("fixture/Response"),
+            0,
+            true,
+            false,
+        ));
+
+        assert_eq!(
+            overlay_metadata_type_shape(erased, receiver_fun),
+            receiver_fun,
+            "metadata owns receiver/function/nullability semantics when the JVM carrier agrees",
+        );
+
+        let free = Ty::obj_args(
+            "kotlin/collections/List",
+            &[Ty::ty_param("T", Ty::obj("kotlin/Any"))],
+        );
+        let concrete_base = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
+        assert_eq!(
+            overlay_metadata_type_shape(concrete_base, free),
+            concrete_base,
+            "an unbound metadata variable must not replace an already-concrete base argument",
+        );
+
+        let wrong_erasure = Ty::fun_with_shape(
+            vec![Ty::obj("fixture/Request")],
+            Ty::obj("fixture/Response"),
+            0,
+            false,
+            false,
+        );
+        assert_eq!(
+            overlay_metadata_type_shape(Ty::obj("kotlin/jvm/functions/Function2"), wrong_erasure),
+            Ty::obj("kotlin/jvm/functions/Function2"),
+            "a structured declaration cannot replace a different physical function arity",
         );
     }
 
