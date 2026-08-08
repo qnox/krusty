@@ -8629,12 +8629,9 @@ impl<'a> Lower<'a> {
                 call
             });
         }
-        // The reified `assertFailsWith<T> { … }` intrinsic, exactly as the bare-name branch applies
-        // it: the callee's platform realization is inline-only bytecode with no callable fallback,
-        // so the semantic try/catch shape is realized directly. A fully-qualified spelling
-        // (`kotlin.test.assertFailsWith<E> { … }`) selects the same callable and needs the same
-        // lowering.
-        if let Some(intrinsic) = self.lower_assert_fails_with_default(e, &c, args) {
+        // Intrinsic realization belongs to the selected semantic callable, not its FQ spelling.
+        // Consume the same boundary as the bare-name static-call path before lowering operands.
+        if let Some(intrinsic) = self.lower_static_intrinsic(e, &c, args) {
             return Some(intrinsic);
         }
         let last_is_array = c.params.last().is_some_and(|p| p.array_elem().is_some());
@@ -15611,6 +15608,25 @@ impl<'a> Lower<'a> {
             None,
             ty_to_ir(callable.ret),
         ))
+    }
+
+    /// Realize a selected receiver-less intrinsic independently of how the source names it. Bare,
+    /// imported, and fully-qualified calls all arrive with the same callable and AST operands; keeping
+    /// the dispatch here prevents a new spelling from bypassing one intrinsic and invoking an
+    /// inline-only throwing body or otherwise acquiring different runtime behavior.
+    fn lower_static_intrinsic(
+        &mut self,
+        call: AstExprId,
+        callable: &crate::libraries::LibraryCallable,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        if let Some(intrinsic) = self.lower_assert_fails_with_default(call, callable, args) {
+            return Some(intrinsic);
+        }
+        if let Some(intrinsic) = self.lower_assert(callable, args) {
+            return Some(intrinsic);
+        }
+        self.lower_println(callable, args)
     }
 
     /// The `kotlin.assert` codegen intrinsic. kotlinc does NOT inline the stdlib body (which reads
@@ -25429,13 +25445,7 @@ impl<'a> Lower<'a> {
                 // result unboxes instead of landing boxed in a primitive slot.
                 let (call_inline, call_log, call_phys) =
                     (c.inline.can_inline(), c.ret, c.physical_ret);
-                if let Some(intrinsic) = self.lower_assert_fails_with_default(e, &c, &args) {
-                    return Some(intrinsic);
-                }
-                if let Some(intrinsic) = self.lower_assert(&c, &args) {
-                    return Some(intrinsic);
-                }
-                if let Some(intrinsic) = self.lower_println(&c, &args) {
+                if let Some(intrinsic) = self.lower_static_intrinsic(e, &c, &args) {
                     return Some(intrinsic);
                 }
                 // Is the callee a `suspend fun`? Read the flag the CHECKER recorded on the resolved

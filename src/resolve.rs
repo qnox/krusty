@@ -23766,6 +23766,16 @@ impl<'a> Checker<'a> {
             .unwrap_or_default()
     }
 
+    /// Publish explicit call type arguments once for every selected-call spelling. Lowering consults
+    /// this semantic handoff only for inline/reified specialization, but resolution must not make
+    /// availability depend on whether the call was safe, bare, imported, qualified, or an extension.
+    fn record_explicit_call_type_args(&mut self, call: ExprId, type_args: &[Ty]) {
+        if !type_args.is_empty() {
+            self.resolved_call_type_args
+                .insert(call, type_args.iter().copied().map(Some).collect());
+        }
+    }
+
     /// Type safe-call lambda arguments from the selected receiver callable.
     fn ext_arg_tys(
         &mut self,
@@ -25636,10 +25646,7 @@ impl<'a> Checker<'a> {
                             .call_arg_names
                             .get(&e.0)
                             .is_some_and(|names| names.iter().any(Option::is_some));
-                        if !type_args.is_empty() {
-                            self.resolved_call_type_args
-                                .insert(e, type_args.iter().copied().map(Some).collect());
-                        }
+                        self.record_explicit_call_type_args(e, &type_args);
                         if let ("toString" | "hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
                             // Safe-call receiver normalization must preserve the qualified path's
                             // function-value restriction. Lambda objects are not materialized with the
@@ -34443,20 +34450,29 @@ impl<'a> Checker<'a> {
                                         "fully-qualified top-level call {pkg}.{name} -> {}",
                                         c.owner.render()
                                     );
-                                    // Stash the RESOLVED explicit type arguments, exactly as the
-                                    // extension channel does (unconditionally on explicit targs;
-                                    // every reader is gated on inline-ness): the lowerer reads them to
-                                    // specialize a `<reified T>` inline callee's spliced body
-                                    // (`kotlin.test.assertFailsWith<E> { … }` spelled fully
-                                    // qualified). Without them the emitter cannot bind the reified
-                                    // marker and the call would fall back to the throwing compiled
-                                    // body.
-                                    if !targs.is_empty() {
-                                        self.resolved_call_type_args.insert(
-                                            call,
-                                            targs.iter().copied().map(Some).collect(),
+                                    // The selected callable owns its argument contract. Every
+                                    // unlabelled `$default` call needs a semantic slot map: ordinary
+                                    // positional arguments fill from the front, while a syntactic
+                                    // trailing lambda fills the final slot. Record that through the
+                                    // same origin-neutral helper used by member and extension
+                                    // selection; checker and lowerer then consume one handoff instead
+                                    // of reconstructing a special FQ-only omission shape.
+                                    let trailing_lambda =
+                                        self.file.call_has_trailing_lambda.contains(&call.0);
+                                    let vararg = self
+                                        .top_level_vararg_slot(&pkg_scope, &name, &c)
+                                        .filter(|&slot| slot + 1 == c.params.len());
+                                    if resolved_slots.is_none()
+                                        && vararg.is_none()
+                                        && c.default_call
+                                    {
+                                        resolved_slots = unlabelled_argument_slots(
+                                            args,
+                                            c.params.len(),
+                                            trailing_lambda,
                                         );
                                     }
+                                    self.record_explicit_call_type_args(call, &targs);
                                     if let Some(slots) = &resolved_slots {
                                         for (parameter, argument) in c.params.iter().zip(slots) {
                                             if let Some(argument) = argument {
@@ -34475,44 +34491,6 @@ impl<'a> Checker<'a> {
                                         // array's ELEMENT type — the representation-neutral rule the
                                         // bare-name, member and local-function paths already apply. An
                                         // explicit spread passes the array itself and keeps the array type.
-                                        let vararg = self
-                                            .top_level_vararg_slot(&pkg_scope, &name, &c)
-                                            .filter(|&slot| slot + 1 == c.params.len());
-                                        // A `$default`-resolved call with a SYNTACTIC trailing lambda
-                                        // and omitted (defaulted) leading parameters binds the lambda
-                                        // to the LAST parameter (`pkg.assertFailsWith<E> { … }` skips
-                                        // `message: String?`). Index-for-index pairing would check the
-                                        // lambda against the first parameter, so map arguments to their
-                                        // semantic slots first — the same trailing-lambda rule the
-                                        // member path and the `$default` lowerer already apply.
-                                        let omitted_trailing_lambda_slots = (vararg.is_none()
-                                            && c.default_call
-                                            && args.len() < c.params.len()
-                                            && self
-                                                .file
-                                                .call_has_trailing_lambda
-                                                .contains(&call.0))
-                                        .then(|| {
-                                            unlabelled_argument_slots(args, c.params.len(), true)
-                                        })
-                                        .flatten();
-                                        if let Some(slots) = omitted_trailing_lambda_slots {
-                                            for (parameter, argument) in c.params.iter().zip(&slots)
-                                            {
-                                                if let Some(argument) = argument {
-                                                    self.expect_assignable(
-                                                        *parameter,
-                                                        self.expr_types[argument.0 as usize],
-                                                        self.span(*argument),
-                                                        "argument",
-                                                    );
-                                                }
-                                            }
-                                            let ret = c.ret;
-                                            self.resolved_calls
-                                                .insert(call, ResolvedCall::TopLevel(c));
-                                            return ret;
-                                        }
                                         for (i, a) in args.iter().enumerate() {
                                             let expected = match vararg {
                                                 Some(slot)
@@ -34635,16 +34613,10 @@ impl<'a> Checker<'a> {
                                                 "fully-qualified trailing-lambda call {pkg}.{name} -> {}",
                                                 c.owner.render()
                                             );
-                                            // Record the resolved callable so the lowerer emits it (the
-                                            // non-trailing-lambda FQ path above records the same way),
-                                            // and stash the resolved explicit type arguments for the
-                                            // same reified-splice reason.
-                                            if !targs.is_empty() {
-                                                self.resolved_call_type_args.insert(
-                                                    call,
-                                                    targs.iter().copied().map(Some).collect(),
-                                                );
-                                            }
+                                            // Record the same explicit type-argument handoff as every
+                                            // other selected static callable; only the preceding lambda
+                                            // shaping differs in this fallback.
+                                            self.record_explicit_call_type_args(call, &targs);
                                             let ret = c.ret;
                                             self.resolved_calls
                                                 .insert(call, ResolvedCall::TopLevel(c));
@@ -35910,10 +35882,7 @@ impl<'a> Checker<'a> {
                 }
                 // Stash the RESOLVED explicit type arguments so the lowerer can specialize a `<reified T>`
                 // classpath extension's spliced body (imports/classpath types resolve here, not there).
-                if !call_targs.is_empty() {
-                    self.resolved_call_type_args
-                        .insert(call, call_targs.iter().copied().map(Some).collect());
-                }
+                self.record_explicit_call_type_args(call, &call_targs);
                 self.retarget_postponable_extension_arguments(
                     scope,
                     rt,
@@ -38621,10 +38590,7 @@ impl<'a> Checker<'a> {
                         // does: a TOP-LEVEL `inline fun <reified T>` (`nameOf<Svc>()`) is spliced,
                         // and its `reifiedOperationMarker` body can only be specialized from them.
                         // Imports/classpath types resolve here, not in the lowerer.
-                        if !call_targs.is_empty() {
-                            self.resolved_call_type_args
-                                .insert(call, call_targs.iter().copied().map(Some).collect());
-                        }
+                        self.record_explicit_call_type_args(call, &call_targs);
                         if let Some(slots) = resolved_slots {
                             self.resolved_call_arg_slots.insert(call, slots);
                         }

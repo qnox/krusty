@@ -1,10 +1,12 @@
-//! A FULLY-QUALIFIED call to a library top-level function with an EXPLICIT type argument and a
+//! A FULLY-QUALIFIED call to a top-level function with an EXPLICIT type argument and a
 //! SYNTACTIC trailing lambda, where a defaulted parameter precedes the trailing `block` parameter —
 //! `kotlin.test.assertFailsWith<E> { … }` spelled without an import. kotlinc accepts this (the
 //! `message: String?` defaults, the lambda binds the trailing `block` parameter, and the explicit
 //! type argument fixes `T`), but krusty mapped the trailing lambda positionally onto the FIRST
 //! parameter and reported "argument type mismatch: actual type is '() -> X', but 'String' was
-//! expected".
+//! expected". The controls deliberately cover both classpath and source-module providers: source
+//! spelling changes selection syntax, not slotting, reification, intrinsic dispatch, or JVM call
+//! origin.
 use super::common;
 
 const LIB: &str = "package pkg\n\
@@ -70,8 +72,8 @@ fn fq_targ_trailing_lambda_reified_checker_clean() {
 
 #[test]
 fn fq_targ_named_arg_and_trailing_lambda_checker_clean() {
-    // The NAMED-argument channel adjacent to the new slot-mapped branch: `message` labelled, lambda
-    // trailing — resolves through `resolved_slots`, not the new mapping, and must stay clean.
+    // The NAMED-argument channel adjacent to unlabelled slot mapping: `message` labelled, lambda
+    // trailing — resolves through the same semantic `resolved_slots` handoff and must stay clean.
     // (`message = null` is a SEPARATE pre-existing gap: the named channel loses the parameter's
     // metadata `String?` nullability and rejects the null.)
     const MAIN: &str = "fun box(): String {\n\
@@ -86,9 +88,9 @@ fn fq_targ_named_arg_and_trailing_lambda_checker_clean() {
 
 #[test]
 fn fq_targ_trailing_lambda_mid_omission_rejected() {
-    // The border the new branch must NOT mis-accept: a positional argument cannot skip a leading
-    // defaulted parameter (`\"x\"` pairs with `a: Int`, kotlinc rejects). Guard against the
-    // slot-mapped branch ever swallowing the mismatch.
+    // The semantic border the shared slot handoff must NOT mis-accept: a positional argument cannot
+    // skip a leading defaulted parameter (`\"x\"` pairs with `a: Int`, kotlinc rejects). Guard
+    // against slot mapping ever swallowing the mismatch for one particular source spelling.
     const MAIN: &str = "fun box(): String {\n\
         \x20 val n = pkg.g<Int>(\"x\") { 42 }\n\
         \x20 return n.toString()\n\
@@ -99,6 +101,29 @@ fn fq_targ_trailing_lambda_mid_omission_rejected() {
     assert!(
         !diags.is_empty(),
         "expected a diagnostic for the positional String-into-Int argument"
+    );
+}
+
+#[test]
+fn explicit_targ_static_call_retains_source_module_origin() {
+    // Keep the provider axis independent from the FQ syntax/slotting fix. Both files are compiled in
+    // one krusty module, so the selected imported callable has no classpath descriptor and must retain
+    // the CrossFile emission route after passing through the common reified-static boundary. Routing
+    // it as a library call would write an empty JVM descriptor and fail class loading. The classpath
+    // controls above reach the same boundary from the other provider.
+    const LIB_SOURCE: &str = "package pkg\n\
+        fun <T> sourceFw(message: String? = null, block: () -> T): T {\n\
+        \x20 if (message != null) throw AssertionError(message)\n\
+        \x20 return block()\n\
+        }\n";
+    const MAIN: &str = "import pkg.sourceFw\n\
+        fun box(): String {\n\
+        \x20 val n = sourceFw<Int> { 42 }\n\
+        \x20 return if (n == 42) \"OK\" else \"fail: $n\"\n\
+        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Library.kt", LIB_SOURCE), ("Main.kt", MAIN)],
+        "explicit_targ_static_call_retains_source_module_origin",
     );
 }
 
