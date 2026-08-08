@@ -5463,3 +5463,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   substitution into each `splice_unified` attempt. This keeps default-slotting, intrinsic behavior,
   reification, and module/classpath origin orthogonal. Test:
   `tests/fq_targ_trailing_lambda_e2e.rs`.
+
+- **A classpath top-level NON-FINAL vararg accepts named/trailing-lambda trailing parameters.**
+  `fun assembleNc(vararg parts: String, block: () -> String)` called as
+  `assembleNc("a", "b", block = { … })`, `assembleNc(block = { … })` (empty vararg), or
+  `assembleNc("a", "b") { … }` resolves and runs (kotlinc 2.4 accepts all three). The labelled
+  form is compacted by the slot map into parameter order (one argument per filled slot, unmapped
+  middle arguments = further vararg elements), so the type-only shape selector
+  (`vararg_parameter_shape_at`) admits a non-final vararg in two forms: trailing parameters all
+  OMITTED (each declares a default — the pre-existing rule) or FILLED 1:1 by the last arguments.
+  The selected callable carries `vararg_index` even without a recovered generic element (no
+  last-parameter-is-array heuristic can find a non-final slot); the checker checks the vararg
+  slot's argument against the ELEMENT type unless it is already the array (spread pass-through),
+  and lowering packs via the slot map (labelled) or `lower_non_last_vararg_args` (trailing
+  lambda). Two boundaries are deliberate. A trailing parameter that declares a DEFAULT stays
+  element-first (`fun tagged(vararg xs: String, s: String = "d")` called `tagged("a", "b")` packs
+  BOTH and defaults `s`), so the positional selector declines rather than bind the last argument
+  to it — resolving that element-form call against a classpath top-level `$default` is a
+  separate, pre-existing gap. A non-final vararg combined with CONTEXT parameters is declined at
+  the selector so all three layers agree (the checker's pairing and the lowerer's packing work in
+  value-parameter space, the emitted list carries the context prefix). An UNLABELLED spread
+  (`f("a", *arr) { … }`) resolves but does not lower: plain-name spread calls are diverted to
+  `lower_spread_call`, which emits only a same-file single-vararg module target and otherwise
+  bails (a skip, never a miscompile); the LABELLED spread form lowers and runs.
+  Tests: `tests/classpath_nonfinal_vararg_named_e2e.rs` (named, trailing-lambda, empty-vararg and
+  labelled-spread cases runtime-verified — `abx`, `x`, `bcx`).

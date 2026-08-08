@@ -25499,10 +25499,38 @@ impl<'a> Lower<'a> {
                         a.push(self.emit_get_value(v));
                     }
                 }
+                // A NON-FINAL vararg (`fun f(vararg parts: String, block: () -> String)`): the
+                // checker recorded the slot each named argument binds (unmapped middle arguments
+                // are further vararg elements), or — for the trailing-lambda spelling — the
+                // positional prefix packs and the lambda binds the single trailing parameter.
+                let non_final_vararg = c
+                    .vararg_index
+                    .filter(|&v| v + 1 < c.params.len() && c.params[v].array_elem().is_some())
+                    .filter(|_| !c.default_call && ctx_n == 0);
+                if let Some(vararg_slot) = non_final_vararg {
+                    if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+                        let (slot_args, prelude) = self.lower_call_slot_args_vararg_pack(
+                            &args,
+                            &slots,
+                            &c.params,
+                            false,
+                            Some(vararg_slot),
+                        )?;
+                        a.extend(slot_args);
+                        arg_prelude = prelude;
+                    } else {
+                        let params = tys_to_ir(&c.params);
+                        a.extend(self.lower_non_last_vararg_args(
+                            e,
+                            &args,
+                            &params,
+                            vararg_slot,
+                        )?);
+                    }
                 // A `$default` call whose last parameter is a vararg (`f(a: Int = 0, vararg xs: T)`
                 // omitting both) is NOT an element-pack: the `default_call` branch emits the
                 // placeholders/mask and an empty array for the omitted vararg slot.
-                if vararg && !c.default_call {
+                } else if vararg && !c.default_call {
                     let fixed = c.params.len() - 1;
                     if args.len() < fixed {
                         return None;

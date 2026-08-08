@@ -38591,6 +38591,19 @@ impl<'a> Checker<'a> {
                         // and its `reifiedOperationMarker` body can only be specialized from them.
                         // Imports/classpath types resolve here, not in the lowerer.
                         self.record_explicit_call_type_args(call, &call_targs);
+                        // For a NON-FINAL vararg the labelled slot map pairs each compacted
+                        // argument with the parameter its label named; capture the pairing
+                        // before the map is handed to the lowerer below.
+                        let slot_arg_pairs: Option<Vec<usize>> = resolved_slots
+                            .as_ref()
+                            .filter(|_| c.vararg_index.is_some())
+                            .map(|slots| {
+                                slots
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(parameter, argument)| argument.map(|_| parameter))
+                                    .collect()
+                            });
                         if let Some(slots) = resolved_slots {
                             self.resolved_call_arg_slots.insert(call, slots);
                         }
@@ -38599,6 +38612,9 @@ impl<'a> Checker<'a> {
                         let vararg = last_is_array
                             && (c.params.len() != arg_tys.len()
                                 || c.params.last().map_or(false, |p| arg_tys.last() != Some(p)));
+                        let non_final_vararg = c.vararg_index.filter(|&v| {
+                            v + 1 < c.params.len() && c.params[v].array_elem().is_some()
+                        });
                         if let Some(slots) = named_slots.as_ref().filter(|_| c.default_call) {
                             // The labelled, parameter-omitting form: each argument is checked against
                             // the parameter its label named, not against the one at its position.
@@ -38616,6 +38632,56 @@ impl<'a> Checker<'a> {
                                     arg_tys[index],
                                     argument,
                                     "argument",
+                                );
+                            }
+                        } else if let Some(vararg_slot) = non_final_vararg {
+                            // NON-FINAL vararg (`fun f(vararg parts: String, block: () ->
+                            // String)`): parameters after the vararg were bound by NAME (the
+                            // compacted `sel_args` holds one argument per filled slot, in
+                            // parameter order) or by a trailing lambda (positional). The vararg
+                            // slot's argument is an ELEMENT unless it already has the array type
+                            // (a spread / pass-through); unmapped middle arguments are further
+                            // elements, coerced by the lowerer like the labelled final-vararg
+                            // form above.
+                            let element = c.vararg_elem.unwrap_or_else(|| {
+                                c.params[vararg_slot].array_elem().unwrap_or(Ty::Error)
+                            });
+                            let pairs: Vec<usize> = slot_arg_pairs.unwrap_or_else(|| {
+                                let trailing = c.params.len() - vararg_slot - 1;
+                                let element_end = arg_tys.len().saturating_sub(trailing);
+                                (0..arg_tys.len())
+                                    .map(|index| {
+                                        if index < vararg_slot {
+                                            index
+                                        } else if index < element_end {
+                                            vararg_slot
+                                        } else {
+                                            vararg_slot + 1 + (index - element_end)
+                                        }
+                                    })
+                                    .collect()
+                            });
+                            for (index, &parameter) in pairs.iter().enumerate() {
+                                let Some(&argument) = sel_args.get(index) else {
+                                    continue;
+                                };
+                                if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+                                    continue;
+                                }
+                                let Some(&declared) = c.params.get(parameter) else {
+                                    continue;
+                                };
+                                let (expected, what) =
+                                    if parameter == vararg_slot && arg_tys[index] != declared {
+                                        (element, "vararg argument")
+                                    } else {
+                                        (declared, "argument")
+                                    };
+                                self.expect_library_call_arg(
+                                    expected,
+                                    arg_tys[index],
+                                    argument,
+                                    what,
                                 );
                             }
                         } else if vararg && !c.params.is_empty() {

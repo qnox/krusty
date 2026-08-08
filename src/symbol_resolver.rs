@@ -1017,9 +1017,11 @@ fn vararg_parameter_shape(
 }
 
 /// Expand positional element-form arguments at an explicitly declared vararg slot. Parameters
-/// after a non-final vararg cannot consume positional arguments in Kotlin; they must be named or
-/// defaulted, so this type-only selector admits the shape only when every trailing parameter has
-/// a default. The returned shape is parallel to the provided arguments for specificity ranking.
+/// after a non-final vararg cannot consume positional arguments in Kotlin's SOURCE syntax, but by
+/// the time this selector runs a labelled call has been compacted into parameter order (one
+/// argument per slot) and a trailing lambda sits positionally last — so the trailing parameters
+/// are admitted either OMITTED (each declares a default) or FILLED 1:1 by the last arguments.
+/// The returned shape is parallel to the provided arguments for specificity ranking.
 fn vararg_parameter_shape_at(
     params: &[Ty],
     args: &[CallArgKind],
@@ -1044,21 +1046,59 @@ fn vararg_parameter_shape_at(
             .zip(args)
             .enumerate()
             .any(|(position, (parameter, argument))| !fits(position, parameter, argument))
-        || (vararg_index + 1..params.len())
-            .any(|position| !param_defaults.get(position).copied().unwrap_or(false))
-        || args[vararg_index..]
-            .iter()
-            .enumerate()
-            .any(|(offset, argument)| {
-                !fits(vararg_index + offset, &vararg_expected(argument), argument)
-            })
     {
         return None;
     }
-    let mut expanded = params[..vararg_index].to_vec();
-    for argument in &args[vararg_index.min(args.len())..] {
-        expanded.push(vararg_expected(argument));
+    let elements_fit = |element_end: usize| {
+        args[vararg_index..element_end]
+            .iter()
+            .enumerate()
+            .all(|(offset, argument)| {
+                fits(vararg_index + offset, &vararg_expected(argument), argument)
+            })
+    };
+    let expand = |element_end: usize| {
+        let mut expanded = params[..vararg_index].to_vec();
+        for argument in &args[vararg_index.min(args.len())..element_end] {
+            expanded.push(vararg_expected(argument));
+        }
+        expanded
+    };
+    // Trailing parameters OMITTED: every remaining argument is a vararg element, legal only when
+    // each parameter after the vararg declares a default.
+    let trailing_all_defaulted = (vararg_index + 1..params.len())
+        .all(|position| param_defaults.get(position).copied().unwrap_or(false));
+    if trailing_all_defaulted && elements_fit(args.len()) {
+        return Some(expand(args.len()));
     }
+    // Trailing parameters FILLED: the last `trailing` arguments bind the parameters after the
+    // vararg 1:1 (a labelled call compacted into parameter order, or a trailing lambda); the
+    // middle arguments are the vararg's elements (possibly none).
+    let trailing = params.len() - vararg_index - 1;
+    if trailing == 0 {
+        return None;
+    }
+    // A DEFAULTED trailing parameter is element-first in Kotlin: `fun tagged(vararg xs: String,
+    // s: String = "d")` called `tagged("a", "b")` packs BOTH arguments and defaults `s` (the
+    // OMITTED form above, or — when the elements do not fit it — the `$default` route this
+    // selector must not pre-empt). Filling it positionally would silently bind the last argument
+    // to `s`, so FILLED is reserved for trailing parameters that are actually required.
+    if trailing_all_defaulted {
+        return None;
+    }
+    let element_end = args.len().checked_sub(trailing)?;
+    if element_end < vararg_index
+        || !elements_fit(element_end)
+        || params[vararg_index + 1..]
+            .iter()
+            .zip(&args[element_end..])
+            .enumerate()
+            .any(|(offset, (parameter, argument))| !fits(element_end + offset, parameter, argument))
+    {
+        return None;
+    }
+    let mut expanded = expand(element_end);
+    expanded.extend_from_slice(&params[vararg_index + 1..]);
     Some(expanded)
 }
 
@@ -2388,10 +2428,47 @@ impl<'a> SymbolResolver<'a> {
                     CandidateSelection::Selected(entry) => Some(entry),
                     CandidateSelection::Ambiguous => return None,
                     CandidateSelection::None => match unique_most_specific(
-                        parsed.iter().filter_map(|entry @ (_, params, _)| {
-                            vararg_parameter_shape(params, args, |i, param, arg| {
-                                fits(param, arg) || adapts(param, arg, i)
-                            })
+                        parsed.iter().filter_map(|entry @ (o, params, _)| {
+                            // Metadata may declare a NON-FINAL vararg (`fun f(vararg parts:
+                            // String, block: () -> String)`); match at that slot, falling back
+                            // to the last parameter when no index is declared. The index is
+                            // full-arity (context prefix included); `params` are value-only.
+                            let vararg_index = o
+                                .call_sig
+                                .vararg_index
+                                .and_then(|index| index.checked_sub(o.context_count))
+                                .or_else(|| params.len().checked_sub(1))?;
+                            // A non-final vararg whose trailing parameters ALL declare defaults
+                            // is element-first (`tagged("a", "b")` packs both and defaults `s`):
+                            // that call belongs to the `$default` route below, which this
+                            // positional selector must not pre-empt by binding the last argument
+                            // to the trailing parameter. Defaults are full-arity like the index.
+                            let full_arity = params.len() + o.context_count;
+                            let trailing_all_defaulted =
+                                (vararg_index + o.context_count + 1..full_arity).all(|position| {
+                                    o.call_sig
+                                        .param_defaults
+                                        .get(position)
+                                        .copied()
+                                        .unwrap_or(false)
+                                });
+                            // A non-final vararg combined with CONTEXT parameters is not modelled
+                            // past this point: the checker's argument pairing and the lowerer's
+                            // packing both work in value-parameter space while the emitted list
+                            // carries the context prefix. Decline here so all three layers agree
+                            // rather than admit a shape only the selector understands.
+                            if vararg_index + 1 < params.len()
+                                && (trailing_all_defaulted || o.context_count > 0)
+                            {
+                                return None;
+                            }
+                            vararg_parameter_shape_at(
+                                params,
+                                args,
+                                vararg_index,
+                                &[],
+                                |i, param, arg| fits(param, arg) || adapts(param, arg, i),
+                            )
                             .map(|shape| (shape, entry))
                         }),
                         |_, left, right| resolution_subtype(self.lib, &self.src, left, right),
@@ -2442,6 +2519,26 @@ impl<'a> SymbolResolver<'a> {
             return None;
         }
 
+        // A NON-FINAL declared vararg (`fun f(vararg parts: String, block: () -> String)`) whose
+        // call binds the trailing parameters 1:1 from the last arguments: the middle arguments
+        // are the vararg's elements. Detected from the declared index, never from the last-param
+        // heuristic below (the last parameter is not an array). The compacted argument list has
+        // exactly `trailing` arguments after the elements, so the element segment ends there.
+        let non_final_vararg = o
+            .call_sig
+            .vararg_index
+            .filter(|_| o.context_count == 0)
+            .and_then(|index| index.checked_sub(o.context_count))
+            .filter(|&v| v + 1 < params.len() && params[v].array_elem().is_some())
+            .filter(|&v| {
+                // An EXACT call passes the array itself at the vararg slot — pass-through, not
+                // an element pack.
+                !(params.len() == arg_tys.len() && arg_tys.get(v) == params.get(v))
+            })
+            .and_then(|v| {
+                let trailing = params.len() - v - 1;
+                arg_tys.len().checked_sub(trailing).map(|end| (v, end))
+            });
         let mut vararg_elem = None;
         let ret_ty = o
             .generic_sig
@@ -2456,7 +2553,40 @@ impl<'a> SymbolResolver<'a> {
                 // arity AND the last arg IS the array param — so it is not a vararg here.
                 let vararg = params.last().is_some_and(|p| p.array_elem().is_some())
                     && (params.len() != arg_tys.len() || arg_tys.last() != params.last());
-                if vararg && !gsig.params.is_empty() {
+                if let Some((v, element_end)) = non_final_vararg.filter(|_| !gsig.params.is_empty())
+                {
+                    for (i, ps) in gsig.params.iter().take(v).enumerate() {
+                        if let Some(a) = arg_tys.get(i) {
+                            if type_args.is_empty() {
+                                unify_inferred_ty(*ps, *a, &mut binds);
+                            } else {
+                                unify_ty(*ps, *a, &mut binds);
+                            }
+                        }
+                    }
+                    if let Some(inner) = gsig.params.get(v).and_then(|p| p.array_elem()) {
+                        for a in arg_tys.get(v..element_end).unwrap_or_default() {
+                            if type_args.is_empty() {
+                                unify_inferred_ty(inner, *a, &mut binds);
+                            } else {
+                                unify_ty(inner, *a, &mut binds);
+                            }
+                        }
+                        vararg_elem = Some(ty_subst(inner, &binds));
+                    }
+                    for (ps, a) in gsig
+                        .params
+                        .iter()
+                        .skip(v + 1)
+                        .zip(arg_tys.get(element_end..).unwrap_or_default())
+                    {
+                        if type_args.is_empty() {
+                            unify_inferred_ty(*ps, *a, &mut binds);
+                        } else {
+                            unify_ty(*ps, *a, &mut binds);
+                        }
+                    }
+                } else if vararg && !gsig.params.is_empty() {
                     let fixed = gsig.params.len() - 1;
                     for (i, ps) in gsig.params.iter().take(fixed).enumerate() {
                         if let Some(a) = arg_tys.get(i) {
@@ -2524,7 +2654,12 @@ impl<'a> SymbolResolver<'a> {
             physical_ret: *ret,
             default_call: false,
             vararg_elem,
-            vararg_index: vararg_elem.and(o.call_sig.vararg_index),
+            // A NON-FINAL vararg call must carry its slot even without a recovered generic
+            // element: no last-parameter heuristic downstream can find it, and both the checker's
+            // argument pass and the lowerer's packing key off this index.
+            vararg_index: vararg_elem
+                .and(o.call_sig.vararg_index)
+                .or(non_final_vararg.map(|(v, _)| v + o.context_count)),
             ..c.clone()
         })
     }
