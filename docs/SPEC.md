@@ -5447,3 +5447,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its real CPS entry point. A same-file `suspend inline` member still reports it and still gates.
   Tests: `cross_file_inline_call_e2e::suspend_inline_extension_cross_file_executes`,
   `coroutine_intrinsics_e2e::suspend_inline_operator_*_reaches_the_inline_gate`.
+
+- **A fully-qualified call with an explicit type argument and a trailing lambda over a defaulted
+  leading parameter (`kotlin.test.assertFailsWith<E> { … }`).** The failure exposed three semantic
+  handoffs that had accidentally depended on source spelling. (1) After top-level selection, every
+  unlabelled `$default` call now publishes one argument-to-parameter slot map: positional arguments
+  fill from the front and a syntactic trailing lambda fills the final slot. The checker and lowerer
+  consume that shared map instead of the FQ channel pairing arguments index-for-index (which checked
+  the lambda against `message: String?`). (2) Explicit call type arguments are published through one
+  spelling-independent helper, and all receiver-less calls reach one reified static-call boundary.
+  That boundary performs substitution and then retains the existing origin router, so a source-module
+  facade stays a source-module call while a classpath facade stays a library call. (3) Receiver-less
+  intrinsics are dispatched from the selected callable for both bare/imported and FQ spellings, rather
+  than giving `assertFailsWith` an FQ-only branch. The inline emitter also passes the same reified
+  substitution into each `splice_unified` attempt. This keeps default-slotting, intrinsic behavior,
+  reification, and module/classpath origin orthogonal. Test:
+  `tests/fq_targ_trailing_lambda_e2e.rs`.
