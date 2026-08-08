@@ -24778,9 +24778,15 @@ impl<'a> Checker<'a> {
             // parameter types — `val f: (Int) -> Int = { it * 2 }`, even when the lambda is the
             // result of a nested `if`/`when` branch or block. Delegate to the shared typed-lambda
             // check (the same path a HOF/typed-initializer argument takes).
-            if let Some(Ty::Fun(signature)) = expected {
-                return self
-                    .check_lambda_with_function_type_labeled(scope, e, signature, false, None);
+            // A NULLABLE expected function type (`var handler: (Scope.(Req) -> Resp)? = null`;
+            // `c.handler = { req -> … }`) shapes the lambda exactly as its non-null form does —
+            // kotlinc types the literal against `F` in an `F?` context. Without the unwrap the
+            // lambda fell through to the erased path and its parameters read as `Any`.
+            if let Some(expected_ty) = expected {
+                if let Ty::Fun(signature) = expected_ty.non_null() {
+                    return self
+                        .check_lambda_with_function_type_labeled(scope, e, signature, false, None);
+                }
             }
             // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. With no explicit
             // parameters but a body referencing `it`, bind the implicit single parameter.
