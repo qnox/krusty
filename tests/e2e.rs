@@ -166,6 +166,8 @@ mod classpath_enum_regex_vc_e2e;
 mod classpath_extension_default_implicit_receiver_e2e;
 #[path = "classpath_extension_receiver_lambda_e2e.rs"]
 mod classpath_extension_receiver_lambda_e2e;
+#[path = "classpath_fun_typed_property_lambda_e2e.rs"]
+mod classpath_fun_typed_property_lambda_e2e;
 #[path = "classpath_function_reference_e2e.rs"]
 mod classpath_function_reference_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
