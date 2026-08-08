@@ -1771,8 +1771,8 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
         // A LOCAL class is not a member of anything: its name is qualified by the DECLARATION it
         // was written in, so the text before the last `$` names no class. The JVM spells that with
         // `outer_class_info_index = 0` and a non-zero `inner_name_index` — which is also what
-        // reflection reads back as `simpleName`. Treating the prefix as an outer class instead made
-        // the loader look for a class that does not exist.
+        // reflection reads back as `simpleName`. Treating the prefix as an outer class makes the
+        // loader look for a class that does not exist.
         let member = !anonymous && !c.is_local_class;
         cw.add_inner_class(InnerClassSpec {
             inner: fq.clone(),

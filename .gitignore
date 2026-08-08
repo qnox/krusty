@@ -9,3 +9,4 @@ docs/badges/
 mutants.out/
 dhat-heap.json
 .idea
+.DS_Store

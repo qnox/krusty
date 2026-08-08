@@ -7740,7 +7740,8 @@ fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::Ha
 
 /// Names reassigned (`=`/`++`/`--`) INSIDE a nested lambda within `e`. A closure that writes a captured
 /// `var` (possibly to null) could run between a narrowing assignment and a later read, so such a `var`
-/// must never be flow-narrowed (soundness for [`Local::narrowed`]). Mirrors [`collect_all_reassigned`]
+/// must never be flow-narrowed (soundness for the scope chain's straight-line reads). Mirrors
+/// [`collect_all_reassigned`]
 /// but only collects once the traversal has descended into a lambda body.
 fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
     let cell = std::cell::RefCell::new(std::mem::take(out));
@@ -8982,7 +8983,7 @@ fn is_function_property_shape(ty: Ty) -> bool {
 /// A bound-name → JVM-internal resolver over a `SymbolTable`: the merged class-name map, which binds
 /// a bare contract/tparam-bound name to its internal for both module and classpath classes (and
 /// already carries the Kotlin built-in → JVM mapping, `CharSequence` → `java/lang/CharSequence`).
-/// Borrows only the (copied) `&SymbolTable`, so a caller can hold it while mutating `self.tparams`.
+/// Borrows only the (copied) `&SymbolTable`, so a caller can hold it while mutating its own state.
 /// Shared with the jvm backend (via `frontend`) so the checker and the `@Metadata` emitter resolve
 /// contract type references through ONE lookup and cannot drift.
 pub(crate) fn class_internal_resolver(
@@ -11457,9 +11458,8 @@ impl CheckerScope<'_> {
     /// enclosing declaration's parameter. `reified` answers whether a name was declared `reified`
     /// (only an `inline fun` may).
     ///
-    /// The rung that calls this OWNS the parameters: they retire with it. Nothing replaces or
-    /// removes a rung's parameters afterwards, which is what keeps a sibling declaration from
-    /// inheriting them.
+    /// The rung that calls this OWNS the parameters: they retire with it, so a sibling declaration
+    /// checked from the same enclosing scope never inherits them.
     ///
     /// This deliberately does NOT report a redeclaration, even though `Ns::Classifier` could: a
     /// class rung also carries the parameters of the enclosing classes an `inner class` can reach,
@@ -11594,17 +11594,16 @@ enum ScopeBinding {
     /// a signature is being inferred); `extra_bounds` are the bounds beyond the first
     /// (`where T : A, T : B`), which `Ty::TyParam` cannot carry.
     ///
-    /// `reified` lives ON the parameter rather than in a parallel set: the two cannot drift, and the
-    /// mark retires with the rung that declared the parameter — an `inline fun <reified T>` cannot
-    /// leave `T` reified for a later sibling declaration.
+    /// `reified` retires with the rung that declared the parameter, so an `inline fun <reified T>`
+    /// cannot leave `T` reified for a later sibling declaration.
     TypeParam {
         bound: Ty,
         extra_bounds: Vec<Ty>,
         reified: bool,
     },
     /// A classifier declared in statement position (`fun f() { class L … }`), bound under its
-    /// SOURCE name to the internal name its hoisted declaration was registered under. This is what
-    /// replaced rewriting the references in the AST: the name resolves where it was written.
+    /// SOURCE name to the internal name its hoisted declaration was registered under, so the name
+    /// resolves where it was written.
     LocalClass(TypeName),
 }
 
@@ -13640,7 +13639,6 @@ struct Checker<'a> {
     /// a function whose facade is in this set (kotlinc), passed to the [`SymbolResolver`].
     fn_scope: Vec<TypeName>,
     function_import_scope: crate::symbol_resolver::FunctionImportScope,
-    /// The `reified` type parameters in scope (a subset of `tparams`, from the enclosing `inline fun`).
     /// `true` while checking expressions where implicit `this` is unavailable or uninitialized — a class's
     /// `super(…)`/delegation-call arguments and constructor-parameter defaults (the latter are
     /// evaluated in the CALLER's context). Every implicit-`this` callable-reference shape uses this
@@ -13675,9 +13673,6 @@ struct Checker<'a> {
     /// When checking a `companion object` member, the enclosing class name — its companion
     /// methods/properties are then in scope unqualified.
     companion_of: Option<String>,
-    /// Stack of frames for local-function scopes; each frame maps name → (StmtId, Signature).
-    /// Pushed when entering a function, popped on exit; each `Stmt::LocalFun` registers into the
-    /// innermost frame so that sibling local-function calls resolve correctly.
     /// Whether executable Kotlin-script statements are being checked.
     in_script_body: bool,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
@@ -13746,9 +13741,8 @@ struct Checker<'a> {
     fn_reassigned: std::collections::HashSet<String>,
     /// Names reassigned INSIDE a closure (lambda) within the function body. A `var` in here can be set
     /// (e.g. to null) by a closure invoked between a narrowing assignment and a later read, so it is
-    /// never flow-narrowed after an assignment (soundness for [`Local::narrowed`]).
+    /// never flow-narrowed after an assignment (soundness for [`scope::Flow`] straight-line reads).
     fn_closure_reassigned: std::collections::HashSet<String>,
-    /// True while any [`Local::narrowed`] flow-narrowing is set — a cheap guard so the common (no
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -13778,7 +13772,8 @@ struct Checker<'a> {
 /// What a local class reads from its enclosing scope, split by whether the reference is modelled.
 #[derive(Default)]
 struct LocalClassCaptures {
-    /// Enclosing bindings read from ordinary member bodies, in declaration order.
+    /// Enclosing bindings read from ordinary member bodies: the enclosing instance first (lowering
+    /// identifies it by position), then the captured values sorted by name.
     values: Vec<AnonymousObjectCapture>,
     /// The first reference that is NOT modelled, if any. Its presence rejects the class.
     unsupported: Option<String>,
@@ -14044,15 +14039,11 @@ impl<'a> Checker<'a> {
         self.exact_anonymous_class_roots = saved.exact_anonymous_class_roots;
     }
 
-    /// The first enclosing-scope name a local class's own bodies read, if any — its CAPTURE.
-    ///
-    /// Deliberately syntactic and conservative: a name the class also declares is not a capture, but
-    /// a name that merely *looks* like one is treated as such. Over-reporting costs a skipped file;
-    /// under-reporting costs a class emitted without the constructor parameter the capture needs.
     /// What a statement-position local class reads from its enclosing scope.
     ///
     /// Deliberately syntactic and conservative: a name the class also declares is not a capture, but
-    /// a name that merely *looks* like one is treated as such. Over-reporting costs a skipped file;
+    /// a name that merely *looks* like one is treated as such. Over-reporting costs an unused
+    /// constructor parameter (or a skipped file, when the name is one of the unmodelled kinds);
     /// under-reporting emits a class without the constructor parameter its capture needs.
     fn local_class_captures(&self, scope: &CheckerScope<'_>, cl: &ClassDecl) -> LocalClassCaptures {
         let mut result = LocalClassCaptures::default();
@@ -19631,8 +19622,8 @@ impl<'a> Checker<'a> {
         resolved
     }
 
-    /// The erased signature key of a function, using the type parameters currently in `self.tparams`
-    /// plus the function's own. This is a semantic key, not a JVM descriptor string; JVM descriptor
+    /// The erased signature key of a function, using the type parameters visible in `scope` plus the
+    /// function's own. This is a semantic key, not a JVM descriptor string; JVM descriptor
     /// formatting belongs in the backend.
     fn erased_sig_key(&self, scope: &CheckerScope<'_>, f: &FunDecl) -> ErasedSigKey {
         let resolve = class_internal_resolver(self.syms);
@@ -21958,9 +21949,8 @@ impl<'a> Checker<'a> {
                 self.declare(scope, &p.name, ty, false);
             }
             // Type each parameter's DEFAULT value so its type info is recorded — the `$default` stub lowering
-            // needs it to resolve a NON-literal default (a ctor call `f: Filt = Filt()`, an object read); a
-            // method's defaults were previously left unchecked (only `check_fun` did top-level ones), so a
-            // non-literal member default typed `Error` and the stub bailed ("call Filt"). A default may read
+            // needs it to resolve a NON-literal default (a ctor call `f: Filt = Filt()`, an object read);
+            // untyped, such a default is `Error` and the stub bails ("call Filt"). A default may read
             // `this`/members but not other parameters (the latter is rejected in `collect_signatures`).
             for p in &f.params {
                 if let Some(dx) = p.default {
@@ -39155,8 +39145,7 @@ impl<'a> Checker<'a> {
             }
             // A local class is checked HERE, from the scope it was written in — the enclosing
             // function's parameters and locals are visible to it, so a capture resolves instead of
-            // reporting an unresolved reference. `check_class` was extracted for exactly this: a
-            // classifier can be entered from any scope.
+            // reporting an unresolved reference.
             Stmt::LocalClass(_) => {
                 let Some(&d) = self.file.local_class_decls.get(&s) else {
                     // Not hoisted (a local class with super-constructor arguments): no declaration
@@ -39190,9 +39179,9 @@ impl<'a> Checker<'a> {
                 // expected return, the loop labels a `break` may name, the mutation summary), so
                 // the enclosing body's is saved across it.
                 // What the class reads from here is decided in THIS scope — the only place the
-                // enclosing bindings exist. A reference the pipeline cannot represent is rejected;
-                // before this statement was checked at all it simply failed to resolve, so the
-                // outcome is the same skip with a diagnostic that says why.
+                // enclosing bindings exist. A reference the pipeline cannot represent is rejected,
+                // so the file skips with a diagnostic naming the capture rather than emitting a
+                // class without what it needs.
                 let captures = self.local_class_captures(scope, &cl);
                 if let Some(captured) = &captures.unsupported {
                     self.diags.error(

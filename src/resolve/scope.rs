@@ -94,8 +94,7 @@ pub(crate) enum Ns {
     Function,
     /// Types introduced lexically: a generic type parameter (`class C<T>`, `fun <T> f()`). One
     /// namespace, different declaring RUNG — a class's parameters sit on its class rung, a
-    /// function's on its function rung, so each retires with the declaration that introduced it
-    /// instead of being replaced wholesale on a shared rung.
+    /// function's on its function rung, so each retires with the declaration that introduced it.
     Classifier,
 }
 
@@ -491,9 +490,8 @@ mod tests {
 
     #[test]
     fn a_type_parameter_retires_with_the_rung_that_declared_it() {
-        // The bug the binding model rules out: declaring a declaration's type parameters into the
-        // SHARED enclosing scope leaves them (and their `reified` marks) visible to the next
-        // declaration checked from it.
+        // A declaration's type parameters (and their `reified` marks) must not stay visible to the
+        // next declaration checked from the same enclosing scope.
         let root: Scope<'_, u32> = Scope::root();
         {
             let first = root.child(ScopeKind::Block);

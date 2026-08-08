@@ -1,9 +1,8 @@
 //! A local class is checked in the LEXICAL SCOPE it was written in.
 //!
-//! It used to be hoisted to a top-level declaration and checked with no enclosing scope at all, so
-//! every reference to anything outside it failed to resolve and the file skipped. It is now entered
-//! from its `Stmt::LocalClass`, on a class rung that carries the enclosing instance — which makes
-//! the enclosing declaration's type parameters and receivers reachable, exactly as kotlinc has them.
+//! It is entered from its `Stmt::LocalClass`, on a class rung that carries the enclosing instance,
+//! which makes the enclosing declaration's type parameters and receivers reachable, exactly as
+//! kotlinc has them.
 //!
 //! Capture of an enclosing VALUE follows from that: what the class reads is decided in the scope it
 //! was written in, and lowering carries each captured binding as a leading constructor parameter.
@@ -30,7 +29,6 @@ fn assert_rejected(src: &str) {
 ///
 /// A local class inside a member of a generic class can name that class's type parameter — the
 /// local class carries the enclosing instance, so the classifier walk does not stop at its rung.
-/// Checking it at file level (the old hoist) put it outside `A` entirely and `T` was unresolved.
 #[test]
 fn a_local_class_can_name_the_enclosing_classs_type_parameter() {
     const SRC: &str = "class A<T> {\n\

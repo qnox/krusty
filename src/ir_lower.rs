@@ -17870,9 +17870,8 @@ impl<'a> Lower<'a> {
     }
 
     /// The classifier identity a candidate internal name denotes, following a `typealias` to its
-    /// TARGET. The checker's qualifier walk follows the same edge, so returning the alias spelling
-    /// here made the lowered internal disagree with the checker's recorded result type — and the
-    /// construction was then dropped as unresolved rather than emitted.
+    /// TARGET. The checker's qualifier walk follows the same edge, and the alias spelling here would
+    /// disagree with the checker's recorded result type, dropping the construction as unresolved.
     fn resolved_classifier_internal(&self, candidate: &str) -> Option<String> {
         if let Some(target) = self
             .syms
