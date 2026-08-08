@@ -32,6 +32,20 @@ fn assert_false_skipped_when_disabled() {
 }
 
 #[test]
+fn fully_qualified_assert_uses_the_same_intrinsic() {
+    // Intrinsic selection is a property of the resolved callable, not whether its source name was
+    // imported or fully qualified. This condition side effect is the discriminating behavior: a
+    // normal static call would evaluate `run` before entering stdlib, while the JVM-assert intrinsic
+    // guards the entire condition evaluation when assertions are disabled.
+    const SRC: &str = "fun box(): String {\n\
+    var side = false\n\
+    kotlin.assert(run { side = true; false })\n\
+    return if (!side) \"OK\" else \"FAIL: condition evaluated\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("qualified disabled assert skipped"), "OK");
+}
+
+#[test]
 fn assert_with_message_lambda_compiles() {
     const SRC: &str = "fun box(): String { assert(2 > 1) { \"never\" }; return \"OK\" }\n";
     assert_eq!(run(SRC).expect("assert with message compiles + runs"), "OK");

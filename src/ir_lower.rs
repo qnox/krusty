@@ -8622,12 +8622,17 @@ impl<'a> Lower<'a> {
             let call_inline = c.inline.can_inline();
             let erased_generic_ret = self.substituted_ret_needs_coercion(logical_ret, physical_ret);
             let suspend = c.suspend;
-            let call = self.emit_module_or_library_static_call(c, a, suspend)?;
+            let call = self.emit_reified_static_call(e, c, a, suspend, None)?;
             return Some(if call_inline || erased_generic_ret {
                 self.coerce_erased_call_result(e, call, &physical_ret, true)
             } else {
                 call
             });
+        }
+        // Intrinsic realization belongs to the selected semantic callable, not its FQ spelling.
+        // Consume the same boundary as the bare-name static-call path before lowering operands.
+        if let Some(intrinsic) = self.lower_static_intrinsic(e, &c, args) {
+            return Some(intrinsic);
         }
         let last_is_array = c.params.last().is_some_and(|p| p.array_elem().is_some());
         if last_is_array {
@@ -8671,7 +8676,11 @@ impl<'a> Lower<'a> {
         let logical_ret = c.ret;
         let erased_generic_ret = self.substituted_ret_needs_coercion(logical_ret, physical_ret);
         let suspend = c.suspend;
-        let call = self.emit_module_or_library_static_call(c, a, suspend)?;
+        // Through the COMMON reified boundary (`emit_reified_static_call`), like the
+        // bare-name top-level and extension origins: a `<reified T>` inline callee spelled fully
+        // qualified needs the call's resolved type arguments attached, or the emitter cannot
+        // specialize the spliced body and would fall back to the throwing compiled one.
+        let call = self.emit_reified_static_call(e, c, a, suspend, None)?;
         let call = if arg_prelude.is_empty() {
             call
         } else {
@@ -15601,6 +15610,25 @@ impl<'a> Lower<'a> {
         ))
     }
 
+    /// Realize a selected receiver-less intrinsic independently of how the source names it. Bare,
+    /// imported, and fully-qualified calls all arrive with the same callable and AST operands; keeping
+    /// the dispatch here prevents a new spelling from bypassing one intrinsic and invoking an
+    /// inline-only throwing body or otherwise acquiring different runtime behavior.
+    fn lower_static_intrinsic(
+        &mut self,
+        call: AstExprId,
+        callable: &crate::libraries::LibraryCallable,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        if let Some(intrinsic) = self.lower_assert_fails_with_default(call, callable, args) {
+            return Some(intrinsic);
+        }
+        if let Some(intrinsic) = self.lower_assert(callable, args) {
+            return Some(intrinsic);
+        }
+        self.lower_println(callable, args)
+    }
+
     /// The `kotlin.assert` codegen intrinsic. kotlinc does NOT inline the stdlib body (which reads
     /// `kotlin/_Assertions.ENABLED`); it guards on the JVM's per-class assertion status and skips even
     /// evaluating the condition when disabled. Lower `assert(cond)` / `assert(cond) { msg }` to
@@ -16986,13 +17014,15 @@ impl<'a> Lower<'a> {
         Vec::new()
     }
 
-    /// Emit one classpath/library static call and attach any reified specialization it needs.
+    /// Emit one receiver-less static call and attach any reified specialization it needs.
     ///
     /// Top-level and extension syntax arrive through different AST lowering branches, but both emit
-    /// the same library callable. Keeping substitution at this common boundary prevents a new call
-    /// origin from silently falling back to the throwing compiled body of a reified inline. `recv_ty`
-    /// is present only when receiver type arguments may infer an otherwise omitted reified argument.
-    fn emit_reified_library_static_call(
+    /// the same semantic callable. Keeping origin routing and substitution at this common boundary
+    /// prevents an FQ/bare/extension spelling from either emitting a source-module callable as a
+    /// descriptor-less library call or falling back to the throwing compiled body of a reified
+    /// inline. `recv_ty` is present only when receiver type arguments may infer an otherwise omitted
+    /// reified argument.
+    fn emit_reified_static_call(
         &mut self,
         ast_call: AstExprId,
         callable: crate::libraries::LibraryCallable,
@@ -17001,7 +17031,7 @@ impl<'a> Lower<'a> {
         recv_ty: Option<Ty>,
     ) -> Option<u32> {
         let reified_subst = self.reified_call_subst_for(ast_call, &callable, recv_ty);
-        let call = self.emit_library_static_call(callable, args, record_suspend)?;
+        let call = self.emit_module_or_library_static_call(callable, args, record_suspend)?;
         if !reified_subst.is_empty() {
             self.ir.reified_call_subst.insert(call, reified_subst);
         }
@@ -17088,7 +17118,7 @@ impl<'a> Lower<'a> {
         // provider presents the LOGICAL (continuation-stripped) descriptor, so an unrecorded call
         // would emit that stripped shape verbatim: no CPS rewrite, `NoSuchMethodError` at runtime.
         let suspend = c.suspend;
-        let call = self.emit_reified_library_static_call(e, c, a, suspend, Some(rt))?;
+        let call = self.emit_reified_static_call(e, c, a, suspend, Some(rt))?;
         self.record_ext_source_receiver(call, source_receiver);
         let call = self.coerce_erased_call_result(e, call, &physical_ret, true);
         Some(self.wrap_arg_prelude(call, arg_prelude))
@@ -25415,13 +25445,7 @@ impl<'a> Lower<'a> {
                 // result unboxes instead of landing boxed in a primitive slot.
                 let (call_inline, call_log, call_phys) =
                     (c.inline.can_inline(), c.ret, c.physical_ret);
-                if let Some(intrinsic) = self.lower_assert_fails_with_default(e, &c, &args) {
-                    return Some(intrinsic);
-                }
-                if let Some(intrinsic) = self.lower_assert(&c, &args) {
-                    return Some(intrinsic);
-                }
-                if let Some(intrinsic) = self.lower_println(&c, &args) {
+                if let Some(intrinsic) = self.lower_static_intrinsic(e, &c, &args) {
                     return Some(intrinsic);
                 }
                 // Is the callee a `suspend fun`? Read the flag the CHECKER recorded on the resolved
@@ -25581,7 +25605,7 @@ impl<'a> Lower<'a> {
                 // the callee's `reifiedOperationMarker` body and falls back to a direct call, which
                 // for a reified callee only ever throws. There is no receiver to infer `T` from, so
                 // the call's own type arguments are the whole binding.
-                let call = self.emit_reified_library_static_call(e, c, a, call_suspend, None)?;
+                let call = self.emit_reified_static_call(e, c, a, call_suspend, None)?;
                 let call = if arg_prelude.is_empty() {
                     call
                 } else {
@@ -27135,7 +27159,7 @@ impl<'a> Lower<'a> {
                 // `rt` is the extension receiver's type — its type args bind a reified `T` that is
                 // inferred from the receiver (`Collection<T>.toTypedArray()`) when none is explicit.
                 let source_receiver = c.source_receiver;
-                let call = self.emit_reified_library_static_call(e, c, a, suspend, Some(rt))?;
+                let call = self.emit_reified_static_call(e, c, a, suspend, Some(rt))?;
                 self.record_ext_source_receiver(call, source_receiver);
                 self.coerce_generic_read(call, e, physical_ret)
             } else if let Some(ResolvedCall::LambdaReturnMember(c)) =

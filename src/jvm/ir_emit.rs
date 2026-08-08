@@ -7151,6 +7151,7 @@ impl<'a> Emitter<'a> {
         body: &crate::jvm::classreader::MethodCode,
         base: u16,
         code: &mut CodeBuilder,
+        reified: &HashMap<String, String>,
     ) -> bool {
         let Some(params) = parse_descriptor_params(descriptor) else {
             return false;
@@ -7316,7 +7317,7 @@ impl<'a> Emitter<'a> {
             &lam_splices,
             0,
             self.cw,
-            &HashMap::new(),
+            reified,
         ) else {
             return false;
         };
@@ -7375,7 +7376,7 @@ impl<'a> Emitter<'a> {
             &lam_splices,
             splice_start,
             self.cw,
-            &HashMap::new(),
+            reified,
         ) else {
             return false;
         };
@@ -7894,7 +7895,7 @@ impl<'a> Emitter<'a> {
                     !crate::jvm::inline::function_invoke_sites(&insns, &body.source_cp).is_empty()
                 });
             if body_invokes_lambda {
-                return self.try_inline_unified(descriptor, args, &body, base, code);
+                return self.try_inline_unified(descriptor, args, &body, base, code, reified);
             }
         }
         // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`
