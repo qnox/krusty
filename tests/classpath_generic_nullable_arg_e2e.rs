@@ -1,6 +1,8 @@
-//! A generic classpath function must widen its type parameter to the common
-//! nullable supertype when one argument is non-null and another is nullable
-//! (`kotlin.test.assertEquals("literal", nullableActual)` shape).
+//! A compiled generic callable must widen its type parameter to the common nullable supertype when
+//! one argument is non-null and another is nullable (`kotlin.test.assertEquals("literal",
+//! nullableActual)` shape). Top-level checks exercise the one selected-call expectation vector;
+//! named member and extension controls pin the provider-neutral mapped-slot admission that lets the
+//! same semantic signature reach inference before post-selection validation.
 
 use super::common;
 
@@ -13,6 +15,12 @@ const LIB: &str = "package lib\n\
      fun <T> firstOf(head: T, vararg rest: T): String = (head ?: rest.firstOrNull()).toString()\n\
      fun <T> tld(expected: T, actual: T, message: String? = null, render: () -> String): String =\n\
      \x20 render() + (if (expected == actual) \"eq\" else \"ne\")\n\
+     class Judge {\n\
+     \x20 fun <T> eqd(expected: T, actual: T, message: String? = null): String =\n\
+     \x20   (message ?: \"\") + (if (expected == actual) \"eq\" else \"ne\")\n\
+     }\n\
+     fun <T> String.eqd(expected: T, actual: T, message: String? = null): String =\n\
+     \x20 (message ?: \"\") + (if (expected == actual) \"eq\" else \"ne\")\n\
      fun maybe(flag: Boolean): String? = if (flag) \"x\" else null\n\
      fun maybeInt(flag: Boolean): Int? = if (flag) 7 else null\n\
      fun maybeTag(flag: Boolean): Tag? = if (flag) Tag(\"t\") else null\n\
@@ -133,6 +141,32 @@ fn named_parameter_omitting_call_widens_generic_param() {
         \x20 return \"OK\"\n\
         }\n";
     common::expect_box_ok_against("cpgenericnullnamed", LIB, main);
+}
+
+#[test]
+fn named_member_omitting_call_uses_semantic_generic_slots() {
+    // Mapped-slot applicability is shared by top-level and member candidates. The member's erased
+    // `Any` slots must not reject the nullable argument before its generic signature can infer
+    // `T := String?`; the selected member plan remains responsible for the final substituted check.
+    let main = "import lib.Judge\n\
+        import lib.maybe\n\
+        fun box(): String {\n\
+        \x20 val judge = Judge()\n\
+        \x20 return if (judge.eqd(expected = \"x\", actual = maybe(false)) == \"ne\") \"OK\" else \"fail\"\n\
+        }\n";
+    common::expect_box_ok_against("cpgenericnullnamedmember", LIB, main);
+}
+
+#[test]
+fn named_extension_omitting_call_uses_semantic_generic_slots() {
+    // The same mapped-slot rule applies to an extension candidate: declaration origin and receiver
+    // syntax do not decide whether a semantic type-parameter slot may reach inference.
+    let main = "import lib.eqd\n\
+        import lib.maybe\n\
+        fun box(): String {\n\
+        \x20 return if (\"receiver\".eqd(expected = \"x\", actual = maybe(false)) == \"ne\") \"OK\" else \"fail\"\n\
+        }\n";
+    common::expect_box_ok_against("cpgenericnullnamedextension", LIB, main);
 }
 
 #[test]
