@@ -1167,6 +1167,9 @@ fn kotlin_codegen_box_conformance() {
     let mut skipped = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
+    // KRUSTY_BOX_LIST=<path>: write one `COMPILED|SKIP <file>` line per corpus file, sorted. The
+    // summary counts say a change cost coverage but not WHICH files — diffing two of these does.
+    let mut listing: Vec<String> = Vec::new();
     for (file, r) in &results {
         match r {
             TestResult::Skip => skipped += 1,
@@ -1179,6 +1182,18 @@ fn kotlin_codegen_box_conformance() {
                 failures.push(format!("{}: {why}", file.display()));
             }
         }
+        if env("KRUSTY_BOX_LIST").is_some() {
+            let tag = if matches!(r, TestResult::Skip) {
+                "SKIP"
+            } else {
+                "COMPILED"
+            };
+            listing.push(format!("{tag} {}", file.display()));
+        }
+    }
+    if let Some(path) = env("KRUSTY_BOX_LIST") {
+        listing.sort();
+        let _ = fs::write(&path, listing.join("\n"));
     }
 
     // Performance + coverage trend log: append one CSV row per run so trends are visible over time.
