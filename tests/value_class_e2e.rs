@@ -174,6 +174,24 @@ fun box(): String {
     );
 }
 
+/// A generic inline extension's receiver is physically its first erased argument. This exercises the
+/// shared callable-slot coercion with a USER value class rather than an unsigned builtin: specializing
+/// `T.let` to `Ticket` leaves the logical receiver as `Ticket` while the JVM descriptor still takes
+/// `Object`. The receiver must therefore be boxed through `Ticket.box-impl` before inline routing;
+/// boxing only the `Int` carrier would verify but fail the spliced lambda's `Ticket` cast.
+///
+/// Keeping a non-builtin case beside the unsigned regressions prevents the representation fix from
+/// shrinking back into a classifier list or unsigned-only emitter branch.
+#[test]
+fn generic_inline_scope_receiver_uses_the_declared_value_class_box() {
+    common::expect_box_ok_with_stdlib(
+        "@JvmInline value class Ticket(val raw: Int)\n\
+         fun make(): Ticket = Ticket(7)\n\
+         fun box(): String = make().let { if (it.raw == 7) \"OK\" else \"bad\" }\n",
+        "GenericInlineValueClassReceiver",
+    );
+}
+
 #[test]
 fn assignment_to_nullable_value_class_var_boxes() {
     let stdlib = common::stdlib_jar();

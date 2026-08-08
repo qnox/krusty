@@ -89,8 +89,7 @@ fn source_extension_lambda_binds_member_and_extension_calls() {
         }\n\
         fun box(): String = Client().cfg { member(\"O\"); ext(\"K\") }.token\n";
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "source_ext_recv_lambda")
-            .expect("strict helper always returns Some"),
+        common::expect_box_run_with_stdlib(SRC, "source_ext_recv_lambda"),
         "OK",
         "source extension receiver lambda"
     );

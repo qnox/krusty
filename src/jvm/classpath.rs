@@ -883,6 +883,16 @@ pub struct MetadataCallFacts {
     pub kept_params: Option<usize>,
     pub call_sig: CallSig,
     pub ret: ReturnInfo,
+    /// The full source-declared return type selected from the SAME descriptor-aligned metadata
+    /// callable as every other fact in this record. Unlike [`Self::ret`], this retains nested type
+    /// arguments, so consumers do not repeat overload alignment merely to recover semantic
+    /// classifiers erased by a JVM signature (`MutableList<MutableSet<T>>` → `List<Set<T>>`).
+    pub declared_ret: Option<Ty>,
+    /// Whether the descriptor-aligned declaration carries Kotlin's `suspend` modifier. Keeping this
+    /// beside the other facts selected from the SAME callable prevents a name-wide flag from leaking
+    /// across overloads, and lets consumers ignore whether a provider exposes source and JVM names
+    /// separately.
+    pub suspend: bool,
     /// Kotlin's source-level `operator` modifier. The JVM descriptor/name cannot encode it.
     pub is_operator: bool,
     /// The callable's declared contract, decoded from `@Metadata` (`None` when it has none).
@@ -913,6 +923,8 @@ impl MetadataCallFacts {
             kept_params: None,
             call_sig,
             ret: ReturnInfo::default(),
+            declared_ret: None,
+            suspend: false,
             is_operator: false,
             contract: None,
             context_count: 0,
@@ -932,7 +944,6 @@ struct ClassMeta {
     /// equality (hash collisions stay correct). Same-name entries keep declaration order (sort is
     /// by `(hash, index)`).
     by_jvm_name: Vec<(u64, u32)>,
-    suspend_names: HashSet<String>,
     /// The facade's decoded [`MetaFn`] slices, SHARED by refcount: the class's own `Package`
     /// functions, or one segment per multifile PART. The parts' decodes are already retained on
     /// their cached `ClassInfo`s — segmenting instead of materializing a merged copy removes the
@@ -1158,6 +1169,7 @@ impl BuiltinsFile {
                                 .map(|p| builtin_ty(p, &bounds, false))
                                 .collect(),
                             ret: builtin_ty(&m.ret, &bounds, false),
+                            return_policy: Default::default(),
                         },
                         is_property: m.is_property,
                         ret_nullable: m.ret_nullable,
@@ -1404,6 +1416,18 @@ fn aligned_meta_callable<'a>(
 
 pub(super) fn metadata_return_info(class: Option<TypeName>, nullable: bool) -> ReturnInfo {
     ReturnInfo::new(nullable, class.map(kotlin_type_name_to_ty))
+}
+
+/// Project the structured return from an already-selected metadata function. Keeping this beside the
+/// lightweight [`ReturnInfo`] projection makes descriptor alignment the single overload decision:
+/// callers may choose the cheap classifier/nullability view or the full generic structure without
+/// searching the same metadata list again.
+fn metadata_declared_return(function: &super::metadata::MetaFn) -> Option<Ty> {
+    function
+        .generic_sig
+        .as_ref()
+        .map(|signature| signature.ret)
+        .or_else(|| function.ret_class.map(kotlin_type_name_to_ty))
 }
 
 /// Per-class `@Metadata` cache: class internal name → Kotlin function names that participate in
@@ -1689,6 +1713,11 @@ impl Classpath {
         tree
     }
 
+    /// Whether a slashed path names a PACKAGE on this classpath. See [`PackageTree::has_package`].
+    pub fn has_package(&self, package: &str) -> bool {
+        !package.is_empty() && self.package_tree().has_package(package)
+    }
+
     fn entry_packages(&self, entry_id: usize) -> std::sync::Arc<JarPackages> {
         global_jar_packages().get_or_build_if(
             &self.cache_key[entry_id],
@@ -1760,7 +1789,6 @@ impl Classpath {
         // copy here duplicated every part `MetaFn` (deep Strings included) — ~a third of peak heap.
         let mut fn_segments: Vec<std::sync::Arc<[super::metadata::MetaFn]>> = Vec::new();
         let mut prop_segments: Vec<std::sync::Arc<[super::metadata::MetaProp]>> = Vec::new();
-        let mut suspend_names: HashSet<String> = HashSet::new();
         if let Some(ci) = &ci {
             if !ci.meta.package_functions.is_empty() {
                 fn_segments.push(ci.meta.package_functions.clone());
@@ -1768,12 +1796,6 @@ impl Classpath {
             if !ci.meta.package_properties.is_empty() {
                 prop_segments.push(ci.meta.package_properties.clone());
             }
-            suspend_names.extend(
-                super::metadata::class_functions(ci)
-                    .iter()
-                    .filter(|f| f.is_suspend())
-                    .map(|f| f.kotlin_name.clone()),
-            );
             // A multifile FACADE has no function/property metadata of its own — its `d1` lists the
             // PART class names, which hold them; each part slice becomes a shared segment (the same
             // fns-empty/props-empty gating the merged-copy version used).
@@ -1788,22 +1810,9 @@ impl Classpath {
                     if merge_props && !pci.meta.package_properties.is_empty() {
                         prop_segments.push(pci.meta.package_properties.clone());
                     }
-                    suspend_names.extend(
-                        super::metadata::class_functions(&pci)
-                            .iter()
-                            .filter(|f| f.is_suspend())
-                            .map(|f| f.kotlin_name.clone()),
-                    );
                 }
             }
         }
-        suspend_names.extend(
-            fn_segments
-                .iter()
-                .flat_map(|s| s.iter())
-                .filter(|f| f.is_suspend())
-                .map(|f| f.kotlin_name.clone()),
-        );
         // Hash-sorted by-JVM-name lookup over the flat segment concatenation: no name copies, and
         // same-name overloads stay in declaration order (sort by `(hash, index)`), matching the old
         // map's insertion-ordered index vecs.
@@ -1816,7 +1825,6 @@ impl Classpath {
         by_jvm_name.sort_unstable();
         let meta = std::rc::Rc::new(ClassMeta {
             by_jvm_name,
-            suspend_names,
             fn_segments,
             prop_segments,
         });
@@ -1942,6 +1950,8 @@ impl Classpath {
             kept_params: Some(end),
             call_sig,
             ret: metadata_return_info(c.ret_class, c.ret_nullable()),
+            declared_ret: metadata_declared_return(c),
+            suspend: c.is_suspend(),
             is_operator: c.is_operator(),
             contract: c.contract.clone(),
             context_count: c.context_count,
@@ -1974,6 +1984,8 @@ impl Classpath {
             kept_params: None,
             call_sig: function.member_call_sig(),
             ret: metadata_return_info(function.ret_class, function.ret_nullable()),
+            declared_ret: metadata_declared_return(function),
+            suspend: function.is_suspend(),
             is_operator: function.is_operator(),
             contract: function.contract.clone(),
             context_count: function.context_count,
@@ -1991,6 +2003,36 @@ impl Classpath {
                 )
             }),
         })
+    }
+
+    /// The metadata-declared RETURN type of the PROPERTY getter realized by JVM method
+    /// `jvm_name`/`jvm_desc`, with full structure when the metadata generic signature carries it and
+    /// the bare classifier otherwise. Function returns travel in [`MetadataCallFacts::declared_ret`]
+    /// from the already descriptor-aligned callable; a getter is not a metadata function, so this
+    /// deliberately separate fallback matches its `JvmPropertySignature` without repeating function
+    /// alignment. Together they carry collection identity that JVM signatures erase at every depth.
+    pub fn metadata_property_ret_ty_name(
+        &self,
+        internal: TypeName,
+        jvm_name: &str,
+        jvm_desc: &str,
+    ) -> Option<Ty> {
+        let ci = self.find_name(internal)?;
+        super::metadata::class_properties(&ci)
+            .iter()
+            .find(|property| {
+                property
+                    .getter
+                    .as_ref()
+                    .is_some_and(|getter| getter.name == jvm_name && getter.desc == jvm_desc)
+            })
+            .and_then(|property| {
+                property
+                    .generic_sig
+                    .as_ref()
+                    .map(|gsig| gsig.ret)
+                    .or_else(|| property.ret_class.map(kotlin_type_name_to_ty))
+            })
     }
 
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
@@ -2878,26 +2920,6 @@ impl Classpath {
         })
     }
 
-    /// Whether `internal.name(...)` is a Kotlin `suspend` function, per the class's `@Metadata`
-    /// `IS_SUSPEND` flag. A call to it is a coroutine suspension point. Includes the superclass walk
-    /// needed for facade part classes.
-    pub fn is_suspend_method_name(&self, internal: TypeName, name: &str) -> bool {
-        let mut cur = Some(internal);
-        while let Some(s) = cur.take() {
-            if s.matches("java/lang/Object") {
-                break;
-            }
-            if self.class_meta_name(s).suspend_names.contains(name) {
-                return true;
-            }
-            match self.find_name(s) {
-                Some(ci) => cur = ci.super_class,
-                None => break,
-            }
-        }
-        false
-    }
-
     /// Find extension function candidates for `receiver_desc.method_name`.
     /// `receiver_desc` is a JVM type descriptor, e.g. `Ljava/lang/String;`.
     /// Returns all static methods in any classpath class whose first parameter matches.
@@ -3745,6 +3767,12 @@ pub struct PackageNode {
 pub struct PackageTree {
     names: NameTree,
     packages: HashMap<NameId, PackageNode>,
+    /// Every package path that EXISTS as a qualifier, including the intermediate ones no jar declares
+    /// directly. A catalog records only the packages that own class files, so `java/util` is a node
+    /// while `java` — which owns none — is not; name resolution walking `java.util.ArrayList` segment
+    /// by segment must still be able to answer "`java` is a package". Ancestors are folded in once at
+    /// compose time rather than re-derived per query.
+    package_prefixes: std::collections::HashSet<NameId>,
     /// Exact class owners, sorted by name and classpath order.
     classes: Vec<(NameId, JarId)>,
     incomplete_entries: Vec<JarId>,
@@ -3766,6 +3794,17 @@ impl PackageTree {
     #[allow(dead_code)]
     fn node_for(&self, pkg: &str) -> Option<&PackageNode> {
         self.names.get(pkg).and_then(|id| self.packages.get(&id))
+    }
+
+    /// Whether a slashed path names a PACKAGE on this classpath — the qualifier half of name
+    /// resolution. A dotted reference is resolved segment by segment, and each prefix is either a
+    /// package, a classifier, or nothing; only this table can answer the first case, so an intermediate
+    /// package that owns no classes of its own (`java`, `kotlin/collections`' parent) answers `true`
+    /// here as well as a leaf one.
+    pub fn has_package(&self, pkg: &str) -> bool {
+        self.names.get(pkg).is_some_and(|id| {
+            self.packages.contains_key(&id) || self.package_prefixes.contains(&id)
+        })
     }
 
     fn jars_for_class(&self, internal: &str) -> Vec<JarId> {
@@ -3985,6 +4024,15 @@ fn compose_package_tree(parts: &[std::sync::Arc<JarPackages>]) -> PackageTree {
             }
             if entry.has_builtins && !node.builtins_jars.contains(&jar_id) {
                 node.builtins_jars.push(jar_id);
+            }
+            // Every ancestor of a declared package is itself a package qualifier, even when no jar
+            // declares it directly.
+            let mut ancestor = pkg;
+            while let Some(parent) = tree.names.parent(ancestor) {
+                if parent == NameTree::ROOT || !tree.package_prefixes.insert(parent) {
+                    break;
+                }
+                ancestor = parent;
             }
         }
         for &class_id in &jp.classes {
@@ -4715,6 +4763,7 @@ mod fq_tests {
                 receiver: None,
                 params: vec![param],
                 ret,
+                return_policy: Default::default(),
             }),
             contract: None,
             context_count: 0,
