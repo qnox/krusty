@@ -3704,7 +3704,12 @@ impl Classpath {
         symbols: crate::libraries::ResolvedSymbols,
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         let rc = std::rc::Rc::new(symbols);
-        if self.package_tree().incomplete_entries.is_empty() && !rc.is_empty() {
+        // Misses are records too. Repeating an absent library probe is common when a source module
+        // contributes a same-named local/top-level declaration: the composite source must still ask
+        // every provider so overloads can mix, but the classpath answer stays empty. Cache that answer
+        // under the textual leaf just like a hit. This does not intern the leaf in the name tree, and
+        // the per-namespace LRU keeps the negative working set bounded.
+        if self.package_tree().incomplete_entries.is_empty() {
             self.symbols_memo
                 .borrow_mut()
                 .entry(namespace)
@@ -6265,10 +6270,11 @@ mod fq_tests {
         assert!(crate::types::existing_type_name(MISSING).is_none());
         assert!(libs.symbols(collections, MISSING_LEAF).is_empty());
         assert!(crate::types::existing_type_name(MISSING).is_none());
-        assert!(
-            cp.cached_symbols(collections, MISSING_LEAF).is_none(),
-            "empty misses are not cached"
-        );
+        let cached_miss = cp
+            .cached_symbols(collections, MISSING_LEAF)
+            .expect("empty symbol lookup is memoized");
+        assert!(cached_miss.is_empty());
+        assert!(crate::types::existing_type_name(MISSING).is_none());
         // Memoized (LRU): the same fqn returns the same `Rc` from the classpath's top-level memo.
         libs.symbols(kotlin, "Pair");
         let a = cp.cached_symbols(kotlin, "Pair").expect("memoized");
