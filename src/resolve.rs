@@ -14,7 +14,8 @@ use crate::ast::*;
 use crate::diag::{DiagSink, DiagnosticIdentity, DiagnosticKind, Span};
 use crate::libraries::{
     map_call_args, required_arity, CallArgMappingError, CallArgMappingFailure, CallSig,
-    EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
+    EmptySymbolSource, GenericReturnPolicy, GenericSig, InlineKind, Origin, ParamList,
+    SemanticPlatform,
 };
 use crate::names::{property_getter_name, property_setter_name, COMPANION_OBJECT_NAME};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
@@ -3694,6 +3695,9 @@ impl SourceConstructorMatcher<'_> {
             }
         }
         let mut result = distinct;
+        if result.len() > 1 {
+            result.retain(|constraint| !Ty::obj_name(constraint.name).is_erased_top());
+        }
         result.sort_unstable_by(|left, right| {
             self.source_name(left.name)
                 .cmp(&self.source_name(right.name))
@@ -6342,13 +6346,34 @@ fn collect_signatures_with_cp_impl(
                     // `data class` synthesizes componentN() + copy(props...) callable members.
                     if c.is_data {
                         let self_ty = Ty::obj(&internal);
-                        for (i, (_, ty, _)) in props.iter().enumerate() {
+                        let self_shape = Ty::obj_args_name(
+                            type_name(&internal),
+                            &c.type_params
+                                .iter()
+                                .map(|parameter| symbolic_ctp.bound(parameter))
+                                .collect::<Vec<_>>(),
+                        );
+                        let data_properties = c
+                            .props
+                            .iter()
+                            .zip(&ctor_params)
+                            .zip(&ctor_param_shapes)
+                            .filter(|((property, _), _)| property.is_property)
+                            .collect::<Vec<_>>();
+                        for (i, ((_, ty), (shape, _))) in data_properties.iter().enumerate() {
                             methods.insert(
                                 format!("component{}", i + 1),
                                 vec![Signature {
                                     params: vec![],
-                                    ret: *ty,
-                                    generic_sig: None,
+                                    ret: **ty,
+                                    generic_sig: Some(GenericSig {
+                                        formals: Vec::new(),
+                                        formal_bounds: Vec::new(),
+                                        receiver: None,
+                                        params: Vec::new(),
+                                        ret: *shape,
+                                        return_policy: GenericReturnPolicy::Exact,
+                                    }),
                                     projected_return_hazard: false,
                                     flags: SigFlags::default()
                                         .with_vararg(false)
@@ -6382,18 +6407,31 @@ fn collect_signatures_with_cp_impl(
                         methods.insert(
                             "copy".into(),
                             vec![Signature {
-                                params: props.iter().map(|(_, t, _)| *t).collect(),
+                                params: data_properties.iter().map(|((_, ty), _)| **ty).collect(),
                                 ret: self_ty,
-                                generic_sig: None,
+                                generic_sig: Some(GenericSig {
+                                    formals: Vec::new(),
+                                    formal_bounds: Vec::new(),
+                                    receiver: None,
+                                    params: data_properties
+                                        .iter()
+                                        .map(|(_, (shape, _))| *shape)
+                                        .collect(),
+                                    ret: self_shape,
+                                    return_policy: GenericReturnPolicy::Exact,
+                                }),
                                 projected_return_hazard: false,
                                 flags: SigFlags::default(),
                                 vararg_index: None,
                                 required: 0,
-                                param_defaults: vec![true; props.len()],
-                                exact_params: vec![false; props.len()],
-                                implicit_integer_coercion: vec![false; props.len()],
+                                param_defaults: vec![true; data_properties.len()],
+                                exact_params: vec![false; data_properties.len()],
+                                implicit_integer_coercion: vec![false; data_properties.len()],
                                 param_default_values: Vec::new(),
-                                param_names: props.iter().map(|(n, _, _)| n.clone()).collect(),
+                                param_names: data_properties
+                                    .iter()
+                                    .map(|((property, _), _)| property.name.clone())
+                                    .collect(),
                                 lambda_param_types: Vec::new(),
                                 lambda_recv: Vec::new(),
                                 visibility: Visibility::Public,
@@ -19946,7 +19984,7 @@ impl<'a> Checker<'a> {
         expected: Option<Ty>,
         sam_signatures: Option<&[Option<crate::symbol_resolver::SamSignature>]>,
     ) -> Ty {
-        let host_checkpoint = (self.script_host_may_declare_call(scope, &selected.callable.name)
+        let host_checkpoint = (self.in_script_body
             && selected
                 .source_key
                 .is_some_and(|(source_file, _)| source_file != self.file_index))
@@ -20133,6 +20171,13 @@ impl<'a> Checker<'a> {
                 candidate.source_key.is_some() && self.source_callable_visible(candidate)
             })
             .collect::<Vec<_>>();
+        if candidates.is_empty() && inaccessible_private {
+            self.diags.error(
+                self.call_callee_name_span(call),
+                format!("cannot access '{name}': it is private in its file"),
+            );
+            return true;
+        }
         crate::trace_compiler!(
             "resolve",
             "inapplicable top-level {name}: source candidates={} args={:?} names={argument_names:?}",
@@ -20348,13 +20393,6 @@ impl<'a> Checker<'a> {
             return false;
         }
         if candidates.is_empty() {
-            if inaccessible_private {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    format!("cannot access '{name}': it is private in its file"),
-                );
-                return true;
-            }
             return false;
         }
         let mut seen_keys = std::collections::HashSet::new();
@@ -20369,9 +20407,6 @@ impl<'a> Checker<'a> {
                     .cloned()
             })
             .collect::<Vec<_>>();
-        if conflict_keys.is_empty() {
-            return false;
-        }
         let mut mapping_errors = Vec::new();
         for (index, candidate) in candidates.iter().enumerate() {
             let context_count = candidate.context_count.min(candidate.callable.params.len());
@@ -20419,7 +20454,7 @@ impl<'a> Checker<'a> {
         }
 
         let prefix = INAPPLICABLE_OVERLOAD_PREFIX;
-        let mut displays = Vec::with_capacity(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
+        let mut displays: Vec<String> = Vec::with_capacity(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
         let mut display_bytes = 0usize;
         let mut seen = std::collections::HashSet::new();
         for key in conflict_keys {
@@ -20456,7 +20491,29 @@ impl<'a> Checker<'a> {
                     break;
                 }
                 display_bytes += separator_bytes + candidate.display.len();
-                displays.push(candidate.display.as_str());
+                displays.push(candidate.display.clone());
+            }
+        }
+        if displays.is_empty() {
+            for candidate in &candidates {
+                if displays.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES {
+                    break;
+                }
+                let display = self
+                    .module_source_display(candidate, candidate.callable.ret)
+                    .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+                let separator_bytes = if displays.is_empty() { 2 } else { 1 };
+                if prefix
+                    .len()
+                    .saturating_add(display_bytes)
+                    .saturating_add(separator_bytes)
+                    .saturating_add(display.len())
+                    > MAX_OVERLOAD_DIAGNOSTIC_BYTES
+                {
+                    break;
+                }
+                display_bytes += separator_bytes + display.len();
+                displays.push(display);
             }
         }
         if displays.is_empty() {
@@ -39772,7 +39829,9 @@ impl<'a> Checker<'a> {
                         | crate::libraries::CompilerIntrinsic::EnumValues
                         | crate::libraries::CompilerIntrinsic::EnumValueOf
                         | crate::libraries::CompilerIntrinsic::TrimIndent
-                        | crate::libraries::CompilerIntrinsic::TrimMargin => None,
+                        | crate::libraries::CompilerIntrinsic::TrimMargin
+                        | crate::libraries::CompilerIntrinsic::StringPlus
+                        | crate::libraries::CompilerIntrinsic::NullableAnyToString => None,
                         crate::libraries::CompilerIntrinsic::ArraySize
                         | crate::libraries::CompilerIntrinsic::CharCode
                         | crate::libraries::CompilerIntrinsic::StringLength => None,
@@ -42598,6 +42657,21 @@ impl<'a> Checker<'a> {
                     .into_iter()
                     .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                     .collect::<Vec<_>>();
+                if top_level_candidates.iter().any(|candidate| {
+                    candidate.visibility == Visibility::Private
+                        && candidate
+                            .source_key
+                            .is_some_and(|(source_file, _)| source_file != self.file_index)
+                }) && top_level_candidates
+                    .iter()
+                    .all(|candidate| !self.source_callable_visible(candidate))
+                {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        format!("cannot access '{fname}': it is private in its file"),
+                    );
+                    return Ty::Error;
+                }
                 let top_level = top_level_sam_pick
                     .map(CallableCandidateSelection::Selected)
                     .or_else(|| {
@@ -42668,6 +42742,26 @@ impl<'a> Checker<'a> {
                         );
                         return Ty::Error;
                     }
+                    if matches!(selection, CallableCandidateSelection::MissingContext(_))
+                        && top_level_candidates.len() > 1
+                    {
+                        self.report_inapplicable_module_top_level_candidates(
+                            InapplicableTopLevelCall {
+                                call,
+                                name: &fname,
+                                args,
+                                argument_names: arg_names.as_deref(),
+                                trailing_lambda: self
+                                    .file
+                                    .call_has_trailing_lambda
+                                    .contains(&call.0),
+                                mapping_error_reported: false,
+                                explicit_type_args: explicit_type_args.clone(),
+                            },
+                            top_level_candidates,
+                        );
+                        return Ty::Error;
+                    }
                     return self.finish_top_level_call(
                         scope,
                         call,
@@ -42681,6 +42775,15 @@ impl<'a> Checker<'a> {
                     );
                 }
                 if !top_level_candidates.is_empty() {
+                    if self.in_script_body
+                        && top_level_candidates.iter().all(|candidate| {
+                            candidate
+                                .source_key
+                                .is_some_and(|(source_file, _)| source_file != self.file_index)
+                        })
+                    {
+                        return Ty::Error;
+                    }
                     if let Some((failure, candidate)) = self.unanimous_callable_mapping_failure(
                         scope,
                         call,
@@ -42704,6 +42807,21 @@ impl<'a> Checker<'a> {
                                     .module_source_display(&candidate, candidate.callable.ret),
                             },
                             failure,
+                        );
+                        self.report_inapplicable_module_top_level_candidates(
+                            InapplicableTopLevelCall {
+                                call,
+                                name: &fname,
+                                args,
+                                argument_names: arg_names.as_deref(),
+                                trailing_lambda: self
+                                    .file
+                                    .call_has_trailing_lambda
+                                    .contains(&call.0),
+                                mapping_error_reported: true,
+                                explicit_type_args: explicit_type_args.clone(),
+                            },
+                            top_level_candidates,
                         );
                         return Ty::Error;
                     }
@@ -45264,6 +45382,16 @@ val result = object { fun value(): String = captured }
     }
 
     #[test]
+    fn data_class_components_come_only_from_primary_constructor_properties() {
+        let errors = check_with_detected_features(
+            "data class Box(val primary: String) { val body: String = \"body\" }\n\
+             fun read(box: Box): String = box.component2()",
+        );
+
+        assert_eq!(errors, ["unresolved reference 'component2'."]);
+    }
+
+    #[test]
     fn nested_class_self_label_uses_the_simple_declaration_name() {
         let (errors, _) = check(
             "inline fun <T> T.apply(block: T.() -> Unit): T { block(); return this }\n\
@@ -47118,6 +47246,7 @@ fun box(): String {
             name: &str,
         ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
             let mut record = (*self.callable_symbols(name)).clone();
+            let core = crate::libraries::EmptySymbolSource.symbols(namespace, name);
             let internal = match namespace {
                 crate::symbol_source::SymbolNamespace::Package(package)
                     if package == TypeName::ROOT
@@ -47144,8 +47273,13 @@ fun box(): String {
                 }
                 _ => None,
             };
-            record.classifier = internal.and_then(|internal| self.classifier_record(internal));
-            record.classifier_name = record.classifier.as_ref().and(internal);
+            record.classifier = internal
+                .and_then(|internal| self.classifier_record(internal))
+                .or_else(|| core.classifier.clone());
+            record.classifier_name = record
+                .classifier
+                .as_ref()
+                .and(internal.or(core.classifier_name));
             std::rc::Rc::new(record)
         }
     }

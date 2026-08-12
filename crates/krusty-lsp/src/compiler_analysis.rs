@@ -367,7 +367,7 @@ struct StandaloneKotlinSymbols;
 #[cfg(test)]
 impl krusty::symbol_source::SymbolSource for StandaloneKotlinSymbols {
     fn package_exists(&self, parent: krusty::types::TypeName, name: &str) -> bool {
-        parent == krusty::types::TypeName::ROOT && name == "kotlin"
+        krusty::libraries::EmptySymbolSource.package_exists(parent, name)
     }
 
     fn symbols(
@@ -379,7 +379,7 @@ impl krusty::symbol_source::SymbolSource for StandaloneKotlinSymbols {
             != krusty::symbol_source::SymbolNamespace::Package(krusty::types::type_name("kotlin"))
             || name != "Deprecated"
         {
-            return std::rc::Rc::new(krusty::libraries::ResolvedSymbols::default());
+            return krusty::libraries::EmptySymbolSource.symbols(namespace, name);
         }
         let mut classifier = krusty::libraries::LibraryType::declaration_header();
         classifier.kind = krusty::libraries::TypeKind::Annotation;

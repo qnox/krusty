@@ -346,17 +346,16 @@ fn b_prim_size(
     match c.args {
         [size_arg] => {
             let size = lw.synth_expr(*size_arg)?;
-            // The allocation intrinsic keys on the PHYSICAL primitive array class. An unsigned array is
-            // the unboxed underlying signed array (`UIntArray` = `[I`, `ULongArray` = `[J`), so allocate
-            // via `kotlin/IntArray.<init>` / `kotlin/LongArray.<init>` — the emitter has no
-            // `kotlin/UIntArray.<init>`. Signed creators already name their physical class.
-            let init_fqn = match elem {
-                Ty::UInt => "kotlin/IntArray",
-                Ty::ULong => "kotlin/LongArray",
-                _ => syn.fqn,
-            };
+            let element = elem
+                .scalar_value_repr()
+                .expect("primitive-array element has a scalar representation");
+            // This synthesized node is already lowered IR: both the allocation operation and its result
+            // use the scalar carrier. The source-level unsigned array type remains in checker data.
             Some(lw.emit(IrExpr::Call {
-                callee: Callee::External(format!("{init_fqn}.<init>")),
+                callee: Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::PrimitiveArrayNew { element },
+                    ret: Ty::array(element),
+                },
                 dispatch_receiver: None,
                 args: vec![size],
             }))

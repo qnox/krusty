@@ -185,12 +185,17 @@ struct JvmBuiltInsCustomizer;
 
 impl JvmBuiltInsCustomizer {
     fn classifier_name(&self, fqn: &str) -> Option<TypeName> {
-        (fqn == "kotlin/Cloneable").then(|| type_name(fqn))
+        let builtin_array = fqn
+            .strip_prefix("kotlin/")
+            .is_some_and(|name| name == "Array" || Ty::primitive_array_element(name).is_some());
+        (fqn == "kotlin/Cloneable" || builtin_array).then(|| type_name(fqn))
     }
 
     fn customize(&self, internal: TypeName, base: Option<LibraryType>) -> Option<LibraryType> {
         let mut classifier = if internal.matches("kotlin/Cloneable") {
             base.unwrap_or_else(Self::cloneable_classifier)
+        } else if Ty::obj_name(internal).is_array() {
+            base.unwrap_or_else(LibraryType::declaration_header)
         } else {
             base?
         };
@@ -574,7 +579,8 @@ impl JvmLibraries {
         for builtin in self.cp.builtin_package_functions(pkg, name) {
             if overloads.iter().any(|candidate| {
                 candidate.generic_sig.as_ref().is_some_and(|signature| {
-                    signature.params == builtin.generic_sig.params
+                    signature.receiver == builtin.generic_sig.receiver
+                        && signature.params == builtin.generic_sig.params
                         && signature.ret == builtin.generic_sig.ret
                 })
             }) {
@@ -582,7 +588,7 @@ impl JvmLibraries {
             }
             let inline = InlineKind::from_flags(builtin.is_inline, builtin.is_inline);
             let mut callable = LibraryCallable::library(
-                type_name(""),
+                pkg,
                 name.to_string(),
                 builtin.params.clone(),
                 builtin.ret,
@@ -591,20 +597,52 @@ impl JvmLibraries {
             );
             callable.inline = inline;
             callable.suspend = builtin.is_suspend;
+            callable.source_receiver = builtin.generic_sig.receiver;
             callable.generic_sig = Some(Box::new(builtin.generic_sig.clone()));
-            let mut function = FunctionInfo::plain(FnKind::TopLevel, None, callable);
+            let kind = if builtin.generic_sig.receiver.is_some() {
+                FnKind::Extension
+            } else {
+                FnKind::TopLevel
+            };
+            let mut function = FunctionInfo::plain(kind, builtin.generic_sig.receiver, callable);
             function.generic_sig = Some(builtin.generic_sig);
             function.call_sig = CallSig::metadata_member(
-                builtin.params.len(),
+                function
+                    .generic_sig
+                    .as_ref()
+                    .map_or(0, |signature| signature.params.len()),
                 builtin.param_names,
                 builtin.param_defaults,
                 builtin.vararg,
             );
+            function.context_count = builtin.context_count;
+            function.callable.context_count = builtin.context_count;
+            function.callable.compiler_intrinsic = match (
+                pkg.matches("kotlin"),
+                name,
+                function.kind,
+                function
+                    .generic_sig
+                    .as_ref()
+                    .and_then(|signature| signature.receiver),
+            ) {
+                (true, "plus", FnKind::Extension, Some(receiver))
+                    if receiver == Ty::nullable(Ty::String) =>
+                {
+                    Some(crate::libraries::CompilerIntrinsic::StringPlus)
+                }
+                (true, "toString", FnKind::Extension, Some(receiver))
+                    if receiver == Ty::nullable(Ty::obj("kotlin/Any")) =>
+                {
+                    Some(crate::libraries::CompilerIntrinsic::NullableAnyToString)
+                }
+                _ => None,
+            };
             function.visibility = builtin.visibility;
             function.flags = FnFlags {
                 inline,
                 suspend: builtin.is_suspend,
-                operator: false,
+                operator: builtin.is_operator,
                 is_abstract: false,
                 low_priority: false,
             };
@@ -3535,16 +3573,17 @@ impl JvmLibraries {
             SymbolNamespace::Package(package) => Some(package),
             SymbolNamespace::Classifier(_) => None,
         };
-        // TOP-LEVEL functions of the package (receiver-less). The receiver-less `functions(name, None)`
-        // query classifies each candidate by its metadata receiver, so an EXTENSION compiled into the same
-        // facade surfaces here too — but with no receiver populated (`FnKind::Extension`, `receiver: None`),
-        // a malformed shape for extension selection. Take only genuine `TopLevel` here; extensions come
-        // from the receiver-carrying tree loop below, so the namespace has ONE clean source per kind.
+        // Class-file extensions are returned here without a receiver and are read once from the
+        // receiver-carrying declaration tree below. A package builtin with no physical JVM method has
+        // no class-file entry; its metadata receiver is complete, so retain that semantic declaration.
         let mut overloads: Vec<_> = package
             .map(|package| {
                 self.top_level_overloads(name, package)
                     .into_iter()
-                    .filter(|o| o.kind == FnKind::TopLevel)
+                    .filter(|o| {
+                        o.kind == FnKind::TopLevel
+                            || (o.kind == FnKind::Extension && o.receiver.is_some())
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -4007,7 +4046,9 @@ impl JvmLibraries {
                     | crate::libraries::CompilerIntrinsic::IsNotEmpty
                     | crate::libraries::CompilerIntrinsic::Count
                     | crate::libraries::CompilerIntrinsic::TrimIndent
-                    | crate::libraries::CompilerIntrinsic::TrimMargin => FnKind::Extension,
+                    | crate::libraries::CompilerIntrinsic::TrimMargin
+                    | crate::libraries::CompilerIntrinsic::StringPlus
+                    | crate::libraries::CompilerIntrinsic::NullableAnyToString => FnKind::Extension,
                 };
                 if overload.kind == selected_declaration_kind {
                     overload.callable.compiler_intrinsic = Some(intrinsic);

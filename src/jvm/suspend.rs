@@ -1628,24 +1628,7 @@ fn hoisted_value_ty(
             } => params.as_ref().map(|(_, ret)| *ret).or_else(|| {
                 crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
             }),
-            // An external callee carries no signature in the IR; the checker's recorded logical type
-            // stands in, but ONLY where logical = physical representation (scalars and String —
-            // `"a" + susp()` chains). An `Obj`/nullable/etc. logical type may hide a value-class or
-            // boxing representation owned by the value-class pass, so those still return `None`.
-            Callee::External(_) => ir.logical_types.get(&expression).copied().filter(|ty| {
-                matches!(
-                    *ty,
-                    Ty::Int
-                        | Ty::Byte
-                        | Ty::Short
-                        | Ty::Long
-                        | Ty::Float
-                        | Ty::Double
-                        | Ty::Boolean
-                        | Ty::Char
-                        | Ty::String
-                )
-            }),
+            Callee::Intrinsic { ret, .. } => Some(*ret),
         },
         IrExpr::MethodCall { class, index, .. } => ir
             .classes
@@ -6288,7 +6271,7 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                     ));
                     crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0
                 }
-                Callee::External(_) | Callee::LocalDefault(_) => return None,
+                Callee::Intrinsic { .. } | Callee::LocalDefault(_) => return None,
             };
             zip(args, &params, &mut out)?;
         }

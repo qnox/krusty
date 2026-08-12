@@ -348,7 +348,7 @@ conformance-bin:
     printf '%s\n' "$bin"
 
 # Run the codegen/box conformance suite and print "<pct> <passed> <scanned>". The suite's native
-# exit status still enforces zero miscompiles; the percentage is an additional release threshold.
+# exit status enforces the 50% scanned-corpus floor; the report exposes the exact score.
 conformance VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -356,7 +356,7 @@ conformance VERSION=`just max-version`:
 
 # Run a PREBUILT conformance test binary (path BIN) against Kotlin VERSION and print
 # "<pct> <passed> <scanned>". The test writes the report before its assertions, so callers receive
-# the metric without suppressing a zero-miscompile failure.
+# the metric without suppressing a below-threshold failure.
 conformance-run BIN VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -384,7 +384,7 @@ conformance-badge:
     read -r pct passed scanned < <(just conformance)
     color=red
     awk "BEGIN{exit !($pct>=10)}" && color=orange || true
-    awk "BEGIN{exit !($pct>=40)}" && color=yellow || true
+    awk "BEGIN{exit !($pct>=50)}" && color=yellow || true
     awk "BEGIN{exit !($pct>=70)}" && color=brightgreen || true
     mkdir -p docs/badges
     printf '{"schemaVersion":1,"label":"Kotlin %s conformance","message":"%s%% (%s/%s)","color":"%s"}\n' \

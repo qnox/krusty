@@ -6015,7 +6015,9 @@ impl<'a> Lower<'a> {
                 .runtime
                 .method_descriptor(physical_params, callable.physical_ret)?;
         }
-        if callable.descriptor.is_empty() && !callable.owner.render().is_empty() {
+        if callable.descriptor.is_empty()
+            && matches!(callable.origin, crate::libraries::Origin::Module { .. })
+        {
             let physical_params = if callable.physical_params.len() == callable.params.len() {
                 callable.physical_params
             } else {
@@ -6042,9 +6044,29 @@ impl<'a> Lower<'a> {
     fn emit_library_static_call(
         &mut self,
         callable: crate::libraries::LibraryCallable,
-        args: Vec<u32>,
+        mut args: Vec<u32>,
         record_suspend: bool,
     ) -> Option<u32> {
+        if callable.descriptor.is_empty() {
+            let operation = match callable.compiler_intrinsic {
+                Some(crate::libraries::CompilerIntrinsic::StringPlus) => {
+                    crate::ir::IrIntrinsic::StringPlus
+                }
+                Some(crate::libraries::CompilerIntrinsic::NullableAnyToString) => {
+                    crate::ir::IrIntrinsic::NullableAnyToString
+                }
+                _ => return self.bail("selected library declaration has no backend realization"),
+            };
+            let receiver = if callable.source_receiver.is_some() {
+                if args.is_empty() {
+                    return self.bail("selected intrinsic extension has no receiver argument");
+                }
+                Some(args.remove(0))
+            } else {
+                None
+            };
+            return Some(self.emit_intrinsic_call(operation, callable.ret, receiver, args));
+        }
         let logical_ret = callable.ret;
         let declared_ret = callable.declared_ret;
         // A descriptor that spells a CPS `Continuation` the lowered arguments do not fill. For a
@@ -6311,13 +6333,18 @@ impl<'a> Lower<'a> {
         Some((class, index))
     }
 
-    fn emit_external_call(
+    fn emit_intrinsic_call(
         &mut self,
-        symbol: impl Into<String>,
+        operation: crate::ir::IrIntrinsic,
+        ret: Ty,
         dispatch_receiver: Option<u32>,
         args: Vec<u32>,
     ) -> u32 {
-        self.emit_call(Callee::External(symbol.into()), dispatch_receiver, args)
+        self.emit_call(
+            Callee::Intrinsic { operation, ret },
+            dispatch_receiver,
+            args,
+        )
     }
 
     fn emit_cross_file_call(
@@ -8263,7 +8290,12 @@ impl<'a> Lower<'a> {
         let ga = self.emit_get_value(arr_v);
         let gi2 = self.emit_get_value(i_v);
         let gtmp = self.emit_get_value(tmp_v);
-        let set = self.emit_external_call("kotlin/Array.set", Some(ga), vec![gi2, gtmp]);
+        let set = self.emit_intrinsic_call(
+            crate::ir::IrIntrinsic::ArraySet,
+            Ty::Unit,
+            Some(ga),
+            vec![gi2, gtmp],
+        );
         let wbody = self.emit_block(vec![var_tmp, set], None);
         // update: i = i + 1
         let gi3 = self.emit_get_value(i_v);
@@ -9285,7 +9317,8 @@ impl<'a> Lower<'a> {
         // reference overload returns `Object[]` and needs a `checkcast` to the element array type.
         let a0 = self.lower_arg(spread, &array_ir)?;
         let a1 = self.lower_arg(spread, &array_ir)?;
-        let size = self.emit_external_call("kotlin/Array.size", Some(a1), vec![]);
+        let size =
+            self.emit_intrinsic_call(crate::ir::IrIntrinsic::ArraySize, Ty::Int, Some(a1), vec![]);
         let copy = self.runtime_call(RuntimeOp::ArrayCopyOf, array_ir, vec![a0, size])?;
         let arg = if prim {
             copy // primitive `copyOf` already returns `[<prim>` — no cast
@@ -13047,7 +13080,12 @@ impl<'a> Lower<'a> {
             }
             IntrinsicMemberReference::StringPlus => {
                 let argument = self.emit_get_value(1);
-                self.emit_external_call("kotlin/String.plus", Some(recv), vec![argument])
+                self.emit_intrinsic_call(
+                    crate::ir::IrIntrinsic::StringPlus,
+                    member.ret,
+                    Some(recv),
+                    vec![argument],
+                )
             }
             IntrinsicMemberReference::IntDec => {
                 let one = self.emit_const(IrConst::Int(1));
@@ -13808,15 +13846,21 @@ impl<'a> Lower<'a> {
         intrinsic: crate::libraries::CompilerIntrinsic,
     ) -> Option<u32> {
         Some(match intrinsic {
-            crate::libraries::CompilerIntrinsic::ArraySize => {
-                self.emit_external_call("kotlin/Array.size", Some(receiver), vec![])
-            }
+            crate::libraries::CompilerIntrinsic::ArraySize => self.emit_intrinsic_call(
+                crate::ir::IrIntrinsic::ArraySize,
+                Ty::Int,
+                Some(receiver),
+                vec![],
+            ),
             crate::libraries::CompilerIntrinsic::CharCode => {
                 self.emit_type_op(IrTypeOp::ImplicitCoercion, receiver, ty_to_ir(Ty::Int))
             }
-            crate::libraries::CompilerIntrinsic::StringLength => {
-                self.emit_external_call("kotlin/String.length", Some(receiver), vec![])
-            }
+            crate::libraries::CompilerIntrinsic::StringLength => self.emit_intrinsic_call(
+                crate::ir::IrIntrinsic::StringLength,
+                Ty::Int,
+                Some(receiver),
+                vec![],
+            ),
             _ => return None,
         })
     }
@@ -19317,9 +19361,19 @@ impl<'a> Lower<'a> {
         let n_v = self.fresh_value();
         let arr_g = self.emit_get_value(arr_v);
         let size = if it_ty == Ty::String {
-            self.emit_external_call("kotlin/String.length", Some(arr_g), vec![])
+            self.emit_intrinsic_call(
+                crate::ir::IrIntrinsic::StringLength,
+                Ty::Int,
+                Some(arr_g),
+                vec![],
+            )
         } else {
-            self.emit_external_call("kotlin/Array.size", Some(arr_g), vec![])
+            self.emit_intrinsic_call(
+                crate::ir::IrIntrinsic::ArraySize,
+                Ty::Int,
+                Some(arr_g),
+                vec![],
+            )
         };
         let var_n = self.emit_variable(n_v, ty_to_ir(Ty::Int), Some(size));
         // condition: i < n
@@ -19332,9 +19386,19 @@ impl<'a> Lower<'a> {
         let arr_g2 = self.emit_get_value(arr_v);
         let gi2 = self.emit_get_value(i_v);
         let elem_get = if it_ty == Ty::String {
-            self.emit_external_call("kotlin/String.get", Some(arr_g2), vec![gi2])
+            self.emit_intrinsic_call(
+                crate::ir::IrIntrinsic::StringGet,
+                Ty::Char,
+                Some(arr_g2),
+                vec![gi2],
+            )
         } else {
-            self.emit_external_call("kotlin/Array.get", Some(arr_g2), vec![gi2])
+            self.emit_intrinsic_call(
+                crate::ir::IrIntrinsic::ArrayGet,
+                elem,
+                Some(arr_g2),
+                vec![gi2],
+            )
         };
         let var_x = self.emit_source_local(name, x_v, ty_to_ir(elem), Some(elem_get));
         let mut out = vec![var_x];
@@ -19615,7 +19679,12 @@ impl<'a> Lower<'a> {
                 elem
             };
         let v = self.lower_arg(value, &ty_to_ir(value_ty))?;
-        Some(self.emit_external_call("kotlin/Array.set", Some(a), vec![i, v]))
+        Some(self.emit_intrinsic_call(
+            crate::ir::IrIntrinsic::ArraySet,
+            Ty::Unit,
+            Some(a),
+            vec![i, v],
+        ))
     }
 
     /// Apply the active inline frames from the nearest declaration outwards. This also composes
@@ -20921,7 +20990,12 @@ impl<'a> Lower<'a> {
                     if at.array_elem().is_some() {
                         let a = self.expr(array)?;
                         let i = self.lower_arg(*index, &ty_to_ir(Ty::Int))?;
-                        return Some(self.emit_external_call("kotlin/Array.get", Some(a), vec![i]));
+                        return Some(self.emit_intrinsic_call(
+                            crate::ir::IrIntrinsic::ArrayGet,
+                            self.info.ty(e),
+                            Some(a),
+                            vec![i],
+                        ));
                     }
                 }
                 let recv_v = self.expr(array)?;
@@ -22685,7 +22759,18 @@ impl<'a> Lower<'a> {
                 // of the builtin operator. Its semantic receiver may still have scalar JVM storage
                 // (`operator fun Int.times(V)`), which is irrelevant here: lowering must obey the
                 // selected call and must not reinterpret the expression from its representation.
-                if self.info.resolved_operator_call(e, opn).is_some() {
+                if let Some(selected) = self.info.resolved_operator_call(e, opn) {
+                    // Unsigned arithmetic is selected from the real classifier declarations, whose
+                    // JVM methods are private implementation details. Realize that already-selected
+                    // member as scalar IR; extensions and user declarations continue through their
+                    // selected callable below.
+                    if lty.is_unsigned() && matches!(selected, ResolvedCall::Member(_)) {
+                        if let Some(value) =
+                            self.lower_prim_op_method(lhs, opn, rhs, self.info.ty(e))
+                        {
+                            return Some(value);
+                        }
+                    }
                     let receiver = self.expr(lhs)?;
                     let (call, _) =
                         self.lower_op_call(receiver, self.recv_ty(lhs), opn, &[rhs], e)?;
@@ -22795,7 +22880,12 @@ impl<'a> Lower<'a> {
                 let mut acc = lower_concat_operand(self, operands[0])?;
                 for &op_e in &operands[1..] {
                     let r = lower_concat_operand(self, op_e)?;
-                    acc = self.emit_external_call("kotlin/String.plus", Some(acc), vec![r]);
+                    acc = self.emit_intrinsic_call(
+                        crate::ir::IrIntrinsic::StringPlus,
+                        self.info.ty(e),
+                        Some(acc),
+                        vec![r],
+                    );
                     // The intermediate accumulators of the flattened chain have no AST node of their
                     // own, so the generic per-expression recording below never sees them; each one is
                     // a `String` (the suspend pass types operand snapshots from this map).
@@ -24135,7 +24225,9 @@ impl<'a> Lower<'a> {
                     | crate::libraries::CompilerIntrinsic::IsNotEmpty
                     | crate::libraries::CompilerIntrinsic::Count
                     | crate::libraries::CompilerIntrinsic::TrimIndent
-                    | crate::libraries::CompilerIntrinsic::TrimMargin => {}
+                    | crate::libraries::CompilerIntrinsic::TrimMargin
+                    | crate::libraries::CompilerIntrinsic::StringPlus
+                    | crate::libraries::CompilerIntrinsic::NullableAnyToString => {}
                     crate::libraries::CompilerIntrinsic::ArraySize
                     | crate::libraries::CompilerIntrinsic::CharCode
                     | crate::libraries::CompilerIntrinsic::StringLength => return None,
@@ -24712,7 +24804,12 @@ impl<'a> Lower<'a> {
                 };
                 if let Some(op) = cmp {
                     let a = self.expr(receiver)?;
-                    let size = self.emit_external_call("kotlin/Array.size", Some(a), vec![]);
+                    let size = self.emit_intrinsic_call(
+                        crate::ir::IrIntrinsic::ArraySize,
+                        Ty::Int,
+                        Some(a),
+                        vec![],
+                    );
                     return Some(match op {
                         Some(c) => {
                             let z = self.emit_const(IrConst::Int(0));
@@ -27226,8 +27323,11 @@ fn lowered_reference_class(
             | Callee::Virtual { descriptor, .. } => runtime
                 .descriptor_method_layout(descriptor)
                 .and_then(|layout| layout.return_class),
-            // An intrinsic named by Kotlin FqName has no signature in the IR at all.
-            Callee::External(_) => None,
+            Callee::Intrinsic { ret, .. } => ret
+                .scalar_value_repr()
+                .is_none()
+                .then(|| ret.obj_internal())
+                .flatten(),
         },
         _ => None,
     }
@@ -27590,9 +27690,12 @@ mod tests {
         let mixed = ir.add_expr(IrExpr::When {
             branches: vec![(Some(literal), boxed), (None, carrier_call)],
         });
-        // An intrinsic named only by Kotlin FqName carries no signature at all.
+        // An external semantic call carries its selected return type.
         let intrinsic = ir.add_expr(IrExpr::Call {
-            callee: Callee::External("kotlin/UInt.toString".to_string()),
+            callee: Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::NullableAnyToString,
+                ret: Ty::String,
+            },
             dispatch_receiver: Some(carrier_call),
             args: vec![],
         });
@@ -27635,6 +27738,25 @@ mod tests {
                 "{what}"
             );
         }
+    }
+
+    #[test]
+    fn intrinsic_call_reference_identity_comes_from_its_selected_return_type() {
+        let mut ir = IrFile::with_package(None);
+        let result = type_name("sample/Result");
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::NullableAnyToString,
+                ret: Ty::obj_name(result),
+            },
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+
+        assert_eq!(
+            lowered_reference_class(&ir, &UnsignedBoxRuntime, call),
+            Some(result)
+        );
     }
 
     /// The gate that keeps a boxed unsigned out of an erased descriptor slot reads a value's

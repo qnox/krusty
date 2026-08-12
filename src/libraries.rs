@@ -316,6 +316,8 @@ pub enum CompilerIntrinsic {
     ArraySize,
     CharCode,
     StringLength,
+    StringPlus,
+    NullableAnyToString,
     Print,
     Println,
     StartCoroutine,

@@ -21,13 +21,21 @@ pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
 
-/// The target of an `IrExpr::Call`. `Local` references a function defined in this IR file;
-/// `External` references a symbol that is **not** — a stdlib `expect`/operator named by its Kotlin
-/// FqName (`kotlin/Array.size`, `kotlin/String.plus`, `kotlin/collections/listOf`). Each backend
-/// resolves an `External` the way kotlinc does: if it is one of the handful in the **intrinsic
-/// table** (array access, arithmetic, …) it emits target bytecode directly; otherwise it resolves
-/// the platform **`actual`** from the linked stdlib (`kotlin-stdlib-jvm`/`-js`) and emits a normal
-/// call. Either way it is *data* (a FqName), never a new IR node.
+/// A compiler-supplied operation selected from a real semantic declaration. This is an operation
+/// identity, not a library name: backends implement it without recovering signature facts from text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrIntrinsic {
+    ArrayGet,
+    ArraySet,
+    ArraySize,
+    StringGet,
+    StringLength,
+    StringPlus,
+    NullableAnyToString,
+    PrimitiveArrayNew { element: Ty },
+}
+
+/// The target of an `IrExpr::Call`. `Local` references a function defined in this IR file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Callee {
     Local(FunId),
@@ -37,7 +45,10 @@ pub enum Callee {
     /// `Object` marker to the real function's parameters. Used when a call omits a (possibly non-const)
     /// defaulted argument, mirroring kotlinc's default-argument ABI.
     LocalDefault(FunId),
-    External(String),
+    Intrinsic {
+        operation: IrIntrinsic,
+        ret: Ty,
+    },
     /// A top-level function defined in ANOTHER source file of the same multi-file compilation —
     /// `invokestatic <facade>.<name>(params)ret`. Carries the signature as backend-agnostic `Ty`s
     /// (the JVM backend builds the descriptor), so `ir_lower` needn't know JVM descriptors. Distinct
@@ -146,7 +157,7 @@ pub enum IrExpr {
     },
     /// A call to a function/constructor/operator/stdlib intrinsic (`IrCall`). The `callee` is a
     /// resolved [`Callee`]: a local function, or an intrinsic identified by Kotlin FqName that each
-    /// backend maps to its platform (`kotlin/String.plus`, `kotlin/io/println`, …). This single node
+    /// backend maps to its platform (`kotlin.plus`, `kotlin.io.println`, …). This single node
     /// expresses every call — there is no dedicated node per stdlib operation.
     Call {
         callee: Callee,
@@ -221,9 +232,7 @@ pub enum IrExpr {
     /// A built-in primitive binary operator (`+`/`-`/`<`/`==`/…) on numeric/boolean operands. One
     /// parameterized node (not one-per-intrinsic): Kotlin IR models these as `IrCall` to the
     /// operator function, but the built-in numeric/boolean ops are universal across backends, so a
-    /// single node lets each emit the native instruction (JVM `iadd`, JS `+`). Every *other*
-    /// operator/stdlib operation — `String.plus`, `toString`, `println`, collections — is an
-    /// ordinary `Call` to a `Callee::External` symbol the backend resolves; there is no per-op node.
+    /// single node lets each emit the native instruction (JVM `iadd`, JS `+`).
     PrimitiveBinOp {
         op: IrBinOp,
         lhs: ExprId,

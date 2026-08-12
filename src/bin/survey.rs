@@ -463,7 +463,15 @@ fn survey_file(
     cp_cache: &mut HashMap<Vec<PathBuf>, Rc<Classpath>>,
 ) -> SurveyOutcome {
     krusty::trace_compiler!("survey", "checking {}", file.display());
-    let src = std::fs::read_to_string(file).unwrap_or_default();
+    let src = match std::fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(error) => {
+            return SurveyOutcome::Failed(format!(
+                "harness: cannot read {}: {error}",
+                file.display()
+            ))
+        }
+    };
     let src = krusty::conformance::prepare_test_source(&src);
     if !krusty::conformance::backend_applicable(&src, krusty::conformance::BACKENDS) {
         return SurveyOutcome::NotApplicable;

@@ -2857,10 +2857,14 @@ pub fn lower_value_classes(
                     }
                 }
             }
-            // The RECEIVER of an `Any`-method external call (`a.toString()`/`a.hashCode()`) on an unboxed
-            // value class boxes, so the call dispatches to the box's override.
+            // The nullable-Any toString declaration consumes a reference. Other intrinsics carry
+            // concrete scalar/array contracts and must not turn their receiver into an erased box.
             if let IrExpr::Call {
-                callee: Callee::External(_),
+                callee:
+                    Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::NullableAnyToString,
+                        ..
+                    },
                 dispatch_receiver: Some(recv),
                 ..
             } = &ir.exprs[id as usize]
@@ -2931,19 +2935,22 @@ pub fn lower_value_classes(
                     }
                 }
             }
-            // An unboxed value class flowing into a stdlib (`External`) call or a dynamic `invoke`
-            // (string-template `append`/`toString`, a generic `Object` param), or stored as a reference
-            // array element (`arrayOf(X(..))` → `X[]`), must be boxed.
+            // The String-plus argument is the declaration's `Any?` operand and therefore boxes an
+            // unboxed value class. Dynamic invokes, reference varargs, and string templates are the
+            // other erased reference boundaries handled here.
             if let IrExpr::Call {
-                callee: Callee::External(_),
+                callee:
+                    Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::StringPlus,
+                        ..
+                    },
                 args,
                 ..
             }
             | IrExpr::InvokeFunction { args, .. }
             | IrExpr::Vararg { elements: args, .. }
             // A value-class part of a string template flows into `StringBuilder.append(Object)` /
-            // `String.valueOf(Object)`, so it must box (→ the value class's `toString`), exactly like an
-            // `External` `String.plus` arg did before templates lowered to `StringConcat`.
+            // `String.valueOf(Object)`, so it must box (→ the value class's `toString`).
             | IrExpr::StringConcat(args) = &ir.exprs[id as usize]
             {
                 for a in args.clone() {
@@ -3863,7 +3870,7 @@ fn record_value_boundary(
                 if matches!(
                     &exprs[value as usize],
                     IrExpr::Call {
-                        callee: Callee::External(_),
+                        callee: Callee::Intrinsic { .. },
                         ..
                     }
                 ) {
@@ -4512,11 +4519,15 @@ fn is_boxed_vc(
             callee: Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. },
             ..
         } => descriptor.ends_with(&format!("L{x_rendered};")),
-        // A stdlib reference-array element read (`arr[i]` → `kotlin/Array.get`) yields a boxed element.
+        // A stdlib reference-array element read yields a boxed element.
         IrExpr::Call {
-            callee: Callee::External(name),
+            callee:
+                Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::ArrayGet,
+                    ..
+                },
             ..
-        } => name == "kotlin/Array.get",
+        } => true,
         // `e as X` / `e as X?` yields a boxed `X` (e.g. casting an `Any` returned by a value-class method
         // seen through a supertype) — the property access then `unbox-impl`s it. EXCEPT when the operand is
         // ALREADY an unboxed `X` (a generic value-class receiver erased to its underlying, with a no-op

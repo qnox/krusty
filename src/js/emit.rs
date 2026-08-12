@@ -358,57 +358,42 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             Callee::Special { name, .. } => {
                 format!("super.{}({})", name, emit_args(ir, args, inst))
             }
-            Callee::External(fq) => match fq.as_str() {
-                "kotlin/String.plus" => {
-                    let r = emit_expr(ir, dispatch_receiver.unwrap(), inst);
-                    format!("({} + {})", r, emit_expr(ir, args[0], inst))
+            Callee::Intrinsic { operation, .. } => match operation {
+                crate::ir::IrIntrinsic::StringPlus => {
+                    let receiver = emit_expr(ir, dispatch_receiver.unwrap(), inst);
+                    format!("({receiver} + {})", emit_expr(ir, args[0], inst))
                 }
-                "kotlin/String.length" | "kotlin/Array.size" => {
+                crate::ir::IrIntrinsic::StringLength | crate::ir::IrIntrinsic::ArraySize => {
                     format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst))
                 }
-                "kotlin/String.get" => format!(
+                crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::ArrayGet => format!(
                     "{}[{}]",
                     emit_expr(ir, dispatch_receiver.unwrap(), inst),
                     emit_expr(ir, args[0], inst)
                 ),
-                "kotlin/String.hashCode" => {
-                    let recv = emit_expr(ir, dispatch_receiver.unwrap(), inst);
-                    format!(
-                        "(()=>{{const s={recv};let h=0;for(let i=0;i<s.length;i++){{h=((h*31)+s.charCodeAt(i))|0;}}return h;}})()"
-                    )
-                }
-                "kotlin/Any.toString" => format!(
-                    "String({})",
-                    emit_expr(ir, dispatch_receiver.unwrap(), inst)
-                ),
-                // Arrays are a regular type the JS backend lowers to a JS `Array`.
-                "kotlin/Array.get" => format!(
-                    "{}[{}]",
-                    emit_expr(ir, dispatch_receiver.unwrap(), inst),
-                    emit_expr(ir, args[0], inst)
-                ),
-                "kotlin/Array.set" => format!(
+                crate::ir::IrIntrinsic::ArraySet => format!(
                     "({}[{}] = {})",
                     emit_expr(ir, dispatch_receiver.unwrap(), inst),
                     emit_expr(ir, args[0], inst),
                     emit_expr(ir, args[1], inst)
                 ),
-                // Primitive arrays lower to JS typed arrays (the real Kotlin/JS representation —
-                // zero-filled, `.length`, indexable). Boolean has no typed array; use a filled Array.
-                _ if fq.ends_with("Array.<init>") => {
+                crate::ir::IrIntrinsic::PrimitiveArrayNew { element } => {
                     let n = emit_expr(ir, args[0], inst);
-                    match fq.trim_start_matches("kotlin/").trim_end_matches(".<init>") {
-                        "IntArray" => format!("new Int32Array({n})"),
-                        "DoubleArray" => format!("new Float64Array({n})"),
-                        "FloatArray" => format!("new Float32Array({n})"),
-                        "ByteArray" => format!("new Int8Array({n})"),
-                        "ShortArray" => format!("new Int16Array({n})"),
-                        "CharArray" => format!("new Uint16Array({n})"),
-                        "BooleanArray" => format!("new Array({n}).fill(false)"),
-                        _ => format!("new Array({n}).fill(0)"), // LongArray etc.
+                    match *element {
+                        Ty::Int => format!("new Int32Array({n})"),
+                        Ty::Double => format!("new Float64Array({n})"),
+                        Ty::Float => format!("new Float32Array({n})"),
+                        Ty::Byte => format!("new Int8Array({n})"),
+                        Ty::Short => format!("new Int16Array({n})"),
+                        Ty::Char => format!("new Uint16Array({n})"),
+                        Ty::Boolean => format!("new Array({n}).fill(false)"),
+                        _ => format!("new Array({n}).fill(0)"),
                     }
                 }
-                _ => "undefined".to_string(),
+                crate::ir::IrIntrinsic::NullableAnyToString => format!(
+                    "String({})",
+                    emit_expr(ir, dispatch_receiver.unwrap(), inst)
+                ),
             },
         },
         IrExpr::TypeOp {

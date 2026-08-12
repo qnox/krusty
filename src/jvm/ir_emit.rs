@@ -2501,7 +2501,7 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
                 None => true,
             },
             Callee::CrossFile { params, ret, .. } => params.iter().all(ty_ok) && ty_ok(ret),
-            Callee::Local(_) | Callee::LocalDefault(_) | Callee::External(_) => true,
+            Callee::Local(_) | Callee::LocalDefault(_) | Callee::Intrinsic { .. } => true,
         }
     }
     fn generic_value_class_ok(ir: &IrFile, class_idx: usize) -> bool {
@@ -9174,7 +9174,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// A call that physically returns (real `invoke`, leaving a `java/lang/Void`) yet is typed `Nothing`.
-    /// Excludes inline-spliced (`error`/`require`) and intrinsic (`External`) callees, which already end
+    /// Excludes inline-spliced (`error`/`require`) and intrinsic callees, which already end
     /// the path in `athrow` and leave nothing to discard.
     fn is_real_nothing_call(&self, node: &IrExpr) -> bool {
         match node {
@@ -9197,7 +9197,7 @@ impl<'a> Emitter<'a> {
                 Callee::Static {
                     descriptor, inline, ..
                 } => !inline.can_inline() && descriptor.ends_with(")Ljava/lang/Void;"),
-                Callee::External(_) => false,
+                Callee::Intrinsic { .. } => false,
             },
             _ => false,
         }
@@ -9655,7 +9655,52 @@ impl<'a> Emitter<'a> {
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
-                Callee::External(fq) => self.emit_intrinsic(fq, dispatch_receiver, args, code),
+                Callee::Intrinsic { operation, .. } => match operation {
+                    crate::ir::IrIntrinsic::ArrayGet => {
+                        self.emit_array_get(dispatch_receiver.unwrap(), args[0], code)
+                    }
+                    crate::ir::IrIntrinsic::ArraySet => {
+                        self.emit_array_set(dispatch_receiver.unwrap(), args[0], args[1], code)
+                    }
+                    crate::ir::IrIntrinsic::ArraySize => {
+                        self.emit_value(dispatch_receiver.unwrap(), code);
+                        code.arraylength();
+                    }
+                    crate::ir::IrIntrinsic::StringGet => {
+                        self.emit_value(dispatch_receiver.unwrap(), code);
+                        self.emit_value(args[0], code);
+                        let method = self.cw.methodref("java/lang/String", "charAt", "(I)C");
+                        code.invokevirtual(method, 1, 1);
+                    }
+                    crate::ir::IrIntrinsic::StringLength => {
+                        self.emit_value(dispatch_receiver.unwrap(), code);
+                        let method = self.cw.methodref("java/lang/String", "length", "()I");
+                        code.invokevirtual(method, 0, 1);
+                    }
+                    crate::ir::IrIntrinsic::StringPlus => {
+                        self.emit_string_plus(dispatch_receiver.unwrap(), args[0], code)
+                    }
+                    crate::ir::IrIntrinsic::NullableAnyToString => {
+                        let receiver = dispatch_receiver.unwrap();
+                        let ty = self.value_ty(receiver);
+                        self.emit_value(receiver, code);
+                        let descriptor = match ty {
+                            Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/String;",
+                            Ty::Long => "(J)Ljava/lang/String;",
+                            Ty::Boolean => "(Z)Ljava/lang/String;",
+                            Ty::Char => "(C)Ljava/lang/String;",
+                            Ty::Double => "(D)Ljava/lang/String;",
+                            Ty::Float => "(F)Ljava/lang/String;",
+                            _ => "(Ljava/lang/Object;)Ljava/lang/String;",
+                        };
+                        let method = self.cw.methodref("java/lang/String", "valueOf", descriptor);
+                        code.invokestatic(method, slot_words(ty) as i32, 1);
+                    }
+                    crate::ir::IrIntrinsic::PrimitiveArrayNew { element } => {
+                        self.emit_value(args[0], code);
+                        code.newarray(prim_newarray_atype(*element));
+                    }
+                },
                 Callee::CrossFile {
                     facade,
                     name,
@@ -9807,12 +9852,18 @@ impl<'a> Emitter<'a> {
                                 realization,
                             );
                             if let Some(realization) = realization {
-                                let intrinsic = match realization {
-                                    JvmArrayActualRealization::Get => "kotlin/Array.get",
-                                    JvmArrayActualRealization::Set => "kotlin/Array.set",
-                                    JvmArrayActualRealization::Size => "kotlin/Array.size",
-                                };
-                                self.emit_intrinsic(intrinsic, &Some(recv), args, code);
+                                match realization {
+                                    JvmArrayActualRealization::Get => {
+                                        self.emit_array_get(recv, args[0], code)
+                                    }
+                                    JvmArrayActualRealization::Set => {
+                                        self.emit_array_set(recv, args[0], args[1], code)
+                                    }
+                                    JvmArrayActualRealization::Size => {
+                                        self.emit_value(recv, code);
+                                        code.arraylength();
+                                    }
+                                }
                                 return;
                             }
                         }
@@ -10768,186 +10819,40 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit_intrinsic(
-        &mut self,
-        fq: &str,
-        recv: &Option<u32>,
-        args: &[u32],
-        code: &mut CodeBuilder,
-    ) {
-        match fq {
-            // Static numeric helpers used by synthesized data-class equals/hashCode.
-            "java/lang/Double.hashCode"
-            | "java/lang/Long.hashCode"
-            | "java/lang/Float.hashCode"
-            | "java/lang/Boolean.hashCode"
-            | "java/lang/Integer.hashCode"
-            | "java/lang/Short.hashCode"
-            | "java/lang/Byte.hashCode"
-            | "java/lang/Character.hashCode"
-            | "java/util/Objects.hashCode" => {
-                self.emit_value(args[0], code);
-                let (cls, d) = match fq {
-                    "java/lang/Double.hashCode" => ("java/lang/Double", "(D)I"),
-                    "java/lang/Long.hashCode" => ("java/lang/Long", "(J)I"),
-                    "java/lang/Float.hashCode" => ("java/lang/Float", "(F)I"),
-                    "java/lang/Boolean.hashCode" => ("java/lang/Boolean", "(Z)I"),
-                    "java/lang/Integer.hashCode" => ("java/lang/Integer", "(I)I"),
-                    "java/lang/Short.hashCode" => ("java/lang/Short", "(S)I"),
-                    "java/lang/Byte.hashCode" => ("java/lang/Byte", "(B)I"),
-                    "java/lang/Character.hashCode" => ("java/lang/Character", "(C)I"),
-                    _ => ("java/util/Objects", "(Ljava/lang/Object;)I"),
-                };
-                let aw = slot_words(self.value_ty(args[0])) as i32;
-                let m = self.cw.methodref(cls, "hashCode", d);
-                code.invokestatic(m, aw, 1);
-            }
-            "java/lang/Double.compare" | "java/lang/Float.compare" => {
-                self.emit_value(args[0], code);
-                self.emit_value(args[1], code);
-                let (cls, d, aw) = if fq == "java/lang/Double.compare" {
-                    ("java/lang/Double", "(DD)I", 4)
-                } else {
-                    ("java/lang/Float", "(FF)I", 2)
-                };
-                let m = self.cw.methodref(cls, "compare", d);
-                code.invokestatic(m, aw, 1);
-            }
-            "kotlin/String.plus" => {
-                let recv = recv.unwrap();
-                self.emit_string_plus(recv, args[0], code);
-            }
-            // `s.length` → `String.length()`.
-            "kotlin/String.length" => {
-                self.emit_value(recv.unwrap(), code);
-                let m = self.cw.methodref("java/lang/String", "length", "()I");
-                code.invokevirtual(m, 0, 1);
-            }
-            "kotlin/String.hashCode" => {
-                self.emit_value(recv.unwrap(), code);
-                let m = self.cw.methodref("java/lang/String", "hashCode", "()I");
-                code.invokevirtual(m, 0, 1);
-            }
-            // `s[i]` → `String.charAt(i)`.
-            "kotlin/String.get" => {
-                self.emit_value(recv.unwrap(), code);
-                self.emit_value(args[0], code);
-                let m = self.cw.methodref("java/lang/String", "charAt", "(I)C");
-                code.invokevirtual(m, 1, 1);
-            }
-            // Array operations: the JVM platform realizes them with native array instructions; the
-            // element type comes from the receiver's IR type (`kotlin/Array.get/set/size`) or from
-            // the per-element constructor name (`kotlin/IntArray.<init>`).
-            "kotlin/Array.get" => {
-                let arr = recv.unwrap();
-                let elem = self.array_elem(arr);
-                let reference_array = self.value_ty(arr).is_reference_array();
-                // The array stays live under the index (and, for `set`, under the value too), so a
-                // branchy subscript must frame it — see `emit_value_over`. Unlike the `Vararg` fill
-                // loop, though, a subscript CAN spill: nothing is on the stack yet. Take that route
-                // when the array must not be held at all (`must_spill_across` — a `try`, whose handler
-                // clears the operand stack, so no frame could describe the held array).
-                if self.must_spill_across(args[0]) {
-                    self.emit_operands(&[arr, args[0]], code);
-                } else {
-                    self.emit_value(arr, code);
-                    let arr_ty = self.value_ty(arr);
-                    let arr_v = self.verif_single(arr_ty);
-                    self.emit_value_over(args[0], &[arr_v], code);
-                }
-                let (op, w) = array_load_op(elem, reference_array);
-                code.array_load(op, w);
-                // A boxed primitive array (`Array<Int>` = `Integer[]`): `a[i]` is an unboxed `Int`, so
-                // unbox the loaded wrapper. (`value_ty` for this call reports the same primitive.)
-                if let Some(p) = reference_array.then(|| boxed_prim_of(elem)).flatten() {
-                    unbox_prim(self.cw, code, p);
-                }
-            }
-            "kotlin/Array.set" => {
-                let arr = recv.unwrap();
-                let elem = self.array_elem(arr);
-                let reference_array = self.value_ty(arr).is_reference_array();
-                if self.must_spill_across(args[0]) || self.must_spill_across(args[1]) {
-                    self.emit_operands(&[arr, args[0], args[1]], code);
-                } else {
-                    self.emit_value(arr, code);
-                    let arr_ty = self.value_ty(arr);
-                    let arr_v = self.verif_single(arr_ty);
-                    self.emit_value_over(args[0], std::slice::from_ref(&arr_v), code);
-                    let idx_ty = self.value_ty(args[0]);
-                    let idx_v = self.verif_single(idx_ty);
-                    self.emit_value_over(args[1], &[arr_v, idx_v], code);
-                }
-                // Boxed primitive array: box the primitive value before the `aastore`.
-                if let Some(p) = reference_array.then(|| boxed_prim_of(elem)).flatten() {
-                    box_prim_free(self.cw, code, p);
-                }
-                let (op, w) = array_store_op(elem, reference_array);
-                code.array_store(op, w);
-            }
-            "kotlin/Array.size" => {
-                self.emit_value(recv.unwrap(), code);
-                code.arraylength();
-            }
-            _ if prim_array_elem_ty(fq).is_some() => {
-                self.emit_value(args[0], code);
-                let elem = prim_array_atype(fq);
-                code.newarray(elem);
-            }
-            // `x.toString()` → `String.valueOf(x)` (the right primitive/Object overload).
-            "kotlin/Any.toString" => {
-                let r = recv.unwrap();
-                let ty = self.value_ty(r);
-                self.emit_value(r, code);
-                let desc = match ty {
-                    Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/String;",
-                    Ty::Long => "(J)Ljava/lang/String;",
-                    Ty::Boolean => "(Z)Ljava/lang/String;",
-                    Ty::Char => "(C)Ljava/lang/String;",
-                    Ty::Double => "(D)Ljava/lang/String;",
-                    Ty::Float => "(F)Ljava/lang/String;",
-                    _ => "(Ljava/lang/Object;)Ljava/lang/String;",
-                };
-                let m = self.cw.methodref("java/lang/String", "valueOf", desc);
-                code.invokestatic(m, slot_words(ty) as i32, 1);
-            }
-            "kotlin/Any.hashCode" => {
-                let r = recv.unwrap();
-                let ty = self.value_ty(r);
-                self.emit_value(r, code);
-                match ty {
-                    // A primitive hashes via its wrapper's static `hashCode`.
-                    Ty::Int | Ty::Short | Ty::Byte | Ty::Char => {}
-                    Ty::Long => {
-                        let m = self.cw.methodref("java/lang/Long", "hashCode", "(J)I");
-                        code.invokestatic(m, 2, 1);
-                    }
-                    Ty::Boolean => {
-                        let m = self.cw.methodref("java/lang/Boolean", "hashCode", "(Z)I");
-                        code.invokestatic(m, 1, 1);
-                    }
-                    Ty::Double => {
-                        let m = self.cw.methodref("java/lang/Double", "hashCode", "(D)I");
-                        code.invokestatic(m, 2, 1);
-                    }
-                    Ty::Float => {
-                        let m = self.cw.methodref("java/lang/Float", "hashCode", "(F)I");
-                        code.invokestatic(m, 1, 1);
-                    }
-                    // Kotlin `Any?.hashCode()` is null-safe: a null reference hashes to 0. `Objects`
-                    // preserves virtual hash dispatch for non-null references and handles null.
-                    _ => {
-                        let m = self.cw.methodref(
-                            "java/util/Objects",
-                            "hashCode",
-                            "(Ljava/lang/Object;)I",
-                        );
-                        code.invokestatic(m, 1, 1);
-                    }
-                }
-            }
-            _ => {}
+    fn emit_array_get(&mut self, array: u32, index: u32, code: &mut CodeBuilder) {
+        let element = self.array_elem(array);
+        let reference_array = self.value_ty(array).is_reference_array();
+        if self.must_spill_across(index) {
+            self.emit_operands(&[array, index], code);
+        } else {
+            self.emit_value(array, code);
+            let array_verification = self.verif_single(self.value_ty(array));
+            self.emit_value_over(index, &[array_verification], code);
         }
+        let (operation, words) = array_load_op(element, reference_array);
+        code.array_load(operation, words);
+        if let Some(primitive) = reference_array.then(|| boxed_prim_of(element)).flatten() {
+            unbox_prim(self.cw, code, primitive);
+        }
+    }
+
+    fn emit_array_set(&mut self, array: u32, index: u32, value: u32, code: &mut CodeBuilder) {
+        let element = self.array_elem(array);
+        let reference_array = self.value_ty(array).is_reference_array();
+        if self.must_spill_across(index) || self.must_spill_across(value) {
+            self.emit_operands(&[array, index, value], code);
+        } else {
+            self.emit_value(array, code);
+            let array_verification = self.verif_single(self.value_ty(array));
+            self.emit_value_over(index, std::slice::from_ref(&array_verification), code);
+            let index_verification = self.verif_single(self.value_ty(index));
+            self.emit_value_over(value, &[array_verification, index_verification], code);
+        }
+        if let Some(primitive) = reference_array.then(|| boxed_prim_of(element)).flatten() {
+            box_prim_free(self.cw, code, primitive);
+        }
+        let (operation, words) = array_store_op(element, reference_array);
+        code.array_store(operation, words);
     }
 
     fn append(&mut self, e: u32, code: &mut CodeBuilder) {
@@ -12520,27 +12425,12 @@ impl<'a> Emitter<'a> {
                 let fid = self.ir.classes[*class as usize].methods[*index as usize];
                 call_ret_ty(&self.ir.functions[fid as usize].ret)
             }
-            IrExpr::Call {
-                callee,
-                dispatch_receiver,
-                ..
-            } => match callee {
+            IrExpr::Call { callee, .. } => match callee {
                 Callee::Local(fid) | Callee::LocalDefault(fid) => {
                     call_ret_ty(&self.ir.functions[*fid as usize].ret)
                 }
                 Callee::CrossFile { ret, .. } => call_ret_ty(ret),
-                // Array `get` returns the receiver's element; an array `<init>` returns the array type.
-                Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver
-                    .map(|r| {
-                        // A boxed primitive array yields the UNBOXED primitive (`a[i]: Int`).
-                        let e = self.array_elem(r);
-                        boxed_prim_of(e).unwrap_or(e)
-                    })
-                    .unwrap_or(Ty::Error),
-                Callee::External(fq) if prim_array_elem_ty(fq).is_some() => {
-                    Ty::array(prim_array_elem_ty(fq).unwrap())
-                }
-                Callee::External(fq) => intrinsic_ret(fq),
+                Callee::Intrinsic { ret, .. } => call_ret_ty(ret),
                 Callee::Static { owner, name, .. } if name == "box-impl" => {
                     Ty::nullable(Ty::obj_name(*owner))
                 }
@@ -12783,49 +12673,6 @@ fn ref_internal(t: Ty) -> String {
             .to_string(),
         _ => "java/lang/Object".to_string(),
     }
-}
-
-fn intrinsic_ret(fq: &str) -> Ty {
-    match fq {
-        "kotlin/String.plus" | "kotlin/Any.toString" => Ty::String,
-        "kotlin/Any.hashCode" => Ty::Int,
-        "kotlin/String.length" | "kotlin/Array.size" => Ty::Int,
-        "kotlin/String.get" => Ty::Char,
-        "kotlin/Array.set" => Ty::Unit,
-        f if f.ends_with(".hashCode") || f.ends_with(".compare") => Ty::Int,
-        _ => Ty::Error,
-    }
-}
-
-/// `newarray` atype for a `kotlin/<Prim>Array.<init>` intrinsic.
-fn prim_array_atype(fq: &str) -> u8 {
-    match prim_array_elem_ty(fq) {
-        Some(Ty::Boolean) => 4,
-        Some(Ty::Char) => 5,
-        Some(Ty::Float) => 6,
-        Some(Ty::Double) => 7,
-        Some(Ty::Byte) => 8,
-        Some(Ty::Short) => 9,
-        Some(Ty::Long) => 11,
-        _ => 10, // Int (the only remaining primitive-array element)
-    }
-}
-
-/// Element `Ty` for a `kotlin/<Prim>Array.<init>` intrinsic FqName — `None` for any other call.
-/// Matches the full FqName exactly (not a suffix) so a user class named `…Array` can't be mistaken
-/// for a primitive-array constructor.
-fn prim_array_elem_ty(fq: &str) -> Option<Ty> {
-    Some(match fq {
-        "kotlin/IntArray.<init>" => Ty::Int,
-        "kotlin/LongArray.<init>" => Ty::Long,
-        "kotlin/DoubleArray.<init>" => Ty::Double,
-        "kotlin/FloatArray.<init>" => Ty::Float,
-        "kotlin/BooleanArray.<init>" => Ty::Boolean,
-        "kotlin/CharArray.<init>" => Ty::Char,
-        "kotlin/ByteArray.<init>" => Ty::Byte,
-        "kotlin/ShortArray.<init>" => Ty::Short,
-        _ => return None,
-    })
 }
 
 /// `(opcode, value-words)` for an array element load (`Xaload`).

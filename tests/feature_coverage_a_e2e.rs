@@ -27,6 +27,33 @@ return \"OK\"\n\
 }
 
 #[test]
+fn generic_data_class_generated_calls_preserve_receiver_type_arguments() {
+    let src = "data class Box<T>(val value: T)\n\
+fun box(): String {\n\
+val original = Box(\"O\")\n\
+val component: String = original.component1()\n\
+val copied: String = original.copy(value = \"K\").value\n\
+return component + copied\n\
+}\n";
+    run_ok(src, "GenericDataCalls");
+}
+
+#[test]
+fn data_class_body_properties_do_not_declare_components() {
+    const SOURCE: &str = "data class Box(val primary: String) { val body: String = \"body\" }\n\
+        fun read(box: Box): String = box.component2()\n";
+    let (code, diagnostics) =
+        common::kotlinc_source_result("DataBodyComponent", SOURCE).expect("kotlinc harness");
+    assert_ne!(
+        code, 0,
+        "kotlinc unexpectedly accepted component2: {diagnostics}"
+    );
+
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SOURCE);
+    assert_eq!(diagnostics, ["unresolved reference 'component2'."]);
+}
+
+#[test]
 fn data_class_copy() {
     let src = "data class Person(val name: String, val age: Int)\n\
 fun box(): String {\n\

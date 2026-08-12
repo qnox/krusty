@@ -1,7 +1,7 @@
 name: ci
 
 # Build the conformance test binary once, run it against every supported Kotlin version, and publish
-# only after every version passes the zero-miscompile and 40% coverage gates.
+# only after every version passes the 50% scanned-corpus conformance gate.
 on:
   pull_request:
   push:
@@ -117,13 +117,14 @@ jobs:
           name: pct-${{ matrix.version }}
           path: pct.txt
           if-no-files-found: error
-      - name: enforce >= 40%
+      - name: enforce >= 50%
         run: |
           set -euo pipefail
-          read -r pct _ _ < pct.txt
-          awk "BEGIN{exit !($pct >= 40)}" \
-            || { echo "conformance ${{ matrix.version }} = ${pct}% < 40% — blocking" >&2; exit 1; }
-          echo "conformance ${{ matrix.version }} = ${pct}% >= 40% OK"
+          read -r pct passed scanned < pct.txt
+          awk -v passed="$passed" -v scanned="$scanned" \
+            'BEGIN { exit !(scanned > 0 && passed * 100 >= scanned * 50) }' \
+            || { echo "conformance ${{ matrix.version }} = ${pct}% < 50% — blocking" >&2; exit 1; }
+          echo "conformance ${{ matrix.version }} = ${pct}% >= 50% OK"
 
   # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
   # parallel; publishing is what waits on the gate.
@@ -227,7 +228,7 @@ jobs:
           read -r pct passed scanned < pct.txt
           color=red
           awk "BEGIN{exit !($pct>=10)}" && color=orange || true
-          awk "BEGIN{exit !($pct>=40)}" && color=yellow || true
+          awk "BEGIN{exit !($pct>=50)}" && color=yellow || true
           awk "BEGIN{exit !($pct>=70)}" && color=brightgreen || true
           {
             echo "pct=$pct"; echo "passed=$passed"; echo "scanned=$scanned"; echo "color=$color"

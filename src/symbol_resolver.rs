@@ -446,10 +446,10 @@ pub(crate) fn inherited_nested_classifier_name(
             if !seen.insert(owner) {
                 continue;
             }
-            if let Some(candidate) = owner
+            let candidate = owner
                 .existing_nested_child(name)
-                .filter(|candidate| classifier_exists(*candidate))
-            {
+                .unwrap_or_else(|| crate::types::type_name_nested_child(owner, name));
+            if classifier_exists(candidate) {
                 matches.insert(candidate);
             }
             next.extend(direct_supertypes(owner));

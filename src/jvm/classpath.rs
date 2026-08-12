@@ -1070,6 +1070,8 @@ struct BuiltinFunction {
     visibility: crate::types::Visibility,
     is_inline: bool,
     is_suspend: bool,
+    is_operator: bool,
+    context_count: usize,
 }
 
 #[derive(Clone)]
@@ -1083,6 +1085,8 @@ pub(super) struct BuiltinPackageFunction {
     pub visibility: crate::types::Visibility,
     pub is_inline: bool,
     pub is_suspend: bool,
+    pub is_operator: bool,
+    pub context_count: usize,
 }
 
 struct BuiltinClass {
@@ -1153,17 +1157,16 @@ fn builtin_descriptor(sig: &GenericSig) -> String {
     format!("({params}){}", type_descriptor(builtin_erased(sig.ret)))
 }
 
-/// A decoded `.kotlin_builtins` type as a [`Ty`]. `bounds` supplies each in-scope type parameter's
-/// declared upper bound; an unlisted one is `Any?`, matching the `@Metadata` generic-signature decoder.
-/// Nullability is applied in NESTED positions only — a top-level `T?` rides on the member's
-/// `ret_nullable` flag, since the descriptor it pairs with erases it — again mirroring that decoder.
-fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>, nested: bool) -> Ty {
+/// A decoded `.kotlin_builtins` type as a semantic [`Ty`]. `bounds` supplies each in-scope type
+/// parameter's declared upper bound; an unlisted one is `Any?`, matching the `@Metadata`
+/// generic-signature decoder. JVM erasure is derived separately by [`builtin_erased`].
+fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>) -> Ty {
     use super::metadata::BuiltinTy;
     let ty = match t {
         BuiltinTy::Class { internal, args, .. } => {
             let args = args
                 .iter()
-                .map(|argument| builtin_ty(argument, bounds, true))
+                .map(|argument| builtin_ty(argument, bounds))
                 .collect();
             super::metadata::gsig_from_kotlin_class(internal, args, false)
         }
@@ -1175,7 +1178,7 @@ fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>, nest
             Ty::ty_param(name, bound)
         }
     };
-    if nested && t.nullable() && matches!(ty, Ty::TyParam(..)) {
+    if t.nullable() {
         Ty::nullable(ty)
     } else {
         ty
@@ -1193,7 +1196,7 @@ fn builtin_bounds(
         let bound = p
             .bounds
             .first()
-            .map(|b| builtin_ty(b, &HashMap::new(), false))
+            .map(|b| builtin_ty(b, &HashMap::new()))
             .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
         out.insert(p.name.clone(), bound);
     }
@@ -1215,17 +1218,20 @@ impl BuiltinsFile {
                         .map(|p| {
                             p.bounds
                                 .iter()
-                                .map(|bound| builtin_ty(bound, &bounds, false))
+                                .map(|bound| builtin_ty(bound, &bounds))
                                 .collect()
                         })
                         .collect(),
-                    receiver: None,
+                    receiver: function
+                        .receiver
+                        .as_ref()
+                        .map(|receiver| builtin_ty(receiver, &bounds)),
                     params: function
                         .params
                         .iter()
-                        .map(|parameter| builtin_ty(parameter, &bounds, false))
+                        .map(|parameter| builtin_ty(parameter, &bounds))
                         .collect(),
-                    ret: builtin_ty(&function.ret, &bounds, false),
+                    ret: builtin_ty(&function.ret, &bounds),
                     return_policy: Default::default(),
                 },
                 param_names: function.param_names,
@@ -1234,6 +1240,8 @@ impl BuiltinsFile {
                 visibility: function.visibility,
                 is_inline: function.is_inline,
                 is_suspend: function.is_suspend,
+                is_operator: function.is_operator,
+                context_count: function.context_count,
             });
         }
         for (internal, class) in package.classes {
@@ -1252,7 +1260,7 @@ impl BuiltinsFile {
             let supertype_tys = class
                 .supertype_tys
                 .iter()
-                .map(|t| builtin_ty(t, &class_bounds, false))
+                .map(|t| builtin_ty(t, &class_bounds))
                 .collect();
             let formals: Vec<String> = class.type_params.iter().map(|p| p.name.clone()).collect();
             let members = class
@@ -1267,20 +1275,11 @@ impl BuiltinsFile {
                             formal_bounds: m
                                 .formals
                                 .iter()
-                                .map(|p| {
-                                    p.bounds
-                                        .iter()
-                                        .map(|b| builtin_ty(b, &bounds, false))
-                                        .collect()
-                                })
+                                .map(|p| p.bounds.iter().map(|b| builtin_ty(b, &bounds)).collect())
                                 .collect(),
                             receiver: None,
-                            params: m
-                                .params
-                                .iter()
-                                .map(|p| builtin_ty(p, &bounds, false))
-                                .collect(),
-                            ret: builtin_ty(&m.ret, &bounds, false),
+                            params: m.params.iter().map(|p| builtin_ty(p, &bounds)).collect(),
+                            ret: builtin_ty(&m.ret, &bounds),
                             return_policy: Default::default(),
                         },
                         is_property: m.is_property,
@@ -1296,7 +1295,7 @@ impl BuiltinsFile {
                     params: constructor
                         .params
                         .iter()
-                        .map(|parameter| builtin_ty(parameter, &class_bounds, false))
+                        .map(|parameter| builtin_ty(parameter, &class_bounds))
                         .collect(),
                     visibility: constructor.visibility,
                 })
@@ -2258,8 +2257,9 @@ impl Classpath {
                 generic_sig: function.generic_sig.clone(),
                 params: function
                     .generic_sig
-                    .params
+                    .receiver
                     .iter()
+                    .chain(&function.generic_sig.params)
                     .copied()
                     .map(builtin_erased)
                     .collect(),
@@ -2270,6 +2270,8 @@ impl Classpath {
                 visibility: function.visibility,
                 is_inline: function.is_inline,
                 is_suspend: function.is_suspend,
+                is_operator: function.is_operator,
+                context_count: function.context_count,
             })
             .collect()
     }
@@ -6251,6 +6253,43 @@ mod fq_tests {
         assert!(
             matches!(inline_only.callables, Callables::Functions(_)),
             "a metadata-public @InlineOnly declaration is a classpath callable on a cold first query even when its JVM method is private"
+        );
+        let builtin_to_string = cp.builtin_package_functions(type_name("kotlin"), "toString");
+        assert!(
+            builtin_to_string.iter().any(|function| {
+                function.generic_sig.receiver == Some(Ty::nullable(Ty::obj("kotlin/Any")))
+                    && function.generic_sig.ret == Ty::String
+            }),
+            "kotlin builtin Any?.toString signature must survive metadata decoding: {:?}",
+            builtin_to_string
+                .iter()
+                .map(|function| &function.generic_sig)
+                .collect::<Vec<_>>()
+        );
+        let string_plus = cp
+            .builtin_members_name(type_name("kotlin/String"))
+            .into_iter()
+            .find(|member| member.name == "plus")
+            .expect("String.plus builtin declaration");
+        assert_eq!(
+            string_plus
+                .generic_sig
+                .expect("String.plus generic signature")
+                .params,
+            vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+            "nullable builtin value parameters must remain semantic Ty::Nullable values"
+        );
+        let to_string = libs.symbols(kotlin, "toString");
+        assert!(
+            to_string.callables.functions().iter().any(|function| {
+                function.kind == crate::libraries::FnKind::Extension
+                    && function.receiver == Some(Ty::nullable(Ty::obj("kotlin/Any")))
+                    && function.callable.owner.matches("kotlin")
+                    && function.callable.name == "toString"
+                    && function.callable.ret == Ty::String
+                    && function.callable.descriptor.is_empty()
+            }),
+            "Any?.toString must retain its complete semantic declaration"
         );
         // A top-level function occupies the CALLABLE namespace, not the classifier one — found via the
         // package's `kotlin_module` facades (tree-driven, no whole-classpath scan).

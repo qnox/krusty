@@ -3820,6 +3820,7 @@ pub struct BuiltinMember {
 /// backend capability. Resolution still needs its complete source signature.
 pub struct BuiltinFunction {
     pub name: String,
+    pub receiver: Option<BuiltinTy>,
     pub params: Vec<BuiltinTy>,
     pub ret: BuiltinTy,
     pub formals: Vec<BuiltinTypeParam>,
@@ -3829,6 +3830,10 @@ pub struct BuiltinFunction {
     pub visibility: crate::types::Visibility,
     pub is_inline: bool,
     pub is_suspend: bool,
+    pub is_operator: bool,
+    /// Old unnamed context receivers followed by named context parameters. Both are leading
+    /// implicit parameters in the semantic signature; only the latter have source names.
+    pub context_count: usize,
 }
 
 #[derive(Default)]
@@ -4127,7 +4132,30 @@ fn parse_builtin_package_functions(
             let mut param_names = Vec::new();
             let mut param_defaults = Vec::new();
             let mut vararg = None;
-            for value in function.value_params {
+            let context_count = if function.context_params.is_empty() {
+                function.context_receiver_bodies.len() + function.context_receiver_type_ids.len()
+            } else {
+                function.context_params.len()
+            };
+            if function.context_params.is_empty() {
+                for ty in function
+                    .context_receiver_bodies
+                    .iter()
+                    .map(|body| tables.ty(body, &tparams, 0))
+                    .chain(
+                        function
+                            .context_receiver_type_ids
+                            .iter()
+                            .map(|&id| tables.ty_by_id(id as usize, &tparams, 0)),
+                    )
+                {
+                    params.push(ty.unwrap_or_else(|| BuiltinTy::class("kotlin/Any")));
+                    param_names.push(String::new());
+                    param_defaults.push(false);
+                }
+            }
+            let values = function.context_params.iter().chain(&function.value_params);
+            for value in values {
                 let parameter_index = params.len();
                 let vararg_element = value
                     .vararg_elem_body
@@ -4195,8 +4223,18 @@ fn parse_builtin_package_functions(
                         .return_type_id
                         .and_then(|id| tables.ty_by_id(id as usize, &tparams, 0))
                 })?;
+            let receiver = function
+                .receiver_body
+                .as_deref()
+                .and_then(|body| tables.ty(body, &tparams, 0))
+                .or_else(|| {
+                    function
+                        .receiver_type_id
+                        .and_then(|id| tables.ty_by_id(id as usize, &tparams, 0))
+                });
             Some(BuiltinFunction {
                 name: strings.get(function.name_id as usize)?.clone(),
+                receiver,
                 params,
                 ret,
                 formals,
@@ -4206,6 +4244,8 @@ fn parse_builtin_package_functions(
                 visibility: function.visibility,
                 is_inline: function.is_inline,
                 is_suspend: function.is_suspend,
+                is_operator: function.is_operator,
+                context_count,
             })
         })
         .collect()
