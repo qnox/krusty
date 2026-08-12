@@ -8321,6 +8321,9 @@ impl<'a> Lower<'a> {
         e: AstExprId,
     ) -> Option<u32> {
         let selected = self.info.resolved_top_level_call(e).cloned()?;
+        if let Some(lowered) = self.lower_selected_top_level_special(e, &selected.callable, args) {
+            return Some(lowered);
+        }
         if !selected.context_args.is_empty() {
             return self.lower_context_top_level_call(e, &selected, args);
         }
@@ -15332,6 +15335,20 @@ impl<'a> Lower<'a> {
         ))
     }
 
+    /// Realize non-call JVM forms attached to an already-selected top-level declaration. Both bare
+    /// and package-qualified syntax arrive here with the same semantic callable; spelling never
+    /// participates in intrinsic selection.
+    fn lower_selected_top_level_special(
+        &mut self,
+        call: AstExprId,
+        callable: &crate::libraries::LibraryCallable,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        self.lower_assert_fails_with_default(call, callable, args)
+            .or_else(|| self.lower_assert(callable, args))
+            .or_else(|| self.lower_println(callable, args))
+    }
+
     /// The `kotlin.assert` codegen intrinsic. kotlinc does NOT inline the stdlib body (which reads
     /// `kotlin/_Assertions.ENABLED`); it guards on the JVM's per-class assertion status and skips even
     /// evaluating the condition when disabled. Lower `assert(cond)` / `assert(cond) { msg }` to
@@ -15343,7 +15360,7 @@ impl<'a> Lower<'a> {
         callable: &crate::libraries::LibraryCallable,
         args: &[AstExprId],
     ) -> Option<u32> {
-        if callable.name != "assert" || !callable.owner.contains("PreconditionsKt") {
+        if callable.compiler_intrinsic != Some(crate::libraries::CompilerIntrinsic::Assert) {
             return None;
         }
         // `// ASSERTIONS_MODE: always-disable` — the call is elided entirely; the condition (and message
@@ -24213,6 +24230,7 @@ impl<'a> Lower<'a> {
                     }
                     crate::libraries::CompilerIntrinsic::ForEach
                     | crate::libraries::CompilerIntrinsic::ForEachIndexed
+                    | crate::libraries::CompilerIntrinsic::Assert
                     | crate::libraries::CompilerIntrinsic::Print
                     | crate::libraries::CompilerIntrinsic::Println
                     | crate::libraries::CompilerIntrinsic::StartCoroutine
@@ -24464,13 +24482,7 @@ impl<'a> Lower<'a> {
                 // result unboxes instead of landing boxed in a primitive slot.
                 let (call_inline, call_log, call_phys) =
                     (c.inline.can_inline(), c.ret, c.physical_ret);
-                if let Some(intrinsic) = self.lower_assert_fails_with_default(e, &c, &args) {
-                    return Some(intrinsic);
-                }
-                if let Some(intrinsic) = self.lower_assert(&c, &args) {
-                    return Some(intrinsic);
-                }
-                if let Some(intrinsic) = self.lower_println(&c, &args) {
+                if let Some(intrinsic) = self.lower_selected_top_level_special(e, &c, &args) {
                     return Some(intrinsic);
                 }
                 // Is the callee a `suspend fun`? Read the flag the CHECKER recorded on the resolved

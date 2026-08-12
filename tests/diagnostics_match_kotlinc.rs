@@ -139,6 +139,7 @@ class Derived : Base({ this })
 #[test]
 fn errors_match_kotlinc_in_text_and_location() {
     let krusty = common::krusty_binary();
+    let stdlib = common::stdlib_jar();
 
     // Snippets within krusty's subset that produce a diagnostic kotlinc also produces identically.
     let cases = [
@@ -260,39 +261,79 @@ fn errors_match_kotlinc_in_text_and_location() {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
 
-    let mut mismatches = Vec::new();
-    for (i, src) in cases.iter().enumerate() {
-        let kt = root.join(format!("t{i}.kt"));
-        fs::write(&kt, src).unwrap();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(10)
+        .min(cases.len());
+    let chunk_size = cases.len().div_ceil(workers);
+    let mut mismatches = std::thread::scope(|scope| {
+        cases
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk, sources)| {
+                let root = &root;
+                let krusty = &krusty;
+                let stdlib = &stdlib;
+                scope.spawn(move || {
+                    let mut mismatches = Vec::new();
+                    for (offset, src) in sources.iter().enumerate() {
+                        let i = chunk * chunk_size + offset;
+                        let kt = root.join(format!("t{i}.kt"));
+                        fs::write(&kt, src).unwrap();
 
-        let kr = Command::new(&krusty)
-            .args(["-d", root.join("o").to_str().unwrap()])
-            .arg(&kt)
-            .output()
-            .unwrap();
-        let kr_error = first_error(String::from_utf8_lossy(&kr.stderr).as_ref())
-            .or_else(|| first_error(&String::from_utf8_lossy(&kr.stdout)));
+                        let kr = Command::new(krusty)
+                            .args(["-d", root.join(format!("o{i}")).to_str().unwrap(), "-cp"])
+                            .arg(stdlib)
+                            .arg(&kt)
+                            .output()
+                            .unwrap();
+                        let kr_error = first_error(String::from_utf8_lossy(&kr.stderr).as_ref())
+                            .or_else(|| first_error(&String::from_utf8_lossy(&kr.stdout)));
 
-        // Reference compile via the persistent kotlinc server (one reused JVM, not a CLI spawn/case).
-        let args = vec![
-            kt.to_string_lossy().into_owned(),
-            "-d".to_string(),
-            root.join("ko").to_string_lossy().into_owned(),
-        ];
-        let Some((_, kc_err)) = common::kotlinc_compile(&args) else {
-            eprintln!("skipping diagnostics_match_kotlinc: kotlinc server unavailable");
-            return;
-        };
-        let kc_error = first_error(&kc_err);
-
-        if kr_error != kc_error {
-            mismatches.push(format!(
-                "diagnostic mismatch for {src:?}\n krusty: {kr_error:?}\n kotlinc: {kc_error:?}"
-            ));
-        }
-    }
+                        let args = vec![
+                            kt.to_string_lossy().into_owned(),
+                            "-d".to_string(),
+                            root.join(format!("ko{i}")).to_string_lossy().into_owned(),
+                            "-cp".to_string(),
+                            stdlib.to_string_lossy().into_owned(),
+                        ];
+                        let (_, kc_err) = common::kotlinc_compile(&args)?;
+                        let kc_error = first_error(&kc_err);
+                        if kr_error != kc_error {
+                            mismatches.push((
+                                i,
+                                format!(
+                                    "diagnostic mismatch for {src:?}\n krusty: {kr_error:?}\n kotlinc: {kc_error:?}"
+                                ),
+                            ));
+                        }
+                    }
+                    Some(mismatches)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Option<Vec<_>>>()
+    });
+    let Some(mut mismatches) = mismatches
+        .take()
+        .map(|chunks| chunks.into_iter().flatten().collect::<Vec<_>>())
+    else {
+        eprintln!("skipping diagnostics_match_kotlinc: kotlinc server unavailable");
+        return;
+    };
+    mismatches.sort_by_key(|(index, _)| *index);
     let _ = fs::remove_dir_all(&root);
-    assert!(mismatches.is_empty(), "{}", mismatches.join("\n\n"));
+    assert!(
+        mismatches.is_empty(),
+        "{}",
+        mismatches
+            .into_iter()
+            .map(|(_, mismatch)| mismatch)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    );
 }
 
 #[test]

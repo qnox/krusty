@@ -132,15 +132,7 @@ mod tests {
     fn compiler_cli_uses_only_public_compiler_layers() {
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-cli/src",
-            &[
-                "compiler",
-                "diag",
-                "features",
-                "frontend",
-                "jvm",
-                "source",
-                "toolchain",
-            ],
+            &["compiler", "diag", "features", "frontend", "jvm", "source"],
         );
     }
 

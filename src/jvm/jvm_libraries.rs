@@ -3988,6 +3988,7 @@ impl JvmLibraries {
                 _ => None,
             },
             SymbolNamespace::Package(package) if package.matches("kotlin") => match name {
+                "assert" => Some(crate::libraries::CompilerIntrinsic::Assert),
                 "enumValues" => Some(crate::libraries::CompilerIntrinsic::EnumValues),
                 "enumValueOf" => Some(crate::libraries::CompilerIntrinsic::EnumValueOf),
                 _ => None,
@@ -4029,6 +4030,7 @@ impl JvmLibraries {
                 let selected_declaration_kind = match intrinsic {
                     crate::libraries::CompilerIntrinsic::Print
                     | crate::libraries::CompilerIntrinsic::Println
+                    | crate::libraries::CompilerIntrinsic::Assert
                     | crate::libraries::CompilerIntrinsic::CoroutineSuspended
                     | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                     | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn

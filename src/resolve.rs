@@ -2039,7 +2039,21 @@ pub enum AnonymousObjectCaptureSource {
     EnclosingInstance,
 }
 
+type ModuleSymbolCache = HashMap<
+    (Option<u32>, crate::symbol_source::SymbolNamespace),
+    HashMap<String, std::rc::Rc<crate::libraries::ResolvedSymbols>>,
+>;
+
 pub struct SymbolTable {
+    /// Module-owned declaration-query cache. It is never shared with another compilation session;
+    /// dependency providers own their caches separately. The optional file component preserves
+    /// private top-level visibility.
+    pub(crate) module_symbol_cache: std::cell::RefCell<ModuleSymbolCache>,
+    pub(crate) module_shape_cache:
+        std::cell::RefCell<HashMap<TypeName, Option<std::rc::Rc<crate::libraries::LibraryType>>>>,
+    pub(crate) module_package_cache:
+        std::cell::RefCell<Option<std::rc::Rc<std::collections::HashSet<TypeName>>>>,
+    module_cache_enabled: std::cell::Cell<bool>,
     pub funs: HashMap<String, Vec<Signature>>,
     conflicting_top_level_keys: std::collections::HashSet<TopLevelFunctionConflictKey>,
     conflicting_top_level_key_by_source: HashMap<(u32, u32), TopLevelFunctionConflictKey>,
@@ -2144,6 +2158,10 @@ pub struct SymbolTable {
 impl Default for SymbolTable {
     fn default() -> SymbolTable {
         SymbolTable {
+            module_symbol_cache: Default::default(),
+            module_shape_cache: Default::default(),
+            module_package_cache: Default::default(),
+            module_cache_enabled: std::cell::Cell::new(false),
             funs: HashMap::new(),
             conflicting_top_level_keys: std::collections::HashSet::new(),
             conflicting_top_level_key_by_source: HashMap::new(),
@@ -2183,6 +2201,27 @@ impl Default for SymbolTable {
 }
 
 impl SymbolTable {
+    pub(crate) fn module_cache_enabled(&self) -> bool {
+        self.module_cache_enabled.get()
+    }
+
+    /// Signature collection mutates the module while querying provisional declarations, so caching
+    /// is disabled there. A checker enables the cache only after its pre-inference mutation phase.
+    fn begin_module_mutation(&self) {
+        self.module_cache_enabled.set(false);
+        self.clear_module_symbol_cache();
+    }
+
+    pub(crate) fn finish_module_mutation(&self) {
+        self.clear_module_symbol_cache();
+        self.module_cache_enabled.set(true);
+    }
+
+    fn clear_module_symbol_cache(&self) {
+        self.module_symbol_cache.borrow_mut().clear();
+        self.module_shape_cache.borrow_mut().clear();
+        *self.module_package_cache.borrow_mut() = None;
+    }
     /// Record the JVM module registrar's complete answer for one source function. `Some` is the
     /// concrete facade static the lowerer may reference; `None` is an explicit promise that no
     /// callable is emitted. The two declaration-keyed collections are maintained as complements so
@@ -7142,6 +7181,7 @@ fn collect_signatures_with_cp_impl(
 
     table.libraries = libraries;
     table.class_names = class_names;
+    table.finish_module_mutation();
     table
 }
 
@@ -13869,6 +13909,7 @@ fn check_file_at_impl_mode(
     diags: &mut DiagSink,
     capture_discovery: bool,
 ) -> TypeInfo {
+    syms.begin_module_mutation();
     let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     // Pre-infer EXPRESSION-body return types (top-level functions AND class methods) and patch the
     // signature table BEFORE the main check — so a call to `fun m() = f()` resolves to its real return,
@@ -13885,6 +13926,8 @@ fn check_file_at_impl_mode(
             preinfer_file_returns_to_fixpoint(file, file_index, syms, &anonymous_lexical_scope);
         }
     }
+
+    syms.finish_module_mutation();
 
     let mut c = make_checker(file, file_index, source_files, &*syms, diags);
     // Entry point: the file scope is the root of every chain (see `scope`).
@@ -14066,6 +14109,7 @@ fn check_file_at_impl_mode(
             }
         }
     }
+    syms.finish_module_mutation();
     let used_extension_receivers = extension_receiver_expr_uses
         .into_iter()
         .chain(extension_receiver_stmt_uses)
@@ -17404,7 +17448,30 @@ impl<'a> Checker<'a> {
                 Err(failure) => failures.push((failure, candidate.clone())),
             }
         }
+        let same_mapping_shape = failures.first().is_some_and(|(_, first)| {
+            failures
+                .iter()
+                .skip(1)
+                .all(|(_, candidate)| Self::same_argument_mapping_shape(first, candidate))
+        });
+        if !same_mapping_shape {
+            return None;
+        }
         take_unanimous_mapping_error(&mut failures)
+    }
+
+    fn same_argument_mapping_shape(
+        first: &crate::libraries::FunctionInfo,
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> bool {
+        candidate.semantic_receiver() == first.semantic_receiver()
+            && candidate.semantic_params() == first.semantic_params()
+            && candidate.context_count == first.context_count
+            && candidate.call_sig.param_names == first.call_sig.param_names
+            && candidate.call_sig.param_defaults == first.call_sig.param_defaults
+            && candidate.call_sig.required == first.call_sig.required
+            && candidate.call_sig.vararg == first.call_sig.vararg
+            && candidate.call_sig.vararg_index == first.call_sig.vararg_index
     }
 
     /// When overload selection rejects a family by type but exactly one declaration has a valid
@@ -17440,13 +17507,57 @@ impl<'a> Checker<'a> {
                     trailing_lambda,
                     &shape.call_sig,
                 )?;
-                Some((shape, parameters))
+                Some((candidate, shape, parameters))
             })
             .collect::<Vec<_>>();
-        let [(shape, parameters)] = mapped.as_slice() else {
+        let [(candidate, shape, parameters)] = mapped.as_slice() else {
             return false;
         };
         let checkpoint = self.diags.diags.len();
+        if let Some(signature) = candidate.generic_sig.as_ref() {
+            let bindings = crate::symbol_resolver::infer_generic_call_bindings(
+                signature,
+                parameters.iter().enumerate().map(|(source, &parameter)| {
+                    let argument = args[source];
+                    let actual = self
+                        .callable_reference_types
+                        .get(&argument)
+                        .copied()
+                        .unwrap_or(arg_tys[source]);
+                    (parameter, actual, false)
+                }),
+                candidate.call_sig.vararg_index,
+            );
+            for (formal_index, formal) in signature.formals.iter().enumerate() {
+                let inferred_from_callable_reference =
+                    parameters.iter().enumerate().any(|(source, &parameter)| {
+                        matches!(self.file.expr(args[source]), Expr::CallableRef { .. })
+                            && signature.params.get(parameter).is_some_and(|parameter| {
+                                ty_mentions_param(*parameter, std::slice::from_ref(formal))
+                            })
+                    });
+                if !inferred_from_callable_reference {
+                    continue;
+                }
+                let satisfies_bounds = bindings.get(formal).is_some_and(|&actual| {
+                    signature
+                        .formal_bounds
+                        .get(formal_index)
+                        .into_iter()
+                        .flatten()
+                        .all(|&bound| self.receiver_is_assignable(actual, bound))
+                });
+                if !satisfies_bounds {
+                    self.diags.error(
+                        self.span(call),
+                        format!(
+                            "cannot infer type for type parameter '{formal}'. Specify it explicitly."
+                        ),
+                    );
+                    return true;
+                }
+            }
+        }
         for (source, &parameter) in parameters.iter().enumerate() {
             let Some((&declared, &actual)) = shape.params.get(parameter).zip(arg_tys.get(source))
             else {
@@ -20224,6 +20335,34 @@ impl<'a> Checker<'a> {
                     for (formal, actual) in inferred {
                         bindings.entry(formal).or_insert(actual);
                     }
+                    for (formal_index, formal) in signature.formals.iter().enumerate() {
+                        if bindings.contains_key(formal)
+                            || explicit_type_args.get(formal_index).is_some()
+                        {
+                            continue;
+                        }
+                        let inferred_from_callable_reference =
+                            parameters.iter().enumerate().any(|(source, parameter)| {
+                                matches!(self.file.expr(args[source]), Expr::CallableRef { .. })
+                                    && signature.params.get(parameter + context_count).is_some_and(
+                                        |parameter| {
+                                            ty_mentions_param(
+                                                *parameter,
+                                                std::slice::from_ref(formal),
+                                            )
+                                        },
+                                    )
+                            });
+                        if inferred_from_callable_reference {
+                            self.diags.error(
+                                self.span(call),
+                                format!(
+                                    "cannot infer type for type parameter '{formal}'. Specify it explicitly."
+                                ),
+                            );
+                            return true;
+                        }
+                    }
                 }
                 let params = signature
                     .params
@@ -20427,7 +20566,14 @@ impl<'a> Checker<'a> {
             }
         }
         let mut reported_mapping_error = false;
-        if !mapping_error_reported && mapping_errors.len() == candidates.len() {
+        let same_mapping_shape = candidates.first().is_some_and(|first| {
+            candidates
+                .iter()
+                .skip(1)
+                .all(|candidate| Self::same_argument_mapping_shape(first, candidate))
+        });
+        if !mapping_error_reported && same_mapping_shape && mapping_errors.len() == candidates.len()
+        {
             if let Some((error, candidate_index)) =
                 take_unanimous_mapping_error(&mut mapping_errors)
             {
@@ -39817,6 +39963,7 @@ impl<'a> Checker<'a> {
                         }
                         crate::libraries::CompilerIntrinsic::Map
                         | crate::libraries::CompilerIntrinsic::FlatMap
+                        | crate::libraries::CompilerIntrinsic::Assert
                         | crate::libraries::CompilerIntrinsic::Print
                         | crate::libraries::CompilerIntrinsic::Println
                         | crate::libraries::CompilerIntrinsic::StartCoroutine

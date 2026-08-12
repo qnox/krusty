@@ -17,6 +17,42 @@ export KRUSTY_TEST_TIMEOUT_SECONDS="${KRUSTY_TEST_TIMEOUT_SECONDS:-120}"
 
 cd "$(dirname "$0")"
 
+# Run one command in its own process group. On timeout terminate the whole group, including JVMs
+# spawned by the test binary. Killing only the Rust parent leaks those children on platforms without
+# Linux's PR_SET_PDEATHSIG and makes every later timing measurement compete with stale compiler work.
+run_with_deadline() {
+  local seconds="$1"
+  shift
+  command -v perl >/dev/null 2>&1 || {
+    echo "run-tests.sh: perl is required to enforce the test deadline" >&2
+    return 2
+  }
+  perl -MPOSIX -e '
+    my $seconds = shift @ARGV;
+    my $pid = fork();
+    die "fork failed: $!\n" unless defined $pid;
+    if ($pid == 0) {
+      POSIX::setpgid(0, 0) == 0 or die "setpgid failed: $!\n";
+      exec @ARGV;
+      die "exec failed: $!\n";
+    }
+    my $timed_out = 0;
+    $SIG{ALRM} = sub {
+      $timed_out = 1;
+      kill "TERM", -$pid;
+      select undef, undef, undef, 0.2;
+      kill "KILL", -$pid;
+    };
+    alarm $seconds;
+    waitpid($pid, 0);
+    alarm 0;
+    exit 124 if $timed_out;
+    exit(128 + ($? & 127)) if $? & 127;
+    exit($? >> 8);
+  ' "$seconds" "$@"
+}
+export -f run_with_deadline
+
 # Frontend/corpus diagnosis is part of the test workflow, not a separate release-build path. Keep it
 # behind this harness so it receives the same provisioned Kotlin version and global deadline as the
 # conformance gate. Extra arguments are passed directly to `survey` (`--frontend-only`, `--file`,
@@ -38,12 +74,8 @@ if [ "${1:-}" = "--survey" ]; then
     echo "run-tests.sh --survey: survey binary missing: $survey_bin" >&2
     exit 1
   }
-  command -v perl >/dev/null 2>&1 || {
-    echo "run-tests.sh --survey: perl is required to enforce the test deadline" >&2
-    exit 2
-  }
-  exec perl -e 'my $seconds = shift @ARGV; alarm($seconds); exec @ARGV; die "exec failed: $!\n"' \
-    "$KRUSTY_TEST_TIMEOUT_SECONDS" "$survey_bin" "$survey_box" "$@"
+  run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$survey_bin" "$survey_box" "$@"
+  exit $?
 fi
 
 if command -v just >/dev/null 2>&1; then
@@ -72,13 +104,9 @@ done
 # the guard least effective where it matters most. Print the full cargo selection before `exec`; if the
 # alarm fires, the last line identifies the active test/filter without relying on buffered test output.
 if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
-  command -v perl >/dev/null 2>&1 || {
-    echo "run-tests.sh: perl is required to enforce the focused-test deadline" >&2
-    exit 2
-  }
   echo "run-tests.sh: focused test timeout=${KRUSTY_TEST_TIMEOUT_SECONDS}s: cargo test $profile_arg $*" >&2
-  exec perl -e 'my $seconds = shift @ARGV; alarm($seconds); exec @ARGV; die "exec failed: $!\n"' \
-    "$KRUSTY_TEST_TIMEOUT_SECONDS" cargo test $profile_arg "$@"
+  run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" cargo test $profile_arg "$@"
+  exit $?
 fi
 
 # Hundreds of e2e tests resolve `java.*` against the JDK's `lib/modules` jimage. Without it they all
@@ -193,20 +221,6 @@ run_label() {
 }
 export -f run_label
 
-run_with_deadline() {
-  local seconds="$1"
-  shift
-  command -v perl >/dev/null 2>&1 || {
-    echo "run-tests.sh: perl is required to enforce the test deadline" >&2
-    return 2
-  }
-  # `alarm` survives `exec`, so the test binary itself receives SIGALRM at the deadline. There is no
-  # watchdog process to leak, and the binary's pipes close so its JVM runners exit as well.
-  perl -e 'my $seconds = shift @ARGV; alarm($seconds); exec @ARGV; die "exec failed: $!\n"' \
-    "$seconds" "$@"
-}
-export -f run_with_deadline
-
 run_one() {
   local b="${2%%::*}" extra="" name slug status=0
   if [ "$2" != "$b" ]; then extra="${2#*::}"; fi
@@ -235,7 +249,7 @@ run_one() {
     # Log name first so the report reads the failing pass's own output; the description carries the
     # filter so two passes of one binary are told apart on sight.
     printf '%s\t%s\n' "$name" "$b${extra:+ [$extra]}" >>"$1/FAILED"
-    if [ "$status" -eq 142 ]; then
+    if [ "$status" -eq 124 ]; then
       printf '%s\t%s\n' "$name" "$b${extra:+ [$extra]}" >>"$1/TIMED_OUT"
     fi
   fi
@@ -298,10 +312,22 @@ if [ -f "$logdir/FAILED" ]; then
   echo "=== FAILED TEST BINARIES ==="
   while IFS=$'\t' read -r name desc; do
     echo "----- $desc -----"
-    # Never let a missing log abort the report under `set -e` — that would hide every failure after
-    # this one, which is the same class of blindness this reporting path already had.
-    cat "$logdir/$name.log" || echo "(log missing: $name)"
+    log="$logdir/$name.log"
+    if [ ! -f "$log" ]; then
+      echo "(log missing: $name)"
+      continue
+    fi
+    # Libtest repeats captured panics and the complete failed-test list after its `failures:` marker.
+    # Printing that suffix preserves actionable diagnostics without replaying thousands of passing
+    # test lines and truncating the actual summary out of CI logs.
+    if grep -q '^failures:' "$log"; then
+      sed -n '/^failures:/,$p' "$log"
+    else
+      tail -200 "$log"
+    fi
   done <"$logdir/FAILED"
+  echo "=== SLOWEST TEST BINARIES ==="
+  sort -rn "$logdir/TIMINGS" | awk 'NR <= 20 {printf "%7.2fs  %s\n", $1 / 1000, $2}'
   exit 1
 fi
 

@@ -21,14 +21,6 @@ use std::collections::HashMap;
 pub struct ModuleSymbols<'a> {
     syms: &'a FrontendSymbols,
     source_file: Option<u32>,
-    /// Positive and negative queries against the immutable symbol table.
-    shapes: std::cell::RefCell<HashMap<TypeName, Option<std::rc::Rc<LibraryType>>>>,
-    symbols: std::cell::RefCell<
-        HashMap<SymbolNamespace, HashMap<String, std::rc::Rc<crate::libraries::ResolvedSymbols>>>,
-    >,
-    /// The module's package namespace, derived once from the declarations themselves (see
-    /// [`ModuleSymbols::packages`]).
-    packages: std::cell::RefCell<Option<std::rc::Rc<std::collections::HashSet<TypeName>>>>,
 }
 
 impl<'a> ModuleSymbols<'a> {
@@ -36,9 +28,6 @@ impl<'a> ModuleSymbols<'a> {
         ModuleSymbols {
             syms,
             source_file: None,
-            shapes: Default::default(),
-            symbols: Default::default(),
-            packages: Default::default(),
         }
     }
 
@@ -46,9 +35,6 @@ impl<'a> ModuleSymbols<'a> {
         ModuleSymbols {
             syms,
             source_file: Some(source_file),
-            shapes: Default::default(),
-            symbols: Default::default(),
-            packages: Default::default(),
         }
     }
 
@@ -58,8 +44,10 @@ impl<'a> ModuleSymbols<'a> {
     /// memoized. Ancestors are included because a qualifier walk steps through them
     /// (`a` then `a.b` then `a.b.C`) even when only the leaf owns declarations.
     fn packages(&self) -> std::rc::Rc<std::collections::HashSet<TypeName>> {
-        if let Some(packages) = self.packages.borrow().as_ref() {
-            return packages.clone();
+        if self.syms.module_cache_enabled() {
+            if let Some(packages) = self.syms.module_package_cache.borrow().as_ref() {
+                return packages.clone();
+            }
         }
         let mut packages = std::collections::HashSet::new();
         packages.extend(self.syms.source_packages.iter().copied());
@@ -81,7 +69,9 @@ impl<'a> ModuleSymbols<'a> {
             }
         }
         let packages = std::rc::Rc::new(packages);
-        *self.packages.borrow_mut() = Some(packages.clone());
+        if self.syms.module_cache_enabled() {
+            *self.syms.module_package_cache.borrow_mut() = Some(packages.clone());
+        }
         packages
     }
 
@@ -102,8 +92,10 @@ impl<'a> ModuleSymbols<'a> {
     /// Build the classifier half of this provider's single symbol record. Kept private so callers
     /// cannot query classifier metadata through a second `SymbolSource` operation.
     fn classifier_record(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
-        if let Some(shape) = self.shapes.borrow().get(&internal) {
-            return shape.clone();
+        if self.syms.module_cache_enabled() {
+            if let Some(shape) = self.syms.module_shape_cache.borrow().get(&internal) {
+                return shape.clone();
+            }
         }
         let shape = self
             .class_by_type_name(internal)
@@ -124,7 +116,12 @@ impl<'a> ModuleSymbols<'a> {
                     .has_source_class_header(internal)
                     .then(|| std::rc::Rc::new(LibraryType::declaration_header()))
             });
-        self.shapes.borrow_mut().insert(internal, shape.clone());
+        if self.syms.module_cache_enabled() {
+            self.syms
+                .module_shape_cache
+                .borrow_mut()
+                .insert(internal, shape.clone());
+        }
         shape
     }
 
@@ -1033,13 +1030,16 @@ impl SymbolSource for ModuleSymbols<'_> {
         name: &str,
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         use crate::libraries::{Callables, ResolvedSymbols};
-        if let Some(record) = self
-            .symbols
-            .borrow()
-            .get(&namespace)
-            .and_then(|symbols| symbols.get(name))
-        {
-            return record.clone();
+        if self.syms.module_cache_enabled() {
+            if let Some(record) = self
+                .syms
+                .module_symbol_cache
+                .borrow()
+                .get(&(self.source_file, namespace))
+                .and_then(|symbols| symbols.get(name))
+            {
+                return record.clone();
+            }
         }
         // Classifier: a module class at the fqn. Callables: `functions(name, receiver)` — members (always
         // visible on their type) plus the module's top-level/extension functions when the fqn's package is
@@ -1311,10 +1311,11 @@ impl SymbolSource for ModuleSymbols<'_> {
             classifier,
             callables,
         });
-        if !record.is_empty() {
-            self.symbols
+        if self.syms.module_cache_enabled() {
+            self.syms
+                .module_symbol_cache
                 .borrow_mut()
-                .entry(namespace)
+                .entry((self.source_file, namespace))
                 .or_default()
                 .insert(name, record.clone());
         }
@@ -1519,6 +1520,7 @@ mod tests {
     fn classifier_reuses_the_shape_built_for_a_repeated_query() {
         let mut st = FrontendSymbols::default();
         st.insert_class(class("demo/Widget"));
+        st.finish_module_mutation();
         let m = ModuleSymbols::new(&st);
         let first = m.classifier(type_name("demo/Widget")).unwrap();
         let second = m.classifier(type_name("demo/Widget")).unwrap();
@@ -1538,6 +1540,7 @@ mod tests {
         st.funs.insert("twice".into(), vec![twice]);
         st.fn_facades_by_decl
             .insert((0, 1), type_name("demo/DemoKt"));
+        st.finish_module_mutation();
         let m = ModuleSymbols::new(&st);
         let namespace = SymbolNamespace::Package(type_name("demo"));
         let first = m.symbols(namespace, "twice");
@@ -1550,6 +1553,32 @@ mod tests {
             std::rc::Rc::ptr_eq(&first, &second),
             "repeated queries must not rebuild the namespace record"
         );
+    }
+
+    #[test]
+    fn symbol_caches_are_isolated_per_module() {
+        let namespace = SymbolNamespace::Package(type_name("demo"));
+
+        let mut first = FrontendSymbols::default();
+        let mut only_here = sig(Vec::new(), Ty::Int);
+        only_here.source_file = Some(0);
+        only_here.source_decl = Some(crate::ast::DeclId(1));
+        only_here.package = "demo".into();
+        first.funs.insert("onlyHere".into(), vec![only_here]);
+        first
+            .fn_facades_by_decl
+            .insert((0, 1), type_name("demo/FirstKt"));
+        first.finish_module_mutation();
+
+        let second = FrontendSymbols::default();
+        second.finish_module_mutation();
+
+        let present = ModuleSymbols::new(&first).symbols(namespace, "onlyHere");
+        let absent = ModuleSymbols::new(&second).symbols(namespace, "onlyHere");
+        assert!(!present.is_empty());
+        assert!(absent.is_empty());
+        assert_eq!(first.module_symbol_cache.borrow().len(), 1);
+        assert_eq!(second.module_symbol_cache.borrow().len(), 1);
     }
 
     #[test]

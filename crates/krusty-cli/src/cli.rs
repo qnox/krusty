@@ -28,8 +28,6 @@ pub struct Options {
     pub jdk_home: Option<PathBuf>,
     /// `-no-jdk`: do NOT add the platform JDK to the classpath (kotlinc semantics).
     pub no_jdk: bool,
-    /// `-no-stdlib`: do NOT add the Kotlin standard library to the classpath (kotlinc semantics).
-    pub no_stdlib: bool,
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
@@ -48,7 +46,6 @@ impl Default for Options {
             print_help: false,
             jdk_home: None,
             no_jdk: false,
-            no_stdlib: false,
             jvm_target_major: None,
         }
     }
@@ -85,6 +82,7 @@ const IGNORED_WITH_VALUE: &[&str] = &[
 /// kotlinc valueless flags that krusty ignores (accept + drop).
 const IGNORED_FLAGS: &[&str] = &[
     "-include-runtime",
+    "-no-stdlib",
     "-no-reflect",
     "-nowarn",
     "-verbose",
@@ -158,7 +156,6 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                 }
             }
             "-no-jdk" => opts.no_jdk = true,
-            "-no-stdlib" => opts.no_stdlib = true,
             "-jvm-target" => {
                 // Honor the target: it sets the emitted class-file version. An unrecognized value is
                 // reported like any other ignored option rather than silently defaulting.
@@ -191,8 +188,8 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
 }
 
 impl Options {
-    /// The classpath to drive resolution with: the user's `-cp` entries, Kotlin stdlib unless
-    /// `-no-stdlib`, and—unless `-no-jdk`—the platform JDK's `lib/modules` jimage. Without the JDK,
+    /// The classpath to drive resolution with: the user's `-cp` entries plus — like kotlinc, unless
+    /// `-no-jdk` — the platform JDK's `lib/modules` jimage (the `java.base` bootclasspath). Without it,
     /// kotlin-stdlib symbols whose `@Metadata` references `java/lang/*` (`require`, `String.isNotBlank`,
     /// collection ops, …) fail to resolve — a confusing "unresolved function" whose real cause is a
     /// missing JDK. Resolved from `-jdk-home`, else `$JAVA_HOME`; appended only when the jimage actually
@@ -200,13 +197,6 @@ impl Options {
     /// stays a pure, env-independent function.
     pub fn effective_classpath(&self) -> Vec<PathBuf> {
         let mut cp = self.classpath.clone();
-        if !self.no_stdlib {
-            if let Some(stdlib) = krusty::toolchain::stdlib_jar() {
-                if !cp.contains(&stdlib) {
-                    cp.push(stdlib);
-                }
-            }
-        }
         if !self.no_jdk {
             if let Some(modules) = platform_jdk_modules(self.jdk_home.as_deref()) {
                 cp.push(modules);
@@ -342,29 +332,15 @@ mod tests {
         assert_eq!(o.sources, vec!["f.kt".to_string()]); // value consumed, not a source
         let o = parse_args(&["-no-jdk", "f.kt"]);
         assert!(o.no_jdk);
-        // Suppressing both defaults leaves only the explicit classpath.
-        let o = parse_args(&["-no-jdk", "-no-stdlib", "-jdk-home", "/opt/jdk", "f.kt"]);
+        // `-no-jdk` suppresses the JDK even with a `-jdk-home`; effective cp adds nothing.
+        let o = parse_args(&["-no-jdk", "-jdk-home", "/opt/jdk", "f.kt"]);
         assert_eq!(o.effective_classpath(), o.classpath);
-    }
-
-    #[test]
-    fn no_stdlib_suppresses_the_default_kotlin_library() {
-        let o = parse_args(&["-no-stdlib", "-no-jdk", "-cp", "a.jar", "f.kt"]);
-        assert!(o.no_stdlib);
-        assert_eq!(o.effective_classpath(), vec![PathBuf::from("a.jar")]);
     }
 
     #[test]
     fn effective_classpath_ignores_a_missing_jdk_home() {
         // A non-existent `-jdk-home` contributes nothing (a bad env must not break an explicit cp).
-        let o = parse_args(&[
-            "-no-stdlib",
-            "-jdk-home",
-            "/definitely/not/a/jdk",
-            "-cp",
-            "a.jar",
-            "f.kt",
-        ]);
+        let o = parse_args(&["-jdk-home", "/definitely/not/a/jdk", "-cp", "a.jar", "f.kt"]);
         assert_eq!(o.effective_classpath(), vec![PathBuf::from("a.jar")]);
     }
 
