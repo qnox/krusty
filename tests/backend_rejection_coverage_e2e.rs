@@ -34,16 +34,16 @@ fn mixed_spread_vararg_accepted() {
     ));
 }
 
-// --- Delegated properties (`by`) — not lowered yet; src/ir_lower.rs deep-bails. Several distinct
-//     delegate providers (custom operator, `lazy`, a `Map`) all take the same bail path. ---
+// --- Delegated properties (`by`). ---
 
 #[test]
-fn delegated_property_observable_rejected() {
-    assert!(rejects(
+fn delegated_property_observable_runs() {
+    common::expect_box_ok_with_stdlib(
         "import kotlin.properties.Delegates\n\
          class C { var x: Int by Delegates.observable(0) { _, _, _ -> } }\n\
-         fun main() { val c = C(); c.x = 5; println(c.x) }\n"
-    ));
+         fun box(): String { val c = C(); c.x = 5; return if (c.x == 5) \"OK\" else \"fail\" }\n",
+        "ObservableDelegate",
+    );
 }
 
 #[test]

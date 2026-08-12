@@ -57,7 +57,10 @@ fn array_of_nulls_primitive() {
     a[0] = 7\n\
     return if (a[0] == 7 && a[1] == null) \"OK\" else \"f2\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("arrayOfNulls<Int>"), "OK");
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SRC, "ArrayOfNullsPrimitive"),
+        "OK"
+    );
 }
 
 #[test]
@@ -68,6 +71,31 @@ fn explicit_type_argument_byte() {
     return if (a[0] == 2.toByte() && a[1] == 2.toByte()) \"OK\" else \"fail ${a[0]},${a[1]}\"\n\
 }\n";
     assert_eq!(run(SRC).expect("arrayOf<Byte>"), "OK");
+}
+
+#[test]
+fn jvm_array_clone_has_exact_array_type_and_object_realization() {
+    const SRC: &str = "fun acceptsCloneable(value: Cloneable): Boolean = value is Cloneable\n\
+fun acceptsSerializable(value: java.io.Serializable): Boolean = value is java.io.Serializable\n\
+fun box(): String {\n\
+    val strings = arrayOf(\"OK\")\n\
+    val ints = intArrayOf(1, 2)\n\
+    val stringsCopy: Array<String> = strings.clone()\n\
+    val intsCopy: IntArray = ints.clone()\n\
+    if (stringsCopy === strings || intsCopy === ints) return \"identity\"\n\
+    if (stringsCopy[0] != \"OK\" || intsCopy[1] != 2) return \"content\"\n\
+    if (!acceptsCloneable(strings) || !acceptsCloneable(ints)) return \"cloneable\"\n\
+    if (!acceptsSerializable(strings) || !acceptsSerializable(ints)) return \"serializable\"\n\
+    return \"OK\"\n\
+}\n";
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], Some(jdk.as_path()));
+    assert!(
+        diagnostics.is_empty(),
+        "kotlinc's JVM array customization should resolve without diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(run(SRC).expect("JVM Array.clone"), "OK");
 }
 
 #[test]

@@ -233,25 +233,19 @@ fn kotlin_fun_interface_param_still_converts() {
     common::expect_box_ok_with_stdlib(SRC, "sam_kotlin_fun_interface");
 }
 
-/// Divergence pin: a function VALUE (not a lambda literal) into a Java SAM parameter. kotlinc
-/// 2.4.10 ACCEPTS this (the Kotlin 2.2 function-value SAM conversion), but krusty's SAM lowering
-/// wraps only lambda literals — a non-literal conversion has no wrapper path even for Kotlin
-/// `fun interface`s — so the call is still an argument type mismatch here.
+/// A function VALUE (not only a lambda literal) converts to a Java SAM parameter. The checker records
+/// the exact selected SAM and lowering builds the forwarding wrapper from that handoff.
 #[test]
-fn function_value_into_java_sam_param_still_fails() {
-    let diags = diagnostics(
+fn function_value_into_java_sam_param_converts() {
+    common::expect_box_ok_with_stdlib(
         "fun runIt(r: Runnable) { r.run() }\n\
          fun box(): String {\n\
-         \x20 val f: () -> Unit = { }\n\
+         \x20 var result = \"fail\"\n\
+         \x20 val f: () -> Unit = { result = \"OK\" }\n\
          \x20 runIt(f)\n\
-         \x20 return \"OK\"\n\
+         \x20 return result\n\
          }\n",
-    );
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.contains("argument type mismatch") && d.contains("Runnable")),
-        "expected argument type mismatch mentioning Runnable, got {diags:?}"
+        "function_value_java_sam",
     );
 }
 

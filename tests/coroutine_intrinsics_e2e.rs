@@ -103,45 +103,47 @@ fun box(): String {{ var r = 0; builder {{ val b = Box(1); r = b[1] }}; return i
     assert_eq!(run(&src).expect("suspend operator get runs"), "OK");
 }
 
-/// The convention scan also feeds the stricter `suspend inline` safety gate. A generated suspend
-/// lambda state machine cannot splice an inline callee, so it must decline before emitting a direct
-/// call to a method whose physical ABI is not the source signature. This is the convention-spelling
-/// counterpart of the plain-call regression in `suspend_receiver_lambda_e2e`; value-returning `plus`
-/// deliberately selects its target through `resolved_operator_calls`, not `resolved_calls`.
+/// A public `suspend inline` member still has a callable CPS entry. Convention calls inside a generated
+/// suspend-lambda state machine use that entry just like ordinary suspend members; only a selected
+/// `MustInline` target, which has no callable entry, belongs at the splice-safety gate.
 #[test]
-fn suspend_inline_operator_plus_in_suspend_lambda_reaches_the_inline_gate() {
+fn suspend_inline_operator_plus_in_suspend_lambda_calls_cps_entry() {
     let src = format!(
         "{BUILDER}\
 class Box(val v: Int) {{ suspend inline operator fun plus(i: Int): Box = Box(v + i) }}\n\
-fun box(): String {{ var r = 0; builder {{ var b = Box(1); b += 2; r = b.v }}; return \"unreachable: $r\" }}\n"
+fun box(): String {{ var r = 0; builder {{ var b = Box(1); b += 2; r = b.v }}; return if (r == 3) \"OK\" else \"fail: $r\" }}\n"
     );
-    common::assert_inline_source_lower_bail(&src, "gate:suspend-inline-call-in-suspend-lambda");
+    assert_eq!(run(&src).expect("suspend-inline operator plus runs"), "OK");
 }
 
-/// The statement-keyed half of the same safety rule. `plusAssign` is retained as a specialized
-/// `CompoundAssignmentTarget`, so that target must carry the exact selected suspend/inline
-/// capabilities instead of reducing them to the suspension bit used by state-machine discovery.
+/// The statement-keyed half of the same rule. `plusAssign` is retained as a specialized
+/// `CompoundAssignmentTarget`, and its exact selected suspend target must reach the state machine.
 #[test]
-fn suspend_inline_operator_plus_assign_in_suspend_lambda_reaches_the_inline_gate() {
+fn suspend_inline_operator_plus_assign_in_suspend_lambda_calls_cps_entry() {
     let src = format!(
         "{BUILDER}\
 class Box(var v: Int) {{ suspend inline operator fun plusAssign(i: Int) {{ v += i }} }}\n\
-fun box(): String {{ var r = 0; builder {{ val b = Box(1); b += 2; r = b.v }}; return \"unreachable: $r\" }}\n"
+fun box(): String {{ var r = 0; builder {{ val b = Box(1); b += 2; r = b.v }}; return if (r == 3) \"OK\" else \"fail: $r\" }}\n"
     );
-    common::assert_inline_source_lower_bail(&src, "gate:suspend-inline-call-in-suspend-lambda");
+    assert_eq!(
+        run(&src).expect("suspend-inline operator plusAssign runs"),
+        "OK"
+    );
 }
 
-/// Relational syntax must record the same exact selected target as every other operator. A former
-/// source-only hierarchy fallback could answer only “suspends”, losing the inline capability and
-/// bypassing the state-machine safety gate.
+/// Relational syntax records the same exact selected target as every other operator and calls its
+/// public CPS entry from the generated state machine.
 #[test]
-fn suspend_inline_operator_compare_to_in_suspend_lambda_reaches_the_inline_gate() {
+fn suspend_inline_operator_compare_to_in_suspend_lambda_calls_cps_entry() {
     let src = format!(
         "{BUILDER}\
 class Box(val v: Int) {{ suspend inline operator fun compareTo(other: Box): Int = v - other.v }}\n\
-fun box(): String {{ var r = false; builder {{ r = Box(1) < Box(2) }}; return \"unreachable: $r\" }}\n"
+fun box(): String {{ var r = false; builder {{ r = Box(1) < Box(2) }}; return if (r) \"OK\" else \"fail\" }}\n"
     );
-    common::assert_inline_source_lower_bail(&src, "gate:suspend-inline-call-in-suspend-lambda");
+    assert_eq!(
+        run(&src).expect("suspend-inline operator compareTo runs"),
+        "OK"
+    );
 }
 
 #[test]

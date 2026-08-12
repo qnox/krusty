@@ -60,3 +60,30 @@ fn classpath_annotation_retention_splits_visible_invisible_drops_source() {
         "SOURCE annotation must be dropped"
     );
 }
+
+#[test]
+fn classpath_low_priority_annotation_reaches_overload_selection() {
+    let library = common::compile_lib(
+        "low_priority_metadata",
+        r#"package lib
+@Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
+@kotlin.internal.LowPriorityInOverloadResolution
+fun choose(value: Int) = "low"
+fun choose(value: Any) = "normal"
+"#,
+    )
+    .expect("compile low-priority library");
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let classes = common::compile_in_process(
+        "import lib.choose\nfun box(): String = choose(1)\n",
+        "LowPriorityConsumer",
+        &[library.clone(), stdlib.clone(), jdk.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("compile consumer");
+    match common::run_box(&classes, "LowPriorityConsumerKt", &[library, stdlib]) {
+        Some(output) => assert_eq!(output.trim(), "normal"),
+        None => eprintln!("skipping: box runner unavailable"),
+    }
+}

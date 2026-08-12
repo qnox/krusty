@@ -56,10 +56,14 @@ const DECLARES_DEFAULT_VALUE_BIT: u64 = 1 << 1;
 fn builtin_index(t: Ty) -> Option<u64> {
     Some(match t {
         Ty::Unit => 2,
+        Ty::Byte => 5,
         Ty::Double => 6,
+        Ty::Float => 7,
         Ty::Int => 8,
         Ty::Long => 9,
+        Ty::Short => 10,
         Ty::Boolean => 11,
+        Ty::Char => 12,
         Ty::String => 14,
         _ => return None,
     })
@@ -143,12 +147,25 @@ fn type_pb_generic(st: &mut StringTable, t: Ty, tps: &HashMap<&str, u64>) -> Pb 
             p.field_varint(9, st.local(name) as u64);
         }
         _ => {
-            let class_name = match base {
-                Ty::Obj(internal, _) => st.class_id_from_desc(&format!("L{internal};")),
-                _ => st.builtin(builtin_index(base).unwrap_or(0)), // 0 = kotlin/Any on erroring code
+            let class_name = match builtin_index(base) {
+                Some(predefined) => st.builtin(predefined),
+                None => match base {
+                    Ty::Obj(internal, _) => st.class_id_from_desc(&format!("L{internal};")),
+                    _ => st.builtin(0), // kotlin/Any on erroring code
+                },
             };
             p.field_varint(6, class_name as u64); // Type.class_name = 6
         }
+    }
+    p
+}
+
+fn type_parameter_pb(st: &mut StringTable, id: usize, name: &str, reified: bool) -> Pb {
+    let mut p = Pb::new();
+    p.field_varint(1, id as u64); // TypeParameter.id = 1
+    p.field_varint(2, st.local(name) as u64); // TypeParameter.name = 2
+    if reified {
+        p.field_varint(3, 1); // TypeParameter.reified = 3
     }
     p
 }
@@ -337,12 +354,7 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     let ret = type_pb_generic(st, f.ret, &tps);
     p.field_message(3, &ret); // Function.return_type = 3
     for (id, (tp_name, reified)) in f.type_params.iter().enumerate() {
-        let mut tp = Pb::new();
-        tp.field_varint(1, id as u64); // TypeParameter.id = 1
-        tp.field_varint(2, st.local(tp_name) as u64); // TypeParameter.name = 2
-        if *reified {
-            tp.field_varint(3, 1); // TypeParameter.reified = 3
-        }
+        let tp = type_parameter_pb(st, id, tp_name, *reified);
         p.repeated_message(4, &tp); // Function.type_parameter = 4
     }
     // Function.receiver_type = 5 (extension functions only) — between return_type and value_parameter,
@@ -393,11 +405,29 @@ pub struct PropMeta {
     pub name: String,
     pub ty: Ty,
     pub is_var: bool,
+    /// The property's declared type parameters (`val <T> C<T>.value: T`). Their indices are the
+    /// `Type.type_parameter` ids used by the receiver and return type.
+    pub type_params: Vec<String>,
     /// Extension-receiver type (`Property.receiver_type` = 10), `Some` for an extension property —
     /// the same separation from the accessor's JVM parameters as [`FnMeta::receiver`].
     pub receiver: Option<Ty>,
     pub getter: (String, String),
     pub setter: Option<(String, String)>,
+}
+
+/// A public top-level typealias declaration in package metadata.
+pub struct TypeAliasMeta {
+    pub name: String,
+    pub target: Ty,
+}
+
+fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
+    let mut p = Pb::new();
+    p.field_varint(2, st.local(&alias.name) as u64); // TypeAlias.name = 2
+    let target = type_pb(st, alias.target);
+    p.field_message(4, &target); // TypeAlias.underlying_type = 4
+    p.field_message(6, &target); // TypeAlias.expanded_type = 6
+    p
 }
 
 /// Package properties use the same schema word as class properties. A top-level `val` has a backing
@@ -417,10 +447,20 @@ fn jvm_method_sig(st: &mut StringTable, name: &str, desc: &str) -> Pb {
 fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     let mut p = Pb::new();
     p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
-    let ret = type_pb(st, m.ty);
+    let tps: HashMap<&str, u64> = m
+        .type_params
+        .iter()
+        .enumerate()
+        .map(|(id, name)| (name.as_str(), id as u64))
+        .collect();
+    let ret = type_pb_generic(st, m.ty, &tps);
     p.field_message(3, &ret); // Property.return_type = 3
+    for (id, name) in m.type_params.iter().enumerate() {
+        let tp = type_parameter_pb(st, id, name, false);
+        p.repeated_message(4, &tp); // Property.type_parameter = 4
+    }
     if let Some(recv) = m.receiver {
-        let rt = type_pb(st, recv);
+        let rt = type_pb_generic(st, recv, &tps);
         p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
     }
     p.field_varint(
@@ -444,7 +484,11 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
 }
 
 /// Build `(d1 bytes, d2 strings)` for a file facade. `d1 = delimited(StringTableTypes) + Package`.
-pub fn build_package(funcs: &[FnMeta], props: &[PropMeta]) -> (Vec<u8>, Vec<String>) {
+pub fn build_package(
+    funcs: &[FnMeta],
+    props: &[PropMeta],
+    aliases: &[TypeAliasMeta],
+) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
     let mut package = Pb::new();
     for f in funcs {
@@ -454,6 +498,10 @@ pub fn build_package(funcs: &[FnMeta], props: &[PropMeta]) -> (Vec<u8>, Vec<Stri
     for m in props {
         let pp = property_pb(&mut st, m);
         package.repeated_message(4, &pp); // Package.property = 4
+    }
+    for alias in aliases {
+        let alias = type_alias_pb(&mut st, alias);
+        package.repeated_message(5, &alias); // Package.type_alias = 5
     }
     let stt = st.serialize_types();
 
@@ -500,6 +548,7 @@ mod tests {
                 context_count: 0,
             }],
             &[],
+            &[],
         );
         assert_eq!(d2, vec!["f".to_string(), "".to_string(), "a".to_string()]);
         assert_eq!(d1, REF, "\n got: {:02x?}\n ref: {:02x?}", d1, REF);
@@ -516,6 +565,7 @@ mod tests {
                 name: "doubled".into(),
                 ty: Ty::String,
                 is_var: false,
+                type_params: Vec::new(),
                 receiver: Some(Ty::String),
                 getter: (
                     "getDoubled".into(),
@@ -523,6 +573,7 @@ mod tests {
                 ),
                 setter: None,
             }],
+            &[],
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
         let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/Lib1Kt", &[]);
@@ -539,6 +590,43 @@ mod tests {
         assert_eq!(
             props[0].getter.as_ref().map(|g| g.name.as_str()),
             Some("getDoubled")
+        );
+    }
+
+    #[test]
+    fn generic_mutable_extension_property_round_trips() {
+        let t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let receiver = Ty::obj_args("sample/C", &[t]);
+        let (d1, d2) = build_package(
+            &[],
+            &[PropMeta {
+                name: "live".into(),
+                ty: t,
+                is_var: true,
+                type_params: vec!["T".into()],
+                receiver: Some(receiver),
+                getter: ("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into()),
+                setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
+            }],
+            &[],
+        );
+        let d1s: String = d1.iter().map(|&b| b as char).collect();
+        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", &[]);
+        let property = &meta.package_properties[0];
+        let signature = property
+            .generic_sig
+            .as_ref()
+            .expect("generic property signature");
+        assert_eq!(signature.formals, ["T"]);
+        assert_eq!(signature.receiver, Some(receiver));
+        assert_eq!(signature.ret, t);
+        assert_eq!(
+            property.getter.as_ref().map(|it| it.name.as_str()),
+            Some("getLive")
+        );
+        assert_eq!(
+            property.setter.as_ref().map(|it| it.name.as_str()),
+            Some("setLive")
         );
     }
 
@@ -580,6 +668,7 @@ mod tests {
                 context_count: 0,
             }],
             &[],
+            &[],
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
         let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", &[]);
@@ -610,6 +699,7 @@ mod tests {
                 type_params: Vec::new(),
                 context_count: 0,
             }],
+            &[],
             &[],
         );
         assert_eq!(d2.iter().filter(|s| s.is_empty()).count(), 1);

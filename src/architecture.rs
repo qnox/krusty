@@ -88,6 +88,7 @@ mod tests {
                 "java_source",
                 "libraries",
                 "source",
+                "symbol_source",
                 "types",
             ],
         );
@@ -100,6 +101,7 @@ mod tests {
                 "frontend",
                 "libraries",
                 "source",
+                "symbol_source",
                 "types",
             ],
         );
@@ -271,7 +273,6 @@ mod tests {
                 "ir",
                 "kt_string",
                 "libraries",
-                "module_symbols",
                 "names",
                 "runtime",
                 "symbol_resolver",
@@ -284,13 +285,39 @@ mod tests {
     }
 
     #[test]
+    fn ir_lower_has_no_symbol_selection_entry_points() {
+        let lowerer = fs::read_to_string("src/ir_lower.rs").expect("read IR lowerer");
+        for forbidden in [
+            "ModuleSymbols",
+            "SymbolResolver",
+            "fn resolve_",
+            ".resolve_",
+            ".prop_of(",
+            ".method_of_name(",
+            ".fun_by_params(",
+        ] {
+            assert!(
+                !lowerer.contains(forbidden),
+                "IR lowering must consume checker selections, not use '{forbidden}'"
+            );
+        }
+    }
+
+    #[test]
     fn module_symbols_uses_only_frontend_symbol_handoff_dependencies() {
         // `names` is a dependency-free leaf of Kotlin naming conventions (accessor spellings, the
         // package-vs-nesting internal-name split). Surfacing a top-level property needs its accessor
         // names, and re-deriving them here would fork the convention rather than share it.
         assert_allowed_crate_modules(
             "src/module_symbols.rs",
-            &["frontend", "libraries", "names", "symbol_source", "types"],
+            &[
+                "frontend",
+                "libraries",
+                "names",
+                "symbol_source",
+                "trace_compiler",
+                "types",
+            ],
         );
     }
 
@@ -349,7 +376,7 @@ mod tests {
         assert_allowed_crate_modules("src/bin/check.rs", &["diag", "frontend"]);
         assert_allowed_crate_modules(
             "src/bin/blockers.rs",
-            &["diag", "frontend", "lexer", "parser"],
+            &["conformance", "diag", "frontend", "lexer", "parser"],
         );
         assert_allowed_crate_modules(
             "src/bin/irbail.rs",
@@ -364,7 +391,15 @@ mod tests {
         );
         assert_allowed_crate_modules(
             "src/bin/bytediff.rs",
-            &["diag", "frontend", "ir_lower", "jvm", "lexer", "parser"],
+            &[
+                "conformance",
+                "diag",
+                "frontend",
+                "ir_lower",
+                "jvm",
+                "lexer",
+                "parser",
+            ],
         );
         assert_allowed_crate_modules(
             "src/bin/survey.rs",
@@ -380,6 +415,7 @@ mod tests {
                 "lexer",
                 "parser",
                 "toolchain",
+                "trace_compiler",
                 "types",
             ],
         );
@@ -409,6 +445,7 @@ mod tests {
                 "symbol_resolver",
                 "symbol_source",
                 "toolchain",
+                "trace_compiler",
                 "types",
             ],
         );

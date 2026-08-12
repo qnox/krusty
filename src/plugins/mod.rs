@@ -23,8 +23,77 @@ pub mod registry;
 pub mod serialization;
 
 use crate::ir::{ClassId, IrFile};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 use std::collections::HashMap;
+
+/// A closed expression operation selected by a frontend plugin after ordinary name and overload
+/// resolution. Core lowering copies this payload into an [`crate::ir::IrExpr::PluginPlaceholder`];
+/// only the named plugin interprets the operation and data. This keeps plugin API recognition and
+/// target realization out of the lowerer.
+#[derive(Clone, Debug)]
+pub struct PluginExpressionPlan {
+    pub plugin: &'static str,
+    pub operation: &'static str,
+    pub data: Vec<TypeName>,
+    /// Checker-selected source operands in target-parameter order with their selected parameter
+    /// types. Lowering evaluates/coerces exactly this list and performs no argument remapping.
+    pub operands: Vec<(crate::ast::ExprId, Ty)>,
+}
+
+/// One already-selected call projected into the plugin contract. Declaration identity, overload,
+/// type arguments, and argument mapping are final; plugins may only attach an implementation plan.
+#[derive(Clone, Debug)]
+pub struct FrontendSelectedCall {
+    pub expression: crate::ast::ExprId,
+    pub owner: TypeName,
+    pub name: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    pub generic_sig: Option<crate::libraries::GenericSig>,
+    pub inline: crate::libraries::InlineKind,
+    pub implementation: Option<crate::libraries::PluginExpressionDeclaration>,
+    pub type_arguments: Vec<Option<Ty>>,
+    pub argument_slots: Vec<Option<crate::ast::ExprId>>,
+}
+
+/// Read-only, resolver-independent inputs for post-resolution plugin planning.
+pub struct FrontendExpressionContext {
+    pub calls: Vec<FrontendSelectedCall>,
+    pub source_annotations: HashMap<TypeName, Vec<TypeName>>,
+}
+
+impl FrontendExpressionContext {
+    pub fn has_source_annotation(&self, classifier: TypeName, annotation: TypeName) -> bool {
+        self.source_annotations
+            .get(&classifier)
+            .is_some_and(|annotations| annotations.contains(&annotation))
+    }
+}
+
+/// A callable declaration contributed by a compiler plugin before type checking. The frontend
+/// publishes these through the same classifier member table as source declarations; resolution does
+/// not know which plugin produced them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontendCallable {
+    pub owner: FrontendCallableOwner,
+    pub name: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    pub plugin_expression: Option<crate::libraries::PluginExpressionDeclaration>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrontendCallableOwner {
+    Classifier,
+    Companion,
+}
+
+/// The resolved source-class information available to frontend declaration generation.
+pub struct FrontendClassContext<'a> {
+    pub classifier: TypeName,
+    pub type_parameter_count: usize,
+    pub annotations: &'a [TypeName],
+}
 
 /// The unqualified tail of an annotation name (`kotlinx/serialization/Serializable` or
 /// `kotlinx.serialization.Serializable` → `Serializable`).
@@ -32,10 +101,22 @@ pub(crate) fn annotation_simple_name(a: &str) -> &str {
     a.rsplit(['/', '.']).next().unwrap_or(a)
 }
 
+fn annotation_type_simple_name(annotation: TypeName) -> String {
+    annotation.segment()
+}
+
+fn source_annotation_simple_name(annotation: &crate::ast::AnnotationRef) -> &str {
+    annotation
+        .name
+        .rsplit('.')
+        .next()
+        .unwrap_or(&annotation.name)
+}
+
 /// Applied annotations keyed by `ClassId`, plus source and target services required by native
 /// plugins. Production contexts borrow annotation slices from the parsed source; owned annotations
 /// are only for synthetic tests/manual plugin harnesses.
-type ClassNameResolver<'a> = dyn Fn(&str) -> Option<String> + 'a;
+type ClassNameResolver<'a> = dyn Fn(&str) -> Option<TypeName> + 'a;
 
 pub struct PluginContext<'a> {
     pub class_annotations: HashMap<ClassId, AnnotationList<'a>>,
@@ -46,12 +127,12 @@ pub struct PluginContext<'a> {
 
 #[derive(Clone, Debug)]
 pub enum AnnotationList<'a> {
-    Borrowed(&'a [String]),
-    Owned(Vec<String>),
+    Borrowed(&'a [TypeName]),
+    Owned(Vec<TypeName>),
 }
 
 impl<'a> AnnotationList<'a> {
-    pub fn as_slice(&self) -> &[String] {
+    pub fn as_slice(&self) -> &[TypeName] {
         match self {
             AnnotationList::Borrowed(annotations) => annotations,
             AnnotationList::Owned(annotations) => annotations,
@@ -59,15 +140,20 @@ impl<'a> AnnotationList<'a> {
     }
 }
 
-impl<'a> From<&'a [String]> for AnnotationList<'a> {
-    fn from(value: &'a [String]) -> Self {
+impl<'a> From<&'a [TypeName]> for AnnotationList<'a> {
+    fn from(value: &'a [TypeName]) -> Self {
         AnnotationList::Borrowed(value)
     }
 }
 
 impl From<Vec<String>> for AnnotationList<'_> {
     fn from(value: Vec<String>) -> Self {
-        AnnotationList::Owned(value)
+        AnnotationList::Owned(
+            value
+                .into_iter()
+                .map(|annotation| crate::types::type_name(&annotation.replace('.', "/")))
+                .collect(),
+        )
     }
 }
 
@@ -131,7 +217,7 @@ impl<'a> PluginContext<'a> {
             .filter(|(_, anns)| {
                 anns.as_slice()
                     .iter()
-                    .any(|a| annotation_simple_name(a) == simple)
+                    .any(|annotation| annotation_type_simple_name(*annotation) == simple)
             })
             .map(|(&id, _)| id)
             .collect();
@@ -171,6 +257,7 @@ impl<'a> PluginContext<'a> {
         };
         self.class_name_resolver
             .and_then(|resolve| resolve(x))
+            .map(TypeName::render)
             .or_else(|| Some(source_internal(file, x)))
     }
 
@@ -185,7 +272,7 @@ impl<'a> PluginContext<'a> {
         let i = c
             .annotations
             .iter()
-            .position(|a| annotation_simple_name(a) == annotation)?;
+            .position(|a| source_annotation_simple_name(a) == annotation)?;
         let arg = c.annotation_args.get(i).and_then(|args| args.first())?;
         self.class_literal_internal(file, *arg)
     }
@@ -206,7 +293,7 @@ impl<'a> PluginContext<'a> {
         let i = p
             .annotations
             .iter()
-            .position(|a| annotation_simple_name(a) == annotation)?;
+            .position(|a| source_annotation_simple_name(a) == annotation)?;
         let arg = p.annotation_args.get(i).and_then(|args| args.first())?;
         self.class_literal_internal(file, *arg)
     }
@@ -227,7 +314,7 @@ impl<'a> PluginContext<'a> {
         let i = p
             .annotations
             .iter()
-            .position(|a| annotation_simple_name(a) == annotation)?;
+            .position(|a| source_annotation_simple_name(a) == annotation)?;
         let arg = p.annotation_args.get(i).and_then(|args| args.first())?;
         file.const_string_value(*arg)
     }
@@ -244,7 +331,7 @@ impl<'a> PluginContext<'a> {
             .is_some_and(|p| {
                 p.annotations
                     .iter()
-                    .any(|a| annotation_simple_name(a) == annotation)
+                    .any(|a| source_annotation_simple_name(a) == annotation)
             })
     }
 
@@ -301,8 +388,21 @@ impl<'a> PluginContext<'a> {
             let internal = c.fq_name();
             if let Some(cd) = source_class_by_internal(file, &internal) {
                 if !cd.annotations.is_empty() {
+                    let annotations = cd
+                        .annotations
+                        .iter()
+                        .filter_map(|annotation| {
+                            class_name_resolver
+                                .and_then(|resolve| resolve(&annotation.name))
+                                .or_else(|| {
+                                    class_name_resolver.is_none().then(|| {
+                                        crate::types::type_name(&annotation.name.replace('.', "/"))
+                                    })
+                                })
+                        })
+                        .collect();
                     ctx.class_annotations
-                        .insert(i as u32, AnnotationList::Borrowed(&cd.annotations));
+                        .insert(i as u32, AnnotationList::Owned(annotations));
                 }
             }
         }
@@ -363,6 +463,25 @@ fn no_target_type_descriptor(_ty: Ty) -> Option<String> {
 pub trait IrPlugin {
     fn name(&self) -> &str;
 
+    /// Contribute declarations that source code may reference. These declarations are published
+    /// before checking; their bodies and target-specific realization remain later plugin phases.
+    fn generate_frontend_declarations(
+        &self,
+        _ctx: &FrontendClassContext<'_>,
+        _members: &mut Vec<FrontendCallable>,
+    ) {
+    }
+
+    /// Attach plugin-owned expression plans after core has selected declarations and overloads.
+    /// Implementations must identify an exact selected declaration; this hook is not a fallback name
+    /// resolver and must never change the type checker's result.
+    fn plan_frontend_expressions(
+        &self,
+        _ctx: &FrontendExpressionContext,
+        _plans: &mut Vec<(crate::ast::ExprId, PluginExpressionPlan)>,
+    ) {
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext<'_>) {}
 
@@ -389,12 +508,17 @@ pub fn run_enabled(
     }
     // The `write$Self$<module>` helper is mangled with the compilation's module name (kotlinc's >=1.6
     // ABI); thread it so it matches the real Gradle module, not the "main" default.
+    let host = enabled_plugins(module_name);
+    host.run(ir, &ctx);
+}
+
+pub(crate) fn enabled_plugins(module_name: &str) -> PluginHost {
     let mut host = PluginHost::new();
     host.register(Box::new(serialization::SerializationPlugin::new(
         serialization::SerializationAbi::default(),
         module_name,
     )));
-    host.run(ir, &ctx);
+    host
 }
 
 /// Runs registered plugins over an `IrFile` phase by phase: all supertypes, then all declarations,
@@ -424,6 +548,27 @@ impl PluginHost {
     /// Names of the registered plugins, in run order (introspection / tests).
     pub fn plugin_names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name()).collect()
+    }
+
+    pub fn generate_frontend_declarations(
+        &self,
+        ctx: &FrontendClassContext<'_>,
+        members: &mut Vec<FrontendCallable>,
+    ) {
+        for plugin in &self.plugins {
+            plugin.generate_frontend_declarations(ctx, members);
+        }
+    }
+
+    pub fn plan_frontend_expressions(
+        &self,
+        ctx: &FrontendExpressionContext,
+    ) -> Vec<(crate::ast::ExprId, PluginExpressionPlan)> {
+        let mut plans = Vec::new();
+        for plugin in &self.plugins {
+            plugin.plan_frontend_expressions(ctx, &mut plans);
+        }
+        plans
     }
 
     pub fn run(&self, ir: &mut IrFile, ctx: &PluginContext<'_>) {
@@ -461,6 +606,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         explicit_param_stores: false,
         methods: Vec::new(),
         is_interface: false,
+        is_fun_interface: false,
         is_annotation: false,
         annotation_impl_of: None,
         is_sealed: false,
@@ -469,6 +615,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         is_open: false,
         superclass: "java/lang/Object".into(),
         super_args: Vec::new(),
+        super_ctor_params: Vec::new(),
         enum_entries: Vec::new(),
         enum_entry_of: None,
         prop_ref: None,
@@ -545,7 +692,7 @@ mod tests {
 
     #[test]
     fn from_source_matches_by_fqname_not_simple_name() {
-        use crate::ast::{ClassDecl, Decl, File};
+        use crate::ast::{AnnotationRef, ClassDecl, Decl, File};
         // Two classes, same simple name `Foo`, different packages — only the annotated one's IrClass
         // must receive the annotation (no simple-name cross-contamination).
         let mut file = File {
@@ -554,7 +701,10 @@ mod tests {
         };
         let annotated = ClassDecl {
             name: "Foo".to_string(),
-            annotations: vec!["Serializable".to_string()],
+            annotations: vec![AnnotationRef {
+                name: "Serializable".to_string(),
+                span: crate::diag::Span::new(0, 0),
+            }],
             ..blank_class("Foo")
         };
         file.decl_arena.push(Decl::Class(annotated));

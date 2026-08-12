@@ -79,12 +79,11 @@ fn mismatched_java_getter_and_setter_do_not_form_a_mutable_property() {
     );
 }
 
-/// Setter discovery must obey the same access context as an ordinary member call. A public getter
-/// with a protected setter is a readable synthetic property, but not a writable one outside the Java
-/// declaration. Keeping the inaccessible setter in the candidate set would make checking succeed
-/// and leave the JVM to reject the emitted call with `IllegalAccessError`.
+/// Setter discovery and access checking are separate. The protected setter remains in the candidate
+/// family, wins ordinary property-write selection, and is then rejected from its selected declaration
+/// metadata. It must not disappear and degrade into the unrelated "val cannot be reassigned" error.
 #[test]
-fn inaccessible_java_setter_does_not_form_a_mutable_property() {
+fn inaccessible_java_setter_reports_selected_member_access() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
     let source = "package fixtures;\n\
@@ -104,10 +103,8 @@ fn inaccessible_java_setter_does_not_form_a_mutable_property() {
         }\n";
     let diagnostics =
         common::front_end_diagnostics(consumer, &[classes, stdlib], Some(jdk.as_path()));
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("cannot be reassigned")),
-        "an inaccessible Java setter must leave the synthetic property read-only: {diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        ["cannot access 'value': it is protected in 'fixtures/ReadOnly'"]
     );
 }

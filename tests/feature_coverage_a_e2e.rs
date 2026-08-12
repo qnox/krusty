@@ -130,6 +130,195 @@ return \"OK\"\n\
 }
 
 #[test]
+fn enum_classifier_callable_references() {
+    let src = "enum class Color { RED, GREEN, BLUE }\n\
+fun box(): String {\n\
+val parse: (String) -> Color = Color::valueOf\n\
+val all: () -> Array<Color> = Color::values\n\
+return if (parse(\"GREEN\") == Color.GREEN && all()[2] == Color.BLUE) \"OK\" else \"fail\"\n\
+}\n";
+    run_ok(src, "EnumClassifierCallableReferences");
+}
+
+#[test]
+fn enum_classifier_callables_are_visible_inside_its_companion() {
+    let src = r#"
+enum class Color { RED, GREEN;
+    companion object {
+        val first = values()[0]
+        val green = valueOf("GREEN")
+    }
+}
+fun box(): String =
+    if (Color.first == Color.RED && Color.green == Color.GREEN) "OK" else "FAIL"
+"#;
+    let Some((errors, selected)) = common::inspect_checker_with_stdlib(src, |file, info, _| {
+        file.expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| {
+                let krusty::ast::Expr::Call { callee, .. } = expression else {
+                    return None;
+                };
+                matches!(file.expr(*callee), krusty::ast::Expr::Name(name) if matches!(name.as_str(), "values" | "valueOf"))
+                    .then_some(krusty::ast::ExprId(index as u32))
+            })
+            .filter(|&call| {
+                info.resolved_companion(call)
+                    .is_some_and(|member| member.implicit_classifier_callable.is_some())
+            })
+            .count()
+    }) else {
+        return;
+    };
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(selected, 2);
+}
+
+#[test]
+fn enum_classifier_callables_remain_visible_when_it_has_a_companion() {
+    let src = r#"
+enum class Color { RED, GREEN;
+    companion object {
+        val first = Color.values()[0]
+    }
+}
+fun box(): String =
+    if (Color.first == Color.RED && Color.valueOf("GREEN") == Color.GREEN) "OK" else "FAIL"
+"#;
+
+    let Some((errors, selected)) = common::inspect_checker_with_stdlib(src, |file, info, _| {
+        file.expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| {
+                matches!(expression, krusty::ast::Expr::Call { .. })
+                    .then_some(krusty::ast::ExprId(index as u32))
+            })
+            .filter(|&call| {
+                info.resolved_companion(call)
+                    .is_some_and(|member| member.implicit_classifier_callable.is_some())
+            })
+            .count()
+    }) else {
+        return;
+    };
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(selected, 2);
+}
+
+#[test]
+fn enum_entries_is_visible_inside_its_companion() {
+    let src = r#"
+enum class Color { RED, GREEN;
+    companion object {
+        val first = entries[0]
+    }
+}
+fun box(): String = Color.first.name
+"#;
+
+    let Some((errors, selected)) = common::inspect_checker_with_stdlib(src, |file, info, _| {
+        file.expr_arena
+            .iter()
+            .enumerate()
+            .filter(|(_, expression)| {
+                matches!(expression, krusty::ast::Expr::Name(name) if name == "entries")
+            })
+            .filter(|(index, _)| {
+                info.ty(krusty::ast::ExprId(*index as u32)) != krusty::types::Ty::Error
+            })
+            .count()
+    }) else {
+        return;
+    };
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(selected, 1);
+}
+
+#[test]
+fn enum_entries_callable_reference_is_distinct_from_same_named_enum_entry() {
+    let src = r#"
+enum class EnumWithClash { values, entries, valueOf }
+fun use(): String {
+    val all = EnumWithClash::entries
+    return all().toString() + EnumWithClash.entries.toString()
+}
+"#;
+
+    let Some((errors, (references, value_reads))) = common::inspect_checker_with_stdlib(
+        src,
+        |file, info, _| {
+            let references = file
+                .expr_arena
+                .iter()
+                .enumerate()
+                .filter_map(|(index, expression)| {
+                    matches!(expression, krusty::ast::Expr::CallableRef { name, .. } if name == "entries")
+                        .then_some(krusty::ast::ExprId(index as u32))
+                })
+                .filter(|&reference| info.callable_reference_is_property(reference))
+                .count();
+            let value_reads = file
+                .expr_arena
+                .iter()
+                .enumerate()
+                .filter_map(|(index, expression)| {
+                    matches!(expression, krusty::ast::Expr::Member { name, .. } if name == "entries")
+                        .then_some(krusty::ast::ExprId(index as u32))
+                })
+                .filter(|&read| info.ty(read) != krusty::types::Ty::Error)
+                .count();
+            (references, value_reads)
+        },
+    ) else {
+        return;
+    };
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!((references, value_reads), (1, 1));
+}
+
+#[test]
+fn accessor_backing_field_remains_resolved_across_nested_declarations() {
+    let src = r#"
+fun <T> eval(block: () -> T): T = block()
+val top: String = "O"
+    get() = eval { field } + "K"
+class Holder {
+    var value: String = "U"
+        get() = eval { field }
+        set(input) {
+            class Local {
+                fun write() { field = input + "K" }
+            }
+            Local().write()
+        }
+}
+fun use(): String {
+    val holder = Holder()
+    holder.value = "O"
+    return top + holder.value
+}
+"#;
+
+    let Some((errors, field_reads)) = common::inspect_checker_with_stdlib(src, |file, info, _| {
+        file.expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| {
+                matches!(expression, krusty::ast::Expr::Name(name) if name == "field")
+                    .then_some(krusty::ast::ExprId(index as u32))
+            })
+            .filter(|&read| info.ty(read) != krusty::types::Ty::Error)
+            .count()
+    }) else {
+        return;
+    };
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(field_reads, 2);
+}
+
+#[test]
 fn enum_entries() {
     let src = "enum class Dir { N, E, S, W }\n\
 class Compass { enum class Point { N, S } }\n\

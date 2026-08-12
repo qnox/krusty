@@ -24,13 +24,6 @@ pub trait TypeOracle {
     /// Empty when the class is unknown or has none (`kotlin/Any`).
     fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName>;
 
-    /// The underlying representation type of a value/inline class (`Aid(val v: String)` → `kotlin/String`),
-    /// or `None` for a non-value class. Lets the relation accept a value-class argument where its erased
-    /// underlying is expected — the JVM ABI a `@JvmInline` boundary presents. Default: no value classes.
-    fn value_underlying(&self, _ty: Ty) -> Option<Ty> {
-        None
-    }
-
     /// Id-backed class identity comparison used by assignability/coercion walks. Platforms that unify
     /// multiple source names onto one runtime class override this without rendering full internal names.
     fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
@@ -108,23 +101,17 @@ fn is_scalar(t: Ty) -> bool {
 /// - A value/inline-class value is assignable where its underlying representation is expected.
 /// - A `TyParam` is checked through `cx` against its bound.
 pub fn is_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool {
-    assignable_inner(cx, oracle, sub, sup, true)
+    assignable_inner(cx, oracle, sub, sup)
 }
 
 /// Pure Kotlin SUBTYPING — like [`is_assignable`] but WITHOUT the value/inline-class erasure step (an
 /// `Aid` is NOT a subtype of its underlying `String`). Use where a genuine type-hierarchy relation is
 /// meant (a classpath supertype walk, a `when`-branch reachability), not a JVM-ABI boundary.
 pub fn is_subtype(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool {
-    assignable_inner(cx, oracle, sub, sup, false)
+    assignable_inner(cx, oracle, sub, sup)
 }
 
-fn assignable_inner(
-    cx: &TyCtx,
-    oracle: &dyn TypeOracle,
-    sub: Ty,
-    sup: Ty,
-    value_class: bool,
-) -> bool {
+fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool {
     if sub == sup {
         return true;
     }
@@ -133,6 +120,29 @@ fn assignable_inner(
     }
     if sub == Ty::Nothing {
         return true;
+    }
+
+    // A Java platform type `T!` is the flexible interval `T..T?`: as a source it may be consumed at
+    // either bound, and as a target it accepts values admitted by the nullable upper bound.
+    if let Ty::PlatformNullable(inner) = sup {
+        return assignable_inner(cx, oracle, sub, Ty::nullable(*inner));
+    }
+    if let Ty::PlatformNullable(inner) = sub {
+        return assignable_inner(cx, oracle, *inner, sup)
+            || assignable_inner(cx, oracle, Ty::nullable(*inner), sup);
+    }
+
+    // Type variables — resolve through the context to the bound/binding, then compare.
+    // This must precede the nullability rejection: `T : Any?` is itself a nullable-capable target, so
+    // `String?` fits it, while `T : Any` still rejects `String?` after the bound is exposed.
+    if let Ty::TyParam(name, bound) = sup {
+        let target = cx.lookup(name, *bound);
+        // Avoid infinite regress when the context maps the variable to itself.
+        return target != sup && assignable_inner(cx, oracle, sub, target);
+    }
+    if let Ty::TyParam(name, bound) = sub {
+        let source = cx.lookup(name, *bound);
+        return source != sub && assignable_inner(cx, oracle, source, sup);
     }
 
     // Nullability. `null` fits any nullable target; `T` fits `T?`; `T?` does not fit non-null `T`.
@@ -147,17 +157,6 @@ fn assignable_inner(
         return false;
     }
 
-    // Type variables — resolve through the context to the bound/binding, then compare.
-    if let Ty::TyParam(name, bound) = sup {
-        let target = cx.lookup(name, *bound);
-        // Avoid infinite regress when the context maps the variable to itself.
-        return target != sup && assignable_inner(cx, oracle, sub, target, value_class);
-    }
-    if let Ty::TyParam(name, bound) = sub {
-        let source = cx.lookup(name, *bound);
-        return source != sub && assignable_inner(cx, oracle, source, sup, value_class);
-    }
-
     // Everything (a boxed primitive included) is assignable to `Any`/`Object`.
     if is_any(sup) {
         return true;
@@ -170,12 +169,6 @@ fn assignable_inner(
         return sub == sup;
     }
 
-    // A `KFunction{N}` IS a function type — it is what a callable reference's own binding is typed as
-    // (`val f = A::b`), and it must stay assignable wherever that function type is accepted. Compare
-    // through the function shape rather than through the synthesized classifier's hierarchy, so the
-    // parameter/return variance rules below apply to it exactly as to any other function value.
-    let sub = crate::types::callable_reference_function_type(sub);
-    let sup = crate::types::callable_reference_function_type(sup);
     match (sub, sup) {
         (Ty::Fun(a), Ty::Fun(b)) => {
             a.params.len() == b.params.len()
@@ -184,38 +177,30 @@ fn assignable_inner(
                 && a.params
                     .iter()
                     .zip(b.params.iter())
-                    .all(|(sp, pp)| assignable_inner(cx, oracle, *pp, *sp, value_class))
+                    .all(|(sp, pp)| assignable_inner(cx, oracle, *pp, *sp))
                 // Return is COVARIANT.
-                && assignable_inner(cx, oracle, a.ret, b.ret, value_class)
+                && assignable_inner(cx, oracle, a.ret, b.ret)
         }
-        (Ty::Obj(_, _), Ty::Obj(_, _)) => obj_assignable(cx, oracle, sub, sup, value_class),
+        (Ty::Obj(_, _), Ty::Obj(_, _)) => obj_assignable(cx, oracle, sub, sup),
         _ => {
             // Mixed reference shapes (`Ty::String` vs `Ty::Obj("kotlin/CharSequence")`, `Fun` vs `Obj`
             // FunctionN) compare through their Kotlin class identity.
-            class_assignable(oracle, sub, sup, value_class)
+            class_assignable(oracle, sub, sup)
         }
     }
 }
 
 /// Two `Obj` reference types: the sub-class reaches the super-class in the hierarchy AND every type
 /// argument matches covariantly.
-fn obj_assignable(
-    cx: &TyCtx,
-    oracle: &dyn TypeOracle,
-    sub: Ty,
-    sup: Ty,
-    value_class: bool,
-) -> bool {
-    if !class_assignable(oracle, sub, sup, value_class) {
+fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool {
+    if !class_assignable(oracle, sub, sup) {
         return false;
     }
     // Type arguments, covariantly. A wildcard (`Any`/`Object`/type variable) on either side matches.
     sup.type_args()
         .iter()
         .zip(sub.type_args().iter())
-        .all(|(&p, &a)| {
-            arg_wildcard(p) || arg_wildcard(a) || assignable_inner(cx, oracle, a, p, value_class)
-        })
+        .all(|(&p, &a)| arg_wildcard(p) || arg_wildcard(a) || assignable_inner(cx, oracle, a, p))
 }
 
 fn arg_wildcard(t: Ty) -> bool {
@@ -226,7 +211,7 @@ fn arg_wildcard(t: Ty) -> bool {
 /// implements it, walking `oracle.direct_supertypes`. Reference types only — a class-less `Ty` yields
 /// `false`. Uses `kotlin_class_internal` so a `Ty::String` / `Ty::Fun` maps to its class. When
 /// `value_class`, a value/inline-class value also reaches its underlying representation's class.
-fn class_assignable(oracle: &dyn TypeOracle, sub: Ty, sup: Ty, value_class: bool) -> bool {
+fn class_assignable(oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool {
     let (Some(start), Some(target)) = (sub.kotlin_class_internal(), sup.kotlin_class_internal())
     else {
         return false;
@@ -241,12 +226,7 @@ fn class_assignable(oracle: &dyn TypeOracle, sub: Ty, sup: Ty, value_class: bool
         let direct = oracle.direct_supertypes(cur);
         stack.extend(direct.into_iter().filter(|s| seen.insert(*s)));
     }
-    // A value/inline class is assignable where its underlying representation is expected (the JVM-ABI
-    // boundary) — only under `is_assignable`, not the pure `is_subtype` relation.
-    value_class
-        && oracle
-            .value_underlying(sub)
-            .is_some_and(|u| u.kotlin_class_internal().is_some_and(|n| n == target) || u == sup)
+    false
 }
 
 #[cfg(test)]
@@ -272,12 +252,6 @@ mod tests {
                 _ => &[],
             };
             s.iter().map(|x| crate::types::type_name(x)).collect()
-        }
-        fn value_underlying(&self, ty: Ty) -> Option<Ty> {
-            match ty {
-                Ty::Obj(n, _) if n.matches("app/Aid") => Some(Ty::String),
-                _ => None,
-            }
         }
         fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
             a == b
@@ -317,6 +291,19 @@ mod tests {
             Ty::nullable(s("app/Dog")),
             Ty::nullable(s("app/Animal"))
         ));
+    }
+
+    #[test]
+    fn java_platform_type_is_flexible_between_non_null_and_nullable_bounds() {
+        let dog = s("app/Dog");
+        let animal = s("app/Animal");
+        let platform_dog = Ty::platform_nullable(dog);
+        assert!(ok(platform_dog, dog));
+        assert!(ok(platform_dog, Ty::nullable(dog)));
+        assert!(ok(platform_dog, animal));
+        assert!(ok(dog, platform_dog));
+        assert!(ok(Ty::nullable(dog), platform_dog));
+        assert!(ok(Ty::Null, platform_dog));
     }
 
     #[test]
@@ -409,12 +396,27 @@ mod tests {
         assert!(is_assignable(&TyCtx::new(), &Fake, s("app/Dog"), tv2));
         // A bound that rejects: Int is not <: T:CharSequence.
         assert!(!is_assignable(&cx, &Fake, Ty::Int, tv));
+
+        // The bound, not the `TyParam` wrapper, decides whether a nullable argument is admissible.
+        let nullable_tv = Ty::ty_param("N", Ty::nullable(s("kotlin/Any")));
+        assert!(is_assignable(
+            &TyCtx::new(),
+            &Fake,
+            Ty::nullable(s("app/Dog")),
+            nullable_tv
+        ));
+        let nonnull_tv = Ty::ty_param("N", s("kotlin/Any"));
+        assert!(!is_assignable(
+            &TyCtx::new(),
+            &Fake,
+            Ty::nullable(s("app/Dog")),
+            nonnull_tv
+        ));
     }
 
     #[test]
-    fn value_class_underlying() {
-        // Aid (value class over String) is assignable where its underlying String is expected.
-        assert!(ok(s("app/Aid"), Ty::String));
-        assert!(ok(s("app/Aid"), s("kotlin/String")));
+    fn value_class_is_not_assignable_to_its_storage_type() {
+        assert!(!ok(s("app/Aid"), Ty::String));
+        assert!(!ok(s("app/Aid"), s("kotlin/String")));
     }
 }

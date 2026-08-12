@@ -6,11 +6,32 @@ use std::rc::Rc;
 
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty::libraries::SemanticPlatform;
 use krusty::symbol_source::SymbolSource;
 use krusty::types::Ty;
 
 use super::common;
+
+fn declared(lib: &JvmLibraries, receiver: Ty, name: &str) -> krusty::libraries::Callables {
+    receiver
+        .kotlin_class_internal()
+        .and_then(|internal| lib.classifier(internal))
+        .and_then(|classifier| classifier.declared_callables.get(name).cloned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn core_inherits_mapped_string_length_property() {
+    let lib = JvmLibraries::new(Rc::new(Classpath::new(vec![common::stdlib_jar()])));
+    let resolver = krusty::symbol_resolver::SymbolResolver::new(&lib);
+    let length = resolver
+        .select_member_property(Ty::String, "length")
+        .expect("core hierarchy walk must inherit CharSequence.length");
+    assert_eq!(length.ty, Ty::Int);
+    let applied = resolver
+        .select_member_property(Ty::obj("kotlin/String"), "length")
+        .expect("interned Kotlin String identity must use the same hierarchy");
+    assert_eq!(applied.ty, Ty::Int);
+}
 
 #[test]
 fn member_property_getter_and_setter_from_metadata() {
@@ -29,7 +50,7 @@ fn member_property_getter_and_setter_from_metadata() {
     let lib = JvmLibraries::new(cp.clone());
 
     // `val label` — a getter, no setter; the getter name comes from metadata, not a `get`+cap guess.
-    let props = lib.property_members(Ty::obj("Holder"), "label");
+    let props = declared(&lib, Ty::obj("Holder"), "label").into_parts().1;
     let label = props
         .overloads
         .iter()
@@ -39,7 +60,7 @@ fn member_property_getter_and_setter_from_metadata() {
     assert!(label.setter.is_none(), "a `val` exposes no setter");
 
     // `var count` — both accessors present.
-    let props = lib.property_members(Ty::obj("Holder"), "count");
+    let props = declared(&lib, Ty::obj("Holder"), "count").into_parts().1;
     let count = props
         .overloads
         .iter()
@@ -53,15 +74,17 @@ fn member_property_getter_and_setter_from_metadata() {
     );
 
     // An absent name yields nothing.
-    assert!(lib
-        .property_members(Ty::obj("Holder"), "nope")
+    assert!(declared(&lib, Ty::obj("Holder"), "nope")
+        .into_parts()
+        .1
         .overloads
         .is_empty());
 
     // `val Holder.tag` — an EXTENSION property. Extension/top-level declarations are surfaced by the
-    // receiver-AGNOSTIC `resolve_symbols` fqn seam (member properties by `property_members`); its getter
+    // receiver-agnostic `resolve_symbols` FQN seam; its getter
     // (a static `getTag(Holder)` on the facade) carries the extension receiver from the Package metadata.
-    let symbols = lib.resolve_symbols("tag");
+    let root = krusty::symbol_source::SymbolNamespace::Package(krusty::types::TypeName::ROOT);
+    let symbols = lib.symbols(root, "tag");
     let props = match &symbols.callables {
         krusty::libraries::Callables::Properties(p) => p.overloads.clone(),
         krusty::libraries::Callables::Both { properties, .. } => properties.overloads.clone(),
@@ -77,7 +100,7 @@ fn member_property_getter_and_setter_from_metadata() {
         krusty::libraries::Callables::Both { .. }
     ));
 
-    let props = match lib.resolve_symbols("isTagged").callables {
+    let props = match lib.symbols(root, "isTagged").callables.clone() {
         krusty::libraries::Callables::Properties(p) => p.overloads,
         _ => Vec::new(),
     };
@@ -140,27 +163,17 @@ fn classpath_jvmname_var_setter_assigns_via_metadata() {
 }
 
 #[test]
-fn callable_reference_targets_must_have_a_real_virtual_method() {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let lib = JvmLibraries::new(Rc::new(Classpath::new(vec![stdlib, jdk])));
-
-    let target = |receiver, name: &str| {
-        let overload = lib
-            .member_overloads(receiver, name)
-            .overloads
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| panic!("missing builtin member {name}"));
-        overload.member_with_return(overload.callable.ret)
+fn classpath_var_extension_property_uses_the_selected_metadata_accessors() {
+    // Extension-property writes use the same PropertyInfo handoff as reads. In particular, neither
+    // the checker nor lowering may reconstruct `getScore`/`setScore`: metadata owns both physical
+    // names, and the selected dependency property supplies them together.
+    let lib = "package lib\nclass Box(var raw: Int)\n\
+               var Box.score: Int\n  @JvmName(\"readScore\") get() = raw\n  \
+               @JvmName(\"writeScore\") set(v) { raw = v }";
+    let main = "import lib.Box\nimport lib.score\nfun box(): String {\n  val b = Box(1)\n  \
+                b.score = 7\n  return if (b.score == 7) \"OK\" else \"f:${b.score}\"\n}";
+    let Some(out) = common::expect_box_run_against("varextsetterjvmname", lib, main) else {
+        return; // toolchain not provisioned
     };
-
-    let string_get = target(Ty::String, "get");
-    assert!(lib.supports_member_reference(&string_get));
-
-    let string_plus = target(Ty::String, "plus");
-    assert!(!lib.supports_member_reference(&string_plus));
-
-    let boolean_not = target(Ty::Boolean, "not");
-    assert!(!lib.supports_member_reference(&boolean_not));
+    assert_eq!(out, "OK");
 }

@@ -109,12 +109,13 @@ fn lateinit_is_initialized_runs() {
 /// compiled-but-crashed (or silently bound the wrong property) without its gate. They must NOT
 /// compile (a skip, never a miscompile).
 #[test]
-fn unsafe_member_prop_ref_shapes_still_rejected() {
+fn member_prop_ref_shapes_fail_closed_or_use_the_selected_getter() {
     if !common::stdlib_toolchain_ready() {
         return;
     }
-    // (name, source) — every one must fail to compile-and-run.
-    let cases: &[(&str, &str)] = &[
+    // Public computed getters are exact callable targets and run. Inaccessible/synthetic-field
+    // shapes still fail closed rather than rebinding a same-named extension or top-level property.
+    let cases: &[(&str, &str, Option<&str>)] = &[
         // A private member property: no accessor is emitted, so the reference class's `get()`
         // would hit a NoSuchMethodError.
         (
@@ -126,6 +127,7 @@ class C {
 }
 fun box(): String = C().r().get()
 "#,
+            None,
         ),
         // A `var` with a private setter: the reference's `set` would dispatch the private setter
         // from a separate class (IllegalAccessError).
@@ -143,6 +145,7 @@ fun box(): String {
     return c.x
 }
 "#,
+            None,
         ),
         // An anonymous object's capture of an enclosing LOCAL (`::x` on a captured local —
         // kotlinc rejects this outright; a top-level capture resolves as the top-level ref,
@@ -159,9 +162,10 @@ fun box(): String {
     return o.r().get()
 }
 "#,
+            None,
         ),
-        // A computed member property (no backing field) — the lowerer must bail, never bind a
-        // coexisting same-named EXTENSION property's getter.
+        // A computed member property (no backing field) runs through the exact getter selected by
+        // the checker, never a coexisting same-named extension getter.
         (
             "ComputedPlusExtension",
             r#"
@@ -174,6 +178,7 @@ val C.x: String
     get() = "ext"
 fun box(): String = C().r().get().toString()
 "#,
+            Some("1"),
         ),
         // A computed member property shadowing a same-named TOP-LEVEL property — likewise must
         // bail rather than bind the top-level.
@@ -188,6 +193,7 @@ class C {
 }
 fun box(): String = C().r().get().toString()
 "#,
+            Some("1"),
         ),
         // A private member property INHERITED from a same-file base (collect flattens base props
         // into the subclass — visibility must still resolve to the DECLARING class).
@@ -200,6 +206,7 @@ class C : B() {
 }
 fun box(): String = C().r().get()
 "#,
+            None,
         ),
         // A `var` with a private setter inherited from a same-file base.
         (
@@ -221,6 +228,7 @@ fun box(): String {
     return c.x
 }
 "#,
+            None,
         ),
         // The same through a GRAND-base (the flattening chains).
         (
@@ -233,13 +241,12 @@ class C : B() {
 }
 fun box(): String = C().r().get()
 "#,
+            None,
         ),
     ];
-    for (stem, src) in cases {
-        assert!(
-            common::compile_and_run_with_stdlib(src, stem).is_none(),
-            "{stem}: unsafe ::prop shape must stay rejected (skip, never miscompile)"
-        );
+    for (stem, src, expected) in cases {
+        let output = common::compile_and_run_with_stdlib(src, stem);
+        assert_eq!(output.as_deref(), *expected, "{stem}");
     }
 }
 
@@ -334,11 +341,8 @@ fun box(): String = if (Extension("O").both() == "OO") "OK" else "FAIL"
     );
 }
 
-/// REJECTION GUARD: an inner class's unqualified `::p` naming an OUTER-class property must NOT
-/// compile (the outer `this` isn't capturable here) — and mixed shapes like
-/// callableReference/bound/emptyLHS.kt (other extension-ref and outer-this shapes) stay skipped.
 #[test]
-fn outer_this_and_extension_ref_shapes_still_rejected() {
+fn outer_this_property_reference_captures_the_outer_receiver() {
     let src = r#"
 class Outer {
     val x: String = "OK"
@@ -346,18 +350,13 @@ class Outer {
         fun ref() = ::x
     }
 }
-fun box(): String = "OK"
+fun box(): String {
+    val outer = Outer()
+    return outer.Inner().ref().get()
+}
 "#;
-    assert!(
-        common::compile_and_run_with_stdlib(src, "ThisPropOuter").is_none(),
-        "an outer-this member property ref must stay rejected"
-    );
-    if !common::corpus_ready() {
-        return;
-    }
     assert_eq!(
-        common::run_box_corpus_case("callableReference/bound/emptyLHS.kt"),
-        None,
-        "emptyLHS uses shapes outside this feature — must stay skipped"
+        common::compile_and_run_with_stdlib(src, "ThisPropOuter"),
+        Some("OK".to_string())
     );
 }

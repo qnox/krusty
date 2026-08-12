@@ -57,7 +57,7 @@ fun box(): String {\n\
 }
 
 #[test]
-fn generic_value_class_storage_stays_unsupported() {
+fn generic_value_class_storage_runs() {
     const SRC: &str = "@JvmInline\n\
 value class Wrapper<T : Int>(val value: T)\n\
 fun <T> last(vararg values: T): T = values[values.size - 1]\n\
@@ -67,5 +67,5 @@ fun <T : Int> read(first: Wrapper<T>, optional: Wrapper<T>?): Int {\n\
     return left.value + right.value\n\
 }\n\
 fun box(): String = if (read(Wrapper(1), Wrapper(2)) == 3) \"OK\" else \"fail\"\n";
-    assert_eq!(run(SRC), None);
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }

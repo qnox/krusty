@@ -35,6 +35,8 @@ pub struct MethodSig {
     pub signature: Option<String>,
     /// JVM reference-parameter nullability in descriptor order.
     pub parameter_nullability: Vec<Option<JavaNullability>>,
+    /// Return nullability annotation. An absent annotation on a Java reference denotes `T!`.
+    pub return_nullability: Option<JavaNullability>,
 }
 
 impl MethodSig {
@@ -79,6 +81,8 @@ pub struct FieldSig {
     pub const_value: Option<ConstVal>,
     /// The field's generic `Signature` attribute (`TA;` for a type-parameter field), if present.
     pub signature: Option<String>,
+    /// Declaration nullability annotation. An absent annotation on a Java reference denotes `T!`.
+    pub nullability: Option<JavaNullability>,
 }
 
 impl FieldSig {
@@ -111,6 +115,7 @@ struct MemberAttributes {
     signature: Option<String>,
     const_value: Option<ConstVal>,
     parameter_nullability: Vec<Option<JavaNullability>>,
+    declaration_nullability: Option<JavaNullability>,
     parameter_access: Vec<u16>,
 }
 
@@ -475,6 +480,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             descriptor: member.descriptor,
             const_value: member.attributes.const_value,
             signature: member.attributes.signature,
+            nullability: member.attributes.declaration_nullability,
         })
         .collect();
     let methods: Vec<MethodSig> = read_members(&mut r)?
@@ -485,6 +491,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             descriptor: member.descriptor,
             signature: member.attributes.signature,
             parameter_nullability: member.attributes.parameter_nullability,
+            return_nullability: member.attributes.declaration_nullability,
         })
         .collect();
 
@@ -746,12 +753,48 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                 let body = r.take(len)?;
                 read_parameter_nullability(body, cp, &mut attributes.parameter_nullability)?;
             }
+            Some(C::Utf8(s))
+                if s == "RuntimeVisibleAnnotations" || s == "RuntimeInvisibleAnnotations" =>
+            {
+                let body = r.take(len)?;
+                read_declaration_nullability(body, cp, &mut attributes.declaration_nullability)?;
+            }
             _ => {
                 r.take(len)?;
             }
         }
     }
     Ok(attributes)
+}
+
+fn read_declaration_nullability(
+    body: &[u8],
+    cp: &[C],
+    out: &mut Option<JavaNullability>,
+) -> Result<(), ReadError> {
+    let utf8 = |index: u16| match cp.get(index as usize) {
+        Some(C::Utf8(value)) => value.as_str(),
+        _ => "",
+    };
+    let mut r = Reader { b: body, i: 0 };
+    let annotation_count = r.u2()?;
+    for _ in 0..annotation_count {
+        let annotation = utf8(r.u2()?);
+        let nullability = match annotation {
+            "Lorg/jetbrains/annotations/NotNull;" => Some(JavaNullability::NotNull),
+            "Lorg/jetbrains/annotations/Nullable;" => Some(JavaNullability::Nullable),
+            _ => None,
+        };
+        let pair_count = r.u2()?;
+        for _ in 0..pair_count {
+            r.u2()?;
+            skip_element_value_extract_string_array(&mut r, cp, false)?;
+        }
+        if nullability.is_some() {
+            *out = nullability;
+        }
+    }
+    Ok(())
 }
 
 fn align_parameter_nullability(
@@ -962,6 +1005,7 @@ mod tests {
             descriptor: descriptor.to_string(),
             signature: None,
             parameter_nullability: Vec::new(),
+            return_nullability: None,
         };
         let concrete = method("(Ljava/lang/String;I)Ljava/lang/String;");
         let return_bridge = method("(Ljava/lang/String;I)Ljava/lang/Object;");

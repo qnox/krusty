@@ -21,7 +21,7 @@ fn classpath_class_companion_object_is_detected() {
     // kotlin/random/Random$Default Default` field on `Random` (the same shape as
     // `kotlinx.serialization.json.Json.Default`).
     let random = libs
-        .resolve_type("kotlin/random/Random")
+        .classifier(krusty::types::type_name("kotlin/random/Random"))
         .expect("kotlin/random/Random resolves on the stdlib classpath");
     let random_companion = random
         .companion_object
@@ -39,7 +39,7 @@ fn classpath_class_companion_object_is_detected() {
     // A class without a companion object has none — the detection must not false-positive on an
     // unrelated static field.
     let pair = libs
-        .resolve_type("kotlin/Pair")
+        .classifier(krusty::types::type_name("kotlin/Pair"))
         .expect("kotlin/Pair resolves");
     assert!(
         pair.companion_object.is_none(),
@@ -50,8 +50,10 @@ fn classpath_class_companion_object_is_detected() {
     // The companion's type (`Random$Default`) must resolve an instance method `nextInt(Int)`
     // (inherited from `Random` via the supertype walk) — what the checker/lowering use to lower the
     // call as `getstatic Random.Default; invokevirtual nextInt`.
-    let (_, cty) = random
+    let cty = random
         .companion_object
+        .as_ref()
+        .map(|(_, ty)| *ty)
         .expect("Random has a companion object");
     use krusty::symbol_resolver::{SymRecv, Symbol};
     let nextint = krusty::symbol_resolver::SymbolResolver::new(&libs)

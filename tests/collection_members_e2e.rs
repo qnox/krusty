@@ -22,7 +22,7 @@ fn for_over_list() {
 #[test]
 fn list_size_and_index() {
     const SRC: &str = "fun box(): String { val l = listOf(\"O\", \"K\"); return if (l.size == 2) l[0] + l[1] else \"no\" }\n";
-    assert_eq!(run(SRC).expect("list size+index compiles + runs"), "OK");
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }
 
 #[test]
@@ -32,6 +32,16 @@ fn list_extension_members() {
     return if (!l.isEmpty() && l.contains(\"O\") && l.indexOf(\"K\") == 1) \"OK\" else \"no\"\n\
 }\n";
     assert_eq!(run(SRC).expect("list members compile + run"), "OK");
+}
+
+#[test]
+fn array_iterators_are_ordinary_resolved_calls() {
+    const SRC: &str = "fun box(): String {\n\
+    val refs = arrayOf(\"O\", \"K\").iterator()\n\
+    val ints = intArrayOf(4, 2).iterator()\n\
+    return refs.next() + refs.next() + (ints.next() + ints.next())\n\
+}\n";
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK6");
 }
 
 #[test]

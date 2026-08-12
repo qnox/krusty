@@ -11,6 +11,8 @@ fn run(src: &str) -> Option<String> {
 
 #[test]
 fn member_extension_property_resolution() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     const CASES: &[(&str, &str, Option<&str>)] = &[
         (
             "both receivers in lexical scope",
@@ -573,7 +575,11 @@ fn member_extension_property_resolution() {
     ];
 
     for &(case, source, expected_diagnostic) in CASES {
-        let diagnostics = common::front_end_diagnostics(source, &[], None);
+        let diagnostics = common::front_end_diagnostics(
+            source,
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path()),
+        );
         if let Some(expected) = expected_diagnostic {
             assert!(
                 diagnostics.iter().any(|message| message.contains(expected)),

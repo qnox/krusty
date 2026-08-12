@@ -62,16 +62,32 @@ fn elvis_with_diverging_lhs_in_statement_position() {
     common::expect_box_ok_with_stdlib(SRC, "diverging_elvis_statement_position");
 }
 
-/// Argument position: the outer `invokevirtual println` followed the terminator, and its operands
+/// Argument position: the outer `invokevirtual consume` followed the terminator, and its operands
 /// were counted into `max_stack` from an already-emptied stack ("Operand stack overflow").
 #[test]
 fn diverging_call_in_argument_position() {
     const SRC: &str = "fun boom(): Nothing = throw RuntimeException(\"boom\")\n\
-        fun run1() { println(boom()) }\n\
+        fun consume(value: String) {}\n\
+        fun run1() { consume(boom()) }\n\
         fun box(): String {\n\
             return try { run1(); \"F:no-throw\" } catch (e: RuntimeException) { if (e.message == \"boom\") \"OK\" else \"F:\" + e.message }\n\
         }\n";
     common::expect_box_ok_with_stdlib(SRC, "diverging_argument_position");
+}
+
+#[test]
+fn println_overloads_are_ambiguous_for_a_diverging_argument() {
+    const SRC: &str = "fun boom(): Nothing = error(\"boom\")\n\
+        fun test() = println(boom())\n";
+    let (code, _) = common::kotlinc_source_result("NothingPrintln", SRC).expect("kotlinc harness");
+    assert_ne!(code, 0, "kotlinc unexpectedly selected a println overload");
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("overload resolution ambiguity")),
+        "krusty diagnostics: {diagnostics:?}"
+    );
 }
 
 /// Receiver position: `boom().toString()`.

@@ -28,6 +28,9 @@ pub struct PropMeta {
     /// modality in `Property.flags` and, since there is no backing field, omits the
     /// `JvmPropertySignature.field` entry entirely.
     pub is_abstract: bool,
+    /// Whether this declaration owns a backing field. A concrete computed property has accessor code
+    /// but no field, just like an abstract property has no field, so modality cannot encode this fact.
+    pub has_backing_field: bool,
     /// Index of the class type parameter this property is declared as (`class C<T>(val a: T)` → 0).
     /// `None` for an ordinary type.
     pub tparam: Option<u32>,
@@ -210,9 +213,14 @@ fn builtin_name_index(internal: &str) -> Option<u64> {
         "kotlin/Any" => Some(0),
         "kotlin/Nothing" => Some(1),
         "kotlin/Unit" => Some(2),
+        "kotlin/Byte" => Some(5),
+        "kotlin/Double" => Some(6),
+        "kotlin/Float" => Some(7),
         "kotlin/Int" => Some(8),
         "kotlin/Long" => Some(9),
+        "kotlin/Short" => Some(10),
         "kotlin/Boolean" => Some(11),
+        "kotlin/Char" => Some(12),
         "kotlin/CharSequence" => Some(13),
         "kotlin/String" => Some(14),
         "kotlin/Enum" => Some(16),
@@ -242,6 +250,9 @@ fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
 fn type_pb_tp(st: &mut StringTable, t: Ty, tparam: Option<u32>) -> Pb {
     if let Some(id) = tparam {
         let mut p = Pb::new();
+        if t.is_nullable() {
+            p.field_varint(3, 1); // Type.nullable = 3 applies to a type-parameter reference too
+        }
         p.field_varint(7, id as u64); // Type.type_parameter = 7
         return p;
     }
@@ -382,8 +393,10 @@ pub struct ClassTail<'a> {
     pub type_params: &'a [String],
     /// Direct sealed subtypes as JVM descriptors.
     pub sealed_subclasses: &'a [&'a str],
-    /// Declared supertypes as JVM descriptors.
-    pub supertype_descs: &'a [&'a str],
+    /// Declared semantic supertypes, including applied type arguments. Physical erasure belongs to
+    /// the classfile `super_class`/`interfaces` entries; Kotlin metadata must retain `H<A>` so
+    /// reflection and downstream type substitution do not see a raw `H`.
+    pub supertypes: &'a [Ty],
 }
 
 impl Default for ClassTail<'_> {
@@ -403,7 +416,7 @@ impl Default for ClassTail<'_> {
             primary_ctor_flags: 0,
             type_params: &[],
             sealed_subclasses: &[],
-            supertype_descs: &[],
+            supertypes: &[],
         }
     }
 }
@@ -455,15 +468,13 @@ pub fn build_class(
         st_msg.field_message(2, &arg); // Type.argument = 2
         st_msg.field_varint(6, st.builtin(ENUM_PREDEFINED) as u64);
         supertype_msgs.push(st_msg);
-    } else if tail.supertype_descs.is_empty() {
+    } else if tail.supertypes.is_empty() {
         let mut st_msg = Pb::new();
         st_msg.field_varint(6, st.builtin(ANY_PREDEFINED) as u64);
         supertype_msgs.push(st_msg);
     } else {
-        for desc in tail.supertype_descs {
-            let mut st_msg = Pb::new();
-            st_msg.field_varint(6, st.class_id_from_desc(desc) as u64); // Type.className via DESC_TO_CLASS_ID
-            supertype_msgs.push(st_msg);
+        for supertype in tail.supertypes {
+            supertype_msgs.push(type_pb(&mut st, *supertype));
         }
     }
 
@@ -522,19 +533,23 @@ pub fn build_class(
                 .as_ref()
                 .map(|(sn, sd)| jvm_method_sig(&mut st, Some(sn), sd));
             let boxed_field_desc = p.field_desc.clone().or(match p.ty {
-                Ty::Nullable(
-                    Ty::Int
-                    | Ty::Long
-                    | Ty::Double
-                    | Ty::Float
-                    | Ty::Byte
-                    | Ty::Short
-                    | Ty::Char
-                    | Ty::Boolean,
-                ) => p
-                    .getter
-                    .as_ref()
-                    .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
+                Ty::Nullable(inner)
+                    if matches!(
+                        *inner,
+                        Ty::Int
+                            | Ty::Long
+                            | Ty::Double
+                            | Ty::Float
+                            | Ty::Byte
+                            | Ty::Short
+                            | Ty::Char
+                            | Ty::Boolean
+                    ) =>
+                {
+                    p.getter
+                        .as_ref()
+                        .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string))
+                }
                 // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
                 // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
                 // same way it does for a boxed nullable primitive.
@@ -550,7 +565,7 @@ pub fn build_class(
             }
             // An abstract property has no backing field at all — kotlinc omits the entry rather than
             // writing an empty one (which is what a concrete property's derived field looks like).
-            if !p.is_abstract {
+            if p.has_backing_field {
                 jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
             }
             if let Some(getter) = &getter {
@@ -707,6 +722,7 @@ mod tests {
                 has_constant: true,
                 is_const: true,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: None,
                 setter: None,
@@ -761,6 +777,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
@@ -861,6 +878,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
@@ -874,6 +892,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
@@ -936,6 +955,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getR".into(), "()Ljava/util/List;".into())),
                 setter: None,
@@ -1044,6 +1064,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
@@ -1093,6 +1114,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
@@ -1146,6 +1168,7 @@ mod tests {
                     is_const: false,
                     visibility: Visibility::Public,
                     is_abstract: false,
+                    has_backing_field: true,
                     tparam: None,
                     getter: Some(("getX".into(), "()I".into())),
                     setter: None,
@@ -1159,6 +1182,7 @@ mod tests {
                     is_const: false,
                     visibility: Visibility::Public,
                     is_abstract: false,
+                    has_backing_field: true,
                     tparam: None,
                     getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),

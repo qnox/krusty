@@ -392,11 +392,10 @@ fn return_in_lambda_arg_body_inline_fun_cross_file_still_rejects() {
     );
 }
 
-/// Guard: a value-class RECEIVER on an inline extension with a function-typed parameter (so the
-/// cross-module `has_callable_inline_extension_body` path doesn't apply) screens out — a
-/// cross-file `invokestatic` applies no value-class mangling/erasure to arg0.
+/// A value-class receiver on a cross-file inline extension keeps the selected physical receiver
+/// representation while the lambda is passed through the emitted facade method.
 #[test]
-fn value_class_receiver_inline_extension_cross_file_still_rejects() {
+fn value_class_receiver_inline_extension_cross_file_executes() {
     const LIB: &str = "@JvmInline\n\
                        value class Z(val value: Int)\n\
                        inline fun Z.transform(f: (Int) -> Int): Int = f(value)\n";
@@ -404,14 +403,14 @@ fn value_class_receiver_inline_extension_cross_file_still_rejects() {
         "fun box(): String = if (Z(21).transform { it * 2 } == 42) \"OK\" else \"fail\"\n";
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    assert!(
+    assert_eq!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
             Some(jdk.as_path())
-        )
-        .is_none(),
-        "cross-file call to a value-class-receiver inline extension must be rejected, never emitted"
+        ),
+        Some("OK".to_string()),
+        "cross-file value-class-receiver inline extension"
     );
 }
 
@@ -593,7 +592,7 @@ fn suspend_inline_extension_cross_file_executes() {
 }
 
 /// The non-`inline` sibling of the case above: same call-site threading, same answer. Both shapes
-/// share the `ResolvedCall::ModuleExtension` lowering path, so they are guarded together.
+/// share the source-origin extension lowering path, so they are guarded together.
 #[test]
 fn suspend_extension_cross_file_executes() {
     const LIB: &str = "suspend fun Int.plusOne(): Int = this + 1\n";
@@ -699,9 +698,9 @@ fn cross_file_ref_to_emitted_fns_stays_clean() {
     assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
 }
 
-/// A checker-only pipeline (the LSP path — no `prepare_module_symbols` registration) must NOT
-/// report the unemitted-inline diagnostic for a cross-file reference to a plain fn: without
-/// registration data the reference declines silently and types through the fallbacks, as before.
+/// A checker-only pipeline (the LSP path — no `prepare_module_symbols` registration) still resolves
+/// the source declaration exactly. It does not need a JVM facade until lowering, so absence of backend
+/// registration is not a source diagnostic.
 #[test]
 fn checker_only_pipeline_cross_file_ref_to_plain_fn_stays_clean() {
     let stdlib = common::stdlib_jar();

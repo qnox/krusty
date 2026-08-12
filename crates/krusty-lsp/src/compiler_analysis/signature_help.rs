@@ -3,8 +3,8 @@
 use std::{borrow::Cow, collections::HashMap};
 
 use krusty::ast::{
-    ClassDecl, ClassKind, Decl, Expr, ExprId, File, FunBody, FunDecl, Param, SecondaryCtor, Stmt,
-    StmtId, TypeRef,
+    ClassDecl, Decl, Expr, ExprId, File, FunBody, FunDecl, Param, SecondaryCtor, Stmt, StmtId,
+    TypeRef,
 };
 use krusty::diag::Span;
 use krusty::types::{type_name, Ty, TypeName};
@@ -239,10 +239,10 @@ impl SignatureHelpSymbols {
     ) -> bool {
         let owner = class_owner(package, &class.name);
         let class_signature = symbols.class_by_type_name(owner);
-        if !matches!(class.kind, ClassKind::Interface | ClassKind::Object) {
+        if !class.is_interface() && !class.is_singleton() {
             let mut group = None;
             let class_name = class.name.rsplit('.').next().unwrap_or(&class.name);
-            if class.has_primary_ctor {
+            if class.primary_ctor_annotations.is_some() {
                 let primary = render_primary_constructor_signature(
                     source,
                     &analysis.file,
@@ -440,11 +440,11 @@ impl SignatureHelpSymbols {
         if let Some(source) = types.and_then(|types| types.resolved_source_call(call)) {
             if let Some(&target) = self.top_by_source.get(&source) {
                 let generic_resolution = if let Some(resolved) =
-                    types.and_then(|types| types.resolved_module_top_level(call))
+                    types.and_then(|types| types.resolved_top_level_call(call))
                 {
                     let base = &self.groups[target.0].candidates[target.1];
                     if !base.type_parameters.is_empty() {
-                        Some((resolved.params.clone(), resolved.ret))
+                        Some((resolved.callable.params.clone(), resolved.callable.ret))
                     } else {
                         None
                     }
@@ -459,14 +459,20 @@ impl SignatureHelpSymbols {
                 });
             }
         }
-        if let Some((owner, name, parameters)) =
-            types.and_then(|types| types.resolved_module_member_signature(call))
+        if let Some(member) = types
+            .and_then(|types| types.resolved_member(call))
+            .filter(|member| matches!(member.origin, krusty::libraries::Origin::Module { .. }))
         {
+            let owner = member.member.owner?;
+            let name = &member.member.name;
+            let parameters = &member.member.params;
             let group = *self.members.get(&(owner, name.to_string()))?;
             let selected = self.groups[group]
                 .candidates
                 .iter()
-                .position(|candidate| candidate.semantic_parameters == parameters)
+                .position(|candidate| {
+                    candidate.semantic_parameters.as_slice() == parameters.as_slice()
+                })
                 .unwrap_or(0);
             return Some(ResolvedSignatureCall {
                 group,
@@ -498,13 +504,18 @@ impl SignatureHelpSymbols {
                     })
             }
             Expr::Member { name, .. } => types
-                .and_then(|types| types.resolved_module_member_signature(call))
-                .and_then(|(owner, _, parameters)| {
+                .and_then(|types| types.resolved_member(call))
+                .filter(|member| matches!(member.origin, krusty::libraries::Origin::Module { .. }))
+                .and_then(|member| {
+                    let owner = member.member.owner?;
+                    let parameters = &member.member.params;
                     let group = *self.members.get(&(owner, name.clone()))?;
                     let selected = self.groups[group]
                         .candidates
                         .iter()
-                        .position(|candidate| candidate.semantic_parameters == parameters)
+                        .position(|candidate| {
+                            candidate.semantic_parameters.as_slice() == parameters.as_slice()
+                        })
                         .unwrap_or(0);
                     Some(ResolvedSignatureCall {
                         group,

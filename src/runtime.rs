@@ -92,6 +92,8 @@ pub enum RuntimeOp {
     /// widening helpers instead (`UInt.MAX_VALUE.toFloat()` must be `4.2949673E9`, not `-1.0`).
     UnsignedToDouble,
     PrimitiveCompare,
+    FloatingIsNaN,
+    FloatingIsInfinite,
     HashCode,
     ArrayToString,
     ArrayHashCode,

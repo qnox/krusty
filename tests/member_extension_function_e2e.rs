@@ -2,6 +2,8 @@ use super::common;
 
 #[test]
 fn member_extension_function_resolution() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     const CASES: &[(&str, &str, Option<&str>)] = &[
         (
             "explicit receiver with implicit dispatch receiver",
@@ -333,7 +335,11 @@ fn member_extension_function_resolution() {
     ];
 
     for (name, source, expected) in CASES {
-        let diagnostics = common::front_end_diagnostics_files(&[*source], &[], None);
+        let diagnostics = common::front_end_diagnostics_files(
+            &[*source],
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path()),
+        );
         match expected {
             None => assert!(
                 diagnostics.is_empty(),

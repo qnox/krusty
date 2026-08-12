@@ -30,6 +30,59 @@ fn contract_calls_in_place_is_erased() {
 }
 
 #[test]
+fn contextual_function_contract_is_erased() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        @file:OptIn(ExperimentalContracts::class)\n\
+        import kotlin.contracts.*\n\
+        context(token: Any)\n\
+        inline fun runOnce(action: () -> Unit) {\n\
+        \x20 contract { callsInPlace(action, InvocationKind.EXACTLY_ONCE) }\n\
+        \x20 action()\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 var result = \"fail\"\n\
+        \x20 with(Any()) { runOnce { result = \"OK\" } }\n\
+        \x20 return result\n\
+        }\n";
+    assert_eq!(run(SRC).expect("contextual contract erased"), "OK");
+}
+
+#[test]
+fn contextual_member_contract_is_erased() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        @file:OptIn(ExperimentalContracts::class)\n\
+        import kotlin.contracts.*\n\
+        class Runner {\n\
+        \x20 context(token: Any)\n\
+        \x20 inline fun runOnce(action: () -> Unit) {\n\
+        \x20\x20 contract { callsInPlace(action, InvocationKind.EXACTLY_ONCE) }\n\
+        \x20\x20 action()\n\
+        \x20 }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 var result = \"fail\"\n\
+        \x20 with(Any()) { Runner().runOnce { result = \"OK\" } }\n\
+        \x20 return result\n\
+        }\n";
+    assert_eq!(run(SRC).expect("contextual member contract erased"), "OK");
+}
+
+#[test]
+fn trailing_contextual_member_contract_is_erased() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        @file:OptIn(ExperimentalContracts::class)\n\
+        import kotlin.contracts.*\n\
+        class Runner {\n\
+        \x20 context(token: Any)\n\
+        \x20 inline fun declare(action: () -> Unit) {\n\
+        \x20\x20 contract { callsInPlace(action, InvocationKind.EXACTLY_ONCE) }\n\
+        \x20 }\n\
+        }\n\
+        fun box(): String { with(Any()) { Runner().declare {} }; return \"OK\" }\n";
+    assert_eq!(run(SRC).expect("trailing contextual contract erased"), "OK");
+}
+
+#[test]
 fn contract_returns_implies_is_erased() {
     // A `returns() implies (…)` contract on a boolean-returning function — also pure metadata.
     const SRC: &str = "@file:OptIn(ExperimentalContracts::class)\n\

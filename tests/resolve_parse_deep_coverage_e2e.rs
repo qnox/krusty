@@ -91,6 +91,48 @@ fun box(): String {\n\
 }
 
 #[test]
+fn low_priority_declarations_leave_normal_candidates_preferred() {
+    const SRC: &str = r#"
+@Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
+@kotlin.internal.LowPriorityInOverloadResolution
+fun choose(value: Int) = "low"
+fun choose(value: Any) = "function"
+
+@Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
+@kotlin.internal.LowPriorityInOverloadResolution
+fun nullable(value: String?) = "fallback"
+fun nullable(value: Any) = "wrong"
+
+class Wrapped(val value: String)
+class Result
+@Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
+@kotlin.internal.LowPriorityInOverloadResolution
+constructor(val value: String) {
+    constructor(value: Wrapped) : this(value.value)
+}
+fun Result(value: String) = Result(Wrapped("factory"))
+
+fun box(): String = choose(1) + ":" + nullable(null) + ":" + Result("x").value
+"#;
+    assert_eq!(run(SRC, "LowPriority"), "function:fallback:factory");
+}
+
+#[test]
+fn imported_low_priority_annotation_binds_before_overload_selection() {
+    const SRC: &str = r#"
+import kotlin.internal.LowPriorityInOverloadResolution as LowPriority
+
+@Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
+@LowPriority
+fun choose(value: Int) = "low"
+fun choose(value: Any) = "normal"
+
+fun box(): String = choose(1)
+"#;
+    assert_eq!(run(SRC, "ImportedLowPriority"), "normal");
+}
+
+#[test]
 fn overload_vararg_vs_fixed() {
     const SRC: &str = "fun sum(a: Int): String = \"one:\" + a\n\
 fun sum(vararg xs: Int): String {\n\

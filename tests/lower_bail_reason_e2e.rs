@@ -70,19 +70,15 @@ fn gated_corpus_cases_report_precise_lower_bail() {
 }
 
 #[test]
-fn companion_with_explicit_base_args_reports_companion_synth() {
-    // `companion object : Base(args)` with explicit base args isn't modeled in the synthesized
-    // `C$Companion` registration — a pass-1a bail that must keep its phase label.
-    common::assert_inline_source_lower_bail(
-        r#"
+fn companion_with_explicit_base_arguments_runs() {
+    const SOURCE: &str = r#"
 open class Base(val x: Int)
 class C {
     companion object : Base(1)
 }
-fun box(): String = "OK"
-"#,
-        "deep:companion-synth",
-    );
+fun box(): String = if (C.x == 1) "OK" else "FAIL"
+"#;
+    common::expect_box_ok_with_stdlib(SOURCE, "CompanionBaseArguments");
 }
 
 #[test]
@@ -133,10 +129,9 @@ fun box(): String = C().x
 }
 
 #[test]
-fn unsupported_call_bucket_uses_ast_shape_not_source_name() {
-    // The expression fallback used to publish the concrete callee (`call suspendCoroutine`). Keep
-    // only its generic AST shape so local, module, and classpath call failures share one category and
-    // neither source names nor generated JVM owners escape into the survey.
+fn unsupported_call_bucket_is_semantic_and_hides_source_name() {
+    // The expression failure must explain the missing lowering contract without publishing the
+    // concrete callee, branching on provider origin, or trying symbol resolution again.
     common::assert_inline_source_lower_bail(
         r#"
 import kotlin.coroutines.suspendCoroutine
@@ -144,6 +139,6 @@ import kotlin.coroutines.suspendCoroutine
 suspend fun pause(): Unit = suspendCoroutine { }
 fun box(): String = "OK"
 "#,
-        "call Name",
+        "unqualified call has no supported semantic lowering",
     );
 }

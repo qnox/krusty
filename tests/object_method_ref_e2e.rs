@@ -5,8 +5,8 @@
 
 use super::common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "C")
+fn run(src: &str) -> String {
+    common::expect_box_run_with_stdlib(src, "C")
 }
 
 #[test]
@@ -25,6 +25,6 @@ fun box(): String {\n\
     if (g(10) != 120) return \"fail g\"\n\
     return \"OK\"\n\
 }\n";
-    let out = run(SRC).expect("object method reference should compile + run");
+    let out = run(SRC);
     assert_eq!(out, "OK");
 }

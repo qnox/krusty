@@ -139,6 +139,47 @@ fn value_class_body_property_round_trips() {
     );
 }
 
+#[test]
+fn value_class_computed_property_round_trips_as_a_static_carrier_accessor() {
+    let source = "@JvmInline value class Numbers(val values: IntArray) {\n\
+                  \x20   val size: Int get() = values.size\n\
+                  }\n";
+    let Some((_, classes)) = krusty_lib_dir("vc_computed_property", source) else {
+        eprintln!("skip (kotlin stdlib / JDK unavailable)");
+        return;
+    };
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "Numbers")
+        .expect("krusty emits Numbers.class");
+    let info = parse_class(bytes).expect("Numbers.class parses");
+    let accessor = info
+        .methods
+        .iter()
+        .find(|method| method.name == "getSize-impl")
+        .expect("computed value-class property is a static carrier accessor");
+    assert_eq!(accessor.descriptor, "([I)I");
+    let property = info
+        .meta
+        .class_properties
+        .iter()
+        .find(|property| property.name == "size")
+        .expect("metadata describes the computed property");
+    assert_eq!(
+        property.getter.as_ref().map(|getter| getter.name.as_str()),
+        Some("getSize-impl")
+    );
+    assert!(
+        info.fields.iter().all(|field| field.name != "size"),
+        "computed property has no backing field"
+    );
+    expect_roundtrip_ok(
+        "vc_computed_property",
+        source,
+        "fun box(): String = if (Numbers(intArrayOf(3, 4)).size == 2) \"OK\" else \"wrong\"\n",
+    );
+}
+
 /// The end-to-end gap this closes: `copy(y = 4)` needs `copy`'s PARAMETER NAMES and `val (a, b) = q`
 /// needs `component1`/`component2`'s `operator` marks. Both methods were always emitted into the class
 /// file; only the `@Metadata` describing them was missing, so a second krusty compilation reported

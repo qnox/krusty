@@ -40,12 +40,116 @@ fn first_error(output: &str) -> Option<ObservedError> {
 }
 
 #[test]
+fn generic_cast_is_accepted_by_both_frontends() {
+    let source = "fun <T> materialize(): T = 42 as T";
+    let root =
+        std::env::temp_dir().join(format!("krusty_generic_cast_parity_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let kt = root.join("GenericCast.kt");
+    fs::write(&kt, source).unwrap();
+    let args = vec![
+        kt.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        root.join("kotlinc-out").to_string_lossy().into_owned(),
+    ];
+    let Some((code, stderr)) = common::kotlinc_compile(&args) else {
+        eprintln!("skipping generic cast parity: kotlinc server unavailable");
+        return;
+    };
+    assert_eq!(code, 0, "kotlinc rejected generic cast: {stderr}");
+    common::expect_front_end_ok_files_with_stdlib(&[source], "generic cast parity");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn constructor_infers_nested_function_type() {
+    let diagnostics = common::front_end_diagnostics(
+        "class C<T>(val consume: ((T) -> Unit)?)\n\
+         fun bad() { val f: (String) -> Unit = { }; val c = C(f); c.consume!!(1) }",
+        &[],
+        None,
+    );
+    assert_eq!(
+        diagnostics,
+        ["argument type mismatch: actual type is 'Int', but 'String' was expected."]
+    );
+}
+
+#[test]
+fn callable_reference_bound_failure_is_inference_error() {
+    let diagnostics = common::front_end_diagnostics(
+        "interface Bound\n\
+         fun foo(x: Int, y: Char = 'K'): String = \"\"\n\
+         fun <T : Bound, U> hold(f: (T) -> U): U = hold(f)\n\
+         fun bad(): String = hold(::foo)",
+        &[],
+        None,
+    );
+    assert_eq!(
+        diagnostics,
+        ["cannot infer type for type parameter 'T'. Specify it explicitly."]
+    );
+}
+
+#[test]
+fn constructor_header_lambda_this_matches_kotlinc() {
+    let source = r#"
+enum class Choice(val callback: () -> Enum.Companion) {
+    RETAIN({ this })
+}
+
+open class Base(val callback: () -> Base.Companion) {
+    companion object
+}
+
+class Derived : Base({ this })
+"#;
+    let root = std::env::temp_dir().join(format!(
+        "krusty_enum_entry_this_parity_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let kt = root.join("EnumEntryThis.kt");
+    fs::write(&kt, source).unwrap();
+    let args = vec![
+        kt.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        root.join("kotlinc-out").to_string_lossy().into_owned(),
+    ];
+    let Some((kotlinc_code, kotlinc_stderr)) = common::kotlinc_compile(&args) else {
+        eprintln!("skipping enum-entry this parity: kotlinc server unavailable");
+        return;
+    };
+    let diagnostics = common::front_end_diagnostics(
+        source,
+        std::slice::from_ref(&common::stdlib_jar()),
+        Some(common::jdk_modules().as_path()),
+    );
+    let _ = fs::remove_dir_all(&root);
+
+    assert_eq!(
+        kotlinc_code, 0,
+        "kotlinc rejected enum this: {kotlinc_stderr}"
+    );
+    assert!(diagnostics.is_empty(), "krusty: {diagnostics:?}");
+}
+
+#[test]
 fn errors_match_kotlinc_in_text_and_location() {
     let krusty = common::krusty_binary();
 
     // Snippets within krusty's subset that produce a diagnostic kotlinc also produces identically.
     let cases = [
         "fun f(): Int = q",
+        // A qualified expression commits to its lexical root before resolving later segments.
+        // `java` is the local Int here, not the lower-priority JDK package, so both compilers must
+        // diagnose `io` and must not backtrack to `java.io.File`.
+        "fun f() { val java = 1; val file = java.io.File(\"A\") }",
+        // The same rule applies to a top-level property root: package lookup is considered only when
+        // the expression/value scope has no winning declaration named `java`.
+        "val java = 1\nfun f() { val file = java.io.File(\"A\") }",
         "fun f(a: Int): String = a",
         "fun f(): String = null",
         "val x: String = null",
@@ -144,6 +248,9 @@ fn errors_match_kotlinc_in_text_and_location() {
         // The `as` sibling reports identically.
         "fun f(p: Any) = p as DefinitelyAbsentClassifier",
         "fun f(p: Any) = p as List<DefinitelyAbsentClassifier>",
+        "fun f(p: Any) = p is (DefinitelyAbsentClassifier) -> String",
+        "fun f(p: Any) = p is Function1<DefinitelyAbsentClassifier, String>",
+        "fun f(p: Any) = p is Function1<Any?, Any?>",
         // Casts permit an erased function shape, so an unresolved parameter remains the primary
         // diagnostic. (`is` is different and is pinned by the unsupported-shape test below.)
         "fun f(p: Any) = p as (DefinitelyAbsentClassifier) -> String",
@@ -189,6 +296,143 @@ fn errors_match_kotlinc_in_text_and_location() {
 }
 
 #[test]
+fn jvm_builtin_errors_match_kotlinc() {
+    let krusty = common::krusty_binary();
+    let root = std::env::temp_dir().join(format!("krusty_jvm_builtin_diag_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let source = "fun f(a: Array<String>): Array<String> = a.clone(1)";
+    let kt = root.join("CloneError.kt");
+    fs::write(&kt, source).unwrap();
+    let stdlib = common::stdlib_jar();
+
+    let kr = Command::new(&krusty)
+        .args(["-d", root.join("o").to_str().unwrap(), "-cp"])
+        .arg(&stdlib)
+        .arg(&kt)
+        .output()
+        .unwrap();
+    let kr_error = first_error(String::from_utf8_lossy(&kr.stderr).as_ref())
+        .or_else(|| first_error(&String::from_utf8_lossy(&kr.stdout)));
+
+    let args = vec![
+        kt.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        root.join("ko").to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        stdlib.to_string_lossy().into_owned(),
+    ];
+    let Some((_, kc_err)) = common::kotlinc_compile(&args) else {
+        eprintln!("skipping jvm_builtin_errors_match_kotlinc: kotlinc server unavailable");
+        return;
+    };
+    let kc_error = first_error(&kc_err);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(kr_error, kc_error, "diagnostic mismatch for {source:?}");
+}
+
+#[test]
+fn kotlin_internal_exact_requires_an_exact_argument_type() {
+    let root = std::env::temp_dir().join(format!(
+        "krusty_kotlin_internal_exact_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+
+    let ordinary = root.join("Ordinary.kt");
+    fs::write(
+        &ordinary,
+        "fun <T> ordinary(value: T) {}\nfun use() = ordinary<CharSequence>(\"x\")",
+    )
+    .unwrap();
+    let ordinary_args = vec![
+        ordinary.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        root.join("ordinary-out").to_string_lossy().into_owned(),
+    ];
+    let Some((ordinary_code, ordinary_stderr)) = common::kotlinc_compile(&ordinary_args) else {
+        eprintln!("skipping kotlin_internal_exact contract: kotlinc server unavailable");
+        return;
+    };
+    assert_eq!(ordinary_code, 0, "{ordinary_stderr}");
+
+    let exact = root.join("Exact.kt");
+    fs::write(
+        &exact,
+        concat!(
+            "@Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n",
+            "fun <T> exact(value: @kotlin.internal.Exact T) {}\n",
+            "fun use() = exact<CharSequence>(\"x\")",
+        ),
+    )
+    .unwrap();
+    let exact_args = vec![
+        exact.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        root.join("exact-out").to_string_lossy().into_owned(),
+    ];
+    let Some((exact_code, exact_stderr)) = common::kotlinc_compile(&exact_args) else {
+        eprintln!("skipping kotlin_internal_exact contract: kotlinc server unavailable");
+        return;
+    };
+    assert_ne!(
+        exact_code, 0,
+        "@Exact unexpectedly accepted the widened type"
+    );
+    assert!(
+        exact_stderr.contains("argument type mismatch"),
+        "unexpected kotlinc diagnostic: {exact_stderr}"
+    );
+
+    let krusty = common::krusty_binary();
+    let krusty_output = Command::new(krusty)
+        .args(["-d", root.join("krusty-out").to_str().unwrap()])
+        .arg(&exact)
+        .output()
+        .unwrap();
+    let krusty_error = first_error(String::from_utf8_lossy(&krusty_output.stderr).as_ref())
+        .or_else(|| first_error(&String::from_utf8_lossy(&krusty_output.stdout)));
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(krusty_error, first_error(&exact_stderr));
+}
+
+#[test]
+fn kotlin_internal_exact_can_require_two_arguments_to_have_the_same_type() {
+    let root = std::env::temp_dir().join(format!(
+        "krusty_kotlin_internal_exact_pair_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("ExactPair.kt");
+    fs::write(
+        &source,
+        concat!(
+            "@Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n",
+            "fun <T> same(first: @kotlin.internal.Exact T, second: @kotlin.internal.Exact T) {}\n",
+            "fun use(first: String, second: CharSequence) = same(first, second)",
+        ),
+    )
+    .unwrap();
+    let args = vec![
+        source.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        root.join("out").to_string_lossy().into_owned(),
+    ];
+    let Some((code, stderr)) = common::kotlinc_compile(&args) else {
+        eprintln!("skipping kotlin_internal_exact pair contract: kotlinc server unavailable");
+        return;
+    };
+    let _ = fs::remove_dir_all(&root);
+    assert_ne!(code, 0, "two @Exact parameters accepted different types");
+    assert!(
+        stderr.contains("argument type mismatch"),
+        "unexpected kotlinc diagnostic: {stderr}"
+    );
+}
+
+#[test]
 fn resolved_but_unsupported_is_as_shapes_are_not_called_unresolved() {
     // `resolve_ty` also returns `Ty::Error` for a KNOWN classifier whose shape the backend cannot
     // implement. That is distinct from an absent classifier: the unresolved-reference helper must
@@ -198,17 +442,6 @@ fn resolved_but_unsupported_is_as_shapes_are_not_called_unresolved() {
         "fun f(p: Any) = p is Array<Nothing>",
         "fun f(p: Any) = p as Array",
         "fun f(p: Any) = p as Array<Nothing>",
-        // Kotlin rejects an arrow-function `is` as an erased-type check before it diagnoses a nested
-        // classifier. Krusty does not render that frontend message yet, but it must reject loudly and
-        // must not pretend the cast operator's unresolved-reference precedence applies here.
-        "fun f(p: Any) = p is (DefinitelyAbsentClassifier) -> String",
-        // The shared type resolver normalizes a named functional interface to the same semantic
-        // `Ty::Fun` shape. Pin that representation-level invariant so parser spelling cannot select a
-        // different diagnostic path.
-        "fun f(p: Any) = p is Function1<DefinitelyAbsentClassifier, String>",
-        // An explicit `Any?` is still a concrete generic argument, not a star projection. The parser
-        // retains that distinction even though both resolve to the same bound.
-        "fun f(p: Any) = p is Function1<Any?, Any?>",
     ] {
         let diagnostics = common::front_end_diagnostics(source, &[], None);
         assert!(

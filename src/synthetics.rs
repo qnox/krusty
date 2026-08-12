@@ -31,6 +31,12 @@ pub struct SynthCall<'a> {
     pub call: AstExprId,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum EnumClassifierCall {
+    Values,
+    ValueOf,
+}
+
 pub(crate) trait SyntheticIrBuilder {
     fn emit(&mut self, expr: IrExpr) -> ExprId;
     fn lower_arg(&mut self, expr: AstExprId, target: &Ty) -> Option<ExprId>;
@@ -41,26 +47,42 @@ pub(crate) trait SyntheticIrBuilder {
     fn build_fill_array(
         &mut self,
         elem: Ty,
+        reference_array: bool,
         size_arg: AstExprId,
         params: Vec<String>,
         body: AstExprId,
     ) -> Option<ExprId>;
     /// Resolve the first reified type argument at this call site.
     fn synth_reified_type_arg(&self, call: AstExprId) -> Option<Ty>;
-    /// Emit `E.values()` or `E.valueOf(String)`.
-    fn synth_enum_static(&mut self, enum_ty: Ty, values: bool, args: Vec<ExprId>)
-        -> Option<ExprId>;
+    /// Emit the selected implicit classifier callable on enum `E`.
+    fn synth_enum_static(
+        &mut self,
+        enum_ty: Ty,
+        operation: EnumClassifierCall,
+        args: Vec<ExprId>,
+    ) -> Option<ExprId>;
 }
 
 /// Builds a synthetic call body, or returns `None` to fall through to normal lowering.
 pub(crate) type BodyFn =
     fn(&'static Synthetic, &mut dyn SyntheticIrBuilder, &SynthCall<'_>) -> Option<ExprId>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyntheticKind {
+    PrimitiveVararg(Ty),
+    PrimitiveSize(Ty),
+    ReferenceVararg,
+    ReferenceSize,
+    EmptyReference,
+    NullableReference,
+}
+
 /// One synthetic function: its fully-qualified name (the identity shared with the JVM intrinsic
 /// registry), the source call name lookup matches on, and its mandatory IR body.
 pub struct Synthetic {
     pub fqn: &'static str,
     pub name: &'static str,
+    pub(crate) kind: SyntheticKind,
     pub(crate) body: BodyFn,
 }
 
@@ -70,61 +92,190 @@ pub fn lookup(name: &str) -> Option<&'static Synthetic> {
     TABLE.iter().find(|s| s.name == name)
 }
 
-const fn syn(fqn: &'static str, name: &'static str, body: BodyFn) -> Synthetic {
-    Synthetic { fqn, name, body }
+pub(crate) fn by_kind(kind: SyntheticKind) -> Option<&'static Synthetic> {
+    TABLE.iter().find(|synthetic| synthetic.kind == kind)
+}
+
+const fn syn(
+    fqn: &'static str,
+    name: &'static str,
+    kind: SyntheticKind,
+    body: BodyFn,
+) -> Synthetic {
+    Synthetic {
+        fqn,
+        name,
+        kind,
+        body,
+    }
 }
 
 static TABLE: &[Synthetic] = &[
     // Primitive vararg literals — `intArrayOf(1, 2, 3): IntArray`.
-    syn("kotlin/intArrayOf", "intArrayOf", b_prim_vararg),
-    syn("kotlin/longArrayOf", "longArrayOf", b_prim_vararg),
-    syn("kotlin/doubleArrayOf", "doubleArrayOf", b_prim_vararg),
-    syn("kotlin/floatArrayOf", "floatArrayOf", b_prim_vararg),
-    syn("kotlin/booleanArrayOf", "booleanArrayOf", b_prim_vararg),
-    syn("kotlin/charArrayOf", "charArrayOf", b_prim_vararg),
-    syn("kotlin/byteArrayOf", "byteArrayOf", b_prim_vararg),
-    syn("kotlin/shortArrayOf", "shortArrayOf", b_prim_vararg),
+    syn(
+        "kotlin/intArrayOf",
+        "intArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::Int),
+        b_prim_vararg,
+    ),
+    syn(
+        "kotlin/longArrayOf",
+        "longArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::Long),
+        b_prim_vararg,
+    ),
+    syn(
+        "kotlin/doubleArrayOf",
+        "doubleArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::Double),
+        b_prim_vararg,
+    ),
+    syn(
+        "kotlin/floatArrayOf",
+        "floatArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::Float),
+        b_prim_vararg,
+    ),
+    syn(
+        "kotlin/booleanArrayOf",
+        "booleanArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::Boolean),
+        b_prim_vararg,
+    ),
+    syn(
+        "kotlin/charArrayOf",
+        "charArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::Char),
+        b_prim_vararg,
+    ),
+    syn(
+        "kotlin/byteArrayOf",
+        "byteArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::Byte),
+        b_prim_vararg,
+    ),
+    syn(
+        "kotlin/shortArrayOf",
+        "shortArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::Short),
+        b_prim_vararg,
+    ),
     // Unsigned vararg literals — `uintArrayOf(1u, 2u): UIntArray`. The element is `UInt`/`ULong`; the
     // physical array is the unboxed `[I`/`[J` (see `ir_lower`'s `Ty::Array(UInt)` mapping).
-    syn("kotlin/uintArrayOf", "uintArrayOf", b_prim_vararg),
-    syn("kotlin/ulongArrayOf", "ulongArrayOf", b_prim_vararg),
+    syn(
+        "kotlin/uintArrayOf",
+        "uintArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::UInt),
+        b_prim_vararg,
+    ),
+    syn(
+        "kotlin/ulongArrayOf",
+        "ulongArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::ULong),
+        b_prim_vararg,
+    ),
     // Primitive size constructors — `IntArray(n)` / `IntArray(n) { i -> e }`.
-    syn("kotlin/IntArray", "IntArray", b_prim_size),
-    syn("kotlin/LongArray", "LongArray", b_prim_size),
-    syn("kotlin/DoubleArray", "DoubleArray", b_prim_size),
-    syn("kotlin/FloatArray", "FloatArray", b_prim_size),
-    syn("kotlin/BooleanArray", "BooleanArray", b_prim_size),
-    syn("kotlin/CharArray", "CharArray", b_prim_size),
-    syn("kotlin/ByteArray", "ByteArray", b_prim_size),
-    syn("kotlin/ShortArray", "ShortArray", b_prim_size),
+    syn(
+        "kotlin/IntArray",
+        "IntArray",
+        SyntheticKind::PrimitiveSize(Ty::Int),
+        b_prim_size,
+    ),
+    syn(
+        "kotlin/LongArray",
+        "LongArray",
+        SyntheticKind::PrimitiveSize(Ty::Long),
+        b_prim_size,
+    ),
+    syn(
+        "kotlin/DoubleArray",
+        "DoubleArray",
+        SyntheticKind::PrimitiveSize(Ty::Double),
+        b_prim_size,
+    ),
+    syn(
+        "kotlin/FloatArray",
+        "FloatArray",
+        SyntheticKind::PrimitiveSize(Ty::Float),
+        b_prim_size,
+    ),
+    syn(
+        "kotlin/BooleanArray",
+        "BooleanArray",
+        SyntheticKind::PrimitiveSize(Ty::Boolean),
+        b_prim_size,
+    ),
+    syn(
+        "kotlin/CharArray",
+        "CharArray",
+        SyntheticKind::PrimitiveSize(Ty::Char),
+        b_prim_size,
+    ),
+    syn(
+        "kotlin/ByteArray",
+        "ByteArray",
+        SyntheticKind::PrimitiveSize(Ty::Byte),
+        b_prim_size,
+    ),
+    syn(
+        "kotlin/ShortArray",
+        "ShortArray",
+        SyntheticKind::PrimitiveSize(Ty::Short),
+        b_prim_size,
+    ),
     // Unsigned size constructors — `UIntArray(n) { i -> e }` (unboxed `[I`/`[J`).
-    syn("kotlin/UIntArray", "UIntArray", b_prim_size),
-    syn("kotlin/ULongArray", "ULongArray", b_prim_size),
+    syn(
+        "kotlin/UIntArray",
+        "UIntArray",
+        SyntheticKind::PrimitiveSize(Ty::UInt),
+        b_prim_size,
+    ),
+    syn(
+        "kotlin/ULongArray",
+        "ULongArray",
+        SyntheticKind::PrimitiveSize(Ty::ULong),
+        b_prim_size,
+    ),
     // Reference creators.
-    syn("kotlin/arrayOf", "arrayOf", b_ref_vararg),
-    syn("kotlin/Array", "Array", b_ref_array),
-    syn("kotlin/emptyArray", "emptyArray", b_empty),
-    syn("kotlin/arrayOfNulls", "arrayOfNulls", b_arr_nulls),
-    // Enum reflection intrinsics have no callable JVM facade.
-    syn("kotlin/enumValueOf", "enumValueOf", b_enum_value_of),
-    syn("kotlin/enumValues", "enumValues", b_enum_values),
+    syn(
+        "kotlin/arrayOf",
+        "arrayOf",
+        SyntheticKind::ReferenceVararg,
+        b_ref_vararg,
+    ),
+    syn(
+        "kotlin/Array",
+        "Array",
+        SyntheticKind::ReferenceSize,
+        b_ref_array,
+    ),
+    syn(
+        "kotlin/emptyArray",
+        "emptyArray",
+        SyntheticKind::EmptyReference,
+        b_empty,
+    ),
+    syn(
+        "kotlin/arrayOfNulls",
+        "arrayOfNulls",
+        SyntheticKind::NullableReference,
+        b_arr_nulls,
+    ),
 ];
 
 /// `enumValueOf<E>(name)` → `E.valueOf(name)`. Declines when the reified `E` is indeterminable.
-fn b_enum_value_of(
-    _syn: &'static Synthetic,
+pub(crate) fn lower_enum_value_of(
     lw: &mut dyn SyntheticIrBuilder,
     c: &SynthCall<'_>,
 ) -> Option<ExprId> {
     let [name_arg] = c.args else { return None };
     let enum_ty = lw.synth_reified_type_arg(c.call)?;
     let name_v = lw.lower_arg(*name_arg, &Ty::String)?;
-    lw.synth_enum_static(enum_ty, false, vec![name_v])
+    lw.synth_enum_static(enum_ty, EnumClassifierCall::ValueOf, vec![name_v])
 }
 
 /// `enumValues<E>()` → `E.values()`.
-fn b_enum_values(
-    _syn: &'static Synthetic,
+pub(crate) fn lower_enum_values(
     lw: &mut dyn SyntheticIrBuilder,
     c: &SynthCall<'_>,
 ) -> Option<ExprId> {
@@ -132,32 +283,21 @@ fn b_enum_values(
         return None;
     }
     let enum_ty = lw.synth_reified_type_arg(c.call)?;
-    lw.synth_enum_static(enum_ty, true, vec![])
+    lw.synth_enum_static(enum_ty, EnumClassifierCall::Values, vec![])
 }
 
 /// The primitive element of an array creator whose name fixes it (`IntArray`/`intArrayOf` → `Int`).
 /// Local to the array bodies — kept out of the core `Synthetic` so the registry stays general.
-fn prim_elem(name: &str) -> Option<Ty> {
-    Some(match name {
-        "intArrayOf" | "IntArray" => Ty::Int,
-        "longArrayOf" | "LongArray" => Ty::Long,
-        "doubleArrayOf" | "DoubleArray" => Ty::Double,
-        "floatArrayOf" | "FloatArray" => Ty::Float,
-        "booleanArrayOf" | "BooleanArray" => Ty::Boolean,
-        "charArrayOf" | "CharArray" => Ty::Char,
-        "byteArrayOf" | "ByteArray" => Ty::Byte,
-        "shortArrayOf" | "ShortArray" => Ty::Short,
-        "uintArrayOf" | "UIntArray" => Ty::UInt,
-        "ulongArrayOf" | "ULongArray" => Ty::ULong,
-        _ => return None,
-    })
-}
-
 /// Lower each argument to a `Vararg` of `elem` (`int[]`/`T[]`/`Integer[]`). A branchy element is declined
 /// (its stackmap frame would strand the partially-built array). A boxed-primitive element (`arrayOf(1)` →
 /// `Integer[]`) is allocated as the wrapper array (the emitter's `array_element_jvm`); each value is boxed
 /// by `lower_arg` / the Vararg emit. `intArrayOf` passes a primitive `Ty` here, so it stays `[I`.
-fn vararg_of(lw: &mut dyn SyntheticIrBuilder, elem: Ty, args: &[AstExprId]) -> Option<ExprId> {
+fn vararg_of(
+    lw: &mut dyn SyntheticIrBuilder,
+    elem: Ty,
+    reference_array: bool,
+    args: &[AstExprId],
+) -> Option<ExprId> {
     let mut elements = Vec::new();
     for &arg in args {
         if lw.synth_is_branchy(arg) {
@@ -167,8 +307,13 @@ fn vararg_of(lw: &mut dyn SyntheticIrBuilder, elem: Ty, args: &[AstExprId]) -> O
     }
     // The whole array type (`kotlin/IntArray` / `kotlin/Array<Int>` / `kotlin/Array<String>`) drives the
     // emitter — a boxed `Array<Int>` becomes `Integer[]`, a primitive `IntArray` stays `[I`.
+    let array_type = if reference_array {
+        Ty::obj_args("kotlin/Array", &[elem])
+    } else {
+        Ty::array(elem)
+    };
     Some(lw.emit(IrExpr::Vararg {
-        array_type: Ty::array(elem),
+        array_type,
         spreads: vec![false; elements.len()],
         elements,
     }))
@@ -182,7 +327,10 @@ fn b_prim_vararg(
     lw: &mut dyn SyntheticIrBuilder,
     c: &SynthCall<'_>,
 ) -> Option<ExprId> {
-    vararg_of(lw, prim_elem(syn.name)?, c.args)
+    let SyntheticKind::PrimitiveVararg(elem) = syn.kind else {
+        return None;
+    };
+    vararg_of(lw, elem, false, c.args)
 }
 
 /// `IntArray(n)` → the `kotlin/IntArray.<init>` allocation intrinsic; `IntArray(n) { i -> e }` → a
@@ -192,7 +340,9 @@ fn b_prim_size(
     lw: &mut dyn SyntheticIrBuilder,
     c: &SynthCall<'_>,
 ) -> Option<ExprId> {
-    let elem = prim_elem(syn.name)?;
+    let SyntheticKind::PrimitiveSize(elem) = syn.kind else {
+        return None;
+    };
     match c.args {
         [size_arg] => {
             let size = lw.synth_expr(*size_arg)?;
@@ -213,7 +363,7 @@ fn b_prim_size(
         }
         [size_arg, init_arg] => {
             let (params, body) = lw.synth_arg_lambda(*init_arg)?;
-            lw.build_fill_array(elem, *size_arg, params, body)
+            lw.build_fill_array(elem, false, *size_arg, params, body)
         }
         _ => None,
     }
@@ -227,11 +377,8 @@ fn b_ref_vararg(
     c: &SynthCall<'_>,
 ) -> Option<ExprId> {
     // Box a primitive element (`arrayOf(1,2,3)` → `Integer[]`); a reference element is unchanged.
-    let elem = lw
-        .synth_array_elem(c.call)
-        .map(|t| t.boxed_ref().unwrap_or(t))
-        .filter(|t| t.is_reference())?;
-    vararg_of(lw, elem, c.args)
+    let elem = lw.synth_array_elem(c.call)?;
+    vararg_of(lw, elem, true, c.args)
 }
 
 /// `Array<T>(n) { i -> e }` → a fill loop over a reference array. The element is a reference, or a boxed
@@ -247,12 +394,9 @@ fn b_ref_array(
     };
     // Box a primitive element so the array is `Integer[]` (the checker types `Array(n){…}` as
     // `Obj("kotlin/Array", [Int])`, element exposed unboxed). A reference element is unchanged.
-    let elem = lw
-        .synth_array_elem(c.call)
-        .map(|t| t.boxed_ref().unwrap_or(t))
-        .filter(|t| t.is_reference())?;
+    let elem = lw.synth_array_elem(c.call)?;
     let (params, body) = lw.synth_arg_lambda(*init_arg)?;
-    lw.build_fill_array(elem, *size_arg, params, body)
+    lw.build_fill_array(elem, true, *size_arg, params, body)
 }
 
 /// `emptyArray<T>()` → an empty `Vararg` of the reified element (`new T[0]`).
@@ -262,7 +406,7 @@ fn b_empty(
     c: &SynthCall<'_>,
 ) -> Option<ExprId> {
     let elem = lw.synth_array_elem(c.call)?;
-    vararg_of(lw, elem, &[])
+    vararg_of(lw, elem, true, &[])
 }
 
 /// `arrayOfNulls<T>(n)` → `new T[n]` (a reference array of nulls; a boxed primitive `Array<Int?>` =
@@ -273,13 +417,10 @@ fn b_arr_nulls(
     c: &SynthCall<'_>,
 ) -> Option<ExprId> {
     let [size_arg] = c.args else { return None };
-    let elem = lw
-        .synth_array_elem(c.call)
-        .map(|t| t.boxed_ref().unwrap_or(t))
-        .filter(|t| t.is_reference())?;
+    let elem = lw.synth_array_elem(c.call)?;
     let size = lw.lower_arg(*size_arg, &Ty::Int)?;
     Some(lw.emit(IrExpr::NewArray {
-        array_type: Ty::array(elem),
+        array_type: Ty::obj_args("kotlin/Array", &[elem]),
         size,
     }))
 }
@@ -330,42 +471,29 @@ mod tests {
     }
 
     #[test]
-    fn prim_elem_maps_both_the_vararg_and_size_spellings() {
-        assert_eq!(prim_elem("intArrayOf"), Some(Ty::Int));
-        assert_eq!(prim_elem("IntArray"), Some(Ty::Int));
-        assert_eq!(prim_elem("longArrayOf"), Some(Ty::Long));
-        assert_eq!(prim_elem("LongArray"), Some(Ty::Long));
-        assert_eq!(prim_elem("doubleArrayOf"), Some(Ty::Double));
-        assert_eq!(prim_elem("DoubleArray"), Some(Ty::Double));
-        assert_eq!(prim_elem("floatArrayOf"), Some(Ty::Float));
-        assert_eq!(prim_elem("FloatArray"), Some(Ty::Float));
-        assert_eq!(prim_elem("booleanArrayOf"), Some(Ty::Boolean));
-        assert_eq!(prim_elem("BooleanArray"), Some(Ty::Boolean));
-        assert_eq!(prim_elem("charArrayOf"), Some(Ty::Char));
-        assert_eq!(prim_elem("CharArray"), Some(Ty::Char));
-        assert_eq!(prim_elem("byteArrayOf"), Some(Ty::Byte));
-        assert_eq!(prim_elem("ByteArray"), Some(Ty::Byte));
-        assert_eq!(prim_elem("shortArrayOf"), Some(Ty::Short));
-        assert_eq!(prim_elem("ShortArray"), Some(Ty::Short));
-        assert_eq!(prim_elem("uintArrayOf"), Some(Ty::UInt));
-        assert_eq!(prim_elem("UIntArray"), Some(Ty::UInt));
-        assert_eq!(prim_elem("ulongArrayOf"), Some(Ty::ULong));
-        assert_eq!(prim_elem("ULongArray"), Some(Ty::ULong));
-    }
-
-    #[test]
-    fn prim_elem_declines_reference_creators_and_unknowns() {
-        // The reference creators (`arrayOf`, `Array`, …) are not primitive-element-fixed.
-        assert_eq!(prim_elem("arrayOf"), None);
-        assert_eq!(prim_elem("Array"), None);
-        assert_eq!(prim_elem("emptyArray"), None);
-        assert_eq!(prim_elem("arrayOfNulls"), None);
-        assert_eq!(prim_elem("whatever"), None);
+    fn creator_kind_carries_the_element_without_parsing_the_name() {
+        assert_eq!(
+            lookup("intArrayOf").map(|s| s.kind),
+            Some(SyntheticKind::PrimitiveVararg(Ty::Int))
+        );
+        assert_eq!(
+            lookup("IntArray").map(|s| s.kind),
+            Some(SyntheticKind::PrimitiveSize(Ty::Int))
+        );
+        assert_eq!(
+            lookup("arrayOf").map(|s| s.kind),
+            Some(SyntheticKind::ReferenceVararg)
+        );
     }
 
     #[test]
     fn syn_constructs_the_expected_identity() {
-        let s = syn("kotlin/intArrayOf", "intArrayOf", b_prim_vararg);
+        let s = syn(
+            "kotlin/intArrayOf",
+            "intArrayOf",
+            SyntheticKind::PrimitiveVararg(Ty::Int),
+            b_prim_vararg,
+        );
         assert_eq!(s.fqn, "kotlin/intArrayOf");
         assert_eq!(s.name, "intArrayOf");
     }

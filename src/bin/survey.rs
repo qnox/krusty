@@ -1,13 +1,17 @@
-use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures_with_cp, FrontendSymbols};
+use krusty::diag::{line_col, DiagSink};
+use krusty::frontend::{
+    check_file, check_file_in_source_set, collect_signatures_with_cp, FrontendSymbols,
+};
 use krusty::ir::IrFile;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 const COROUTINE_HELPERS: &str = r#"package helpers
 import kotlin.coroutines.*
@@ -52,19 +56,40 @@ class ResultContinuation : Continuation<Any?> {
 }
 "#;
 
+fn first_diagnostic(stage: &str, diagnostics: &DiagSink, sources: &[(&str, &str)]) -> String {
+    let diagnostic = &diagnostics.diags[0];
+    let (name, source) = sources
+        .get(diagnostic.file as usize)
+        .copied()
+        .unwrap_or(("<source>", ""));
+    let (line, column) = line_col(source, diagnostic.span.lo);
+    let source_line = source
+        .lines()
+        .nth(line.saturating_sub(1))
+        .unwrap_or("")
+        .trim();
+    format!(
+        "{stage}: {}\n{name}:{line}:{column}: {source_line}",
+        diagnostic.msg
+    )
+}
+
 /// Run the full pipeline against the real classpath (stdlib + JDK `lib/modules`), so skip reasons
 /// match the conformance harness instead of a stdlib-less approximation. Returns the first error
 /// with a stage prefix for the
 /// silent lower/emit bailouts that carry no diagnostic).
-fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
+fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str, frontend_only: bool) -> Option<String> {
     let mut d = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
     let toks = lex(src, &mut d);
+    if d.has_errors() {
+        return Some(first_diagnostic("lex", &d, &[(stem, src)]));
+    }
     let mut files = vec![krusty::parser::parse_with_features(
         src, &toks, &mut d, &features,
     )];
     if d.has_errors() {
-        return Some(d.diags[0].msg.clone());
+        return Some(first_diagnostic("parse", &d, &[(stem, src)]));
     }
     // Multiplatform: a matched `expect` header is replaced by its `actual` (mirrors the gate).
     if features.has("MultiPlatformProjects") {
@@ -73,11 +98,14 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
     let platform = Box::new(JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
     if d.has_errors() {
-        return Some(d.diags[0].msg.clone());
+        return Some(first_diagnostic("signatures", &d, &[(stem, src)]));
     }
     let info = check_file(&files[0], &mut syms, &mut d);
     if d.has_errors() {
-        return Some(d.diags[0].msg.clone());
+        return Some(first_diagnostic("check", &d, &[(stem, src)]));
+    }
+    if frontend_only {
+        return None;
     }
     let facade = file_class_name(stem, files[0].package.as_deref());
     let runtime = JvmLibraries::new(cp.clone());
@@ -180,18 +208,32 @@ fn first_error_blocks(
     blocks: &[(String, String)],
     cp: &Rc<Classpath>,
     features: &krusty::features::LangFeatures,
+    frontend_only: bool,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut d = DiagSink::new();
-    let mut files: Vec<_> = blocks
-        .iter()
-        .map(|(_, content)| {
-            let toks = lex(content, &mut d);
-            krusty::parser::parse_with_features(content, &toks, &mut d, features)
-        })
-        .collect();
-    if d.has_errors() {
-        return Err(d.diags[0].msg.clone());
+    let mut files = Vec::with_capacity(blocks.len());
+    for (index, (_, content)) in blocks.iter().enumerate() {
+        d.set_file(index as u32);
+        let toks = lex(content, &mut d);
+        if d.has_errors() {
+            let sources = blocks
+                .iter()
+                .map(|(name, source)| (name.as_str(), source.as_str()))
+                .collect::<Vec<_>>();
+            return Err(first_diagnostic("lex", &d, &sources));
+        }
+        files.push(krusty::parser::parse_with_features(
+            content, &toks, &mut d, features,
+        ));
+        if d.has_errors() {
+            let sources = blocks
+                .iter()
+                .map(|(name, source)| (name.as_str(), source.as_str()))
+                .collect::<Vec<_>>();
+            return Err(first_diagnostic("parse", &d, &sources));
+        }
     }
+    d.set_file(0);
     // Multiplatform: a matched `expect` header is replaced by its `actual` across the set.
     if features.has("MultiPlatformProjects") {
         krusty::frontend::strip_matched_expects(&mut files);
@@ -200,7 +242,11 @@ fn first_error_blocks(
     let platform = Box::new(JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
     if d.has_errors() {
-        return Err(d.diags[0].msg.clone());
+        let sources = blocks
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        return Err(first_diagnostic("signatures", &d, &sources));
     }
 
     // Use the production registrar for both positive facade owners and explicit splice-only
@@ -212,9 +258,16 @@ fn first_error_blocks(
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
         d.set_file(i as u32);
-        let info = check_file(file, &mut syms, &mut d);
+        let info = check_file_in_source_set(&files, i as u32, &mut syms, &mut d);
         if d.has_errors() {
-            return Err(d.diags[0].msg.clone());
+            let sources = blocks
+                .iter()
+                .map(|(name, source)| (name.as_str(), source.as_str()))
+                .collect::<Vec<_>>();
+            return Err(first_diagnostic("check", &d, &sources));
+        }
+        if frontend_only {
+            continue;
         }
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         let runtime = JvmLibraries::new(cp.clone());
@@ -240,7 +293,11 @@ fn first_error_blocks(
             cp,
         )?);
     }
-    require_compilation_output(all)
+    if frontend_only {
+        Ok(all)
+    } else {
+        require_compilation_output(all)
+    }
 }
 
 /// Survey a `// MODULE:` test the way the gate's `compile_module_test` builds it: each build unit
@@ -250,6 +307,7 @@ fn first_error_module(
     src: &str,
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
+    frontend_only: bool,
 ) -> Option<String> {
     static UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let Some(mut modules) = krusty::conformance::split_modules(src) else {
@@ -263,8 +321,9 @@ fn first_error_module(
     let uid = UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("krusty_survey_mod_{}_{uid}", std::process::id()));
     let mut dirmap: HashMap<String, PathBuf> = HashMap::new();
+    let units = krusty::conformance::module_units(&modules);
     let result = (|| {
-        for m in &krusty::conformance::module_units(&modules) {
+        for (module_index, m) in units.iter().enumerate() {
             if !m.java_files.is_empty() {
                 return Some("module: .java sources (javac-dependent, gate-only)".into());
             }
@@ -290,8 +349,20 @@ fn first_error_module(
             }
             // Dependency-class dirs are unique per test — a fresh Classpath, not the shared cache.
             let cp = Rc::new(Classpath::new(cp_paths));
-            let classes = match first_error_blocks(&m.files, &cp, &features) {
+            // A later module resolves this unit through its emitted classpath. Only those dependency
+            // units need backend output during a frontend survey; the terminal unit stops after
+            // checking. If a dependency cannot be emitted, the frontend survey cannot inspect its
+            // consumers faithfully, so leave that case to the full conformance gate instead of
+            // misclassifying a backend limitation as a frontend error.
+            let needed_by_later = units[module_index + 1..]
+                .iter()
+                .any(|later| later.deps.iter().any(|dependency| dependency == &m.name));
+            let check_only = frontend_only && !needed_by_later;
+            let classes = match first_error_blocks(&m.files, &cp, &features, check_only) {
                 Ok(c) => c,
+                Err(e) if frontend_only && (e.starts_with("lower:") || e.starts_with("emit:")) => {
+                    return None
+                }
                 Err(e) => return Some(e),
             };
             let moddir = tmp.join(&m.name);
@@ -325,11 +396,17 @@ fn truncate_chars(message: &str, limit: usize) -> String {
 }
 
 fn categorize(err: &str) -> String {
+    let err = err.lines().next().unwrap_or(err);
     // Backend (`lower:`/`emit:`) diagnostics are already curated, precise reasons — keep them
     // verbatim rather than re-bucketing on a substring coincidence (e.g. a `lower:` reason that
     // happens to contain "bridge").
     if err.starts_with("lower:") || err.starts_with("emit:") {
         return truncate_chars(err, 70);
+    }
+    for stage in ["lex:", "parse:", "signatures:", "check:"] {
+        if err.starts_with(stage) {
+            return truncate_chars(err, 90);
+        }
     }
     if err.contains("class bodies support") {
         return "nested decl in class body".into();
@@ -355,6 +432,9 @@ fn categorize(err: &str) -> String {
     if err.contains("conflicting declarations") {
         return "conflicting declarations".into();
     }
+    if err.starts_with("compiler panic:") {
+        return format!("compiler panic: {}", truncate_chars(err, 80));
+    }
     if err.contains("krusty: ") {
         let m = err.trim_start_matches("krusty: ");
         return format!("krusty: {}", truncate_chars(m, 60));
@@ -365,81 +445,44 @@ fn categorize(err: &str) -> String {
     format!("other: {}", truncate_chars(err, 60))
 }
 
-fn collect_kt(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        let mut es: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-        es.sort();
-        for p in es {
-            if p.is_dir() {
-                collect_kt(&p, out);
-            } else if p.extension().is_some_and(|e| e == "kt") {
-                out.push(p);
-            }
-        }
-    }
-}
-
 fn main() {
-    // Deeply nested corpus sources overflow the default main stack; the gate compiles on 64 MiB
-    // worker stacks — match it.
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(run)
-        .expect("spawn survey thread")
-        .join()
-        .expect("survey thread panicked");
+    run();
 }
 
-fn run() {
-    let mut args = std::env::args().skip(1);
-    let box_dir = args
-        .next()
-        .expect("usage: survey <box_dir> [--samples <category>]");
-    let samples_cat = if args.next().as_deref() == Some("--samples") {
-        args.next()
-    } else {
-        None
-    };
+#[derive(Debug)]
+enum SurveyOutcome {
+    Passed,
+    Failed(String),
+    NotApplicable,
+}
 
-    // Build each classpath from source directives through the shared `toolchain` path used by
-    // conformance and e2e tests. The JDK `lib/modules` bootclasspath is appended so `java.*`
-    // resolves, and each distinct jar-set gets one cached `Classpath`.
-    let jdk_modules = krusty::toolchain::jdk_modules();
-    let mut cp_cache: HashMap<Vec<PathBuf>, Rc<Classpath>> = HashMap::new();
-
-    let mut errors: HashMap<String, Vec<String>> = HashMap::new();
-    let mut scanned = 0u32;
-    let mut compiled = 0u32;
-    let mut files = Vec::new();
-    collect_kt(std::path::Path::new(&box_dir), &mut files);
-    for f in &files {
-        let src = std::fs::read_to_string(f).unwrap_or_default();
-        let src = src.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
-        if !src.contains("fun box()") {
-            continue;
-        }
-        // INDY-lambda mode is outside this survey; otherwise defer backend
-        // applicability to the shared `conformance` directive logic.
-        if src.contains("// LAMBDAS: INDY") || !krusty::conformance::applies(&src) {
-            continue;
-        }
-        scanned += 1;
-        let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("File");
-        let base_jars = krusty::toolchain::classpath_jars_for(&src);
-        let err = if src.contains("// MODULE:") {
-            first_error_module(&src, &base_jars, jdk_modules.as_deref())
+fn survey_file(
+    file: &Path,
+    jdk_modules: Option<&Path>,
+    frontend_only: bool,
+    cp_cache: &mut HashMap<Vec<PathBuf>, Rc<Classpath>>,
+) -> SurveyOutcome {
+    krusty::trace_compiler!("survey", "checking {}", file.display());
+    let src = std::fs::read_to_string(file).unwrap_or_default();
+    let src = krusty::conformance::prepare_test_source(&src);
+    if !krusty::conformance::backend_applicable(&src, krusty::conformance::BACKENDS) {
+        return SurveyOutcome::NotApplicable;
+    }
+    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("File");
+    let base_jars = krusty::toolchain::classpath_jars_for(&src);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if src.contains("// MODULE:") {
+            first_error_module(&src, &base_jars, jdk_modules, frontend_only)
         } else {
             let mut cp_paths = base_jars;
-            if let Some(j) = &jdk_modules {
-                cp_paths.push(j.clone());
+            if let Some(jdk) = jdk_modules {
+                cp_paths.push(jdk.to_path_buf());
             }
             let cp = cp_cache
                 .entry(cp_paths.clone())
-                .or_insert_with(|| Rc::new(Classpath::new(cp_paths.clone())))
+                .or_insert_with(|| Rc::new(Classpath::new(cp_paths)))
                 .clone();
             if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
-                // The gate's `compile_multifile` shape: `// FILE:` blocks as one module, plus the
-                // generated coroutine helpers for `// WITH_COROUTINES` (even single-file).
                 let (mut blocks, java_blocks) = krusty::conformance::split_files(&src);
                 if blocks.is_empty() && java_blocks.is_empty() {
                     blocks.push((stem.to_string(), src.to_string()));
@@ -451,27 +494,207 @@ fn run() {
                     Some("multifile: .java sources (javac-dependent, gate-only)".into())
                 } else {
                     let features = krusty::features::LangFeatures::from_source(&src);
-                    first_error_blocks(&blocks, &cp, &features).err()
+                    first_error_blocks(&blocks, &cp, &features, frontend_only).err()
                 }
             } else {
-                first_error(&src, &cp, stem)
+                first_error(&src, &cp, stem, frontend_only)
             }
-        };
-        match err {
-            None => compiled += 1,
-            Some(e) => {
-                let cat = categorize(&e);
-                errors
-                    .entry(cat)
-                    .or_default()
-                    .push(f.to_string_lossy().to_string());
+        }
+    })) {
+        Ok(None) => SurveyOutcome::Passed,
+        Ok(Some(error)) => SurveyOutcome::Failed(error),
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic payload");
+            SurveyOutcome::Failed(format!("compiler panic: {message}"))
+        }
+    }
+}
+
+fn run() {
+    let mut args = std::env::args().skip(1);
+    let box_dir = args.next().expect(
+        "usage: survey <box_dir> [--frontend-only] [--file <path>] [--samples <category>] [--report <path>]",
+    );
+    let mut samples_cat = None;
+    let mut report_path = None;
+    let mut only_file = None;
+    let mut frontend_only = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--frontend-only" => frontend_only = true,
+            "--file" => {
+                only_file = Some(PathBuf::from(args.next().expect("--file requires a path")));
+            }
+            "--samples" => {
+                samples_cat = Some(args.next().expect("--samples requires a category"));
+            }
+            "--report" => {
+                report_path = Some(PathBuf::from(
+                    args.next().expect("--report requires a path"),
+                ));
+            }
+            _ => panic!("unknown survey argument: {arg}"),
+        }
+    }
+
+    let jdk_modules = krusty::toolchain::jdk_modules();
+    let limit = std::env::var("KRUSTY_BOX_LIMIT")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(usize::MAX);
+    let files = match only_file.as_ref() {
+        Some(path) => vec![if path.is_absolute() {
+            path.clone()
+        } else {
+            Path::new(&box_dir).join(path)
+        }],
+        None => krusty::conformance::evenly_sample(
+            krusty::conformance::kotlin_files(std::path::Path::new(&box_dir)),
+            limit,
+        ),
+    };
+    let jobs = std::env::var("KRUSTY_SURVEY_JOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+        })
+        .max(1)
+        .min(files.len().max(1));
+    let next = AtomicUsize::new(0);
+    let completed = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicBool::new(false));
+    let active = Arc::new(Mutex::new(vec![None::<String>; jobs]));
+    {
+        let completed = Arc::clone(&completed);
+        let finished = Arc::clone(&finished);
+        let active = Arc::clone(&active);
+        let total = files.len();
+        std::thread::Builder::new()
+            .name("survey-progress".to_string())
+            .spawn(move || {
+                while !finished.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_secs(15));
+                    if finished.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let active = active.lock().expect("survey progress lock poisoned");
+                    eprintln!(
+                        "survey progress: {}/{} complete; active: {}",
+                        completed.load(Ordering::Relaxed),
+                        total,
+                        active
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(worker, file)| {
+                                file.as_ref().map(|file| format!("worker {worker}: {file}"))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" | "),
+                    );
+                }
+            })
+            .expect("spawn survey progress reporter");
+    }
+    let results = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(jobs);
+        for worker in 0..jobs {
+            let files = &files;
+            let next = &next;
+            let results = &results;
+            let completed = Arc::clone(&completed);
+            let active = Arc::clone(&active);
+            let jdk_modules = jdk_modules.as_deref();
+            workers.push(
+                std::thread::Builder::new()
+                    .name(format!("survey-{worker}"))
+                    .stack_size(64 * 1024 * 1024)
+                    .spawn_scoped(scope, move || {
+                        // `Classpath` contains thread-local `Rc` state. Each worker reuses its own
+                        // small set rather than sharing it or rebuilding it for every corpus file.
+                        let mut cp_cache = HashMap::new();
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(file) = files.get(index) else { break };
+                            active.lock().expect("survey progress lock poisoned")[worker] =
+                                Some(file.to_string_lossy().into_owned());
+                            let outcome =
+                                survey_file(file, jdk_modules, frontend_only, &mut cp_cache);
+                            results
+                                .lock()
+                                .expect("survey result lock poisoned")
+                                .push((file.to_string_lossy().to_string(), outcome));
+                            completed.fetch_add(1, Ordering::Relaxed);
+                        }
+                        active.lock().expect("survey progress lock poisoned")[worker] = None;
+                    })
+                    .expect("spawn survey worker"),
+            );
+        }
+        for worker in workers {
+            worker.join().expect("survey worker panicked");
+        }
+    });
+    finished.store(true, Ordering::Relaxed);
+
+    let mut results = results.into_inner().expect("survey result lock poisoned");
+    results.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    if only_file.is_some() {
+        for (file, outcome) in &results {
+            match outcome {
+                SurveyOutcome::Passed => println!("File: {file}\nFrontend: OK"),
+                SurveyOutcome::Failed(error) => println!("File: {file}\nError: {error}"),
+                SurveyOutcome::NotApplicable => {
+                    println!("File: {file}\nNot applicable to JVM_IR/K2")
+                }
             }
         }
     }
-    let total_skip: u32 = errors.values().map(|v| v.len() as u32).sum();
-    println!("Scanned: {scanned}  Compiled: {compiled}  Skip-errors: {total_skip}");
+    let discovered = results.len() as u32;
+    let mut attempted = 0u32;
+    let mut passed = 0u32;
+    let mut not_applicable = 0u32;
+    let mut errors: HashMap<String, Vec<String>> = HashMap::new();
+    for (file, outcome) in results {
+        match outcome {
+            SurveyOutcome::Passed => {
+                attempted += 1;
+                passed += 1;
+            }
+            SurveyOutcome::Failed(e) => {
+                attempted += 1;
+                let cat = categorize(&e);
+                errors.entry(cat).or_default().push(file);
+            }
+            SurveyOutcome::NotApplicable => not_applicable += 1,
+        }
+    }
+    let failed: u32 = errors.values().map(|v| v.len() as u32).sum();
+    println!(
+        "Discovered: {discovered}  Applicable: {attempted}  Passed: {passed}  Failed: {failed}  Not-applicable: {not_applicable}"
+    );
     let mut sorted: Vec<_> = errors.iter().collect();
-    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(b.0)));
+    if let Some(path) = report_path {
+        let mut report = String::from("count\tcategory\tfile\n");
+        for (category, files) in &sorted {
+            let category = category.replace('\t', "\\t").replace('\n', "\\n");
+            for file in *files {
+                report.push_str(&format!("{}\t{category}\t{file}\n", files.len()));
+            }
+        }
+        std::fs::write(&path, report).unwrap_or_else(|error| {
+            panic!("failed to write survey report {}: {error}", path.display())
+        });
+    }
     if let Some(cat) = &samples_cat {
         for (k, files) in &sorted {
             if k.contains(cat.as_str()) {
@@ -522,7 +745,7 @@ mod tests {
         ];
         let features =
             krusty::features::LangFeatures::from_source("// LANGUAGE: +MultiPlatformProjects");
-        let out = first_error_blocks(&blocks, &cp, &features);
+        let out = first_error_blocks(&blocks, &cp, &features, false);
         assert!(
             out.is_ok(),
             "an all-expect file must not bail the whole set: {out:?}"
@@ -540,7 +763,7 @@ mod tests {
             "typealias Greeting = String\n".to_string(),
         )];
         let features = krusty::features::LangFeatures::from_source("");
-        let out = first_error_blocks(&blocks, &cp, &features);
+        let out = first_error_blocks(&blocks, &cp, &features, false);
         assert_eq!(
             out.err().as_deref(),
             Some(
@@ -556,7 +779,18 @@ mod tests {
     fn typealias_only_file_uses_compilation_unit_empty_reason() {
         let Some(cp) = test_cp() else { return };
         assert_eq!(
-            first_error("typealias Greeting = String\n", &cp, "Alias").as_deref(),
+            first_error("typealias Greeting = String\n", &cp, "Alias", false).as_deref(),
+            Some(EMITTED_NO_CLASSES)
+        );
+    }
+
+    #[test]
+    fn frontend_only_module_stops_after_checking() {
+        let source = "// MODULE: lib\n// FILE: alias.kt\ntypealias Greeting = String\n\
+                      // MODULE: main(lib)\n// FILE: main.kt\nfun box() = \"OK\"\n";
+        assert_eq!(first_error_module(source, &[], None, true), None);
+        assert_eq!(
+            first_error_module(source, &[], None, false).as_deref(),
             Some(EMITTED_NO_CLASSES)
         );
     }
@@ -579,5 +813,17 @@ mod tests {
         let truncated = truncate_chars(&message, 60);
         assert_eq!(truncated.chars().count(), 60);
         assert!(message.starts_with(&truncated));
+    }
+
+    #[test]
+    fn frontend_stage_is_not_guessed_from_diagnostic_words() {
+        assert_eq!(
+            categorize("check: argument type mismatch: expected String"),
+            "check: argument type mismatch: expected String"
+        );
+        assert_eq!(
+            categorize("signatures: unresolved reference 'Missing'."),
+            "signatures: unresolved reference 'Missing'."
+        );
     }
 }

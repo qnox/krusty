@@ -16,6 +16,29 @@
 use crate::name_tree::FxHashMap;
 use crate::types::TypeName;
 
+/// JVM realization of a semantic intrinsic companion. Kotlinc's `CompanionObjectMapping` consists
+/// of every primitive owner plus `String` and `Enum`; derive the primitive portion from the shared
+/// Kotlin/JVM mapping instead of maintaining another classifier-name list.
+pub fn intrinsic_companion_to_jvm(internal: &str) -> Option<String> {
+    let companion = crate::types::existing_type_name(internal)?;
+    if companion.nested_segment_ref() != "Companion" {
+        return None;
+    }
+    let owner = companion.nested_owner()?;
+    let ids = builtin_ids();
+    let primitive = ids
+        .jvm_builtin
+        .get(&owner)
+        .is_some_and(|(_, jvm)| ids.wrapper_prim.contains_key(jvm));
+    if !primitive && !owner.matches("kotlin/String") && !owner.matches("kotlin/Enum") {
+        return None;
+    }
+    Some(format!(
+        "kotlin/jvm/internal/{}CompanionObject",
+        owner.segment_ref()
+    ))
+}
+
 /// Every simple name handled by [`kotlin_builtin_to_jvm`], used to seed the resolver's class map.
 pub const BUILTIN_MAPPED_NAMES: &[&str] = &[
     "Any",
@@ -278,9 +301,9 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     if let Some(j) = kotlin_builtin_to_jvm(internal) {
         return j;
     }
-    // A synthesized `kotlin.reflect.KFunction{N}` (no such class exists) erases to the arity-less
-    // `kotlin/reflect/KFunction`, exactly as kotlinc emits it.
-    if crate::types::kfunction_arity(crate::types::type_name(internal)).is_some() {
+    if crate::types::existing_type_name(internal)
+        .is_some_and(super::jvm_libraries::is_fictitious_kfunction)
+    {
         return crate::types::KFUNCTION_INTERNAL;
     }
     TYPE_MAP
@@ -594,11 +617,15 @@ pub fn to_kotlin_internal(internal: &str) -> &str {
 /// The JVM wrapper (box) class for a primitive `Ty` (`Int` → `java/lang/Integer`), or `None` for a
 /// non-primitive. The single source of truth for boxing owners shared by codegen and the front end.
 pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
-    // Route through the single primitive→wrapper table: `boxed_ref` carries a primitive as its Kotlin
-    // internal name (`Ty::Int` → `Obj("kotlin/Int")`, `Ty::UInt` → `Obj("kotlin/UInt")`), which
-    // `kotlin_prim_to_wrapper` boxes (`kotlin/Int` → `java/lang/Integer`, `kotlin/UInt` → `kotlin/UInt`).
-    let boxed = t.boxed_ref()?.obj_internal()?;
-    kotlin_prim_to_wrapper(&boxed.render())
+    let scalar = t.scalar_value_repr()?;
+    let internal = t.obj_internal()?;
+    // The semantic type is the Kotlin classifier. JVM boxing is chosen here, at the backend
+    // boundary, from that classifier identity; core never manufactures a wrapper type.
+    if scalar == t || t.is_unsigned() {
+        kotlin_prim_to_wrapper(&internal.render())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

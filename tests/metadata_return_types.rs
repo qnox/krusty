@@ -72,7 +72,7 @@ fn builtins_decode_collection_hierarchy() {
         .expect("collections.kotlin_builtins in stdlib jar");
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
-    let h = parse_builtins(&bytes);
+    let h = parse_builtins(&bytes).classes;
     assert_eq!(
         h.get("kotlin/collections/MutableList")
             .map(|c| c.supertypes.as_slice()),
@@ -107,6 +107,7 @@ fn builtins_string_members_from_metadata() {
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
     let string = krusty::jvm::metadata::parse_builtins(&bytes)
+        .classes
         .remove("kotlin/String")
         .expect("String builtin class");
     // `kotlin/String` omits `Class.flags` in the shipped fragment. The protobuf default is the
@@ -153,7 +154,7 @@ fn builtins_fragment(jar: &std::path::Path, path: &str) -> Vec<u8> {
 fn builtins_decode_type_parameters_and_arguments() {
     let jar = common::stdlib_jar();
     let bytes = builtins_fragment(&jar, "kotlin/collections/collections.kotlin_builtins");
-    let classes = parse_builtins(&bytes);
+    let classes = parse_builtins(&bytes).classes;
 
     let list = classes
         .get("kotlin/collections/List")
@@ -217,10 +218,13 @@ fn builtin_generic_member_binds_receiver_argument_without_jdk() {
     // Interface-ness comes from the builtin's own `CLASS_KIND`, not a curated JVM-name table — with
     // no `java/util/List` to read the flag off, a curated table that omits `java/util/*` answered
     // "class" for every collection member.
-    let members =
-        krusty::symbol_source::SymbolSource::resolve_type(&libs, "kotlin/collections/List")
-            .expect("List resolves from .kotlin_builtins")
-            .members;
+    let members = krusty::symbol_source::SymbolSource::classifier(
+        &libs,
+        krusty::types::type_name("kotlin/collections/List"),
+    )
+    .expect("List resolves from .kotlin_builtins")
+    .members
+    .clone();
     assert!(
         members
             .iter()

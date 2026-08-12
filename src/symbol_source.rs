@@ -1,62 +1,51 @@
 //! `SymbolSource` — the federatable seam shared by every provider of declarations.
 //!
-//! A *source* answers the two arg-independent questions resolution needs about a body of code: the
-//! overloads of a name (`functions`) and the shape of a type (`resolve_type`, which also redirects a
-//! `typealias` to its target). Both the current module (its AST decls) and a compiled library (a
-//! classpath) are sources.
+//! A source answers one arg-independent question: what declarations occupy `(namespace, name)`.
+//! A namespace is always explicit: either a package (including [`TypeName::ROOT`] for the default
+//! package) or a classifier. The leaf stays textual because most probes are callable names, not
+//! classifier identities, and a miss must not add an arbitrary leaf to the global type-name tree. The
+//! returned record contains both Kotlin declaration namespaces at that key: classifier metadata and
+//! callable signatures. Both the current module and compiled libraries implement this same lookup.
 //!
 //! Sources COMPOSE: a [`CompositeSource`] holds an ordered list of children and is itself a
-//! `SymbolSource`, so `[current module, sibling modules, stdlib, extra jars]` federate uniformly with
-//! first-source-wins precedence (user code shadows libraries). Selection of a single overload stays
-//! INSIDE one source (an extension's receiver-MRO rank is only comparable within one type hierarchy);
-//! the composite federates at the resolve boundary, never by flattening one global overload set.
+//! `SymbolSource`, so `[current module, sibling modules, stdlib, extra jars]` federate uniformly.
+//! Classifiers use first-source-wins precedence; callable overloads from every contributing source are
+//! collected together and selected later by [`crate::symbol_resolver::SymbolResolver`].
 
+pub use crate::libraries::ClassifierAccess;
 use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
-use crate::types::{Ty, TypeName, Visibility};
+use crate::types::TypeName;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClassifierAccess {
-    Public,
-    Internal,
-    Protected,
-    Private,
-    PackagePrivate,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SymbolNamespace {
+    /// A package namespace. [`TypeName::ROOT`] represents the default package; it is not absence.
+    Package(TypeName),
+    /// A classifier namespace, used by nested classifiers and member callables alike.
+    Classifier(TypeName),
 }
 
-impl From<Visibility> for ClassifierAccess {
-    fn from(visibility: Visibility) -> Self {
-        match visibility {
-            Visibility::Public => Self::Public,
-            Visibility::Internal => Self::Internal,
-            Visibility::Protected => Self::Protected,
-            Visibility::Private => Self::Private,
+impl SymbolNamespace {
+    pub fn name(self) -> TypeName {
+        match self {
+            Self::Package(name) | Self::Classifier(name) => name,
         }
     }
-}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InheritanceShape {
-    pub is_interface: bool,
-    pub is_extensible: bool,
-    pub has_no_arg_constructor: bool,
-    pub supports_external_subclassing: bool,
-}
+    /// Decompose a classifier identity into its semantic namespace and final source segment. A
+    /// top-level classifier always has a package namespace, including `Package(TypeName::ROOT)`;
+    /// a nested classifier has its immediate classifier as namespace.
+    pub fn classifier_key(internal: TypeName) -> (Self, &'static str) {
+        internal.nested_owner().map_or_else(
+            || (Self::Package(internal.namespace()), internal.segment_ref()),
+            |owner| (Self::Classifier(owner), internal.nested_segment_ref()),
+        )
+    }
 
-impl InheritanceShape {
-    pub fn from_type(
-        ty: &LibraryType,
-        is_extensible: bool,
-        supports_external_subclassing: bool,
-    ) -> Self {
-        InheritanceShape {
-            is_interface: ty.is_interface(),
-            is_extensible,
-            has_no_arg_constructor: ty.constructors.is_empty()
-                || ty
-                    .constructors
-                    .iter()
-                    .any(|constructor| constructor.params.is_empty()),
-            supports_external_subclassing,
+    /// Read an already-interned classifier child at this namespace without interning a miss.
+    pub fn existing_classifier(self, name: &str) -> Option<TypeName> {
+        match self {
+            Self::Package(package) => crate::types::existing_type_name_child(package, name),
+            Self::Classifier(owner) => crate::types::existing_type_name_nested_child(owner, name),
         }
     }
 }
@@ -64,144 +53,38 @@ impl InheritanceShape {
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
 /// surface that federates across sources; arg-dependent selection/binding lives above (the resolver).
 pub trait SymbolSource {
-    /// The instance-member overloads named `name` applicable on receiver `recv` (own + inherited), each an
-    /// [`crate::libraries::FunctionInfo`] tagged with its receiver-MRO rung. UNLIKE the extension/top-level
-    /// namespace (`resolve_symbols`, receiver-AGNOSTIC by fqn), a member is inherently RECEIVER-COUPLED: its
-    /// return can bind to the receiver's type arguments (`Repo<Cfg>.byId(): Cfg`, a suspend `Continuation<T>`
-    /// recovered from the receiver) — a decode only the platform that knows the receiver's shape can do. So
-    /// members are their own receiver-parameterized query through the TYPE, not the fqn seam. Empty default.
-    fn member_overloads(&self, _recv: Ty, _name: &str) -> FunctionSet {
-        FunctionSet::default()
+    /// Core projection of the classifier half of [`Self::symbols`]. Providers must not override this;
+    /// the implementation lives here solely while call sites migrate to reading the record directly.
+    fn classifier(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+        let (namespace, name) = SymbolNamespace::classifier_key(internal);
+        self.symbols(namespace, name).classifier.clone()
     }
 
-    /// The shape of the type named `internal` — constructors, members, companion, supertypes, and the
-    /// type-shape facts a resolver needs about it (formal type parameters, sealed subclasses, enum
-    /// entries, value-class underlying, constructor named-parameter lists, value-class-typed properties).
-    /// `None` if this source has no such type.
-    fn resolve_type(&self, _internal: &str) -> Option<LibraryType> {
-        None
-    }
-
-    /// Id-backed type lookup, returning a SHARED handle — providers memoize the shape and hand out the
-    /// same `Rc`. Providers that already index by ids should override this; the default keeps legacy
-    /// string-backed sources working while callers stop rendering names at each use site.
-    fn resolve_type_name(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
-        self.resolve_type(&internal.render()).map(std::rc::Rc::new)
-    }
-
-    /// Whether a slashed path names a PACKAGE in this source.
+    /// Whether `name` is a package directly inside `parent` in this source.
     ///
     /// A Kotlin reference is resolved one segment at a time, and each prefix denotes a package, a
-    /// classifier, or nothing. Classifiers are answered by `resolve_type_name`; this is the other half,
+    /// classifier, or nothing. Classifiers are carried by [`Self::symbols`]; packages are the one
+    /// namespace fact not representable by a declaration record,
     /// without which a fully-qualified reference (`java.util.ArrayList`, `pkg.topLevelFun()`) has no
     /// way to know that its leading segments are a package rather than an unresolved name. Intermediate
     /// packages that declare nothing themselves must answer `true`. Empty default — a source with no
     /// package namespace of its own contributes nothing to the walk.
-    fn package_exists(&self, _package: TypeName) -> bool {
+    fn package_exists(&self, _parent: TypeName, _name: &str) -> bool {
         false
     }
 
-    /// The declaration visibility of a classifier.
-    fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {
-        self.resolve_type_name(internal).map(|classifier| {
-            if classifier.is_public {
-                Visibility::Public
-            } else {
-                Visibility::Private
-            }
-        })
-    }
-
-    fn classifier_access(&self, internal: TypeName) -> Option<ClassifierAccess> {
-        self.classifier_visibility(internal).map(Into::into)
-    }
-
-    /// Whether ordinary lookup may use a classifier from `accessor_package`.
-    fn classifier_accessible_from_package(
-        &self,
-        internal: TypeName,
-        _accessor_package: TypeName,
-    ) -> bool {
-        self.classifier_visibility(internal) == Some(Visibility::Public)
-    }
-
-    /// Resolve a nested classifier through `inheritor`'s supertype scope.
-    fn inherited_classifier_shape(
-        &self,
-        internal: TypeName,
-        _inheritor: TypeName,
-    ) -> Option<std::rc::Rc<LibraryType>> {
-        match self.classifier_visibility(internal)? {
-            Visibility::Public | Visibility::Internal | Visibility::Protected => {
-                self.resolve_type_name(internal)
-            }
-            Visibility::Private => None,
-        }
-    }
-
-    /// Direct supertypes with type arguments substituted from `ty`.
-    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
-        let Some(internal) = ty.obj_internal() else {
-            return Vec::new();
-        };
-        self.resolve_type_name(internal)
-            .map(|shape| shape.supertypes.iter_ids().map(Ty::obj_name).collect())
-            .unwrap_or_default()
-    }
-
-    /// Whether `internal` names a `@JvmInline value`/inline class — the value-class-ness attribute of the
-    /// class SYMBOL, queried by name. THE authority the value-class pass and resolver consult, rather than
-    /// a side "value-class set". Derived from the symbol's `value_underlying` shape.
-    fn is_value(&self, internal: &str) -> bool {
-        self.is_value_name(crate::types::type_name(internal))
-    }
-
-    fn is_value_name(&self, internal: TypeName) -> bool {
-        self.resolve_type_name(internal)
-            .is_some_and(|t| t.value_underlying.is_some())
-    }
-
-    /// Resolve a fully-qualified name to its namespace record (classifier + callables) — THE FQN query
-    /// this source answers. The resolver forms candidate FQNs from the file's import scope and unions the
-    /// results across candidates + sources; this returns just what THIS source has at `fqn`. `receiver`
-    /// Receiver-coupled work (value-class receivers, `@JvmName` element variants, return binding) is
-    /// SELECTION + emit, done by the consumer — resolution is purely by fqn. Empty by default.
-    fn resolve_symbols(&self, _fqn: &str) -> ResolvedSymbols {
-        ResolvedSymbols::default()
-    }
-
-    /// Id-backed namespace lookup, returning a SHARED record — consumers borrow the halves they need
-    /// (a type position reads only the classifier). Providers that already carry class/internal names
-    /// as ids should override this; the default keeps legacy string-backed sources working while
-    /// callers stop rendering names at each use site.
-    fn resolve_symbols_name(&self, fqn: TypeName) -> std::rc::Rc<ResolvedSymbols> {
-        std::rc::Rc::new(self.resolve_symbols(&fqn.render()))
-    }
-
-    /// The MEMBER-property declarations named `name` on receiver `recv` (own + inherited), each with its
-    /// [`crate::libraries::PropKind`], type, accessors, and visibility — symmetric to [`Self::member_overloads`]
-    /// and RECEIVER-COUPLED for the same reason (a member property is a shape of the type). Extension/top-level
-    /// properties are surfaced by [`Self::resolve_symbols`]. Empty by default (a source with no such property).
-    fn property_members(&self, _recv: Ty, _name: &str) -> PropertySet {
-        PropertySet::default()
-    }
-
-    /// Whether `name` on `recv` (its type + supertype closure) is declared a PROPERTY rather than a
-    /// function — the authoritative classifier a callable reference needs to choose a `KProperty`
-    /// (`s::length`) over a zero-arg method reference (`it::next`). Both may otherwise resolve to a
-    /// zero-arg readable member, so the getter-guessing resolver cannot tell them apart. Default `false`.
-    fn member_is_property(&self, _recv: Ty, _name: &str) -> bool {
-        false
-    }
-
-    fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
-        let ty = self.resolve_type_name(internal)?;
-        Some(InheritanceShape::from_type(&ty, false, false))
+    /// Return the complete declaration record for one `(namespace, name)` key. This is the sole
+    /// declaration API. `Package(TypeName::ROOT)` is the default package. Providers may map the key to
+    /// an already-interned classifier, but must not intern it merely because it was probed. Parallel
+    /// classifier/member/visibility queries whose answers can disagree with this record must not be
+    /// exposed.
+    fn symbols(&self, _namespace: SymbolNamespace, _name: &str) -> std::rc::Rc<ResolvedSymbols> {
+        std::rc::Rc::new(ResolvedSymbols::default())
     }
 }
 
 /// An ordered federation of sources — itself a [`SymbolSource`], so it nests. Earlier children win:
-/// `functions` concatenates in order (each overload keeps its own origin), `resolve_type` takes the
+/// Callables concatenate in order (each overload keeps its own origin); the classifier comes from the
 /// first/earliest contributor on a name clash. Holds children by REFERENCE so a resolver can federate the
 /// borrowed live sources (the current module over the classpath) without allocation or moving them.
 #[derive(Default)]
@@ -222,95 +105,21 @@ impl<'a> CompositeSource<'a> {
 }
 
 impl SymbolSource for CompositeSource<'_> {
-    fn member_overloads(&self, recv: Ty, name: &str) -> FunctionSet {
-        // Concatenate in precedence order — each `FunctionInfo` already carries its source's origin, and
-        // selection is done per-source (ranks are not comparable across sources), so order is enough.
-        FunctionSet {
-            overloads: self
-                .children
-                .iter()
-                .flat_map(|c| c.member_overloads(recv, name).overloads)
-                .collect(),
-        }
-    }
-
-    fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-        self.children.iter().find_map(|c| c.resolve_type(internal))
-    }
-
-    fn resolve_type_name(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
-        self.children
-            .iter()
-            .find_map(|c| c.resolve_type_name(internal))
-    }
-
     /// A package exists if ANY source declares it — packages are a union across the module and the
     /// classpath, not a shadowing lookup: the same package name legitimately holds declarations from
     /// both, and a qualifier walk must be able to continue through either.
-    fn package_exists(&self, package: TypeName) -> bool {
-        self.children.iter().any(|c| c.package_exists(package))
+    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
+        self.children.iter().any(|c| c.package_exists(parent, name))
     }
 
-    fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {
-        self.children
-            .iter()
-            .find_map(|child| child.classifier_visibility(internal))
-    }
-
-    fn classifier_access(&self, internal: TypeName) -> Option<ClassifierAccess> {
-        self.children
-            .iter()
-            .find(|child| child.classifier_visibility(internal).is_some())
-            .and_then(|child| child.classifier_access(internal))
-    }
-
-    fn classifier_accessible_from_package(
-        &self,
-        internal: TypeName,
-        accessor_package: TypeName,
-    ) -> bool {
-        self.children
-            .iter()
-            .find(|child| child.classifier_visibility(internal).is_some())
-            .is_some_and(|child| {
-                child.classifier_accessible_from_package(internal, accessor_package)
-            })
-    }
-
-    fn inherited_classifier_shape(
-        &self,
-        internal: TypeName,
-        inheritor: TypeName,
-    ) -> Option<std::rc::Rc<LibraryType>> {
-        self.children
-            .iter()
-            .find(|child| child.classifier_visibility(internal).is_some())
-            .and_then(|child| child.inherited_classifier_shape(internal, inheritor))
-    }
-
-    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
-        let Some(internal) = ty.obj_internal() else {
-            return Vec::new();
-        };
-        self.children
-            .iter()
-            .find(|child| child.resolve_type_name(internal).is_some())
-            .map(|child| child.direct_supertypes(ty))
-            .unwrap_or_default()
-    }
-
-    fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
-        (*self.resolve_symbols_name(crate::types::type_name(fqn))).clone()
-    }
-
-    fn resolve_symbols_name(&self, fqn: TypeName) -> std::rc::Rc<ResolvedSymbols> {
+    fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
         use crate::libraries::Callables;
         // Classifier: first source wins (user shadows library). Callables: concatenate in precedence
         // order (each overload keeps its origin) — functions XOR a property, so take whichever appears.
         // A single contributing source (the common case) passes its record through unmerged.
         let mut records: Vec<std::rc::Rc<ResolvedSymbols>> = Vec::new();
         for c in &self.children {
-            let r = c.resolve_symbols_name(fqn);
+            let r = c.symbols(namespace, name);
             if !r.is_empty() {
                 records.push(r);
             }
@@ -320,11 +129,13 @@ impl SymbolSource for CompositeSource<'_> {
             1 => records.pop().expect("one record"),
             _ => {
                 let mut classifier = None;
+                let mut classifier_name = None;
                 let mut fns = Vec::new();
                 let mut props = Vec::new();
                 for r in &records {
                     if classifier.is_none() {
                         classifier = r.classifier.clone();
+                        classifier_name = r.classifier_name;
                     }
                     match &r.callables {
                         Callables::Functions(f) => fns.extend(f.overloads.iter().cloned()),
@@ -349,35 +160,12 @@ impl SymbolSource for CompositeSource<'_> {
                     (true, true) => Callables::None,
                 };
                 std::rc::Rc::new(ResolvedSymbols {
+                    classifier_name,
                     classifier,
                     callables,
                 })
             }
         }
-    }
-
-    fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
-        self.children
-            .iter()
-            .find_map(|source| source.inheritance_shape_name(internal))
-    }
-
-    fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
-        // Concatenate in precedence order, exactly like `member_overloads` — selection (receiver rank)
-        // stays per-source, so order is enough.
-        PropertySet {
-            overloads: self
-                .children
-                .iter()
-                .flat_map(|c| c.property_members(recv, name).overloads)
-                .collect(),
-        }
-    }
-
-    fn member_is_property(&self, recv: Ty, name: &str) -> bool {
-        self.children
-            .iter()
-            .any(|c| c.member_is_property(recv, name))
     }
 }
 
@@ -385,7 +173,8 @@ impl SymbolSource for CompositeSource<'_> {
 mod tests {
     use super::*;
     use crate::libraries::{
-        FnKind, FunctionInfo, LibraryCallable, LibraryType, PropKind, PropertyInfo, Visibility,
+        Callables, FnKind, FunctionInfo, LibraryCallable, LibraryType, PropKind, PropertyInfo,
+        Visibility,
     };
     use crate::types::Ty;
 
@@ -400,102 +189,116 @@ mod tests {
         LibraryCallable::library(owner, name, vec![], Ty::Unit, Ty::Unit, "()V")
     }
 
-    impl SymbolSource for FakeSource {
-        fn member_overloads(&self, _recv: Ty, name: &str) -> FunctionSet {
-            // A source provides ONE member overload of its chosen name, owner-stamped so federation order
-            // is observable.
-            if self.fn_name.as_deref() == Some(name) {
-                FunctionSet {
-                    overloads: vec![FunctionInfo::plain(
-                        FnKind::Member,
-                        None,
-                        callable(&self.owner, name),
-                    )],
+    fn declared(source: &dyn SymbolSource, receiver: Ty, name: &str) -> Callables {
+        crate::symbol_resolver::declared_member_callables(source, receiver, name)
+    }
+
+    impl FakeSource {
+        fn classifier_record(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+            if self
+                .typed
+                .as_deref()
+                .is_some_and(|name| internal.matches(name))
+            {
+                let mut declared_callables = std::collections::HashMap::new();
+                if let Some(name) = &self.fn_name {
+                    declared_callables.insert(
+                        name.clone(),
+                        Callables::from_parts(
+                            FunctionSet {
+                                overloads: vec![FunctionInfo::plain(
+                                    FnKind::Member,
+                                    None,
+                                    callable(&self.owner, name),
+                                )],
+                            },
+                            PropertySet {
+                                overloads: vec![PropertyInfo {
+                                    kind: PropKind::Member,
+                                    receiver: None,
+                                    formals: Vec::new(),
+                                    ty: Ty::Int,
+                                    context_count: 0,
+                                    getter: callable(&self.owner, name),
+                                    setter: None,
+                                    setter_visibility: Visibility::Public,
+                                    is_const: false,
+                                    visibility: Visibility::Public,
+                                    owner: self.owner.as_str().into(),
+                                    receiver_rank: 0,
+                                    source_key: None,
+                                }],
+                            },
+                        ),
+                    );
                 }
-            } else {
-                FunctionSet::default()
-            }
-        }
-        fn property_members(&self, _recv: Ty, name: &str) -> PropertySet {
-            // A source provides ONE member property whose name matches its `fn_name`, owner-stamped so
-            // federation order is observable.
-            if self.fn_name.as_deref() == Some(name) {
-                PropertySet {
-                    overloads: vec![PropertyInfo {
-                        kind: PropKind::Member,
-                        receiver: None,
-                        formals: Vec::new(),
-                        ty: Ty::Int,
-                        context_count: 0,
-                        getter: callable(&self.owner, name),
-                        setter: None,
-                        is_const: false,
-                        visibility: Visibility::Public,
-                        owner: self.owner.as_str().into(),
-                        receiver_rank: 0,
-                        source_key: None,
-                    }],
-                }
-            } else {
-                PropertySet::default()
-            }
-        }
-        fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-            if self.typed.as_deref() == Some(internal) {
-                Some(LibraryType {
-                    is_public: true,
+                Some(std::rc::Rc::new(LibraryType {
+                    access: crate::libraries::ClassifierAccess::Public,
+                    source_file: None,
+                    is_nested: false,
+                    outer_instance: None,
                     kind: crate::libraries::TypeKind::Class,
+                    inheritance: crate::libraries::ClassifierInheritance {
+                        is_extensible: self.owner == "library",
+                        ..Default::default()
+                    },
                     supertypes: vec![self.owner.clone()].into(),
+                    supertype_templates: vec![Ty::obj(&self.owner)],
                     constructors: vec![],
                     fields: vec![],
+                    declared_callables,
                     members: vec![],
                     companion: vec![],
-                    companion_consts: std::collections::HashMap::new(),
+                    constants: std::collections::HashMap::new(),
                     sam_method: None,
+                    callable_signature: None,
                     companion_object: None,
                     value_companion_fns: Vec::new(),
                     value_underlying: None,
+                    value_underlying_property: None,
                     alias_target: None,
                     type_params: Vec::new(),
+                    type_param_bounds: Vec::new(),
                     sealed_subclasses: crate::types::TypeNameList::new(),
                     enum_entries: Vec::new(),
                     enum_entries_accessor: None,
-                    value_ctor_has_default: false,
                     ctor_named_params: Vec::new(),
-                    value_class_properties: Vec::new(),
                     retention: None,
-                })
+                }))
             } else {
                 None
             }
         }
-        fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
-            let ty = self.resolve_type_name(internal)?;
-            Some(InheritanceShape::from_type(
-                &ty,
-                self.owner == "library",
-                false,
-            ))
-        }
-        fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
-            // The record at `fqn`: this fake's type (when `typed` matches) and its one top-level
+    }
+
+    impl SymbolSource for FakeSource {
+        fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
+            // The record at `(namespace, name)`: this fake's type (when `typed` matches) and its one top-level
             // overload (when `fn_name` matches).
-            let classifier = self.resolve_type(fqn).map(std::rc::Rc::new);
-            let callables = if self.fn_name.as_deref() == Some(fqn) {
+            let classifier_name = namespace.existing_classifier(name);
+            let classifier = classifier_name.and_then(|name| self.classifier_record(name));
+            let callables = if namespace == SymbolNamespace::Package(TypeName::ROOT)
+                && self.fn_name.as_deref() == Some(name)
+            {
                 crate::libraries::Callables::Functions(FunctionSet {
                     overloads: vec![FunctionInfo::plain(
                         FnKind::TopLevel,
                         None,
-                        callable(&self.owner, fqn),
+                        callable(&self.owner, name),
                     )],
                 })
             } else {
                 crate::libraries::Callables::None
             };
-            ResolvedSymbols {
+            std::rc::Rc::new(ResolvedSymbols {
+                classifier_name: classifier.as_ref().map(|classifier| {
+                    classifier
+                        .alias_target
+                        .unwrap_or_else(|| classifier_name.expect("classifier identity"))
+                }),
                 classifier,
                 callables,
-            }
+            })
         }
     }
 
@@ -520,11 +323,10 @@ mod tests {
         let m = module();
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
-        let fs = c.member_overloads(Ty::obj("R"), "greet");
-        // Both contribute; the module's (first) overload comes first.
-        assert_eq!(fs.overloads.len(), 2);
+        let fs = declared(&c, Ty::obj("shared"), "greet").into_parts().0;
+        // The classifier record follows first-source precedence.
+        assert_eq!(fs.overloads.len(), 1);
         assert!(fs.overloads[0].callable.owner.matches("module"));
-        assert!(fs.overloads[1].callable.owner.matches("library"));
     }
 
     #[test]
@@ -532,8 +334,9 @@ mod tests {
         let m = module();
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
-        assert!(c
-            .member_overloads(Ty::obj("R"), "absent")
+        assert!(declared(&c, Ty::obj("shared"), "absent")
+            .into_parts()
+            .0
             .overloads
             .is_empty());
     }
@@ -545,10 +348,9 @@ mod tests {
         let m = module();
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
-        let ps = c.property_members(Ty::obj("R"), "greet");
-        assert_eq!(ps.overloads.len(), 2);
+        let ps = declared(&c, Ty::obj("shared"), "greet").into_parts().1;
+        assert_eq!(ps.overloads.len(), 1);
         assert!(ps.overloads[0].owner.matches("module"));
-        assert!(ps.overloads[1].owner.matches("library"));
     }
 
     #[test]
@@ -556,39 +358,40 @@ mod tests {
         let m = module();
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
-        assert!(c
-            .property_members(Ty::obj("R"), "absent")
+        assert!(declared(&c, Ty::obj("shared"), "absent")
+            .into_parts()
+            .1
             .overloads
             .is_empty());
         // A receiver-scoped query also finds nothing here (the fakes only provide top-level props).
-        assert!(c
-            .property_members(Ty::obj("X"), "absent")
+        assert!(declared(&c, Ty::obj("X"), "absent")
+            .into_parts()
+            .1
             .overloads
             .is_empty());
     }
 
     #[test]
-    fn resolve_type_takes_the_earliest_source() {
+    fn classifier_takes_the_earliest_source() {
         let m = module();
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
         // Both define `shared`; the module (first) wins.
-        let t = c.resolve_type("shared").expect("a shape");
+        let t = c
+            .classifier(crate::types::type_name("shared"))
+            .expect("a shape");
         assert_eq!(t.supertypes.to_vec(), vec!["module".to_string()]);
+        assert!(!t.inheritance.is_extensible);
         assert!(
-            !c.inheritance_shape_name(crate::types::type_name("shared"))
-                .expect("an inheritance shape")
-                .is_extensible
-        );
-        assert!(
-            l.inheritance_shape_name(crate::types::type_name("shared"))
-                .expect("a library inheritance shape")
+            l.classifier(crate::types::type_name("shared"))
+                .expect("a library classifier")
+                .inheritance
                 .is_extensible
         );
     }
 
     #[test]
-    fn resolve_type_falls_through_to_later_source() {
+    fn classifier_comes_from_the_first_source_that_declares_it() {
         // Only the library has `lib/only`.
         let lib = FakeSource {
             fn_name: None,
@@ -597,8 +400,8 @@ mod tests {
         };
         let m = module();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &lib]);
-        assert!(c.resolve_type("lib/only").is_some());
-        assert!(c.resolve_type("nope").is_none());
+        assert!(c.classifier(crate::types::type_name("lib/only")).is_some());
+        assert!(c.classifier(crate::types::type_name("nope")).is_none());
     }
 
     #[test]
@@ -608,8 +411,8 @@ mod tests {
         let l = library();
         let outer = CompositeSource::new(vec![&inner as &dyn SymbolSource, &l]);
         // Nesting works: the inner composite's module overload is found, library appends after.
-        let fs = outer.member_overloads(Ty::obj("R"), "greet");
-        assert_eq!(fs.overloads.len(), 2);
+        let fs = declared(&outer, Ty::obj("shared"), "greet").into_parts().0;
+        assert_eq!(fs.overloads.len(), 1);
         assert!(fs.overloads[0].callable.owner.matches("module"));
     }
 
@@ -619,24 +422,24 @@ mod tests {
         let l = library();
         let mut c = CompositeSource::new(vec![&m as &dyn SymbolSource]);
         c.push(&l);
-        let fs = c.member_overloads(Ty::obj("R"), "greet");
-        assert_eq!(fs.overloads.len(), 2);
-        // The pushed library is consulted last.
-        assert!(fs.overloads[1].callable.owner.matches("library"));
+        let fs = declared(&c, Ty::obj("shared"), "greet").into_parts().0;
+        assert_eq!(fs.overloads.len(), 1);
+        assert!(fs.overloads[0].callable.owner.matches("module"));
     }
 
     #[test]
     fn empty_composite_has_no_functions_and_no_types() {
         let c = CompositeSource::default();
-        assert!(c
-            .member_overloads(Ty::obj("R"), "anything")
+        assert!(declared(&c, Ty::obj("R"), "anything")
+            .into_parts()
+            .0
             .overloads
             .is_empty());
-        assert!(c.resolve_type("anything").is_none());
+        assert!(c.classifier(crate::types::type_name("anything")).is_none());
     }
 
     #[test]
-    fn resolve_symbols_passes_a_single_contributor_through() {
+    fn symbols_passes_a_single_contributor_through() {
         // Only the library answers `greet`: the composite must surface its record intact (the
         // single-record fast path) and stay empty for an unknown name.
         let m = FakeSource {
@@ -646,7 +449,7 @@ mod tests {
         };
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
-        let r = c.resolve_symbols_name(crate::types::type_name("greet"));
+        let r = c.symbols(SymbolNamespace::Package(TypeName::ROOT), "greet");
         assert!(r.classifier.is_none());
         match &r.callables {
             crate::libraries::Callables::Functions(f) => {
@@ -656,12 +459,12 @@ mod tests {
             _ => panic!("expected functions"),
         }
         assert!(c
-            .resolve_symbols_name(crate::types::type_name("missing"))
+            .symbols(SymbolNamespace::Package(TypeName::ROOT), "missing")
             .is_empty());
     }
 
     #[test]
-    fn resolve_symbols_merges_classifier_and_callables_across_children() {
+    fn symbols_merges_classifier_and_callables_across_children() {
         // The module knows the TYPE `shared`, the library the FUNCTION `shared` — the merged record
         // carries both namespaces, classifier from the earliest contributor, overloads concatenated in
         // precedence order.
@@ -676,8 +479,11 @@ mod tests {
             typed: Some("shared".into()),
         };
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
-        let r = c.resolve_symbols("shared");
-        let classifier = r.classifier.expect("merged record keeps the classifier");
+        let r = c.symbols(SymbolNamespace::Package(TypeName::ROOT), "shared");
+        let classifier = r
+            .classifier
+            .as_ref()
+            .expect("merged record keeps the classifier");
         assert!(classifier.supertypes.contains("module"));
         match &r.callables {
             crate::libraries::Callables::Functions(f) => {
@@ -687,5 +493,43 @@ mod tests {
             }
             _ => panic!("expected functions"),
         }
+    }
+
+    #[test]
+    fn missing_textual_symbol_probe_does_not_intern_a_type_name() {
+        const MISSING: &str = "property_name_that_must_never_enter_the_type_tree_7f36a9";
+        assert!(crate::types::existing_type_name(MISSING).is_none());
+
+        let source = FakeSource {
+            fn_name: None,
+            owner: "empty".into(),
+            typed: None,
+        };
+        assert!(source
+            .symbols(SymbolNamespace::Package(TypeName::ROOT), MISSING)
+            .is_empty());
+
+        assert!(
+            crate::types::existing_type_name(MISSING).is_none(),
+            "a callable miss must remain a string and must not pollute the classifier name tree"
+        );
+    }
+
+    #[test]
+    fn classifier_keys_preserve_root_packages_and_immediate_classifier_owners() {
+        let top = crate::types::type_name("Top");
+        assert_eq!(
+            SymbolNamespace::classifier_key(top),
+            (SymbolNamespace::Package(TypeName::ROOT), "Top")
+        );
+
+        let nested = crate::types::type_name("sample/Outer$Inner$Deep");
+        assert_eq!(
+            SymbolNamespace::classifier_key(nested),
+            (
+                SymbolNamespace::Classifier(crate::types::type_name("sample/Outer$Inner")),
+                "Deep",
+            )
+        );
     }
 }

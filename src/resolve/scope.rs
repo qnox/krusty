@@ -13,7 +13,7 @@
 //! The binding payload `B` stays generic so this module does not depend on the checker's `Local`.
 //! The flow frame is concrete: narrowings are a property of lexical scopes, so they live here.
 
-use crate::types::{Ty, TypeName};
+use crate::types::Ty;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -24,7 +24,9 @@ pub(crate) enum ScopeKind {
     File,
     /// A class or object body.
     Class {
-        ty: TypeName,
+        /// Applied semantic receiver (`C<T>`), not merely the classifier name. Erasing the arguments
+        /// here makes `this@C` disagree with an explicitly written `C<T>` in the same body.
+        ty: Ty,
         /// FALSE for a plain nested `class`, a named `object` and a companion: those cut the
         /// implicit-receiver chain, so neither `this@Outer` nor the outer class's type parameters
         /// are reachable. TRUE for `inner class`, a local class and an anonymous object, which
@@ -98,6 +100,13 @@ pub(crate) enum Ns {
     Classifier,
 }
 
+/// One value available for implicit context-parameter binding. Scope owns the precedence between
+/// receiver rungs and lexical values; the resolver only checks type applicability.
+pub(crate) enum ContextValue {
+    ImplicitReceiver { ty: Ty, current: bool },
+    Binding { name: String },
+}
+
 struct Binding<B> {
     name: String,
     ns: Ns,
@@ -107,6 +116,11 @@ struct Binding<B> {
 pub(crate) struct Scope<'p, B> {
     parent: Option<&'p Scope<'p, B>>,
     kind: ScopeKind,
+    /// Context receivers belonging to this function rung, outermost first. The ordinary
+    /// extension/current receiver stays in [`ScopeKind::Function`]; keeping the remaining
+    /// receivers on the same rung lets every scope consumer (member lookup and context-argument
+    /// selection alike) observe the exact lambda shape.
+    context_receivers: Vec<Ty>,
     /// Bindings introduced by THIS scope, in declaration order. Declaration order is what makes
     /// `fun g(a: Int, b: Int = a)` resolve and `fun g(a: Int = b, b: Int)` not.
     ///
@@ -130,6 +144,7 @@ impl<'p, B> Scope<'p, B> {
         Scope {
             parent,
             kind,
+            context_receivers: Vec::new(),
             bindings: RefCell::new(Vec::new()),
             flow: RefCell::new(Flow::default()),
         }
@@ -141,6 +156,16 @@ impl<'p, B> Scope<'p, B> {
             "the file scope is the root of the chain"
         );
         Scope::with_parent(Some(self), kind)
+    }
+
+    pub(crate) fn function_child(
+        &'p self,
+        receiver: Option<Ty>,
+        context_receivers: &[Ty],
+    ) -> Scope<'p, B> {
+        let mut child = Scope::with_parent(Some(self), ScopeKind::Function { receiver });
+        child.context_receivers.extend_from_slice(context_receivers);
+        child
     }
 
     pub(crate) fn kind(&self) -> ScopeKind {
@@ -269,6 +294,28 @@ impl<'p, B> Scope<'p, B> {
         None
     }
 
+    /// Select the nearest value that may fill one context parameter. Implicit receivers are ordered
+    /// innermost-first, then lexical bindings are ordered by their ordinary scope chain.
+    pub(crate) fn find_context_value(
+        &self,
+        mut receiver_matches: impl FnMut(Ty) -> bool,
+        mut binding_matches: impl FnMut(&B) -> bool,
+    ) -> Option<ContextValue>
+    where
+        B: Clone,
+    {
+        for (index, ty) in self.implicit_receivers().into_iter().enumerate() {
+            if receiver_matches(ty) {
+                return Some(ContextValue::ImplicitReceiver {
+                    ty,
+                    current: index == 0,
+                });
+            }
+        }
+        self.find_binding(Ns::Value, |binding| binding_matches(binding))
+            .map(|(name, _)| ContextValue::Binding { name })
+    }
+
     /// Every binding THIS scope introduces in `ns`, in declaration order. The per-rung view a
     /// namespace whose lookup is rung-sensitive needs (classifiers stop at [`Self::classifier_rungs`]).
     pub(crate) fn own_bindings(&self, ns: Ns, mut visit: impl FnMut(&str, &B)) {
@@ -354,12 +401,48 @@ impl<'p, B> Scope<'p, B> {
                 ScopeKind::Class {
                     ty, carries_outer, ..
                 } => {
-                    out.push(Ty::Obj(ty, &[]));
+                    out.push(ty);
                     if !carries_outer {
                         break;
                     }
                 }
                 _ => {}
+            }
+            if matches!(scope.kind, ScopeKind::Function { .. }) {
+                out.extend(scope.context_receivers.iter().rev().copied());
+            }
+        }
+        out
+    }
+
+    /// Implicit receivers encountered before the first lexical binding of `name` in `ns`.
+    ///
+    /// Unqualified lookup is a rung-by-rung tower, not "all lexical bindings, then all receivers":
+    /// a binding on the current rung wins there, while a nearer extension/receiver-lambda receiver
+    /// wins over a binding on an outer rung. This projection lets the checker query receiver members
+    /// before committing the ordinary chain-wide binding lookup without copying scope traversal.
+    pub(crate) fn implicit_receivers_before_binding(&self, name: &str, ns: Ns) -> Vec<Ty> {
+        let mut out = Vec::new();
+        for scope in self.ancestors() {
+            if scope.declared_here(name, ns) {
+                break;
+            }
+            match scope.kind {
+                ScopeKind::Function {
+                    receiver: Some(receiver),
+                } => out.push(receiver),
+                ScopeKind::Class {
+                    ty, carries_outer, ..
+                } => {
+                    out.push(ty);
+                    if !carries_outer {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            if matches!(scope.kind, ScopeKind::Function { .. }) {
+                out.extend(scope.context_receivers.iter().rev().copied());
             }
         }
         out
@@ -378,7 +461,7 @@ mod tests {
 
     fn class(name: &str, carries_outer: bool) -> ScopeKind {
         ScopeKind::Class {
-            ty: type_name(name),
+            ty: Ty::Obj(type_name(name), &[]),
             carries_outer,
         }
     }
@@ -453,6 +536,25 @@ mod tests {
             "the extension receiver is nearer than the enclosing class"
         );
         assert_eq!(ext.this_ty(), Some(obj("kotlin/String")));
+    }
+
+    #[test]
+    fn extension_receiver_precedes_an_outer_constructor_binding() {
+        let root: Scope<'_, u32> = Scope::root();
+        let class_scope = root.child(class("Container", false));
+        let constructor_body = class_scope.child(ScopeKind::Block);
+        constructor_body.rebind("value", Ns::Value, 1);
+        let accessor = constructor_body.child(ScopeKind::Function {
+            receiver: Some(obj("Token")),
+        });
+
+        assert_eq!(
+            accessor.implicit_receivers_before_binding("value", Ns::Value),
+            vec![obj("Token")]
+        );
+        assert!(accessor
+            .implicit_receivers_before_binding("local", Ns::Value)
+            .contains(&obj("Container")));
     }
 
     #[test]

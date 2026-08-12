@@ -50,11 +50,11 @@ fn withlock_lambda_with_suspend_and_nonlocal_return_compiles() {
          import kotlinx.coroutines.sync.withLock\n\
          suspend fun make(): String = \"x\"\n\
          suspend fun f(m: Mutex, s: String?): String = m.withLock { s?.let { return@withLock it }; make() }\n";
-    let rejected =
-        common::backend_rejects_in_process(SRC, "S", &[stdlib, coro], Some(jdk.as_path()));
+    let outcome =
+        common::backend_outcome_in_process(SRC, "S", &[stdlib, coro], Some(jdk.as_path()));
     assert_eq!(
-        rejected,
-        Some(false),
+        outcome,
+        Some(common::BackendOutcome::Emitted),
         "the non-local-return withLock shape should compile, not be declined"
     );
 }

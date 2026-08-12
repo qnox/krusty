@@ -1,11 +1,9 @@
 //! build.688 cc1 + bb1.
 //!
 //! cc1: an `is`-check on a value from a SAME-PACKAGE classpath call (`package q`, no import) used as a plain
-//! boolean value (`val v = Rules.validate(s); return v is V.Ok`). The lowerer's `ty_ref`/
-//! `resolve_qualified_nested` resolved a classpath type through explicit imports but NOT through the file's
-//! own package (the implicit same-package wildcard the checker uses), so `V.Ok` erased to `Ty::Error` and the
-//! `is` lowering bailed ("this construct is not yet supported"). `resolve_qualified_nested` now also resolves
-//! an unqualified same-package classpath type via the file's package.
+//! boolean value (`val v = Rules.validate(s); return v is V.Ok`). Lowering previously re-resolved `V.Ok`
+//! but missed the file's implicit same-package import, so it erased to `Ty::Error` and bailed. The checker now
+//! records the resolved `TypeRef`; lowering consumes that identity and performs no import lookup.
 //!
 //! bb1: a value-class parameter with a no-arg default combined with nominal-subtype arguments in ONE
 //! constructor call (`data class Outer(id: Vid, a: A, b: B)` built `Outer(id = Vid(), a = A.X(…), b =
@@ -20,7 +18,12 @@ fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
     let libout = common::compile_lib(tag, lib)?;
-    common::compile_and_run_box(main, "Main", &[libout, sl], Some(jdk.as_path()))
+    Some(common::expect_box_run(
+        main,
+        "Main",
+        &[libout, sl],
+        Some(jdk.as_path()),
+    ))
 }
 
 /// Reference-compiled dependency variant: these cases consume kotlinc-emitted metadata

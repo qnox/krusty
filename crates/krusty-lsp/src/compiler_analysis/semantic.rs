@@ -6,18 +6,17 @@ use std::{
 };
 
 use krusty::ast::{
-    BinOp, ClassDecl, ClassKind, Decl, Expr, ExprId, File, FunBody, FunDecl, Param, PropDecl,
-    PropParam, Stmt, StmtId, TypeRef, UnOp,
+    AnnotationRef, BinOp, ClassDecl, ClassKind, Decl, Expr, ExprId, File, FunBody, FunDecl, Param,
+    PropDecl, PropParam, Stmt, StmtId, TypeRef, UnOp,
 };
 use krusty::diag::{DiagSink, Span};
 use krusty::frontend::{
-    lex_name_tokens, CompoundAssignmentTarget, FrontendNameToken, FrontendNameTokenKind,
-    FrontendSymbols, FrontendTypeInfo,
+    lex_name_tokens, FrontendNameToken, FrontendNameTokenKind, FrontendSymbols, FrontendTypeInfo,
 };
 use krusty::types::{type_name, Ty, TypeName};
 
 use super::{
-    checked_property_type,
+    checked_property_type, companion_class,
     navigation::{
         declaration_name_span, definition_name_span, render_function_hover, source_name, MemberKind,
     },
@@ -227,13 +226,13 @@ impl HighlightSymbols {
             source_class_owners: HashMap::new(),
             members: HashMap::new(),
         };
-        for file in files {
+        for (file_index, file) in files.iter().enumerate() {
             for &declaration in &file.file.decls {
                 if let Decl::Class(class) = file.file.decl(declaration) {
-                    metadata.collect_class(&file.file, class);
+                    metadata.collect_class(file_index as u32, &file.file, class, symbols);
                     metadata.source_classes.insert(
                         source_classifier_name(&file.file, &class.name),
-                        class_highlight(class),
+                        class_highlight(file_index as u32, class, symbols),
                     );
                     metadata.source_class_owners.insert(
                         source_classifier_name(&file.file, &class.name),
@@ -282,7 +281,13 @@ impl HighlightSymbols {
         metadata
     }
 
-    fn collect_class(&mut self, file: &File, class: &ClassDecl) {
+    fn collect_class(
+        &mut self,
+        file_index: u32,
+        file: &File,
+        class: &ClassDecl,
+        symbols: &FrontendSymbols,
+    ) {
         let owner = source_classifier_internal(file, &class.name);
         for property in &class.props {
             self.members.insert(
@@ -290,7 +295,7 @@ impl HighlightSymbols {
                 MemberHighlight {
                     kind: HighlightKind::Property,
                     modifiers: variable_modifier(property.is_var)
-                        | if is_deprecated(&property.annotations) {
+                        | if is_deprecated(symbols, file_index, &property.annotations) {
                             HighlightModifiers::DEPRECATED
                         } else {
                             0
@@ -298,7 +303,7 @@ impl HighlightSymbols {
                 },
             );
         }
-        for property in class.body_props.iter().chain(&class.companion_props) {
+        for property in &class.body_props {
             self.members.insert(
                 (owner, property.name.clone()),
                 MemberHighlight {
@@ -307,7 +312,7 @@ impl HighlightSymbols {
                 },
             );
         }
-        for function in class.methods.iter().chain(&class.companion_methods) {
+        for function in &class.methods {
             self.members.insert(
                 (owner, function.name.clone()),
                 MemberHighlight {
@@ -316,9 +321,34 @@ impl HighlightSymbols {
                     } else {
                         HighlightKind::Method
                     },
-                    modifiers: function_modifiers(function),
+                    modifiers: function_modifiers(symbols, file_index, function),
                 },
             );
+        }
+        if let Some(companion) = companion_class(file, class) {
+            for property in &companion.body_props {
+                self.members.insert(
+                    (owner, property.name.clone()),
+                    MemberHighlight {
+                        kind: HighlightKind::Property,
+                        modifiers: variable_modifier(property.is_var) | HighlightModifiers::STATIC,
+                    },
+                );
+            }
+            for function in &companion.methods {
+                self.members.insert(
+                    (owner, function.name.clone()),
+                    MemberHighlight {
+                        kind: if function.is_operator() {
+                            HighlightKind::Operator
+                        } else {
+                            HighlightKind::Method
+                        },
+                        modifiers: function_modifiers(symbols, file_index, function)
+                            | HighlightModifiers::STATIC,
+                    },
+                );
+            }
         }
         for entry in &class.enum_entries {
             self.members.insert(
@@ -326,7 +356,7 @@ impl HighlightSymbols {
                 MemberHighlight {
                     kind: HighlightKind::EnumMember,
                     modifiers: HighlightModifiers::READONLY
-                        | if is_deprecated(&entry.annotations) {
+                        | if is_deprecated(symbols, file_index, &entry.annotations) {
                             HighlightModifiers::DEPRECATED
                         } else {
                             0
@@ -363,20 +393,27 @@ impl HighlightSymbols {
     }
 }
 
-fn class_highlight(class: &ClassDecl) -> MemberHighlight {
-    let kind = match class.kind {
-        ClassKind::Enum => HighlightKind::Enum,
-        ClassKind::Interface => HighlightKind::Interface,
-        ClassKind::Annotation => HighlightKind::Decorator,
-        ClassKind::Object => HighlightKind::Type,
-        ClassKind::Class if class.is_data => HighlightKind::Struct,
-        ClassKind::Class => HighlightKind::Class,
+fn class_highlight(
+    file_index: u32,
+    class: &ClassDecl,
+    symbols: &FrontendSymbols,
+) -> MemberHighlight {
+    let kind = if class.is_singleton() {
+        HighlightKind::Type
+    } else {
+        match class.kind {
+            ClassKind::Enum => HighlightKind::Enum,
+            ClassKind::Interface => HighlightKind::Interface,
+            ClassKind::Annotation => HighlightKind::Decorator,
+            ClassKind::Class if class.is_data => HighlightKind::Struct,
+            ClassKind::Class => HighlightKind::Class,
+        }
     };
     let modifiers = if class.kind == ClassKind::Interface || class.modality.is_abstract() {
         HighlightModifiers::ABSTRACT
     } else {
         0
-    } | if is_deprecated(&class.annotations) {
+    } | if is_deprecated(symbols, file_index, &class.annotations) {
         HighlightModifiers::DEPRECATED
     } else {
         0
@@ -873,12 +910,12 @@ impl<'a> SemanticClassifier<'a> {
     }
 
     fn mark_class(&mut self, class: &ClassDecl) {
-        let kind = class_highlight(class).kind;
+        let kind = class_highlight(self.file_index, class, self.symbols).kind;
         let mut modifiers = HighlightModifiers::DECLARATION;
         if class.modality.is_abstract() || class.kind == ClassKind::Interface {
             modifiers |= HighlightModifiers::ABSTRACT;
         }
-        if is_deprecated(&class.annotations) {
+        if is_deprecated(self.symbols, self.file_index, &class.annotations) {
             modifiers |= HighlightModifiers::DEPRECATED;
         }
         self.mark_named_in(class.span, &class.name, kind, modifiers, false);
@@ -904,15 +941,12 @@ impl<'a> SemanticClassifier<'a> {
             );
             self.add_member_function_binding(class.span, method, false);
         }
-        let companion_scope = class
-            .companion_methods
-            .iter()
-            .map(|method| method.span)
-            .chain(class.companion_props.iter().map(|property| property.span))
-            .reduce(|left, right| Span::new(left.lo.min(right.lo), left.hi.max(right.hi)));
-        for method in &class.companion_methods {
-            self.mark_function(method, true, true, false);
-            self.add_member_function_binding(companion_scope.unwrap_or(class.span), method, true);
+        let companion = companion_class(self.file, class);
+        if let Some(companion) = companion {
+            for method in &companion.methods {
+                self.mark_function(method, true, true, false);
+                self.add_member_function_binding(companion.span, method, true);
+            }
         }
         for property in &class.body_props {
             let (definition, type_definition) = self.mark_property(property, false);
@@ -929,19 +963,21 @@ impl<'a> SemanticClassifier<'a> {
                 self.set_last_binding_owner(ty);
             }
         }
-        for property in &class.companion_props {
-            let (definition, type_definition) = self.mark_property(property, true);
-            self.add_binding(
-                &property.name,
-                companion_scope.unwrap_or(class.span),
-                companion_scope.unwrap_or(class.span).lo,
-                HighlightKind::Property,
-                variable_modifier(property.is_var) | HighlightModifiers::STATIC,
-                definition,
-            );
-            self.set_last_binding_type_definition(type_definition);
-            if let Some(ty) = &property.ty {
-                self.set_last_binding_owner(ty);
+        if let Some(companion) = companion {
+            for property in &companion.body_props {
+                let (definition, type_definition) = self.mark_property(property, true);
+                self.add_binding(
+                    &property.name,
+                    companion.span,
+                    companion.span.lo,
+                    HighlightKind::Property,
+                    variable_modifier(property.is_var) | HighlightModifiers::STATIC,
+                    definition,
+                );
+                self.set_last_binding_type_definition(type_definition);
+                if let Some(ty) = &property.ty {
+                    self.set_last_binding_owner(ty);
+                }
             }
         }
         for entry in &class.enum_entries {
@@ -950,7 +986,7 @@ impl<'a> SemanticClassifier<'a> {
                 HighlightKind::EnumMember,
                 HighlightModifiers::DECLARATION
                     | HighlightModifiers::READONLY
-                    | if is_deprecated(&entry.annotations) {
+                    | if is_deprecated(self.symbols, self.file_index, &entry.annotations) {
                         HighlightModifiers::DEPRECATED
                     } else {
                         0
@@ -989,7 +1025,7 @@ impl<'a> SemanticClassifier<'a> {
         if function.is_suspend() {
             modifiers |= HighlightModifiers::ASYNC;
         }
-        if is_deprecated(&function.annotations) {
+        if is_deprecated(self.symbols, self.file_index, &function.annotations) {
             modifiers |= HighlightModifiers::DEPRECATED;
         }
         self.mark_named_in(function.span, &function.name, kind, modifiers, false);
@@ -1052,7 +1088,7 @@ impl<'a> SemanticClassifier<'a> {
         } else {
             (HighlightKind::Parameter, HighlightModifiers::READONLY)
         };
-        let deprecated = if is_deprecated(&parameter.annotations) {
+        let deprecated = if is_deprecated(self.symbols, self.file_index, &parameter.annotations) {
             HighlightModifiers::DEPRECATED
         } else {
             0
@@ -1460,7 +1496,7 @@ impl<'a> SemanticClassifier<'a> {
                     self.enclosing_block_scope(span),
                     span.lo,
                     kind,
-                    function_modifiers(function),
+                    function_modifiers(self.symbols, self.file_index, function),
                     definition,
                 );
                 let name = definition
@@ -1557,12 +1593,15 @@ impl<'a> SemanticClassifier<'a> {
                 .and_then(|types| types.compound_assignment_target(statement))
         });
         if let Some(target) = in_place_target {
-            modifiers = match target {
-                CompoundAssignmentTarget::Member { .. } => 0,
-                CompoundAssignmentTarget::SourceExtension { .. } => HighlightModifiers::STATIC,
-                CompoundAssignmentTarget::LibraryExtension { .. } => {
+            modifiers = match (target.origin(), target.is_extension()) {
+                (Some(krusty::libraries::Origin::Module { .. }), true) => {
+                    HighlightModifiers::STATIC
+                }
+                (Some(krusty::libraries::Origin::Module { .. }), false) => 0,
+                (Some(krusty::libraries::Origin::Library), _) => {
                     HighlightModifiers::DEFAULT_LIBRARY
                 }
+                (None, _) => 0,
             };
         } else if let Some(name) = op.arith_operator_name() {
             if self
@@ -1943,7 +1982,7 @@ impl<'a> SemanticClassifier<'a> {
                 } else {
                     let property = self
                         .type_info
-                        .is_some_and(|types| types.bound_property_refs.contains_key(&id));
+                        .is_some_and(|types| types.callable_reference_is_property(id));
                     MemberHighlight {
                         kind: if property {
                             HighlightKind::Property
@@ -2316,7 +2355,8 @@ impl<'a> SemanticClassifier<'a> {
             });
         }
         let (member_name, member_desc) = if let Some(callable) = types
-            .resolved_top_level(expression)
+            .resolved_top_level_call(expression)
+            .map(|call| &call.callable)
             .or_else(|| types.resolved_extension(expression))
         {
             (callable.name.clone(), callable.descriptor.clone())
@@ -2368,13 +2408,19 @@ impl<'a> SemanticClassifier<'a> {
         name: &str,
         kind: MemberKind,
     ) -> Option<DefinitionTarget> {
-        let (owner, resolved_name, params) = self
-            .type_info?
-            .resolved_module_member_signature(expression)?;
-        (resolved_name == name)
+        let selected = self.type_info?.resolved_member(expression)?;
+        if !matches!(selected.origin, krusty::libraries::Origin::Module { .. }) {
+            return None;
+        }
+        let owner = selected.member.owner?;
+        (selected.member.name == name)
             .then(|| {
-                self.definition_symbols
-                    .member_target(&owner.render(), name, kind, params)
+                self.definition_symbols.member_target(
+                    &owner.render(),
+                    name,
+                    kind,
+                    &selected.member.params,
+                )
             })
             .flatten()
     }
@@ -2397,14 +2443,16 @@ impl<'a> SemanticClassifier<'a> {
                 .member_target(owner, name, kind, &member.params);
         }
 
-        let (owner, resolved_name, params) = types.resolved_module_member_signature(expression)?;
-        if resolved_name != name {
+        let selected = types.resolved_member(expression)?;
+        if !matches!(selected.origin, krusty::libraries::Origin::Module { .. })
+            || selected.member.name != name
+        {
             return None;
         }
-        let owner = owner.render();
+        let owner = selected.member.owner?.render();
         let owner = owner.strip_suffix("$Companion")?;
         self.definition_symbols
-            .member_target(owner, name, kind, params)
+            .member_target(owner, name, kind, &selected.member.params)
     }
 
     fn record_member_definitions(
@@ -2433,10 +2481,10 @@ impl<'a> SemanticClassifier<'a> {
                 .and_then(|types| types.resolved_super_call(expression))
                 .and_then(|resolved| {
                     self.definition_symbols.member_target(
-                        &resolved.owner()?.render(),
+                        &resolved.owner.render(),
                         name,
                         MemberKind::InstanceFunction,
-                        resolved.params(),
+                        &resolved.params,
                     )
                 })
             {
@@ -2449,8 +2497,7 @@ impl<'a> SemanticClassifier<'a> {
             }
             if let Some(target) = self
                 .type_info
-                .and_then(|types| types.source_extension_property(expression))
-                .and_then(|property| property.source_key)
+                .and_then(|types| types.callable_reference_source_key(expression))
                 .and_then(|(file, declaration)| {
                     self.definition_symbols
                         .declaration_target(file, declaration)
@@ -2459,15 +2506,21 @@ impl<'a> SemanticClassifier<'a> {
                 self.push_definition(source_span, target);
                 return;
             }
-            if let Some((owner, resolved_name, params)) = self
+            if let Some(selected) = self
                 .type_info
-                .and_then(|types| types.resolved_module_member_signature(expression))
+                .and_then(|types| types.resolved_member(expression))
+                .filter(|member| matches!(member.origin, krusty::libraries::Origin::Module { .. }))
             {
-                if resolved_name == name {
-                    if let Some(target) =
-                        self.definition_symbols
-                            .member_target(&owner.render(), name, kind, params)
-                    {
+                if selected.member.name == name {
+                    let Some(owner) = selected.member.owner else {
+                        return;
+                    };
+                    if let Some(target) = self.definition_symbols.member_target(
+                        &owner.render(),
+                        name,
+                        kind,
+                        &selected.member.params,
+                    ) {
                         let nested = matches!(self.file.expr(expression), Expr::Call { .. })
                             .then(|| self.receiver_definition_owner(receiver))
                             .flatten()
@@ -2643,10 +2696,14 @@ impl<'a> SemanticClassifier<'a> {
                         modifiers: variable_modifier(is_var),
                     };
                 }
-                if class.has_method(name) || class.static_methods.contains_key(name) {
+                let companion_has_method = class
+                    .companion_internal
+                    .and_then(|companion| self.symbols.classes.get(&companion))
+                    .is_some_and(|companion| companion.has_method(name));
+                if class.has_method(name) || companion_has_method {
                     return MemberHighlight {
                         kind: HighlightKind::Method,
-                        modifiers: if class.static_methods.contains_key(name) {
+                        modifiers: if companion_has_method {
                             HighlightModifiers::STATIC
                         } else {
                             0
@@ -2720,7 +2777,10 @@ impl<'a> SemanticClassifier<'a> {
         let Some(types) = self.type_info else {
             return modifiers;
         };
-        if let Some(callable) = types.resolved_top_level(call) {
+        if let Some(callable) = types
+            .resolved_top_level_call(call)
+            .map(|call| &call.callable)
+        {
             modifiers |= HighlightModifiers::STATIC;
             if callable.suspend {
                 modifiers |= HighlightModifiers::ASYNC;
@@ -2754,11 +2814,6 @@ impl<'a> SemanticClassifier<'a> {
                 .is_some_and(|owner| owner.starts_with("kotlin/"))
             {
                 modifiers |= HighlightModifiers::DEFAULT_LIBRARY;
-            }
-        } else if let Some(callable) = types.resolved_module_top_level(call) {
-            modifiers |= HighlightModifiers::STATIC;
-            if callable.suspend {
-                modifiers |= HighlightModifiers::ASYNC;
             }
         }
         modifiers
@@ -2837,12 +2892,7 @@ impl<'a> SemanticClassifier<'a> {
         } else if let Some(internal) = self
             .type_info
             .and_then(|types| types.resolved_type_ref(ty))
-            .filter(|internal| {
-                self.symbols
-                    .libraries
-                    .resolve_type_name(*internal)
-                    .is_some()
-            })
+            .filter(|internal| self.symbols.libraries.classifier(*internal).is_some())
         {
             self.push_library_definition(
                 source_span,
@@ -3000,7 +3050,7 @@ impl<'a> SemanticClassifier<'a> {
         if function.is_suspend() {
             modifiers |= HighlightModifiers::ASYNC;
         }
-        if is_deprecated(&function.annotations) {
+        if is_deprecated(self.symbols, self.file_index, &function.annotations) {
             modifiers |= HighlightModifiers::DEPRECATED;
         }
         let definition = self
@@ -3214,13 +3264,18 @@ fn default_library_member_owner(symbols: &FrontendSymbols, owner: krusty::types:
     symbols.libraries.is_default_library_owner(owner)
 }
 
-fn is_deprecated(annotations: &[String]) -> bool {
+fn is_deprecated(
+    symbols: &FrontendSymbols,
+    file_index: u32,
+    annotations: &[AnnotationRef],
+) -> bool {
+    let deprecated = type_name("kotlin/Deprecated");
     annotations
         .iter()
-        .any(|annotation| annotation == "Deprecated")
+        .any(|annotation| symbols.resolved_annotation(file_index, annotation) == Some(deprecated))
 }
 
-fn function_modifiers(function: &FunDecl) -> u16 {
+fn function_modifiers(symbols: &FrontendSymbols, file_index: u32, function: &FunDecl) -> u16 {
     let mut modifiers = 0;
     if function.is_abstract() && matches!(function.body, FunBody::None) {
         modifiers |= HighlightModifiers::ABSTRACT;
@@ -3228,7 +3283,7 @@ fn function_modifiers(function: &FunDecl) -> u16 {
     if function.is_suspend() {
         modifiers |= HighlightModifiers::ASYNC;
     }
-    if is_deprecated(&function.annotations) {
+    if is_deprecated(symbols, file_index, &function.annotations) {
         modifiers |= HighlightModifiers::DEPRECATED;
     }
     modifiers

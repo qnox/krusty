@@ -108,7 +108,7 @@ fn declared_method_shapes(
     }
     dedup_method_shapes(
         syms.libraries
-            .resolve_type_name(owner)
+            .classifier(owner)
             .into_iter()
             .flat_map(|class| {
                 class
@@ -132,11 +132,11 @@ fn direct_superclass(syms: &FrontendSymbols, owner: TypeName) -> Option<TypeName
     if let Some(class) = syms.class_by_type_name(owner) {
         return class.super_internal;
     }
-    syms.libraries.resolve_type_name(owner).and_then(|class| {
+    syms.libraries.classifier(owner).and_then(|class| {
         class.supertypes.iter_ids().find(|&candidate| {
             !syms
                 .libraries
-                .resolve_type_name(candidate)
+                .classifier(candidate)
                 .is_some_and(|ty| ty.is_interface())
                 && !syms
                     .class_by_type_name(candidate)
@@ -269,18 +269,23 @@ fn declared_property_shape(
             is_var,
         });
     }
-    syms.libraries
-        .property_members(Ty::obj_name(owner), name)
-        .overloads
-        .into_iter()
-        .find(|property| {
-            matches!(property.kind, crate::libraries::PropKind::Member) && property.owner == owner
-        })
-        .map(|property| PropertyShape {
-            ty: property.ty,
-            accessor_ret: property.ty,
-            is_var: property.setter.is_some(),
-        })
+    crate::symbol_resolver::declared_member_callables(
+        syms.libraries.as_ref(),
+        Ty::obj_name(owner),
+        name,
+    )
+    .into_parts()
+    .1
+    .overloads
+    .into_iter()
+    .find(|property| {
+        matches!(property.kind, crate::libraries::PropKind::Member) && property.owner == owner
+    })
+    .map(|property| PropertyShape {
+        ty: property.ty,
+        accessor_ret: property.ty,
+        is_var: property.setter.is_some(),
+    })
 }
 
 /// A property overriding a supertype property with a different erased type (a covariant override
@@ -745,7 +750,7 @@ fn interface_bridges(
             .is_some_and(|c| c.is_interface())
             || syms
                 .libraries
-                .resolve_type_name(sup)
+                .classifier(sup)
                 .is_some_and(|t| t.is_interface());
         if is_iface && !ifaces.contains_name(sup) {
             ifaces.push_name(sup);
@@ -768,7 +773,7 @@ fn interface_bridges(
         })
         .collect();
     for itf in ifaces.iter_ids() {
-        let classpath_interface = syms.libraries.resolve_type_name(itf).is_some();
+        let classpath_interface = syms.libraries.classifier(itf).is_some();
         let applied_interface_args = syms
             .applied_hierarchy(Ty::obj_name(internal_name))
             .into_iter()
@@ -796,7 +801,7 @@ fn interface_bridges(
                     )
                 })
                 .collect()
-        } else if let Some(interface) = syms.libraries.resolve_type_name(itf) {
+        } else if let Some(interface) = syms.libraries.classifier(itf) {
             interface
                 .members
                 .iter()

@@ -112,6 +112,14 @@ fun box(): String { build<String> { yield(\"OK\") }; return \"OK\" }\n",
 }
 
 #[test]
+fn sequence_builder_exposes_its_receiver_members() {
+    assert_resolves(
+        "sequence builder receiver",
+        "// WITH_STDLIB\nfun box(): String { val xs = sequence<Int> { yield(1) }; return \"OK\" }",
+    );
+}
+
+#[test]
 fn kotlin_test_assert_fails_with_default_is_inline_only_callable() {
     let mut cp_paths =
         common::classpath_jars_for("// WITH_STDLIB\nimport kotlin.test.assertFailsWith\n");
@@ -124,8 +132,14 @@ fn kotlin_test_assert_fails_with_default_is_inline_only_callable() {
     let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
     let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(cp);
     let overloads = match platform
-        .resolve_symbols("kotlin/test/assertFailsWith$default")
+        .symbols(
+            krusty::symbol_source::SymbolNamespace::Package(krusty::types::type_name(
+                "kotlin/test",
+            )),
+            "assertFailsWith$default",
+        )
         .callables
+        .clone()
     {
         krusty::libraries::Callables::Functions(f) => f.overloads,
         _ => Vec::new(),
@@ -144,6 +158,68 @@ fn kotlin_test_assert_fails_with_default_is_inline_only_callable() {
         "assertFailsWith$default must be exposed as splice-only inline"
     );
     assert_eq!(overload.call_sig.param_defaults, vec![true, false]);
+}
+
+#[test]
+fn enum_reflection_functions_are_published_from_stdlib_metadata() {
+    let mut cp_paths = common::classpath_jars_for("// WITH_STDLIB\n");
+    if cp_paths.is_empty() {
+        eprintln!("skip enum metadata shape: no stdlib jar");
+        return;
+    }
+    cp_paths.push(common::jdk_modules());
+    let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
+    let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(cp);
+
+    for (name, arity) in [("enumValues", 0), ("enumValueOf", 1)] {
+        let overloads = match platform
+            .symbols(
+                krusty::symbol_source::SymbolNamespace::Package(krusty::types::type_name("kotlin")),
+                name,
+            )
+            .callables
+            .clone()
+        {
+            krusty::libraries::Callables::Functions(functions) => functions.overloads,
+            _ => Vec::new(),
+        };
+        assert!(
+            overloads
+                .iter()
+                .any(|function| function.callable.params.len() == arity),
+            "stdlib metadata must publish kotlin/{name}; got {} overloads",
+            overloads.len(),
+        );
+    }
+}
+
+#[test]
+fn enum_values_is_selected_as_the_stdlib_top_level_callable() {
+    let src = "// WITH_STDLIB\nenum class E { A }\nfun use() = enumValues<E>()\n";
+    let Some((errors, selected)) =
+        common::inspect_checker_with_stdlib(src, |file, info, _| {
+            file.expr_arena.iter().enumerate().any(|(index, expression)| {
+            let krusty::ast::Expr::Call { callee, .. } = expression else {
+                return false;
+            };
+            matches!(file.expr(*callee), krusty::ast::Expr::Name(name) if name == "enumValues")
+                && info
+                    .resolved_top_level_call(krusty::ast::ExprId(index as u32))
+                    .is_some_and(|target| {
+                        target.callable.name == "enumValues"
+                            && target.callable.compiler_intrinsic
+                                == Some(krusty::libraries::CompilerIntrinsic::EnumValues)
+                    })
+        })
+        })
+    else {
+        return;
+    };
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(
+        selected,
+        "enumValues must first resolve to its stdlib declaration"
+    );
 }
 
 #[test]

@@ -5,6 +5,92 @@ use crate::types::{Ty, TypeName, TypeNameList};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+/// A source default value captured without an AST/file identity. Providers attach these directly to
+/// callable metadata so any selected source callable can be lowered without looking its declaration
+/// up again. Unrepresentable defaults remain `None` and therefore cannot be silently miscompiled.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DefaultValue {
+    Int(i64),
+    Long(i64),
+    Double(f64),
+    Float(f32),
+    Bool(bool),
+    Char(u16),
+    Str(crate::kt_string::KtString),
+    Null,
+    Object(String),
+}
+
+impl DefaultValue {
+    pub fn fills_param_ty(&self, ty: Ty) -> bool {
+        match self {
+            Self::Int(_) => ty.int_arithmetic_repr() == Ty::Int,
+            Self::Long(_) => ty == Ty::Long,
+            Self::Double(_) => ty == Ty::Double,
+            Self::Float(_) => ty == Ty::Float,
+            Self::Bool(_) => ty == Ty::Boolean,
+            Self::Char(_) => ty == Ty::Char,
+            Self::Str(_) => ty == Ty::String,
+            Self::Null => ty.is_reference(),
+            Self::Object(_) => false,
+        }
+    }
+}
+
+/// Declaration-level classifier access. Unlike [`Visibility`], this preserves JVM package-private
+/// metadata; accessibility itself is computed by the resolver from this fact and its use context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClassifierAccess {
+    Public,
+    Internal,
+    Protected,
+    Private,
+    PackagePrivate,
+}
+
+/// Inheritance capabilities declared by one classifier. This is part of the classifier record, not a
+/// second provider query; core consumes it while walking the class model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClassifierInheritance {
+    pub is_abstract: bool,
+    pub is_extensible: bool,
+    pub has_no_arg_constructor: bool,
+    pub supports_external_subclassing: bool,
+}
+
+impl Default for ClassifierInheritance {
+    fn default() -> Self {
+        Self {
+            is_abstract: false,
+            is_extensible: false,
+            has_no_arg_constructor: true,
+            supports_external_subclassing: false,
+        }
+    }
+}
+
+impl From<Visibility> for ClassifierAccess {
+    fn from(visibility: Visibility) -> Self {
+        match visibility {
+            Visibility::Public => Self::Public,
+            Visibility::Internal => Self::Internal,
+            Visibility::Protected => Self::Protected,
+            Visibility::Private => Self::Private,
+        }
+    }
+}
+
+impl ClassifierAccess {
+    pub fn visibility(self) -> Visibility {
+        match self {
+            Self::Public => Visibility::Public,
+            Self::Internal => Visibility::Internal,
+            Self::Protected => Visibility::Protected,
+            Self::Private | Self::PackagePrivate => Visibility::Private,
+        }
+    }
+}
+
 /// A parsed generic signature in Kotlin's logical shape: formal type-parameter names, an OPTIONAL
 /// receiver, the value parameters, and the return. Every node is a plain [`Ty`] — a type variable is a
 /// [`Ty::TyParam`] (name + `kotlin/Any` bound), a generic class carries its arguments in [`Ty::Obj`], a
@@ -62,9 +148,9 @@ impl GenericSig {
 }
 
 /// Bit-packed boolean flags for a [`LibraryMember`], collapsing `ret_nullable`/`is_interface`/
-/// `suspend`/`is_operator`/`is_extension` into one byte. Read through the `LibraryMember` accessors of the same
+/// `suspend`/`is_operator`/`is_extension`/`is_abstract` into one byte. Read through the `LibraryMember` accessors of the same
 /// names; mutated through the matching `set_*` methods; built with the `with_*` chain. Headroom for
-/// three more flags.
+/// name; mutated through the matching `set_*` methods.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LmFlags(u8);
 
@@ -81,6 +167,7 @@ impl LmFlags {
     /// descriptor distinguishes that from an ordinary member taking a parameter of the same type, and
     /// a call site must know which, since only a member extension needs its dispatch receiver in scope.
     const IS_EXTENSION: u8 = 1 << 4;
+    const IS_ABSTRACT: u8 = 1 << 5;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -116,6 +203,22 @@ impl LmFlags {
     pub const fn with_is_extension(self, on: bool) -> Self {
         self.with(Self::IS_EXTENSION, on)
     }
+    #[inline]
+    pub const fn with_is_abstract(self, on: bool) -> Self {
+        self.with(Self::IS_ABSTRACT, on)
+    }
+}
+
+/// Provider-owned physical realization of a semantic member. Resolution carries this opaque handle
+/// unchanged; only lowering interprets it after overload selection has committed the declaration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MemberRealization {
+    /// Ordinary dispatch through the semantic receiver.
+    #[default]
+    Dispatch,
+    /// Direct provider call. Some realizations encode the semantic receiver as their first argument
+    /// (value-class implementation methods); others address a singleton implementation directly.
+    Direct { pass_receiver: bool },
 }
 
 /// One member (constructor, member function/property accessor, or companion member) of a library
@@ -133,6 +236,7 @@ pub struct LibraryMember {
     pub ret: Ty,
     pub physical_ret: Ty,
     pub descriptor: String,
+    pub realization: MemberRealization,
     pub signature: Option<String>,
     /// The member's PARSED generic signature, if the provider has one — carries type-variable binding
     /// facts (a constructor's `(TA;TB;)V`) without making consumers parse backend signature strings.
@@ -155,6 +259,17 @@ pub struct LibraryMember {
     /// call and lambda-parameter typing without the removed receiver-indexed `functions()` seam. Default
     /// (empty) for a provider that records no source parameter metadata.
     pub call_sig: CallSig,
+    /// Leading context-parameter count of this member's logical parameter list.
+    pub context_count: usize,
+    /// Declared source-level overload priority from metadata.
+    pub low_priority: bool,
+    /// Declared contract effects from metadata.
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
+    /// File-independent values for source defaults, parallel to [`Self::params`]. Presence and named
+    /// argument mapping remain in [`Self::call_sig`]; this payload is consumed only after selection.
+    pub default_values: Vec<Option<DefaultValue>>,
+    /// Opaque default-argument bridge coupled to this selected declaration.
+    pub default_realization: Option<Box<DefaultCallRealization>>,
     /// The member's DECLARED (un-erased, pre-substitution) return type, straight from `@Metadata` —
     /// the return analogue of [`LibraryCallable::source_receiver`], and recorded with no value-class
     /// reasoning of its own.
@@ -166,6 +281,87 @@ pub struct LibraryMember {
     /// value-class pass reads this to decide the result's representation. `None` when the provider
     /// records no metadata return classifier.
     pub declared_ret: Option<Ty>,
+    /// Language-defined classifier callable synthesized for this declaration. This is semantic
+    /// identity, not a backend spelling: each backend decides how the selected operation is realized.
+    /// Ordinary declared members carry `None`.
+    pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
+    /// Compiler-plugin expression implementation attached to this exact declaration. Ordinary
+    /// declarations leave it unset; selection carries it unchanged to the plugin planning phase.
+    pub plugin_expression: Option<PluginExpressionDeclaration>,
+}
+
+/// Callable declarations contributed by the Kotlin language to a classifier rather than written in
+/// its body. They participate in the ordinary classifier-callable overload set; the tag survives
+/// selection so lowering never rediscovers the operation from its source name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImplicitClassifierCallable {
+    EnumValues,
+    EnumValueOf,
+}
+
+/// A property contributed by the Kotlin language to a classifier rather than declared on an
+/// instance or companion object. Its source type is backend-neutral; a provider may additionally
+/// attach the exact physical getter used by lowering.
+#[derive(Clone, Debug)]
+pub struct ClassifierProperty {
+    pub ty: Ty,
+    pub getter: Option<LibraryMember>,
+}
+
+/// A source-declared callable whose implementation is supplied by the compiler after ordinary symbol
+/// and overload selection. Providers attach this to the exact declaration identity; lowering never
+/// grants intrinsic behavior from a coincidental source name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompilerIntrinsic {
+    ArraySize,
+    CharCode,
+    StringLength,
+    Print,
+    Println,
+    StartCoroutine,
+    CoroutineSuspended,
+    SuspendCoroutine,
+    SuspendCoroutineUninterceptedOrReturn,
+    EnumValues,
+    EnumValueOf,
+    ForEach,
+    ForEachIndexed,
+    Map,
+    FlatMap,
+    IsEmpty,
+    IsNotEmpty,
+    Count,
+    TrimIndent,
+    TrimMargin,
+}
+
+/// A declaration-defined inline body whose source-independent control-flow shape must be expanded
+/// before backend coroutine lowering. Providers decode this from the exact selected declaration's
+/// compiled inline body; source spelling never participates.
+#[derive(Clone, Debug)]
+pub enum InlineBodyPlan {
+    /// Invoke one function-typed parameter with values loaded from other callable parameters and return
+    /// the invocation result.
+    InvokeLambda {
+        lambda_parameter: usize,
+        argument_parameters: Vec<usize>,
+    },
+    /// Invoke a suspending member on the extension receiver, invoke one lambda parameter, and invoke a
+    /// cleanup member with the same state argument on normal and exceptional exits.
+    SuspendBeforeLambdaFinally {
+        lambda_parameter: usize,
+        state_parameter: usize,
+        state_default: DefaultValue,
+        enter: LibraryMember,
+        cleanup: LibraryMember,
+    },
+}
+
+/// Opaque compiler-plugin implementation identity attached to one declared callable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PluginExpressionDeclaration {
+    pub plugin: &'static str,
+    pub operation: &'static str,
 }
 
 /// A public static field and its optional compile-time constant.
@@ -220,11 +416,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// any builtins whose source type is not represented as `Ty::Obj` (`UInt` → `Int`).
     fn value_underlying(&self, _ty: Ty) -> Option<Ty> {
         None
-    }
-
-    fn value_underlying_name(&self, internal: TypeName) -> Option<Ty> {
-        self.resolve_type_name(internal)
-            .and_then(|t| t.value_underlying)
     }
 
     /// A runtime-valued public static field on `internal` or its supertypes.
@@ -306,11 +497,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         ty.fun_arity().map(usize::from)
     }
 
-    /// Whether a member has a physical target suitable for a callable reference.
-    fn supports_member_reference(&self, _member: &LibraryMember) -> bool {
-        true
-    }
-
     /// The platform/library type used for a property reference with the given arity and mutability.
     /// Resolver needs this type so direct property-reference APIs (`get`, `name`) keep working, but the
     /// actual class name is provider-owned.
@@ -318,6 +504,13 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// `KProperty0<V>`, `[Recv, V]` for a `KProperty1<Recv, V>`. Passing them is what makes
     /// `(::foo).get()` type as the property's own type instead of the erased upper bound.
     fn property_reference_type(&self, _arity: usize, _mutable: bool, _args: &[Ty]) -> Option<Ty> {
+        None
+    }
+
+    /// Platform reflection classifier for an already-resolved callable-reference signature.
+    /// Direction matters: the signature selects the classifier; consumers never parse a classifier
+    /// name to reconstruct the signature.
+    fn function_reference_type(&self, _function: Ty) -> Option<Ty> {
         None
     }
 
@@ -343,20 +536,14 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         &[]
     }
 
-    /// Platform spelling for a physical zero-arg getter when Kotlin property metadata is unavailable.
-    /// Common resolution asks for a semantic property name first; this hook is a fallback owned by the
-    /// target because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
-    /// Every plausible physical getter spelling for `property`, most-conventional first
+    /// Platform spellings for physical zero-arg getters when declaration metadata is unavailable.
+    /// Common resolution asks for a semantic property name; the target returns every physical spelling
+    /// as one provider result because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
+    /// The candidates are most-conventional first
     /// (`id` → `getId`, `getID`; `urlPath` → `getUrlPath`, `getURLPath`) — the inverse of
     /// Kotlin's decapitalize-smart getter-to-property mapping.
-    fn physical_property_getter_names(&self, property: &str) -> Vec<String> {
-        self.physical_property_getter_name(property)
-            .into_iter()
-            .collect()
-    }
-
-    fn physical_property_getter_name(&self, _property: &str) -> Option<String> {
-        None
+    fn physical_property_getter_names(&self, _property: &str) -> Vec<String> {
+        Vec::new()
     }
 
     /// Resolve a built-in type's SIMPLE name (`List`, `Map`, `Comparable`) to its front-end internal
@@ -413,13 +600,21 @@ impl LibraryMember {
             ret,
             physical_ret: ret,
             descriptor,
+            realization: MemberRealization::Dispatch,
             signature: None,
             generic_sig: None,
             flags: LmFlags::default(),
             inline: InlineKind::None,
             visibility: Visibility::Public,
             call_sig: CallSig::default(),
+            context_count: 0,
+            low_priority: false,
+            contract: None,
+            default_values: Vec::new(),
+            default_realization: None,
             declared_ret: None,
+            implicit_classifier_callable: None,
+            plugin_expression: None,
         }
     }
 
@@ -461,7 +656,12 @@ impl LibraryMember {
     pub fn set_is_member_extension(&mut self, on: bool) {
         self.flags = self.flags.with_is_extension(on);
     }
-
+    pub fn is_abstract(&self) -> bool {
+        self.flags.has(LmFlags::IS_ABSTRACT)
+    }
+    pub fn set_is_abstract(&mut self, on: bool) {
+        self.flags = self.flags.with_is_abstract(on);
+    }
     pub fn owner_name(&self) -> Option<String> {
         self.owner.map(TypeName::render)
     }
@@ -500,12 +700,17 @@ impl LibraryCallable {
         LibraryCallable {
             owner: owner.into(),
             name: name.into(),
+            compiler_intrinsic: None,
+            plugin_expression: None,
+            inline_body_plan: None,
+            physical_params: params.clone(),
             params,
             ret,
             physical_ret,
             descriptor: descriptor.into(),
             suspend: false,
             owner_is_interface: false,
+            member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,
             default_call: false,
             vararg_elem: None,
@@ -517,6 +722,7 @@ impl LibraryCallable {
             contract: None,
             generic_sig: None,
             singleton_dispatch: None,
+            default_realization: None,
             declared_ret: None,
         }
     }
@@ -577,7 +783,19 @@ pub struct LibraryCallable {
     pub owner: TypeName,
     /// Kotlin/source name used for selection.
     pub name: String,
+    /// Compiler implementation attached to this exact declaration, if it has no ordinary callable
+    /// body on the target. Selection remains completely ordinary; the backend consumes this tag only
+    /// after the checker has committed the call target.
+    pub compiler_intrinsic: Option<CompilerIntrinsic>,
+    pub plugin_expression: Option<PluginExpressionDeclaration>,
+    /// Structural expansion decoded from this exact declaration's inline body.
+    pub inline_body_plan: Option<Box<InlineBodyPlan>>,
+    /// Call-site-specialized source parameter types used for applicability and checking.
     pub params: Vec<Ty>,
+    /// Declaration parameter types used by the platform ABI. Generic selection may specialize
+    /// [`Self::params`], but it never changes this vector (`fun <T> id(x: T)` remains `Object`-erased
+    /// when called as `id("x")`).
+    pub physical_params: Vec<Ty>,
     /// The *logical* return type — for a generic callable, the substituted type (`listOf<Int>` →
     /// `List<Int>`, `first()` → the element). The checker reports this.
     pub ret: Ty,
@@ -596,6 +814,10 @@ pub struct LibraryCallable {
     /// selected from. Dropping it emitted `invokevirtual` on an interface — an
     /// `IncompatibleClassChangeError` at class-load time.
     pub owner_is_interface: bool,
+    /// A semantic member whose physical implementation is static and consumes the dispatch receiver
+    /// as its leading argument. This remains an opaque realization fact; overload selection still
+    /// treats the declaration as an ordinary member.
+    pub member_realization: MemberRealization,
     /// The callee's inline-ness in one field (was `is_inline` + `must_inline`): [`InlineKind::CanInline`]
     /// for a Kotlin `inline` function the backend MAY splice instead of emitting an `invokestatic`,
     /// [`InlineKind::MustInline`] for a non-public `@InlineOnly` callee the backend MUST splice (no legal
@@ -665,6 +887,17 @@ pub struct LibraryCallable {
     /// Boxed for the same reason as [`Self::generic_sig`]: this struct rides the `ResolvedCall` enum,
     /// whose variant size must stay flat, and only a vanishing fraction of callables carry one.
     pub singleton_dispatch: Option<Box<StaticFieldRef>>,
+    /// Opaque platform target for this declaration's default-argument bridge. It is attached to the
+    /// selected source callable and never participates in name or overload resolution.
+    pub default_realization: Option<Box<DefaultCallRealization>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DefaultCallRealization {
+    pub descriptor: String,
+    pub real_params: Vec<Ty>,
+    pub ret: Ty,
+    pub suspend: bool,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member
@@ -689,6 +922,12 @@ pub struct CallSig {
     pub param_names: Vec<String>,
     /// Per logical param: whether it has a default value (so it may be omitted). Parallel to the params.
     pub param_defaults: Vec<bool>,
+    /// Per logical parameter: the declared type is annotated with Kotlin's internal `@Exact`, so
+    /// applicability requires equality after generic substitution rather than ordinary subtyping.
+    pub exact_params: Vec<bool>,
+    /// Per logical parameter, the resolved declaration carries
+    /// `kotlin.internal.ImplicitIntegerCoercion`.
+    pub implicit_integer_coercion: Vec<bool>,
     /// Per logical param: if it is a function type `(A, B) -> R`, its inner param types `[A, B]` (to type
     /// a lambda argument's `it`/params); otherwise empty. Parallel to the params.
     pub lambda_param_types: Vec<Vec<Ty>>,
@@ -716,8 +955,12 @@ pub struct CallSig {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct ParamList {
+    pub visibility: Visibility,
     pub names: Vec<String>,
     pub defaults: Vec<bool>,
+    /// Declared Kotlin parameter types, parallel to [`Self::names`]. Empty only when the provider cannot
+    /// recover the semantic signature. Constructor selection must never replace these with storage types.
+    pub types: Vec<Ty>,
     /// Per parameter: whether its declared type is a RECEIVER function type (`Recv.() -> R`). The JVM
     /// descriptor and `Signature` both erase that to a plain `FunctionN`, so only the source-level
     /// metadata carries it — and without it a lambda argument gets no implicit receiver, leaving a bare
@@ -937,6 +1180,58 @@ pub fn map_call_args<T: Copy>(
 }
 
 impl CallSig {
+    /// The call shape after parameters supplied outside the source argument list have been removed.
+    pub fn suffix(&self, start: usize) -> Self {
+        let start = start.min(self.param_names.len());
+        CallSig {
+            param_names: self.param_names[start..].to_vec(),
+            param_defaults: self
+                .param_defaults
+                .get(start..)
+                .unwrap_or_default()
+                .to_vec(),
+            exact_params: self.exact_params.get(start..).unwrap_or_default().to_vec(),
+            implicit_integer_coercion: self
+                .implicit_integer_coercion
+                .get(start..)
+                .unwrap_or_default()
+                .to_vec(),
+            lambda_param_types: self
+                .lambda_param_types
+                .get(start..)
+                .unwrap_or_default()
+                .to_vec(),
+            lambda_receivers: self
+                .lambda_receivers
+                .get(start..)
+                .unwrap_or_default()
+                .to_vec(),
+            lambda_receiver_params: self
+                .lambda_receiver_params
+                .get(start..)
+                .unwrap_or_default()
+                .to_vec(),
+            lambda_context_counts: self
+                .lambda_context_counts
+                .get(start..)
+                .unwrap_or_default()
+                .to_vec(),
+            lambda_materialized: self
+                .lambda_materialized
+                .get(start..)
+                .unwrap_or_default()
+                .to_vec(),
+            platform_nullable_params: self
+                .platform_nullable_params
+                .get(start..)
+                .unwrap_or_default()
+                .to_vec(),
+            required: self.required.saturating_sub(start),
+            vararg: self.vararg,
+            vararg_index: self.vararg_index.and_then(|index| index.checked_sub(start)),
+        }
+    }
+
     pub fn has_param_names(&self) -> bool {
         !self.param_names.is_empty()
     }
@@ -955,10 +1250,6 @@ impl CallSig {
 
     pub fn can_map_omitted_args(&self, param_count: usize) -> bool {
         (self.required < param_count || self.vararg_index.is_some()) && self.has_param_names()
-    }
-
-    pub fn requires_all_args(&self, param_count: usize) -> bool {
-        !self.vararg && self.required == param_count
     }
 
     pub fn source(
@@ -1014,11 +1305,9 @@ impl CallSig {
         CallSig::metadata_base(param_count, Vec::new(), Vec::new(), None)
     }
 
-    /// Build the source call shape for a non-extension Kotlin function decoded from metadata.
-    /// Members and receiver-less top-level functions carry the same value-parameter semantics;
-    /// keeping one constructor prevents either origin from silently dropping receiver-lambda or
-    /// materialization facts. Extension functions first remove their callable receiver and are
-    /// handled by [`Self::metadata_extension`].
+    /// Build the source call shape for a Kotlin function decoded from metadata. `param_count` is
+    /// always the source VALUE-parameter count: dispatch and extension receivers are not call
+    /// arguments and therefore never appear in this structure.
     #[allow(clippy::too_many_arguments)]
     pub fn metadata_function(
         param_count: usize,
@@ -1048,28 +1337,6 @@ impl CallSig {
     ) {
         self.lambda_receivers = vec_for_arity(lambda_receivers, param_count);
         self.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count);
-    }
-
-    pub fn metadata_extension(
-        physical_param_count: usize,
-        names: Vec<String>,
-        defaults: Vec<bool>,
-        vararg_index: Option<usize>,
-    ) -> Self {
-        // Do not route extension declarations through `metadata_function`. Their callable receiver
-        // is removed here, and extension resolution derives each lambda argument's full function
-        // shape from the selected extension signature. Publishing the receiver-lambda marks through
-        // this second channel would make one semantic fact origin-dependent and can re-check
-        // receiver blocks through the member path, where labeled `this` lowering has different
-        // ownership. Ordinary members and receiver-less top-level functions have no such competing
-        // channel, so they intentionally share `metadata_function` instead.
-        // The physical param count includes the extension receiver; the source VALUE params (with their
-        // default flags — an `inline fun Mutex.withLock(owner: Any? = null, action)` needs them so an
-        // omitted-default trailing-lambda call resolves) follow it.
-        physical_param_count
-            .checked_sub(1)
-            .map(|param_count| CallSig::metadata_base(param_count, names, defaults, vararg_index))
-            .unwrap_or_default()
     }
 
     fn metadata_base(
@@ -1180,11 +1447,17 @@ pub struct FunctionInfo {
     /// The source-level call shape (defaults, named params, lambda param types, vararg) the checker needs
     /// beyond the erased descriptor. `Default` (empty) when the source doesn't provide it.
     pub call_sig: CallSig,
+    /// File-independent values for source defaults, parallel to the callable's value parameters.
+    pub default_values: Vec<Option<DefaultValue>>,
     /// Number of leading context parameters in the logical parameter list.
     pub context_count: usize,
     /// Source declaration key for a callable from the current compilation module. Classpath callables
     /// leave this unset.
     pub source_key: Option<(u32, u32)>,
+    /// Language-defined callable contributed by the classifier itself rather than by its companion
+    /// value. It travels on the same candidate structure so the checker can combine both facets and
+    /// run overload selection once.
+    pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
 }
 
 impl FunctionInfo {
@@ -1203,13 +1476,20 @@ impl FunctionInfo {
         self.generic_sig.as_ref().map_or_else(
             || {
                 if self.is_extension() {
-                    self.extension_value_params()
+                    self.callable.params.get(1..).unwrap_or(&[])
                 } else {
                     &self.callable.params
                 }
             },
             |signature| signature.params.as_slice(),
         )
+    }
+
+    /// Parameters written at the call site. Extension receivers and leading context parameters are
+    /// supplied independently, so neither belongs in source argument mapping.
+    pub fn value_params(&self) -> &[Ty] {
+        let params = self.semantic_params();
+        &params[self.context_count.min(params.len())..]
     }
 
     pub fn semantic_signature(&self) -> Cow<'_, GenericSig> {
@@ -1228,10 +1508,6 @@ impl FunctionInfo {
         )
     }
 
-    pub fn extension_value_params(&self) -> &[Ty] {
-        self.callable.params.get(1..).unwrap_or(&[])
-    }
-
     pub fn plain(kind: FnKind, receiver: Option<Ty>, callable: LibraryCallable) -> Self {
         FunctionInfo {
             kind,
@@ -1245,9 +1521,56 @@ impl FunctionInfo {
             generic_sig: None,
             projected_return_hazard: false,
             call_sig: CallSig::default(),
+            default_values: Vec::new(),
             context_count: 0,
             source_key: None,
+            implicit_classifier_callable: None,
         }
+    }
+
+    /// Normalize one callable exposed through a classifier (`Owner.name`) into the same candidate
+    /// structure used by package, module, and lexical sources. The classifier record owns the source
+    /// declaration facts; this conversion copies them once into the selected-call handle so import
+    /// scope and qualified syntax cannot grow separate reconstruction paths.
+    pub fn classifier_member(kind: FnKind, owner: TypeName, member: LibraryMember) -> Self {
+        let physical_name = member
+            .physical_name
+            .clone()
+            .unwrap_or_else(|| member.name.clone());
+        let mut callable = LibraryCallable::library(
+            member.owner.unwrap_or(owner),
+            physical_name,
+            member.params.clone(),
+            member.ret,
+            member.physical_ret,
+            member.descriptor.clone(),
+        );
+        callable.signature = member.signature.clone();
+        callable.generic_sig = member.generic_sig.clone().map(Box::new);
+        callable.inline = member.inline;
+        callable.suspend = member.suspend();
+        callable.owner_is_interface = member.is_interface();
+        callable.member_realization = member.realization;
+        callable.default_realization = member.default_realization.clone();
+        callable.declared_ret = member.declared_ret;
+        callable.context_count = member.context_count;
+        callable.contract = member.contract.clone();
+        callable.plugin_expression = member.plugin_expression;
+
+        let mut candidate = FunctionInfo::plain(kind, None, callable);
+        candidate.ret = ReturnInfo::new(member.ret_nullable(), member.declared_ret);
+        candidate.visibility = member.visibility;
+        candidate.generic_sig = member.generic_sig.clone();
+        candidate.call_sig = member.call_sig.clone();
+        candidate.context_count = member.context_count;
+        candidate.flags.inline = member.inline;
+        candidate.flags.suspend = member.suspend();
+        candidate.flags.operator = member.is_operator();
+        candidate.flags.is_abstract = member.is_abstract();
+        candidate.flags.low_priority = member.low_priority;
+        candidate.default_values = member.default_values.clone();
+        candidate.implicit_classifier_callable = member.implicit_classifier_callable;
+        candidate
     }
 
     /// The legacy public-only accessibility predicate (`visibility == Public`) — what the resolver's
@@ -1276,16 +1599,27 @@ impl FunctionInfo {
         // indistinguishable substituted/physical types and unbox a real carrier as though it were a box.
         member.declared_ret = self.callable.declared_ret;
         member.signature = self.callable.signature.clone();
+        member.default_values = self.default_values.clone();
+        member.default_realization = self.callable.default_realization.clone();
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
+        member.visibility = self.visibility;
         member.set_suspend(self.flags.suspend);
+        member.set_is_operator(self.flags.operator);
+        member.set_is_abstract(self.flags.is_abstract);
         // Interface-ness travels with the selected overload for the same reason `suspend` does: it is a
         // fact about the DECLARATION, and the emit site may have no way to re-derive it (a mapped
         // builtin's JVM owner has no class file on a JDK-less classpath). Round-tripping the member
         // through `FunctionInfo` must not lose it, or the call emits `invokevirtual` on an interface.
         member.set_is_interface(self.callable.owner_is_interface);
+        member.realization = self.callable.member_realization;
         // Keep source call shape coupled to the selected overload.
         member.call_sig = self.call_sig.clone();
+        member.context_count = self.context_count;
+        member.low_priority = self.flags.low_priority;
+        member.contract = self.callable.contract.clone();
+        member.implicit_classifier_callable = self.implicit_classifier_callable;
+        member.plugin_expression = self.callable.plugin_expression;
         member
     }
 }
@@ -1345,6 +1679,13 @@ pub struct FnFlags {
     /// Kotlin's `operator` modifier. Call conventions such as `receiver(args)` must filter on this
     /// semantic flag; JVM method names alone cannot distinguish an explicit `.invoke()` declaration.
     pub operator: bool,
+    /// The declaration has no implementation. Ordinary virtual calls may select it because dispatch
+    /// reaches a concrete override; a non-virtual `super` call must continue to another direct
+    /// supertype instead.
+    pub is_abstract: bool,
+    /// `@LowPriorityInOverloadResolution`: discard this declaration whenever an ordinary candidate
+    /// is applicable at the same callable-tower level.
+    pub low_priority: bool,
 }
 
 /// All overloads of one function name applicable to a call — members AND extensions AND top-level, in one
@@ -1401,7 +1742,7 @@ pub enum PropKind {
 /// The type is carried as a Kotlin-level [`Ty`] (a type variable is a [`Ty::TyParam`]): the resolver
 /// reads the Kotlin type; erasure to a descriptor happens only at the emit boundary, inside the opaque
 /// accessor [`LibraryCallable`]s.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PropertyInfo {
     pub kind: PropKind,
     /// The extension/member receiver type; `None` for a top-level property.
@@ -1416,6 +1757,9 @@ pub struct PropertyInfo {
     pub getter: LibraryCallable,
     /// The setter, present iff the property is a `var`.
     pub setter: Option<LibraryCallable>,
+    /// The setter's own visibility. Accessors can differ, so property visibility cannot stand in for
+    /// this fact.
+    pub setter_visibility: Visibility,
     /// `const val` — a compile-time constant whose value use sites inline.
     pub is_const: bool,
     /// The property's Kotlin visibility.
@@ -1472,6 +1816,49 @@ pub enum Callables {
     },
 }
 
+impl Callables {
+    pub fn from_parts(functions: FunctionSet, properties: PropertySet) -> Self {
+        match (
+            functions.overloads.is_empty(),
+            properties.overloads.is_empty(),
+        ) {
+            (true, true) => Self::None,
+            (false, true) => Self::Functions(functions),
+            (true, false) => Self::Properties(properties),
+            (false, false) => Self::Both {
+                functions,
+                properties,
+            },
+        }
+    }
+
+    pub fn into_parts(self) -> (FunctionSet, PropertySet) {
+        match self {
+            Self::None => (FunctionSet::default(), PropertySet::default()),
+            Self::Functions(functions) => (functions, PropertySet::default()),
+            Self::Properties(properties) => (FunctionSet::default(), properties),
+            Self::Both {
+                functions,
+                properties,
+            } => (functions, properties),
+        }
+    }
+
+    pub fn functions(&self) -> &[FunctionInfo] {
+        match self {
+            Self::Functions(functions) | Self::Both { functions, .. } => &functions.overloads,
+            Self::None | Self::Properties(_) => &[],
+        }
+    }
+
+    pub fn properties(&self) -> &[PropertyInfo] {
+        match self {
+            Self::Properties(properties) | Self::Both { properties, .. } => &properties.overloads,
+            Self::None | Self::Functions(_) => &[],
+        }
+    }
+}
+
 /// What a fully-qualified name resolves to in a [`crate::symbol_source::SymbolSource`] — the
 /// platform-neutral namespace record (the spec's top-level memo value). Kotlin has TWO namespaces
 /// (classifier vs callable) and one name can occupy both at once, so this is a RECORD: the `classifier`
@@ -1480,6 +1867,11 @@ pub enum Callables {
 /// the classifier's constructors, then property-`invoke` fallback; value → property / object).
 #[derive(Clone, Default)]
 pub struct ResolvedSymbols {
+    /// Resolved classifier identity. This is carried by the record instead of reconstructed from the
+    /// queried spelling: a lexical scope may expose `Local` whose declaration identity is
+    /// `pkg/Owner$Local`, and a typealias spelling denotes its target. Providers and scopes therefore
+    /// return exactly the same record and the selection loop does not need an origin-specific branch.
+    pub classifier_name: Option<TypeName>,
     /// Shared with the type-name memo, so cloning a record never deep-clones the classifier.
     pub classifier: Option<std::rc::Rc<LibraryType>>,
     pub callables: Callables,
@@ -1488,7 +1880,9 @@ pub struct ResolvedSymbols {
 impl ResolvedSymbols {
     /// Nothing resolves this name (both namespaces empty).
     pub fn is_empty(&self) -> bool {
-        self.classifier.is_none() && matches!(self.callables, Callables::None)
+        self.classifier_name.is_none()
+            && self.classifier.is_none()
+            && matches!(self.callables, Callables::None)
     }
 }
 
@@ -1497,29 +1891,49 @@ impl ResolvedSymbols {
 /// knowing the target ABI.
 #[derive(Clone)]
 pub struct LibraryType {
-    pub is_public: bool,
+    pub access: ClassifierAccess,
+    /// Source file that declares this classifier in the current compilation module. Dependency and
+    /// platform classifiers leave it unset. Core accessibility uses this for top-level `private`.
+    pub source_file: Option<u32>,
+    /// True when this classifier is structurally declared inside another classifier. Core inherited
+    /// nested-class lookup uses this instead of asking a provider to repeat the lookup policy.
+    pub is_nested: bool,
+    /// Enclosing instance captured by an `inner` classifier. A plain nested classifier has
+    /// `is_nested = true` and no outer instance; constructor-reference shape prepends this type only
+    /// when the declaration actually captures it.
+    pub outer_instance: Option<TypeName>,
     /// The declaration kind (class / interface / annotation / object). One field instead of parallel
     /// booleans — read it through the `is_*` accessors, which encode the JVM reality that an annotation
     /// is also an interface.
     pub kind: TypeKind,
+    /// Modality and construction facts of this declaration.
+    pub inheritance: ClassifierInheritance,
     /// Internal names of the superclass + implemented interfaces (for the inherited-member walk).
     pub supertypes: TypeNameList,
+    /// Direct supertype signatures with the classifier's own type parameters still symbolic. Core
+    /// substitutes an applied receiver into these templates before its single hierarchy BFS.
+    pub supertype_templates: Vec<Ty>,
     pub constructors: Vec<LibraryMember>,
     /// Field declarations owned by this classifier. Selection is deliberately not performed by the
     /// provider: the resolver walks these together with properties and supertypes, so source, module,
     /// and compiled classifiers obey one hiding and precedence rule.
     pub fields: Vec<LibraryField>,
+    /// Exact source-level callable/property declarations keyed by source name. Providers populate this
+    /// once with the classifier signature; core applies receiver type arguments and walks inheritance.
+    pub declared_callables: HashMap<String, Callables>,
     /// Instance members (member functions and property accessors).
     pub members: Vec<LibraryMember>,
     /// Companion-object members — accessed as `Type.member(…)` (the JVM realizes these as statics).
     pub companion: Vec<LibraryMember>,
-    /// Compile-time constants exposed by the companion object (`Int.MAX_VALUE`, `Double.NaN`, …).
-    /// Stored on the type shape so lowering consumes already-resolved library facts instead of making
-    /// a platform-specific side query.
-    pub companion_consts: HashMap<String, LibraryConst>,
+    /// Compile-time constants declared by this classifier. For `Int.Companion.MAX_VALUE`, this map is
+    /// on the `Int.Companion` classifier; the outer classifier merely points at that companion.
+    pub constants: HashMap<String, LibraryConst>,
     /// The single abstract method when this type is a functional interface. None for ordinary classes,
     /// non-SAM interfaces, and sources that do not provide SAM metadata.
     pub sam_method: Option<LibraryMember>,
+    /// Function signature implemented by values of this classifier. This is classifier metadata, not
+    /// a convention inferred from its name; core substitutes the classifier's applied type arguments.
+    pub callable_signature: Option<Ty>,
     /// The companion-object INSTANCE, if this class has one: `(field_name, companion_type_internal)`.
     /// A Kotlin `class C { companion object [Name] }` compiles to a `public static final C$Name`
     /// field on `C` (default name `Companion`, e.g. `Json.Default: Json$Default`). A bare reference to
@@ -1534,6 +1948,9 @@ pub struct LibraryType {
     /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
     /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
     pub value_underlying: Option<Ty>,
+    /// Source name of a value class's sole underlying property. Kept beside its underlying type because
+    /// together they are the complete semantic value-class shape used by the JVM representation pass.
+    pub value_underlying_property: Option<String>,
     /// When this name is a `typealias`, the target internal it expands to (`kotlin/collections/ArrayList`
     /// → `java/util/ArrayList`); `None` for a real type. Name resolution records the target, so an alias
     /// resolves to the underlying type with no separate alias query.
@@ -1543,6 +1960,10 @@ pub struct LibraryType {
     /// construction's type arguments by unifying the ctor's generic parameter signatures against the
     /// actual argument types.
     pub type_params: Vec<String>,
+    /// Declared upper bounds parallel to [`Self::type_params`]. Star projections are expanded from
+    /// this classifier metadata (`Box<*>` for `Box<T : CharSequence>` reads as the bound), never from
+    /// a provider-specific query or an unconditional `Any?` fallback.
+    pub type_param_bounds: Vec<Vec<Ty>>,
     /// The direct subclasses (JVM internal names) of a `sealed` type, from its `@Metadata`; empty for a
     /// non-sealed type. Lets an exhaustive `when` over a classpath sealed subject be proven exhaustive.
     pub sealed_subclasses: TypeNameList,
@@ -1554,17 +1975,8 @@ pub struct LibraryType {
     /// the accessor is not a source-callable `getEntries()` function, and keeping a dedicated fact
     /// prevents consumers from rediscovering it by provider-specific names or descriptors.
     pub enum_entries_accessor: Option<LibraryMember>,
-    /// Whether a `@JvmInline value class`'s primary constructor is defaulted — kotlinc emits a
-    /// `constructor-impl$default` synthetic exactly then, which realizes an all-defaulted `Id()`.
-    pub value_ctor_has_default: bool,
     /// Constructor SOURCE parameter names plus per-parameter default flags from `@Metadata`.
     pub ctor_named_params: Vec<ParamList>,
-    /// Properties whose JVM getter is value-class-`@JvmName`-mangled (`Holder(val id: Vid)` →
-    /// `getId-<hash>`) and whose physical return erases to the value class's underlying, so ordinary
-    /// getter resolution misses them. Keyed by SOURCE property name; the member carries the MANGLED getter
-    /// name + physical descriptor but the LOGICAL value-class return type from `@Metadata`, so `h.id` types
-    /// as the value class.
-    pub value_class_properties: Vec<(String, LibraryMember)>,
     /// For a classpath annotation type: the `java.lang.annotation.RetentionPolicy` constant name of its
     /// `@Retention` (`"RUNTIME"` / `"CLASS"` / `"SOURCE"`), or `None` if absent. Drives whether a use of
     /// the annotation is emitted `RuntimeVisibleAnnotations` (RUNTIME) / `RuntimeInvisibleAnnotations`
@@ -1586,6 +1998,46 @@ pub enum TypeKind {
 }
 
 impl LibraryType {
+    /// A declaration header used before a provider has constructed the full classifier signature.
+    /// It commits only classifier existence; later phases replace it with their ordinary immutable
+    /// record. Keeping even this bootstrap fact in the classifier API avoids a parallel existence
+    /// query whose answer could disagree with the record.
+    pub fn declaration_header() -> Self {
+        Self {
+            access: ClassifierAccess::Public,
+            source_file: None,
+            is_nested: false,
+            outer_instance: None,
+            kind: TypeKind::Class,
+            inheritance: Default::default(),
+            supertypes: TypeNameList::new(),
+            supertype_templates: Vec::new(),
+            constructors: Vec::new(),
+            fields: Vec::new(),
+            declared_callables: HashMap::new(),
+            members: Vec::new(),
+            companion: Vec::new(),
+            constants: HashMap::new(),
+            sam_method: None,
+            callable_signature: None,
+            companion_object: None,
+            value_companion_fns: Vec::new(),
+            value_underlying: None,
+            value_underlying_property: None,
+            alias_target: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            sealed_subclasses: TypeNameList::new(),
+            enum_entries: Vec::new(),
+            enum_entries_accessor: None,
+            ctor_named_params: Vec::new(),
+            retention: None,
+        }
+    }
+
+    pub fn is_public(&self) -> bool {
+        self.access == ClassifierAccess::Public
+    }
     pub fn is_interface(&self) -> bool {
         matches!(self.kind, TypeKind::Interface | TypeKind::Annotation)
     }
@@ -1597,6 +2049,58 @@ impl LibraryType {
     }
     pub fn is_enum(&self) -> bool {
         self.kind == TypeKind::Enum
+    }
+
+    /// Classifier-callable overloads visible as `Type.name(...)`. Besides declarations supplied by
+    /// the symbol source, every concrete enum receives Kotlin's two implicit functions. Keeping the
+    /// contribution here makes module and dependency classifiers expose one structure and keeps the
+    /// resolver out of language-declaration synthesis.
+    pub fn classifier_callables(&self, owner: TypeName) -> Vec<LibraryMember> {
+        let mut callables = self.companion.clone();
+        if !self.is_enum() {
+            return callables;
+        }
+
+        let mut values = LibraryMember::new(
+            "values".to_string(),
+            Vec::new(),
+            Ty::array(Ty::obj_name(owner)),
+            String::new(),
+        );
+        values.owner = Some(owner);
+        values.implicit_classifier_callable = Some(ImplicitClassifierCallable::EnumValues);
+
+        let mut value_of = LibraryMember::new(
+            "valueOf".to_string(),
+            vec![Ty::String],
+            Ty::obj_name(owner),
+            String::new(),
+        );
+        value_of.owner = Some(owner);
+        value_of.implicit_classifier_callable = Some(ImplicitClassifierCallable::EnumValueOf);
+
+        for implicit in [values, value_of] {
+            if let Some(physical) = callables.iter_mut().find(|member| {
+                member.name == implicit.name
+                    && member.params == implicit.params
+                    && member.ret == implicit.ret
+            }) {
+                physical.implicit_classifier_callable = implicit.implicit_classifier_callable;
+            } else {
+                callables.push(implicit);
+            }
+        }
+        callables
+    }
+
+    /// Language-defined properties visible on the classifier itself. These are deliberately not
+    /// inserted into instance or companion members: `EnumType.entries` has a classifier receiver,
+    /// and `EnumType::entries` is consequently a bound zero-argument property reference.
+    pub fn classifier_property(&self, owner: TypeName, name: &str) -> Option<ClassifierProperty> {
+        (self.is_enum() && name == "entries").then(|| ClassifierProperty {
+            ty: Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj_name(owner)]),
+            getter: self.enum_entries_accessor.clone(),
+        })
     }
 
     /// Whether an enum entry named `name` is declared on this type — lets `EnumName.ENTRY` resolve.
@@ -1615,14 +2119,6 @@ impl LibraryType {
             })
             .cloned()
     }
-
-    /// The value-class-typed property `property`'s member (mangled getter + logical value-class return),
-    /// or `None` for an ordinary property.
-    pub fn value_class_property(&self, property: &str) -> Option<&LibraryMember> {
-        self.value_class_properties
-            .iter()
-            .find_map(|(p, m)| (p == property).then_some(m))
-    }
 }
 
 impl LibraryType {
@@ -1630,6 +2126,26 @@ impl LibraryType {
     pub fn annotation_members(&self) -> Option<Vec<(String, Ty)>> {
         if !self.is_annotation() {
             return None;
+        }
+        // A Kotlin annotation's element declarations are constructor properties in metadata; their
+        // physical no-arg methods are accessor realizations, not Kotlin function declarations, and are
+        // intentionally absent from `members`. The primary constructor therefore supplies the exact
+        // element names/types. A Java `@interface` has no Kotlin constructor metadata and falls through
+        // to its declared abstract methods below.
+        if let Some(parameters) = self.ctor_named_params.iter().find(|parameters| {
+            !parameters.names.is_empty()
+                && parameters.names.len() == parameters.types.len()
+                && !parameters.names.iter().any(String::is_empty)
+                && !parameters.types.contains(&Ty::Error)
+        }) {
+            return Some(
+                parameters
+                    .names
+                    .iter()
+                    .cloned()
+                    .zip(parameters.types.iter().copied())
+                    .collect(),
+            );
         }
         let mut out = Vec::new();
         for m in &self.members {
@@ -1662,47 +2178,324 @@ pub struct LibraryConst {
     pub value: LibConst,
 }
 
-/// A compiled-library source: a [`SymbolSource`] (its type universe, overloads, and type shapes) PLUS
-/// the backend extras needed while deciding whether a selected call can be emitted. The federatable half
-/// is `SymbolSource`; these extras are consulted only after ordinary symbol selection, never across the
-/// source federation.
-/// A recognized `kotlin.coroutines` compiler intrinsic. These are `@InlineOnly` stdlib declarations the
-/// reference compiler replaces by name with dedicated codegen rather than calling/inlining (their stub
-/// bodies just `throw`). Platform-neutral language concept; backend codegen is keyed on this variant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoroutineIntrinsic {
-    /// `COROUTINE_SUSPENDED` — the suspension sentinel (typed `Any`).
-    CoroutineSuspended,
-    /// `suspendCoroutineUninterceptedOrReturn { c -> … }` — inline the block with the enclosing
-    /// function's own continuation bound as the parameter; its `Any?` result becomes the result.
-    SuspendCoroutineUninterceptedOrReturn,
-    /// `suspendCoroutine { c -> … }` — the stdlib inline wrapper: build a `SafeContinuation` over the
-    /// enclosing continuation, run the block with it, return `safe.getOrThrow()`.
-    SuspendCoroutine,
-    /// `startCoroutine` — start a coroutine with a completion continuation (extension on a suspend
-    /// function type).
-    StartCoroutine,
-    /// `createCoroutine` — build (but don't start) a coroutine, returning the initial continuation.
-    CreateCoroutine,
-}
+/// A symbol source with no external libraries — compiling a self-contained source set with no
+/// classpath. Kotlin's language-level builtin classifiers still exist: this provider publishes their
+/// common hierarchy and `Any` declarations so the resolver never needs a builtin-name fallback.
+pub struct EmptySymbolSource;
 
-pub fn coroutine_intrinsic(name: &str) -> Option<CoroutineIntrinsic> {
-    match name {
-        "COROUTINE_SUSPENDED" => Some(CoroutineIntrinsic::CoroutineSuspended),
-        "suspendCoroutineUninterceptedOrReturn" => {
-            Some(CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn)
+pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner: TypeName) {
+    fn member_property(
+        classifier: &mut LibraryType,
+        owner: TypeName,
+        name: &str,
+        ty: Ty,
+        intrinsic: CompilerIntrinsic,
+    ) {
+        if let Some(callables) = classifier.declared_callables.get_mut(name) {
+            let (functions, mut properties) = std::mem::take(callables).into_parts();
+            if !properties.overloads.is_empty() {
+                for property in &mut properties.overloads {
+                    property.getter.compiler_intrinsic = Some(intrinsic);
+                }
+                *callables = Callables::from_parts(functions, properties);
+                return;
+            }
+            *callables = Callables::from_parts(functions, properties);
         }
-        "suspendCoroutine" => Some(CoroutineIntrinsic::SuspendCoroutine),
-        "startCoroutine" => Some(CoroutineIntrinsic::StartCoroutine),
-        "createCoroutine" => Some(CoroutineIntrinsic::CreateCoroutine),
-        _ => None,
+        let mut getter = LibraryCallable::library(owner, name, Vec::new(), ty, ty, "");
+        getter.compiler_intrinsic = Some(intrinsic);
+        let property = PropertyInfo {
+            kind: PropKind::Member,
+            receiver: Some(Ty::obj_name(owner)),
+            formals: Vec::new(),
+            ty,
+            context_count: 0,
+            getter,
+            setter: None,
+            setter_visibility: Visibility::Private,
+            is_const: false,
+            visibility: Visibility::Public,
+            owner,
+            receiver_rank: 0,
+            source_key: None,
+        };
+        classifier
+            .declared_callables
+            .entry(name.to_string())
+            .and_modify(|callables| {
+                let (functions, mut properties) = std::mem::take(callables).into_parts();
+                properties.overloads.push(property.clone());
+                *callables = Callables::from_parts(functions, properties);
+            })
+            .or_insert_with(|| {
+                Callables::Properties(PropertySet {
+                    overloads: vec![property],
+                })
+            });
+    }
+
+    if owner.matches("kotlin/String") {
+        member_property(
+            classifier,
+            owner,
+            "length",
+            Ty::Int,
+            CompilerIntrinsic::StringLength,
+        );
+    }
+    if owner.matches("kotlin/Array") || Ty::primitive_array_element(owner.segment_ref()).is_some() {
+        member_property(
+            classifier,
+            owner,
+            "size",
+            Ty::Int,
+            CompilerIntrinsic::ArraySize,
+        );
     }
 }
 
-/// A symbol source with no external libraries — compiling a self-contained source set with no classpath.
-pub struct EmptySymbolSource;
+impl EmptySymbolSource {
+    fn builtin_classifier(name: &str, internal: TypeName) -> Option<LibraryType> {
+        let known = Ty::from_name(name).is_some()
+            || Ty::primitive_array_element(name).is_some()
+            || matches!(name, "Array" | "Function");
+        if !known {
+            return None;
+        }
 
-impl crate::symbol_source::SymbolSource for EmptySymbolSource {}
+        let mut classifier = LibraryType::declaration_header();
+        if name == "Function" {
+            classifier.kind = TypeKind::Interface;
+            classifier.type_params.push("R".to_string());
+            classifier.type_param_bounds.push(Vec::new());
+        }
+        if name == "Unit" {
+            classifier.kind = TypeKind::Object;
+        }
+        if name != "Any" && name != "Nothing" {
+            classifier.supertypes.push_name(crate::types::wk::any());
+            classifier
+                .supertype_templates
+                .push(Ty::obj_name(crate::types::wk::any()));
+        }
+        if name == "Nothing" {
+            // `Nothing` has no instances, but its expressions have every non-null type as a
+            // supertype; `Any` is the only declaration owner needed for member lookup here.
+            classifier.supertypes.push_name(crate::types::wk::any());
+            classifier
+                .supertype_templates
+                .push(Ty::obj_name(crate::types::wk::any()));
+        }
+        if name == "Any" {
+            classifier.constructors.push(LibraryMember::new(
+                "<init>".to_string(),
+                Vec::new(),
+                Ty::Unit,
+                "()V".to_string(),
+            ));
+            let declarations = [
+                (
+                    "equals",
+                    vec![Ty::nullable(Ty::obj_name(internal))],
+                    Ty::Boolean,
+                ),
+                ("hashCode", Vec::new(), Ty::Int),
+                ("toString", Vec::new(), Ty::String),
+            ];
+            for (name, params, ret) in declarations {
+                let callable = LibraryCallable::library(internal, name, params, ret, ret, "");
+                classifier.declared_callables.insert(
+                    name.to_string(),
+                    Callables::Functions(FunctionSet {
+                        overloads: vec![FunctionInfo::plain(FnKind::Member, None, callable)],
+                    }),
+                );
+            }
+        }
+        add_core_builtin_declarations(&mut classifier, internal);
+        Some(classifier)
+    }
+
+    fn builtin_char_property(name: &str) -> Callables {
+        if name != "code" {
+            return Callables::None;
+        }
+        let owner = crate::types::type_name("kotlin/CharKt");
+        let mut getter =
+            LibraryCallable::library(owner, "getCode", vec![Ty::Char], Ty::Int, Ty::Int, "");
+        getter.compiler_intrinsic = Some(CompilerIntrinsic::CharCode);
+        Callables::Properties(PropertySet {
+            overloads: vec![PropertyInfo {
+                kind: PropKind::Extension,
+                receiver: Some(Ty::Char),
+                formals: Vec::new(),
+                ty: Ty::Int,
+                context_count: 0,
+                getter,
+                setter: None,
+                setter_visibility: Visibility::Private,
+                is_const: false,
+                visibility: Visibility::Public,
+                owner,
+                receiver_rank: 0,
+                source_key: None,
+            }],
+        })
+    }
+
+    fn builtin_text_callables(name: &str) -> Callables {
+        let signatures: &[(&[Ty], Ty)] = match name {
+            "substring" => &[(&[Ty::Int], Ty::String), (&[Ty::Int, Ty::Int], Ty::String)],
+            "indexOf" => &[(&[Ty::String], Ty::Int)],
+            "trimIndent" | "trimMargin" => &[(&[], Ty::String)],
+            _ => return Callables::None,
+        };
+        let receiver = Ty::String;
+        let owner = crate::types::type_name("kotlin/text/StringsKt");
+        let overloads = signatures
+            .iter()
+            .map(|(params, ret)| {
+                let mut callable = LibraryCallable::library(
+                    owner,
+                    name,
+                    std::iter::once(receiver)
+                        .chain(params.iter().copied())
+                        .collect(),
+                    *ret,
+                    *ret,
+                    "",
+                );
+                callable.compiler_intrinsic = match name {
+                    "trimIndent" => Some(CompilerIntrinsic::TrimIndent),
+                    "trimMargin" => Some(CompilerIntrinsic::TrimMargin),
+                    _ => None,
+                };
+                FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
+            })
+            .collect();
+        Callables::Functions(FunctionSet { overloads })
+    }
+
+    fn builtin_console_callables(name: &str) -> Callables {
+        let arities: &[usize] = match name {
+            "print" => &[1],
+            "println" => &[0, 1],
+            _ => return Callables::None,
+        };
+        let owner = crate::types::type_name("kotlin/io/ConsoleKt");
+        let intrinsic = if name == "print" {
+            CompilerIntrinsic::Print
+        } else {
+            CompilerIntrinsic::Println
+        };
+        let message = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+        let overloads = arities
+            .iter()
+            .map(|arity| {
+                let params = if *arity == 0 {
+                    Vec::new()
+                } else {
+                    vec![message]
+                };
+                let mut callable =
+                    LibraryCallable::library(owner, name, params, Ty::Unit, Ty::Unit, "");
+                callable.compiler_intrinsic = Some(intrinsic);
+                FunctionInfo::plain(FnKind::TopLevel, None, callable)
+            })
+            .collect();
+        Callables::Functions(FunctionSet { overloads })
+    }
+
+    fn builtin_coroutine_intrinsic_callables(name: &str) -> Callables {
+        if name != "COROUTINE_SUSPENDED" {
+            return Callables::None;
+        }
+        let ty = Ty::obj_name(crate::types::wk::any());
+        let mut getter = LibraryCallable::library(
+            crate::types::type_name("kotlin/coroutines/intrinsics/IntrinsicsKt"),
+            "getCOROUTINE_SUSPENDED",
+            Vec::new(),
+            ty,
+            ty,
+            "()Ljava/lang/Object;",
+        );
+        getter.compiler_intrinsic = Some(CompilerIntrinsic::CoroutineSuspended);
+        Callables::Properties(PropertySet {
+            overloads: vec![PropertyInfo {
+                kind: PropKind::TopLevel,
+                receiver: None,
+                formals: Vec::new(),
+                ty,
+                context_count: 0,
+                getter,
+                setter: None,
+                setter_visibility: Visibility::Private,
+                is_const: false,
+                visibility: Visibility::Public,
+                owner: crate::types::type_name("kotlin/coroutines/intrinsics/IntrinsicsKt"),
+                receiver_rank: 0,
+                source_key: None,
+            }],
+        })
+    }
+}
+
+impl crate::symbol_source::SymbolSource for EmptySymbolSource {
+    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
+        (parent == TypeName::ROOT && name == "kotlin")
+            || (parent.matches("kotlin") && matches!(name, "coroutines" | "io" | "text"))
+            || (parent.matches("kotlin/coroutines") && name == "intrinsics")
+    }
+
+    fn symbols(
+        &self,
+        namespace: crate::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<ResolvedSymbols> {
+        let crate::symbol_source::SymbolNamespace::Package(package) = namespace else {
+            return std::rc::Rc::new(ResolvedSymbols::default());
+        };
+        if package.matches("kotlin/text") {
+            return std::rc::Rc::new(ResolvedSymbols {
+                callables: Self::builtin_text_callables(name),
+                ..ResolvedSymbols::default()
+            });
+        }
+        if package.matches("kotlin/io") {
+            return std::rc::Rc::new(ResolvedSymbols {
+                callables: Self::builtin_console_callables(name),
+                ..ResolvedSymbols::default()
+            });
+        }
+        if package.matches("kotlin/coroutines/intrinsics") {
+            return std::rc::Rc::new(ResolvedSymbols {
+                callables: Self::builtin_coroutine_intrinsic_callables(name),
+                ..ResolvedSymbols::default()
+            });
+        }
+        if !package.matches("kotlin") {
+            return std::rc::Rc::new(ResolvedSymbols::default());
+        }
+        let callables = Self::builtin_char_property(name);
+        let Some(internal) = namespace.existing_classifier(name) else {
+            return std::rc::Rc::new(ResolvedSymbols {
+                callables,
+                ..ResolvedSymbols::default()
+            });
+        };
+        let Some(classifier) = Self::builtin_classifier(name, internal) else {
+            return std::rc::Rc::new(ResolvedSymbols {
+                callables,
+                ..ResolvedSymbols::default()
+            });
+        };
+        std::rc::Rc::new(ResolvedSymbols {
+            classifier_name: Some(internal),
+            classifier: Some(std::rc::Rc::new(classifier)),
+            callables,
+        })
+    }
+}
 impl SemanticPlatform for EmptySymbolSource {}
 
 #[cfg(test)]
@@ -1762,26 +2555,33 @@ mod tests {
 
     fn ty_with<F: FnOnce(&mut super::LibraryType)>(f: F) -> super::LibraryType {
         let mut t = super::LibraryType {
-            is_public: true,
+            access: super::ClassifierAccess::Public,
+            source_file: None,
+            is_nested: false,
+            outer_instance: None,
             kind: super::TypeKind::Class,
+            inheritance: Default::default(),
             supertypes: crate::types::TypeNameList::new(),
+            supertype_templates: Vec::new(),
             constructors: vec![],
             fields: vec![],
+            declared_callables: std::collections::HashMap::new(),
             members: vec![],
             companion: vec![],
-            companion_consts: std::collections::HashMap::new(),
+            constants: std::collections::HashMap::new(),
             sam_method: None,
+            callable_signature: None,
             companion_object: None,
             value_companion_fns: vec![],
             value_underlying: None,
+            value_underlying_property: None,
             alias_target: None,
             type_params: vec![],
+            type_param_bounds: vec![],
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: vec![],
             enum_entries_accessor: None,
-            value_ctor_has_default: false,
             ctor_named_params: vec![],
-            value_class_properties: vec![],
             retention: None,
         };
         f(&mut t);
@@ -1800,8 +2600,10 @@ mod tests {
     #[test]
     fn library_type_constructor_named_params_picks_long_enough_and_valid() {
         let expected = ParamList {
+            visibility: Visibility::Public,
             names: vec!["host".into(), "port".into()],
             defaults: vec![false, true],
+            types: Vec::new(),
             recv_fun: vec![false, false],
             vararg: None,
         };
@@ -1813,8 +2615,10 @@ mod tests {
 
         let bad = ty_with(|t| {
             t.ctor_named_params = vec![ParamList {
+                visibility: Visibility::Public,
                 names: vec!["".into()],
                 defaults: vec![false],
+                types: Vec::new(),
                 recv_fun: vec![false],
                 vararg: None,
             }];
@@ -1843,22 +2647,6 @@ mod tests {
             map_call_args(&arguments, None, &[], 1, 1, &[], None, false),
             Ok(vec![Some(arguments[0])])
         );
-    }
-
-    #[test]
-    fn library_type_value_class_property_lookup_by_source_name() {
-        let member = super::LibraryMember::new(
-            "getId-abc123".into(),
-            vec![],
-            crate::types::Ty::obj("lib/Vid"),
-            "()Ljava/lang/String;".into(),
-        );
-        let t = ty_with(|t| t.value_class_properties = vec![("id".into(), member)]);
-        assert_eq!(
-            t.value_class_property("id").map(|m| m.name.as_str()),
-            Some("getId-abc123")
-        );
-        assert!(t.value_class_property("missing").is_none());
     }
 
     #[test]

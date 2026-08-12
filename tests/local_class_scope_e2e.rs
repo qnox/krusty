@@ -191,11 +191,10 @@ fn the_enclosing_instance_precedes_a_captured_local() {
 
 /// kotlinc: accepted — krusty limitation, the file skips.
 ///
-/// A `@JvmInline value class` has no instance to capture: `this` is the bare underlying value, so a
-/// field typed as the class would hold something else entirely. The box corpus caught this as a
-/// `VerifyError` (`codegen/box/inlineClasses/initBlock.kt`).
+/// A local class captures the semantic value-class receiver; backend representation realizes that
+/// capture through the carrier without changing name or member resolution.
 #[test]
-fn capturing_an_unboxed_value_class_receiver_is_rejected() {
+fn local_class_captures_value_class_receiver() {
     const SRC: &str = "@JvmInline\n\
         value class V(val s: String) {\n\
         \x20   fun m(): String {\n\
@@ -204,7 +203,7 @@ fn capturing_an_unboxed_value_class_receiver_is_rejected() {
         \x20   }\n\
         }\n\
         fun box(): String = V(\"OK\").m()\n";
-    assert_rejected(SRC);
+    assert_eq!(run(SRC), Some("OK".to_string()));
 }
 
 /// kotlinc: accepted.

@@ -4,7 +4,7 @@
 //! Kotlin's rule: importing a member of an object brings that name into scope WITH the object as its
 //! implicit dispatch receiver; for an extension member the use site supplies the extension receiver and
 //! the singleton is the dispatch receiver. krusty's callable namespace is keyed by fully-qualified
-//! name, and `resolve_symbols_name` only ever treated the parent of that name as a PACKAGE — so an
+//! name, and `symbols` only ever treated the parent of that name as a PACKAGE — so an
 //! object or companion parent surfaced nothing. The one shape that worked, `import Obj.memberFun`, did
 //! so through a separate special case, not the namespace.
 //!

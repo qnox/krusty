@@ -153,8 +153,13 @@ mod tests {
     #[test]
     fn nested_reference_resolves_through_the_dollar_separated_name() {
         let source = "package demo;\nclass Use { Outer.Inner x; }\n";
-        let occurrences =
-            definition_occurrences(source, &classes(&[("demo/Outer$Inner", target(5, 1, 6))]));
+        let occurrences = definition_occurrences(
+            source,
+            &classes(&[
+                ("demo/Outer", target(5, 1, 6)),
+                ("demo/Outer$Inner", target(5, 1, 6)),
+            ]),
+        );
         assert_eq!(occurrences.len(), 1);
         assert_eq!(occurrences[0].target, target(5, 1, 6));
     }

@@ -90,6 +90,7 @@ pub(crate) fn render_ty(ty: Ty) -> String {
             format!("{suspend}({parameters}) -> {}", render_ty(signature.ret))
         }
         Ty::Nullable(inner) => format!("{}?", render_ty(*inner)),
+        Ty::PlatformNullable(inner) => format!("{}!", render_ty(*inner)),
         Ty::TyParam(name, _) => name.to_string(),
     }
 }

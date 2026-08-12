@@ -4,7 +4,7 @@
 //! nested class, not `inner`), and reading an inherited constructor-property field. Same-file, runnable.
 use super::common;
 fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "Main")
+    Some(common::expect_box_run_with_stdlib(src, "Main"))
 }
 
 #[test]

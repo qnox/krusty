@@ -72,7 +72,7 @@ pub fn materialize(
         }
     }
     let libraries = JvmLibraries::new(classpath.clone());
-    let mut lib = libraries.resolve_type(internal)?;
+    let mut lib = (*libraries.classifier(type_name(internal))?).clone();
     let mut meta = classpath
         .find(internal)
         .map(|class| class.meta.clone())

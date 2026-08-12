@@ -45,7 +45,7 @@ fn conflicting_bindings_do_not_miscompile() {
         \x20 val r: A = select(null, B())\n\
         \x20 return if (r is B) \"OK\" else \"no\"\n\
         }\n";
-    assert_eq!(run(SRC).expect("conflicting bindings run"), "OK");
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }
 
 #[test]

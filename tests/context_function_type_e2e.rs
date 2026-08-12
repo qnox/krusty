@@ -128,6 +128,17 @@ fun box(): String = inspect(Prefix(\"O\"), Target(\"K\")) { first + second }\n";
 }
 
 #[test]
+fn context_extension_lambda_keeps_its_value_parameter() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+class Prefix(val first: String)\n\
+class Target(val second: String)\n\
+context(prefix: Prefix)\n\
+fun <T> Target.consume(action: context(Prefix) Target.(Int) -> T): T = action(Prefix(\"O\"), this, 0)\n\
+fun box(): String = with(Prefix(\"wrong\")) { Target(\"K\").consume { first + second } }\n";
+    common::expect_box_ok_with_stdlib(SRC, "ContextExtensionLambdaValue");
+}
+
+#[test]
 fn non_inline_context_lambda_materializes_implicit_receiver() {
     const SRC: &str = "// LANGUAGE: +ContextParameters\n\
 class Session(val token: String)\n\
@@ -212,26 +223,66 @@ fun box(): String = retain(\"OK\") { token }\n";
 }
 
 #[test]
+fn suspend_context_extension_lambda_is_target_typed() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+class Left\n\
+class Right\n\
+class Target\n\
+context(_: Left, _: Right) fun Target.complete() {}\n\
+fun retain(action: suspend context(Left, Right) Target.() -> Unit) = \"OK\"\n\
+fun box(): String = retain { complete() }\n";
+    common::expect_front_end_ok_files_with_stdlib(&[SRC], "SuspendContextExtensionLambda");
+}
+
+#[test]
+fn context_extension_lambda_accepts_unit_member_call_body() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        interface Context\n\
+        class Receiver\n\
+        interface Action { context(context: Context) fun run() }\n\
+        fun execute(block: suspend context(Context) Receiver.(Action) -> Unit) = Unit\n\
+        fun box(): String { execute { it.run() }; return \"OK\" }\n";
+    common::expect_front_end_ok_files_with_stdlib(&[SRC], "Main");
+}
+
+#[test]
+fn same_package_callable_hides_imported_callable() {
+    const SUPPORT: &str = "package support\n\
+fun <T> executeNow(action: suspend () -> T): T = error(\"imported\")\n";
+    const CALLER: &str = "// LANGUAGE: +ContextParameters\n\
+import support.*\n\
+class Left\n\
+class Right\n\
+class Target\n\
+context(_: Left, _: Right) fun Target.complete() {}\n\
+fun <T> executeNow(action: suspend () -> T): T = error(\"local\")\n\
+fun consume(action: suspend context(Left, Right) Target.() -> Unit) =\n\
+    executeNow { action(Left(), Right(), Target()) }\n\
+fun box(): String { consume { complete() }; return \"OK\" }\n";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[SUPPORT, CALLER],
+        "SamePackageCallablePrecedence",
+    );
+}
+
+#[test]
 fn invoked_suspend_context_and_extension_of_same_type_use_distinct_storage() {
     const SRC: &str = "// LANGUAGE: +ContextParameters\n\
-import kotlin.coroutines.Continuation\n\
-import kotlin.coroutines.EmptyCoroutineContext\n\
-import kotlin.coroutines.startCoroutine\n\
 class Session(val token: String)\n\
-fun <T> runNow(block: suspend () -> T): T {\n\
-    var result: Result<T>? = null\n\
-    block.startCoroutine(Continuation(EmptyCoroutineContext) { result = it })\n\
-    return result!!.getOrThrow()\n\
-}\n\
 suspend fun execute(\n\
     context: Session,\n\
     target: Session,\n\
     action: suspend context(Session) Session.() -> String,\n\
 ): String = action(context, target)\n\
-fun box(): String = runNow {\n\
+suspend fun probe(): String =\n\
     execute(Session(\"wrong\"), Session(\"OK\")) { token }\n\
-}\n";
-    common::expect_box_ok_with_stdlib(SRC, "InvokedSuspendContextExtensionLambda");
+";
+    common::expect_suspend_result(
+        "InvokedSuspendContextExtensionLambda",
+        SRC,
+        "probe(continuation)",
+        "OK",
+    );
 }
 
 #[test]

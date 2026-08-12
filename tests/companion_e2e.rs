@@ -121,6 +121,41 @@ fun box(): String { C.ZZZ().c; return \"OK\" }\n";
 }
 
 #[test]
+fn instance_members_outrank_same_shaped_companion_members() {
+    let src = r#"
+class Exact {
+    fun f(): Int = 1
+    companion object { fun f(): Int = 2 }
+    fun selected(): Int = f()
+}
+
+class Defaulted {
+    fun f(value: Int = 1): Int = value
+    companion object { fun f(): Int = 2 }
+    fun selected(): Int = f()
+}
+
+class Variadic {
+    fun f(prefix: Int = 1, vararg value: Int): Int = prefix + value.size
+    companion object { fun f(): Int = 2 }
+    fun selected(): Int = f()
+}
+
+fun box(): String =
+    if (Exact().selected() == 1 && Exact.f() == 2 &&
+        Defaulted().selected() == 1 && Defaulted.f() == 2 &&
+        Variadic().selected() == 1 && Variadic.f() == 2) "OK" else "FAIL"
+"#;
+
+    // Pin the language decision, not the old conservative rejection: kotlinc accepts all three
+    // declaration pairs, and the nearer instance receiver wins only for the unqualified call.
+    if common::compile_lib("CompanionInstanceOverlapKotlinc", src).is_none() {
+        return;
+    }
+    common::expect_box_ok_with_stdlib(src, "CompanionInstanceOverlap");
+}
+
+#[test]
 fn companion_reaches_the_outer_class_private_var() {
     // A companion is a SEPARATE class file, so it can neither call a private property's accessor
     // (kotlinc synthesizes none) nor `putfield` the private backing field. kotlinc routes the write

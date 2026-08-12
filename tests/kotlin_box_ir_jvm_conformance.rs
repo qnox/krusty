@@ -1,9 +1,7 @@
 //! Kotlin compiler conformance suite (`compiler/testData/codegen/box`).
 //!
-//! Each `fun box(): String` → `"OK"` test is:
-//!   * **skip**  — krusty compile error (unsupported feature)
-//!   * **pass**  — compiles and box() returns "OK" on the JVM
-//!   * **FAIL**  — compiled but produced wrong/invalid bytecode (a bug)
+//! Each corpus case either passes or fails. Unsupported syntax, resolution, lowering, emission, or
+//! harness behavior is a failure, never an exclusion from the denominator.
 //!
 //! Performance design:
 //!   - In-process compilation (no krusty subprocess)
@@ -22,8 +20,8 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -125,20 +123,6 @@ fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 
-fn collect_kt(dir: &Path, out: &mut Vec<PathBuf>) {
-    if let Ok(rd) = fs::read_dir(dir) {
-        let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-        entries.sort();
-        for p in entries {
-            if p.is_dir() {
-                collect_kt(&p, out);
-            } else if p.extension().is_some_and(|e| e == "kt") {
-                out.push(p);
-            }
-        }
-    }
-}
-
 fn discover_box_dir() -> PathBuf {
     if let Some(path) = krusty::toolchain::box_corpus_dir() {
         return path;
@@ -175,15 +159,51 @@ static T_SIGS: AtomicU64 = AtomicU64::new(0);
 static T_CHECK: AtomicU64 = AtomicU64::new(0);
 static T_EMIT: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone)]
+struct ActiveBoxCase {
+    path: PathBuf,
+    phase: String,
+    since: Instant,
+}
+
+fn mark_box_case_phase(
+    active: &[Mutex<Option<ActiveBoxCase>>],
+    worker: usize,
+    path: &Path,
+    phase: &str,
+) {
+    *active[worker].lock().unwrap() = Some(ActiveBoxCase {
+        path: path.to_path_buf(),
+        phase: phase.to_string(),
+        since: Instant::now(),
+    });
+}
+
 // Compile Kotlin source to a list of (class_internal_name, class_bytes) pairs.
 // Returns None if compilation fails (unsupported feature).
 thread_local! {
-    /// One `Classpath` per (rayon thread, classpath set), reused across every file that thread
-    /// compiles — the real `kotlinc`/`main.rs` builds the classpath once per invocation too, so
-    /// rebuilding (and re-indexing the stdlib jar) per file was pure harness overhead. `Classpath` is
-    /// `!Sync` (RefCell caches), so the cache is thread-local rather than shared across workers.
+    /// Stable jar/jimage classpaths reused per rayon thread. Module and javac scratch directories are
+    /// deliberately excluded: their unique paths would retain one complete `Classpath` per corpus case
+    /// after the directory was deleted, eventually reducing signature collection to swap-bound work.
     static CP_CACHE: std::cell::RefCell<std::collections::HashMap<Vec<std::path::PathBuf>, std::rc::Rc<Classpath>>>
         = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn classpath_paths_are_cacheable(paths: &[PathBuf]) -> bool {
+    paths.iter().all(|path| path.is_file())
+}
+
+fn harness_classpath(paths: Vec<PathBuf>) -> std::rc::Rc<Classpath> {
+    if !classpath_paths_are_cacheable(&paths) {
+        return std::rc::Rc::new(Classpath::new(paths));
+    }
+    CP_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry(paths.clone())
+            .or_insert_with(|| std::rc::Rc::new(Classpath::new(paths)))
+            .clone()
+    })
 }
 
 fn compile_source(
@@ -191,12 +211,15 @@ fn compile_source(
     stem: &str,
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
+    progress: &dyn Fn(&str),
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    progress("lex");
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
     let t0 = std::time::Instant::now();
     let toks = lex(src, &mut diags);
     T_LEX.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    progress("parse");
     let t1 = std::time::Instant::now();
     let mut files = vec![krusty::parser::parse_with_features(
         src, &toks, &mut diags, &features,
@@ -208,6 +231,7 @@ fn compile_source(
     if features.has("MultiPlatformProjects") {
         krusty::frontend::strip_matched_expects(&mut files);
     }
+    progress("signatures");
     let t2 = std::time::Instant::now();
     // The stdlib is on krusty's classpath only for `// WITH_STDLIB` tests — the caller passes the
     // located jar (or `None`), exactly as a drop-in `kotlinc` user supplies `-classpath`.
@@ -218,13 +242,8 @@ fn compile_source(
     if let Some(p) = jdk_modules {
         cp_paths.push(p.to_path_buf());
     }
-    // Reuse a thread-local `Classpath` for this classpath set (warm caches across files).
-    let cp = CP_CACHE.with(|c| {
-        c.borrow_mut()
-            .entry(cp_paths.clone())
-            .or_insert_with(|| std::rc::Rc::new(Classpath::new(cp_paths.clone())))
-            .clone()
-    });
+    // Reuse stable jar/jimage classpaths; scratch directory classpaths die with their compile.
+    let cp = harness_classpath(cp_paths);
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     T_SIGS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -233,6 +252,7 @@ fn compile_source(
     }
     let file = &files[0];
     let t3 = std::time::Instant::now();
+    progress("check");
     let info = check_file(file, &mut syms, &mut diags);
     T_CHECK.fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if diags.has_errors() {
@@ -242,6 +262,7 @@ fn compile_source(
     let facade_name = file_class_name(stem, file.package.as_deref());
 
     let t4 = std::time::Instant::now();
+    progress("lower");
     // Lower the checked file to krusty-ir, then emit JVM bytecode (the sole codegen path).
     let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
     let mut ir = match lower_file(file, &info, &syms, &runtime) {
@@ -266,6 +287,7 @@ fn compile_source(
     // allowed the conformance artifact to diverge whenever the shipping defaults gained a field.
     let opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone());
     let run = ir_emit::EmitRun::default();
+    progress("emit");
     let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all_with_opts(
         &ir,
         &facade_name,
@@ -391,7 +413,7 @@ fn compile_multifile(
     // `// LANGUAGE:` directives live in the preamble before the first `// FILE:` — read them from the
     // whole source and apply to every block.
     let features = krusty::features::LangFeatures::from_source(src);
-    let compiled = compile_blocks(&blocks, &cp, jdk_modules, &features);
+    let compiled = compile_blocks(&blocks, &cp, jdk_modules, &features, None);
     // The javac classes were read into memory (and BoxRunner loads from bytes), so the scratch
     // src+classes tree is no longer needed — success or skip.
     if let Some(javadir) = cp.last().filter(|_| !java_classes.is_empty()) {
@@ -449,12 +471,7 @@ fn compile_kotlin_first(
     if let Some(p) = jdk_modules {
         cp_paths.push(p.to_path_buf());
     }
-    let classpath = CP_CACHE.with(|c| {
-        c.borrow_mut()
-            .entry(cp_paths.clone())
-            .or_insert_with(|| std::rc::Rc::new(Classpath::new(cp_paths.clone())))
-            .clone()
-    });
+    let classpath = harness_classpath(cp_paths);
     let resolve = |cand: &str| kotlin_names.contains(cand) || classpath.find(cand).is_some();
     let stubs = krusty::jvm::java_stub::stub_classes(
         java_blocks,
@@ -471,7 +488,7 @@ fn compile_kotlin_first(
         write_classes_to_dir(&stubs, &stubdir)?;
         let mut cp = cp_jars.to_vec();
         cp.push(stubdir);
-        let kotlin_classes = compile_blocks(blocks, &cp, jdk_modules, &features)?;
+        let kotlin_classes = compile_blocks(blocks, &cp, jdk_modules, &features, None)?;
         // Real javac against krusty's output (the stubs are DISCARDED — javac must see the real
         // Kotlin classes so Java→Kotlin references type-check for real).
         let kotlindir = root.join("kotlin");
@@ -499,7 +516,14 @@ fn compile_blocks(
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
     features: &krusty::features::LangFeatures,
+    progress: Option<&dyn Fn(&str)>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    let report = |phase: &str| {
+        if let Some(progress) = progress {
+            progress(phase);
+        }
+    };
+    report("module parse");
     let mut diags = DiagSink::new();
     let mut files: Vec<_> = blocks
         .iter()
@@ -516,16 +540,13 @@ fn compile_blocks(
         krusty::frontend::strip_matched_expects(&mut files);
     }
 
+    report("module classpath");
     let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
     if let Some(p) = jdk_modules {
         cp_paths.push(p.to_path_buf());
     }
-    let cp = CP_CACHE.with(|c| {
-        c.borrow_mut()
-            .entry(cp_paths.clone())
-            .or_insert_with(|| std::rc::Rc::new(Classpath::new(cp_paths.clone())))
-            .clone()
-    });
+    let cp = harness_classpath(cp_paths);
+    report("module signatures");
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     if diags.has_errors() {
@@ -534,18 +555,22 @@ fn compile_blocks(
     // Cross-file maps: each top-level function/property (inline fns with callable bodies
     // included) → its file's facade. Use the PRODUCTION registration so the harness can't drift
     // from the CLI (it did: it excluded all inline fns).
+    report("module symbol wiring");
     let stems: Vec<String> = blocks.iter().map(|(name, _)| name.clone()).collect();
     krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
 
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
-        let info = check_file(file, &mut syms, &mut diags);
+        report("module check");
+        let info =
+            krusty::frontend::check_file_in_source_set(&files, i as u32, &mut syms, &mut diags);
         if diags.has_errors() {
             return None;
         }
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+        report("module lower");
         let mut ir = krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime)?;
         // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip, don't miscompile.
         krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
@@ -560,6 +585,7 @@ fn compile_blocks(
         let opts =
             krusty::jvm::backend::shipping_emit_options(&blocks[i].0, "main", None, cp.clone());
         let run = ir_emit::EmitRun::default();
+        report("module emit");
         let out = ir_emit::emit_all_with_opts(&ir, &facade, &*cp, metadata.as_ref(), &opts, &run)?;
         all.extend(out);
     }
@@ -591,6 +617,7 @@ fn compile_module_test(
     src: &str,
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
+    progress: &dyn Fn(&str),
 ) -> Option<Vec<(String, Vec<u8>)>> {
     static UID: AtomicU64 = AtomicU64::new(0);
     let mut modules = split_modules(src)?;
@@ -626,6 +653,7 @@ fn compile_module_test(
             break;
         }
         let (files, java_files) = (&m.files, &m.java_files);
+        let report = |phase: &str| progress(&format!("module {}: {phase}", m.name));
         // A source-less unit (an empty hmpp intermediate built standalone) emits nothing; it still
         // gets a (created, empty) classpath dir so dependents resolve it.
         if files.is_empty() && java_files.is_empty() {
@@ -641,7 +669,7 @@ fn compile_module_test(
         // only deps/JDK); when that fails — the Java references THIS module's Kotlin — fall back to
         // the Kotlin-first stub pipeline, exactly like the single-module path.
         let classes = if java_files.is_empty() {
-            compile_blocks(files, &cp, jdk_modules, &features)
+            compile_blocks(files, &cp, jdk_modules, &features, Some(&report))
         } else {
             match common::javac_compile(java_files, &cp) {
                 Some((javadir, java_classes)) => {
@@ -650,7 +678,7 @@ fn compile_module_test(
                     } else {
                         let mut kcp = cp.clone();
                         kcp.push(javadir.clone());
-                        compile_blocks(files, &kcp, jdk_modules, &features)
+                        compile_blocks(files, &kcp, jdk_modules, &features, None)
                     };
                     if let Some(root) = javadir.parent() {
                         let _ = fs::remove_dir_all(root);
@@ -877,8 +905,21 @@ fn conformance_report_has_stable_machine_format() {
 }
 
 #[test]
+fn scratch_directory_classpaths_are_not_retained() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    assert!(!classpath_paths_are_cacheable(std::slice::from_ref(
+        &manifest
+    )));
+    assert!(classpath_paths_are_cacheable(
+        &[manifest.join("Cargo.toml")]
+    ));
+}
+
+#[test]
 fn kotlin_codegen_box_conformance() {
+    eprintln!("box setup: discover corpus");
     let box_dir = discover_box_dir();
+    eprintln!("box setup: corpus={}", box_dir.display());
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping box conformance: set JAVA_HOME");
         return;
@@ -892,6 +933,7 @@ fn kotlin_codegen_box_conformance() {
     };
     // Locate a real kotlin-stdlib jar (drop-in `-classpath`), used for `// WITH_STDLIB` tests at
     // compile time and on the JVM at runtime. No bespoke env var.
+    eprintln!("box setup: locate Kotlin runtime jars");
     let stdlib_jar = common::stdlib_jar();
     // Runtime classpath: every candidate stdlib-family jar (kotlin-stdlib, kotlin-test, reflect,
     // stdlib-jdk8, coroutines, annotations). The per-thread JVM has a fixed classpath, and extra
@@ -914,12 +956,12 @@ fn kotlin_codegen_box_conformance() {
         }
         paths.join(":")
     };
+    eprintln!("box setup: Kotlin runtime jars ready");
     let limit: usize = env("KRUSTY_BOX_LIMIT")
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let mut files = Vec::new();
-    collect_kt(&box_dir, &mut files);
+    let mut files = krusty::conformance::kotlin_files(&box_dir);
     // KRUSTY_BOX_ONLY: run only files whose path contains this substring — a focused single-test debug
     // loop (pair with a `trace`-feature build + KRUSTY_TRACE=<category>). Empty/unset runs the corpus.
     if let Some(only) = env("KRUSTY_BOX_ONLY") {
@@ -928,10 +970,8 @@ fn kotlin_codegen_box_conformance() {
     // KRUSTY_BOX_LIMIT caps the run for fast dev rounds. Sample evenly across the *sorted* corpus
     // (a stride) rather than truncating to the first N — the first N are all `annotations/…`, which
     // would hide coverage in every other package. A full (unset) run keeps the whole corpus.
-    if limit < files.len() {
-        let stride = files.len() / limit;
-        files = files.into_iter().step_by(stride.max(1)).collect();
-    }
+    files = krusty::conformance::evenly_sample(files, limit);
+    eprintln!("box setup: scheduled {} cases", files.len());
 
     let work = std::env::temp_dir().join(format!("krusty_box_{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
@@ -940,6 +980,7 @@ fn kotlin_codegen_box_conformance() {
     // Compile BoxRunner.java once.
     let runner_cp = setup_runner(&java_home, &work);
     let runner_cp_str = runner_cp.to_str().unwrap().to_string();
+    eprintln!("box setup: JVM runner ready");
 
     // Build a thread pool with a large stack (8 MiB) so deeply-nested source files don't
     // overflow the default 2 MiB Rayon stack during recursive descent parsing/checking.
@@ -953,7 +994,54 @@ fn kotlin_codegen_box_conformance() {
     }
     let pool = pb.build().unwrap();
     let n_threads = pool.current_num_threads();
+    eprintln!("box setup: compiler pool ready ({n_threads} workers)");
     let runners: Vec<Mutex<Option<BoxRunner>>> = (0..n_threads).map(|_| Mutex::new(None)).collect();
+    let completed = Arc::new(AtomicUsize::new(0));
+    let recent_failures: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let active: Arc<Vec<Mutex<Option<ActiveBoxCase>>>> =
+        Arc::new((0..n_threads).map(|_| Mutex::new(None)).collect());
+    let progress_done = Arc::new(AtomicBool::new(false));
+    let progress_thread = {
+        let completed = completed.clone();
+        let recent_failures = recent_failures.clone();
+        let active = active.clone();
+        let progress_done = progress_done.clone();
+        let total = files.len();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            eprintln!("box progress: 0/{total} (starting)");
+            while !progress_done.load(Ordering::Relaxed) {
+                std::thread::park_timeout(Duration::from_secs(10));
+                if progress_done.load(Ordering::Relaxed) {
+                    break;
+                }
+                let elapsed = started.elapsed();
+                let done = completed.load(Ordering::Relaxed);
+                let rate = done as f64 / elapsed.as_secs_f64().max(0.001);
+                let mut slow: Vec<ActiveBoxCase> = active
+                    .iter()
+                    .filter_map(|slot| slot.lock().unwrap().clone())
+                    .filter(|case| case.since.elapsed() >= Duration::from_secs(2))
+                    .collect();
+                slow.sort_by_key(|case| std::cmp::Reverse(case.since.elapsed()));
+                eprintln!(
+                    "box progress: {done}/{total} in {:.1}s ({rate:.1} cases/s)",
+                    elapsed.as_secs_f64()
+                );
+                for case in slow.into_iter().take(16) {
+                    eprintln!(
+                        "  active {:.1}s [{}] {}",
+                        case.since.elapsed().as_secs_f64(),
+                        case.phase,
+                        case.path.display()
+                    );
+                }
+                for (path, why) in recent_failures.lock().unwrap().iter().rev().take(8) {
+                    eprintln!("  recent failure {}: {why}", path.display());
+                }
+            }
+        })
+    };
 
     // Phase timers (nanoseconds, accumulated across threads).
     let t_compile = AtomicU64::new(0);
@@ -992,38 +1080,23 @@ fn kotlin_codegen_box_conformance() {
         files
             .par_iter()
             .map(|file| {
+                let tid = rayon::current_thread_index().unwrap_or(0);
+                mark_box_case_phase(&active, tid, file, "read");
+                if env("KRUSTY_BOX_TRACE_CASES").is_some() {
+                    eprintln!("box case {}", file.display());
+                }
                 let tc0 = std::time::Instant::now();
                 let tr0 = std::time::Instant::now();
                 let src = fs::read_to_string(file).unwrap_or_default();
                 // The Kotlin test runner expands the `OPTIONAL_JVM_INLINE_ANNOTATION` placeholder to
                 // `@JvmInline` (single-field value classes). Mirror that so value-class tests reach the
                 // compiler instead of failing to parse on the bare placeholder identifier.
-                let src = src.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
+                let src = krusty::conformance::prepare_test_source(&src);
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                let __ret = (|| {
-                    // Skip no-box tests. A `// MODULE:` multi-module test compiles each module (in
-                    // dependency order, chained via the classpath) through `compile_module_test`; a
-                    // `// FILE:` single-module test compiles its blocks together via `compile_multifile`.
-                    if !src.contains("fun box()") {
-                        return (file.clone(), TestResult::Skip);
+                let __ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if !backend_applicable(&src, krusty::conformance::BACKENDS) {
+                        return (file.clone(), TestResult::NotApplicable);
                     }
-                    // Skip tests that require invokedynamic lambdas or features not supported on JVM_IR K2.
-                    if src.contains("// LAMBDAS: INDY") || src.contains("IGNORE_BACKEND_K2: JVM_IR")
-                    {
-                        return (file.clone(), TestResult::Skip);
-                    }
-                    // Respect the backend directives: a `// TARGET_BACKEND:` that excludes JVM, or an
-                    // `// IGNORE_BACKEND[_K1/_K2]:` that names JVM/JVM_IR, means this test is not for us.
-                    if !backend_applicable(&src, &["JVM", "JVM_IR"]) {
-                        return (file.clone(), TestResult::Skip);
-                    }
-                    // A test whose expected outcome assumes a `FREE_COMPILER_ARGS` flag krusty doesn't
-                    // model (e.g. `genericSafeCasts`, which changes `as T` codegen) is unsound to judge
-                    // against krusty's default semantics — skip, don't mis-grade.
-                    if krusty::conformance::needs_unmodeled_compiler_flag(&src) {
-                        return (file.clone(), TestResult::Skip);
-                    }
-
                     // In-process compilation. A `// WITH_STDLIB` test gets the kotlin-stdlib jar on krusty's
                     // classpath (so stdlib aliases/types resolve); others compile with no stdlib.
                     let stem = file
@@ -1032,31 +1105,50 @@ fn kotlin_codegen_box_conformance() {
                         .unwrap_or("File")
                         .to_string();
                     // Directive-exact compile classpath (WITH_STDLIB/WITH_REFLECT/STDLIB_JDK8/WITH_COROUTINES).
+                    mark_box_case_phase(&active, tid, file, "classpath");
                     let tj0 = std::time::Instant::now();
                     let compile_cp = common::classpath_jars_for(&src);
                     t_cpjars.fetch_add(tj0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     let t0 = std::time::Instant::now();
+                    mark_box_case_phase(&active, tid, file, "compile");
                     // A `// FILE:` multi-file test, OR a `// WITH_COROUTINES` test (which needs the
                     // generated `helpers` source compiled alongside it), goes through the multi-block path.
                     let compiled = if src.contains("// MODULE:") {
-                        compile_module_test(&src, &compile_cp, jdk_modules.as_deref())
+                        compile_module_test(&src, &compile_cp, jdk_modules.as_deref(), &|phase| {
+                            mark_box_case_phase(&active, tid, file, phase)
+                        })
                     } else if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
                         compile_multifile(&src, &stem, &compile_cp, jdk_modules.as_deref())
                     } else {
-                        compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref())
+                        compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref(), &|phase| {
+                            mark_box_case_phase(&active, tid, file, phase)
+                        })
                     };
                     let classes = match compiled {
                         Some(c) => c,
-                        None => return (file.clone(), TestResult::Skip),
+                        None => {
+                            return (
+                                file.clone(),
+                                TestResult::Fail("compiler rejected the corpus case".to_string()),
+                            )
+                        }
                     };
                     t_compile.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    mark_box_case_phase(&active, tid, file, "post-compile");
                     if byte_diff_on {
                         let outcome = byte_diff_file(&src, &stem, &compile_cp, &classes);
                         byte_diffs.lock().unwrap().push((file.clone(), outcome));
                     }
                     let box_class = match find_box_class(&classes) {
                         Some(c) => c,
-                        None => return (file.clone(), TestResult::Skip),
+                        None => {
+                            return (
+                                file.clone(),
+                                TestResult::Fail(
+                                    "emitted classes contain no `box()` entry point".to_string(),
+                                ),
+                            )
+                        }
                     };
 
                     // KRUSTY_NO_RUN: compile + lower only (no JVM execution) — for profiling the
@@ -1066,13 +1158,13 @@ fn kotlin_codegen_box_conformance() {
                     }
 
                     // Execute in the per-thread persistent JVM.
-                    let tid = rayon::current_thread_index().unwrap_or(0);
                     let mut guard = runners[tid].lock().unwrap();
                     if guard.is_none() {
                         *guard = Some(BoxRunner::new(&java, &runner_cp_str, &stdlib));
                     }
                     let runner = guard.as_mut().unwrap();
                     let t1 = std::time::Instant::now();
+                    mark_box_case_phase(&active, tid, file, "jvm");
                     let result = match runner.run(&classes, &box_class) {
                         Some(r) => r,
                         None => {
@@ -1088,12 +1180,35 @@ fn kotlin_codegen_box_conformance() {
                     } else {
                         (file.clone(), TestResult::Fail(result))
                     }
-                })();
+                }))
+                .unwrap_or_else(|panic| {
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or("non-string panic payload");
+                    (
+                        file.clone(),
+                        TestResult::Fail(format!("compiler panic: {message}")),
+                    )
+                });
                 t_closure.fetch_add(tc0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                if let TestResult::Fail(why) = &__ret.1 {
+                    let summary = why.lines().next().unwrap_or(why).to_string();
+                    recent_failures
+                        .lock()
+                        .unwrap()
+                        .push((file.clone(), summary));
+                }
+                *active[tid].lock().unwrap() = None;
+                completed.fetch_add(1, Ordering::Relaxed);
                 __ret
             })
             .collect()
     });
+    progress_done.store(true, Ordering::Relaxed);
+    progress_thread.thread().unpark();
+    progress_thread.join().unwrap();
 
     // Peak-memory snapshot (KRUSTY_MEM_REPORT=1): process RSS after all compiles, the point where the
     // classpath caches are warmest. Confirms whether the per-thread LRU caps bound RSS. For a per-cache /
@@ -1130,10 +1245,9 @@ fn kotlin_codegen_box_conformance() {
                 let krusty_frame = frames
                     .frames
                     .iter()
-                    .rev()
-                    .flat_map(|f| f.iter().rev())
+                    .flat_map(|frame| frame.iter())
                     .map(|f| f.name())
-                    .find(|name| name.starts_with("krusty::"));
+                    .find(|name| name.starts_with("krusty::") || name.starts_with("<krusty::"));
                 if let Some(name) = krusty_frame {
                     *leaf.entry(name).or_default() += *count;
                 }
@@ -1164,15 +1278,14 @@ fn kotlin_codegen_box_conformance() {
 
     let mut compiled = 0usize;
     let mut passed = 0usize;
-    let mut skipped = 0usize;
+    let mut not_applicable = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
-    // KRUSTY_BOX_LIST=<path>: write one `COMPILED|SKIP <file>` line per corpus file, sorted. The
-    // summary counts say a change cost coverage but not WHICH files — diffing two of these does.
+    // KRUSTY_BOX_LIST=<path>: write one `PASS|FAIL <file>` line per corpus file, sorted.
     let mut listing: Vec<String> = Vec::new();
     for (file, r) in &results {
         match r {
-            TestResult::Skip => skipped += 1,
+            TestResult::NotApplicable => not_applicable += 1,
             TestResult::Pass => {
                 compiled += 1;
                 passed += 1;
@@ -1183,10 +1296,10 @@ fn kotlin_codegen_box_conformance() {
             }
         }
         if env("KRUSTY_BOX_LIST").is_some() {
-            let tag = if matches!(r, TestResult::Skip) {
-                "SKIP"
-            } else {
-                "COMPILED"
+            let tag = match r {
+                TestResult::NotApplicable => "NOT-APPLICABLE",
+                TestResult::Pass => "PASS",
+                TestResult::Fail(_) => "FAIL",
             };
             listing.push(format!("{tag} {}", file.display()));
         }
@@ -1221,8 +1334,9 @@ fn kotlin_codegen_box_conformance() {
 
     eprintln!("\n=== Kotlin codegen/box conformance ===");
     eprintln!(
-        "scanned: {}  | krusty-compiled: {compiled}  | box()=OK: {passed}  | skipped(unsupported): {skipped}  | FAIL: {}",
+        "cases: {}  | applicable: {}  | krusty-compiled: {compiled}  | box()=OK: {passed}  | FAIL: {}  | not-applicable: {not_applicable}",
         files.len(),
+        files.len() - not_applicable,
         failures.len()
     );
     if byte_diff_on {
@@ -1268,7 +1382,7 @@ fn kotlin_codegen_box_conformance() {
     if env("KRUSTY_BOX_LIST").is_some() {
         for (file, r) in &results {
             let tag = match r {
-                TestResult::Skip => "SKIP",
+                TestResult::NotApplicable => "NOT-APPLICABLE",
                 TestResult::Pass => "PASS",
                 TestResult::Fail(_) => "FAIL",
             };
@@ -1291,7 +1405,7 @@ fn kotlin_codegen_box_conformance() {
 }
 
 enum TestResult {
-    Skip,
+    NotApplicable,
     Pass,
     Fail(String),
 }

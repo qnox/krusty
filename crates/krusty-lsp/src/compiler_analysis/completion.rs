@@ -9,6 +9,7 @@ use krusty::diag::Span;
 use krusty::types::{Ty, Visibility};
 
 use super::{
+    companion_class,
     rendering::{render_ty, render_type},
     FileAnalysis,
 };
@@ -289,23 +290,25 @@ impl CompletionSymbols {
 
         let static_owner = format!("@{owner}");
         let mut static_members = Vec::new();
-        for property in &class.companion_props {
-            if completion_member_visible(property.visibility, internal_visible) {
-                let mut symbol = property_symbol(property, None);
-                symbol.result_type = property
-                    .ty
-                    .as_ref()
-                    .map(|ty| self.owner_for_type(&file.file, ty));
-                static_members.push(symbol);
+        if let Some(companion) = companion_class(&file.file, class) {
+            for property in &companion.body_props {
+                if completion_member_visible(property.visibility, internal_visible) {
+                    let mut symbol = property_symbol(property, None);
+                    symbol.result_type = property
+                        .ty
+                        .as_ref()
+                        .map(|ty| self.owner_for_type(&file.file, ty));
+                    static_members.push(symbol);
+                }
             }
-        }
-        for function in &class.companion_methods {
-            if completion_member_visible(function.visibility, internal_visible) {
-                static_members.push(function_symbol(
-                    function,
-                    FunctionContext::Member,
-                    file.inferred_function_return(function),
-                ));
+            for function in &companion.methods {
+                if completion_member_visible(function.visibility, internal_visible) {
+                    static_members.push(function_symbol(
+                        function,
+                        FunctionContext::Member,
+                        file.inferred_function_return(function),
+                    ));
+                }
             }
         }
         for entry in &class.enum_entries {
@@ -446,15 +449,17 @@ impl FileAnalysis {
                             &class.type_params,
                         );
                     }
-                    let companion_owner = format!("@{owner}");
-                    for function in &class.companion_methods {
-                        add_function_scope(
-                            &mut result,
-                            function,
-                            &self.file,
-                            Some(&companion_owner),
-                            symbols,
-                        );
+                    if let Some(companion) = companion_class(&self.file, class) {
+                        let companion_owner = format!("@{owner}");
+                        for function in &companion.methods {
+                            add_function_scope(
+                                &mut result,
+                                function,
+                                &self.file,
+                                Some(&companion_owner),
+                                symbols,
+                            );
+                        }
                     }
                     for function in class.enum_entries.iter().flat_map(|entry| &entry.methods) {
                         add_function_scope(
@@ -665,6 +670,7 @@ impl FileAnalysis {
                             .any(|parameter| parameter.name == *name)
                 }
                 Stmt::LocalClass(class) => {
+                    let companion = companion_class(&self.file, class);
                     class.name == *name
                         || class.props.iter().any(|property| property.name == *name)
                         || class
@@ -675,7 +681,7 @@ impl FileAnalysis {
                         || class
                             .methods
                             .iter()
-                            .chain(&class.companion_methods)
+                            .chain(companion.into_iter().flat_map(|class| &class.methods))
                             .chain(
                                 class
                                     .enum_entries
@@ -687,7 +693,7 @@ impl FileAnalysis {
                         || class
                             .body_props
                             .iter()
-                            .chain(&class.companion_props)
+                            .chain(companion.into_iter().flat_map(|class| &class.body_props))
                             .chain(
                                 class
                                     .enum_entries
@@ -732,6 +738,7 @@ impl FileAnalysis {
                                 == Some(name)
                     }
                     Decl::Class(class) => {
+                        let companion = companion_class(&self.file, class);
                         class.props.iter().any(|property| property.name == *name)
                             || class
                                 .secondary_ctors
@@ -741,7 +748,7 @@ impl FileAnalysis {
                             || class
                                 .body_props
                                 .iter()
-                                .chain(&class.companion_props)
+                                .chain(companion.into_iter().flat_map(|class| &class.body_props))
                                 .chain(
                                     class
                                         .enum_entries
@@ -759,7 +766,7 @@ impl FileAnalysis {
                             || class
                                 .methods
                                 .iter()
-                                .chain(&class.companion_methods)
+                                .chain(companion.into_iter().flat_map(|class| &class.methods))
                                 .chain(
                                     class
                                         .enum_entries
@@ -963,7 +970,7 @@ fn class_kind(class: &ClassDecl) -> CompletionKind {
         ClassKind::Interface => CompletionKind::Interface,
         ClassKind::Enum => CompletionKind::Enum,
         ClassKind::Class if class.is_data => CompletionKind::Struct,
-        ClassKind::Class | ClassKind::Object | ClassKind::Annotation => CompletionKind::Class,
+        ClassKind::Class | ClassKind::Annotation => CompletionKind::Class,
     }
 }
 

@@ -2,9 +2,8 @@
 //! parsed from source, decoded from / emitted to `@Metadata` (the round trip is covered by
 //! `contract_metadata_roundtrip_e2e`), and these programs lower to working code — a captured
 //! `var`/field write from an exactly-once lambda is Ref-boxed / written through the captured
-//! `this`. Call-site SEMANTICS (definite assignment, captured-var permission) are NOT yet derived
-//! from `callsInPlace` — the checker has no `Effect::CallsInPlace` consumer; these tests pin the
-//! shapes so a future application can't regress the compile+run behavior.
+//! `this`. Call-site semantics consume the selected declaration's effect; they never infer behavior
+//! from a standard-library function's spelling.
 //! Mirrors `contracts/constructorArgument.kt` (non-inline, init lambda) and
 //! `contracts/fieldInConstructorParens.kt` (private inline member, val-field write).
 
@@ -55,6 +54,33 @@ class Smth {\n\
 fun box(): String = if (Smth().whatever == 42) \"OK\" else \"FAIL\"\n";
     assert_eq!(
         run(SRC).expect("inline EO lambda val-field write compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn selected_exactly_once_contract_allows_non_local_return() {
+    const SRC: &str = "import kotlin.contracts.*\n\
+@OptIn(ExperimentalContracts::class)\n\
+inline fun <R> executeExactlyOnce(block: () -> R): R {\n\
+    contract { callsInPlace(block, InvocationKind.EXACTLY_ONCE) }\n\
+    return block()\n\
+}\n\
+fun box(): String {\n\
+    executeExactlyOnce { return \"OK\" }\n\
+}\n";
+
+    if let Some((code, diagnostics)) = common::kotlinc_source_result(
+        "selected_exactly_once_contract_allows_non_local_return",
+        SRC,
+    ) {
+        assert_eq!(
+            code, 0,
+            "kotlinc rejected contract-driven return: {diagnostics}"
+        );
+    }
+    assert_eq!(
+        run(SRC).expect("selected exactly-once contract permits non-local return"),
         "OK"
     );
 }

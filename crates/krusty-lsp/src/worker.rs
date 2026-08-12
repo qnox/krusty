@@ -1705,7 +1705,7 @@ mod tests {
         let classpath = vec![PathBuf::from("module.jar")];
         let language_arguments = vec!["-Xname-based-destructuring".to_string()];
         let mut session = LangFeatures::new();
-        session.enable("ContextParameters");
+        session.enable("SessionOnly");
         let target = DumpTarget {
             sources: &sources,
             source_kinds: &[SourceKind::Kotlin, SourceKind::Java],
@@ -1744,6 +1744,7 @@ mod tests {
         assert_eq!(
             dump.analysis.language_features,
             vec![
+                "ContextParameters".to_string(),
                 "MultiDollarInterpolation".to_string(),
                 "NameBasedDestructuring".to_string(),
             ],
@@ -1831,8 +1832,8 @@ mod tests {
             std::env::temp_dir().join(format!("krusty-worker-dump-bail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
 
-        // An interface `var` with a custom setter is checked fine but gates IR lowering.
-        let source = "interface Named {\n    var label: String\n        get() = \"value\"\n        set(v) {}\n}\n\
+        // A recursive `tailrec` member is checked fine but is not loop-transformed yet.
+        let source = "class Counter {\n    tailrec fun count(value: Int): Int =\n        if (value == 0) 0 else count(value - 1)\n}\n\
                       fun box(): String = \"OK\"\n";
         let request = serde_json::json!({
             "dump": {
@@ -1851,7 +1852,7 @@ mod tests {
 
         let text = std::fs::read_to_string(read_dump_path(output)).unwrap();
         assert!(
-            text.contains("not lowered: gate:interface"),
+            text.contains("not lowered: gate:tailrec-member"),
             "the bail reason must survive into the document: {text}"
         );
         assert!(

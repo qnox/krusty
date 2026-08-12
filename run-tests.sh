@@ -10,7 +10,41 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # the pre-push gate). Give the test threads a generous stack, matching `scripts/coverage.sh`.
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}" # 128 MiB
 
+# Bound every test-binary process, not just the corpus pass. A resolver/checker loop must terminate
+# with the binary name, exact filter, and captured diagnostics instead of wedging the gate. Healthy
+# local binaries finish well inside two minutes; slow systems can raise the explicit override.
+export KRUSTY_TEST_TIMEOUT_SECONDS="${KRUSTY_TEST_TIMEOUT_SECONDS:-120}"
+
 cd "$(dirname "$0")"
+
+# Frontend/corpus diagnosis is part of the test workflow, not a separate release-build path. Keep it
+# behind this harness so it receives the same provisioned Kotlin version and global deadline as the
+# conformance gate. Extra arguments are passed directly to `survey` (`--frontend-only`, `--file`,
+# `--samples`, `--report`).
+if [ "${1:-}" = "--survey" ]; then
+  shift
+  command -v just >/dev/null 2>&1 || {
+    echo "run-tests.sh --survey: just is required to provision the pinned Kotlin corpus" >&2
+    exit 2
+  }
+  survey_version="$(just max-version)"
+  export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$survey_version")}"
+  survey_box="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$survey_version")}"
+  cargo build --profile gate --bin survey
+  survey_target="${CARGO_TARGET_DIR:-$PWD/target}"
+  [[ "$survey_target" = /* ]] || survey_target="$PWD/$survey_target"
+  survey_bin="$survey_target/gate/survey"
+  [[ -x "$survey_bin" ]] || {
+    echo "run-tests.sh --survey: survey binary missing: $survey_bin" >&2
+    exit 1
+  }
+  command -v perl >/dev/null 2>&1 || {
+    echo "run-tests.sh --survey: perl is required to enforce the test deadline" >&2
+    exit 2
+  }
+  exec perl -e 'my $seconds = shift @ARGV; alarm($seconds); exec @ARGV; die "exec failed: $!\n"' \
+    "$KRUSTY_TEST_TIMEOUT_SECONDS" "$survey_bin" "$survey_box" "$@"
+fi
 
 if command -v just >/dev/null 2>&1; then
   v="$(just max-version)"
@@ -33,11 +67,18 @@ for a in "$@"; do
   esac
 done
 
-# Filtered/profile-specific runs are single-purpose; defer to cargo's normal runner. They may not need
-# a JVM at all, so the toolchain preflight below deliberately sits after this and guards only the full
-# suite; a filtered run that does need one still gets the same diagnosis from `common::jdk_modules`.
+# Filtered/profile-specific runs are single-purpose. They still receive the global deadline: these are
+# exactly the runs used while diagnosing a resolver loop, so letting the focused path hang would make
+# the guard least effective where it matters most. Print the full cargo selection before `exec`; if the
+# alarm fires, the last line identifies the active test/filter without relying on buffered test output.
 if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
-  exec cargo test $profile_arg "$@"
+  command -v perl >/dev/null 2>&1 || {
+    echo "run-tests.sh: perl is required to enforce the focused-test deadline" >&2
+    exit 2
+  }
+  echo "run-tests.sh: focused test timeout=${KRUSTY_TEST_TIMEOUT_SECONDS}s: cargo test $profile_arg $*" >&2
+  exec perl -e 'my $seconds = shift @ARGV; alarm($seconds); exec @ARGV; die "exec failed: $!\n"' \
+    "$KRUSTY_TEST_TIMEOUT_SECONDS" cargo test $profile_arg "$@"
 fi
 
 # Hundreds of e2e tests resolve `java.*` against the JDK's `lib/modules` jimage. Without it they all
@@ -152,8 +193,22 @@ run_label() {
 }
 export -f run_label
 
+run_with_deadline() {
+  local seconds="$1"
+  shift
+  command -v perl >/dev/null 2>&1 || {
+    echo "run-tests.sh: perl is required to enforce the test deadline" >&2
+    return 2
+  }
+  # `alarm` survives `exec`, so the test binary itself receives SIGALRM at the deadline. There is no
+  # watchdog process to leak, and the binary's pipes close so its JVM runners exit as well.
+  perl -e 'my $seconds = shift @ARGV; alarm($seconds); exec @ARGV; die "exec failed: $!\n"' \
+    "$seconds" "$@"
+}
+export -f run_with_deadline
+
 run_one() {
-  local b="${2%%::*}" extra="" name slug
+  local b="${2%%::*}" extra="" name slug status=0
   if [ "$2" != "$b" ]; then extra="${2#*::}"; fi
   name="$(basename "$b")"
   slug="$(run_label "$extra")"
@@ -171,12 +226,18 @@ run_one() {
   name="$uniq"
   local start end ms
   start="$(epoch_ms)"
-  if "$b" $extra >"$1/$name.log" 2>&1; then
+  if run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$b" $extra >"$1/$name.log" 2>&1; then
     :
   else
+    status=$?
+  fi
+  if [ "$status" -ne 0 ]; then
     # Log name first so the report reads the failing pass's own output; the description carries the
     # filter so two passes of one binary are told apart on sight.
     printf '%s\t%s\n' "$name" "$b${extra:+ [$extra]}" >>"$1/FAILED"
+    if [ "$status" -eq 142 ]; then
+      printf '%s\t%s\n' "$name" "$b${extra:+ [$extra]}" >>"$1/TIMED_OUT"
+    fi
   fi
   end="$(epoch_ms)"
   ms=$((end - start))

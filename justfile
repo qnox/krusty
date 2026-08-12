@@ -13,6 +13,7 @@
 #   just kotlinc    download+unpack the reference kotlinc dist; prints bin path
 #   just box-corpus clone+cache the Kotlin codegen/box corpus; prints box dir
 #   just conformance       print box-suite conformance "<pct> <passed> <scanned>"
+#   just profile-box [filter]  profile compiler-only box cases; writes target/flamegraph.svg
 #   just install-hooks    lefthook install
 #   just version          krusty release version, e.g. 2.4.20-build.3
 #   just max-version      highest supported Kotlin reference version (release base)
@@ -118,6 +119,11 @@ test-fast:
 # harness. The suite is internally rayon-parallel, so it uses all cores on its own.
 conformance-plain:
     ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+
+# Sample compiler CPU time for the box corpus and write an interactive flamegraph. An optional path
+# substring focuses one case, for example: `just profile-box ranges/contains/generated/arrayIndices.kt`.
+profile-box FILTER="":
+    KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 KRUSTY_BOX_ONLY="{{FILTER}}" ./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture
 
 # Run the whole external/reference conformance binary without coverage instrumentation, against the
 # LATEST supported Kotlin version only — the version-dependent half of `just ci`. This is what runs

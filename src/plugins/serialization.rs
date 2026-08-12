@@ -17,7 +17,10 @@ use crate::ir::{
 use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::names::property_getter_name;
-use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
+use crate::plugins::{
+    synthetic_class, FrontendCallable, FrontendCallableOwner, FrontendClassContext,
+    FrontendExpressionContext, IrPlugin, PluginContext, PluginExpressionPlan,
+};
 use crate::types::{type_name, Ty};
 
 pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
@@ -163,13 +166,13 @@ impl Default for SerializationPlugin {
 /// named `$serializer`, so its binary name is `Foo$$serializer` (the outer class + the nesting `$` +
 /// the object name `$serializer`) — matching kotlinc, which krusty previously emitted as `Foo$serializer`.
 fn serializer_fq(class_fq: &str) -> String {
-    format!("{class_fq}$$serializer")
+    crate::types::type_name_nested_child(type_name(class_fq), "$serializer").render()
 }
 
 /// The FqName of a `@Serializable` class's `Companion` object (`Foo` → `Foo$Companion`), which holds
 /// the `serializer()` accessor (kotlinc puts it there, not as a static on the class itself).
 fn companion_fq(class_fq: &str) -> String {
-    format!("{class_fq}$Companion")
+    crate::types::type_name_nested_child(type_name(class_fq), "Companion").render()
 }
 
 /// Place `serializer()` as an INSTANCE method on `class_fq`'s `Companion` — reusing an existing user
@@ -248,26 +251,93 @@ fn serializer_of(
     ret: Ty,
     args: Vec<ExprId>,
 ) -> ExprId {
-    let expected_companion = companion_fq(class_fq);
-    let companion_routed = ir.classes.iter().any(|c| {
-        c.fq_name_matches(class_fq)
-            && c.type_params.is_empty()
-            && c.companion_class_matches(&expected_companion)
-    });
-    if companion_routed {
-        companion_serializer_call(ir, class_fq, params, ret, args)
-    } else {
-        ir.add_expr(IrExpr::Call {
+    serializer_of_name(ir, type_name(class_fq), params, ret, args)
+}
+
+/// Emit the accessor the plugin actually generated. A companion's mere presence is insufficient:
+/// an `object` can acquire a frontend companion signature while its generated serializer accessor is
+/// a static method on the object itself. The generated IR declaration is the realization authority.
+fn serializer_of_name(
+    ir: &mut IrFile,
+    classifier: crate::types::TypeName,
+    params: Vec<Ty>,
+    ret: Ty,
+    args: Vec<ExprId>,
+) -> ExprId {
+    let (direct, companion) = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name_id() == classifier)
+        .map(|class| {
+            let direct = class.methods.iter().any(|&method| {
+                let function = &ir.functions[method as usize];
+                function.name == "serializer"
+                    && function.params == params
+                    && function.ret == ret
+                    && function.is_static
+            });
+            (direct, class.companion_class)
+        })
+        .unwrap_or((true, None));
+    if direct || companion.is_none() {
+        return ir.add_expr(IrExpr::Call {
             callee: Callee::CrossFile {
-                facade: type_name(class_fq),
+                facade: classifier,
                 name: "serializer".to_string(),
                 params,
                 ret,
             },
             dispatch_receiver: None,
             args,
-        })
+        });
     }
+    let companion = companion.unwrap();
+    let receiver = ir.add_expr(IrExpr::ExternalStaticInstance {
+        owner: classifier,
+        ty: companion,
+        field: "Companion".to_string(),
+    });
+    ir.add_expr(IrExpr::Call {
+        callee: Callee::Virtual {
+            owner: companion,
+            name: "serializer".to_string(),
+            descriptor: String::new(),
+            params: Some((params, ret)),
+            interface: false,
+        },
+        dispatch_receiver: Some(receiver),
+        args,
+    })
+}
+
+fn generated_serializer_signature(
+    ir: &IrFile,
+    classifier: crate::types::TypeName,
+    arity: usize,
+) -> Option<(Vec<Ty>, Ty)> {
+    let class = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name_id() == classifier)?;
+    let direct = class.methods.iter().find_map(|&method| {
+        let function = &ir.functions[method as usize];
+        (function.name == "serializer" && function.is_static && function.params.len() == arity)
+            .then(|| (function.params.clone(), function.ret))
+    });
+    if direct.is_some() {
+        return direct;
+    }
+    let companion = class.companion_class?;
+    ir.classes
+        .iter()
+        .find(|class| class.fq_name_id() == companion)?
+        .methods
+        .iter()
+        .find_map(|&method| {
+            let function = &ir.functions[method as usize];
+            (function.name == "serializer" && !function.is_static && function.params.len() == arity)
+                .then(|| (function.params.clone(), function.ret))
+        })
 }
 
 fn unit() -> Ty {
@@ -305,12 +375,27 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
         else {
             continue;
         };
-        // Operand/name layout is fixed by the core producer; a malformed node is left untouched
+        let kind = *kind;
+        if kind == "serializer" {
+            let [class_internal] = data.as_slice() else {
+                continue;
+            };
+            let class_internal = *class_internal;
+            let Some((params, ret)) =
+                generated_serializer_signature(ir, class_internal, exprs.len())
+            else {
+                continue;
+            };
+            let realized = serializer_of_name(ir, class_internal, params, ret, exprs.clone());
+            ir.exprs[mid] = ir.exprs[realized as usize].clone();
+            continue;
+        }
+        // Operand/name layout is fixed by the plugin planner; a malformed node is left untouched
         // (`jvm_can_emit` then declines the file rather than miscompiling).
         let (&[recv, ser, arg], [fmt, class_internal]) = (exprs.as_slice(), data.as_slice()) else {
             continue;
         };
-        let (kind, fmt, class_internal) = (*kind, *fmt, *class_internal);
+        let (fmt, class_internal) = (*fmt, *class_internal);
         let call = |descriptor: &str| IrExpr::Call {
             callee: Callee::Virtual {
                 owner: fmt,
@@ -385,12 +470,11 @@ fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
 /// JVM local-slot width of a field type. Long/Double take two slots — but a NULLABLE Long?/Double? is
 /// carried boxed (`java.lang.Long`/`Double`), a one-slot reference.
 fn slot_width(ty: &Ty) -> u32 {
-    match ty {
+    match *ty {
         // A non-nullable Long/Double occupies two slots, whether carried as a de-erased primitive
         // (`Ty::Long`) or an erased `Obj("kotlin/Long")`. A NULLABLE one is boxed (`java/lang/Long`,
         // `Ty::Nullable`) — a one-slot reference — and falls through to 1.
         Ty::Long | Ty::Double => 2,
-        Ty::Obj(fq_name, _) if *fq_name == "kotlin/Long" || *fq_name == "kotlin/Double" => 2,
         _ => 1,
     }
 }
@@ -1215,6 +1299,98 @@ impl SerializationPlugin {
 impl IrPlugin for SerializationPlugin {
     fn name(&self) -> &str {
         "kotlinx.serialization"
+    }
+
+    fn generate_frontend_declarations(
+        &self,
+        ctx: &FrontendClassContext<'_>,
+        members: &mut Vec<FrontendCallable>,
+    ) {
+        if !ctx
+            .annotations
+            .iter()
+            .any(|annotation| annotation.matches(SERIALIZABLE_FQ))
+        {
+            return;
+        }
+        let serializer = type_name(KSERIALIZER_FQ);
+        members.push(FrontendCallable {
+            owner: FrontendCallableOwner::Companion,
+            name: "serializer".to_string(),
+            params: vec![Ty::obj_name(serializer); ctx.type_parameter_count],
+            ret: Ty::obj_args_name(serializer, &[Ty::obj_name(ctx.classifier)]),
+            plugin_expression: Some(crate::libraries::PluginExpressionDeclaration {
+                plugin: "serialization",
+                operation: "serializer",
+            }),
+        });
+    }
+
+    fn plan_frontend_expressions(
+        &self,
+        ctx: &FrontendExpressionContext,
+        plans: &mut Vec<(crate::ast::ExprId, PluginExpressionPlan)>,
+    ) {
+        let serializer_package = type_name("kotlinx/serialization");
+        let serializer_type = type_name(KSERIALIZER_FQ);
+        let serializable_annotation = type_name(SERIALIZABLE_FQ);
+        for call in &ctx.calls {
+            let implementation = call.implementation.or_else(|| {
+                let signature = call.generic_sig.as_ref()?;
+                (call.owner.namespace() == serializer_package
+                    && call.name == "serializer"
+                    && call.params.is_empty()
+                    && call.inline.can_inline()
+                    && signature.formals.len() == 1
+                    && signature.params.is_empty()
+                    && signature.ret.kotlin_class_internal() == Some(serializer_type))
+                .then_some(crate::libraries::PluginExpressionDeclaration {
+                    plugin: "serialization",
+                    operation: "serializer",
+                })
+            });
+            let Some(implementation) = implementation else {
+                continue;
+            };
+            if implementation.plugin != "serialization" || implementation.operation != "serializer"
+            {
+                continue;
+            }
+            let classifier = match call.type_arguments.as_slice() {
+                [Some(classifier)] => classifier.kotlin_class_internal(),
+                _ => None,
+            }
+            .or_else(|| {
+                (call.ret.kotlin_class_internal() == Some(serializer_type))
+                    .then(|| call.ret.type_args().first().copied())
+                    .flatten()
+                    .and_then(Ty::kotlin_class_internal)
+            });
+            let Some(classifier) = classifier else {
+                continue;
+            };
+            if !ctx.has_source_annotation(classifier, serializable_annotation) {
+                continue;
+            }
+            let operands = call
+                .argument_slots
+                .iter()
+                .zip(&call.params)
+                .filter_map(|(argument, parameter)| argument.map(|argument| (argument, *parameter)))
+                .collect::<Vec<_>>();
+            if operands.len() != call.params.len() {
+                continue;
+            }
+            plans.push((
+                call.expression,
+                PluginExpressionPlan {
+                    plugin: implementation.plugin,
+                    operation: implementation.operation,
+                    data: vec![classifier],
+                    operands,
+                },
+            ));
+        }
     }
 
     /// Generate the `$serializer` object, its members, and the `serializer()` accessor.
@@ -2701,6 +2877,35 @@ mod tests {
 
     fn plugin_context() -> PluginContext<'static> {
         PluginContext::default().with_target_type_descriptor(jvm_type_descriptor)
+    }
+
+    #[test]
+    fn contributes_serializer_as_a_companion_member() {
+        let annotation = [type_name(SERIALIZABLE_FQ)];
+        let classifier = type_name("demo/Box");
+        let mut members = Vec::new();
+        SerializationPlugin::default().generate_frontend_declarations(
+            &FrontendClassContext {
+                classifier,
+                type_parameter_count: 1,
+                annotations: &annotation,
+            },
+            &mut members,
+        );
+
+        assert_eq!(
+            members,
+            vec![FrontendCallable {
+                owner: FrontendCallableOwner::Companion,
+                name: "serializer".to_string(),
+                params: vec![Ty::obj(KSERIALIZER_FQ)],
+                ret: Ty::obj_args_name(type_name(KSERIALIZER_FQ), &[Ty::obj_name(classifier)]),
+                plugin_expression: Some(crate::libraries::PluginExpressionDeclaration {
+                    plugin: "serialization",
+                    operation: "serializer",
+                }),
+            }]
+        );
     }
 
     /// Build `@Serializable class <name>(<one val per field type>)` as IR + an annotation table.

@@ -12,9 +12,7 @@
 use super::common;
 
 fn run_box(src: &str, stem: &str) {
-    let Some(out) = common::compile_and_run_with_stdlib(src, stem) else {
-        panic!("{stem}: expected the box to compile and run");
-    };
+    let out = common::expect_box_run_with_stdlib(src, stem);
     assert_eq!(out, "OK", "{stem}");
 }
 
@@ -49,6 +47,64 @@ class Outer {
 fun box() = Outer.get()
 "#,
         "CompOwnMethod",
+    );
+}
+
+#[test]
+fn primitive_companion_classifier_and_value_are_one_symbol() {
+    run_box(
+        r#"
+fun Double.Companion.answer(): String = "OK"
+
+fun box(): String {
+    val implicit = Double
+    val explicit = Double.Companion
+    if (implicit !== explicit) return "different companion values"
+    return explicit.answer()
+}
+"#,
+        "PrimitiveCompanionValue",
+    );
+}
+
+#[test]
+fn primitive_double_companion_extensions_and_constants() {
+    run_box(
+        r#"
+fun <T> assertEquals(a: T, b: T) { if (a != b) throw AssertionError("$a != $b") }
+
+fun Double.Companion.MAX() = MAX_VALUE
+fun Double.Companion.MIN() = MIN_VALUE
+
+fun <T> test(o: T) { assertEquals(o === Double.Companion, true) }
+
+fun box(): String {
+    assertEquals(1.7976931348623157E308, Double.MAX_VALUE)
+    assertEquals(Double.MIN_VALUE, Double.MIN())
+    assertEquals(Double.MAX_VALUE, Double.Companion.MAX())
+    test(Double)
+    test(Double.Companion)
+    return "OK"
+}
+"#,
+        "PrimitiveDoubleCompanionApi",
+    );
+}
+
+#[test]
+fn primitive_int_companion_extensions_and_constants() {
+    run_box(
+        r#"
+fun Int.Companion.maximum() = MAX_VALUE
+fun Int.Companion.minimum() = MIN_VALUE
+
+fun box(): String {
+    if (Int.maximum() != 2147483647) return "maximum"
+    if (Int.minimum() != -2147483648) return "minimum"
+    return "OK"
+}
+"#,
+        "PrimitiveIntCompanionApi",
     );
 }
 
@@ -135,7 +191,7 @@ class Outer {
     fun test() = Nested().foo()
 }
 
-interface Runnable { fun get(): String }
+fun interface Runnable { fun get(): String }
 
 fun box() = Outer().test()
 "#,
@@ -143,10 +199,9 @@ fun box() = Outer().test()
     );
 }
 
-/// BOUNDARY: a companion member that collides with an instance member is deliberately rejected
-/// at the front end (a `Companion.` qualifier would be needed) — pinned so a future fix promotes it.
+/// The nearest instance member wins over the enclosing companion member.
 #[test]
-fn member_companion_collision_stays_rejected() {
+fn instance_member_wins_over_companion_member() {
     let src = r#"
 class Outer {
     val result = "member"
@@ -160,9 +215,60 @@ class Outer {
 
 fun box() = Outer().test()
 "#;
-    assert!(
-        common::compile_and_run_with_stdlib(src, "CompCollision").is_none(),
-        "the member/companion collision gate must stay"
+    assert_eq!(
+        common::compile_and_run_with_stdlib(src, "CompCollision").as_deref(),
+        Some("member"),
+    );
+}
+
+#[test]
+fn kotlinc_member_companion_property_field_shape() {
+    let src = r#"
+class Outer {
+    val result = "member"
+
+    companion object {
+        val result = "companion"
+    }
+}
+"#;
+    let Some(out) = common::compile_lib("CompCollisionReference", src) else {
+        return;
+    };
+    let bytes = std::fs::read(out.join("Outer.class")).expect("read kotlinc Outer.class");
+    let class = krusty::jvm::classreader::parse_class(&bytes).expect("parse kotlinc Outer.class");
+    let instance = class
+        .fields
+        .iter()
+        .find(|field| field.name == "result$1")
+        .expect("kotlinc mangles the instance backing field");
+    let companion = class
+        .fields
+        .iter()
+        .find(|field| field.name == "result")
+        .expect("kotlinc keeps the companion static's source name");
+    assert_eq!(instance.access & 0x0008, 0, "instance field is not static");
+    assert_ne!(companion.access & 0x0008, 0, "companion field is static");
+}
+
+#[test]
+fn instance_function_wins_over_companion_function() {
+    let src = r#"
+class Outer {
+    fun result() = "member"
+
+    companion object {
+        fun result() = "companion"
+    }
+
+    fun test() = result()
+}
+
+fun box() = Outer().test()
+"#;
+    assert_eq!(
+        common::compile_and_run_with_stdlib(src, "CompFunctionCollision").as_deref(),
+        Some("member"),
     );
 }
 
@@ -211,10 +317,8 @@ fun box() = Outer().test()
     );
 }
 
-/// REJECTION GUARD: a `private` companion property read cross-class (its field is emitted
-/// private; no nestmate support) must not compile to a direct getstatic.
 #[test]
-fn private_companion_prop_cross_class_still_rejected() {
+fn private_companion_property_is_visible_to_a_nested_class() {
     let src = r#"
 class Outer {
     companion object {
@@ -230,53 +334,41 @@ class Outer {
 
 fun box() = Outer().test()
 "#;
-    assert!(
-        common::compile_and_run_with_stdlib(src, "CompPrivateCross").is_none(),
-        "a private companion property read cross-class must not compile to a direct getstatic"
-    );
+    common::expect_box_ok_with_stdlib(src, "CompPrivateCross");
 }
 
-/// The exact corpus cases. Companion METHOD calls from nested classes
-/// (`privateCompanionObjectAccessedFromNestedClassSeveralTimes.kt`), the companion object AS A
-/// VALUE (`privateCompanionObjectUsedInNestedClass.kt`), and the generic-HOF lambda case
-/// (`privateCompanionObjectAccessedFromLambdaInNestedClass.kt`, whose `eval {}` return needs
-/// generic substitution in signature inference) are separate gaps — pinned as boundaries below.
 #[test]
-fn corpus_companion_access_box_ok() {
-    if !common::corpus_ready() {
-        return;
-    }
-    for case in [
-        "objects/companionObjectAccess/privateCompanionObjectAccessedFromNestedClass.kt",
-        "objects/companionObjectAccess/privateCompanionObjectAccessedFromInitBlock.kt",
-        "objects/companionObjectAccess/privateCompanionObjectAccessedFromInitBlockOfNestedClass.kt",
-        "objects/companionObjectAccess/privateCompanionObjectAccessedFromAnonymousObjectInNestedClass.kt",
-        "objects/companionObjectAccess/protectedCompanionObjectAccessedFromNestedClass.kt",
-    ] {
-        assert_eq!(
-            common::run_box_corpus_case(case).as_deref(),
-            Some("OK"),
-            "{case} must execute successfully, not silently skip"
-        );
+fn nested_initializers_and_anonymous_objects_read_the_companion() {
+    const SOURCE: &str = r#"
+interface Text { fun read(): String }
+class Outer {
+    companion object { private val token = "OK" }
+    val initialized = token
+    class Nested {
+        val initialized = token
+        fun anonymous(): Text = object : Text { override fun read() = token }
     }
 }
+fun box(): String {
+    val outer = Outer()
+    val nested = Outer.Nested()
+    return if (outer.initialized == "OK" && nested.initialized == "OK") nested.anonymous().read() else "FAIL"
+}
+"#;
+    common::expect_box_ok_with_stdlib(SOURCE, "NestedCompanionReads");
+}
 
-/// Companion METHOD calls, the companion object AS A VALUE, and the generic-HOF lambda case stay
-/// skipped (separate features from the property read this file covers).
 #[test]
-fn boundary_companion_method_and_value_stay_skipped() {
-    if !common::corpus_ready() {
-        return;
+fn nested_class_calls_private_companion_methods_directly_and_in_a_lambda() {
+    const SOURCE: &str = r#"
+inline fun <T> eval(block: () -> T): T = block()
+class Outer {
+    companion object { private fun part() = "O" }
+    class Nested {
+        fun result(): String = part() + part() + eval { part() }
     }
-    for case in [
-        "objects/companionObjectAccess/privateCompanionObjectAccessedFromNestedClassSeveralTimes.kt",
-        "objects/companionObjectAccess/privateCompanionObjectUsedInNestedClass.kt",
-        "objects/companionObjectAccess/privateCompanionObjectAccessedFromLambdaInNestedClass.kt",
-    ] {
-        assert_eq!(
-            common::run_box_corpus_case(case),
-            None,
-            "{case} needs machinery outside this feature — must stay skipped"
-        );
-    }
+}
+fun box(): String = if (Outer.Nested().result() == "OOO") "OK" else "FAIL"
+"#;
+    common::expect_box_ok_with_stdlib(SOURCE, "NestedCompanionMethods");
 }

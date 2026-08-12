@@ -89,7 +89,7 @@ fn package_value_param_defaults_round_trip() {
         type_params: Vec::new(),
         context_count: 0,
     }];
-    let (d1, d2) = build_package(&funcs, &[]);
+    let (d1, d2) = build_package(&funcs, &[], &[]);
     let ci = class_info("com/example/HostKt", d1, d2);
 
     let fns = package_functions(&ci);
@@ -129,7 +129,7 @@ fn package_extension_receiver_round_trips() {
         type_params: Vec::new(),
         context_count: 0,
     }];
-    let (d1, d2) = build_package(&funcs, &[]);
+    let (d1, d2) = build_package(&funcs, &[], &[]);
     let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
 
     let f = package_functions(&ci)
@@ -173,7 +173,7 @@ fn package_receiver_function_type_param_round_trips() {
         type_params: Vec::new(),
         context_count: 0,
     }];
-    let (d1, d2) = build_package(&funcs, &[]);
+    let (d1, d2) = build_package(&funcs, &[], &[]);
     let ci = class_info("com/example/NavHostKt", d1, d2);
 
     let f = package_functions(&ci)
