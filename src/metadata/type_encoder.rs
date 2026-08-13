@@ -149,7 +149,7 @@ impl fmt::Display for TypeEncodeError {
     }
 }
 
-pub(crate) type TypeParameters<'a> = HashMap<&'a str, u64>;
+pub(crate) type TypeParameters = HashMap<String, u64>;
 
 #[derive(Clone, Debug, Default)]
 pub struct MetadataTypeParameter {
@@ -159,17 +159,33 @@ pub struct MetadataTypeParameter {
     pub upper_bounds: Vec<Ty>,
 }
 
-pub(crate) fn type_parameters<'a>(names: impl Iterator<Item = &'a str>) -> TypeParameters<'a> {
+pub(crate) fn type_parameters<'a>(names: impl Iterator<Item = &'a str>) -> TypeParameters {
     names
         .enumerate()
-        .map(|(index, name)| (name, index as u64))
+        .map(|(index, name)| (name.to_owned(), index as u64))
+        .collect()
+}
+
+pub(crate) fn semantic_type_parameters<'a>(
+    names: impl Iterator<Item = &'a str>,
+    semantic_names: impl Iterator<Item = &'a str>,
+) -> TypeParameters {
+    names
+        .zip(semantic_names)
+        .enumerate()
+        .flat_map(|(index, (name, semantic))| {
+            [
+                (name.to_owned(), index as u64),
+                (semantic.to_owned(), index as u64),
+            ]
+        })
         .collect()
 }
 
 pub(crate) fn encode_type(
     strings: &mut StringTable,
     ty: Ty,
-    type_parameters: &TypeParameters<'_>,
+    type_parameters: &TypeParameters,
 ) -> Result<Pb, TypeEncodeError> {
     encode_type_with_parameter(strings, ty, type_parameters, None)
 }
@@ -185,7 +201,7 @@ pub(crate) fn encode_indexed_type_parameter(
 fn encode_type_with_parameter(
     strings: &mut StringTable,
     ty: Ty,
-    type_parameters: &TypeParameters<'_>,
+    type_parameters: &TypeParameters,
     forced_parameter: Option<u64>,
 ) -> Result<Pb, TypeEncodeError> {
     let (nullable, flexible, base) = match ty {
@@ -219,11 +235,12 @@ fn encode_type_with_parameter(
                 .get(name)
                 .copied()
                 .ok_or_else(|| TypeEncodeError::MissingTypeParameter(name.to_owned()))?;
+            let source_name = crate::types::type_parameter_source_name(name);
             if nullable {
                 message.field_varint(3, 1);
             }
             message.field_varint(7, index);
-            message.field_varint(9, strings.local(name) as u64);
+            message.field_varint(9, strings.local(source_name) as u64);
         }
         Ty::Obj(classifier, arguments) => {
             // kotlinc interns the enclosing classifier before recursively interning its arguments,
@@ -296,7 +313,7 @@ fn encode_arguments(
     message: &mut Pb,
     strings: &mut StringTable,
     arguments: &[Ty],
-    type_parameters: &TypeParameters<'_>,
+    type_parameters: &TypeParameters,
 ) -> Result<(), TypeEncodeError> {
     for argument in arguments {
         let (projection, argument) = match argument {
@@ -325,7 +342,7 @@ pub(crate) fn encode_metadata_type_parameter(
     strings: &mut StringTable,
     index: usize,
     parameter: &MetadataTypeParameter,
-    type_parameters: &TypeParameters<'_>,
+    type_parameters: &TypeParameters,
 ) -> Result<Pb, TypeEncodeError> {
     let mut message = Pb::new();
     message.field_varint(1, index as u64);

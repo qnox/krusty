@@ -41,6 +41,18 @@ fn a_local_class_can_name_the_enclosing_classs_type_parameter() {
     assert_eq!(run(SRC).expect("outer type parameter resolves"), "OK");
 }
 
+#[test]
+fn nearest_enclosing_type_parameter_wins_in_a_local_class() {
+    const SRC: &str = "class Outer<T> {\n\
+        \x20   fun <T> read(value: T): T {\n\
+        \x20       class Local(val captured: T) { fun get(): T = captured }\n\
+        \x20       return Local(value).get()\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = Outer<Int>().read(\"OK\")\n";
+    assert_eq!(run(SRC).expect("nearest type parameter is captured"), "OK");
+}
+
 /// kotlinc: accepted.
 ///
 /// The local class's own property shadows a same-named property of the enclosing class, so this is

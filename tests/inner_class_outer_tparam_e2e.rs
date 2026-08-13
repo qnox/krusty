@@ -80,3 +80,39 @@ fun box(): String = Outer.Middle().make()
 
     common::expect_box_ok_with_stdlib(src, "NearestSiblingCtorType");
 }
+
+#[test]
+fn shadowed_inner_parameter_does_not_erase_the_outer_parameter_identity() {
+    let src = r#"
+class Outer<T>(val outer: T) {
+    inner class Inner<T>(val inner: T) {
+        fun result(): String = this@Outer.outer.toString() + inner.toString()
+    }
+}
+
+fun box(): String = Outer("O").Inner("K").result()
+"#;
+
+    common::expect_box_ok_with_stdlib(src, "ShadowedInnerOuterTypeParameter");
+}
+
+#[test]
+fn three_level_inner_class_carries_every_enclosing_type_argument() {
+    let src = r#"
+class Outer<T>(val t: T) {
+    inner class Middle<U>(val u: U) {
+        inner class Inner<V>(val v: V) {
+            fun result(): String = t.toString() + u.toString() + v.toString()
+        }
+    }
+}
+
+fun box(): String {
+    val outer = Outer("O")
+    val middle = outer.Middle("K")
+    return middle.Inner("").result()
+}
+"#;
+
+    common::expect_box_ok_with_stdlib(src, "ThreeLevelInnerTypeParameters");
+}

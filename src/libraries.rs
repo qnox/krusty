@@ -234,6 +234,9 @@ pub struct LibraryMember {
     pub owner: Option<TypeName>,
     /// Physical method name when it differs from the Kotlin/source member name.
     pub physical_name: Option<String>,
+    /// Declaration/ABI parameter types before call-site generic substitution. Resolution specializes
+    /// [`Self::params`]; lowering consumes this stable parallel shape.
+    pub physical_params: Vec<Ty>,
     pub params: Vec<Ty>,
     pub ret: Ty,
     pub physical_ret: Ty,
@@ -606,6 +609,7 @@ impl LibraryMember {
             name,
             owner: None,
             physical_name: None,
+            physical_params: params.clone(),
             params,
             ret,
             physical_ret: ret,
@@ -907,6 +911,9 @@ pub struct LibraryCallable {
 pub struct DefaultCallRealization {
     pub descriptor: String,
     pub real_params: Vec<Ty>,
+    /// Number of platform mask words before the trailing marker. Zero denotes a marker-only
+    /// realization; consumers must not infer this ABI fact from the source parameter count.
+    pub mask_count: usize,
     pub ret: Ty,
     pub suspend: bool,
 }
@@ -1620,6 +1627,7 @@ impl FunctionInfo {
             ret,
             self.callable.descriptor.clone(),
         );
+        member.physical_params = self.callable.physical_params.clone();
         member.owner = Some(self.callable.owner);
         member.physical_ret = self.callable.physical_ret;
         // Preserve the selected declaration's pre-substitution return when a generic `FunctionInfo`

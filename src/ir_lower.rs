@@ -785,8 +785,10 @@ fn lower_file_at_reporting_impl(
                 c.delegation_exprs.len()
             );
             // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
-            if let Some(s) = class_generic_sig(file, c, info, syms) {
-                lo.ir.insert_class_signature(&internal, s);
+            match class_generic_sig(file, c, info, syms) {
+                Ok(Some(signature)) => lo.ir.insert_class_signature(&internal, signature),
+                Ok(None) => {}
+                Err(reason) => return lo.bail(reason),
             }
             // A field whose declared type is a bare type parameter (`val a: A`) gets a field `Signature`
             // (`TA;`); record the (field, type-param) pairs for the JVM backend to format.
@@ -1061,7 +1063,10 @@ fn lower_file_at_reporting_impl(
                                 c.props.iter().any(|p| &p.name == n && p.default.is_some()),
                             )
                             .with_is_final(field_finals.get(i).copied().unwrap_or(false))
-                            .with_is_private(true)
+                            // Kotlin's synthetic enclosing-instance field is package-visible so a
+                            // deeper inner class can traverse `this$0.this$0`. User backing fields
+                            // remain private and are reached through their accessors.
+                            .with_is_private(!(inner_outer.is_some() && i == 0))
                             .with_is_lateinit(lateinit_names.contains(n.as_str())),
                     }
                 })
@@ -1080,6 +1085,7 @@ fn lower_file_at_reporting_impl(
                     .zip(class_sig.type_param_bounds().iter().copied().map(ty_to_ir))
                     .collect(),
                 type_params: c.type_params.clone(),
+                captured_type_params: class_sig.metadata_captured_type_parameters.clone(),
                 supertypes: vec![],
                 properties: Vec::new(),
                 fields: ir_fields,
@@ -1442,8 +1448,12 @@ fn lower_file_at_reporting_impl(
                     lo.ir.suspend_funs.push(fid);
                 }
                 // A generic member method gets the same JVM `Signature` as a generic top-level function.
-                if let Some(s) = fn_generic_sig(info, m) {
-                    lo.ir.signatures.insert(fid, s);
+                match fn_generic_sig(info, m) {
+                    Ok(Some(signature)) => {
+                        lo.ir.signatures.insert(fid, signature);
+                    }
+                    Ok(None) => {}
+                    Err(reason) => return lo.bail(reason),
                 }
                 methods
                     .entry(m.name.clone())
@@ -2262,8 +2272,12 @@ fn lower_file_at_reporting_impl(
                 }
                 // Emit a JVM generic `Signature` for a type-parameterized function (kotlinc does), so the
                 // bytecode matches for generics. `None` for non-generic / not-yet-modeled shapes.
-                if let Some(s) = fn_generic_sig(info, f) {
-                    lo.ir.signatures.insert(id, s);
+                match fn_generic_sig(info, f) {
+                    Ok(Some(signature)) => {
+                        lo.ir.signatures.insert(id, signature);
+                    }
+                    Ok(None) => {}
+                    Err(reason) => return lo.bail(reason),
                 }
                 // Tag a `suspend fun` for the coroutine pass (`jvm::suspend`), which owns the whole
                 // transform (CPS signature now; state machine later) — ir_lower keeps the plain form,
@@ -4051,6 +4065,7 @@ fn lower_file_at_reporting_impl(
                             decl_line: 0,
                             type_param_bounds: vec![],
                             type_params: Vec::new(),
+                            captured_type_params: Vec::new(),
                             supertypes: vec![],
                             properties: Vec::new(),
                             fields: prop_fields
@@ -5806,55 +5821,23 @@ impl<'a> Lower<'a> {
     /// Pack expanded member arguments into the physical trailing array.
     fn lower_library_member_vararg_args(
         &mut self,
-        call: Option<AstExprId>,
+        call: AstExprId,
         args: &[AstExprId],
         member: &crate::libraries::LibraryMember,
-    ) -> Option<Vec<u32>> {
+        physical_params: &[Ty],
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
         if !member.call_sig.vararg {
             return None;
         }
-        let (array, fixed) = member.params.split_last()?;
-        if args.len() < fixed.len() {
-            return None;
-        }
-        if let Some(slots) = call
-            .and_then(|call| self.info.resolved_call_arg_slots.get(&call))
-            .cloned()
-        {
-            if slots.iter().any(Option::is_none) {
-                return None;
-            }
-            return self.lower_call_slot_args(args, &slots, &member.params);
-        }
-        let mut lowered = Vec::with_capacity(member.params.len());
-        for (&argument, &parameter) in args[..fixed.len()].iter().zip(fixed) {
-            lowered.push(self.lower_arg(argument, &ty_to_ir(parameter))?);
-        }
-        let trailing = &args[fixed.len()..];
-        if trailing.len() == 1 && self.info.ty(trailing[0]) == *array {
-            lowered.push(self.lower_arg(trailing[0], &ty_to_ir(*array))?);
-            return Some(lowered);
-        }
-        let element = array.array_elem()?;
-        let mut elements = Vec::with_capacity(trailing.len());
-        let mut spreads = Vec::with_capacity(trailing.len());
-        for &argument in trailing {
-            // A SPREAD (`*xs`) contributes its WHOLE array, so it lowers at the array type and the
-            // parallel flag routes the emitter to kotlinc's `SpreadBuilder` sequence. The
-            // pass-through above only catches a spread whose type equals the parameter array
-            // exactly; a Java vararg widens (`Array<String>` into `Object[]`), and packing that as
-            // one ELEMENT passed a one-element array — `Constructor.newInstance(*empty)` then
-            // failed at run time with "wrong number of arguments: 1 expected: 0".
-            let is_spread = self.afile.is_spread_arg(argument);
-            elements.push(if is_spread {
-                self.lower_arg(argument, &ty_to_ir(*array))?
-            } else {
-                self.lower_arg(argument, &ty_to_ir(element))?
-            });
-            spreads.push(is_spread);
-        }
-        lowered.push(self.emit_vararg_with_spreads(*array, elements, spreads));
-        Some(lowered)
+        let slots = self.info.resolved_call_arg_slots.get(&call).cloned()?;
+        self.lower_call_slot_args_vararg_pack(
+            args,
+            &slots,
+            physical_params,
+            &member.params,
+            false,
+            member.call_sig.vararg_index,
+        )
     }
 
     /// Emit one already-selected implicit enum classifier callable on an owner outside this file. The
@@ -8629,24 +8612,33 @@ impl<'a> Lower<'a> {
                     .syms
                     .class_model(owner)
                     .and_then(|class| class.value_underlying);
-                let mut lowered = if member.call_sig.vararg {
-                    self.lower_library_member_vararg_args(Some(call), &args, &member)?
+                let (mut lowered, prelude) = if member.call_sig.vararg {
+                    self.lower_library_member_vararg_args(
+                        call,
+                        &args,
+                        &member,
+                        &member.physical_params,
+                    )?
                 } else {
                     let mut lowered = Vec::new();
                     let layout = self.runtime.descriptor_method_layout(&member.descriptor);
-                    for (index, (arg, pty)) in args.iter().zip(&member.params).enumerate() {
-                        let value = self.lower_arg(*arg, &ty_to_ir(*pty))?;
+                    for (index, (arg, (semantic, physical))) in args
+                        .iter()
+                        .zip(member.params.iter().zip(&member.physical_params))
+                        .enumerate()
+                    {
+                        let value = self.lower_arg(*arg, &ty_to_ir(*semantic))?;
                         let slot_is_reference = layout
                             .as_ref()
                             .and_then(|layout| layout.reference_slots.get(index).copied());
                         lowered.push(self.coerce_argument_value_for_physical_slot(
                             value,
-                            *pty,
-                            *pty,
+                            *semantic,
+                            *physical,
                             slot_is_reference,
                         )?);
                     }
-                    lowered
+                    (lowered, Vec::new())
                 };
                 if let Some(outer) = outer {
                     lowered.insert(0, self.expr(outer)?);
@@ -8660,9 +8652,11 @@ impl<'a> Lower<'a> {
                     let params = value_underlying
                         .map(|underlying| vec![ty_to_ir(underlying)])
                         .unwrap_or_else(|| tys_to_ir(&member.params));
-                    return Some(self.ir.new_cross_file(&internal, params, lowered));
+                    let new = self.ir.new_cross_file(&internal, params, lowered);
+                    return Some(self.wrap_arg_prelude(new, prelude));
                 }
-                Some(self.emit_new_external(&internal, member.descriptor, lowered))
+                let new = self.emit_new_external(&internal, member.descriptor, lowered);
+                Some(self.wrap_arg_prelude(new, prelude))
             }
             ResolvedConstructor::PlainSlots {
                 outer,
@@ -8690,8 +8684,15 @@ impl<'a> Lower<'a> {
                     let new = self.ir.new_cross_file(&internal, params, lowered);
                     return Some(self.wrap_arg_prelude(new, prelude));
                 }
-                let (mut lowered, prelude) =
-                    self.lower_call_slot_args_source_order(args, &slots, &member.params, false)?;
+                let (mut lowered, prelude) = self.lower_call_slot_args_source_order_with_element(
+                    args,
+                    &slots,
+                    &member.physical_params,
+                    Some(&member.params),
+                    None,
+                    member.call_sig.vararg_index,
+                    OmittedSlotPolicy::Reject,
+                )?;
                 if let Some(outer) = outer {
                     lowered.insert(0, self.expr(outer)?);
                 }
@@ -8701,41 +8702,35 @@ impl<'a> Lower<'a> {
             ResolvedConstructor::Synthetic {
                 outer, ctor, args, ..
             } => {
-                let mut lowered = Vec::new();
-                if let Some(outer) = outer {
-                    lowered.push(self.expr(outer)?);
-                }
-                for (i, pty) in ctor.real_params.iter().enumerate() {
-                    if i < ctor.provided {
-                        lowered.push(self.lower_arg(args[i], &ty_to_ir(*pty))?);
-                    } else {
-                        lowered.push(self.zero_placeholder(*pty));
-                    }
-                }
-                for mask in ctor.masks {
-                    lowered.push(self.emit_const(IrConst::Int(mask)));
-                }
-                lowered.push(self.emit_const(IrConst::Null)); // DefaultConstructorMarker
-                Some(self.emit_new_external(&internal, ctor.descriptor, lowered))
-            }
-            ResolvedConstructor::NamedDefault {
-                outer,
-                descriptor,
-                real_params,
-                slots,
-                masks,
-                ..
-            } => {
-                let (mut lowered, prelude) =
-                    self.lower_call_slot_args_source_order(args, &slots, &real_params, true)?;
+                let slots = self.info.resolved_call_arg_slots.get(&call)?.clone();
+                let vararg = ctor.declaration.call_sig.vararg_index;
+                let (mut lowered, prelude) = self.lower_call_slot_args_source_order_with_element(
+                    &args,
+                    &slots,
+                    &ctor.real_params,
+                    Some(&ctor.declaration.params),
+                    None,
+                    vararg,
+                    OmittedSlotPolicy::DefaultPlaceholders { vararg },
+                )?;
                 if let Some(outer) = outer {
                     lowered.insert(0, self.expr(outer)?);
+                }
+                let masked = Self::default_masked_slots(&slots, vararg).collect::<Vec<_>>();
+                let mut masks = vec![0i32; ctor.mask_count];
+                for parameter in masked {
+                    let Some(mask) = masks.get_mut(parameter / 32) else {
+                        return self.bail(
+                            "checker selected a default constructor whose realization lacks a mask slot",
+                        );
+                    };
+                    *mask |= default_mask_bit(parameter);
                 }
                 for mask in masks {
                     lowered.push(self.emit_const(IrConst::Int(mask)));
                 }
                 lowered.push(self.emit_const(IrConst::Null));
-                let new = self.emit_new_external(&internal, descriptor, lowered);
+                let new = self.emit_new_external(&internal, ctor.descriptor, lowered);
                 Some(self.wrap_arg_prelude(new, prelude))
             }
         }
@@ -9433,7 +9428,7 @@ impl<'a> Lower<'a> {
             let value_params: Vec<Ty> = sig.params.to_vec();
             let bind_names =
                 self.suspend_lambda_bind_names(e, params, value_params.len(), sig.context_count)?;
-            return self.lower_suspend_lambda(body, &value_params, bind_names);
+            return self.lower_suspend_lambda(body, &value_params, sig.ret, bind_names);
         }
         self.lower_lambda_sam(e, params, body, None)
     }
@@ -10297,6 +10292,7 @@ impl<'a> Lower<'a> {
         &mut self,
         body: AstExprId,
         params: &[Ty],
+        ret: Ty,
         bind_names: Vec<String>,
     ) -> Option<u32> {
         let arity = params.len();
@@ -10431,6 +10427,7 @@ impl<'a> Lower<'a> {
             decl_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
+            captured_type_params: Vec::new(),
             supertypes: vec![],
             properties: Vec::new(),
             fields: ir_fields,
@@ -10484,11 +10481,11 @@ impl<'a> Lower<'a> {
         // Set when the body needs the general (multi-suspension / control-flow) lambda-mode machine,
         // built by the coroutine pass from the plain `invokeSuspend` body.
         let mut needs_pass_sm = false;
-        // One checked semantic body type drives BOTH invokeSuspend forms. In particular, `Unit?`
-        // denotes the same effect-only tail whether an internal suspension selects the general state
-        // machine or the body stays on the leaf path; reconstructing that classification separately
-        // is what previously left the leaf safe-call case behind.
+        // Keep the body's checked value type distinct from the lambda's selected return contract.
+        // A contextual `() -> Unit` marks the body as discarded in `TypeInfo`; the state machine must
+        // still store a suspending body's actual result before explicitly yielding `Unit`.
         let body_ty = self.info.ty(body);
+        let coerces_to_unit = ret == Ty::Unit && self.info.is_discarded_expression(body);
         let inv_susp_body = if body_suspends {
             // Single-suspension lambda (`{ foo() }` or `{ val a = foo(); <tail> }`), no captures (gated
             // above). The continuation is `this`: thread it into the call, dispatch on `this.label`.
@@ -10559,9 +10556,13 @@ impl<'a> Lower<'a> {
             // suspension in the value (`if (c) foo() else 7`) surfaces as a `Variable{init: When}`
             // the flattener's `stmt_cond_suspension` handles — not a raw `return box(When)`.
             b_stmts.push(self.emit_variable(tmp_idx, body_ir_ty, Some(b_val)));
-            let tmpg = self.emit_get_value(tmp_idx);
-            let boxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, tmpg, object_ir.clone());
-            b_stmts.push(self.emit_return(Some(boxed)));
+            let result = if coerces_to_unit {
+                self.emit_unit()
+            } else {
+                let tmpg = self.emit_get_value(tmp_idx);
+                self.emit_type_op(IrTypeOp::ImplicitCoercion, tmpg, object_ir.clone())
+            };
+            b_stmts.push(self.emit_return(Some(result)));
             self.emit_block(b_stmts, None)
         } else {
             let mut stmts = vec![throw_on_failure(self, 1)?];
@@ -10589,7 +10590,7 @@ impl<'a> Lower<'a> {
             self.scope = saved_scope;
             self.next_value = saved_next;
             let body_val = body_val?;
-            if body_ty.non_null() == Ty::Unit {
+            if coerces_to_unit || body_ty.non_null() == Ty::Unit {
                 // A leaf `suspend () -> Unit` lambda follows the same semantic rule as the general
                 // state-machine branch above. Include `Unit?`: a safe call on a void member has that
                 // checked type, but this IR lowers both its present and null arms for effect and leaves
@@ -12635,6 +12636,7 @@ impl<'a> Lower<'a> {
             decl_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
+            captured_type_params: Vec::new(),
             supertypes: vec![],
             properties: Vec::new(),
             fields: vec![],
@@ -12777,6 +12779,7 @@ impl<'a> Lower<'a> {
             decl_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
+            captured_type_params: Vec::new(),
             supertypes: vec![],
             properties: Vec::new(),
             fields: vec![],
@@ -13032,6 +13035,7 @@ impl<'a> Lower<'a> {
             decl_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
+            captured_type_params: Vec::new(),
             supertypes: vec![],
             properties: Vec::new(),
             fields: vec![],
@@ -13664,6 +13668,7 @@ impl<'a> Lower<'a> {
             decl_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
+            captured_type_params: Vec::new(),
             supertypes: vec![],
             properties: Vec::new(),
             fields: vec![],
@@ -14081,10 +14086,16 @@ impl<'a> Lower<'a> {
                 if matches!(resolved.origin, crate::libraries::Origin::Library) =>
             {
                 let internal = recv_ty.kotlin_class_internal()?;
+                let physical_params = resolved.physical_params;
                 let member = resolved.member;
                 let physical_ret = member.physical_ret;
-                let a = if member.call_sig.vararg {
-                    self.lower_library_member_vararg_args(source_expr, args, &member)?
+                let (a, prelude) = if member.call_sig.vararg {
+                    self.lower_library_member_vararg_args(
+                        source_expr?,
+                        args,
+                        &member,
+                        &physical_params,
+                    )?
                 } else {
                     if member.params.len() != args.len() {
                         return None;
@@ -14093,7 +14104,7 @@ impl<'a> Lower<'a> {
                     for (k, &arg) in args.iter().enumerate() {
                         lowered.push(self.lower_arg(arg, &ty_to_ir(member.params[k]))?);
                     }
-                    lowered
+                    (lowered, Vec::new())
                 };
                 // Platform flexibility only participates in front-end applicability. Once the
                 // selected call is lowered, its value has the lower-bound Kotlin type while the
@@ -14105,7 +14116,8 @@ impl<'a> Lower<'a> {
                 let suspend = resolved.suspend;
                 let call =
                     self.emit_library_member_call(recv_v, internal, member, ret, suspend, a)?;
-                Some((self.coerce_to_static(call, ret, physical_ret), ret))
+                let call = self.coerce_to_static(call, ret, physical_ret);
+                Some((self.wrap_arg_prelude(call, prelude), ret))
             }
             ResolvedCall::Member(resolved) => {
                 let owner = resolved.member.owner?;
@@ -15126,7 +15138,7 @@ impl<'a> Lower<'a> {
                             value_params.len(),
                             s.context_count,
                         )?;
-                        return self.lower_suspend_lambda(body, &value_params, bind_names);
+                        return self.lower_suspend_lambda(body, &value_params, s.ret, bind_names);
                     }
                     return None;
                 }
@@ -15160,7 +15172,7 @@ impl<'a> Lower<'a> {
                     if let Some(bind_names) =
                         self.suspend_lambda_bind_names(arg, &lparams, params.len(), s.context_count)
                     {
-                        return self.lower_suspend_lambda(body, &ty_params, bind_names);
+                        return self.lower_suspend_lambda(body, &ty_params, s.ret, bind_names);
                     }
                 }
                 // Suspend conversion: a NON-suspend function VALUE flowing into the suspend
@@ -17359,14 +17371,18 @@ impl<'a> Lower<'a> {
                 return Some(r);
             }
             let ret = resolved.ret;
+            let physical_params = resolved.physical_params;
             let member = resolved.member;
-            let a = if member.call_sig.vararg {
-                self.lower_library_member_vararg_args(Some(e), args, &member)?
+            let (a, prelude) = if member.call_sig.vararg {
+                self.lower_library_member_vararg_args(e, args, &member, &physical_params)?
             } else if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
                 if slots.iter().any(Option::is_none) {
                     return None;
                 }
-                self.lower_call_slot_args(args, &slots, &member.params)?
+                (
+                    self.lower_call_slot_args(args, &slots, &member.params)?,
+                    Vec::new(),
+                )
             } else {
                 if args.len() != member.params.len() {
                     return None;
@@ -17375,7 +17391,7 @@ impl<'a> Lower<'a> {
                 for (&arg, &parameter) in args.iter().zip(&member.params) {
                     lowered.push(self.lower_arg(arg, &ty_to_ir(parameter))?);
                 }
-                lowered
+                (lowered, Vec::new())
             };
             let owner = member
                 .owner
@@ -17383,7 +17399,8 @@ impl<'a> Lower<'a> {
                 .unwrap_or_else(crate::types::wk::any);
             let physical_ret = member.physical_ret;
             let call = self.emit_library_member_call(this_value, owner, member, ret, false, a)?;
-            return Some(self.coerce_to_static(call, ret, physical_ret));
+            let call = self.coerce_to_static(call, ret, physical_ret);
+            return Some(self.wrap_arg_prelude(call, prelude));
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) —
         // `invokestatic <facade>.name(this, args)` (the receiver is the first parameter of the lowered
@@ -23755,13 +23772,13 @@ impl<'a> Lower<'a> {
                         target.nullable_boxed()?
                     }
                     Some(target) => target,
-                    None => match self.cur_tparams.iter().find(|(n, _, _)| *n == ty.name) {
-                        Some((name, bound, _)) => Ty::ty_param(name, *bound),
-                        None if ty.name != "Unit" => match self.ty_ref(&ty)? {
+                    None => match declared_target.non_null() {
+                        target @ Ty::TyParam(_, _) => target,
+                        _ if ty.name != "Unit" => match self.ty_ref(&ty)? {
                             primitive if !primitive.is_reference() => primitive.nullable_boxed()?,
                             reference => reference,
                         },
-                        None => self.ty_ref(&ty)?,
+                        _ => self.ty_ref(&ty)?,
                     },
                 };
                 let target_ir = ty_to_ir(target);
@@ -23802,7 +23819,7 @@ impl<'a> Lower<'a> {
                 _ => self.info.ty(operand),
             };
             let target_is_tparam =
-                reified_target.is_none() && self.cur_tparams.iter().any(|(n, _, _)| *n == ty.name);
+                reified_target.is_none() && matches!(declared_target.non_null(), Ty::TyParam(_, _));
             if self.has_scalar_value_repr(operand_repr)
                 && !operand_repr.is_unsigned()
                 && !target_is_tparam
@@ -23837,19 +23854,17 @@ impl<'a> Lower<'a> {
             // (`CastNonNull`); a nullable target (`as T?`, or an unbounded `<T : Any?>`) does not.
             // A definitely-non-null target (`as (T & Any)`) also null-checks even when `T` itself
             // has a nullable bound: the intersection is the source-level non-null guarantee.
-            if let Some((name, bound, non_null)) = self
-                .cur_tparams
-                .iter()
-                .find(|(n, _, _)| *n == ty.name)
-                .filter(|_| reified_target.is_none())
-            {
-                let op = if (*non_null || ty.definitely_non_null()) && !ty.nullable() {
-                    IrTypeOp::CastNonNull
-                } else {
-                    IrTypeOp::Cast
-                };
-                let type_operand = Ty::ty_param(name, *bound);
-                return Some(self.emit_type_op(op, arg, type_operand));
+            if reified_target.is_none() {
+                if let Ty::TyParam(_, bound) = declared_target.non_null() {
+                    let op = if (!bound.upper_bound_admits_null() || ty.definitely_non_null())
+                        && !ty.nullable()
+                    {
+                        IrTypeOp::CastNonNull
+                    } else {
+                        IrTypeOp::Cast
+                    };
+                    return Some(self.emit_type_op(op, arg, declared_target.non_null()));
+                }
             }
             // A GENUINE primitive operand cast to a DIFFERENT primitive (`1 as Byte`, `1.0 as Int`):
             // NOT a numeric conversion (`i2b` would be wrong) — box it to its own wrapper, then the
@@ -25441,14 +25456,13 @@ impl<'a> Lower<'a> {
                 });
                 if member.call_sig.vararg {
                     if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
-                        if slots.iter().any(Option::is_none) {
-                            return None;
-                        }
-                        let (a, mut prelude) = self.lower_call_slot_args_source_order(
+                        let (a, mut prelude) = self.lower_call_slot_args_vararg_pack(
                             &args,
                             &slots,
+                            &resolved.physical_params,
                             &member.params,
                             false,
+                            member.call_sig.vararg_index,
                         )?;
                         let recv = self.spill_receiver_before_args(recv, rt, &mut prelude);
                         let call = self.emit_library_member_call(
@@ -25462,16 +25476,7 @@ impl<'a> Lower<'a> {
                         let call = self.coerce_to_static(call, ret, physical_ret);
                         return Some(self.wrap_arg_prelude(call, prelude));
                     }
-                    let a = self.lower_library_member_vararg_args(Some(e), &args, &member)?;
-                    let call = self.emit_library_member_call(
-                        recv,
-                        owner,
-                        member,
-                        ret,
-                        resolved.suspend,
-                        a,
-                    )?;
-                    return Some(self.coerce_to_static(call, ret, physical_ret));
+                    return None;
                 }
                 // Fewer arguments than the resolved member has parameters means a DEFAULTED
                 // argument was omitted, but the `$default` path above (`lower_library_default_member_
@@ -26982,12 +26987,14 @@ fn class_generic_sig(
     c: &ast::ClassDecl,
     info: &FrontendTypeInfo,
     syms: &FrontendSymbols,
-) -> Option<crate::ir::IrGenericSig> {
+) -> Result<Option<crate::ir::IrGenericSig>, &'static str> {
     // A CLASS with a PARAMETERIZED supertype (`object O : Operation<Result<Int>>`): carry the superclass
     // + interfaces as `Ty`s (with their type arguments) so the backend can format a class `Signature` a
     // cross-module reader uses to recover a member's concrete generic return. Independent of own type params.
     if !c.base_type_args.is_empty() || c.supertypes.iter().any(|s| !s.targs.is_empty()) {
-        let class = syms.class_by_internal(&class_internal(file, &c.name))?;
+        let class = syms
+            .class_by_internal(&class_internal(file, &c.name))
+            .ok_or("internal:missing-checked-class-signature")?;
         let mut supers: Vec<Ty> = Vec::new();
         // Superclass first (kotlin/Any → the backend's Object when no base).
         supers.push(class.super_internal.map_or_else(
@@ -27018,32 +27025,36 @@ fn class_generic_sig(
                 class.type_params(),
                 class.type_param_variances(),
                 &c.type_param_bounds,
+                c.span.lo,
             )?
         };
         crate::trace_compiler!("value_classes", "class {} supers = {:?}", c.name, supers);
-        return Some(crate::ir::IrGenericSig {
+        return Ok(Some(crate::ir::IrGenericSig {
             type_params,
             params: Vec::new(),
             ret: None,
             supers,
-        });
+        }));
     }
     // The original case: a generic class with only own type parameters and no supertypes.
     if c.type_params.is_empty() || c.base_class.is_some() || !c.supertypes.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let class = syms.class_by_internal(&class_internal(file, &c.name))?;
-    Some(crate::ir::IrGenericSig {
+    let class = syms
+        .class_by_internal(&class_internal(file, &c.name))
+        .ok_or("internal:missing-checked-class-signature")?;
+    Ok(Some(crate::ir::IrGenericSig {
         type_params: type_param_bounds_ir(
             info,
             class.type_params(),
             class.type_param_variances(),
             &c.type_param_bounds,
+            c.span.lo,
         )?,
         params: Vec::new(),
         ret: None,
         supers: Vec::new(),
-    })
+    }))
 }
 
 /// For a generic class, list `(field name, type-parameter name)` for each property whose declared type
@@ -27074,26 +27085,38 @@ fn class_field_tparams(c: &ast::ClassDecl) -> Vec<(String, String)> {
 /// Extract the backend-agnostic generic-signature shape of a type-parameterized function. Concrete
 /// parameter/return types remain on the `IrFunction`; this records the formal declarations and marks
 /// bare type-parameter positions. Parameterized positions retain their `TyParam`s in the function type.
-fn fn_generic_sig(info: &FrontendTypeInfo, f: &ast::FunDecl) -> Option<crate::ir::IrGenericSig> {
+fn fn_generic_sig(
+    info: &FrontendTypeInfo,
+    f: &ast::FunDecl,
+) -> Result<Option<crate::ir::IrGenericSig>, &'static str> {
     if f.type_params.is_empty() {
-        return None;
+        return Ok(None);
     }
     let tps = &f.type_params;
     let params = f
         .params
         .iter()
         .map(|parameter| info.resolved_declaration_type(&parameter.ty))
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>()
+        .ok_or("internal:missing-checked-generic-declaration-type")?;
     let ret = match f.ret.as_ref() {
-        Some(reference) => info.resolved_declaration_type(reference)?,
+        Some(reference) => info
+            .resolved_declaration_type(reference)
+            .ok_or("internal:missing-checked-generic-declaration-type")?,
         None => Ty::Unit,
     };
-    Some(crate::ir::IrGenericSig {
-        type_params: type_param_bounds_ir(info, tps, &[], &f.type_param_bounds)?,
+    Ok(Some(crate::ir::IrGenericSig {
+        type_params: type_param_bounds_ir(
+            info,
+            tps,
+            &[],
+            &f.type_param_bounds,
+            f.signature_span.lo,
+        )?,
         params,
         ret: Some(ret),
         supers: Vec::new(),
-    })
+    }))
 }
 
 /// Pair each type-parameter name with its upper bound as a Kotlin `IrType` (`kotlin/Any` when none / an
@@ -27104,8 +27127,13 @@ fn type_param_bounds_ir(
     names: &[String],
     variances: &[crate::types::TypeVariance],
     bounds: &[(String, ast::TypeRef)],
-) -> Option<Vec<crate::ir::IrTypeParameter>> {
+    declaration_start: u32,
+) -> Result<Vec<crate::ir::IrTypeParameter>, &'static str> {
     let any = || Ty::obj("kotlin/Any");
+    let semantic_names = info.resolved_declaration_type_parameters(declaration_start);
+    if semantic_names.len() != names.len() {
+        return Err("internal:missing-checked-type-parameter-identities");
+    }
     let mut out = Vec::with_capacity(names.len());
     for (index, tp) in names.iter().enumerate() {
         let mut resolved_bounds = bounds
@@ -27113,20 +27141,23 @@ fn type_param_bounds_ir(
             .filter(|(name, _)| name == tp)
             .map(|(_, bound)| {
                 let b = bound;
-                let (bound, bound_is_interface) = info.resolved_type_bound(b)?;
-                Some((ty_to_ir(bound), bound_is_interface))
+                let (bound, bound_is_interface) = info
+                    .resolved_type_bound(b)
+                    .ok_or("internal:missing-checked-type-parameter-bound")?;
+                Ok((ty_to_ir(bound), bound_is_interface))
             })
-            .collect::<Option<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, &'static str>>()?;
         if resolved_bounds.is_empty() {
             resolved_bounds.push((any(), false));
         }
         out.push(crate::ir::IrTypeParameter {
             name: tp.clone(),
+            semantic_name: semantic_names[index].clone(),
             bounds: resolved_bounds,
             variance: variances.get(index).copied().unwrap_or_default(),
         });
     }
-    Some(out)
+    Ok(out)
 }
 
 fn ref_is_bare_tparam(r: &ast::TypeRef, tps: &[String]) -> bool {

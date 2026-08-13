@@ -12,8 +12,8 @@
 //! builtin types use `predefined_index` (Record.f2); everything else is a verbatim d2 entry.
 
 use crate::metadata::type_encoder::{
-    encode_indexed_type_parameter, encode_metadata_type_parameter, encode_type, type_parameters,
-    MetadataTypeParameter, StringTable, TypeParameters,
+    encode_indexed_type_parameter, encode_metadata_type_parameter, encode_type,
+    semantic_type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::{Ty, Visibility};
@@ -59,6 +59,8 @@ pub struct FnMeta {
     /// Function-owned type parameters. Class parameters are inherited from the enclosing class
     /// table; these are emitted on the function with ids following that inherited prefix.
     pub type_params: Vec<String>,
+    /// Semantic identities parallel to `type_params`.
+    pub semantic_type_params: Vec<String>,
     pub type_param_bounds: Vec<Vec<Ty>>,
     /// `Function.flags` (f9): e.g. operator (`componentN`) or the data-class `copy`. 0 ⇒ omitted.
     pub flags: u64,
@@ -84,6 +86,7 @@ impl FnMeta {
             params,
             ret,
             type_params: Vec::new(),
+            semantic_type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             flags: DEFAULT_FUNCTION_FLAGS,
             params_have_defaults: false,
@@ -150,7 +153,7 @@ fn property_flags(prop: &PropMeta) -> u64 {
         }
 }
 
-fn type_pb(st: &mut StringTable, t: Ty, type_parameters: &TypeParameters<'_>) -> Pb {
+fn type_pb(st: &mut StringTable, t: Ty, type_parameters: &TypeParameters) -> Pb {
     encode_type(st, t, type_parameters)
         .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
@@ -161,7 +164,7 @@ fn type_pb_tp(
     st: &mut StringTable,
     t: Ty,
     tparam: Option<u32>,
-    type_parameters: &TypeParameters<'_>,
+    type_parameters: &TypeParameters,
 ) -> Pb {
     match tparam {
         Some(index) => encode_indexed_type_parameter(st, t, index),
@@ -181,11 +184,7 @@ struct CtorShape<'a> {
     sig_name: Option<&'a str>,
 }
 
-fn build_ctor(
-    st: &mut StringTable,
-    shape: CtorShape<'_>,
-    type_parameters: &TypeParameters<'_>,
-) -> Pb {
+fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &TypeParameters) -> Pb {
     let mut ctor = Pb::new();
     if shape.flags != 0 {
         ctor.field_varint(1, shape.flags); // Constructor.flags = 1
@@ -273,6 +272,9 @@ pub struct ClassTail<'a> {
     /// `Class.typeParameter` so the metadata describes the class as generic.
     pub type_params: &'a [String],
     pub type_param_bounds: &'a [crate::ir::IrTypeParameter],
+    /// Enclosing declaration parameters referenced by this class's members. Kotlin metadata does
+    /// not repeat their declarations, but reserves their IDs before this class's own parameters.
+    pub captured_type_params: &'a [String],
     /// Direct sealed subtypes as JVM descriptors.
     pub sealed_subclasses: &'a [&'a str],
     /// Declared semantic supertypes, including applied type arguments. Physical erasure belongs to
@@ -298,6 +300,7 @@ impl Default for ClassTail<'_> {
             primary_ctor_flags: 0,
             type_params: &[],
             type_param_bounds: &[],
+            captured_type_params: &[],
             sealed_subclasses: &[],
             supertypes: &[],
         }
@@ -328,7 +331,26 @@ pub fn build_class(
 
     // f5 = typeParameter: `{ id, name }` per declared parameter, in order. kotlinc interns the names
     // right after the fq_name, before any member signature.
-    let class_type_parameters = type_parameters(tail.type_params.iter().map(String::as_str));
+    assert_eq!(
+        tail.type_param_bounds.len(),
+        tail.type_params.len(),
+        "metadata class type parameters require semantic identities"
+    );
+    let captured_count = tail.captured_type_params.len();
+    let mut class_type_parameters = TypeParameters::new();
+    for (index, semantic) in tail.captured_type_params.iter().enumerate() {
+        class_type_parameters.insert(semantic.clone(), index as u64);
+    }
+    for (index, (source, parameter)) in tail
+        .type_params
+        .iter()
+        .zip(tail.type_param_bounds)
+        .enumerate()
+    {
+        let id = (captured_count + index) as u64;
+        class_type_parameters.insert(source.clone(), id);
+        class_type_parameters.insert(parameter.semantic_name.clone(), id);
+    }
     let tparam_msgs: Vec<Pb> = tail
         .type_param_bounds
         .iter()
@@ -336,7 +358,7 @@ pub fn build_class(
         .map(|(i, parameter)| {
             encode_metadata_type_parameter(
                 &mut st,
-                i,
+                captured_count + i,
                 &MetadataTypeParameter {
                     name: parameter.name.clone(),
                     reified: false,
@@ -371,6 +393,11 @@ pub fn build_class(
 
     // f8 = constructors: the primary (flags 0), then any secondary constructors — each interning in
     // order (kotlinc emits the ctor JVM name `<init>` explicitly, not omitted).
+    let ctor_param_tparams = tail
+        .ctor_param_tparams
+        .iter()
+        .map(|parameter| parameter.map(|index| index + captured_count as u32))
+        .collect::<Vec<_>>();
     let mut ctor_msgs = if tail.emit_primary_ctor {
         vec![build_ctor(
             &mut st,
@@ -379,7 +406,7 @@ pub fn build_class(
                 desc: ctor_desc,
                 flags: tail.primary_ctor_flags,
                 param_defaults: tail.ctor_param_defaults,
-                param_tparams: tail.ctor_param_tparams,
+                param_tparams: &ctor_param_tparams,
                 sig_name: tail.ctor_sig_name,
             },
             &class_type_parameters,
@@ -408,7 +435,12 @@ pub fn build_class(
         .map(|p| {
             let mut prop = Pb::new();
             prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
-            let ty = type_pb_tp(&mut st, p.ty, p.tparam, &class_type_parameters);
+            let ty = type_pb_tp(
+                &mut st,
+                p.ty,
+                p.tparam.map(|index| index + captured_count as u32),
+                &class_type_parameters,
+            );
             prop.field_message(3, &ty); // Property.return_type = 3
             let pflags = property_flags(p);
             if pflags != property_flags::DEFAULT {
@@ -483,9 +515,24 @@ pub fn build_class(
             let mut func = Pb::new();
             func.field_varint(2, st.local(&m.name) as u64);
             let mut function_type_parameters = class_type_parameters.clone();
+            assert_eq!(
+                m.semantic_type_params.len(),
+                m.type_params.len(),
+                "metadata member type parameters require semantic identities"
+            );
+            let semantic_names = &m.semantic_type_params;
+            let own_type_parameters = semantic_type_parameters(
+                m.type_params.iter().map(String::as_str),
+                semantic_names.iter().map(String::as_str),
+            );
             for (index, name) in m.type_params.iter().enumerate() {
-                let id = tail.type_params.len() + index;
-                function_type_parameters.insert(name, id as u64);
+                let id = captured_count + tail.type_params.len() + index;
+                for key in own_type_parameters
+                    .iter()
+                    .filter_map(|(key, own)| (*own == index as u64).then_some(key))
+                {
+                    function_type_parameters.insert(key.clone(), id as u64);
+                }
                 let parameter = encode_metadata_type_parameter(
                     &mut st,
                     id,
@@ -734,6 +781,7 @@ mod tests {
                 params: vec![],
                 ret: Ty::Int,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
@@ -745,6 +793,7 @@ mod tests {
                 params: vec![],
                 ret: Ty::String,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
@@ -756,6 +805,7 @@ mod tests {
                 params: vec![("x".into(), Ty::Int), ("y".into(), Ty::String)],
                 ret: Ty::obj("demo/Point"),
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: COPY_FN_FLAGS,
                 params_have_defaults: true,
@@ -767,6 +817,7 @@ mod tests {
                 params: vec![("other".into(), any_q)],
                 ret: Ty::Boolean,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: EQUALS_FN_FLAGS,
                 params_have_defaults: false,
@@ -778,6 +829,7 @@ mod tests {
                 params: vec![],
                 ret: Ty::Int,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
@@ -789,6 +841,7 @@ mod tests {
                 params: vec![],
                 ret: Ty::String,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,

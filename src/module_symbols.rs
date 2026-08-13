@@ -390,7 +390,11 @@ impl<'a> ModuleSymbols<'a> {
             // then bind `Scope<String>` before selecting a member extension declared on `Scope<T>`, in
             // exactly the same way for source and decoded metadata.
             type_parameters: crate::types::TypeParameters::new(
-                c.type_params.clone(),
+                c.type_params
+                    .iter()
+                    .chain(c.captured_type_parameters.type_params.iter())
+                    .cloned()
+                    .collect(),
                 c.type_param_bounds
                     .iter()
                     .map(|bound| {
@@ -398,8 +402,18 @@ impl<'a> ModuleSymbols<'a> {
                             .then_some(vec![*bound])
                             .unwrap_or_default()
                     })
+                    .chain(
+                        c.captured_type_parameters
+                            .type_param_bounds
+                            .iter()
+                            .map(|bound| vec![*bound]),
+                    )
                     .collect(),
-                c.type_param_variances.clone(),
+                c.type_param_variances
+                    .iter()
+                    .chain(c.captured_type_parameters.type_param_variances.iter())
+                    .copied()
+                    .collect(),
             ),
             sealed_subclasses,
             enum_entries,
@@ -1427,6 +1441,8 @@ mod tests {
             ctor_defaults: vec![],
             secondary_ctors: vec![],
             type_parameters: crate::types::TypeParameters::default(),
+            captured_type_parameters: crate::types::TypeParameters::default(),
+            metadata_captured_type_parameters: Vec::new(),
             generic_props: HashMap::new(),
             generic_property_shapes: HashMap::new(),
             value_field: None,
@@ -1546,6 +1562,24 @@ mod tests {
         assert_eq!(
             properties.overloads[0].receiver,
             Some(Ty::obj("sample/Sample$Companion"))
+        );
+    }
+
+    #[test]
+    fn named_companion_keeps_its_declared_classifier_segment() {
+        let mut symbols = FrontendSymbols::default();
+        let mut sample = class("sample/Sample");
+        sample.companion_internal = Some(type_name("sample/Sample$Factory"));
+        symbols.insert_class(sample);
+        symbols.insert_class(class("sample/Sample$Factory"));
+
+        let source = ModuleSymbols::new(&symbols);
+        let sample = source
+            .classifier(type_name("sample/Sample"))
+            .expect("outer classifier");
+        assert_eq!(
+            sample.companion_object,
+            Some(("Factory".to_string(), type_name("sample/Sample$Factory")))
         );
     }
 

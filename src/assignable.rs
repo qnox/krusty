@@ -159,8 +159,43 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
             || assignable_inner(cx, oracle, Ty::nullable(*inner), sup);
     }
 
+    // Nullability. `null` fits any nullable target; `T` fits `T?`; `T?` does not fit non-null `T`.
+    if sub == Ty::Null {
+        return matches!(sup, Ty::Nullable(_)) || sup == Ty::Null;
+    }
+    if let Ty::Nullable(inner) = sup {
+        // A symbolic source has the nullability of its upper bound. Follow that bound before
+        // stripping the target's `?`: `<T : Any?>` is a subtype of `Any?` (and therefore fits a
+        // star projection), but is not a subtype of non-null `Any`. Preserve the direct `T <: T?`
+        // relation without expanding T to an unrelated upper bound first.
+        if matches!(sub, Ty::TyParam(source, _) if matches!(*inner, Ty::TyParam(target, _) if source == target))
+        {
+            return true;
+        }
+        if let Ty::TyParam(_, bound) = sub {
+            return *bound != sub && assignable_inner(cx, oracle, *bound, sup);
+        }
+        return is_assignable(cx, oracle, sub.non_null(), *inner);
+    }
+    if matches!(sub, Ty::Nullable(_)) {
+        // sup is non-null here (the `Nullable` sup arm returned above).
+        return false;
+    }
+
+    // A source type variable is a subtype of its declared upper bound, including another variable
+    // (`<R, T : R>` means `T <: R`). Check this before rejecting an unbound target variable; otherwise
+    // the target arm hides the only declared proof of that relation.
+    if let (Ty::TyParam(source_name, source_bound), Ty::TyParam(target_name, _)) = (sub, sup) {
+        if source_name != target_name {
+            let source = cx.lookup(source_name).unwrap_or(*source_bound);
+            return source != sub && assignable_inner(cx, oracle, source, sup);
+        }
+    }
+
     // An unbound target type variable is not its upper bound: `String <: Any?` does not prove
-    // `String <: T`. Generic inference must bind T before ordinary assignability is asked.
+    // `String <: T`. Generic inference must bind T before ordinary assignability is asked. This comes
+    // AFTER nullability so the same symbolic type still obeys Kotlin's ordinary `T <: T?` relation;
+    // expanding the source `T` to its bound first loses that identity.
     if let Ty::TyParam(name, _) = sup {
         return cx
             .lookup(name)
@@ -169,18 +204,6 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     if let Ty::TyParam(name, bound) = sub {
         let source = cx.lookup(name).unwrap_or(*bound);
         return source != sub && assignable_inner(cx, oracle, source, sup);
-    }
-
-    // Nullability. `null` fits any nullable target; `T` fits `T?`; `T?` does not fit non-null `T`.
-    if sub == Ty::Null {
-        return matches!(sup, Ty::Nullable(_)) || sup == Ty::Null;
-    }
-    if let Ty::Nullable(inner) = sup {
-        return is_assignable(cx, oracle, sub.non_null(), *inner);
-    }
-    if matches!(sub, Ty::Nullable(_)) {
-        // sup is non-null here (the `Nullable` sup arm returned above).
-        return false;
     }
 
     // Everything (a boxed primitive included) is assignable to `Any`/`Object`.
@@ -444,6 +467,12 @@ mod tests {
             Ty::nullable(s("app/Dog")),
             Ty::nullable(s("app/Animal"))
         ));
+
+        let parameter = Ty::ty_param("T", Ty::nullable(s("kotlin/Any")));
+        assert!(ok(parameter, Ty::nullable(parameter)));
+        assert!(ok(parameter, Ty::nullable(s("kotlin/Any"))));
+        assert!(!ok(parameter, s("kotlin/Any")));
+        assert!(!ok(Ty::nullable(parameter), parameter));
     }
 
     #[test]
@@ -526,6 +555,18 @@ mod tests {
     }
 
     #[test]
+    fn invariant_star_projection_accepts_a_nullable_bounded_argument() {
+        let parameter = Ty::ty_param("T", Ty::nullable(s("kotlin/Any")));
+        assert!(ok(
+            g("app/Box", &[parameter]),
+            g(
+                "app/Box",
+                &[Ty::out_projection(Ty::nullable(s("kotlin/Any")))]
+            )
+        ));
+    }
+
+    #[test]
     fn invariant_type_argument_requires_a_binding_not_a_wildcard() {
         let variable = Ty::ty_param("T", s("kotlin/Any"));
         let generic = g("app/Box", &[variable]);
@@ -603,6 +644,19 @@ mod tests {
             &Fake,
             Ty::nullable(s("app/Dog")),
             nonnull_tv
+        ));
+
+        let result = Ty::ty_param("R", Ty::nullable(s("kotlin/Any")));
+        let derived = Ty::ty_param("T", result);
+        assert!(is_assignable(&TyCtx::new(), &Fake, derived, result));
+        assert!(!is_assignable(&TyCtx::new(), &Fake, result, derived));
+        assert!(!is_assignable(&TyCtx::new(), &Fake, Ty::Null, result));
+        assert!(!is_assignable(&TyCtx::new(), &Fake, Ty::Null, derived));
+        assert!(is_assignable(
+            &TyCtx::new(),
+            &Fake,
+            Ty::Null,
+            Ty::nullable(derived)
         ));
     }
 

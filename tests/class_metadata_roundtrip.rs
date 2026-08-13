@@ -77,6 +77,7 @@ fn class_member_value_params_round_trip() {
 fn class_type_parameter_bound_and_variance_round_trip() {
     let parameter = krusty::ir::IrTypeParameter {
         name: "T".to_string(),
+        semantic_name: "T".to_string(),
         bounds: vec![(Ty::obj("kotlin/CharSequence"), true)],
         variance: TypeVariance::Out,
     };
@@ -106,6 +107,131 @@ fn class_type_parameter_bound_and_variance_round_trip() {
 }
 
 #[test]
+fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids() {
+    let outer = "outer-semantic".to_string();
+    let own = "inner-semantic".to_string();
+    let own_parameter = krusty::ir::IrTypeParameter {
+        name: "U".to_string(),
+        semantic_name: own.clone(),
+        bounds: vec![(Ty::obj("kotlin/Any"), false)],
+        variance: TypeVariance::Invariant,
+    };
+    let methods = vec![FnMeta {
+        name: "pair".to_string(),
+        params: vec![
+            (
+                "outer".to_string(),
+                Ty::ty_param(&outer, Ty::obj("kotlin/Any")),
+            ),
+            (
+                "inner".to_string(),
+                Ty::ty_param(&own, Ty::obj("kotlin/Any")),
+            ),
+        ],
+        ret: Ty::obj_args(
+            "kotlin/Pair",
+            &[
+                Ty::ty_param(&outer, Ty::obj("kotlin/Any")),
+                Ty::ty_param(&own, Ty::obj("kotlin/Any")),
+            ],
+        ),
+        type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
+        flags: krusty::metadata::class_builder::DEFAULT_FUNCTION_FLAGS,
+        params_have_defaults: false,
+        jvm_sig: None,
+        jvm_sig_name: None,
+    }];
+    let own_names = vec!["U".to_string()];
+    let captured = vec![outer];
+    let (d1, d2) = build_class(
+        "sample/Outer$Inner",
+        &[],
+        "(Lsample/Outer;)V",
+        &[],
+        &methods,
+        &[],
+        &ClassTail {
+            type_params: &own_names,
+            type_param_bounds: std::slice::from_ref(&own_parameter),
+            captured_type_params: &captured,
+            ..Default::default()
+        },
+    );
+    let ci = class_info_kind("sample/Outer$Inner", d1, d2, Some(1));
+    assert_eq!(ci.meta.class_type_parameters.type_params(), &["U"]);
+    let pair = class_functions(&ci)
+        .iter()
+        .find(|function| function.jvm_name == "pair")
+        .expect("pair metadata");
+    let signature = pair.generic_sig.as_ref().expect("generic member signature");
+    assert!(matches!(
+        signature.params[0],
+        Ty::TyParam("outer-semantic", _)
+    ));
+    assert!(matches!(signature.params[1], Ty::TyParam("U", _)));
+}
+
+#[test]
+fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
+    let outer = "outer-semantic".to_string();
+    let middle = "middle-semantic".to_string();
+    let own = "inner-semantic".to_string();
+    let bound = Ty::obj("kotlin/Any");
+    let own_parameter = krusty::ir::IrTypeParameter {
+        name: "V".to_string(),
+        semantic_name: own.clone(),
+        bounds: vec![(bound, false)],
+        variance: TypeVariance::Invariant,
+    };
+    let parameter = |name: &str| (name.to_string(), Ty::ty_param(name, bound));
+    let methods = vec![FnMeta {
+        name: "triple".to_string(),
+        params: vec![parameter(&outer), parameter(&middle), parameter(&own)],
+        ret: Ty::Unit,
+        type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
+        flags: krusty::metadata::class_builder::DEFAULT_FUNCTION_FLAGS,
+        params_have_defaults: false,
+        jvm_sig: None,
+        jvm_sig_name: None,
+    }];
+    let own_names = vec!["V".to_string()];
+    let captured = vec![outer, middle];
+    let (d1, d2) = build_class(
+        "sample/Outer$Middle$Inner",
+        &[],
+        "(Lsample/Outer$Middle;)V",
+        &[],
+        &methods,
+        &[],
+        &ClassTail {
+            type_params: &own_names,
+            type_param_bounds: std::slice::from_ref(&own_parameter),
+            captured_type_params: &captured,
+            ..Default::default()
+        },
+    );
+    let ci = class_info_kind("sample/Outer$Middle$Inner", d1, d2, Some(1));
+    let signature = class_functions(&ci)
+        .iter()
+        .find(|function| function.jvm_name == "triple")
+        .and_then(|function| function.generic_sig.as_ref())
+        .expect("triple metadata signature");
+    assert!(matches!(
+        signature.params[0],
+        Ty::TyParam("outer-semantic", _)
+    ));
+    assert!(matches!(
+        signature.params[1],
+        Ty::TyParam("middle-semantic", _)
+    ));
+    assert!(matches!(signature.params[2], Ty::TyParam("V", _)));
+}
+
+#[test]
 fn package_value_param_defaults_round_trip() {
     use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
     // A top-level `fun host(a: String, b: Int = 7): String` — only `b` DECLARES_DEFAULT_VALUE. The
@@ -122,6 +248,7 @@ fn package_value_param_defaults_round_trip() {
         contract: None,
         inline: false,
         type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         context_count: 0,
     }];
@@ -159,6 +286,7 @@ fn package_function_type_parameter_bound_round_trips() {
         contract: None,
         inline: false,
         type_params: vec![("T".to_string(), false)],
+        semantic_type_params: vec!["T".to_string()],
         type_param_bounds: vec![vec![Ty::obj("kotlin/CharSequence")]],
         context_count: 0,
     }];
@@ -198,6 +326,7 @@ fn package_extension_receiver_round_trips() {
         contract: None,
         inline: false,
         type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         context_count: 0,
     }];
@@ -251,6 +380,7 @@ fn package_receiver_function_type_param_round_trips() {
         contract: None,
         inline: false,
         type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         context_count: 0,
     }];

@@ -597,6 +597,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         decl_line: 0,
         type_param_bounds: Vec::new(),
         type_params: Vec::new(),
+        captured_type_params: Vec::new(),
         supertypes: Vec::new(),
         properties: Vec::new(),
         fields: Vec::new(),

@@ -3460,7 +3460,7 @@ impl Flat<'_> {
     /// Emit the suspend-call sequence into `out`, transferring to state `resume` (the loop re-dispatches
     /// `resume` on synchronous completion; on `COROUTINE_SUSPENDED` the function returns and a later
     /// resume re-enters at `resume`).
-    fn emit_suspension(&mut self, out: &mut Vec<ExprId>, point: ExprId, resume: usize) {
+    fn emit_suspension(&mut self, out: &mut Vec<ExprId>, point: ExprId, resume: usize) -> bool {
         crate::trace_compiler!(
             "suspend",
             "emit_suspension {point}:{:?}",
@@ -3472,7 +3472,7 @@ impl Flat<'_> {
                 "emit_suspension BAIL: no scope snapshot for suspension point {point}"
             );
             self.failed = true;
-            return;
+            return false;
         };
         if !self.bind_operand_temps(out, point, &list) {
             crate::trace_compiler!(
@@ -3480,7 +3480,19 @@ impl Flat<'_> {
                 "emit_suspension BAIL: unre-bindable operands at suspension point {point}"
             );
             self.failed = true;
-            return;
+            return false;
+        }
+        // A suspend call whose source result is `Nothing` can still return
+        // `COROUTINE_SUSPENDED`. The ordinary emitter-level bottom guard must therefore not run on
+        // the physical call itself (it would throw before the marker comparison). Preserve the fact
+        // for the resume state, then clear it from this rewritten CPS call.
+        let bottom = self
+            .ir
+            .logical_types
+            .get(&point)
+            .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing);
+        if bottom {
+            self.ir.logical_types.remove(&point);
         }
         self.spill_scope(out, &list);
         self.resume_points.push(point);
@@ -3533,6 +3545,14 @@ impl Flat<'_> {
         out.push(when);
         let vg = self.gv(vv);
         self.setfield(out, 0, vg); // cont.result = v (so the resume reads the synchronous value)
+        bottom
+    }
+
+    fn terminate_bottom_resume(&mut self, out: &mut Vec<ExprId>) {
+        let exception =
+            self.ir
+                .new_external("kotlin/KotlinNothingValueException", "()V", Vec::new());
+        out.push(self.add(IrExpr::Throw { operand: exception }));
     }
     /// Bind a suspension result from `cont.result` (loaded into `r`) at a resume state's entry.
     /// A spilled local's slot is pre-declared in the machine PROLOGUE (zero-initialized), so assign
@@ -3756,10 +3776,14 @@ impl Flat<'_> {
                 self.goto(&mut bb, target);
             } else if is_suspension_point(self.ir, uvalue, self.suspend) {
                 let br_resume = self.new_state();
-                self.emit_suspension(&mut bb, uvalue, br_resume);
+                let bottom = self.emit_suspension(&mut bb, uvalue, br_resume);
                 let mut rs: Vec<ExprId> = Vec::new();
-                self.bind_from_r(&mut rs, local, ty, br_resume, uvalue);
-                self.goto(&mut rs, merge);
+                if bottom {
+                    self.terminate_bottom_resume(&mut rs);
+                } else {
+                    self.bind_from_r(&mut rs, local, ty, br_resume, uvalue);
+                    self.goto(&mut rs, merge);
+                }
                 self.states[br_resume] = rs;
             } else {
                 if self.is_spilled(local) {
@@ -3917,14 +3941,18 @@ impl Flat<'_> {
             }
             if let Some((bind, call)) = self.stmt_suspension(stmt) {
                 let resume = self.new_state();
-                self.emit_suspension(&mut out, call, resume);
+                let bottom = self.emit_suspension(&mut out, call, resume);
                 self.states[cur] = out;
                 let mut rs: Vec<ExprId> = Vec::new();
-                if let Some((local, ty)) = bind {
+                if bottom {
+                    self.terminate_bottom_resume(&mut rs);
+                } else if let Some((local, ty)) = bind {
                     self.bind_from_r(&mut rs, local, &ty, resume, call);
                 }
                 self.states[resume] = rs;
-                self.flatten(&stmts[i + 1..], resume, after);
+                if !bottom {
+                    self.flatten(&stmts[i + 1..], resume, after);
+                }
                 return;
             }
             if let Some((local, ty, when_branches)) = self.stmt_cond_suspension(stmt) {
@@ -5545,6 +5573,7 @@ fn build_continuation_class(
         decl_line: 0,
         type_param_bounds: vec![],
         type_params: Vec::new(),
+        captured_type_params: Vec::new(),
         supertypes: vec![],
         properties: Vec::new(),
         fields,

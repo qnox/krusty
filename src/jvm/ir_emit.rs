@@ -854,6 +854,15 @@ fn build_class_metadata(
                             .collect()
                     })
                     .unwrap_or_default();
+                let semantic_function_type_params = semantic_signature
+                    .map(|signature| {
+                        signature
+                            .type_params
+                            .iter()
+                            .map(|parameter| parameter.semantic_name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let function_type_param_bounds = semantic_signature
                     .map(|signature| {
                         signature
@@ -888,6 +897,7 @@ fn build_class_metadata(
                         .collect(),
                     ret: metadata_ret,
                     type_params: function_type_params,
+                    semantic_type_params: semantic_function_type_params,
                     type_param_bounds: function_type_param_bounds,
                     flags: function_flags(ir, fid, f) | if is_suspend { FN_IS_SUSPEND } else { 0 },
                     params_have_defaults: false,
@@ -909,6 +919,7 @@ fn build_class_metadata(
                 params: vec![],
                 ret: f.ty,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
@@ -925,6 +936,7 @@ fn build_class_metadata(
                     .collect(),
                 ret: class_ty,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: COPY_FN_FLAGS,
                 params_have_defaults: true,
@@ -937,6 +949,7 @@ fn build_class_metadata(
             params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
             ret: Ty::Boolean,
             type_params: Vec::new(),
+            semantic_type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             flags: EQUALS_FN_FLAGS,
             params_have_defaults: false,
@@ -948,6 +961,7 @@ fn build_class_metadata(
             params: vec![],
             ret: Ty::Int,
             type_params: Vec::new(),
+            semantic_type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             flags: HASHCODE_TOSTRING_FN_FLAGS,
             params_have_defaults: false,
@@ -959,6 +973,7 @@ fn build_class_metadata(
             params: vec![],
             ret: Ty::String,
             type_params: Vec::new(),
+            semantic_type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             flags: HASHCODE_TOSTRING_FN_FLAGS,
             params_have_defaults: false,
@@ -977,6 +992,7 @@ fn build_class_metadata(
                 params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
                 ret: Ty::Boolean,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: EQUALS_FN_FLAGS,
                 params_have_defaults: false,
@@ -988,6 +1004,7 @@ fn build_class_metadata(
                 params: vec![],
                 ret: Ty::Int,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
@@ -999,6 +1016,7 @@ fn build_class_metadata(
                 params: vec![],
                 ret: Ty::String,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
@@ -1064,6 +1082,7 @@ fn build_class_metadata(
         &ClassTail {
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
+            captured_type_params: &c.captured_type_params,
             ctor_param_tparams: &ctor_param_tparams,
             flags: class_metadata_flags(c),
             // An `enum class`'s primary ctor is private too — entries are the only instances.
@@ -6651,7 +6670,10 @@ fn ty_generic_sig(t: &Ty) -> Option<String> {
         return ty_generic_sig(inner);
     }
     if let Ty::TyParam(name, _) = t {
-        return Some(format!("T{name};"));
+        return Some(format!(
+            "T{};",
+            crate::types::type_parameter_source_name(name)
+        ));
     }
     if t.non_null().is_jvm_scalar() {
         // A scalar in a generic position is a reference. In particular, an unsigned classifier uses
@@ -10104,7 +10126,9 @@ impl<'a> Emitter<'a> {
                         // Null-check (throws on null) then checkcast — matching kotlinc's `as T`.
                         let kotlin_name = match type_operand.non_null() {
                             Ty::Obj(fq_name, _) => fq_name.replace('/', "."),
-                            Ty::TyParam(name, _) => name.to_string(),
+                            Ty::TyParam(name, _) => {
+                                crate::types::type_parameter_source_name(name).to_string()
+                            }
                             _ => "kotlin.Any".to_string(),
                         };
                         code.dup();

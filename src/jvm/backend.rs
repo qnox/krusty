@@ -644,6 +644,9 @@ pub fn facade_package_metadata(
                 .iter()
                 .map(|tp| (tp.clone(), f.reified_type_params.contains(tp)))
                 .collect(),
+            semantic_type_params: generic
+                .map(|signature| signature.formals.clone())
+                .unwrap_or_default(),
             type_param_bounds: generic
                 .map(|signature| signature.formal_bounds.clone())
                 .unwrap_or_default(),

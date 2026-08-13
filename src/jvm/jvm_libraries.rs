@@ -327,6 +327,19 @@ fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>) -> Ty {
     if !ty.is_reference() {
         return ty;
     }
+    // With no type-use qualifier, Java's flexibility applies recursively: `String[]` exposes
+    // `Array<String!>!`, and `List<String>` exposes `List<String!>!`. Qualifying only the outer
+    // classifier incorrectly rejects `null` as an expanded Java `String...` element.
+    let ty = match ty.non_null() {
+        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            name,
+            &arguments
+                .iter()
+                .map(|argument| java_type_argument_nullability(*argument))
+                .collect::<Vec<_>>(),
+        ),
+        _ => ty,
+    };
     // Java wrapper classes are Kotlin primitive types with Java's flexible/nullability qualifier.
     // Keep the physical wrapper in the JVM descriptor; the semantic signature must be `Int!`, not
     // `java.lang.Integer!`, so core type checking needs no representation-specific compatibility rule.
@@ -340,6 +353,18 @@ fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>) -> Ty {
         Some(JavaNullability::NotNull) => ty.non_null(),
         Some(JavaNullability::Nullable) => Ty::nullable(ty),
         None => Ty::platform_nullable(ty),
+    }
+}
+
+/// Apply Java's unqualified flexibility inside a generic argument without discarding its semantic
+/// wrapper. A declaration variable stays a variable whose bound is flexible; use-site variance stays
+/// a projection whose interior is flexible.
+fn java_type_argument_nullability(ty: Ty) -> Ty {
+    match ty {
+        Ty::TyParam(name, bound) => Ty::ty_param(name, java_type_nullability(*bound, None)),
+        Ty::InProjection(inner) => Ty::in_projection(java_type_argument_nullability(*inner)),
+        Ty::OutProjection(inner) => Ty::out_projection(java_type_argument_nullability(*inner)),
+        _ => java_type_nullability(ty, None),
     }
 }
 
@@ -1529,6 +1554,11 @@ impl JvmLibraries {
             let mut enum_entries_accessor = None;
             let has_kotlin_metadata = ci.meta.is_present();
             let uses_java_type_semantics = !has_kotlin_metadata;
+            let constructor_outer = ci.inner_class_self().and_then(|entry| {
+                (entry.access & ACC_STATIC == 0)
+                    .then(|| entry.outer.as_deref().map(type_name))
+                    .flatten()
+            });
             // Identify the generated accessor while decoding JVM declarations, where metadata and
             // class flags are authoritative. The backend-neutral checker then consumes an explicit
             // capability instead of inferring declaration origin from a same-named static method.
@@ -1711,6 +1741,24 @@ impl JvmLibraries {
                         continue;
                     }
                     member.params.clone_from(&declaration.params.types);
+                    let physical_source_start = if let Some(outer) = constructor_outer {
+                        if physical_params
+                            .first()
+                            .and_then(|parameter| parameter.obj_internal())
+                            != Some(outer)
+                        {
+                            continue;
+                        }
+                        1
+                    } else {
+                        0
+                    };
+                    let physical_source_end = physical_source_start + member.params.len();
+                    if physical_source_end > physical_params.len() {
+                        continue;
+                    }
+                    member.physical_params =
+                        physical_params[physical_source_start..physical_source_end].to_vec();
                     let class_formals = &ci.meta.class_type_parameters.type_params;
                     if !class_formals.is_empty() {
                         let class_arguments = class_formals
@@ -1744,23 +1792,14 @@ impl JvmLibraries {
                         declaration.params.defaults.clone(),
                         declaration.params.vararg,
                     );
-                    // Some declarations (notably constructors with value-class parameters) point
-                    // directly at an alternate JVM constructor whose final parameter is the platform
-                    // marker. Normalize that exact metadata key into an attached realization now;
-                    // consumers continue to see only the source parameter list.
+                    // A constructor metadata key ending in the platform marker names an alternate
+                    // realization, not a directly callable source constructor. The inner-aware pass
+                    // below validates and attaches that realization after all declarations exist.
                     if physical_params.last().copied().is_some_and(|parameter| {
                         parameter.obj_internal().is_some_and(|name| {
                             name.matches("kotlin/jvm/internal/DefaultConstructorMarker")
                         })
                     }) {
-                        let real_count = member.params.len().min(physical_params.len() - 1);
-                        member.default_realization =
-                            Some(Box::new(crate::libraries::DefaultCallRealization {
-                                descriptor: member.descriptor.clone(),
-                                real_params: physical_params[..real_count].to_vec(),
-                                ret: Ty::Unit,
-                                suspend: false,
-                            }));
                         member.descriptor.clear();
                     }
                 }
@@ -2130,25 +2169,40 @@ impl JvmLibraries {
                     if constructor.default_realization.is_some() {
                         continue;
                     }
+                    let has_defaults = constructor
+                        .call_sig
+                        .param_defaults
+                        .iter()
+                        .any(|default| *default);
+                    let source_count = constructor.params.len();
+                    let mask_count = source_count.div_ceil(32).max(1);
+                    let outer_count = usize::from(constructor_outer.is_some());
                     let metadata = meta_constructors.iter().find(|declaration| {
                         declaration.params.names == constructor.call_sig.param_names
                             && declaration.params.types == constructor.params
                     });
-                    let physical = metadata
+                    let expected_real_params = metadata
                         .and_then(|declaration| declaration.jvm_desc)
                         .or_else(|| {
                             (!constructor.descriptor.is_empty())
                                 .then_some(constructor.descriptor.as_str())
                         })
                         .and_then(parse_method_desc)
-                        .map(|(params, _)| params);
-                    let Some(physical) = physical else { continue };
-                    let has_defaults = constructor
-                        .call_sig
-                        .param_defaults
-                        .iter()
-                        .any(|default| *default);
-                    let mask_count = physical.len().div_ceil(32).max(1);
+                        .and_then(|(mut params, ret)| {
+                            (ret == Ty::Unit).then_some(())?;
+                            if params.last().copied().is_some_and(|parameter| {
+                                parameter.obj_internal().is_some_and(|name| {
+                                    name.matches("kotlin/jvm/internal/DefaultConstructorMarker")
+                                })
+                            }) {
+                                params.pop();
+                            }
+                            (params.len() == outer_count + source_count)
+                                .then(|| params[outer_count..].to_vec())
+                        });
+                    let Some(expected_real_params) = expected_real_params else {
+                        continue;
+                    };
                     constructor.default_realization = ci.methods.iter().find_map(|method| {
                         if method.name != "<init>" {
                             return None;
@@ -2159,19 +2213,23 @@ impl JvmLibraries {
                                 name.matches("kotlin/jvm/internal/DefaultConstructorMarker")
                             })
                         });
+                        let real_start = outer_count;
+                        let real_end = real_start + source_count;
                         let shape_matches = if has_defaults {
-                            params.starts_with(&physical)
-                                && params.len() == physical.len() + mask_count + 1
-                                && params[physical.len()..physical.len() + mask_count]
+                            params.len() == outer_count + source_count + mask_count + 1
+                                && params[real_start..real_end] == expected_real_params
+                                && params[real_end..real_end + mask_count]
                                     .iter()
                                     .all(|parameter| *parameter == Ty::Int)
                         } else {
-                            params.len() == physical.len() + 1 && params.starts_with(&physical)
+                            params.len() == outer_count + source_count + 1
+                                && params[real_start..real_end] == expected_real_params
                         };
                         (ret == Ty::Unit && marker && shape_matches).then(|| {
                             Box::new(crate::libraries::DefaultCallRealization {
                                 descriptor: method.descriptor.clone(),
-                                real_params: physical.clone(),
+                                real_params: params[real_start..real_end].to_vec(),
+                                mask_count: if has_defaults { mask_count } else { 0 },
                                 ret: Ty::Unit,
                                 suspend: false,
                             })
@@ -2630,22 +2688,29 @@ fn parse_gsig_type_args(s: &str, for_field: bool) -> Option<(Vec<Ty>, bool, bool
     let mut field_inexact = false;
     while !rest.starts_with('>') {
         if let Some(tail) = rest.strip_prefix('*') {
-            args.push(Ty::obj("kotlin/Any"));
+            args.push(Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any"))));
             field_inexact = true;
             rest = tail;
             continue;
         }
-        let (arg, projected) = rest
-            .strip_prefix('+')
-            .or_else(|| rest.strip_prefix('-'))
-            .map_or((rest, false), |arg| (arg, true));
+        let (arg, variance) = if let Some(arg) = rest.strip_prefix('+') {
+            (arg, Some(crate::types::TypeVariance::Out))
+        } else if let Some(arg) = rest.strip_prefix('-') {
+            (arg, Some(crate::types::TypeVariance::In))
+        } else {
+            (rest, None)
+        };
         if !matches!(arg.as_bytes().first(), Some(b'L' | b'T' | b'[')) {
             return None;
         }
         let parsed = parse_gsig_inner(arg, for_field)?;
         has_free |= parsed.has_free;
-        field_inexact |= projected || parsed.field_inexact;
-        args.push(parsed.ty);
+        field_inexact |= variance.is_some() || parsed.field_inexact;
+        args.push(match variance {
+            Some(crate::types::TypeVariance::Out) => Ty::out_projection(parsed.ty),
+            Some(crate::types::TypeVariance::In) => Ty::in_projection(parsed.ty),
+            Some(crate::types::TypeVariance::Invariant) | None => parsed.ty,
+        });
         rest = parsed.rest;
     }
     Some((args, has_free, field_inexact, rest.strip_prefix('>')?))
@@ -2706,14 +2771,14 @@ fn parse_formals(s: &str) -> (Vec<String>, Vec<Vec<Ty>>, &str) {
             let Some((bound, tail)) = parse_gsig(rest) else {
                 return (Vec::new(), Vec::new(), original);
             };
-            bounds.push(Ty::platform_nullable(bound));
+            bounds.push(java_type_nullability(bound, None));
             rest = tail;
         }
         while let Some(tail) = rest.strip_prefix(':') {
             let Some((bound, after)) = parse_gsig(tail) else {
                 return (Vec::new(), Vec::new(), original);
             };
-            bounds.push(Ty::platform_nullable(bound));
+            bounds.push(java_type_nullability(bound, None));
             rest = after;
         }
         formal_bounds.push(bounds);
@@ -4483,6 +4548,7 @@ impl JvmLibraries {
                 Some(crate::libraries::DefaultCallRealization {
                     descriptor: method.descriptor.clone(),
                     real_params: callable.physical_params.clone(),
+                    mask_count,
                     ret,
                     suspend: callable.suspend,
                 })
@@ -4546,6 +4612,7 @@ impl JvmLibraries {
             Some(crate::libraries::DefaultCallRealization {
                 descriptor: method.descriptor.clone(),
                 real_params: real_params.clone(),
+                mask_count,
                 ret,
                 suspend,
             })
@@ -5751,9 +5818,9 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, fictitious_function_class, method_layout, overlay_metadata_collection_names,
-        parse_class_gsig, parse_concrete_field_gsig, parse_field_gsig, parse_method_desc,
-        parse_method_gsig,
+        desc_to_ty, fictitious_function_class, java_type_nullability, method_layout,
+        overlay_metadata_collection_names, parse_class_gsig, parse_concrete_field_gsig,
+        parse_field_gsig, parse_formals, parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
     use crate::symbol_source::SymbolNamespace;
@@ -6569,11 +6636,35 @@ mod tests {
             signature.formal_bounds[2],
             [Ty::platform_nullable(Ty::obj_args(
                 "java/util/Collection",
-                &[Ty::ty_param(
+                &[Ty::in_projection(Ty::ty_param(
                     "R",
                     Ty::platform_nullable(Ty::obj("kotlin/Any")),
-                )],
+                ))],
             ))]
+        );
+    }
+
+    #[test]
+    fn java_flexibility_recurses_through_formal_bounds_and_projections() {
+        let (_, bounds, _) =
+            parse_formals("<T:Ljava/util/List<Ljava/lang/String;>;>Ljava/lang/Object;");
+        assert_eq!(
+            bounds,
+            [vec![Ty::platform_nullable(Ty::obj_args(
+                "java/util/List",
+                &[Ty::platform_nullable(Ty::String)],
+            ))]],
+        );
+
+        assert_eq!(
+            java_type_nullability(
+                Ty::obj_args("java/util/List", &[Ty::in_projection(Ty::String)]),
+                None,
+            ),
+            Ty::platform_nullable(Ty::obj_args(
+                "java/util/List",
+                &[Ty::in_projection(Ty::platform_nullable(Ty::String))],
+            )),
         );
     }
 
@@ -6601,11 +6692,17 @@ mod tests {
                 .expect("method signature");
         assert_eq!(
             method.params,
-            [Ty::obj_args("java/util/List", &[Ty::String])]
+            [Ty::obj_args(
+                "java/util/List",
+                &[Ty::out_projection(Ty::String)]
+            )]
         );
         assert_eq!(
             method.ret,
-            Ty::obj_args("java/util/List", &[Ty::obj("kotlin/Any")])
+            Ty::obj_args(
+                "java/util/List",
+                &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
+            )
         );
 
         let (_, _, supertypes) = parse_class_gsig(

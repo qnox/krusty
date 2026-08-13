@@ -794,6 +794,10 @@ pub struct IrClass {
     /// those with only the implicit `Any` bound (unlike [`type_param_bounds`], which lists only non-`Any`
     /// bounds). Empty for a non-generic class.
     pub type_params: Vec<String>,
+    /// Semantic identities captured from enclosing generic declarations. These are available to
+    /// member metadata but are not declarations of this class. Kotlin metadata assigns them IDs
+    /// before this class's own parameters (an inner `U` is id 1 when outer `T` is id 0).
+    pub captured_type_params: Vec<String>,
     pub supertypes: Vec<Ty>,
     /// Instance fields. The first `ctor_param_count` are the primary-constructor parameters (stored
     /// directly from args, in order); any after them are class-body properties initialized by `init_body`.
@@ -1549,6 +1553,7 @@ pub struct IrGenericSig {
 #[derive(Clone, Debug)]
 pub struct IrTypeParameter {
     pub name: String,
+    pub semantic_name: String,
     pub bounds: Vec<(Ty, bool)>,
     pub variance: crate::types::TypeVariance,
 }
@@ -2373,6 +2378,7 @@ mod tests {
             decl_line: 0,
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
+            captured_type_params: Vec::new(),
             supertypes: Vec::new(),
             properties: Vec::new(),
             fields: Vec::new(),

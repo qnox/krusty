@@ -2461,6 +2461,7 @@ impl Classpath {
                         name: member_name,
                         owner: Some(owner),
                         physical_name: None,
+                        physical_params: params.clone(),
                         params,
                         ret,
                         physical_ret,

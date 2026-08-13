@@ -86,6 +86,28 @@ fn generic_method_result_binds_outer_type_parameter() {
 }
 
 #[test]
+fn dependent_function_bound_keeps_the_enclosing_formal_identity() {
+    let source = "fun <T : CharSequence, U : T> keep(value: U): T = value\n\
+                  fun box(): String = keep<String, String>(\"OK\")";
+    let (code, stderr) =
+        common::kotlinc_source_result("DependentFunctionBound", source).expect("kotlinc harness");
+    assert_eq!(code, 0, "kotlinc rejected dependent bound: {stderr}");
+    common::expect_front_end_ok_files_with_stdlib(&[source], "dependent function bound");
+}
+
+#[test]
+fn member_type_parameter_bound_keeps_the_class_formal_identity() {
+    let source = "class Outer<T : CharSequence> {\n\
+                      fun <U : T> keep(value: U): T = value\n\
+                  }\n\
+                  fun box(): String = Outer<String>().keep(\"OK\")";
+    let (code, stderr) =
+        common::kotlinc_source_result("MemberDependentBound", source).expect("kotlinc harness");
+    assert_eq!(code, 0, "kotlinc rejected dependent member bound: {stderr}");
+    common::expect_front_end_ok_files_with_stdlib(&[source], "dependent member bound");
+}
+
+#[test]
 fn where_constraint_subject_diagnostic_matches_kotlinc() {
     let source = "class C<T> where U : Any";
     let (code, stderr) =

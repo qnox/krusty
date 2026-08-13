@@ -117,6 +117,40 @@ fn named_args_to_classpath_constructor() {
 }
 
 #[test]
+fn named_array_argument_to_classpath_vararg_constructor() {
+    let lib = "package app\n\
+        class Words(vararg val parts: String)\n";
+    let main = "package app\n\
+        fun box(): String {\n\
+        \x20 val words = Words(parts = arrayOf(\"O\", \"K\"))\n\
+        \x20 return words.parts.joinToString(\"\")\n\
+        }\n";
+    let Some(out) = run_box_against(lib, main, "named_vararg_ctor") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn classpath_default_constructor_keeps_vararg_and_lambda_semantics() {
+    let lib = "package app\n\
+        class Words(\n\
+        \x20 vararg val parts: String,\n\
+        \x20 val transform: (String) -> String = { it },\n\
+        )\n";
+    let main = "package app\n\
+        fun box(): String {\n\
+        \x20 val empty = Words()\n\
+        \x20 val mapped = Words(transform = { it + \"!\" })\n\
+        \x20 return if (empty.parts.isEmpty() && mapped.parts.isEmpty() && mapped.transform(\"OK\") == \"OK!\") \"OK\" else \"fail\"\n\
+        }\n";
+    let Some(out) = run_box_against(lib, main, "default_vararg_ctor") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+#[test]
 fn jvmstatic_object_member() {
     let lib = "package app\n\
         object Ids { @JvmStatic fun of(s: String): String = s }\n";

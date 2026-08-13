@@ -247,7 +247,7 @@ fn specialize_member_type(
                 return ty;
             };
             let adjusted = |binding: Ty| {
-                if bound.admits_null() {
+                if bound.upper_bound_admits_null() {
                     binding
                 } else {
                     binding.non_null()
@@ -1253,10 +1253,16 @@ fn unify_inferred_ty_impl(
             }
             match binds.entry(name.to_string()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(inference_actual(actual));
+                    entry.insert(inference_actual(
+                        actual.projection_inner().unwrap_or(actual),
+                    ));
                 }
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.insert(merge_inferred_ty_from_symbols(source, *entry.get(), actual));
+                    entry.insert(merge_inferred_ty_from_symbols(
+                        source,
+                        *entry.get(),
+                        actual.projection_inner().unwrap_or(actual),
+                    ));
                 }
             }
         }
@@ -1304,6 +1310,34 @@ fn merge_inferred_ty_from_symbols(
     current: Ty,
     actual: Ty,
 ) -> Ty {
+    let current = current.projection_inner().unwrap_or(current);
+    let actual = actual.projection_inner().unwrap_or(actual);
+    if current.non_null() == actual.non_null() {
+        let base = current.non_null();
+        return if current.is_nullable() || actual.is_nullable() {
+            Ty::nullable(base)
+        } else if matches!(current, Ty::PlatformNullable(_))
+            || matches!(actual, Ty::PlatformNullable(_))
+        {
+            Ty::platform_nullable(base)
+        } else {
+            base
+        };
+    }
+    if let Some(source) = source {
+        let oracle = SourceOracle(source);
+        let context = crate::assignable::TyCtx::new();
+        let current_to_actual =
+            crate::assignable::is_assignable(&context, &oracle, current, actual);
+        let actual_to_current =
+            crate::assignable::is_assignable(&context, &oracle, actual, current);
+        if current_to_actual && !actual_to_current {
+            return actual;
+        }
+        if actual_to_current && !current_to_actual {
+            return current;
+        }
+    }
     let merged = merge_inferred_ty(Some(current), actual);
     let Some(source) = source else { return merged };
     if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
@@ -1456,6 +1490,7 @@ struct CallInferenceConstraints {
 pub(crate) struct InferredCallBindings {
     pub bindings: GSigBinds,
     pub upper_only: std::collections::HashSet<String>,
+    pub upper_bounds: std::collections::HashMap<String, Vec<Ty>>,
 }
 
 impl CallInferenceConstraints {
@@ -1488,16 +1523,17 @@ impl CallInferenceConstraints {
     fn solve(self) -> InferredCallBindings {
         let upper_only = self
             .upper
-            .into_iter()
+            .iter()
             .filter_map(|(formal, upper)| {
-                (!self.lower.contains_key(&formal)
+                (!self.lower.contains_key(formal)
                     && upper.iter().any(|constraint| *constraint != Ty::Error))
-                .then_some(formal)
+                .then_some(formal.clone())
             })
             .collect();
         InferredCallBindings {
             bindings: self.lower,
             upper_only,
+            upper_bounds: self.upper,
         }
     }
 }
@@ -1711,6 +1747,35 @@ pub(crate) fn infer_generic_return_bindings(
     generic_bindings_satisfy_bounds(generic_sig, &bindings, admits).then_some(bindings)
 }
 
+/// Infer a generic result against an expected supertype. Generic return inference normally compares
+/// equal constructors directly; a nested call also needs the ordinary applied-supertype relation
+/// (`MutableSet<T>` used where `MutableCollection<in R>` is expected). Providers publish only direct
+/// templates, so core performs the same structural hierarchy walk used by assignability.
+pub(crate) fn infer_generic_return_bindings_from_symbols(
+    source: &dyn SymbolSource,
+    generic_sig: &GenericSig,
+    expected: Ty,
+    admits: impl FnMut(Ty, Ty) -> bool,
+) -> Option<GSigBinds> {
+    let declared = match (generic_sig.ret.non_null(), expected.non_null()) {
+        (Ty::Obj(declared_owner, _), Ty::Obj(expected_owner, _))
+            if declared_owner != expected_owner =>
+        {
+            receiver_hierarchy(source, generic_sig.ret.non_null())
+                .into_iter()
+                .map(|(ty, _)| ty)
+                .find(|ty| {
+                    ty.obj_internal()
+                        .is_some_and(|owner| owner == expected_owner)
+                })?
+        }
+        _ => generic_sig.ret,
+    };
+    let mut projected = generic_sig.clone();
+    projected.ret = declared;
+    infer_generic_return_bindings(&projected, expected, admits)
+}
+
 /// Symbolic constraints contributed by an expected return type. `constrained_formals` also contains
 /// formals whose occurrences disagreed, so ordinary inference cannot replace a real conflict with a
 /// last-write-wins binding.
@@ -1872,6 +1937,13 @@ fn seed_undeclared_return_bindings(
 
 fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
     if provider == Ty::Error {
+        return inferred;
+    }
+    // A provider return can still contain the declaration's unbound formal while call inference has
+    // already specialized the same position. The inferred concrete type is authoritative here:
+    // merging `List<R>` with `List<Int>` must produce `List<Int>`, not restore `R` and discard the
+    // callable argument's return constraint.
+    if matches!(provider.non_null(), Ty::TyParam(_, _)) && !inferred.mentions_ty_param() {
         return inferred;
     }
     if inferred == Ty::Error
@@ -2266,10 +2338,17 @@ fn bind_defaulted_ext_ret_slots(
     ty_subst(semantic.ret, &binds)
 }
 
-/// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
+/// If `sig` is a function type, the partially substituted semantic types of its lambda parameters.
+/// Unbound formals remain symbolic: this helper shapes a postponed lambda before its body contributes
+/// inference constraints, so erasing `T` to its bound here would turn real evidence from `it` into
+/// `Any` before overload selection runs. Empty for anything else.
 pub(crate) fn function_input_types(sig: Ty, binds: &GSigBinds) -> Vec<Ty> {
     match sig.non_null() {
-        Ty::Fun(fsig) => ty_subst_all(&fsig.params, binds),
+        Ty::Fun(fsig) => fsig
+            .params
+            .iter()
+            .map(|parameter| ty_subst_keep_unbound(*parameter, binds))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -2554,6 +2633,30 @@ fn parameter_at_least_as_specific(
     left == right
         || (left == arg.ty() && arg.adapts_integer_literal_to(right))
         || platform_arg_assignable(lib, &right, &left)
+}
+
+/// Select the unique most-specific parameter shape from an already-applicable tied family. This is
+/// independent of declaration kind: functions and constructors use the same Kotlin relation, while
+/// retaining their own candidate records and call materialization.
+pub(crate) fn most_specific_parameter_shape_index(
+    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
+    parameter_shapes: &[Vec<Ty>],
+    args: &[CallArgKind],
+) -> CandidateSelection<usize> {
+    unique_most_specific_with_conflicts(
+        parameter_shapes
+            .iter()
+            .enumerate()
+            .map(|(index, params)| (params.clone(), index)),
+        |position, left, right| {
+            args.get(position).is_some_and(|argument| {
+                parameter_at_least_as_specific(lib, left, right, argument.clone())
+                    || source_arg_assignable(src, &right, &left)
+            })
+        },
+        |_, _| true,
+    )
 }
 
 fn integer_literal_overload<T>(
@@ -3528,18 +3631,18 @@ impl<'a> SymbolResolver<'a> {
                 .filter(|property| property.kind == PropKind::Member && property.receiver_rank == 0)
                 .min_by_key(|property| property.receiver_rank);
             if let Some(mut property) = local_property {
-                let arguments = current.type_args();
-                let declared_ty = if shape.type_params.len() == arguments.len() {
-                    let bindings = shape
-                        .type_params
-                        .iter()
-                        .cloned()
-                        .zip(arguments.iter().copied())
-                        .collect();
-                    ty_subst(property.ty, &bindings)
-                } else {
-                    property.ty
-                };
+                crate::trace_compiler!(
+                    "resolve",
+                    "member property candidate receiver={current:?} owner={} name={name} classifier_formals={:?} declared={:?}",
+                    property.owner,
+                    shape.type_params,
+                    property.ty,
+                );
+                // `declared_callables` has already applied `current` to this declaration. Applying
+                // the classifier bindings again is not idempotent: after `Content<T>.value` becomes
+                // a caller-owned type parameter, a second substitution sees that scoped parameter
+                // as unbound and erases it to `Any`.
+                let declared_ty = property.ty;
                 let ty = nearer
                     .iter()
                     .find_map(|(shape, applied)| {
@@ -3559,6 +3662,11 @@ impl<'a> SymbolResolver<'a> {
                     .unwrap_or(declared_ty);
                 property.ty = ty;
                 property.getter.ret = ty;
+                crate::trace_compiler!(
+                    "resolve",
+                    "member property selected receiver={current:?} owner={} name={name} ty={ty:?}",
+                    property.owner,
+                );
                 let interface = self
                     .src
                     .classifier(property.owner)
@@ -4880,21 +4988,15 @@ pub(crate) fn apply_platform_call_parameter_nullability(
 /// backend needs to invoke that declaration when a direct call is unavailable.
 #[derive(Clone, Debug)]
 pub struct SyntheticCtorCall {
+    /// The selected Kotlin declaration. Its semantic parameters and call shape remain authoritative;
+    /// the fields below describe only the provider's alternate physical realization.
+    pub declaration: LibraryMember,
     /// The synthetic `<init>` descriptor to invoke.
     pub descriptor: String,
     /// The REAL (source) parameter types in descriptor form — a value-class param appears here as its
     /// erased underlying. Provided args coerce to the leading `provided` of these; the rest are omitted.
     pub real_params: Vec<Ty>,
-    /// Kotlin declaration parameter types used for applicability and argument checking. Parallel to
-    /// [`Self::real_params`], which is only the opaque platform invocation shape consumed by lowering.
-    pub semantic_params: Vec<Ty>,
-    /// Number of args the caller supplies (a prefix of `real_params`).
-    pub provided: usize,
-    /// Default-argument masks in 32-parameter chunks. Empty for a realization that only needs its
-    /// trailing marker and does not omit source parameters.
-    pub masks: Vec<i32>,
-    /// Source visibility of the synthetic constructor.
-    pub visibility: crate::types::Visibility,
+    pub mask_count: usize,
 }
 
 /// One checker-ready constructor application. Overload selection always chooses the semantic
@@ -4902,7 +5004,7 @@ pub struct SyntheticCtorCall {
 #[derive(Clone, Debug)]
 pub enum SelectedConstructorCall {
     Direct(Box<LibraryMember>),
-    Platform(SyntheticCtorCall),
+    Platform(Box<SyntheticCtorCall>),
 }
 
 fn select_constructor_call(
@@ -4942,22 +5044,17 @@ pub(crate) fn select_constructor_call_from_type(
     let omitted = args.len() < declaration.params.len();
     if omitted || (declaration.descriptor.is_empty() && declaration.default_realization.is_some()) {
         let realization = declaration.default_realization.as_deref()?;
-        let mut masks = vec![0i32; declaration.params.len().div_ceil(32)];
-        if omitted {
-            for index in args.len()..declaration.params.len() {
-                masks[index / 32] |= 1i32 << (index % 32);
-            }
-        } else {
-            masks.clear();
-        }
-        return Some(SelectedConstructorCall::Platform(SyntheticCtorCall {
-            descriptor: realization.descriptor.clone(),
-            real_params: realization.real_params.clone(),
-            semantic_params: declaration.params.clone(),
-            provided: args.len(),
-            masks,
-            visibility: declaration.visibility,
-        }));
+        let descriptor = realization.descriptor.clone();
+        let real_params = realization.real_params.clone();
+        let mask_count = realization.mask_count;
+        return Some(SelectedConstructorCall::Platform(Box::new(
+            SyntheticCtorCall {
+                declaration,
+                descriptor,
+                real_params,
+                mask_count,
+            },
+        )));
     }
     Some(SelectedConstructorCall::Direct(Box::new(declaration)))
 }
@@ -4971,17 +5068,17 @@ pub(crate) fn select_constructor_declaration_from_type(
     classifier: &crate::libraries::LibraryType,
     args: &[CallArgKind],
 ) -> Option<LibraryMember> {
-    let selected = best_callable_member_overload(
-        lib,
-        src,
-        classifier.constructors.iter(),
-        "<init>",
-        args,
-        &[],
-    )?;
-    let mut declaration = selected.clone();
-    declaration.params = specialized_constructor_params(selected, args);
-    Some(declaration)
+    let candidates = classifier
+        .constructors
+        .iter()
+        .map(|constructor| {
+            let mut declaration = constructor.clone();
+            declaration.params = specialized_constructor_params(constructor, args);
+            declaration
+        })
+        .collect::<Vec<_>>();
+    let selected = best_callable_member_overload(lib, src, candidates.iter(), "<init>", args, &[])?;
+    Some(selected.clone())
 }
 
 /// Select a constructor declaration after syntax has mapped arguments to source parameter slots.
@@ -5289,7 +5386,7 @@ impl ResolvedMember {
         projected_return_hazard: bool,
         origin: Origin,
     ) -> Self {
-        let physical_params = member.params.clone();
+        let physical_params = member.physical_params.clone();
         let suspend = member.suspend();
         Self {
             receiver,
@@ -5317,6 +5414,7 @@ impl ResolvedMember {
             callable.ret,
             callable.descriptor,
         );
+        member.physical_params = callable.physical_params.clone();
         member.owner = Some(callable.owner);
         member.physical_ret = callable.physical_ret;
         member.signature = callable.signature;
@@ -5577,9 +5675,10 @@ impl ReceiverMro {
     }
 
     fn match_receiver(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<(u32, Ty)> {
-        // Type variables accept null through a nullable upper bound.
+        // A generic receiver may bind its parameter to a nullable type even though a bare T is not
+        // itself a nullable value occurrence. An explicit non-null upper bound closes that route.
         let accepts_nullable = decl_recv.admits_null()
-            || matches!(decl_recv, Ty::TyParam(_, bound) if bound.admits_null());
+            || matches!(decl_recv, Ty::TyParam(_, bound) if bound.upper_bound_admits_null());
         // The null literal has no classifier hierarchy of its own, but it is a valid receiver for
         // every nullable extension receiver. Candidate specificity is decided after this applicability
         // rung; inventing a class key for `Null` would incorrectly make it a member of `Any`'s MRO.
@@ -6078,12 +6177,13 @@ fn select_overload_tracking_with_functions(
     for o in &overloads {
         crate::trace_compiler!(
             "resolve",
-            "  raw {name} kind={:?} recv={:?} params={:?} context={} required={} pub={} rank={} origin={:?} owner={}",
+            "  raw {name} kind={:?} recv={:?} params={:?} context={} required={} vararg={:?} pub={} rank={} origin={:?} owner={}",
             o.kind,
             o.semantic_receiver(),
             o.callable.params,
             o.context_count,
             o.call_sig.required,
+            o.call_sig.vararg_index,
             o.public(),
             o.receiver_rank,
             o.callable.origin,
@@ -6849,6 +6949,41 @@ mod tests {
     }
 
     #[test]
+    fn source_constraint_join_is_order_independent_for_flexible_and_projected_types() {
+        let flexible = Ty::platform_nullable(Ty::String);
+        for (left, right) in [(Ty::String, flexible), (flexible, Ty::String)] {
+            assert_eq!(
+                merge_inferred_ty_from_symbols(Some(&EMPTY_SOURCE), left, right),
+                flexible
+            );
+        }
+
+        let projected = Ty::out_projection(Ty::String);
+        assert_eq!(
+            merge_inferred_ty_from_symbols(Some(&EMPTY_SOURCE), projected, Ty::String),
+            Ty::String
+        );
+        assert_eq!(
+            merge_inferred_ty_from_symbols(Some(&EMPTY_SOURCE), Ty::String, projected),
+            Ty::String
+        );
+    }
+
+    #[test]
+    fn specialized_return_does_not_restore_an_unbound_provider_formal() {
+        let result = Ty::ty_param("R", Ty::nullable(Ty::obj("kotlin/Any")));
+
+        assert_eq!(merge_specialized_return(result, Ty::Int), Ty::Int);
+        assert_eq!(
+            merge_specialized_return(
+                Ty::obj_args("kotlin/collections/List", &[result]),
+                Ty::obj_args("kotlin/collections/List", &[Ty::Int]),
+            ),
+            Ty::obj_args("kotlin/collections/List", &[Ty::Int]),
+        );
+    }
+
+    #[test]
     fn diverging_constraint_does_not_freeze_an_ordinary_generic_binding() {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let mut bindings = GSigBinds::new();
@@ -7008,6 +7143,17 @@ mod tests {
         assert_eq!(
             function_input_types(function, &GSigBinds::new()),
             vec![Ty::String]
+        );
+    }
+
+    #[test]
+    fn lambda_input_shape_preserves_an_unbound_type_parameter() {
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let function = Ty::fun(vec![parameter], Ty::Unit);
+
+        assert_eq!(
+            function_input_types(function, &GSigBinds::new()),
+            vec![parameter]
         );
     }
 
@@ -7441,6 +7587,7 @@ mod tests {
         declaration.default_realization = Some(Box::new(DefaultCallRealization {
             descriptor: "(ILplatform/Marker;)V".to_string(),
             real_params: vec![Ty::Int],
+            mask_count: 0,
             ret: Ty::Unit,
             suspend: false,
         }));
@@ -7461,6 +7608,90 @@ mod tests {
             ),
             Some(SelectedConstructorCall::Platform(_))
         ));
+    }
+
+    #[test]
+    fn constructor_selection_infers_class_type_parameters_before_applicability() {
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let mut constructor = LibraryMember::new(
+            "<init>".into(),
+            vec![Ty::obj("kotlin/Any")],
+            Ty::Unit,
+            "(Ljava/lang/Object;)V".into(),
+        );
+        constructor.generic_sig = Some(GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: None,
+            params: vec![parameter],
+            ret: Ty::Unit,
+            return_policy: Default::default(),
+        });
+        let mut classifier = fake_library_type(Vec::new(), vec![constructor]);
+        classifier.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["T".to_string()],
+            vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
+        );
+        let source = FakeSource {
+            name: "",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+
+        let selected = select_constructor_declaration_from_type(
+            &source,
+            &source,
+            &classifier,
+            &[CallArgKind::IntegerLiteral {
+                ty: Ty::Int,
+                value: 1,
+            }],
+        )
+        .expect("the inferred constructor parameter must be applicable");
+
+        assert_eq!(selected.params, vec![Ty::Int]);
+        assert_eq!(selected.physical_params, vec![Ty::obj("kotlin/Any")]);
+    }
+
+    #[test]
+    fn generic_vararg_constructor_keeps_its_declaration_array_shape() {
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let mut constructor = LibraryMember::new(
+            "<init>".into(),
+            vec![Ty::array(Ty::obj("kotlin/Any"))],
+            Ty::Unit,
+            "([Ljava/lang/Object;)V".into(),
+        );
+        constructor.call_sig =
+            CallSig::metadata_member(1, vec!["values".to_string()], vec![false], Some(0));
+        constructor.generic_sig = Some(GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
+            receiver: None,
+            params: vec![Ty::array(parameter)],
+            ret: Ty::Unit,
+            return_policy: Default::default(),
+        });
+        let classifier = fake_library_type(Vec::new(), vec![constructor]);
+        let source = FakeSource {
+            name: "",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+
+        let selected = select_constructor_declaration_from_type(
+            &source,
+            &source,
+            &classifier,
+            &[CallArgKind::Typed(Ty::array(Ty::String))],
+        )
+        .expect("generic vararg constructor");
+
+        assert_eq!(selected.params, vec![Ty::array(Ty::String)]);
+        assert_eq!(
+            selected.physical_params,
+            vec![Ty::array(Ty::obj("kotlin/Any"))]
+        );
     }
 
     fn top_level_default_uint_info() -> FunctionInfo {

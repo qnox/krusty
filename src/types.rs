@@ -3,7 +3,7 @@
 //! Backend-specific names and descriptors are kept out of this module.
 
 use crate::name_tree::{NameId, NameTree};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
 
@@ -18,6 +18,8 @@ pub struct TypeNameList {
 // The tree is concurrent (lock-free reads, internally-locked inserts), so the global interner is a
 // bare shared instance.
 static TYPE_NAMES: OnceLock<NameTree> = OnceLock::new();
+static TYPE_PARAMETER_SOURCES: OnceLock<Mutex<HashMap<&'static str, &'static str>>> =
+    OnceLock::new();
 
 fn type_names() -> &'static NameTree {
     TYPE_NAMES.get_or_init(|| {
@@ -181,6 +183,28 @@ pub fn intern(name: &str) -> &'static str {
     let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
     set.insert(leaked);
     leaked
+}
+
+/// Intern one declaration-owned type-parameter identity and retain its source spelling separately.
+/// The semantic key is opaque: callers compare it only by identity and never parse declaration
+/// coordinates or spelling out of it.
+pub(crate) fn declaration_type_parameter(
+    compilation: u64,
+    file: u32,
+    declaration_start: u32,
+    index: usize,
+    source: &str,
+) -> &'static str {
+    let semantic = intern(&format!(
+        "\0tp:{compilation}:{file}:{declaration_start}:{index}"
+    ));
+    let source = intern(source);
+    TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(semantic, source);
+    semantic
 }
 
 impl TypeName {
@@ -734,7 +758,7 @@ impl Ty {
                 .get(name)
                 .copied()
                 .map(|binding| {
-                    if bound.admits_null() {
+                    if bound.upper_bound_admits_null() {
                         binding
                     } else {
                         binding.non_null()
@@ -845,11 +869,28 @@ impl Ty {
         matches!(self, Ty::Nullable(_))
     }
 
-    /// Whether this type admits `null`: an explicit nullable type or the upper bound of a flexible
-    /// platform type. This is distinct from [`Self::is_nullable`], which identifies source `T?`
-    /// syntax and must not collapse `T!` to that single bound.
+    /// Whether this type occurrence admits `null`: an explicit nullable type or a flexible platform
+    /// type. A bare type parameter does not admit `null`, even when its upper bound is `Any?`: the
+    /// parameter may still be instantiated with a non-null type, and only `T?` accepts the literal.
+    /// This is distinct from [`Self::is_nullable`], which identifies source `T?` syntax and must not
+    /// collapse `T!` to that single bound.
     pub fn admits_null(self) -> bool {
-        matches!(self, Ty::Nullable(_) | Ty::PlatformNullable(_))
+        matches!(self, Ty::Nullable(_) | Ty::PlatformNullable(_) | Ty::Null)
+    }
+
+    /// Whether this type's upper-bound chain admits `null`. This is for substitution and generic
+    /// constraint reasoning only; it deliberately does not make a bare [`Ty::TyParam`] nullable as
+    /// a source type occurrence (see [`Self::admits_null`]).
+    pub fn upper_bound_admits_null(self) -> bool {
+        let mut current = self;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            match current {
+                Ty::Nullable(_) | Ty::PlatformNullable(_) | Ty::Null => return true,
+                Ty::TyParam(name, bound) if seen.insert(name) => current = *bound,
+                _ => return false,
+            }
+        }
     }
 
     /// The non-null form: strips a `?` if present, else returns `self`.
@@ -1531,14 +1572,28 @@ impl Ty {
     }
 }
 
-/// The source spelling carried by a semantic type-parameter key. Local declarations are alpha-
-/// renamed because two nested declarations may legally use the same spelling; diagnostics still
-/// show the written name. Class and top-level declaration keys are already unique in every signature
-/// that owns them and therefore remain their source spelling.
+/// The source spelling carried by a declaration-scoped semantic type-parameter key. Diagnostics and
+/// metadata show the written name even though inference uses the full identity.
 pub(crate) fn type_parameter_source_name(name: &str) -> &str {
-    name.strip_prefix("$local$")
-        .and_then(|key| key.rsplit_once('$'))
-        .map_or(name, |(_, source)| source)
+    TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .get(name)
+        .copied()
+        .unwrap_or(name)
+}
+
+#[cfg(test)]
+mod declaration_type_parameter_tests {
+    use super::{declaration_type_parameter, type_parameter_source_name};
+
+    #[test]
+    fn source_spelling_is_not_parsed_from_the_semantic_identity() {
+        let semantic = declaration_type_parameter(11, 7, 19, 0, "T$nested");
+        assert_eq!(type_parameter_source_name(semantic), "T$nested");
+        assert_ne!(semantic, "T$nested");
+    }
 }
 
 /// Whether `ty` mentions any of the named type parameters (`T` itself, `List<T>`, `(T) -> T`,
@@ -1747,7 +1802,7 @@ fn substitute_type_parameters(
             .get(name)
             .copied()
             .map(|binding| {
-                if bound.admits_null() {
+                if bound.upper_bound_admits_null() {
                     binding
                 } else {
                     binding.non_null()

@@ -3,8 +3,8 @@
 //! names use `predefinedIndex` into `JvmNameResolverBase.PREDEFINED_STRINGS` (see METADATA_NOTES.md).
 
 use crate::metadata::type_encoder::{
-    encode_metadata_type_parameter, encode_type, encode_type_parameter, type_parameters,
-    MetadataTypeParameter, StringTable, TypeParameters,
+    encode_metadata_type_parameter, encode_type, encode_type_parameter, semantic_type_parameters,
+    type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::Ty;
@@ -36,6 +36,8 @@ pub struct FnMeta {
     /// table (field 4); their indices are the `Type.type_parameter` ids used by generic
     /// receiver/parameter/return types and `is`-conclusions in the contract.
     pub type_params: Vec<(String, bool)>,
+    /// Semantic identities parallel to `type_params`.
+    pub semantic_type_params: Vec<String>,
     /// Declared upper bounds, parallel to `type_params`.
     pub type_param_bounds: Vec<Vec<Ty>>,
     /// The function's decoded contract, emitted as `Function.contract` (field 32) so a separate
@@ -60,7 +62,7 @@ fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
 /// table ids via `tps`. Handles generic class arguments (`Type.argument` = 2), nullability
 /// (`Type.nullable` = 3), class types (`Type.class_name` = 6), and type parameters
 /// (`Type.type_parameter` = 7).
-fn type_pb_generic(st: &mut StringTable, t: Ty, tps: &TypeParameters<'_>) -> Pb {
+fn type_pb_generic(st: &mut StringTable, t: Ty, tps: &TypeParameters) -> Pb {
     encode_type(st, t, tps).unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
 
@@ -70,7 +72,7 @@ fn type_pb_generic(st: &mut StringTable, t: Ty, tps: &TypeParameters<'_>) -> Pb 
 fn contract_pb(
     st: &mut StringTable,
     contract: &crate::contracts::Contract,
-    tps: &TypeParameters<'_>,
+    tps: &TypeParameters,
 ) -> Pb {
     let mut p = Pb::new();
     for e in &contract.effects {
@@ -79,7 +81,7 @@ fn contract_pb(
     p
 }
 
-fn effect_pb(st: &mut StringTable, e: &crate::contracts::Effect, tps: &TypeParameters<'_>) -> Pb {
+fn effect_pb(st: &mut StringTable, e: &crate::contracts::Effect, tps: &TypeParameters) -> Pb {
     use crate::contracts::Effect;
     let mut p = Pb::new();
     match e {
@@ -106,7 +108,7 @@ fn write_returns_effect(
     st: &mut StringTable,
     rv: &crate::contracts::ReturnsValue,
     conclusion: Option<&crate::contracts::Condition>,
-    tps: &TypeParameters<'_>,
+    tps: &TypeParameters,
 ) {
     use crate::contracts::ReturnsValue;
     match rv {
@@ -141,11 +143,7 @@ fn expression_param_ref_pb(param: crate::contracts::ParamRef) -> Pb {
     p
 }
 
-fn condition_pb(
-    st: &mut StringTable,
-    c: &crate::contracts::Condition,
-    tps: &TypeParameters<'_>,
-) -> Pb {
+fn condition_pb(st: &mut StringTable, c: &crate::contracts::Condition, tps: &TypeParameters) -> Pb {
     use crate::contracts::{Condition, ConditionType};
     let mut p = Pb::new();
     match c {
@@ -217,7 +215,20 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     p.field_varint(2, st.local(&f.name) as u64); // Function.name = 2
                                                  // The function's type-parameter table (Function.type_parameter = 4): indices are the
                                                  // `Type.type_parameter` ids generic types and contract conclusions reference.
-    let tps = type_parameters(f.type_params.iter().map(|(name, _)| name.as_str()));
+    assert_eq!(
+        f.semantic_type_params.len(),
+        f.type_params.len(),
+        "metadata function type parameters require semantic identities"
+    );
+    let semantic_names = f
+        .semantic_type_params
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let tps = semantic_type_parameters(
+        f.type_params.iter().map(|(name, _)| name.as_str()),
+        semantic_names.into_iter(),
+    );
     let ret = type_pb_generic(st, f.ret, &tps);
     p.field_message(3, &ret); // Function.return_type = 3
     for (id, (tp_name, reified)) in f.type_params.iter().enumerate() {
@@ -414,6 +425,7 @@ mod tests {
                 contract: None,
                 inline: false,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 context_count: 0,
             }],
@@ -533,6 +545,7 @@ mod tests {
                 jvm_desc: Some("(LRefinement;Ljava/lang/Object;)Z".into()),
                 inline: true,
                 type_params: vec![("T".into(), false), ("R".into(), true)],
+                semantic_type_params: vec!["T".into(), "R".into()],
                 type_param_bounds: Vec::new(),
                 contract: Some(std::sync::Arc::new(contract.clone())),
                 context_count: 0,
@@ -566,6 +579,7 @@ mod tests {
                 contract: None,
                 inline: false,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 context_count: 0,
             }],
