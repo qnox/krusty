@@ -134,6 +134,21 @@ fun box(): String = (::Result).let { it("OK") }.value
 }
 
 #[test]
+fn callable_reference_return_inference_also_constrains_parameters() {
+    let diagnostics = common::front_end_diagnostics_with_stdlib(
+        r#"
+fun <T> consume(block: (T) -> T) {}
+fun mismatched(value: String): Int = value.length
+fun test() { consume(::mismatched) }
+"#,
+    );
+    assert_eq!(
+        diagnostics,
+        vec!["none of the following candidates is applicable:"]
+    );
+}
+
+#[test]
 fn selected_empty_array_uses_the_target_element_type() {
     let src = r#"
 fun accept(values: Array<String>): Array<String> = values

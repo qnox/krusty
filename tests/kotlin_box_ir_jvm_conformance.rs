@@ -1395,8 +1395,8 @@ fn kotlin_codegen_box_conformance() {
     }
     let applicable = files.len() - not_applicable;
     assert!(
-        passed * 100 >= applicable * 63,
-        "box conformance is below 63% of backend-applicable cases: {passed}/{applicable} passed; {} failed; {not_applicable} not applicable",
+        passed * 100 >= applicable * 75,
+        "box conformance is below 75% of backend-applicable cases: {passed}/{applicable} passed; {} failed; {not_applicable} not applicable",
         failures.len()
     );
     assert!(

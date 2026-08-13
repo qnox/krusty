@@ -1601,16 +1601,23 @@ fn collect_call_inference_constraints(
                 } else {
                     actual
                 };
+                let declared_variance = variances
+                    .get(index)
+                    .copied()
+                    .unwrap_or(crate::types::TypeVariance::Invariant);
+                // An invariant classifier argument is an equality constraint even when the
+                // classifier itself occurs contravariantly. For `(Box<T>) -> Unit` matched against
+                // `(Box<Value>) -> Unit`, `T` is `Value`, not an upper-only variable defaulting to
+                // `Nothing`. Use-site projections still carry their own direction in `argument`.
+                let argument_position = match declared_variance {
+                    crate::types::TypeVariance::Invariant => ConstraintPosition::Lower,
+                    variance => position.through(variance),
+                };
                 collect_call_inference_constraints(
                     source,
                     argument,
                     actual,
-                    position.through(
-                        variances
-                            .get(index)
-                            .copied()
-                            .unwrap_or(crate::types::TypeVariance::Invariant),
-                    ),
+                    argument_position,
                     constraints,
                 );
             }
@@ -4304,7 +4311,17 @@ impl<'a> SymbolResolver<'a> {
         if !self.extension_slots_admit_bounds(receiver, type_args, o, slots) {
             return None;
         }
-        let vparams = logical_value_params(o, binding_receiver, type_args);
+        let slot_arguments = slots
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                slot.map(CallArgKind::Typed).unwrap_or_else(|| {
+                    CallArgKind::Typed(o.semantic_params().get(index).copied().unwrap_or(Ty::Error))
+                })
+            })
+            .collect::<Vec<_>>();
+        let vparams =
+            logical_call_params(&self.src, o, binding_receiver, &slot_arguments, type_args);
         if vparams.len() != slots.len() {
             return None;
         }

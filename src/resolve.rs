@@ -15644,18 +15644,30 @@ impl<'a> Checker<'a> {
             return false;
         }
         let context = crate::assignable::TyCtx::new();
+        // A callable reference can complete a surrounding generic call's result constraint. For
+        // `bind(viewModel::property)` with `bind(() -> T?)`, the property return `String?` binds
+        // `T = String`; comparing directly with the still-symbolic `T?` would reject the candidate
+        // before the enclosing call gets that evidence.
+        let mut result_bindings = crate::symbol_resolver::GSigBinds::new();
+        crate::symbol_resolver::unify_inferred_ty(expected.ret, ret, &mut result_bindings);
+        let expected_ret =
+            crate::symbol_resolver::ty_subst_keep_unbound(expected.ret, &result_bindings);
         expected
             .params
             .iter()
             .zip(params)
-            .all(|(expected, actual)| match expected.non_null() {
-                Ty::TyParam(_, bound) => {
-                    crate::assignable::is_subtype(&context, self, *actual, *bound)
+            .all(|(expected, actual)| {
+                let expected =
+                    crate::symbol_resolver::ty_subst_keep_unbound(*expected, &result_bindings);
+                match expected.non_null() {
+                    Ty::TyParam(_, bound) => {
+                        crate::assignable::is_subtype(&context, self, *actual, *bound)
+                    }
+                    _ => crate::assignable::is_subtype(&context, self, expected, *actual),
                 }
-                _ => crate::assignable::is_subtype(&context, self, *expected, *actual),
             })
             && ((allow_unit_coercion && expected.ret == Ty::Unit)
-                || crate::assignable::is_subtype(&context, self, ret, expected.ret))
+                || crate::assignable::is_subtype(&context, self, ret, expected_ret))
     }
 
     fn callable_ref_shape_at_least_as_specific(
@@ -33790,8 +33802,22 @@ impl<'a> Checker<'a> {
             return Some(Ty::Error);
         }
         let ret = selected.ret;
-        let semantic_params =
+        let mut semantic_params =
             self.applied_member_semantic_params(selected.receiver, &selected.member);
+        if selected.member.generic_sig.is_some() {
+            let argument_kinds = self.checked_call_arg_kinds(scope, args);
+            let explicit_type_args = self.resolved_explicit_type_args(scope, call);
+            if let Some(specialized) = self.applied_member_call_params(
+                selected.receiver,
+                &selected.member,
+                &argument_kinds,
+                self.file.call_arg_names.get(&call.0).map(Vec::as_slice),
+                self.file.call_has_trailing_lambda.contains(&call.0),
+                &explicit_type_args,
+            ) {
+                semantic_params = specialized;
+            }
+        }
         let context_count = selected.member.context_count.min(semantic_params.len());
         let value_params = if context_count == 0 {
             semantic_params
@@ -33823,7 +33849,11 @@ impl<'a> Checker<'a> {
             && self
                 .resolved_call_arg_slots
                 .get(&call)
-                .is_some_and(|slots| slots.iter().any(Option::is_none))
+                .is_some_and(|slots| {
+                    slots.iter().enumerate().any(|(parameter, argument)| {
+                        argument.is_none() && value_call_sig.vararg_index != Some(parameter)
+                    })
+                })
             && !self.record_default_member_call(call, &selected.member)
         {
             return Some(Ty::Error);

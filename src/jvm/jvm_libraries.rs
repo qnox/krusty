@@ -6636,7 +6636,12 @@ mod tests {
             parse_class_gsig("<T:Ljava/lang/CharSequence;>Ljava/lang/Object;")
                 .expect("class signature");
         assert_eq!(formals, ["T"]);
-        assert_eq!(bounds, [vec![Ty::obj("java/lang/CharSequence")]]);
+        assert_eq!(
+            bounds,
+            [vec![Ty::platform_nullable(Ty::obj(
+                "java/lang/CharSequence"
+            ))]]
+        );
     }
 
     #[test]
