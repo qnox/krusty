@@ -138,6 +138,18 @@ fn source_function_type_arguments_respect_dnn_and_upper_bounds() {
 }
 
 #[test]
+fn null_cannot_infer_a_definitely_non_null_function_parameter() {
+    let diagnostics = diagnostics(
+        "fun <T> f(x: T & Any): T & Any = x\n\
+         fun g() { f(null) }",
+    );
+    assert_eq!(
+        diagnostics,
+        ["cannot infer type for type parameter 'T'. Specify it explicitly."]
+    );
+}
+
+#[test]
 fn intersection_requires_type_parameter_and_any_rhs() {
     for source in [
         "fun f(value: String & Any) = value",

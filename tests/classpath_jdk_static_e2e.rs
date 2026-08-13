@@ -263,33 +263,31 @@ fn fully_qualified_jdk_vararg_constructor_accepts_expanded_arguments() {
 }
 
 #[test]
-fn function_value_is_not_passed_to_java_sam_without_an_adapter() {
+fn function_value_is_adapted_to_java_sam() {
     let jdk = common::jdk_modules();
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
-    for call in [
-        "NumericApi.transform(1, operation)",
-        "NumericApi().transformInstance(1, operation)",
-    ] {
-        let source = format!(
-            "import fixtures.NumericApi\n\
-             fun f(operation: (Int) -> Int): Int = {call}\n"
-        );
-        let diagnostics = common::front_end_diagnostics(
-            &source,
-            std::slice::from_ref(&java_classes),
-            Some(jdk.as_path()),
-        );
-        assert!(
-            diagnostics.iter().any(|message| {
-                message.contains("unresolved Java static")
-                    || message.contains("none of the following candidates is applicable")
-            }),
-            "{call}: {diagnostics:?}"
-        );
-    }
+    let stdlib = common::stdlib_jar();
+    let classpath = vec![java_classes, stdlib];
+    let source = "import fixtures.NumericApi\n\
+        fun box(): String {\n\
+        \x20 val operation: (Int) -> Int = { it + 1 }\n\
+        \x20 if (NumericApi.transform(1, operation) != 2) return \"static\"\n\
+        \x20 if (NumericApi().transformInstance(2, operation) != 3) return \"instance\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
+        .unwrap_or_else(|| {
+            panic!(
+                "compile function-value SAM adaptation: {:?}",
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
+            )
+        });
+    let output =
+        common::run_box(&classes, "MainKt", &classpath).expect("run function-value SAM adaptation");
     let _ = std::fs::remove_dir_all(temp_root);
+    assert_eq!(output.trim(), "OK");
 }
 
 #[test]

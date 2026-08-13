@@ -1917,19 +1917,6 @@ pub struct ResolvedSymbols {
     pub callables: Callables,
 }
 
-#[derive(Clone, Debug)]
-pub enum ValueIdentity {
-    Lexical,
-    ImplicitReceiver { receiver: Ty },
-    Symbol,
-}
-
-#[derive(Clone, Default)]
-pub struct ScopedSymbols {
-    pub records: Vec<std::rc::Rc<ResolvedSymbols>>,
-    pub value: Option<ValueIdentity>,
-}
-
 impl ResolvedSymbols {
     /// Nothing resolves this name (both namespaces empty).
     pub fn is_empty(&self) -> bool {

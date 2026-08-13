@@ -2321,7 +2321,12 @@ pub fn expect_box_ok_against(tag: &str, lib_src: &str, main: &str) {
         .unwrap_or_else(|| {
             let cp = [build.krusty_out().to_path_buf(), stdlib.clone()];
             let diagnostics = front_end_diagnostics(main, &cp, Some(jdk.as_path()));
-            panic!("{tag}: compile/run returned None; diagnostics: {diagnostics:?}")
+            let backend = diagnostics
+                .is_empty()
+                .then(|| backend_outcome_in_process(main, "Main", &cp, Some(jdk.as_path())));
+            panic!(
+                "{tag}: compile/run returned None; diagnostics: {diagnostics:?}; backend: {backend:?}"
+            )
         });
     assert_eq!(output, "OK", "{tag}");
 }

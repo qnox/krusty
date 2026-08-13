@@ -8,9 +8,7 @@
 //! was written in, and lowering carries each captured binding as a leading constructor parameter.
 //! The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in
 //! the chain — and is carried as one capture, first, since lowering identifies it by position.
-//! A reference that is not modelled yet (a local function, a reassigned `var`, or a capture read
-//! during construction) is rejected — the file skips rather than emitting a class without what it
-//! needs. Each test records the reference `kotlinc` (2.4.10) verdict.
+//! Each test records the reference `kotlinc` (2.4.10) verdict.
 
 use super::common;
 
@@ -116,12 +114,12 @@ fn a_captured_parameter_is_supplied_at_every_construction() {
     assert_eq!(run(SRC).expect("every construction supplies it"), "OK");
 }
 
-/// kotlinc: accepted — krusty limitation, the file skips.
+/// kotlinc: accepted.
 ///
 /// A captured `var` that is reassigned is shared MUTABLE state: copying it into the instance would
 /// freeze the value at construction, so only an effectively-immutable binding is captured.
 #[test]
-fn a_reassigned_captured_var_is_rejected() {
+fn a_reassigned_captured_var_is_shared() {
     const SRC: &str = "fun f(): String {\n\
         \x20   var captured = \"no\"\n\
         \x20   class L { fun read() = captured }\n\
@@ -129,24 +127,27 @@ fn a_reassigned_captured_var_is_rejected() {
         \x20   return L().read()\n\
         }\n\
         fun box(): String = f()\n";
-    assert_rejected(SRC);
+    assert_eq!(run(SRC).expect("reassigned capture is shared"), "OK");
 }
 
-/// kotlinc: accepted — krusty limitation, the file skips.
+/// kotlinc: accepted.
 ///
 /// The capture is read during CONSTRUCTION — here from a primary-constructor parameter default,
 /// which is evaluated in a synthetic constructor that carries no captures at all. Scanning only
 /// member bodies missed this, and the box corpus caught the miscompile
 /// (`localClasses/capturingInDefaultConstructorParameter.kt`).
 #[test]
-fn a_capture_in_a_constructor_parameter_default_is_rejected() {
+fn a_capture_is_available_in_a_constructor_parameter_default() {
     const SRC: &str = "fun f(): String {\n\
         \x20   val captured = \"OK\"\n\
         \x20   class L(val t: String = captured)\n\
         \x20   return L().t\n\
         }\n\
         fun box(): String = f()\n";
-    assert_rejected(SRC);
+    assert_eq!(
+        run(SRC).expect("constructor default captures its scope"),
+        "OK"
+    );
 }
 
 /// kotlinc: accepted.

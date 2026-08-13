@@ -237,16 +237,14 @@ fn kotlin_fun_interface_param_still_converts() {
 /// the exact selected SAM and lowering builds the forwarding wrapper from that handoff.
 #[test]
 fn function_value_into_java_sam_param_converts() {
-    common::expect_box_ok_with_stdlib(
-        "fun runIt(r: Runnable) { r.run() }\n\
+    const SOURCE: &str = "fun runIt(r: Runnable) { r.run() }\n\
          fun box(): String {\n\
          \x20 var result = \"fail\"\n\
          \x20 val f: () -> Unit = { result = \"OK\" }\n\
          \x20 runIt(f)\n\
          \x20 return result\n\
-         }\n",
-        "function_value_java_sam",
-    );
+         }\n";
+    common::expect_box_ok_with_stdlib(SOURCE, "function_value_java_sam");
 }
 
 /// Negative pin (kotlinc-pinned): a lambda matched against TWO same-arity Java-SAM overloads of
@@ -277,14 +275,22 @@ fn two_sam_overload_top_level_lambda_is_ambiguous() {
 /// diagnostic lists the two candidates with their distinct parameter types.
 #[test]
 fn two_sam_overload_member_lambda_is_ambiguous() {
-    let diags = diagnostics(
-        "import java.util.function.Consumer\n\
+    const SOURCE: &str = "import java.util.function.Consumer\n\
          class M {\n\
          \x20 fun perform(c: Consumer<String>): String = \"consumer\"\n\
          \x20 fun perform(r: Runnable): String = \"runnable\"\n\
          }\n\
-         fun box(): String = M().perform { }\n",
+         fun box(): String = M().perform { }\n";
+    let Some((reference_code, reference_stderr)) =
+        common::kotlinc_source_result("member_sam_ambiguity_reference", SOURCE)
+    else {
+        return;
+    };
+    assert_ne!(
+        reference_code, 0,
+        "kotlinc accepted fixture: {reference_stderr}"
     );
+    let diags = diagnostics(SOURCE);
     assert!(
         diags
             .iter()

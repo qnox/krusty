@@ -1682,6 +1682,22 @@ impl JvmLibraries {
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
                 if let Some(declaration) = declaration {
+                    crate::trace_compiler!(
+                        "member_slots",
+                        "classifier metadata callable owner={internal_name:?} source={} jvm={} value_params={:?} context_params={:?}",
+                        declaration.kotlin_name,
+                        declaration.jvm_name,
+                        declaration
+                            .value_params
+                            .iter()
+                            .map(|parameter| parameter.name.as_str())
+                            .collect::<Vec<_>>(),
+                        declaration
+                            .context_params
+                            .iter()
+                            .map(|parameter| parameter.name.as_str())
+                            .collect::<Vec<_>>(),
+                    );
                     let Some(signature) = declaration.generic_sig.clone() else {
                         crate::trace_compiler!(
                             "metadata_missing_type",
@@ -3753,6 +3769,18 @@ impl JvmLibraries {
                     let receiver = Ty::obj_name(internal_name);
                     for name in self.member_scope_names(internal_name, &classifier) {
                         let declarations = self.declared_callables_for(receiver, &name);
+                        crate::trace_compiler!(
+                            "member_slots",
+                            "classifier callable record owner={internal_name:?} name={name} members={:?}",
+                            declarations
+                                .functions()
+                                .iter()
+                                .map(|function| (
+                                    function.callable.name.as_str(),
+                                    function.call_sig.param_names.as_slice(),
+                                ))
+                                .collect::<Vec<_>>(),
+                        );
                         if !matches!(declarations, crate::libraries::Callables::None) {
                             classifier.declared_callables.insert(name, declarations);
                         }

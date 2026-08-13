@@ -54,10 +54,7 @@ fun box(): String {\n\
     }\n\
     return if (map[1] == 1) \"OK\" else \"FAIL\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("buildMap put statement compiles + runs"),
-        "OK"
-    );
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }
 
 #[test]

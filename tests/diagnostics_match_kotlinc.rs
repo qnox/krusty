@@ -305,6 +305,9 @@ fn errors_match_kotlinc_in_text_and_location() {
         "fun f(p: Any) = p is Array<Nothing>",
         "fun f(p: Any) = p as Array",
         "fun f(p: Any) = p as Array<Nothing>",
+        // Two unrelated final classifiers have no possible runtime overlap, so the cast is an
+        // error rather than bytecode that can only fail. Keep this in exact kotlinc parity coverage.
+        "fun box(): String { val s = 1 as String; return s }",
         // Casts permit an erased function shape, so an unresolved parameter remains the primary
         // diagnostic. (`is` is different and is pinned by the unsupported-shape test below.)
         "fun f(p: Any) = p as (DefinitelyAbsentClassifier) -> String",

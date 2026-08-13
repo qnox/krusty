@@ -1902,6 +1902,44 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &std::collections::HashMap<St
     }
 }
 
+/// Replace declaration-local type-parameter identities throughout a semantic type, including the
+/// inline upper bounds carried by nested `TyParam` nodes. Renaming only the outer occurrence leaves
+/// chains such as `D : B, B : A` partly keyed by source spelling and breaks bound member lookup.
+pub(crate) fn ty_rename_params(
+    ty: Ty,
+    identities: &std::collections::HashMap<&str, &'static str>,
+) -> Ty {
+    match ty {
+        Ty::TyParam(name, bound) => Ty::ty_param(
+            identities.get(name).copied().unwrap_or(name),
+            ty_rename_params(*bound, identities),
+        ),
+        Ty::Fun(signature) => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|parameter| ty_rename_params(*parameter, identities))
+                .collect(),
+            ty_rename_params(signature.ret, identities),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
+        Ty::Nullable(inner) => Ty::nullable(ty_rename_params(*inner, identities)),
+        Ty::PlatformNullable(inner) => Ty::platform_nullable(ty_rename_params(*inner, identities)),
+        Ty::InProjection(inner) => Ty::in_projection(ty_rename_params(*inner, identities)),
+        Ty::OutProjection(inner) => Ty::out_projection(ty_rename_params(*inner, identities)),
+        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            name,
+            &arguments
+                .iter()
+                .map(|argument| ty_rename_params(*argument, identities))
+                .collect::<Vec<_>>(),
+        ),
+        _ => ty,
+    }
+}
+
 pub(crate) fn ty_subst_keep_unbound(
     ty: Ty,
     bindings: &std::collections::HashMap<String, Ty>,

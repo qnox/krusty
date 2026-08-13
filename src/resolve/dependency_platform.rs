@@ -203,20 +203,6 @@ fn merge_functions(
     primary
 }
 
-fn public_functions(mut functions: FunctionSet) -> FunctionSet {
-    functions
-        .overloads
-        .retain(|function| function.visibility == Visibility::Public);
-    functions
-}
-
-fn public_properties(mut properties: PropertySet) -> PropertySet {
-    properties
-        .overloads
-        .retain(|property| property.visibility == Visibility::Public);
-    properties
-}
-
 fn merge_properties(
     platform: &dyn SemanticPlatform,
     mut primary: PropertySet,
@@ -288,16 +274,8 @@ fn merge_type(
         primary.declared_callables.insert(
             name,
             Callables::from_parts(
-                merge_functions(
-                    platform,
-                    primary_functions,
-                    public_functions(source_functions),
-                ),
-                merge_properties(
-                    platform,
-                    primary_properties,
-                    public_properties(source_properties),
-                ),
+                merge_functions(platform, primary_functions, source_functions),
+                merge_properties(platform, primary_properties, source_properties),
             ),
         );
     }
@@ -355,15 +333,11 @@ impl SymbolSource for DependencyPlatform {
             classifier_name: primary.classifier_name.or(source.classifier_name),
             classifier,
             callables: Callables::from_parts(
-                merge_functions(
-                    self.platform.as_ref(),
-                    primary_functions,
-                    public_functions(source_functions),
-                ),
+                merge_functions(self.platform.as_ref(), primary_functions, source_functions),
                 merge_properties(
                     self.platform.as_ref(),
                     primary_properties,
-                    public_properties(source_properties),
+                    source_properties,
                 ),
             ),
         });
@@ -699,5 +673,36 @@ mod tests {
             merged.overloads[0].getter.origin,
             Origin::Module { .. }
         ));
+    }
+
+    #[test]
+    fn dependency_projection_preserves_protected_members_for_core_access_checks() {
+        let owner = crate::types::type_name("demo/Base");
+        let mut classifier = type_shape(true);
+        let mut member =
+            LibraryMember::new("secret".to_string(), Vec::new(), Ty::Int, "()I".to_string());
+        member.owner = Some(owner);
+        member.visibility = Visibility::Protected;
+        classifier.members.push(member.clone());
+
+        let mut function = crate::libraries::FunctionInfo::classifier_member(
+            crate::libraries::FnKind::Member,
+            owner,
+            member,
+        );
+        function.visibility = Visibility::Protected;
+        let callables = Callables::Functions(FunctionSet {
+            overloads: vec![function],
+        });
+        classifier
+            .declared_callables
+            .insert("secret".to_string(), callables);
+        let merged = merge_type(&TypeVisibility::default(), type_shape(true), classifier);
+        assert_eq!(merged.members.len(), 1);
+        assert_eq!(merged.members[0].visibility, Visibility::Protected);
+        assert_eq!(
+            merged.declared_callables["secret"].functions()[0].visibility,
+            Visibility::Protected
+        );
     }
 }

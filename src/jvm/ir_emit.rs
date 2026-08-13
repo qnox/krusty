@@ -680,7 +680,7 @@ fn build_class_metadata(
         })
         .collect();
     props.extend(c.properties.iter().filter_map(|property| {
-        if property.backing_field.is_some() {
+        if c.fields.iter().any(|field| field.name == property.name) {
             return None;
         }
         let visibility = property_visibility(ir, &c.fq_name(), &property.name);
@@ -6855,6 +6855,10 @@ fn jvm_type_params(g: &crate::ir::IrGenericSig) -> Option<String> {
     let mut s = String::from("<");
     for parameter in &g.type_params {
         s.push_str(&parameter.name);
+        if parameter.bounds.is_empty() {
+            s.push_str(":Ljava/lang/Object;");
+            continue;
+        }
         let bounds = parameter.bounds.iter();
         if bounds.clone().all(|(_, is_interface)| *is_interface) {
             s.push(':');

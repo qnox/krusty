@@ -25,7 +25,7 @@ const LIB: &str = r#"
     // Same SOURCE name and arity, but a distinct JVM spelling and unrelated generic return. A
     // `$default` synthetic must recover metadata from its exact base, not this same-arity sibling.
     @JvmName("alternateDescribe")
-    fun <U> describe(value: Int = 0, marker: Long = 0): U? = null
+    fun <U> describe(value: Int, marker: Long = 0): U? = null
 
     inline fun <reified T : Any> isA(value: Any): Boolean = value is T
 "#;

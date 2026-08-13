@@ -277,7 +277,19 @@ impl<'a> ModuleSymbols<'a> {
                 )
             })
             .collect::<Vec<_>>();
-        if let Some(s) = c.super_internal {
+        let enum_entries = self.syms.enum_entries_of(c.internal_name()).cloned();
+        if enum_entries.is_some() {
+            // An enum's implicit superclass is the applied Kotlin declaration `Enum<Self>`.
+            // Keep that semantic argument in the common class model so inherited members such as
+            // `compareTo(other: E)` are specialized from the receiver like every generic member.
+            // The backend independently maps this declaration to its platform representation.
+            let enum_type = crate::types::type_name("kotlin/Enum");
+            supertypes.push(enum_type);
+            supertype_templates.push(Ty::obj_args_name(
+                enum_type,
+                &[Ty::obj_name(c.internal_name())],
+            ));
+        } else if let Some(s) = c.super_internal {
             supertypes.push(s);
             supertype_templates.push(Ty::obj_args_name(s, &c.super_type_args));
         } else if c.internal_name() != crate::types::wk::any() {
@@ -288,7 +300,6 @@ impl<'a> ModuleSymbols<'a> {
             supertypes.push(crate::types::wk::any());
             supertype_templates.push(Ty::obj_name(crate::types::wk::any()));
         }
-        let enum_entries = self.syms.enum_entries_of(c.internal_name()).cloned();
         let kind = if c.is_annotation() {
             crate::libraries::TypeKind::Annotation
         } else if c.is_object() {

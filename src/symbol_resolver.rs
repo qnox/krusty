@@ -53,6 +53,65 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
     direct_supertypes_from_classifier(&classifier, ty)
 }
 
+/// Apply a runtime subtype named without arguments to the generic arguments already known on one of
+/// its supertypes. A smart cast from `Opt<T>` to source spelling `Sm` denotes `Sm<T>` when
+/// `Sm<X> : Opt<X>`; keeping `Sm` raw would erase reads of `Sm.value` to `Any`.
+pub(crate) fn apply_subtype_arguments_from_supertype(
+    source: &dyn SymbolSource,
+    subtype: Ty,
+    supertype: Ty,
+) -> Ty {
+    if !subtype.type_args().is_empty() || supertype.type_args().is_empty() {
+        return subtype;
+    }
+    let Some(subtype_name) = subtype.kotlin_class_internal() else {
+        return subtype;
+    };
+    let Some(classifier) = source.classifier(subtype_name) else {
+        return subtype;
+    };
+    if classifier.type_params.is_empty() {
+        return subtype;
+    }
+    let symbolic_args = classifier
+        .type_params
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            Ty::ty_param(
+                name,
+                classifier
+                    .type_param_bounds
+                    .get(index)
+                    .and_then(|bounds| bounds.first())
+                    .copied()
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
+            )
+        })
+        .collect::<Vec<_>>();
+    let symbolic_subtype = Ty::obj_args_name(subtype_name, &symbolic_args);
+    let Some(applied_supertype) = receiver_hierarchy(source, symbolic_subtype)
+        .into_iter()
+        .map(|(candidate, _)| candidate)
+        .find(|candidate| candidate.kotlin_class_internal() == supertype.kotlin_class_internal())
+    else {
+        return subtype;
+    };
+    let mut bindings = GSigBinds::new();
+    unify_ty_from_symbols(source, applied_supertype, supertype, &mut bindings);
+    let arguments = symbolic_args
+        .iter()
+        .map(|argument| ty_subst_keep_unbound(*argument, &bindings))
+        .collect::<Vec<_>>();
+    if arguments.iter().zip(&classifier.type_params).all(
+        |(argument, formal)| !matches!(argument, Ty::TyParam(identity, _) if identity == formal),
+    ) {
+        Ty::obj_args_name(subtype_name, &arguments)
+    } else {
+        subtype
+    }
+}
+
 fn direct_supertypes_from_classifier(
     classifier: &crate::libraries::LibraryType,
     ty: Ty,
@@ -327,6 +386,30 @@ fn specialize_member_type(
         }
         _ => ty,
     }
+}
+
+pub(crate) fn specialize_signature_input_type(
+    source: &dyn SymbolSource,
+    ty: Ty,
+    bindings: &GSigBinds,
+) -> Ty {
+    specialize_member_type(source, ty, bindings, TypePosition::In)
+}
+
+pub(crate) fn specialize_signature_output_type(
+    source: &dyn SymbolSource,
+    ty: Ty,
+    bindings: &GSigBinds,
+) -> Ty {
+    specialize_member_type(source, ty, bindings, TypePosition::Out)
+}
+
+pub(crate) fn specialize_signature_receiver_type(
+    source: &dyn SymbolSource,
+    ty: Ty,
+    bindings: &GSigBinds,
+) -> Ty {
+    specialize_member_type(source, ty, bindings, TypePosition::Invariant)
 }
 
 fn specialize_callable(
@@ -1706,6 +1789,7 @@ pub(crate) fn generic_bindings_satisfy_bounds(
             let Some(actual) = bindings.get(formal).copied() else {
                 return true;
             };
+            let actual = actual.projection_inner().unwrap_or(actual);
             bounds
                 .iter()
                 .all(|bound| admits(actual, ty_subst(*bound, &bindings)))
@@ -2400,9 +2484,27 @@ pub(crate) fn sam_arg_matches(
     let Some(arg_ret) = arg.fun_ret() else {
         return false;
     };
-    sam.ret == Ty::Unit
-        || matches!(arg_ret, Ty::Error | Ty::Nothing)
-        || platform_arg_assignable(lib, &sam.ret, &arg_ret)
+    sam_return_matches(lib, src, sam.ret, arg_ret)
+}
+
+pub(crate) fn sam_return_matches(
+    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
+    expected: Ty,
+    actual: Ty,
+) -> bool {
+    if expected == Ty::Unit || matches!(actual, Ty::Error | Ty::Nothing) {
+        return true;
+    }
+    // A method-owned result formal is intentionally still open while overload applicability is
+    // decided. Its lambda result constrains that formal after selection; at this stage only the
+    // declared upper bound can reject the candidate.
+    let expected = match expected {
+        Ty::TyParam(_, bound) => *bound,
+        expected => expected,
+    };
+    platform_arg_assignable(lib, &expected, &actual)
+        || source_arg_assignable(src, &expected, &actual)
 }
 
 fn arg_fits_platform(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
@@ -3664,8 +3766,9 @@ impl<'a> SymbolResolver<'a> {
                 property.getter.ret = ty;
                 crate::trace_compiler!(
                     "resolve",
-                    "member property selected receiver={current:?} owner={} name={name} ty={ty:?}",
+                    "member property selected receiver={current:?} owner={} name={name} ty={ty:?} visibility={:?}",
                     property.owner,
+                    property.visibility,
                 );
                 let interface = self
                     .src
@@ -4927,14 +5030,6 @@ fn platform_subtype(lib: &dyn SemanticPlatform, sub: Ty, sup: Ty) -> bool {
     )
 }
 
-pub(crate) fn apply_platform_parameter_nullability(
-    params: Vec<Ty>,
-    nullable: &[bool],
-    args: &[Ty],
-) -> Vec<Ty> {
-    apply_platform_call_parameter_nullability(params, nullable, args, false)
-}
-
 pub(crate) fn apply_platform_call_parameter_nullability(
     mut params: Vec<Ty>,
     nullable: &[bool],
@@ -5368,6 +5463,9 @@ pub struct ResolvedMember {
     /// Declaration/ABI parameter types before call-site generic substitution. Checking uses
     /// `member.params`; module linking and argument realization use this parallel physical shape.
     pub physical_params: Vec<Ty>,
+    /// One entry per leading context parameter. `Some` is supplied from scope; `None` is an
+    /// explicitly named source argument. Ordinary members have an empty vector.
+    pub context_args: Vec<Option<crate::resolve::ResolvedContextArgument>>,
     pub ret: Ty,
     pub projected_return_hazard: bool,
     /// The resolved member is a `suspend fun` — the caller (a suspend body) must thread a
@@ -5392,6 +5490,7 @@ impl ResolvedMember {
             receiver,
             member,
             physical_params,
+            context_args: Vec::new(),
             ret,
             projected_return_hazard,
             suspend,
@@ -5429,6 +5528,7 @@ impl ResolvedMember {
             receiver,
             member,
             physical_params,
+            context_args: Vec::new(),
             ret,
             projected_return_hazard,
             suspend,
@@ -5477,6 +5577,7 @@ fn resolved_member_from_info(
         ret,
         member,
         physical_params: o.callable.physical_params.clone(),
+        context_args: Vec::new(),
         projected_return_hazard: o.projected_return_hazard,
         suspend: o.flags.suspend,
         origin: o.callable.origin.clone(),
@@ -5518,6 +5619,7 @@ fn member_property_read_from_declaration(
         ret: declaration.ty,
         member,
         physical_params,
+        context_args: Vec::new(),
         projected_return_hazard: false,
         suspend: callable.suspend,
         origin: callable.origin,
@@ -5587,6 +5689,14 @@ fn receiver_type_args_match(src: &dyn SymbolSource, decl_recv: Ty, recv: Ty) -> 
     // Kotlin, but here `Any` stands for the erased variable, not the type `Any`).
     let cx = crate::assignable::TyCtx::new();
     let oracle = SourceOracle(src);
+    if decl_recv.mentions_ty_param() {
+        let mut bindings = GSigBinds::new();
+        unify_ty_from_symbols(src, decl_recv, recv, &mut bindings);
+        let specialized = ty_subst_keep_unbound(decl_recv, &bindings);
+        if !specialized.mentions_ty_param() {
+            return crate::assignable::is_assignable(&cx, &oracle, recv, specialized);
+        }
+    }
     let wildcard = |t: Ty| {
         let t = t.projection_inner().unwrap_or(t);
         t.is_ty_param()
@@ -6503,6 +6613,22 @@ fn logical_call_params(
 /// class passed where a library member expects its (library) supertype — `class V : Thread()` into
 /// `take(Thread)` — is invisible to the platform oracle, which only walks classpath supertypes.
 fn source_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool {
+    if let Ty::TyParam(_, bound) = param.non_null() {
+        if *arg == Ty::Null && (param.is_nullable() || bound.is_nullable()) {
+            return true;
+        }
+        let expected = if param.is_nullable() {
+            Ty::nullable(*bound)
+        } else {
+            *bound
+        };
+        return crate::assignable::is_assignable(
+            &crate::assignable::TyCtx::new(),
+            &SourceOracle(src),
+            *arg,
+            expected,
+        );
+    }
     crate::assignable::is_assignable(
         &crate::assignable::TyCtx::new(),
         &SourceOracle(src),
@@ -6512,6 +6638,22 @@ fn source_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool {
 }
 
 fn platform_arg_assignable(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
+    if let Ty::TyParam(_, bound) = param.non_null() {
+        if *arg == Ty::Null && (param.is_nullable() || bound.is_nullable()) {
+            return true;
+        }
+        let expected = if param.is_nullable() {
+            Ty::nullable(*bound)
+        } else {
+            *bound
+        };
+        return crate::assignable::is_assignable(
+            &crate::assignable::TyCtx::new(),
+            &PlatformOracle(lib),
+            *arg,
+            expected,
+        );
+    }
     (*arg == Ty::Null && param.is_reference())
         || crate::assignable::is_assignable(
             &crate::assignable::TyCtx::new(),
@@ -6902,6 +7044,7 @@ mod tests {
 
     struct EmptySource;
     impl SymbolSource for EmptySource {}
+    impl SemanticPlatform for EmptySource {}
     const EMPTY_SOURCE: EmptySource = EmptySource;
 
     #[test]
@@ -7087,6 +7230,17 @@ mod tests {
             infer_generic_bindings(&signature, [(0, Ty::Null), (1, binding)]).get("T"),
             Some(&binding)
         );
+    }
+
+    #[test]
+    fn null_is_assignable_to_a_nullable_type_parameter_with_a_non_null_bound() {
+        let parameter = Ty::nullable(Ty::ty_param("T", Ty::obj("kotlin/Any")));
+        assert!(source_arg_assignable(&EMPTY_SOURCE, &parameter, &Ty::Null));
+        assert!(platform_arg_assignable(
+            &EMPTY_SOURCE,
+            &parameter,
+            &Ty::Null
+        ));
     }
 
     #[test]

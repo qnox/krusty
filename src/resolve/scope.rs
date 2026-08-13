@@ -103,7 +103,7 @@ pub(crate) enum Ns {
 
 pub(crate) enum RootValue<B> {
     Binding(B),
-    Receiver(Ty),
+    Receiver,
     External,
 }
 
@@ -125,15 +125,17 @@ pub(crate) enum ContextValue {
 
 struct ScopedReceiver {
     ty: Ty,
+    identity: (usize, usize),
     extension_declaration: Option<Span>,
     context_name: Option<String>,
     context_shadow_depth: usize,
 }
 
 impl ScopedReceiver {
-    fn plain(ty: Ty) -> Self {
+    fn plain(ty: Ty, identity: (usize, usize)) -> Self {
         Self {
             ty,
+            identity,
             extension_declaration: None,
             context_name: None,
             context_shadow_depth: 0,
@@ -332,13 +334,13 @@ impl<'p, B> Scope<'p, B> {
                 ScopeKind::Function {
                     receiver: Some(receiver),
                 } if receiver_has_value(receiver) => {
-                    return Some(RootValue::Receiver(receiver));
+                    return Some(RootValue::Receiver);
                 }
                 ScopeKind::Class {
                     ty, carries_outer, ..
                 } => {
                     if receiver_has_value(ty) {
-                        return Some(RootValue::Receiver(ty));
+                        return Some(RootValue::Receiver);
                     }
                     if !carries_outer {
                         break;
@@ -349,7 +351,7 @@ impl<'p, B> Scope<'p, B> {
             if matches!(rung.kind, ScopeKind::Function { .. }) {
                 for (receiver, _) in rung.context_receivers.iter().rev() {
                     if receiver_has_value(*receiver) {
-                        return Some(RootValue::Receiver(*receiver));
+                        return Some(RootValue::Receiver);
                     }
                 }
             }
@@ -364,22 +366,6 @@ impl<'p, B> Scope<'p, B> {
             .borrow()
             .iter()
             .any(|b| b.ns == ns && b.name == name)
-    }
-
-    /// Remove and return a binding THIS scope introduced. Used to HIDE a binding for the duration
-    /// of a nested resolution (a class property that would otherwise shadow an extension receiver);
-    /// the caller re-binds it afterwards.
-    ///
-    /// Deliberately this rung only, not the chain: the restore is a [`Self::rebind`] on some named
-    /// scope, and taking from an ancestor would put the binding back on a DIFFERENT rung than it
-    /// came from — silently changing what `declared_here` reports and where
-    /// [`Self::narrow_local`]'s invalidation stops.
-    pub(crate) fn take_own_binding(&self, name: &str, ns: Ns) -> Option<B> {
-        let mut bindings = self.bindings.borrow_mut();
-        let at = bindings
-            .iter()
-            .rposition(|b| b.ns == ns && b.name == name)?;
-        Some(bindings.remove(at).payload)
     }
 
     /// Every live binding in the chain, innermost scope first. Used by capture discovery, which
@@ -519,10 +505,18 @@ impl<'p, B> Scope<'p, B> {
 
     /// Implicit receivers paired with the extension declaration, if any, that introduced their
     /// runtime value. Ordering is identical to [`Self::implicit_receivers`].
-    pub(crate) fn implicit_receivers_with_declarations(&self) -> Vec<(Ty, Option<Span>)> {
+    pub(crate) fn implicit_receivers_with_declarations(
+        &self,
+    ) -> Vec<(Ty, Option<Span>, (usize, usize))> {
         self.implicit_receiver_values()
             .into_iter()
-            .map(|receiver| (receiver.ty, receiver.extension_declaration))
+            .map(|receiver| {
+                (
+                    receiver.ty,
+                    receiver.extension_declaration,
+                    receiver.identity,
+                )
+            })
             .collect()
     }
 
@@ -532,6 +526,7 @@ impl<'p, B> Scope<'p, B> {
         let push = |out: &mut Vec<ScopedReceiver>,
                     same_name_depths: &mut HashMap<String, usize>,
                     ty,
+                    identity,
                     context_name: Option<String>,
                     extension_declaration: Option<Span>| {
             let context_shadow_depth = context_name
@@ -544,12 +539,14 @@ impl<'p, B> Scope<'p, B> {
                 .unwrap_or(0);
             out.push(ScopedReceiver {
                 ty,
+                identity,
                 extension_declaration,
                 context_name,
                 context_shadow_depth,
             });
         };
         for scope in self.ancestors() {
+            let scope_identity = scope as *const Self as usize;
             if !matches!(scope.kind, ScopeKind::Function { .. }) {
                 for binding in scope.bindings.borrow().iter().rev() {
                     if binding.ns == Ns::Value {
@@ -565,6 +562,7 @@ impl<'p, B> Scope<'p, B> {
                         &mut out,
                         &mut same_name_depths,
                         receiver,
+                        (scope_identity, 0),
                         scope.current_receiver_name.clone(),
                         scope.extension_receiver_declaration,
                     );
@@ -572,7 +570,7 @@ impl<'p, B> Scope<'p, B> {
                 ScopeKind::Class {
                     ty, carries_outer, ..
                 } => {
-                    out.push(ScopedReceiver::plain(ty));
+                    out.push(ScopedReceiver::plain(ty, (scope_identity, 0)));
                     if !carries_outer {
                         break;
                     }
@@ -584,11 +582,12 @@ impl<'p, B> Scope<'p, B> {
                 if let Some(name) = scope.current_receiver_name.as_ref() {
                     *receiver_binding_counts.entry(name.clone()).or_default() += 1;
                 }
-                for (ty, name) in scope.context_receivers.iter().rev() {
+                for (index, (ty, name)) in scope.context_receivers.iter().rev().enumerate() {
                     push(
                         &mut out,
                         &mut same_name_depths,
                         *ty,
+                        (scope_identity, index + 1),
                         Some(name.clone()),
                         None,
                     );
@@ -624,20 +623,29 @@ impl<'p, B> Scope<'p, B> {
     /// a binding on the current rung wins there, while a nearer extension/receiver-lambda receiver
     /// wins over a binding on an outer rung. This projection lets the checker query receiver members
     /// before committing the ordinary chain-wide binding lookup without copying scope traversal.
-    pub(crate) fn implicit_receivers_before_binding(&self, name: &str, ns: Ns) -> Vec<Ty> {
+    pub(crate) fn implicit_receiver_identities_before_binding(
+        &self,
+        name: &str,
+        ns: Ns,
+    ) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
         for scope in self.ancestors() {
+            let scope_identity = scope as *const Self as usize;
             if scope.declared_here(name, ns) {
                 break;
             }
             match scope.kind {
                 ScopeKind::Function {
                     receiver: Some(receiver),
-                } => out.push(receiver),
+                } => {
+                    let _ = receiver;
+                    out.push((scope_identity, 0));
+                }
                 ScopeKind::Class {
                     ty, carries_outer, ..
                 } => {
-                    out.push(ty);
+                    let _ = ty;
+                    out.push((scope_identity, 0));
                     if !carries_outer {
                         break;
                     }
@@ -645,10 +653,27 @@ impl<'p, B> Scope<'p, B> {
                 _ => {}
             }
             if matches!(scope.kind, ScopeKind::Function { .. }) {
-                out.extend(scope.context_receivers.iter().rev().map(|(ty, _)| *ty));
+                out.extend(
+                    scope
+                        .context_receivers
+                        .iter()
+                        .rev()
+                        .enumerate()
+                        .map(|(index, _)| (scope_identity, index + 1)),
+                );
             }
         }
         out
+    }
+
+    #[cfg(test)]
+    pub(crate) fn implicit_receivers_before_binding(&self, name: &str, ns: Ns) -> Vec<Ty> {
+        let identities = self.implicit_receiver_identities_before_binding(name, ns);
+        self.implicit_receiver_values()
+            .into_iter()
+            .filter(|receiver| identities.contains(&receiver.identity))
+            .map(|receiver| receiver.ty)
+            .collect()
     }
 
     /// The type a bare `this` denotes.
@@ -892,25 +917,6 @@ mod tests {
             Some(7),
             "the file rung is consulted past the cut"
         );
-    }
-
-    #[test]
-    fn take_own_binding_does_not_reach_into_an_enclosing_rung() {
-        // The restore is a `rebind` on some NAMED scope, so taking from an ancestor would put the
-        // binding back on a different rung than it came from — silently moving what
-        // `declared_here` reports and where `narrow_local`'s invalidation stops.
-        let root: Scope<'_, u32> = Scope::root();
-        let outer = root.child(ScopeKind::Function { receiver: None });
-        outer.rebind("x", Ns::Value, 1);
-        let inner = outer.child(ScopeKind::Block);
-
-        assert_eq!(inner.take_own_binding("x", Ns::Value), None);
-        assert!(
-            outer.declared_here("x", Ns::Value),
-            "the enclosing rung keeps its binding"
-        );
-        assert_eq!(outer.take_own_binding("x", Ns::Value), Some(1));
-        assert!(!outer.declared_here("x", Ns::Value));
     }
 
     #[test]

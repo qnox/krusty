@@ -2362,6 +2362,10 @@ fn lower_file_at_reporting_impl(
                     param_checks: vec![],
                 });
                 lo.computed_props.insert(p.name.clone(), (fid, ty));
+                // The checker identifies every source property by its declaration key. Publish the
+                // delegated accessor through that same table as ordinary computed properties; name
+                // lookup remains only the registration convenience for legacy internal callers.
+                lo.source_property_accessors.insert(d, (fid, None));
                 let d_ty = p.delegate.map(|de| info.ty(de)).unwrap_or(Ty::Error);
                 let d_idx = static_base + lo.statics.len() as u32;
                 lo.statics
@@ -7490,33 +7494,34 @@ impl<'a> Lower<'a> {
         let interface = member.is_interface();
         let vararg_index = member.call_sig.vararg_index;
         let suspend = resolved.suspend;
-        let context_args = self
-            .info
-            .context_args
-            .get(&call_expr)
-            .cloned()
-            .unwrap_or_default();
-        let context_count = context_args.len();
-        let value_params = params.get(context_count..)?;
-        let physical_value_params = physical_params.get(context_count..)?;
-        let value_vararg_index = vararg_index.and_then(|index| index.checked_sub(context_count));
+        let context_args = &resolved.context_args;
+        let slots = if context_args.is_empty() {
+            None
+        } else {
+            Some(self.full_context_call_slots(call_expr, context_args, params.len())?)
+        };
         // Resolve source arguments to semantic slots once. This is also where an omitted vararg becomes
         // its typed empty array, so every emission branch (linked, direct, or `$default`) observes the
         // same argument realization and only genuine defaulted slots remain `None`.
-        let (value_args, mut prelude) = self.lower_selected_module_member_args(
+        let (mut provided, mut prelude) = self.lower_selected_module_member_args(
             call_expr,
             args,
-            value_params,
-            physical_value_params,
-            value_vararg_index,
-            None,
+            params,
+            physical_params,
+            vararg_index,
+            slots,
         )?;
-        let mut provided = self
-            .lower_context_argument_values(&context_args, &params[..context_count])?
-            .into_iter()
-            .map(Some)
-            .collect::<Vec<_>>();
-        provided.extend(value_args);
+        for (parameter, source) in context_args.iter().enumerate() {
+            let Some(source) = source else {
+                continue;
+            };
+            let value = self.lower_context_argument_value(source, params[parameter])?;
+            provided[parameter] = Some(self.coerce_argument_value(
+                value,
+                params[parameter],
+                ty_to_ir(physical_params[parameter]),
+            )?);
+        }
         if let Some((class, index, _fid, linked_ret)) =
             self.link_local_method(&owner.render(), name, physical_params)
         {
@@ -9775,14 +9780,8 @@ impl<'a> Lower<'a> {
             let inline_b = self.emit_block(inline_stmts, Some(unit));
             (ty_to_ir(stored_value_ty(Ty::Unit)), b, inline_b)
         } else {
-            let ret_val = if lambda_ret.is_reference()
-                && !matches!(lambda_ret, Ty::Null)
-                && !lambda_ret.is_erased_top()
-            {
-                self.emit_type_op(IrTypeOp::Cast, ve, ty_to_ir(lambda_ret))
-            } else {
-                ve
-            };
+            let ret_val =
+                self.coerce_argument_value(ve, self.info.semantic_ty(body), ty_to_ir(lambda_ret))?;
             let (method_ret, function_value) = (lambda_ret, ret_val);
             let ret = self.emit_return(Some(function_value));
             let mut method_stmts = function_param_prelude.clone();
@@ -14250,15 +14249,11 @@ impl<'a> Lower<'a> {
                 if inline.must_inline() {
                     return None;
                 }
-                // The recorded receiver matches the call site directly, or in its NON-NULL form
-                // (a safe call records the non-null receiver — and a nullable PRIMITIVE keys
-                // apart from the unboxed one under `erased_recv`, so compare both ways). The
-                // argument coercion below still uses the real `recv_ty` (unboxing the boxed
-                // receiver when needed).
-                if target != name
-                    || (receiver.erased_recv() != recv_ty.erased_recv()
-                        && receiver.erased_recv() != recv_ty.non_null().erased_recv())
-                {
+                // Receiver applicability was decided by the checker. The selected declaration may
+                // name a supertype (`fun A.test()` called on `B`), so comparing it with the call-site
+                // type here would both duplicate resolution and reject valid calls. Lowering only
+                // realizes that semantic handoff at the declaration's physical receiver boundary.
+                if target != name {
                     return None;
                 }
                 let exact_local = source
@@ -14318,7 +14313,7 @@ impl<'a> Lower<'a> {
                         None => return None,
                     };
                     let receiver_value =
-                        self.spill_receiver_before_args(receiver_value, recv_ty, &mut prelude);
+                        self.spill_receiver_before_args(receiver_value, params[0], &mut prelude);
                     let mut lowered = vec![receiver_value];
                     lowered.extend(context_values);
                     lowered.extend(arguments);
@@ -15945,7 +15940,7 @@ impl<'a> Lower<'a> {
                 let (slot, _) = self.lookup(name)?;
                 Some(self.emit_get_value(slot))
             }
-            ReceiverFnValueOrigin::DispatchProperty(owner) => {
+            ReceiverFnValueOrigin::DispatchProperty { owner, .. } => {
                 let receiver = self.receiver_fn_dispatch_value(owner)?;
                 // A synthesized class (an anonymous object capturing a receiver lambda) has no tracked
                 // declaration; its captured field carries the type.
@@ -19966,6 +19961,17 @@ impl<'a> Lower<'a> {
         if member.is_some() && f.receiver.is_some() {
             return None;
         }
+        let context_args = if let Some(target) = module_target {
+            target.context_args.clone()
+        } else if let Some(ResolvedCall::Member(target)) = member_target {
+            target.context_args.clone()
+        } else {
+            Vec::new()
+        };
+        if context_args.len() != f.context_count || context_args.iter().any(Option::is_none) {
+            return None;
+        }
+        let context_count = context_args.len();
         // The extension receiver type (`inline fun String.foo()` → `String`), or `None` for a plain fn.
         // A GENERIC receiver (`<T> T.foo()`) is specialized to the ACTUAL receiver's type at the call site.
         let recv_ty = if let Some(member) = member.as_ref() {
@@ -19995,16 +20001,17 @@ impl<'a> Lower<'a> {
         // The vararg need not be LAST: `inline fun pick(vararg xs: Int, f: (Int) -> Boolean)` is the
         // idiomatic shape for a trailing lambda after a vararg. Parameters AFTER it are supplied
         // positionally at the END of the argument list, so the vararg takes the middle span.
-        let has_default = f.params.iter().any(|p| p.default.is_some());
-        let vararg_index = f.params.iter().position(|p| p.is_vararg);
+        let value_declarations = &f.params[context_count..];
+        let has_default = value_declarations.iter().any(|p| p.default.is_some());
+        let vararg_index = value_declarations.iter().position(|p| p.is_vararg);
         let vararg = vararg_index.is_some();
         // Parameters declared after the vararg — bound from the TAIL of the argument list.
-        let n_after = vararg_index.map_or(0, |vi| f.params.len() - vi - 1);
+        let n_after = vararg_index.map_or(0, |vi| value_declarations.len() - vi - 1);
         if has_default && vararg {
             return None;
         }
         if let Some(vi) = vararg_index {
-            let vp = &f.params[vi];
+            let vp = &value_declarations[vi];
             let is_tparam = f.type_params.iter().any(|tp| tp == &vp.ty.name);
             if (recv_ty.is_some() && member.is_none()) || is_tparam || !vp.ty.fun_params.is_empty()
             {
@@ -20035,14 +20042,15 @@ impl<'a> Lower<'a> {
         };
         crate::trace_compiler!(
             "lower",
-            "inline target {fname} params={sig_params:?} ret={sig_ret:?} receiver={recv_ty:?}"
+            "inline target {fname} params={sig_params:?} ret={sig_ret:?} receiver={recv_ty:?} contexts={context_args:?}"
         );
         if sig_params.len() != pnames.len() {
             return None;
         }
+        let value_sig_params = &sig_params[context_count..];
         // The vararg parameter's INDEX: every earlier parameter binds args positionally by index,
         // every later one binds from the argument list's tail.
-        let n_fixed = vararg_index.unwrap_or(sig_params.len());
+        let n_fixed = vararg_index.unwrap_or(value_sig_params.len());
         let source_args = args.to_vec();
         let eff_storage: Vec<AstExprId>;
         let mut named_vararg_omitted = false;
@@ -20074,7 +20082,7 @@ impl<'a> Lower<'a> {
                 .get(&call_id)
                 .cloned()
                 .unwrap_or_default();
-            let np = f.params.len();
+            let np = value_declarations.len();
             if args.len() > np {
                 return None;
             }
@@ -20101,7 +20109,7 @@ impl<'a> Lower<'a> {
                         pos += 1;
                     }
                     Some(nm) => {
-                        let idx = f.params.iter().position(|p| &p.name == nm)?;
+                        let idx = value_declarations.iter().position(|p| &p.name == nm)?;
                         if slot[idx].is_some() {
                             return None;
                         }
@@ -20110,7 +20118,7 @@ impl<'a> Lower<'a> {
                 }
             }
             let mut eff = Vec::with_capacity(np);
-            for (k, p) in f.params.iter().enumerate() {
+            for (k, p) in value_declarations.iter().enumerate() {
                 match slot[k] {
                     Some(a) => eff.push(a),
                     None => eff.push(p.default?),
@@ -20119,7 +20127,7 @@ impl<'a> Lower<'a> {
             eff_storage = eff;
             &eff_storage
         } else {
-            if sig_params.len() != args.len() {
+            if value_sig_params.len() != args.len() {
                 return None;
             }
             args
@@ -20145,7 +20153,7 @@ impl<'a> Lower<'a> {
         for parameter in &f.type_params {
             tbinds.remove(parameter);
         }
-        for (i, p) in f.params.iter().enumerate().take(n_fixed) {
+        for (i, p) in value_declarations.iter().enumerate().take(n_fixed) {
             if tparams.contains(p.ty.name.as_str())
                 && !matches!(self.afile.expr(args[i]), Expr::Lambda { .. })
             {
@@ -20191,6 +20199,13 @@ impl<'a> Lower<'a> {
         let reif_depth = self.reified_subst.len();
         if !f.reified_type_params.is_empty() {
             let resolved = self.info.resolved_call_type_args.get(&AstExprId(call_id));
+            let declaration_generic = module_target
+                .and_then(|target| target.callable.generic_sig.as_deref())
+                .or(match member_target {
+                    Some(ResolvedCall::Member(target)) => target.member.generic_sig.as_ref(),
+                    Some(ResolvedCall::Extension(target)) => target.callable.generic_sig.as_deref(),
+                    _ => None,
+                });
             let mut map = std::collections::HashMap::new();
             for (i, tp) in f.type_params.iter().enumerate() {
                 if f.reified_type_params.contains(tp) {
@@ -20207,7 +20222,16 @@ impl<'a> Lower<'a> {
                         self.inline_active.truncate(active_depth);
                         return None;
                     };
-                    map.insert(tp.clone(), self.apply_reified_substitution(actual));
+                    let actual = self.apply_reified_substitution(actual);
+                    map.insert(tp.clone(), actual);
+                    // Checked type operands carry the declaration's alpha-renamed formal identity,
+                    // while the AST keeps its source spelling. Bind both keys to the same call-site
+                    // type so inlining consumes the semantic identity already selected by resolution.
+                    if let Some(identity) =
+                        declaration_generic.and_then(|signature| signature.formals.get(i))
+                    {
+                        map.insert(identity.clone(), actual);
+                    }
                 }
             }
             self.reified_subst.push(map);
@@ -20257,6 +20281,14 @@ impl<'a> Lower<'a> {
                 self.scope.push(("this".to_string(), slot, rt));
             }
         }
+        for (parameter, source) in context_args.iter().enumerate() {
+            let source = source.as_ref()?;
+            let ty = sig_params[parameter];
+            let value = self.lower_context_argument_value(source, ty)?;
+            let slot = self.fresh_value();
+            stmts.push(self.emit_variable(slot, ty_to_ir(ty), Some(value)));
+            self.scope.push((pnames[parameter].clone(), slot, ty));
+        }
         if has_named {
             for argument in &source_args {
                 let Some(parameter_index) = args.iter().position(|candidate| candidate == argument)
@@ -20267,6 +20299,7 @@ impl<'a> Lower<'a> {
                     self.reified_subst.truncate(reif_depth);
                     return None;
                 };
+                let parameter_index = context_count + parameter_index;
                 let parameter_ty = sig_params[parameter_index];
                 let splice = matches!(parameter_ty, Ty::Fun(_))
                     && matches!(self.afile.expr(*argument), Expr::Lambda { .. })
@@ -20300,15 +20333,23 @@ impl<'a> Lower<'a> {
                 prelowered_args.insert(*argument, slot);
             }
         }
-        for (i, pty) in sig_params.iter().enumerate() {
+        for (value_index, pty) in value_sig_params.iter().enumerate() {
+            let i = context_count + value_index;
             // Parameters BEFORE the vararg bind by index; those after it bind from the argument
             // list's tail (the vararg absorbs the variable-width middle span).
-            let ai = if vararg && i > n_fixed {
-                args.len() - (sig_params.len() - i)
+            let ai = if vararg && value_index > n_fixed {
+                args.len() - (value_sig_params.len() - value_index)
             } else {
-                i
+                value_index
             };
-            if vararg && i == n_fixed {
+            crate::trace_compiler!(
+                "lower",
+                "inline parameter target={fname} index={i} name={} type={pty:?} argument={:?} actual={:?}",
+                pnames[i],
+                args.get(ai),
+                args.get(ai).map(|argument| self.info.ty(*argument)),
+            );
+            if vararg && value_index == n_fixed {
                 if has_named {
                     if named_vararg_omitted {
                         let value = self.emit_vararg(ty_to_ir(*pty), Vec::new());
@@ -20422,34 +20463,11 @@ impl<'a> Lower<'a> {
                         self.reified_subst.truncate(reif_depth);
                         return None;
                     }
-                    // The lambda's parameter types, with the inline fn's type params specialized
-                    // (`(T)->T` on a `twice(1){…}` call → `it: Int`, not the erased `Any` of `fnsig`).
-                    let lam_param_tys: Vec<Ty> = member_param_shapes
-                        .as_ref()
-                        .and_then(|shapes| shapes.get(i))
-                        .map(|shape| crate::symbol_resolver::ty_subst(*shape, &tbinds))
-                        .and_then(|shape| match shape {
-                            Ty::Fun(signature) => Some(signature.params.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| {
-                            f.params[i]
-                                .ty
-                                .fun_params
-                                .iter()
-                                .map(|fp| {
-                                    tbinds
-                                        .get(fp.name.as_str())
-                                        .copied()
-                                        .unwrap_or_else(|| checked_type(self.info, fp))
-                                })
-                                .collect()
-                        });
-                    let lam_param_tys = if lam_param_tys.len() == fnsig.params.len() {
-                        lam_param_tys
-                    } else {
-                        fnsig.params.clone()
-                    };
+                    // The checker-selected callable already carries the fully specialized semantic
+                    // lambda shape. Re-decoding the source `TypeRef` here loses the distinction
+                    // between context, extension, and return positions; the splicer consumes the
+                    // selected parameter list verbatim.
+                    let lam_param_tys = fnsig.params.clone();
                     self.inline_lambdas.push(InlineLambda {
                         name: pnames[i].clone(),
                         params,
@@ -20785,6 +20803,13 @@ impl<'a> Lower<'a> {
         if args.len() != lam_params.len() || lam_params.len() != lam_param_tys.len() {
             return None;
         }
+        crate::trace_compiler!(
+            "lower",
+            "inline lambda invoke name={} params={lam_params:?} types={lam_param_tys:?} args={:?} actuals={:?}",
+            self.inline_lambdas[idx].name,
+            args,
+            args.iter().map(|argument| self.info.ty(*argument)).collect::<Vec<_>>(),
+        );
         let callee_scope = self.scope.clone();
         let callee_class = self.cur_class;
         let callee_fn_name = self.cur_fn_name.clone();
@@ -23275,10 +23300,13 @@ impl<'a> Lower<'a> {
                 // (`x is Int?` → `x == null || x instanceof Integer`). Float/Double are now allowed: a
                 // smart-cast of them reaches the IEEE-correct numeric `==` conform. Unsigned stays
                 // excluded (its conform / value-box unbox isn't modeled).
-                let base = self.ty_ref(&base_ref).or_else(|| {
-                    Ty::from_name(&base_ref.name)
-                        .filter(|t| self.has_scalar_value_repr(*t) && !t.is_unsigned())
-                });
+                let base = match self.info.expr_lowers.get(&source) {
+                    Some(ExprLowering::RuntimeTypeOperand(target)) => Some(*target),
+                    _ => self.ty_ref(&base_ref).or_else(|| {
+                        Ty::from_name(&base_ref.name)
+                            .filter(|t| self.has_scalar_value_repr(*t) && !t.is_unsigned())
+                    }),
+                };
                 if let Some(target) = base {
                     let inst_operand = ty_to_ir(target);
                     // The operand is stored into an `Any` slot (below); a PRIMITIVE operand must be
@@ -23331,7 +23359,11 @@ impl<'a> Lower<'a> {
             // the backend resolves from the primitive type_operand).
             let target = match self.info.expr_lowers.get(&source) {
                 Some(ExprLowering::RuntimeTypeOperand(target)) => Some(*target),
-                _ => self.ty_ref(&ty),
+                _ => self
+                    .info
+                    .resolved_type(&ty)
+                    .map(|target| self.apply_reified_substitution(target))
+                    .or_else(|| self.ty_ref(&ty)),
             }
             .or_else(|| {
                 if ty.nullable() {
@@ -23349,6 +23381,11 @@ impl<'a> Lower<'a> {
             } else {
                 ty_to_ir(target)
             };
+            crate::trace_compiler!(
+                "lower",
+                "runtime type test source={source:?} declared={:?} target={target:?} negated={negated}",
+                self.info.resolved_type(&ty),
+            );
             self.emit_type_op(op, arg, type_operand)
         };
         Some(t)
@@ -23730,34 +23767,6 @@ impl<'a> Lower<'a> {
             let specialized_target = self.apply_reified_substitution(declared_target);
             let reified_target =
                 (specialized_target != declared_target).then_some(specialized_target);
-            // A `Unit`-typed OPERAND (`println() as Any`, `foo() as Unit`, `foo() as? Int`): run it
-            // for effect, then its value is the `Unit.INSTANCE` singleton (a reference) — cast that.
-            if self.info.ty(operand) == Ty::Unit {
-                let eff = self.expr(operand)?;
-                let non_null_ref = ast::TypeRef {
-                    flags: ty.flags.with_nullable(false),
-                    ..ty.clone()
-                };
-                let value = if !nullable {
-                    // `as T`: `checkcast` the singleton (only `Any`/`Unit` succeed; an impossible
-                    // target was already rejected by the checker).
-                    let target = self.ty_ref(&non_null_ref)?;
-                    let unit = self.emit_unit();
-                    self.emit_type_op(IrTypeOp::Cast, unit, ty_to_ir(target))
-                } else if let Some(target) = self.ty_ref(&non_null_ref) {
-                    // `as? T` (reference target): the singleton is-a `T` (true for `Any`/`Unit`) →
-                    // keep it, else `null`.
-                    let u1 = self.emit_unit();
-                    let is_t = self.emit_type_op(IrTypeOp::InstanceOf, u1, ty_to_ir(target));
-                    let u2 = self.emit_unit();
-                    let nullc = self.emit_const(IrConst::Null);
-                    self.emit_when(vec![(Some(is_t), u2), (None, nullc)])
-                } else {
-                    // `as? Prim` (`Unit` is never a primitive wrapper) → always `null`.
-                    self.emit_const(IrConst::Null)
-                };
-                return Some(self.emit_block(vec![eff], Some(value)));
-            }
             // `x as? T` (safe cast): `{ val t = x; if (t is T) t as T else null }` — `instanceof`
             // then `checkcast` on the non-null branch, `null` on a mismatch (never throws). The
             // target must be a reference (a primitive `as? Int` yields the boxed `Int?` wrapper —
@@ -23771,23 +23780,30 @@ impl<'a> Lower<'a> {
                     Some(target) if self.has_scalar_value_repr(target) => {
                         target.nullable_boxed()?
                     }
-                    Some(target) => target,
+                    Some(target) => stored_value_ty(target),
                     None => match declared_target.non_null() {
                         target @ Ty::TyParam(_, _) => target,
-                        _ if ty.name != "Unit" => match self.ty_ref(&ty)? {
+                        Ty::Unit => stored_value_ty(Ty::Unit),
+                        _ => match self.ty_ref(&ty)? {
                             primitive if !primitive.is_reference() => primitive.nullable_boxed()?,
                             reference => reference,
                         },
-                        _ => self.ty_ref(&ty)?,
                     },
                 };
                 let target_ir = ty_to_ir(target);
-                let mut v = self.expr(operand)?;
+                let operand_ty = self.info.ty(operand);
+                let mut v = if operand_ty == Ty::Unit {
+                    let effect = self.expr(operand)?;
+                    let unit = self.emit_unit();
+                    self.emit_block(vec![effect], Some(unit))
+                } else {
+                    self.expr(operand)?
+                };
                 // A PRIMITIVE operand (`1 as? Int`, `1.0 as? Double`) carries a scalar value, but
                 // `instanceof`/`checkcast` need a reference — box it to `Any` first, then the var
                 // holds (and the cast keeps) the wrapper, exactly like a reference operand.
-                let operand_ty = self.info.ty(operand);
-                let mut oty = ty_to_ir(operand_ty);
+                let operand_storage_ty = stored_value_ty(operand_ty);
+                let mut oty = ty_to_ir(operand_storage_ty);
                 if self.has_scalar_value_repr(operand_ty) {
                     let any = ty_to_ir(Ty::obj("kotlin/Any"));
                     v = self.emit_type_op(IrTypeOp::ImplicitCoercion, v, any);
@@ -23803,7 +23819,22 @@ impl<'a> Lower<'a> {
                 let when = self.emit_when(vec![(Some(is_t), cast_t), (None, nullc)]);
                 return Some(self.emit_block(vec![var_t], Some(when)));
             }
-            let arg = self.expr(operand)?;
+            // A discarded `Unit`-to-`Unit` cast has no runtime check: evaluate its operand for
+            // effect and do not manufacture a singleton that statement lowering would then need
+            // to pop despite the expression's semantic `Unit` type.
+            if self.info.ty(operand) == Ty::Unit
+                && declared_target.non_null() == Ty::Unit
+                && self.info.is_discarded_expression(e)
+            {
+                return self.expr(operand);
+            }
+            let arg = if self.info.ty(operand) == Ty::Unit {
+                let effect = self.expr(operand)?;
+                let unit = self.emit_unit();
+                self.emit_block(vec![effect], Some(unit))
+            } else {
+                self.expr(operand)?
+            };
             // A PRIMITIVE operand cast to a reference type (`42 as Any`, `'a' as Char?`, `b as
             // Byte?`) is a BOX: the primitive is boxed to its wrapper (which is-a the target), an
             // `ImplicitCoercion` the JVM backend emits as `valueOf`. Handle it before the
@@ -23824,28 +23855,16 @@ impl<'a> Lower<'a> {
                 && !operand_repr.is_unsigned()
                 && !target_is_tparam
             {
-                // A PRIMITIVE operand cast to a reference (`42 as Any`, `x as Object`) is a BOX to the
-                // target reference. Use the resolved target (`info.ty(e)` for `Any`/`Object`, else the
-                // non-null `TypeRef`) — a specialized operand's `info.ty(e)` can itself read as the
-                // erased operand, so resolve the target from the annotation when it isn't a reference.
-                let target = {
-                    let t = self.info.ty(e);
-                    if t.is_reference() {
-                        Some(t)
-                    } else {
-                        let nn = ast::TypeRef {
-                            flags: ty.flags.with_nullable(false),
-                            ..ty.clone()
-                        };
-                        self.ty_ref(&nn).filter(|t| t.is_reference())
-                    }
-                };
-                if let Some(target) = target {
-                    return Some(self.emit_type_op(
-                        IrTypeOp::ImplicitCoercion,
-                        arg,
-                        ty_to_ir(target),
-                    ));
+                let target = reified_target.unwrap_or(declared_target);
+                if target.is_reference() {
+                    // Boxing preserves the operand's runtime classifier; it does not magically
+                    // create an instance of the cast target. `1 as Any` therefore boxes Integer and
+                    // needs no effective checkcast, while `1 as String` boxes the same Integer and
+                    // then checkcasts String (valid bytecode that throws CCE at runtime).
+                    let carrier = operand_repr.nullable_boxed()?;
+                    let boxed =
+                        self.emit_type_op(IrTypeOp::ImplicitCoercion, arg, ty_to_ir(carrier));
+                    return Some(self.emit_type_op(IrTypeOp::Cast, boxed, ty_to_ir(target)));
                 }
             }
             // `x as T` — a cast to a type parameter in scope. The IR keeps `T` (with its bound) as
@@ -23903,14 +23922,10 @@ impl<'a> Lower<'a> {
                 }
             }
             // `x as Foo?` is a plain `checkcast Foo` (a reference target; `null` passes the
-            // checkcast). `ty_ref` rejects any nullable `TypeRef`, so resolve the NON-NULL form —
-            // the JVM cast target is the same class either way; only the null-throwing behaviour
-            // (selected below via `ty.nullable`) differs.
-            let non_null_ty = ast::TypeRef {
-                flags: ty.flags.with_nullable(false),
-                ..ty.clone()
-            };
-            let target = self.ty_ref(&non_null_ty)?;
+            // checkcast). Use the target already resolved by the checker. Constructing a different
+            // `TypeRef` here cannot work: resolved type references are keyed by the original AST
+            // node, and lowering must not perform another name lookup.
+            let target = stored_value_ty(reified_target.unwrap_or(declared_target).non_null());
             // Preserve the target's `?` on the cast: the JVM `checkcast` class is the same either way,
             // but the value-class pass needs the nullability to decide a `Str?` (`= String?`, unboxed)
             // vs a non-null `Str` cast — a plain (non-VC) reference cast is unaffected (the emitter
@@ -24319,6 +24334,15 @@ impl<'a> Lower<'a> {
                         ) {
                             return Some(inlined);
                         }
+                        if target.callable.inline.must_inline() {
+                            crate::trace_compiler!(
+                                "lower",
+                                "required inline expansion failed call={} callable={}",
+                                e.0,
+                                target.callable.name,
+                            );
+                            return self.bail("gate:required-inline-expansion-failed");
+                        }
                     } else if matches!(
                         target.callable.origin,
                         crate::libraries::Origin::Module { .. }
@@ -24587,7 +24611,7 @@ impl<'a> Lower<'a> {
                 }
             } {
                 r
-            } else if let Some(c) = {
+            } else if let Some(target) = {
                 // A receiver-less top-level library function (`listOf(…)`) → `invokestatic
                 // facade.name(args)`. Resolved (vararg-aware) through the library set, so no
                 // stdlib facade or descriptor is hardcoded.
@@ -24596,10 +24620,9 @@ impl<'a> Lower<'a> {
                     "lower checker-selected top-level callable {fname}() cur_class={:?}",
                     self.cur_class
                 );
-                self.info
-                    .resolved_top_level_call(e)
-                    .map(|target| target.callable.clone())
+                self.info.resolved_top_level_call(e).cloned()
             } {
+                let c = target.callable.clone();
                 // For a spliced top-level `inline fun` (`run { 2 + 3 }`), the body returns the
                 // ERASED `Object` (a generic `R`); coerce it to the logical type so a primitive
                 // result unboxes instead of landing boxed in a primitive slot.
@@ -24607,6 +24630,9 @@ impl<'a> Lower<'a> {
                     (c.inline.can_inline(), c.ret, c.physical_ret);
                 if let Some(intrinsic) = self.lower_selected_top_level_special(e, &c, &args) {
                     return Some(intrinsic);
+                }
+                if !target.context_args.is_empty() {
+                    return self.lower_context_top_level_call(e, &target, &args);
                 }
                 // Is the callee a `suspend fun`? Read the flag the CHECKER recorded on the resolved
                 // callable (it flows uniformly from the AST for a module/sibling-file fn and from
@@ -24658,17 +24684,7 @@ impl<'a> Lower<'a> {
                 // receiver, or a named local). Load and PREPEND them so the emitted argument list
                 // matches the callee's leading context parameters. Combining context parameters
                 // with a vararg / `$default` call is not modelled — skip (sound).
-                let ctx_sources = self.info.context_args.get(&e).cloned();
-                let ctx_n = ctx_sources.as_ref().map_or(0, |v| v.len());
-                if ctx_n > 0 {
-                    if selected_vararg.is_some() || c.default_call {
-                        return None;
-                    }
-                    a.extend(self.lower_context_argument_values(
-                        ctx_sources.as_ref().unwrap(),
-                        &c.params[..ctx_n],
-                    )?);
-                }
+                let ctx_n = 0;
                 // A `$default` call whose last parameter is a vararg (`f(a: Int = 0, vararg xs: T)`
                 // omitting both) is NOT an element-pack: the `default_call` branch emits the
                 // placeholders/mask and an empty array for the omitted vararg slot.
@@ -25456,6 +25472,14 @@ impl<'a> Lower<'a> {
                 });
                 if member.call_sig.vararg {
                     if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+                        crate::trace_compiler!(
+                            "lower",
+                            "selected member vararg call={e:?} source_args={} slots={slots:?} physical_params={} semantic_params={} vararg_index={:?}",
+                            args.len(),
+                            resolved.physical_params.len(),
+                            member.params.len(),
+                            member.call_sig.vararg_index,
+                        );
                         let (a, mut prelude) = self.lower_call_slot_args_vararg_pack(
                             &args,
                             &slots,
@@ -27022,7 +27046,7 @@ fn class_generic_sig(
         } else {
             type_param_bounds_ir(
                 info,
-                class.type_params(),
+                &c.type_params,
                 class.type_param_variances(),
                 &c.type_param_bounds,
                 c.span.lo,
@@ -27046,7 +27070,7 @@ fn class_generic_sig(
     Ok(Some(crate::ir::IrGenericSig {
         type_params: type_param_bounds_ir(
             info,
-            class.type_params(),
+            &c.type_params,
             class.type_param_variances(),
             &c.type_param_bounds,
             c.span.lo,
@@ -27129,14 +27153,13 @@ fn type_param_bounds_ir(
     bounds: &[(String, ast::TypeRef)],
     declaration_start: u32,
 ) -> Result<Vec<crate::ir::IrTypeParameter>, &'static str> {
-    let any = || Ty::obj("kotlin/Any");
     let semantic_names = info.resolved_declaration_type_parameters(declaration_start);
     if semantic_names.len() != names.len() {
         return Err("internal:missing-checked-type-parameter-identities");
     }
     let mut out = Vec::with_capacity(names.len());
     for (index, tp) in names.iter().enumerate() {
-        let mut resolved_bounds = bounds
+        let resolved_bounds = bounds
             .iter()
             .filter(|(name, _)| name == tp)
             .map(|(_, bound)| {
@@ -27147,9 +27170,6 @@ fn type_param_bounds_ir(
                 Ok((ty_to_ir(bound), bound_is_interface))
             })
             .collect::<Result<Vec<_>, &'static str>>()?;
-        if resolved_bounds.is_empty() {
-            resolved_bounds.push((any(), false));
-        }
         out.push(crate::ir::IrTypeParameter {
             name: tp.clone(),
             semantic_name: semantic_names[index].clone(),

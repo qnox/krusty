@@ -322,9 +322,12 @@ fn cross_file_projected_generic_return_with_concrete_inference_is_accepted() {
              fun box(): String = \"value\".decodeOut(Context<Any>()).toString()\n",
         ),
     ];
+    let result = common::compile_and_run_files_with_stdlib(&sources);
     assert_eq!(
-        common::compile_and_run_files_with_stdlib(&sources).as_deref(),
-        Some("OK")
+        result.as_deref(),
+        Some("OK"),
+        "frontend diagnostics: {:?}",
+        common::module_front_end_diagnostics(&sources)
     );
 }
 
@@ -338,7 +341,11 @@ fn projected_generic_member_return_inference_matches_kotlinc() {
     let (reference_code, stderr) =
         common::kotlinc_source_result("ProjectedMemberReturn", SOURCE).expect("pinned kotlinc");
     assert_eq!(reference_code, 0, "kotlinc rejected fixture: {stderr}");
-    assert!(common::front_end_diagnostics_with_stdlib(SOURCE).is_empty());
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SOURCE);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected frontend diagnostics: {diagnostics:?}"
+    );
 }
 
 #[test]

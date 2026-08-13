@@ -595,6 +595,41 @@ fn member_extension_property_resolution() {
 }
 
 #[test]
+fn dispatch_smartcast_does_not_narrow_a_same_typed_extension_receiver() {
+    const SRC: &str = r#"
+class C(val value: String?) {
+    val C.size: Int
+        get() {
+            if (this@C.value == null) return 0
+            return value.length
+    }
+}
+"#;
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.contains(
+            "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver"
+        )),
+        "the extension receiver must not inherit the dispatch receiver's smartcast: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn dispatch_smartcast_survives_a_nearer_receiver_scope() {
+    const SRC: &str = r#"
+class C(val value: String?) {
+    fun read(): Int {
+        if (value == null) return 0
+        return R().read { value.length }
+    }
+}
+class R { fun read(block: R.() -> Int): Int = block() }
+"#;
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn imported_extension_property_keeps_declaration_identity() {
     let model = "\
 package sample.model

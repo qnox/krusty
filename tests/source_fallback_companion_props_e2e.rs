@@ -176,9 +176,9 @@ enum class Signal { READY, WAITING }
 }
 
 #[test]
-fn computed_companion_property_is_not_projected_as_a_field() {
-    // `StaticPropertyStorage::CompanionAccessors` is authoritative: a fallback provider cannot turn
-    // a field-less getter into an outer-class field merely because both declarations are properties.
+fn computed_companion_property_resolves_from_its_declaration() {
+    // A computed property is still a source declaration. Resolution selects that declaration; the
+    // eventual dependency artifact supplies its accessor realization, and no field is invented.
     let d = fallback_diagnostics(
         r#"
 package app
@@ -197,11 +197,7 @@ class Settings {
 }
 "#,
     );
-    assert!(
-        d.iter()
-            .any(|m| m.contains("unresolved reference 'Settings'.")),
-        "a computed companion property has no fallback static field: {d:?}"
-    );
+    assert_resolves(&d, "Settings.dynamic");
 }
 
 // A genuinely-absent member must keep reporting the same unresolved-reference diagnostic.
@@ -225,11 +221,7 @@ class Limits {
 }
 "#,
     );
-    assert!(
-        d.iter()
-            .any(|m| m.contains("unresolved reference 'Limits'.")),
-        "expected the absent-member diagnostic to stay unchanged, got: {d:?}"
-    );
+    assert_eq!(d, ["unresolved reference 'MISSING'."]);
 }
 
 // An `internal` companion property is module-scoped: the dependent module's read must keep
@@ -256,11 +248,7 @@ class Limits {
 }
 "#,
     );
-    assert!(
-        d.iter()
-            .any(|m| m.contains("unresolved reference 'Limits'.")),
-        "expected cross-module internal access to stay rejected, got: {d:?}"
-    );
+    assert_eq!(d, ["unresolved reference 'HIDDEN'."]);
 }
 
 // The same `internal` companion property read from its OWN module keeps working.
