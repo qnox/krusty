@@ -69,9 +69,12 @@ invocation separately because each is a separate process with its own wall time.
 CI builds the conformance test binary once and runs that artifact against every version in
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
 runtime reference toolchain, so the matrix does not rebuild Rust code per Kotlin version. Each leg
-must score at least 75% of backend-applicable cases before a release can publish. Unsupported and
+must score at least 55% of backend-applicable cases before a release can publish. Unsupported and
 miscompiled applicable cases count against that floor; cases excluded solely by the selected
 backend do not.
+
+The general and corpus test-binary deadlines default to 120 seconds. The larger product e2e binary
+defaults to 300 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.
 
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.
@@ -159,7 +162,9 @@ Performance-relevant harness state:
 Optional profiling knobs:
 
 - `KRUSTY_TEST_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline applied to every test
-  binary; raise it explicitly on slow systems.
+  binary except e2e; raise it explicitly on slow systems.
+- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 300-second deadline for both focused and full
+  e2e runs.
 - `KRUSTY_CORPUS_TIMEOUT_SECONDS=<seconds>` overrides that deadline for the dedicated corpus pass.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.

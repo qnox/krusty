@@ -1711,6 +1711,125 @@ pub(crate) fn infer_generic_return_bindings(
     generic_bindings_satisfy_bounds(generic_sig, &bindings, admits).then_some(bindings)
 }
 
+/// Symbolic constraints contributed by an expected return type. `constrained_formals` also contains
+/// formals whose occurrences disagreed, so ordinary inference cannot replace a real conflict with a
+/// last-write-wins binding.
+pub(crate) struct SymbolicReturnConstraints {
+    pub bindings: GSigBinds,
+    pub constrained_formals: std::collections::HashSet<String>,
+    pub conflicting_formals: std::collections::HashSet<String>,
+}
+
+/// Relate callee-owned return variables to caller-owned symbolic expected types. The two scopes are
+/// deliberately independent: `<T> build(): List<T>` used from `<U> outer(): List<U>` constrains the
+/// callee's `T` to the caller's `U`; equal source spelling is neither required nor treated as identity.
+/// Only matching type constructors are traversed, and repeated occurrences must agree exactly.
+pub(crate) fn infer_generic_symbolic_return_constraints(
+    declared: Ty,
+    expected: Ty,
+    formals: &[String],
+) -> SymbolicReturnConstraints {
+    fn symbolic_parameter(ty: Ty) -> bool {
+        match ty {
+            Ty::TyParam(..) => true,
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => symbolic_parameter(*inner),
+            _ => false,
+        }
+    }
+
+    fn collect(
+        declared: Ty,
+        expected: Ty,
+        formals: &[String],
+        candidates: &mut std::collections::HashMap<String, (Option<Ty>, bool)>,
+        constrained_formals: &mut std::collections::HashSet<String>,
+    ) {
+        match (declared, expected) {
+            (Ty::TyParam(declared, _), expected_ty)
+                if formals.iter().any(|formal| formal.as_str() == declared) =>
+            {
+                let symbolic = symbolic_parameter(expected_ty);
+                if symbolic {
+                    constrained_formals.insert(declared.to_string());
+                }
+                match candidates.entry(declared.to_string()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert((Some(expected_ty), symbolic));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        let (current, all_symbolic) = entry.get_mut();
+                        *all_symbolic &= symbolic;
+                        if current.is_some_and(|current| current != expected_ty) {
+                            *current = None;
+                        }
+                    }
+                }
+            }
+            (Ty::Obj(declared_name, declared_args), Ty::Obj(expected_name, expected_args))
+                if declared_name == expected_name && declared_args.len() == expected_args.len() =>
+            {
+                for (&declared, &expected) in declared_args.iter().zip(expected_args.iter()) {
+                    collect(declared, expected, formals, candidates, constrained_formals);
+                }
+            }
+            (Ty::Fun(declared), Ty::Fun(expected))
+                if declared.params.len() == expected.params.len()
+                    && declared.context_count == expected.context_count
+                    && declared.has_receiver == expected.has_receiver
+                    && declared.suspend == expected.suspend =>
+            {
+                for (&declared, &expected) in declared.params.iter().zip(expected.params.iter()) {
+                    collect(declared, expected, formals, candidates, constrained_formals);
+                }
+                collect(
+                    declared.ret,
+                    expected.ret,
+                    formals,
+                    candidates,
+                    constrained_formals,
+                );
+            }
+            (Ty::Nullable(declared), Ty::Nullable(expected))
+            | (Ty::PlatformNullable(declared), Ty::PlatformNullable(expected))
+            | (Ty::InProjection(declared), Ty::InProjection(expected))
+            | (Ty::OutProjection(declared), Ty::OutProjection(expected)) => {
+                collect(
+                    *declared,
+                    *expected,
+                    formals,
+                    candidates,
+                    constrained_formals,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let mut candidates = std::collections::HashMap::new();
+    let mut constrained_formals = std::collections::HashSet::new();
+    collect(
+        declared,
+        expected,
+        formals,
+        &mut candidates,
+        &mut constrained_formals,
+    );
+    let mut bindings = GSigBinds::new();
+    let mut conflicting_formals = std::collections::HashSet::new();
+    for (formal, (actual, all_symbolic)) in candidates {
+        if let Some(actual) = actual.filter(|_| all_symbolic) {
+            bindings.insert(formal, actual);
+        } else if actual.is_none() {
+            conflicting_formals.insert(formal);
+        }
+    }
+    SymbolicReturnConstraints {
+        bindings,
+        constrained_formals,
+        conflicting_formals,
+    }
+}
+
 /// A JVM method signature may reference owner type parameters without declaring them. Recover those
 /// bindings from the provider's receiver-specialized return; method-owned formals still bind from args.
 fn seed_undeclared_return_bindings(
@@ -6750,6 +6869,69 @@ mod tests {
 
         unify_inferred_ty(parameter, Ty::obj("fixtures/Concrete"), &mut inferred);
         assert_eq!(inferred.get("T"), Some(&Ty::obj("fixtures/Concrete")));
+    }
+
+    #[test]
+    fn contextual_identity_is_collected_through_a_nested_result() {
+        let formal = Ty::ty_param("T", Ty::obj("fixtures/Marker"));
+        let declared = Ty::obj_args("kotlin/collections/List", &[formal]);
+        let expected = Ty::obj_args("kotlin/collections/List", &[formal]);
+
+        assert_eq!(
+            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()])
+                .bindings
+                .get("T"),
+            Some(&formal)
+        );
+        assert!(infer_generic_symbolic_return_constraints(
+            Ty::obj_args("kotlin/collections/Set", &[formal]),
+            expected,
+            &["T".to_string()],
+        )
+        .bindings
+        .is_empty());
+    }
+
+    #[test]
+    fn contextual_identity_preserves_nested_expected_nullability() {
+        let formal = Ty::ty_param("T", Ty::obj("fixtures/Marker"));
+        let declared = Ty::obj_args("kotlin/collections/List", &[formal]);
+        let expected = Ty::obj_args("kotlin/collections/List", &[Ty::nullable(formal)]);
+
+        assert_eq!(
+            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()])
+                .bindings
+                .get("T"),
+            Some(&Ty::nullable(formal))
+        );
+    }
+
+    #[test]
+    fn repeated_symbolic_return_constraints_must_agree() {
+        let callee = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let caller = Ty::ty_param("U", Ty::obj("kotlin/Any"));
+        let declared = Ty::obj_args("fixtures/Duo", &[callee, callee, callee]);
+        let expected = Ty::obj_args("fixtures/Duo", &[caller, Ty::nullable(caller), caller]);
+
+        let constraints =
+            infer_generic_symbolic_return_constraints(declared, expected, &["T".to_string()]);
+        assert!(constraints.bindings.is_empty());
+        assert!(constraints.constrained_formals.contains("T"));
+        assert!(constraints.conflicting_formals.contains("T"));
+    }
+
+    #[test]
+    fn symbolic_and_concrete_return_constraints_conflict() {
+        let callee = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let caller = Ty::ty_param("U", Ty::obj("kotlin/Any"));
+        let constraints = infer_generic_symbolic_return_constraints(
+            Ty::obj_args("fixtures/Duo", &[callee, callee]),
+            Ty::obj_args("fixtures/Duo", &[caller, Ty::String]),
+            &["T".to_string()],
+        );
+
+        assert!(constraints.bindings.is_empty());
+        assert!(constraints.conflicting_formals.contains("T"));
     }
 
     #[test]

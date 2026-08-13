@@ -287,6 +287,98 @@ suspend fun <T> await(value: T): T =
 }
 
 #[test]
+fn nested_contextual_result_preserves_the_lambda_input_type_parameter() {
+    let source = r#"
+interface Marker { fun mark(): String }
+
+fun <T> build(transform: (T) -> String): List<T> = TODO()
+fun <U : Marker> outer(): List<U> = build { it.mark() }
+"#;
+    let Some((code, diagnostics)) = common::kotlinc_source_result("NestedContextResult", source)
+    else {
+        return;
+    };
+    assert_eq!(code, 0, "kotlinc rejected the fixture: {diagnostics}");
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(source),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn repeated_contextual_result_constraints_do_not_choose_one_occurrence() {
+    let source = r#"
+interface Marker { fun mark(): String }
+class Duo<A, B>
+
+fun <T> build(transform: (T) -> String): Duo<T, T> = TODO()
+fun <U : Marker> outer(): Duo<U, U?> = build { it.mark() }
+"#;
+    let Some((code, diagnostics)) = common::kotlinc_source_result("RepeatedContextResult", source)
+    else {
+        return;
+    };
+    assert_ne!(code, 0, "kotlinc accepted the conflicting fixture");
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(source),
+        vec!["cannot infer type for type parameter 'T'. Specify it explicitly."]
+    );
+    assert!(
+        diagnostics.contains("cannot infer type for type parameter 'T'")
+            || diagnostics.contains("type mismatch"),
+        "unexpected kotlinc diagnostic: {diagnostics}"
+    );
+}
+
+#[test]
+fn symbolic_and_concrete_contextual_result_constraints_conflict() {
+    let source = r#"
+interface Marker { fun mark(): String }
+class Duo<A, B>
+
+fun <T> build(transform: (T) -> String): Duo<T, T> = TODO()
+fun <U : Marker> outer(): Duo<U, String> = build { it.mark() }
+"#;
+    let Some((code, diagnostics)) = common::kotlinc_source_result("MixedContextResult", source)
+    else {
+        return;
+    };
+    assert_ne!(code, 0, "kotlinc accepted the conflicting fixture");
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(source),
+        vec!["cannot infer type for type parameter 'T'. Specify it explicitly."]
+    );
+    assert!(
+        diagnostics.contains("cannot infer type for type parameter 'T'")
+            || diagnostics.contains("type mismatch"),
+        "unexpected kotlinc diagnostic: {diagnostics}"
+    );
+}
+
+#[test]
+fn nested_contextual_nullable_result_keeps_the_lambda_input_nullable() {
+    let source = r#"
+interface Marker { fun mark(): String }
+
+fun <T> build(transform: (T) -> String): List<T> = TODO()
+fun <T : Marker> outer(): List<T?> = build { it.mark() }
+"#;
+    let Some((code, diagnostics)) = common::kotlinc_source_result("NullableNestedContext", source)
+    else {
+        return;
+    };
+    assert_ne!(code, 0, "kotlinc accepted the invalid fixture");
+    assert!(
+        diagnostics.contains("only safe (?.) or non-null asserted (!!.) calls are allowed"),
+        "unexpected kotlinc diagnostic: {diagnostics}"
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(source),
+        vec!["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'T?'."]
+    );
+}
+
+#[test]
 fn unit_value_uses_the_selected_singleton_classifier() {
     let src = r#"
 fun accept(value: Unit): String = "OK"
@@ -547,6 +639,46 @@ fun consume() {
 "#,
     );
     assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
+fn generic_common_supertypes_reconstruct_kotlin_projections() {
+    let source = r#"
+class A
+class B
+
+class Invariant<T>
+class Covariant<out T>
+class Contravariant<in T>
+class Dependent<A, B : A>
+interface Recursive<T>
+class RecursiveA : Recursive<RecursiveA>
+class RecursiveB : Recursive<RecursiveB>
+
+fun invariant(flag: Boolean): Invariant<out Any> =
+    if (flag) Invariant<A>() else Invariant<B>()
+
+fun covariant(flag: Boolean): Covariant<Any> =
+    if (flag) Covariant<A>() else Covariant<B>()
+
+fun contravariant(flag: Boolean): Contravariant<Nothing> =
+    if (flag) Contravariant<A>() else Contravariant<B>()
+
+fun dependent(flag: Boolean): Dependent<out Any, *> =
+    if (flag) Dependent<A, A>() else Dependent<B, B>()
+
+fun recursive(flag: Boolean): Recursive<*> =
+    if (flag) RecursiveA() else RecursiveB()
+"#;
+    let Some((code, diagnostics)) = common::kotlinc_source_result("GenericCommonSupertype", source)
+    else {
+        return;
+    };
+    assert_eq!(code, 0, "kotlinc rejected the fixture: {diagnostics}");
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(source),
+        Vec::<String>::new()
+    );
 }
 
 #[test]

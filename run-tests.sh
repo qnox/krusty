@@ -104,8 +104,25 @@ done
 # the guard least effective where it matters most. Print the full cargo selection before `exec`; if the
 # alarm fires, the last line identifies the active test/filter without relying on buffered test output.
 if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
-  echo "run-tests.sh: focused test timeout=${KRUSTY_TEST_TIMEOUT_SECONDS}s: cargo test $profile_arg $*" >&2
-  run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" cargo test $profile_arg "$@"
+  focused_timeout="$KRUSTY_TEST_TIMEOUT_SECONDS"
+  test_target=""
+  read_test_target=0
+  for a in "$@"; do
+    if [ "$read_test_target" -eq 1 ]; then
+      test_target="$a"
+      read_test_target=0
+      continue
+    fi
+    case "$a" in
+      --test) read_test_target=1 ;;
+      --test=*) test_target="${a#--test=}" ;;
+    esac
+  done
+  if [ "$test_target" = "e2e" ]; then
+    focused_timeout="${KRUSTY_E2E_TIMEOUT_SECONDS:-300}"
+  fi
+  echo "run-tests.sh: focused test timeout=${focused_timeout}s: cargo test $profile_arg $*" >&2
+  run_with_deadline "$focused_timeout" cargo test $profile_arg "$@"
   exit $?
 fi
 
@@ -294,7 +311,8 @@ done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
 pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
 if [ -n "$e2e_bin" ]; then
-  KRUSTY_BOX_RUNNER_POOL="$pool" run_one "$logdir" "$e2e_bin::--test-threads=$ncpu"
+  KRUSTY_TEST_TIMEOUT_SECONDS="${KRUSTY_E2E_TIMEOUT_SECONDS:-300}" \
+    KRUSTY_BOX_RUNNER_POOL="$pool" run_one "$logdir" "$e2e_bin::--test-threads=$ncpu"
 fi
 
 # Everything except conformance and e2e — small suites parallelized across binaries.

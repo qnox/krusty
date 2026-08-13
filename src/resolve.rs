@@ -3049,10 +3049,10 @@ impl SymbolTable {
         let Some(internal) = root.obj_internal() else {
             return Vec::new();
         };
-        let mut pending = vec![(internal, root, 0)];
+        let mut pending = std::collections::VecDeque::from([(internal, root, 0)]);
         let mut seen = std::collections::HashSet::new();
         let mut hierarchy = Vec::new();
-        while let Some((owner, applied, depth)) = pending.pop() {
+        while let Some((owner, applied, depth)) = pending.pop_front() {
             if !seen.insert(owner) {
                 continue;
             }
@@ -15078,8 +15078,10 @@ impl crate::assignable::TypeOracle for Checker<'_> {
 ///
 /// This is the single same-class path used by `Checker::join`:
 ///
-/// * two `Obj`/`TyParam` spellings compare their erased object identity and erase type arguments,
-///   preserving the existing `List<A>` + `List<B>` -> `List<*>` behavior;
+/// * two non-generic `Obj`/`TyParam` spellings compare their semantic object identity, retaining a
+///   shared type-parameter identity when both sides carry the same variable;
+/// * generic applications are deliberately left to [`Checker::applied_common_supertype`], which
+///   reconstructs their arguments from declaration-site variance instead of erasing them;
 /// * an exact builtin/function shape keeps that canonical shape;
 /// * a builtin and its object spelling compare their Kotlin class identity, with the builtin shape
 ///   winning (`String` + `Obj("kotlin/String")` -> `String`).
@@ -15087,6 +15089,16 @@ impl crate::assignable::TypeOracle for Checker<'_> {
 /// Nullability is reapplied from the ORIGINAL inputs. That last detail matters for mixed spellings:
 /// unequal `Ty` values do not imply that one was nullable, so two non-null String spellings must not
 /// accidentally become `String?`.
+fn common_result_nullability(a: Ty, b: Ty, base: Ty) -> Ty {
+    if matches!(a, Ty::Nullable(_)) || matches!(b, Ty::Nullable(_)) {
+        Ty::nullable(base.non_null())
+    } else if matches!(a, Ty::PlatformNullable(_)) || matches!(b, Ty::PlatformNullable(_)) {
+        Ty::platform_nullable(base.non_null())
+    } else {
+        base
+    }
+}
+
 fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
     let (an, bn) = (a.non_null(), b.non_null());
     let erased = |ty: Ty| matches!(ty, Ty::Obj(..) | Ty::TyParam(..));
@@ -15098,9 +15110,20 @@ fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
     };
 
     let base = match (erased(an), erased(bn)) {
-        // Keep the pre-existing erased-object semantics for generic classes and type parameters.
-        (true, true) => match (an.obj_internal(), bn.obj_internal()) {
-            (Some(left), Some(right)) if left == right => Ty::obj_name(left),
+        (true, true) => match (an, bn) {
+            (Ty::TyParam(left, _), Ty::TyParam(right, _)) if left == right => an,
+            (Ty::Obj(left, left_args), Ty::Obj(right, right_args))
+                if left == right && left_args.is_empty() && right_args.is_empty() =>
+            {
+                Ty::obj_name(left)
+            }
+            (left, right)
+                if left.type_args().is_empty()
+                    && right.type_args().is_empty()
+                    && left.obj_internal() == right.obj_internal() =>
+            {
+                Ty::obj_name(left.obj_internal()?)
+            }
             _ => return None,
         },
         // Non-object shapes (builtin scalars and function types) must agree exactly.
@@ -15111,11 +15134,7 @@ fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
         (true, false) if same_kotlin_class(an, bn) => bn,
         _ => return None,
     };
-    Some(if a.is_nullable() || b.is_nullable() {
-        Ty::nullable(base)
-    } else {
-        base
-    })
+    Some(common_result_nullability(a, b, base))
 }
 
 impl<'a> Checker<'a> {
@@ -18014,14 +18033,11 @@ impl<'a> Checker<'a> {
             crate::symbol_resolver::unify_ty(receiver_sig, receiver, &mut binds);
         }
         if let Some(expected) = expected_result {
-            if let Some(result_bindings) = crate::symbol_resolver::infer_generic_return_bindings(
-                &semantic,
-                expected,
-                |actual, bound| self.receiver_is_assignable(actual, bound),
-            ) {
-                for (formal, actual) in result_bindings {
-                    binds.entry(formal).or_insert(actual);
-                }
+            for (formal, actual) in self
+                .contextual_lambda_result_bindings(&semantic, expected)
+                .ok()?
+            {
+                binds.entry(formal).or_insert(actual);
             }
         }
         for (&parameter, actual) in argument_map.iter().zip(arg_tys) {
@@ -18193,6 +18209,64 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .is_some_and(|items| items.iter().any(|item| *item)))
         .then_some(shape)
+    }
+
+    fn contextual_lambda_result_bindings(
+        &self,
+        signature: &crate::libraries::GenericSig,
+        expected: Ty,
+    ) -> Result<crate::symbol_resolver::GSigBinds, String> {
+        crate::trace_compiler!(
+            "expected_call",
+            "contextual lambda result declared={:?} expected={expected:?}",
+            signature.ret,
+        );
+        let symbolic = crate::symbol_resolver::infer_generic_symbolic_return_constraints(
+            signature.ret,
+            expected,
+            &signature.formals,
+        );
+        if !symbolic.conflicting_formals.is_empty() {
+            crate::trace_compiler!(
+                "expected_call",
+                "contextual lambda result conflicts={:?}",
+                symbolic.conflicting_formals,
+            );
+            return Err(symbolic
+                .conflicting_formals
+                .iter()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| "?".to_string()));
+        }
+        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        for (formal, actual) in symbolic.bindings {
+            let shapes_lambda_input = signature.params.iter().any(|parameter| {
+                matches!(parameter.non_null(), Ty::Fun(function)
+                if function.params.iter().any(|input| {
+                    ty_mentions_param(*input, std::slice::from_ref(&formal))
+                }))
+            });
+            if shapes_lambda_input {
+                bindings.entry(formal).or_insert(actual);
+            }
+        }
+        if let Some(inferred) = crate::symbol_resolver::infer_generic_return_bindings(
+            signature,
+            expected,
+            |actual, bound| self.receiver_is_assignable(actual, bound),
+        ) {
+            for (formal, actual) in inferred {
+                if !symbolic.constrained_formals.contains(&formal) {
+                    bindings.entry(formal).or_insert(actual);
+                }
+            }
+        }
+        crate::trace_compiler!(
+            "expected_call",
+            "contextual lambda result bindings={bindings:?}",
+        );
+        Ok(bindings)
     }
 
     fn top_level_lambda_shape_in_scope(
@@ -23505,118 +23579,23 @@ impl<'a> Checker<'a> {
     /// declaration-site variance (`Comparable<T>` is semantically `Comparable<in T>`).
     fn check_type_parameter_bound(&mut self, scope: &CheckerScope<'_>, bound: &TypeRef) -> Ty {
         let checked = self.type_ref_ty(scope, bound);
-        let Some(owner) = checked.non_null().obj_internal() else {
-            self.resolved_type_bounds
-                .insert((bound.span.lo, bound.span.hi), (checked, false));
-            return checked;
-        };
-        let bound_is_interface = self
-            .fed_source()
-            .classifier(owner)
+        let bound_is_interface = checked
+            .non_null()
+            .obj_internal()
+            .and_then(|owner| self.fed_source().classifier(owner))
             .is_some_and(|classifier| classifier.is_interface());
-        if bound.targs.is_empty() {
-            self.resolved_type_bounds.insert(
-                (bound.span.lo, bound.span.hi),
-                (checked, bound_is_interface),
-            );
-            return checked;
-        }
-        let arguments = bound
-            .targs
-            .iter()
-            .map(|argument| {
-                let argument_ty = if scope.tparam_contains(&argument.name)
-                    && argument.targs.is_empty()
-                    && argument.arg.is_none()
-                    && argument.fun_params.is_empty()
-                {
-                    scope.tparam_bound(&argument.name)
-                } else {
-                    self.type_ref_ty(scope, argument)
-                };
-                if argument.in_projection() || argument.out_projection() {
-                    projected_typeref_argument(
-                        argument,
-                        argument_ty,
-                        Ty::nullable(Ty::obj("kotlin/Any")),
-                    )
-                } else {
-                    argument_ty
-                }
-            })
-            .collect::<Vec<_>>();
-        let signature = Ty::obj_args_name(owner, &arguments);
-        let signature = if bound.nullable() {
-            Ty::nullable(signature)
-        } else {
-            signature
-        };
         self.resolved_type_bounds.insert(
             (bound.span.lo, bound.span.hi),
-            (signature, bound_is_interface),
+            (checked, bound_is_interface),
         );
-        signature
+        checked
     }
 
     /// Preserve a declaration type's generic variables without changing ordinary expression typing.
     /// The checker already resolved every classifier and projection; lowering consumes this exact
     /// shape for metadata and generic signatures and never decodes the source spelling again.
     fn check_declaration_type(&mut self, scope: &CheckerScope<'_>, reference: &TypeRef) -> Ty {
-        if scope.tparam_contains(&reference.name)
-            && reference.targs.is_empty()
-            && reference.arg.is_none()
-            && reference.fun_params.is_empty()
-        {
-            let parameter = scope.tparam_bound(&reference.name);
-            let parameter = if reference.nullable() {
-                Ty::nullable(parameter)
-            } else {
-                parameter
-            };
-            self.resolved_declaration_types
-                .insert((reference.span.lo, reference.span.hi), parameter);
-            return parameter;
-        }
-        let checked = self.type_ref_ty(scope, reference);
-        let Some(owner) = checked.non_null().obj_internal() else {
-            self.resolved_declaration_types
-                .insert((reference.span.lo, reference.span.hi), checked);
-            return checked;
-        };
-        let declaration = if reference.targs.is_empty() {
-            checked
-        } else {
-            let arguments = reference
-                .targs
-                .iter()
-                .map(|argument| {
-                    let argument_ty = if scope.tparam_contains(&argument.name)
-                        && argument.targs.is_empty()
-                        && argument.arg.is_none()
-                        && argument.fun_params.is_empty()
-                    {
-                        scope.tparam_bound(&argument.name)
-                    } else {
-                        self.check_declaration_type(scope, argument)
-                    };
-                    if argument.in_projection() || argument.out_projection() {
-                        projected_typeref_argument(
-                            argument,
-                            argument_ty,
-                            Ty::nullable(Ty::obj("kotlin/Any")),
-                        )
-                    } else {
-                        argument_ty
-                    }
-                })
-                .collect::<Vec<_>>();
-            let declaration = Ty::obj_args_name(owner, &arguments);
-            if reference.nullable() {
-                Ty::nullable(declaration)
-            } else {
-                declaration
-            }
-        };
+        let declaration = self.type_ref_ty(scope, reference);
         self.resolved_declaration_types
             .insert((reference.span.lo, reference.span.hi), declaration);
         declaration
@@ -42157,16 +42136,22 @@ impl<'a> Checker<'a> {
                         }
                     }
                     if let Some(expected) = expected {
-                        if let Some(inferred) =
-                            crate::symbol_resolver::infer_generic_return_bindings(
-                                generic,
-                                expected,
-                                |actual, bound| self.receiver_is_assignable(actual, bound),
-                            )
+                        let result_bindings = match self
+                            .contextual_lambda_result_bindings(generic, expected)
                         {
-                            for (formal, actual) in inferred {
-                                bindings.entry(formal).or_insert(actual);
+                            Ok(bindings) => bindings,
+                            Err(formal) => {
+                                self.diags.error(
+                                span,
+                                format!(
+                                    "cannot infer type for type parameter '{formal}'. Specify it explicitly."
+                                ),
+                            );
+                                return self.set(call, Ty::Error);
                             }
+                        };
+                        for (formal, actual) in result_bindings {
+                            bindings.entry(formal).or_insert(actual);
                         }
                     }
                     if let Some(shape) = &known_call_shape {
@@ -43784,74 +43769,8 @@ impl<'a> Checker<'a> {
     }
 
     fn join(&mut self, a: Ty, b: Ty, span: Span) -> Ty {
-        if a == Ty::Error || b == Ty::Error {
-            return Ty::Error;
-        }
-        if a == b {
-            return a;
-        }
-        // `Nothing` is the bottom type: a diverging branch contributes no value, so the join is the
-        // other branch (`if (c) x else throw e` has the type of `x`).
-        if a == Ty::Nothing {
-            return b;
-        }
-        if b == Ty::Nothing {
-            return a;
-        }
-        if let Some(t) = Ty::promote(a, b) {
-            return t;
-        }
-        if a == Ty::Null && b.is_reference() {
-            return Ty::nullable(b.non_null());
-        }
-        if b == Ty::Null && a.is_reference() {
-            return Ty::nullable(a.non_null());
-        }
-        if (a == Ty::Unit && b == Ty::Null) || (b == Ty::Unit && a == Ty::Null) {
-            return Ty::nullable(Ty::Unit);
-        }
-        if a == Ty::Unit || b == Ty::Unit {
-            return Ty::Unit;
-        }
-        // Numeric widening: Int is joinable with Long (result is Long).
-        if matches!((a, b), (Ty::Int | Ty::Long, Ty::Int | Ty::Long)) {
-            return Ty::Long;
-        }
-        // A primitive joins with `null` as its boxed (nullable) form — `if (c) true else null` is a
-        // `Boolean?`, the primitive branch boxed at the merge.
-        if a == Ty::Null {
-            if let Some(nb) = b.nullable_boxed() {
-                return nb;
-            }
-        }
-        if b == Ty::Null {
-            if let Some(nb) = a.nullable_boxed() {
-                return nb;
-            }
-        }
-        // One semantic SAME-CLASS path covers source, module, and classpath spellings. It preserves
-        // actual nullability, keeps canonical builtin/function shapes, and retains the established
-        // erased-type-argument behavior for `Obj`/`TyParam` joins. Keeping this federated avoids the
-        // object-only and builtin-only branches disagreeing on mixed representations.
-        if let Some(joined) = same_type_class_join(a, b) {
+        if let Some(joined) = self.semantic_common_supertype(a, b) {
             return joined;
-        }
-        if let Some(joined) = self.applied_common_supertype(a, b) {
-            return joined;
-        }
-        // Two values of DIFFERENT reference classes join to their common supertype, which krusty
-        // approximates as `Any` (`java/lang/Object`) — the universal upper bound. Preserve nullability
-        // when either input is nullable: `String?` and `Marker` join to `Any?`, never the unsound `Any`.
-        // The emitter writes `Object` for the merge-point frame so each branch's (more specific) value
-        // verifies against it. `String`/`Array`/`Fun` are references too, so this also covers
-        // `if (c) "s" else SomeObj()`.
-        if a.is_reference() && b.is_reference() {
-            let any = Ty::obj("kotlin/Any");
-            return if a.is_nullable() || b.is_nullable() {
-                Ty::nullable(any)
-            } else {
-                any
-            };
         }
         self.diags.error(
             span,
@@ -43864,39 +43783,253 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// The unique nearest common classifier, with its type arguments as reached from both operands.
+    fn semantic_common_supertype(&self, a: Ty, b: Ty) -> Option<Ty> {
+        self.semantic_common_supertype_inner(a, b, &mut std::collections::HashSet::new())
+    }
+
+    fn semantic_common_supertype_inner(
+        &self,
+        a: Ty,
+        b: Ty,
+        visiting: &mut std::collections::HashSet<(Ty, Ty)>,
+    ) -> Option<Ty> {
+        if a == Ty::Error || b == Ty::Error {
+            return Some(Ty::Error);
+        }
+        if a == b {
+            return Some(a);
+        }
+        // `Nothing` is the bottom type: a diverging branch contributes no value, so the join is the
+        // other branch (`if (c) x else throw e` has the type of `x`).
+        if a == Ty::Nothing {
+            return Some(b);
+        }
+        if b == Ty::Nothing {
+            return Some(a);
+        }
+        if let Some(t) = Ty::promote(a, b) {
+            return Some(t);
+        }
+        if a == Ty::Null && b.is_reference() {
+            return Some(Ty::nullable(b.non_null()));
+        }
+        if b == Ty::Null && a.is_reference() {
+            return Some(Ty::nullable(a.non_null()));
+        }
+        if (a == Ty::Unit && b == Ty::Null) || (b == Ty::Unit && a == Ty::Null) {
+            return Some(Ty::nullable(Ty::Unit));
+        }
+        if a == Ty::Unit || b == Ty::Unit {
+            return Some(Ty::Unit);
+        }
+        // Numeric widening: Int is joinable with Long (result is Long).
+        if matches!((a, b), (Ty::Int | Ty::Long, Ty::Int | Ty::Long)) {
+            return Some(Ty::Long);
+        }
+        // A primitive joins with `null` as its boxed (nullable) form — `if (c) true else null` is a
+        // `Boolean?`, the primitive branch boxed at the merge.
+        if a == Ty::Null {
+            if let Some(nb) = b.nullable_boxed() {
+                return Some(nb);
+            }
+        }
+        if b == Ty::Null {
+            if let Some(nb) = a.nullable_boxed() {
+                return Some(nb);
+            }
+        }
+        // One semantic SAME-CLASS path covers source, module, and classpath spellings. It preserves
+        // actual nullability and canonical builtin/function shapes. Parameterized classifiers are
+        // handled below from their declaration metadata rather than erased here.
+        if let Some(joined) = same_type_class_join(a, b) {
+            return Some(joined);
+        }
+        if let Some(joined) = self.applied_common_supertype_inner(a, b, visiting) {
+            return Some(joined);
+        }
+        // Kotlin's universal reference upper bound is the result when no single more-specific common
+        // classifier can represent the result. Preserve source/flexible nullability: `String?` and
+        // `Marker` produce `Any?`, never the unsound non-null `Any`.
+        if a.is_reference() && b.is_reference() {
+            return Some(common_result_nullability(a, b, Ty::obj("kotlin/Any")));
+        }
+        None
+    }
+
+    /// The unique most-specific common classifier, with its type arguments as reached from both operands.
     /// `MutableList<Int>` and `List<Int>` therefore join as `List<Int>` rather than losing the
     /// declaration graph and collapsing to `Any`. If the two paths reach different applications of
-    /// the same generic classifier, retain the classifier but erase the disputed arguments; an
-    /// intersection of multiple unrelated nearest interfaces is not representable as one [`Ty`].
+    /// the same generic classifier, reconstruct projections from declaration-site variance; an
+    /// intersection of multiple unrelated most-specific interfaces is not representable as one [`Ty`].
+    #[cfg(test)]
     fn applied_common_supertype(&self, left: Ty, right: Ty) -> Option<Ty> {
-        let common = self
-            .syms
-            .source_constructor_matcher()
-            .common_supertypes(&[left, right]);
-        let [common] = common.as_slice() else {
+        self.applied_common_supertype_inner(left, right, &mut std::collections::HashSet::new())
+    }
+
+    fn applied_common_supertype_inner(
+        &self,
+        left: Ty,
+        right: Ty,
+        visiting: &mut std::collections::HashSet<(Ty, Ty)>,
+    ) -> Option<Ty> {
+        if !visiting.insert((left, right)) {
+            return None;
+        }
+        let result = self.applied_common_supertype_unguarded(left, right, visiting);
+        visiting.remove(&(left, right));
+        result
+    }
+
+    fn applied_common_supertype_unguarded(
+        &self,
+        left: Ty,
+        right: Ty,
+        visiting: &mut std::collections::HashSet<(Ty, Ty)>,
+    ) -> Option<Ty> {
+        let left_hierarchy = self.syms.applied_hierarchy(left);
+        let right_hierarchy = self.syms.applied_hierarchy(right);
+        let right_by_owner = right_hierarchy
+            .into_iter()
+            .map(|(owner, applied, _)| (owner, applied))
+            .collect::<HashMap<_, _>>();
+        let common = left_hierarchy
+            .into_iter()
+            .filter_map(|(owner, left_applied, _)| {
+                right_by_owner
+                    .get(&owner)
+                    .copied()
+                    .map(|right_applied| (owner, left_applied, right_applied))
+            })
+            .collect::<Vec<_>>();
+        let dominated = common
+            .iter()
+            .flat_map(|(owner, _, _)| {
+                self.syms
+                    .applied_hierarchy(Ty::obj_name(*owner))
+                    .into_iter()
+                    .skip(1)
+                    .map(|(ancestor, _, _)| ancestor)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let most_specific = common
+            .iter()
+            .copied()
+            .filter(|(candidate, _, _)| !dominated.contains(candidate))
+            .collect::<Vec<_>>();
+        let [(owner, left_applied, right_applied)] = most_specific.as_slice() else {
             return None;
         };
-        let applied = |root| {
-            self.syms
-                .applied_hierarchy(root)
-                .into_iter()
-                .find(|(owner, _, _)| {
-                    crate::symbol_resolver::platform_type_names_match(*owner, common.name)
-                })
-                .map(|(_, applied, _)| applied)
+        let joined =
+            self.join_applied_classifier(*owner, *left_applied, *right_applied, visiting)?;
+        Some(common_result_nullability(left, right, joined))
+    }
+
+    fn join_applied_classifier(
+        &self,
+        owner: TypeName,
+        left: Ty,
+        right: Ty,
+        visiting: &mut std::collections::HashSet<(Ty, Ty)>,
+    ) -> Option<Ty> {
+        if left == right {
+            return Some(left.non_null());
+        }
+        let (Ty::Obj(left_owner, left_args), Ty::Obj(right_owner, right_args)) =
+            (left.non_null(), right.non_null())
+        else {
+            return None;
         };
-        let (left_applied, right_applied) = (applied(left)?, applied(right)?);
-        let joined = if left_applied == right_applied {
-            left_applied
-        } else {
-            Ty::obj_name(common.name)
+        if left_owner != owner || right_owner != owner || left_args.len() != right_args.len() {
+            return None;
+        }
+        if left_args.is_empty() {
+            return Some(Ty::obj_name(owner));
+        }
+        let classifier = self.resolver().classifier(owner)?;
+        if classifier.type_params.len() != left_args.len() {
+            return None;
+        }
+        let mut arguments = Vec::with_capacity(left_args.len());
+        let mut left_formals = crate::symbol_resolver::GSigBinds::new();
+        let mut right_formals = crate::symbol_resolver::GSigBinds::new();
+        for (index, (&left, &right)) in left_args.iter().zip(right_args).enumerate() {
+            let declared_bound = classifier
+                .type_param_bounds
+                .get(index)
+                .and_then(|bounds| bounds.first())
+                .copied()
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+            let left_bound =
+                crate::symbol_resolver::ty_subst_keep_unbound(declared_bound, &left_formals);
+            let right_bound =
+                crate::symbol_resolver::ty_subst_keep_unbound(declared_bound, &right_formals);
+            let star_upper_bound =
+                self.semantic_common_supertype_inner(left_bound, right_bound, visiting)?;
+            let argument = self.join_type_projection(
+                classifier
+                    .type_param_variances
+                    .get(index)
+                    .copied()
+                    .unwrap_or_default(),
+                star_upper_bound,
+                left,
+                right,
+                visiting,
+            )?;
+            let formal = classifier.type_params[index].clone();
+            left_formals.insert(formal.clone(), left.projection_inner().unwrap_or(left));
+            right_formals.insert(formal, right.projection_inner().unwrap_or(right));
+            arguments.push(argument);
+        }
+        Some(Ty::obj_args_name(owner, &arguments))
+    }
+
+    fn join_type_projection(
+        &self,
+        declaration_variance: crate::types::TypeVariance,
+        star_upper_bound: Ty,
+        left: Ty,
+        right: Ty,
+        visiting: &mut std::collections::HashSet<(Ty, Ty)>,
+    ) -> Option<Ty> {
+        if left == right {
+            return Some(left);
+        }
+        let projection = |argument| match argument {
+            Ty::InProjection(inner) => (true, false, *inner),
+            Ty::OutProjection(inner) => (false, true, *inner),
+            other => (true, true, other),
         };
-        Some(if left.is_nullable() || right.is_nullable() {
-            Ty::nullable(joined.non_null())
-        } else {
-            joined
-        })
+        let (left_in, left_out, left) = projection(left);
+        let (right_in, right_out, right) = projection(right);
+        let allows_out = declaration_variance != crate::types::TypeVariance::In;
+        if allows_out && left_out && right_out {
+            if visiting.contains(&(left, right)) || visiting.contains(&(right, left)) {
+                return Some(Ty::out_projection(star_upper_bound));
+            }
+            let joined = self.semantic_common_supertype_inner(left, right, visiting);
+            return Some(match (declaration_variance, joined) {
+                (crate::types::TypeVariance::Out, Some(joined)) => joined,
+                (_, Some(joined)) => Ty::out_projection(joined),
+                (_, None) => Ty::out_projection(star_upper_bound),
+            });
+        }
+        let allows_in = declaration_variance != crate::types::TypeVariance::Out;
+        if allows_in && left_in && right_in {
+            let intersection = if self.receiver_is_assignable(left, right) {
+                left
+            } else if self.receiver_is_assignable(right, left) {
+                right
+            } else {
+                Ty::Nothing
+            };
+            return Some(if declaration_variance == crate::types::TypeVariance::In {
+                intersection
+            } else {
+                Ty::in_projection(intersection)
+            });
+        }
+        Some(Ty::out_projection(star_upper_bound))
     }
 
     fn try_in_place_assignment(
@@ -44197,6 +44330,10 @@ impl<'a> Checker<'a> {
             }
             None => it,
         };
+        crate::trace_compiler!(
+            "resolve",
+            "local declaration name={name} declared={declared:?} initializer={it:?} binding={bind:?}"
+        );
         // Record the resolved ANNOTATION type so the lowerer reuses it (a library type resolved
         // through imports survives even when the initializer is `null`/less specific).
         if let Some(d) = declared {
@@ -47018,16 +47155,26 @@ fun use() {
             Some(Ty::nullable(Ty::String))
         );
         assert_eq!(
+            same_type_class_join(Ty::platform_nullable(Ty::String), Ty::String),
+            Some(Ty::platform_nullable(Ty::String))
+        );
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        assert_eq!(
+            same_type_class_join(parameter, Ty::nullable(parameter)),
+            Some(Ty::nullable(parameter))
+        );
+        assert_eq!(
             same_type_class_join(Ty::obj("kotlin/String"), Ty::String),
             Some(Ty::String)
         );
-        // Object pairs retain the established erased-type-argument join.
+        // Generic applications need classifier variance metadata, which this spelling-only helper
+        // deliberately cannot guess. The checker's semantic common-supertype path owns them.
         assert_eq!(
             same_type_class_join(
                 Ty::obj_args("kotlin/collections/List", &[Ty::Int]),
                 Ty::obj_args("kotlin/collections/List", &[Ty::String])
             ),
-            Some(Ty::obj("kotlin/collections/List"))
+            None
         );
         assert_eq!(same_type_class_join(Ty::String, Ty::Int), None);
         assert_eq!(
@@ -50572,6 +50719,254 @@ fun box(): String {
         }
         check_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
+    }
+
+    #[test]
+    fn applied_hierarchy_records_the_shortest_diamond_path() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "interface Root\n\
+             interface Short : Root\n\
+             interface Mid : Root\n\
+             interface Deep : Mid\n\
+             class Value : Deep, Short",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let symbols = collect_signatures_with_cp(
+            &files,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert_no_diags(&diagnostics);
+
+        let hierarchy = symbols.applied_hierarchy(Ty::obj("Value"));
+        assert_eq!(
+            hierarchy
+                .iter()
+                .find(|(owner, _, _)| owner.matches("Root"))
+                .map(|(_, _, depth)| *depth),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn applied_common_supertype_rejects_equal_depth_semantic_owners() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "interface First\n\
+             interface Second\n\
+             class Left : First, Second\n\
+             class Right : First, Second",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let symbols = collect_signatures_with_cp(
+            &files,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert_no_diags(&diagnostics);
+        let mut probe_diagnostics = DiagSink::new();
+        let checker = make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+
+        assert_eq!(
+            checker.applied_common_supertype(Ty::obj("Left"), Ty::obj("Right")),
+            None
+        );
+    }
+
+    #[test]
+    fn applied_common_supertype_rejects_incomparable_owners_at_different_depths() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "interface First\n\
+             interface Second\n\
+             interface ViaSecond : Second\n\
+             class Left : First, ViaSecond\n\
+             class Right : First, ViaSecond",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let symbols = collect_signatures_with_cp(
+            &files,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert_no_diags(&diagnostics);
+        let mut probe_diagnostics = DiagSink::new();
+        let checker = make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+
+        assert_eq!(
+            checker.applied_common_supertype(Ty::obj("Left"), Ty::obj("Right")),
+            None
+        );
+    }
+
+    #[test]
+    fn applied_common_supertype_removes_transitively_dominated_owner() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "interface Root\n\
+             interface Mid : Root\n\
+             interface Leaf : Mid\n\
+             class Left : Leaf\n\
+             class Right : Leaf",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let symbols = collect_signatures_with_cp(
+            &files,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert_no_diags(&diagnostics);
+        let mut probe_diagnostics = DiagSink::new();
+        let checker = make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+
+        assert_eq!(
+            checker.applied_common_supertype(Ty::obj("Left"), Ty::obj("Right")),
+            Some(Ty::obj("Leaf"))
+        );
+    }
+
+    #[test]
+    fn same_invariant_classifier_join_reconstructs_an_out_projection() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file("class A\nclass B\nclass Inv<T>", &mut diagnostics);
+        let files = vec![file];
+        let symbols = collect_signatures_with_cp(
+            &files,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert_no_diags(&diagnostics);
+        let mut probe_diagnostics = DiagSink::new();
+        let mut checker =
+            make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+
+        assert_eq!(
+            checker.join(
+                Ty::obj_args("Inv", &[Ty::obj("A")]),
+                Ty::obj_args("Inv", &[Ty::obj("B")]),
+                Span::new(0, 0),
+            ),
+            Ty::obj_args("Inv", &[Ty::out_projection(Ty::obj("kotlin/Any"))])
+        );
+        assert_no_diags(&probe_diagnostics);
+    }
+
+    #[test]
+    fn same_covariant_classifier_join_reconstructs_its_argument() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file("class A\nclass B\ninterface Cov<out T>", &mut diagnostics);
+        let files = vec![file];
+        let symbols = collect_signatures_with_cp(
+            &files,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert_no_diags(&diagnostics);
+        let mut probe_diagnostics = DiagSink::new();
+        let mut checker =
+            make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+
+        assert_eq!(
+            checker.join(
+                Ty::obj_args("Cov", &[Ty::obj("A")]),
+                Ty::obj_args("Cov", &[Ty::obj("B")]),
+                Span::new(0, 0),
+            ),
+            Ty::obj_args("Cov", &[Ty::obj("kotlin/Any")])
+        );
+        assert_no_diags(&probe_diagnostics);
+    }
+
+    #[test]
+    fn same_contravariant_classifier_join_uses_the_bottom_argument() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file("class A\nclass B\ninterface Contra<in T>", &mut diagnostics);
+        let files = vec![file];
+        let symbols = collect_signatures_with_cp(
+            &files,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert_no_diags(&diagnostics);
+        let mut probe_diagnostics = DiagSink::new();
+        let mut checker =
+            make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+
+        assert_eq!(
+            checker.join(
+                Ty::obj_args("Contra", &[Ty::obj("A")]),
+                Ty::obj_args("Contra", &[Ty::obj("B")]),
+                Span::new(0, 0),
+            ),
+            Ty::obj_args("Contra", &[Ty::Nothing])
+        );
+        assert_no_diags(&probe_diagnostics);
+    }
+
+    #[test]
+    fn unrelated_platform_references_join_to_platform_any() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file("class A\nclass B", &mut diagnostics);
+        let files = vec![file];
+        let symbols = collect_signatures_with_cp(
+            &files,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert_no_diags(&diagnostics);
+        let mut probe_diagnostics = DiagSink::new();
+        let mut checker =
+            make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+
+        assert_eq!(
+            checker.join(
+                Ty::platform_nullable(Ty::obj("A")),
+                Ty::obj("B"),
+                Span::new(0, 0),
+            ),
+            Ty::platform_nullable(Ty::obj("kotlin/Any"))
+        );
+        assert_eq!(
+            checker.join(
+                Ty::platform_nullable(Ty::obj("A")),
+                Ty::nullable(Ty::obj("B")),
+                Span::new(0, 0),
+            ),
+            Ty::nullable(Ty::obj("kotlin/Any"))
+        );
+        assert_no_diags(&probe_diagnostics);
+    }
+
+    #[test]
+    fn recursive_common_supertype_terminates_with_a_star_projection() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "interface Base<T>\nclass A : Base<A>\nclass B : Base<B>",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let symbols = collect_signatures_with_cp(
+            &files,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert_no_diags(&diagnostics);
+        let mut probe_diagnostics = DiagSink::new();
+        let checker = make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+
+        assert_eq!(
+            checker.applied_common_supertype(Ty::obj("A"), Ty::obj("B")),
+            Some(Ty::obj_args(
+                "Base",
+                &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
+            ))
+        );
+        assert_no_diags(&probe_diagnostics);
     }
 
     #[test]
