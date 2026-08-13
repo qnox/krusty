@@ -503,8 +503,9 @@ pub struct TypeRef {
     pub name: String,
     /// Nullability, function-type shape, and use-site projection flags.
     pub flags: TrFlags,
-    /// The first generic type argument, captured for `Array<T>` (element) and function types
-    /// (the return type). General class type arguments live in `targs`.
+    /// The return type of function syntax. Classifier type arguments, including `Array<T>`, live in
+    /// `targs`; keeping one generic classifier in a second representation loses projections and makes
+    /// every type decoder grow an Array-only branch.
     pub arg: Option<Box<TypeRef>>,
     /// All generic type arguments on a class type (`Map<K, V>` → `[K, V]`). Empty for non-generic
     /// types. JVM-erased in descriptors but kept so the front end recovers member/element types.
@@ -856,6 +857,16 @@ pub struct AstEnumEntry {
     pub init_order: Vec<ClassInit>,
 }
 
+pub type ClassTypeParameters = crate::types::TypeParameters<Vec<(String, TypeRef)>>;
+
+impl std::ops::Deref for ClassDecl {
+    type Target = ClassTypeParameters;
+
+    fn deref(&self) -> &Self::Target {
+        &self.type_parameters
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassDecl {
     pub name: String,
@@ -869,10 +880,9 @@ pub struct ClassDecl {
     /// a no-arg annotation.
     pub annotation_args: Vec<Vec<ExprId>>,
     /// Generic type-parameter names (`class C<T>`), erased to `Any`/`Object`.
-    pub type_params: Vec<String>,
+    pub type_parameters: ClassTypeParameters,
     /// Declared non-`Any` upper bounds (`<T: String>` → `("T", String)`). A value class's underlying
     /// type parameter erases to its bound (`value class S<T: String>(val x: T)` → `String`), like kotlinc.
-    pub type_param_bounds: Vec<(String, TypeRef)>,
     pub props: Vec<PropParam>,
     /// Member functions declared in the class body (instance methods). v0: no secondary ctors.
     pub methods: Vec<FunDecl>,
@@ -992,6 +1002,18 @@ impl Modality {
 }
 
 impl ClassDecl {
+    pub fn type_params(&self) -> &Vec<String> {
+        &self.type_parameters.type_params
+    }
+
+    pub fn type_param_bounds(&self) -> &Vec<(String, TypeRef)> {
+        &self.type_parameters.type_param_bounds
+    }
+
+    pub fn type_param_variances(&self) -> &Vec<crate::types::TypeVariance> {
+        &self.type_parameters.type_param_variances
+    }
+
     /// `abstract` or `sealed` (both carry `ACC_ABSTRACT`).
     pub fn is_abstract(&self) -> bool {
         self.modality.is_abstract()
@@ -1334,8 +1356,6 @@ pub struct File {
     /// reference retains its complete source spelling and own span until name resolution commits it
     /// to a canonical classifier identity.
     pub type_annotations: std::collections::HashMap<u32, Vec<AnnotationRef>>,
-    /// Original projected argument keyed by the enclosing type's start offset.
-    pub type_projection_args: std::collections::HashMap<u32, TypeRef>,
     /// `// ASSERTIONS_MODE: always-enable` — `assert(...)` is emitted UNGUARDED (always checks + throws),
     /// not behind the per-class `desiredAssertionStatus()` guard. From the test directive / `-Xassertions`.
     pub assert_always_enabled: bool,

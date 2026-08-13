@@ -4443,7 +4443,12 @@ fn prop_access(
             // the following property/member access gets a chance to call `unbox-impl`.
             result
         } else if result.is_ty_param() {
-            u
+            // The declaration's generic underlying is erased (`Wrapper<T>.value: Object`), but an
+            // applied read keeps the selected bound. A scalar-bounded `T` therefore needs the bound's
+            // carrier (`T : Int` -> `int`), while an ordinary reference-bounded `T` keeps the erased
+            // underlying. Treating every type parameter as `u` loses the only fact that can unbox the
+            // result before arithmetic.
+            result.scalar_value_repr().unwrap_or(u)
         } else {
             erase(&result, under)
         },

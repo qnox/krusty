@@ -876,7 +876,7 @@ impl DefinitionSymbols {
         let Some(parent_class) = source_class(files, parent_source) else {
             return Some(Vec::new());
         };
-        let binding_count = parent_class.type_params.len();
+        let binding_count = parent_class.type_params().len();
         if binding_count > *work_remaining {
             *work_remaining = 0;
             return None;
@@ -1351,7 +1351,7 @@ fn member_signatures_compatible(
 
 fn source_method_has_type_parameters(files: &[FileAnalysis], source: SourceMethod) -> bool {
     source_method(files, source).is_some_and(|(class, method)| {
-        !class.type_params.is_empty() || !method.type_params.is_empty()
+        !class.type_params().is_empty() || !method.type_params.is_empty()
     })
 }
 
@@ -1381,14 +1381,14 @@ fn root_type_bindings(
     class: &ClassDecl,
     work_remaining: &mut usize,
 ) -> Option<Vec<ImplementationType>> {
-    if class.type_params.len() > *work_remaining {
+    if class.type_params().len() > *work_remaining {
         *work_remaining = 0;
         return None;
     }
-    *work_remaining -= class.type_params.len();
+    *work_remaining -= class.type_params().len();
     Some(
         class
-            .type_params
+            .type_params()
             .iter()
             .enumerate()
             .map(|(index, _)| ImplementationType {
@@ -1488,7 +1488,7 @@ fn implementation_type(
         });
     }
     if let Some(parameter) = current_class
-        .type_params
+        .type_params()
         .iter()
         .position(|parameter| parameter == &reference.name)
     {
@@ -1606,8 +1606,8 @@ fn render_class_hover(class: &ClassDecl, name: &str, source: &str) -> String {
         }
     };
     let type_parameters = render_type_parameters(
-        &class.type_params,
-        &class.type_param_bounds,
+        class.type_params(),
+        class.type_param_bounds(),
         &HashSet::new(),
         &HashSet::new(),
         "",

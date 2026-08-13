@@ -1,6 +1,23 @@
 use super::common;
 
 #[test]
+fn labeled_dispatch_receiver_is_not_the_compatible_extension_receiver() {
+    const SOURCE: &str = r#"
+        open class Base(val value: String)
+        class Dispatch : Base("D") {
+            fun Base.read(): String = this@Dispatch.value + this.value
+            fun test(): String = Base("E").read()
+        }
+        fun box(): String = if (Dispatch().test() == "DE") "OK" else "FAIL"
+    "#;
+
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SOURCE, "LabeledMemberExtensionDispatch"),
+        "OK"
+    );
+}
+
+#[test]
 fn member_extension_function_resolution() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();

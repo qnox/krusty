@@ -33,16 +33,8 @@ pre-push:
     lint:
       priority: 1
       run: just lint
-    # Own tests, PLAIN (no coverage): the instrumented `coverage-gate` is ~10-20 min and belongs on CI
-    # (`just ci` runs it across all Kotlin versions as the unbypassable backstop). Locally, run the own
-    # suite plain for correctness only — fast — and leave the coverage floor to CI.
+    # The canonical plain suite includes own, end-to-end, and conformance tests exactly once. Coverage
+    # instrumentation belongs on CI (`just ci`); duplicating the corpus here only lengthens the gate.
     test:
       priority: 2
       run: just test
-    # Conformance WITHOUT coverage: the kotlin box/codegen corpus, plain (instrumenting it would be
-    # slow and it's excluded from the coverage metric anyway). Runs after coverage. On a 4-core box
-    # the full gate lands around ~3 minutes — the hardware floor for this scope; CI (`just ci`) runs
-    # everything across all Kotlin versions as the unbypassable backstop.
-    conformance:
-      priority: 3
-      run: just conformance-plain

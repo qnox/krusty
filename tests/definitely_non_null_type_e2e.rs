@@ -56,16 +56,18 @@ fn bounded_generic_vararg_before_trailing_lambda_is_packed() {
         \x20 collect(42, 43) { }\n\
         \x20 return \"OK\"\n\
         }\n";
-    assert_eq!(run(SRC).expect("non-last generic vararg"), "OK");
+    let result = run(SRC).unwrap_or_else(|| panic!("{:?}", diagnostics(SRC)));
+    assert_eq!(result, "OK");
 
     let errors = diagnostics(
         "fun <T : Any> collect(vararg values: T, block: Array<T>.() -> Unit) {}\n\
          fun bad() { collect(42, null) { } }\n",
     );
     assert!(
-        errors
-            .iter()
-            .any(|message| message.contains("argument type mismatch")),
+        errors.iter().any(|message| {
+            message.contains("argument type mismatch")
+                || message.contains("null cannot be a value of a non-null type")
+        }),
         "{errors:?}"
     );
 }

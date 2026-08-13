@@ -29,6 +29,27 @@ fn method_signature(cs: &[(String, Vec<u8>)], facade: &str, name: &str) -> Optio
         .and_then(|m| m.signature.clone())
 }
 
+fn kotlinc_class_signature(src: &str, name: &str) -> String {
+    let work = common::scratch_dir().expect("reference work directory");
+    let source = work.join("G.kt");
+    let output = work.join("out");
+    std::fs::write(&source, src).expect("write reference source");
+    let (code, stderr) = common::kotlinc_compile(&[
+        source.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        output.to_string_lossy().into_owned(),
+    ])
+    .expect("pinned kotlinc");
+    assert_eq!(code, 0, "kotlinc rejected fixture: {stderr}");
+    let bytes = std::fs::read(output.join(format!("{name}.class"))).expect("reference class");
+    let signature = krusty::jvm::classreader::parse_class(&bytes)
+        .expect("parse reference class")
+        .signature
+        .expect("reference generic signature");
+    let _ = std::fs::remove_dir_all(work);
+    signature
+}
+
 #[test]
 fn generic_function_emits_signature() {
     let src = "fun <T> id(t: T): T = t\nfun plain(x: Int): Int = x\n";
@@ -62,6 +83,18 @@ fn generic_member_method_compiles_runs_and_signs() {
             Some("OK")
         );
     }
+}
+
+#[test]
+fn nested_generic_member_declares_its_type_parameter() {
+    let src = "class D {\n  fun <T> same(xs: List<T>): List<T> = xs\n}\n";
+    let Some(cs) = classes(src) else {
+        return;
+    };
+    assert_eq!(
+        method_signature(&cs, "D", "same").as_deref(),
+        Some("<T:Ljava/lang/Object;>(Ljava/util/List<+TT;>;)Ljava/util/List<+TT;>;")
+    );
 }
 
 #[test]
@@ -198,14 +231,8 @@ fn reference_bounded_type_param_emits_class_signature() {
             .and_then(|(_, b)| krusty::jvm::classreader::parse_class(b).ok())
             .and_then(|ci| ci.signature)
     };
-    assert_eq!(
-        class_sig("Usr").as_deref(),
-        Some("<T:LI;>Ljava/lang/Object;")
-    );
-    assert_eq!(
-        class_sig("Seq").as_deref(),
-        Some("<T:Ljava/lang/CharSequence;>Ljava/lang/Object;")
-    );
-    // Parameterized bound: conservatively suppressed (no wrong descriptor).
-    assert_eq!(class_sig("Cmp"), None);
+    for name in ["Usr", "Seq", "Cmp"] {
+        let kotlinc = kotlinc_class_signature(src, name);
+        assert_eq!(class_sig(name).as_deref(), Some(kotlinc.as_str()), "{name}");
+    }
 }

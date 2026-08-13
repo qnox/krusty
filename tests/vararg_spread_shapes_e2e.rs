@@ -61,6 +61,16 @@ fn source_extension_mixed_element_and_spread() {
 }
 
 #[test]
+fn source_extension_accepts_one_spread_array() {
+    const SRC: &str = "fun String.attach(vararg tails: String): String = this + tails[0]\n\
+        fun box(): String = \"O\".attach(*arrayOf(\"K\"))\n";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SRC, "ext_one_spread"),
+        "OK"
+    );
+}
+
+#[test]
 fn source_extension_mixed_spread_with_trailing_default() {
     const SRC: &str = "class B\n\
         fun B.segd(vararg s: String, flag: Boolean = false): String =\n\
@@ -265,17 +275,39 @@ fn source_generic_named_whole_array_preserves_selected_array_form() {
     // array as one element. Exercise direct, spread, and mixed forms together so the regression also
     // proves that the semantic marker does not change explicit-spread packing.
     const SRC: &str = "class Sink<in T>\n\
-        fun <T> choose(vararg values: Sink<T>): T = null as T\n\
+        fun <T> choose(vararg values: Sink<T>): String = values.size.toString()\n\
         fun box(): String {\n\
         \x20 val direct = choose(values = arrayOf(Sink<Int>(), Sink<String>()))\n\
         \x20 val spread = choose(values = *arrayOf(Sink<Int>(), Sink<String>()))\n\
         \x20 val mixed = choose(Sink<Int>(), *arrayOf(Sink<String>()), Sink<Long>())\n\
-        \x20 return if (direct == null && direct == spread && spread == mixed) \"OK\" else \"FAIL\"\n\
+        \x20 return if (direct == \"2\" && spread == \"2\" && mixed == \"3\") \"OK\" else \"FAIL:$direct/$spread/$mixed\"\n\
         }\n";
+    let (reference_code, reference_diagnostics) =
+        common::kotlinc_source_result("generic_named_array_reference", SRC)
+            .expect("reference kotlinc");
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected generic vararg shape: {reference_diagnostics}"
+    );
     assert_eq!(
         common::expect_box_run_with_stdlib(SRC, "generic_named_array"),
         "OK"
     );
+}
+
+#[test]
+fn source_generic_contravariant_vararg_infers_nothing() {
+    const SRC: &str = "class Sink<in T>\n\
+        fun <T> choose(vararg values: Sink<T>): T = null as T\n\
+        fun probe(): Nothing = choose(Sink<Int>(), Sink<String>(), Sink<Long>())\n";
+    let (nothing_code, nothing_diagnostics) =
+        common::kotlinc_source_result("generic_contravariant_vararg_nothing_reference", SRC)
+            .expect("reference kotlinc");
+    assert_eq!(
+        nothing_code, 0,
+        "kotlinc does not infer Nothing: {nothing_diagnostics}"
+    );
+    common::expect_front_end_ok_files_with_stdlib(&[SRC], "contravariant vararg Nothing inference");
 }
 
 const LIB: &str = "package lib\n\

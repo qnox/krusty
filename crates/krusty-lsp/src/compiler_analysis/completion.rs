@@ -446,7 +446,7 @@ impl FileAnalysis {
                         add_type_parameters(
                             &mut result,
                             function_scope(function, &self.file),
-                            &class.type_params,
+                            class.type_params(),
                         );
                     }
                     if let Some(companion) = companion_class(&self.file, class) {

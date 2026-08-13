@@ -294,6 +294,20 @@ fn unrelated_concrete_value_class_parameter_does_not_trigger_suspend_gate() {
 
 #[test]
 fn cross_file_projected_generic_return_with_concrete_inference_is_accepted() {
+    let (reference_code, reference_stderr) = common::kotlinc_source_result(
+        "ProjectedGenericReturn",
+        "fun <T> something(): T = \"OK\" as T\n\
+         class Context<T>\n\
+         fun <T> Any.decodeIn(typeFrom: Context<in T>): T = something()\n\
+         fun <T> Any?.decodeOut(typeFrom: Context<out T>): T =\n\
+             this?.decodeIn(typeFrom) ?: throw AssertionError()\n\
+         fun box(): String = \"value\".decodeOut(Context<Any>()).toString()\n",
+    )
+    .expect("pinned kotlinc is available");
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected fixture: {reference_stderr}"
+    );
     let sources = [
         (
             "Decode",
@@ -315,14 +329,16 @@ fn cross_file_projected_generic_return_with_concrete_inference_is_accepted() {
 }
 
 #[test]
-fn projected_generic_member_return_inference_rejected() {
-    assert!(rejects(
-        "class Context<T>\n\
+fn projected_generic_member_return_inference_matches_kotlinc() {
+    const SOURCE: &str = "class Context<T>\n\
          fun <T> something(): T = Any() as T\n\
          class Decoder { fun <T> decodeIn(typeFrom: Context<in T>): T = something() }\n\
          fun <T> Decoder.decodeOut(typeFrom: Context<out T>): T = decodeIn(typeFrom)\n\
-         fun box(): String = Decoder().decodeOut(Context<Any>()).toString()\n"
-    ));
+         fun box(): String = Decoder().decodeOut(Context<Any>()).toString()\n";
+    let (reference_code, stderr) =
+        common::kotlinc_source_result("ProjectedMemberReturn", SOURCE).expect("pinned kotlinc");
+    assert_eq!(reference_code, 0, "kotlinc rejected fixture: {stderr}");
+    assert!(common::front_end_diagnostics_with_stdlib(SOURCE).is_empty());
 }
 
 #[test]

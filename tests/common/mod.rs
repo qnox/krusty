@@ -1002,7 +1002,12 @@ public class BoxRunner {
                         return r == null ? "null" : r;
                     } catch (Throwable t) {
                         Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null) ? t.getCause() : t;
-                        return "ERROR:" + cause.getClass().getSimpleName() + ":" + cause.getMessage();
+                        StringBuilder detail = new StringBuilder();
+                        for (Throwable current = cause; current != null; current = current.getCause()) {
+                            if (detail.length() > 0) detail.append(" <- ");
+                            detail.append(current.getClass().getSimpleName()).append(":").append(current.getMessage());
+                        }
+                        return "ERROR:" + detail;
                     }
                 });
                 try {
@@ -2354,8 +2359,13 @@ fn expect_suspend_result_with_classpath(
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create suspend test directory");
     classpath.push(stdlib);
-    compile_to_dir(main, "Main", &classpath, Some(jdk.as_path()), &dir)
-        .unwrap_or_else(|| panic!("{tag}: failed to compile suspend caller"));
+    compile_to_dir(main, "Main", &classpath, Some(jdk.as_path()), &dir).unwrap_or_else(|| {
+        let diagnostics = front_end_diagnostics(main, &classpath, Some(jdk.as_path()));
+        let backend = backend_outcome_in_process(main, "Main", &classpath, Some(jdk.as_path()));
+        panic!(
+            "{tag}: failed to compile suspend caller; diagnostics: {diagnostics:?}; backend: {backend:?}"
+        )
+    });
     let driver = format!(
         "import kotlin.coroutines.*;\n\
          public class M {{\n\

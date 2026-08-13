@@ -17,9 +17,7 @@
 use super::common;
 
 fn run_box(src: &str, stem: &str) {
-    let Some(out) = common::compile_and_run_with_stdlib(src, stem) else {
-        panic!("{stem}: expected the box to compile and run");
-    };
+    let out = common::expect_box_run_with_stdlib(src, stem);
     assert_eq!(out, "OK", "{stem}");
 }
 
@@ -404,6 +402,23 @@ fun box(): String {
     );
 }
 
+#[test]
+fn safecall_function_any_methods_run() {
+    run_box(
+        r#"
+fun box(): String {
+    val callback: (() -> Int)? = { 1 }
+    if (callback?.toString() == null) return "toString"
+    if (callback?.hashCode() == null) return "hashCode"
+    val absent: (() -> Int)? = null
+    if (absent?.toString() != null) return "null"
+    return "OK"
+}
+"#,
+        "SafeCallFunctionAnyMethods",
+    );
+}
+
 /// REJECTION GUARDS: shapes that must never EMIT. Asserts on the backend outcome, not a run
 /// result — a skip and an emitted-but-crashing class both make a run-based check pass, but only
 /// the former is acceptable.
@@ -429,27 +444,6 @@ fun box(): String {
     fun local(x: Int) = x + 1
     val t: Int? = 2
     return if (t?.local(2) == 3) "OK" else "fail"
-}
-"#,
-        ),
-        // Function-object Any methods are deliberately unsupported by the qualified path because
-        // krusty does not yet preserve the singleton identity/structured string semantics. The generic
-        // safe-call lowering must not make the same receiver emittable merely by adding `?.`.
-        (
-            "SafeCallFunctionAnyMethod",
-            r#"
-fun box(): String {
-    val callback: (() -> Int)? = { 1 }
-    return callback?.toString() ?: "OK"
-}
-"#,
-        ),
-        (
-            "SafeCallFunctionHashCode",
-            r#"
-fun box(): String {
-    val callback: (() -> Int)? = { 1 }
-    return if (callback?.hashCode() == null) "OK" else "fail"
 }
 "#,
         ),

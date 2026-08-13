@@ -900,6 +900,20 @@ impl<'a> SemanticClassifier<'a> {
             .join(".");
         if let Some(target) = self.definition_symbols.class_target(self.file, &qualified) {
             self.push_definition(self.tokens[terminal].span, target);
+        } else if let Some(internal) = self
+            .symbols
+            .class_names
+            .get_class(name)
+            .filter(|internal| self.symbols.libraries.classifier(*internal).is_some())
+        {
+            self.push_library_definition(
+                self.tokens[terminal].span,
+                LibraryRef {
+                    fqn: internal.render(),
+                    member_name: String::new(),
+                    member_desc: String::new(),
+                },
+            );
         }
         if let Some(alias) = alias_marker
             .and_then(|marker| names.get(marker + 1))
@@ -922,8 +936,8 @@ impl<'a> SemanticClassifier<'a> {
         if let Some(target) = self.definition_symbols.class_target(self.file, &class.name) {
             self.push_type_definition(target.span, target);
         }
-        self.mark_type_parameters(class.span, class.span, &class.type_params);
-        for (_, bound) in &class.type_param_bounds {
+        self.mark_type_parameters(class.span, class.span, class.type_params());
+        for (_, bound) in class.type_param_bounds() {
             self.mark_type(bound);
         }
         for parameter in &class.props {

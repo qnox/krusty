@@ -81,6 +81,39 @@ fn unbound_mutable_property_ref_set_accepts_declared_nullable_value() {
 }
 
 #[test]
+fn generic_nullable_extension_property_ref_keeps_nullable_type_argument() {
+    let diagnostics = common::front_end_diagnostics_with_stdlib(
+        r#"
+var <T> T.payload: T
+    get() = this
+    set(value) {}
+
+fun use() {
+    String?::payload.set(null, null)
+}
+"#,
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
+fn generic_function_reference_can_receive_a_generic_extension_property_reference() {
+    let diagnostics = common::front_end_diagnostics_with_stdlib(
+        r#"
+class Items<T>(val item: T)
+
+val <T> ((Items<T>) -> T).value: T
+    get() = this(Items(null as T))
+
+fun <T> Items<T>.read(): T = item
+
+fun <T> reference(): () -> T = Items<T>::read::value
+"#,
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
 fn generic_local_property_reference_is_invokable() {
     const MAIN: &str = "import kotlin.reflect.KProperty1\n\
         fun <T> readPayload(value: T): T {\n\

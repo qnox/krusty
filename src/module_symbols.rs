@@ -212,11 +212,11 @@ impl<'a> ModuleSymbols<'a> {
                 required,
                 c.ctor_vararg,
             );
-            if !c.tparam_names.is_empty() {
+            if !c.type_params.is_empty() {
                 constructor.generic_sig = Some(GenericSig {
-                    formals: c.tparam_names.clone(),
+                    formals: c.type_params.clone(),
                     formal_bounds: c
-                        .tparam_bounds
+                        .type_param_bounds
                         .iter()
                         .map(|bound| {
                             if *bound == Ty::Error {
@@ -234,13 +234,13 @@ impl<'a> ModuleSymbols<'a> {
                         .collect(),
                     ret: Ty::obj_args_name(
                         c.internal_name(),
-                        &c.tparam_names
+                        &c.type_params
                             .iter()
                             .enumerate()
                             .map(|(index, name)| {
                                 Ty::ty_param(
                                     name,
-                                    c.tparam_bounds
+                                    c.type_param_bounds
                                         .get(index)
                                         .copied()
                                         .filter(|bound| *bound != Ty::Error)
@@ -377,7 +377,7 @@ impl<'a> ModuleSymbols<'a> {
             // callable-tower case instead of retaining a source-only retry path.
             companion_object: c
                 .companion_internal
-                .map(|companion| (crate::names::COMPANION_OBJECT_NAME.to_string(), companion)),
+                .map(|companion| (companion.nested_segment_ref().to_string(), companion)),
             value_companion_fns: Vec::new(),
             // `LibraryType` is the provider-neutral classifier shape consumed by the federated
             // resolver. Preserve source value-class metadata here just as a classpath provider
@@ -389,16 +389,18 @@ impl<'a> ModuleSymbols<'a> {
             // Preserve the classifier's formals on the common type shape. Receiver-coupled queries can
             // then bind `Scope<String>` before selecting a member extension declared on `Scope<T>`, in
             // exactly the same way for source and decoded metadata.
-            type_params: c.tparam_names.clone(),
-            type_param_bounds: c
-                .tparam_bounds
-                .iter()
-                .map(|bound| {
-                    (*bound != Ty::Error)
-                        .then_some(vec![*bound])
-                        .unwrap_or_default()
-                })
-                .collect(),
+            type_parameters: crate::types::TypeParameters::new(
+                c.type_params.clone(),
+                c.type_param_bounds
+                    .iter()
+                    .map(|bound| {
+                        (*bound != Ty::Error)
+                            .then_some(vec![*bound])
+                            .unwrap_or_default()
+                    })
+                    .collect(),
+                c.type_param_variances.clone(),
+            ),
             sealed_subclasses,
             enum_entries,
             enum_entries_accessor,
@@ -410,6 +412,8 @@ impl<'a> ModuleSymbols<'a> {
             .keys()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
+        names.extend(c.member_ext_funs.keys().cloned());
+        names.extend(c.member_ext_props.keys().cloned());
         for (name, property) in &c.declared_props {
             names.insert(name.clone());
             names.insert(property.getter_name.clone());
@@ -439,17 +443,17 @@ impl<'a> ModuleSymbols<'a> {
             "resolve",
             "source SAM metadata owner={} type_params={:?}",
             root.internal_name(),
-            root.tparam_names
+            root.type_params
         );
 
         let root_args = root
-            .tparam_names
+            .type_params
             .iter()
             .enumerate()
             .map(|(index, name)| {
                 Ty::ty_param(
                     name,
-                    root.tparam_bounds
+                    root.type_param_bounds
                         .get(index)
                         .copied()
                         .filter(|bound| *bound != Ty::Error)
@@ -489,9 +493,9 @@ impl<'a> ModuleSymbols<'a> {
                             .find(|method| method.params == signature.params)
                     }) {
                         member.generic_sig = Some(GenericSig {
-                            formals: root.tparam_names.clone(),
+                            formals: root.type_params.clone(),
                             formal_bounds: root
-                                .tparam_bounds
+                                .type_param_bounds
                                 .iter()
                                 .map(|bound| {
                                     (*bound != Ty::Error)
@@ -751,9 +755,9 @@ impl<'a> ModuleSymbols<'a> {
                     .generic_props
                     .get(name)
                     .and_then(|&(index, definitely_non_null)| {
-                        let parameter = class.tparam_names.get(index)?;
+                        let parameter = class.type_params.get(index)?;
                         let bound = class
-                            .tparam_bounds
+                            .type_param_bounds
                             .get(index)
                             .copied()
                             .filter(|bound| *bound != Ty::Error)
@@ -1120,9 +1124,17 @@ impl SymbolSource for ModuleSymbols<'_> {
         // and ordinary overload selection remains origin-neutral.
         if let SymbolNamespace::Classifier(owner) = namespace {
             if let Some(classifier) = self.classifier_record(owner).filter(|ty| ty.is_object()) {
+                let companion_storage = owner.nested_owner().and_then(|outer| {
+                    self.classifier_record(outer)
+                        .and_then(|outer_type| outer_type.companion_object.clone())
+                        .filter(|(_, companion)| *companion == owner)
+                        .map(|(field, _)| (outer, field))
+                });
+                let (field_owner, field_name) =
+                    companion_storage.unwrap_or_else(|| (owner, "INSTANCE".to_string()));
                 let singleton = crate::libraries::StaticFieldRef {
-                    owner,
-                    name: "INSTANCE".to_string(),
+                    owner: field_owner,
+                    name: field_name,
                     descriptor: Some(format!("L{};", owner.render())),
                     ty: Ty::obj_name(owner),
                     constant: None,
@@ -1136,6 +1148,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 for mut function in imported_functions.overloads {
                     function.kind = FnKind::TopLevel;
                     function.receiver = None;
+                    function.source_key = None;
                     function.callable.singleton_dispatch = Some(Box::new(singleton.clone()));
                     overloads.push(function);
                 }
@@ -1149,6 +1162,27 @@ impl SymbolSource for ModuleSymbols<'_> {
                     properties.push(property);
                 }
                 if let Some(class) = self.class_by_type_name(owner) {
+                    for declaration in class.member_ext_funs(&name) {
+                        let mut function = fn_info(
+                            FnKind::Extension,
+                            declaration.signature(),
+                            Some(declaration.receiver_ty()),
+                            CallableOwner {
+                                internal: owner,
+                                is_interface: class.is_interface(),
+                            },
+                            &name,
+                            0,
+                            Origin::Module { facade: owner },
+                        );
+                        // This is a member callable imported into the receiver-less callable scope,
+                        // not a top-level declaration. Its complete emit handle is the singleton
+                        // dispatch below; a source declaration key would misroute it through the
+                        // cross-file static-extension path.
+                        function.source_key = None;
+                        function.callable.singleton_dispatch = Some(Box::new(singleton.clone()));
+                        overloads.push(function);
+                    }
                     for declaration in class.member_ext_props(&name) {
                         let mut getter_params = vec![declaration.receiver_ty()];
                         getter_params.extend_from_slice(declaration.context_params());
@@ -1392,8 +1426,7 @@ mod tests {
             super_ctor_params: Vec::new(),
             ctor_defaults: vec![],
             secondary_ctors: vec![],
-            tparam_names: vec![],
-            tparam_bounds: vec![],
+            type_parameters: crate::types::TypeParameters::default(),
             generic_props: HashMap::new(),
             generic_property_shapes: HashMap::new(),
             value_field: None,

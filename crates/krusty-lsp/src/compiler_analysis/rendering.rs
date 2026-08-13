@@ -92,5 +92,7 @@ pub(crate) fn render_ty(ty: Ty) -> String {
         Ty::Nullable(inner) => format!("{}?", render_ty(*inner)),
         Ty::PlatformNullable(inner) => format!("{}!", render_ty(*inner)),
         Ty::TyParam(name, _) => name.to_string(),
+        Ty::InProjection(inner) => format!("in {}", render_ty(*inner)),
+        Ty::OutProjection(inner) => format!("out {}", render_ty(*inner)),
     }
 }

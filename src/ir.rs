@@ -1531,19 +1531,26 @@ pub struct IrFile {
 /// platform's equivalent needs). NO target descriptors here — each backend formats its own.
 #[derive(Clone, Debug)]
 pub struct IrGenericSig {
-    /// Each type parameter: its name and its upper bound as a Kotlin `Ty` (`kotlin/Any` when none).
-    pub type_params: Vec<(String, Ty)>,
-    /// Per value parameter: `Some(name)` when it is a bare type-parameter reference, else `None` (the
-    /// backend uses the parameter's own erased type). Empty for a class signature.
-    pub param_tparams: Vec<Option<String>>,
-    /// `Some(name)` when the return type is a bare type-parameter reference, else `None`.
-    pub ret_tparam: Option<String>,
+    /// Each declared type parameter with its complete semantic bound shape. Whether that bound is an
+    /// interface is declaration metadata, not something a backend may infer from a physical name.
+    pub type_params: Vec<IrTypeParameter>,
+    /// Complete semantic value-parameter types for a function signature. Empty for a class signature.
+    pub params: Vec<Ty>,
+    /// Complete semantic return type for a function signature. `None` for a class signature.
+    pub ret: Option<Ty>,
     /// For a CLASS signature with a PARAMETERIZED supertype: the superclass + superinterfaces as
     /// platform-agnostic `Ty`s carrying their type arguments (`[Any, Operation<Result<Int>>]`), so a
     /// cross-module reader recovers a member's concrete generic return. The backend formats these into the
     /// JVM `Signature` string. Empty ⇒ no parameterized supertype (backend emits the default `Object`
     /// superclass). Empty for a function signature.
     pub supers: Vec<Ty>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IrTypeParameter {
+    pub name: String,
+    pub bounds: Vec<(Ty, bool)>,
+    pub variance: crate::types::TypeVariance,
 }
 
 impl IrFile {

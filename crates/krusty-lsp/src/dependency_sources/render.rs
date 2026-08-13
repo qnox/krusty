@@ -113,9 +113,9 @@ pub fn render_library_class(
     text.push_str(&class_name);
     let type_hi = text.len() as u32;
 
-    if !lib.type_params.is_empty() {
+    if !lib.type_params().is_empty() {
         text.push('<');
-        text.push_str(&lib.type_params.join(", "));
+        text.push_str(&lib.type_params().join(", "));
         text.push('>');
     }
 

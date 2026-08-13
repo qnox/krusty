@@ -276,8 +276,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         visibility: Visibility::Public,
         annotations: Vec::new(),
         annotation_args: Vec::new(),
-        type_params: Vec::new(),
-        type_param_bounds: Vec::new(),
+        type_parameters: crate::ast::ClassTypeParameters::new(Vec::new(), Vec::new(), Vec::new()),
         props: Vec::new(),
         methods: Vec::new(),
         companion: None,
@@ -631,7 +630,8 @@ fn expand_fun_type_aliases(file: &mut File) {
         expand_bounds(&mut p.type_param_bounds, aliases);
     }
     fn expand_class(c: &mut ClassDecl, aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
-        expand_bounds(&mut c.type_param_bounds, aliases);
+        c.type_parameters
+            .map_bounds(|bounds| expand_bounds(bounds, aliases));
         for p in &mut c.props {
             expand(&mut p.ty, aliases, 0);
         }
@@ -1795,12 +1795,12 @@ impl<'a> Parser<'a> {
         self.bump(); // val/var
                      // Optional generic type parameters on an extension property (`val <T> T.foo: T`) —
                      // erased, but retained so they scope over the receiver, type, and accessor bodies.
-        let (type_params, _tp_non_null, _tp_reified, type_param_bounds) = if self.at(TokenKind::Lt)
-        {
-            self.parse_type_params()
-        } else {
-            Default::default()
-        };
+        let (type_params, _tp_non_null, _tp_reified, type_param_bounds, _) =
+            if self.at(TokenKind::Lt) {
+                self.parse_type_params()
+            } else {
+                Default::default()
+            };
         let (receiver, name) = self.parse_receiver_and_declaration_name("property name");
         let ty = if self.eat(TokenKind::Colon) {
             Some(self.parse_type())
@@ -2280,8 +2280,11 @@ impl<'a> Parser<'a> {
             visibility: visibility_of(modifiers),
             annotations,
             annotation_args,
-            type_params: Vec::new(),
-            type_param_bounds: Vec::new(),
+            type_parameters: crate::ast::ClassTypeParameters::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
             props: Vec::new(),
             methods,
             companion: None,
@@ -2652,8 +2655,11 @@ impl<'a> Parser<'a> {
             visibility: Visibility::Public,
             annotations,
             annotation_args,
-            type_params: Vec::new(),
-            type_param_bounds: Vec::new(),
+            type_parameters: crate::ast::ClassTypeParameters::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
             props,
             methods,
             companion,
@@ -2693,7 +2699,11 @@ impl<'a> Parser<'a> {
     /// `where` may sit on a following line, so newlines are skipped only when the clause is actually
     /// present (otherwise the position is restored). Physical specialization of a bound belongs to
     /// emission; the parser retains every source-valid bound unchanged.
-    fn parse_where_clause(&mut self) -> Vec<(String, TypeRef)> {
+    fn parse_where_clause(
+        &mut self,
+        declared_type_params: &[String],
+        declaration_name: &str,
+    ) -> Vec<(String, TypeRef)> {
         let mut bounds: Vec<(String, TypeRef)> = Vec::new();
         let save = self.i;
         self.skip_newlines();
@@ -2711,9 +2721,18 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_newlines();
             let mut tp_name = String::new();
+            let type_parameter_span = self.tok().span;
             if self.at(TokenKind::Ident) {
                 tp_name = self.text().to_string();
                 self.bump(); // type-parameter name
+            }
+            if !tp_name.is_empty() && !declared_type_params.iter().any(|name| name == &tp_name) {
+                self.diags.error(
+                    type_parameter_span,
+                    format!(
+                        "'{tp_name}' does not refer to a type parameter of '{declaration_name}'."
+                    ),
+                );
             }
             if self.eat(TokenKind::Colon) {
                 let bound = self.parse_type();
@@ -2807,7 +2826,7 @@ impl<'a> Parser<'a> {
                 body_close_line: 0,
             };
         }
-        let (type_params, non_null_type_params, reified_type_params, type_param_bounds) =
+        let (type_params, non_null_type_params, reified_type_params, type_param_bounds, _) =
             if self.at(TokenKind::Lt) {
                 self.parse_type_params()
             } else {
@@ -2815,6 +2834,7 @@ impl<'a> Parser<'a> {
                     Vec::new(),
                     std::collections::HashSet::new(),
                     std::collections::HashSet::new(),
+                    Vec::new(),
                     Vec::new(),
                 )
             };
@@ -2839,7 +2859,7 @@ impl<'a> Parser<'a> {
         // A `where` bound is the same constraint as the inline `<T : Bound>` form; join them so every
         // consumer sees one list.
         let mut type_param_bounds = type_param_bounds;
-        type_param_bounds.extend(self.parse_where_clause());
+        type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
         let signature_end = self.t[self.i.saturating_sub(1)].span.hi;
         // A `=`-body or block body may sit on a following line (`fun f(): T\n{ … }`). Skip plain line
         // breaks to find it, restoring the position if what follows is neither — an abstract/no-body
@@ -3247,13 +3267,15 @@ impl<'a> Parser<'a> {
             self.diags.error(self.tok().span, "expected class name");
             "<error>".to_string()
         };
-        let (type_params, _, _, type_param_bounds) = if self.at(TokenKind::Lt) {
+        let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
+        {
             self.parse_type_params()
         } else {
             (
                 Vec::new(),
                 std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
+                Vec::new(),
                 Vec::new(),
             )
         };
@@ -3347,7 +3369,7 @@ impl<'a> Parser<'a> {
         // `class Derived<T> : Base<T>() where T : I1, T : I2` — generic constraints after the
         // supertype list, before the body. Same constraint as the inline form; one joined list.
         let mut type_param_bounds = type_param_bounds;
-        type_param_bounds.extend(self.parse_where_clause());
+        type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
         // Optional class body: member `fun`s, body properties (`val`/`var`), and `init { }` blocks.
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
@@ -3506,8 +3528,11 @@ impl<'a> Parser<'a> {
             visibility: Visibility::Public,
             annotations,
             annotation_args,
-            type_params,
-            type_param_bounds,
+            type_parameters: crate::ast::ClassTypeParameters::new(
+                type_params,
+                type_param_bounds,
+                type_param_variances,
+            ),
             props,
             methods,
             companion,
@@ -3747,7 +3772,8 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
-        let (type_params, _, _, type_param_bounds) = if self.at(TokenKind::Lt) {
+        let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
+        {
             self.parse_type_params()
         } else {
             (
@@ -3755,13 +3781,14 @@ impl<'a> Parser<'a> {
                 std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 Vec::new(),
+                Vec::new(),
             )
         };
         let (supertypes, _base, _base_type_args, _base_args, _, _) = self.parse_supertypes();
         // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the
         // body. Same constraint as the inline form; one joined list.
         let mut type_param_bounds = type_param_bounds;
-        type_param_bounds.extend(self.parse_where_clause());
+        type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut companion = None;
@@ -3849,8 +3876,11 @@ impl<'a> Parser<'a> {
             visibility: Visibility::Public,
             annotations,
             annotation_args,
-            type_params,
-            type_param_bounds: Vec::new(),
+            type_parameters: crate::ast::ClassTypeParameters::new(
+                type_params,
+                type_param_bounds,
+                type_param_variances,
+            ),
             props: Vec::new(),
             methods,
             companion,
@@ -3983,8 +4013,10 @@ impl<'a> Parser<'a> {
             visibility: Visibility::Public,
             annotations: Vec::new(),
             annotation_args: Vec::new(),
-            type_params: self.current_lexical_type_params(),
-            type_param_bounds: self.current_lexical_type_param_bounds(),
+            type_parameters: crate::ast::ClassTypeParameters::invariant(
+                self.current_lexical_type_params(),
+                self.current_lexical_type_param_bounds(),
+            ),
             props: Vec::new(),
             methods,
             companion: None,
@@ -4127,8 +4159,11 @@ impl<'a> Parser<'a> {
             visibility: Visibility::Public,
             annotations,
             annotation_args,
-            type_params: Vec::new(),
-            type_param_bounds: Vec::new(),
+            type_parameters: crate::ast::ClassTypeParameters::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
             props: Vec::new(),
             methods,
             companion: None,
@@ -4392,51 +4427,16 @@ impl<'a> Parser<'a> {
                 name.push_str(self.text());
                 self.bump();
             }
-            // For `Array<T>`, capture the element type in `arg`; for any other generic type, capture
-            // the full argument list in `targs` (erased in JVM descriptors, kept for member typing).
-            let mut targs = Vec::new();
-            let arg = if name == "Array" && self.at(TokenKind::Lt) {
-                self.bump(); // '<'
-                let (in_projection, out_projection) = self.skip_variance(); // `out`/`in`
-                let any_nullable = || TypeRef {
-                    name: "Any".to_string(),
-                    flags: TrFlags::default()
-                        .with_nullable(true)
-                        .with_definitely_non_null(false),
-                    arg: None,
-                    targs: Vec::new(),
-                    span,
-                    fun_params: Vec::new(),
-                    fun_context_count: 0,
-                };
-                // `Array<*>` and `Array<in X>` (contravariant) READ as `Any?` — the element erases to
-                // Object so a value that is a WIDER array than `X` (`Array<in Array<String>> = x` holding
-                // `Object[][]`) frames correctly. `Array<out X>` keeps `X`.
-                let elem = if self.eat(TokenKind::Star) {
-                    any_nullable()
-                } else {
-                    let mut declared = self.parse_type();
-                    declared.set_projection(in_projection, out_projection);
-                    if in_projection {
-                        self.file.type_projection_args.insert(span.lo, declared);
-                        any_nullable()
-                    } else {
-                        declared
-                    }
-                };
-                self.expect(TokenKind::Gt, "'>'");
-                Some(Box::new(elem))
-            } else {
-                targs = self.parse_type_args(); // `Box<Int>` → carry `[Int]` (erased in descriptors)
-                None
-            };
+            // Every classifier uses the same type-argument structure. Projection semantics belong to
+            // resolution; the parser retains exactly what was written.
+            let mut targs = self.parse_type_args();
+            let arg = None;
             // A generic-qualified nested type `Outer<A>.Inner<B>.Innermost<C>`: the dotted-path loop
             // above stops at the `<` after `Outer`, so continue consuming `.Nested` segments (each with
             // its own erased type arguments) here. The dotted name (`Outer.Inner.Innermost`) resolves
             // the nested class; the intermediate segments' arguments are erased in JVM descriptors, so
             // only the last segment's arguments are retained (matching the plain `Outer.Inner` path).
-            while arg.is_none()
-                && self.at(TokenKind::Dot)
+            while self.at(TokenKind::Dot)
                 && self
                     .t
                     .get(self.i + 1)
@@ -4662,21 +4662,13 @@ impl<'a> Parser<'a> {
                 break segment;
             }
         };
-        let receiver_arg = if receiver_name == "Array" {
-            let argument = receiver_targs.drain(..).next().map(Box::new);
-            receiver_targs.clear();
-            argument
-        } else {
-            None
-        };
-
         (
             Some(TypeRef {
                 name: receiver_name,
                 flags: TrFlags::default()
                     .with_nullable(nullable)
                     .with_definitely_non_null(false),
-                arg: receiver_arg,
+                arg: None,
                 targs: receiver_targs,
                 span: Span::new(receiver_start, receiver_hi),
                 fun_params: Vec::new(),
@@ -4697,23 +4689,30 @@ impl<'a> Parser<'a> {
         std::collections::HashSet<String>,
         std::collections::HashSet<String>,
         Vec<(String, TypeRef)>,
+        Vec<crate::types::TypeVariance>,
     ) {
         let mut names = Vec::new();
         let mut non_null = std::collections::HashSet::new();
         let mut reified = std::collections::HashSet::new();
         let mut bounds: Vec<(String, TypeRef)> = Vec::new();
+        let mut variances = Vec::new();
         if !self.eat(TokenKind::Lt) {
-            return (names, non_null, reified, bounds);
+            return (names, non_null, reified, bounds, variances);
         }
         loop {
             self.skip_newlines();
             // Skip variance/reified modifiers. `in` is a keyword; `out`/`reified` are idents.
             let mut is_reified = false;
+            let mut variance = crate::types::TypeVariance::Invariant;
             while (self.at(TokenKind::Ident) && matches!(self.text(), "reified" | "out"))
                 || self.at(TokenKind::KwIn)
             {
                 if self.at(TokenKind::Ident) && self.text() == "reified" {
                     is_reified = true;
+                } else if self.at(TokenKind::Ident) && self.text() == "out" {
+                    variance = crate::types::TypeVariance::Out;
+                } else if self.at(TokenKind::KwIn) {
+                    variance = crate::types::TypeVariance::In;
                 }
                 self.bump();
             }
@@ -4726,6 +4725,7 @@ impl<'a> Parser<'a> {
             };
             if !tname.is_empty() {
                 names.push(tname.clone());
+                variances.push(variance);
                 if is_reified {
                     reified.insert(tname.clone());
                 }
@@ -4747,7 +4747,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(TokenKind::Gt, "'>'");
-        (names, non_null, reified, bounds)
+        (names, non_null, reified, bounds, variances)
     }
 
     // ---- statements ----
@@ -8744,8 +8744,8 @@ mod tests {
         assert_eq!(receivers[6].targs[0].name, "Entry");
         assert!(receivers[6].arg.is_none());
         assert_eq!(receivers[7].name, "Array");
-        assert_eq!(receivers[7].arg.as_deref().unwrap().name, "Entry");
-        assert!(receivers[7].targs.is_empty());
+        assert!(receivers[7].arg.is_none());
+        assert_eq!(receivers[7].targs[0].name, "Entry");
     }
 
     #[test]
@@ -8775,12 +8775,8 @@ mod tests {
         assert!(!input.out_projection());
         assert!(!output.in_projection());
         assert!(output.out_projection());
-        assert_eq!(
-            array.arg.as_deref().map(|argument| argument.name.as_str()),
-            Some("Any")
-        );
-        assert!(array.targs.is_empty());
-        let projected = &file.type_projection_args[&array.span.lo];
+        assert!(array.arg.is_none());
+        let projected = &array.targs[0];
         assert!(projected.in_projection());
         assert_eq!(projected.name, "T");
     }
@@ -9495,6 +9491,23 @@ class HeaderHost {
                 .map(|argument| argument.name.as_str())
                 .collect::<Vec<_>>(),
             ["String", "Int"]
+        );
+    }
+
+    #[test]
+    fn where_constraint_must_name_a_declared_type_parameter() {
+        let source = "class C<T> where U : Any";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let _ = parse(source, &tokens, &mut diagnostics);
+
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            ["'U' does not refer to a type parameter of 'C'."]
         );
     }
 

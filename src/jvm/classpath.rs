@@ -1096,6 +1096,7 @@ struct BuiltinClass {
     supertype_tys: Vec<Ty>,
     /// The class's formal type-parameter names, in declaration order (`Map` → `[K, V]`).
     formals: Vec<String>,
+    formal_variances: Vec<crate::types::TypeVariance>,
     members: Vec<BuiltinMember>,
     constructors: Vec<BuiltinConstructor>,
     /// Metadata-declared companion: simple source name plus the companion classifier's exact
@@ -1141,7 +1142,11 @@ fn builtin_erased(ty: Ty) -> Ty {
         // their bound, so the same recursive rule covers both cases and stays aligned with
         // `names::type_descriptor` and bridge erasure.
         Ty::TyParam(_, bound) => builtin_erased(*bound),
-        Ty::Nullable(inner) => builtin_erased(*inner),
+        // Nullability is erased from reference classifiers, but not from scalar representation: a
+        // nullable scalar occupies its wrapper reference in a JVM descriptor.
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+            inner.boxed_ref().unwrap_or_else(|| builtin_erased(*inner))
+        }
         Ty::Obj(name, args) if !args.is_empty() => Ty::obj_name(name),
         other => other,
     }
@@ -1177,6 +1182,8 @@ fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>) -> T
                 .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
             Ty::ty_param(name, bound)
         }
+        BuiltinTy::InProjection(inner) => Ty::in_projection(builtin_ty(inner, bounds)),
+        BuiltinTy::OutProjection(inner) => Ty::out_projection(builtin_ty(inner, bounds)),
     };
     if t.nullable() {
         Ty::nullable(ty)
@@ -1263,6 +1270,7 @@ impl BuiltinsFile {
                 .map(|t| builtin_ty(t, &class_bounds))
                 .collect();
             let formals: Vec<String> = class.type_params.iter().map(|p| p.name.clone()).collect();
+            let formal_variances = class.type_params.iter().map(|p| p.variance).collect();
             let members = class
                 .members
                 .into_iter()
@@ -1306,6 +1314,7 @@ impl BuiltinsFile {
                     supertypes,
                     supertype_tys,
                     formals,
+                    formal_variances,
                     members,
                     constructors,
                     companion_object,
@@ -2469,6 +2478,7 @@ impl Classpath {
                             .with_is_interface(is_iface)
                             .with_is_operator(m.is_operator),
                         inline: crate::libraries::InlineKind::None,
+                        inline_body_plan: None,
                         // Builtin (`.kotlin_builtins`) members are all public API.
                         visibility: crate::libraries::Visibility::Public,
                         call_sig: crate::libraries::CallSig::metadata_plain(
@@ -2598,6 +2608,17 @@ impl Classpath {
         self.builtins_file_for_package(Self::builtins_package_for(kotlin))
             .get_name(kotlin)
             .map(|c| (c.formals.clone(), c.supertype_tys.clone()))
+    }
+
+    pub fn builtin_class_variances_name(
+        &self,
+        internal: TypeName,
+    ) -> Option<Vec<crate::types::TypeVariance>> {
+        let kotlin =
+            super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal);
+        self.builtins_file_for_package(Self::builtins_package_for(kotlin))
+            .get_name(kotlin)
+            .map(|class| class.formal_variances.clone())
     }
 
     /// Direct supertypes declared in `.kotlin_builtins` for a Kotlin builtin class.
@@ -5163,6 +5184,19 @@ mod fq_tests {
         );
         let unbounded = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
         assert_eq!(builtin_erased(unbounded), Ty::obj("kotlin/Any"));
+    }
+
+    #[test]
+    fn builtin_erasure_preserves_nullable_scalar_storage() {
+        assert_eq!(
+            builtin_erased(Ty::nullable(Ty::Int)),
+            Ty::obj("java/lang/Integer")
+        );
+        assert_eq!(
+            builtin_erased(Ty::nullable(Ty::UInt)),
+            Ty::obj("kotlin/UInt")
+        );
+        assert_eq!(builtin_erased(Ty::nullable(Ty::String)), Ty::String);
     }
 
     #[test]

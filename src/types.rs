@@ -648,6 +648,10 @@ pub enum Ty {
     /// A Java platform type `T!`: flexible between `T` and `T?`. Unlike [`Nullable`](Ty::Nullable),
     /// direct member access is permitted; assignability accepts it at either nullability bound.
     PlatformNullable(&'static Ty),
+    /// Use-site type projections. These occur only as generic arguments (`Box<in T>` / `Box<out T>`)
+    /// and remain semantic until assignability/inference consumes their variance.
+    InProjection(&'static Ty),
+    OutProjection(&'static Ty),
     /// A generic type-parameter reference (`T`), carrying its name and declared upper bound
     /// (`<T : CharSequence>` → bound `CharSequence`; unbounded `<T>` → bound `kotlin/Any`). The checker
     /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); runtime
@@ -730,7 +734,7 @@ impl Ty {
                 .get(name)
                 .copied()
                 .map(|binding| {
-                    if bound.is_nullable() {
+                    if bound.admits_null() {
                         binding
                     } else {
                         binding.non_null()
@@ -750,6 +754,8 @@ impl Ty {
             ),
             Ty::Nullable(inner) => Ty::nullable(inner.substitute_erased(bindings)),
             Ty::PlatformNullable(inner) => Ty::platform_nullable(inner.substitute_erased(bindings)),
+            Ty::InProjection(inner) => Ty::in_projection(inner.substitute_erased(bindings)),
+            Ty::OutProjection(inner) => Ty::out_projection(inner.substitute_erased(bindings)),
             Ty::Obj(internal, arguments) if !arguments.is_empty() => {
                 let arguments = arguments
                     .iter()
@@ -819,9 +825,31 @@ impl Ty {
         }
     }
 
+    pub fn in_projection(inner: Ty) -> Ty {
+        Ty::InProjection(intern_ty(inner))
+    }
+
+    pub fn out_projection(inner: Ty) -> Ty {
+        Ty::OutProjection(intern_ty(inner))
+    }
+
+    pub fn projection_inner(self) -> Option<Ty> {
+        match self {
+            Ty::InProjection(inner) | Ty::OutProjection(inner) => Some(*inner),
+            _ => None,
+        }
+    }
+
     /// Whether this type is nullable (`T?`).
     pub fn is_nullable(self) -> bool {
         matches!(self, Ty::Nullable(_))
+    }
+
+    /// Whether this type admits `null`: an explicit nullable type or the upper bound of a flexible
+    /// platform type. This is distinct from [`Self::is_nullable`], which identifies source `T?`
+    /// syntax and must not collapse `T!` to that single bound.
+    pub fn admits_null(self) -> bool {
+        matches!(self, Ty::Nullable(_) | Ty::PlatformNullable(_))
     }
 
     /// The non-null form: strips a `?` if present, else returns `self`.
@@ -1165,6 +1193,15 @@ impl Ty {
 
     /// Render a Kotlin source type.
     pub fn source_name(self) -> String {
+        self.source_name_with_type_parameter(&|name| type_parameter_source_name(name).to_string())
+    }
+
+    /// Render a Kotlin source type while letting a diagnostic qualify type-parameter names with
+    /// their declaration owner. Semantic type identities remain unchanged.
+    pub(crate) fn source_name_with_type_parameter(
+        self,
+        type_parameter: &dyn Fn(&str) -> String,
+    ) -> String {
         match self {
             Ty::Int => "Int".to_string(),
             Ty::Byte => "Byte".to_string(),
@@ -1192,7 +1229,7 @@ impl Ty {
                 } else {
                     let arguments = args
                         .iter()
-                        .map(|argument| argument.source_name())
+                        .map(|argument| argument.source_name_with_type_parameter(type_parameter))
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("{base}<{arguments}>")
@@ -1205,22 +1242,37 @@ impl Ty {
                 let parameters = signature
                     .params
                     .iter()
-                    .map(|parameter| parameter.source_name())
+                    .map(|parameter| parameter.source_name_with_type_parameter(type_parameter))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let suspend = if signature.suspend { "suspend " } else { "" };
-                format!("{suspend}({parameters}) -> {}", signature.ret.source_name())
+                format!(
+                    "{suspend}({parameters}) -> {}",
+                    signature
+                        .ret
+                        .source_name_with_type_parameter(type_parameter)
+                )
             }
             Ty::Nullable(inner) => {
-                let rendered = inner.source_name();
+                let rendered = inner.source_name_with_type_parameter(type_parameter);
                 if matches!(*inner, Ty::Fun(_)) {
                     format!("({rendered})?")
                 } else {
                     format!("{rendered}?")
                 }
             }
-            Ty::PlatformNullable(inner) => format!("{}!", inner.source_name()),
-            Ty::TyParam(n, _) => n.to_string(),
+            Ty::PlatformNullable(inner) => {
+                format!("{}!", inner.source_name_with_type_parameter(type_parameter))
+            }
+            Ty::InProjection(inner) => format!(
+                "in {}",
+                inner.source_name_with_type_parameter(type_parameter)
+            ),
+            Ty::OutProjection(inner) => format!(
+                "out {}",
+                inner.source_name_with_type_parameter(type_parameter)
+            ),
+            Ty::TyParam(n, _) => type_parameter(n),
         }
     }
 
@@ -1247,6 +1299,8 @@ impl Ty {
             Ty::Fun(_) => "Function".to_string(),
             Ty::Nullable(inner) => format!("{}?", inner.name()),
             Ty::PlatformNullable(inner) => format!("{}!", inner.name()),
+            Ty::InProjection(inner) => format!("in {}", inner.name()),
+            Ty::OutProjection(inner) => format!("out {}", inner.name()),
             Ty::TyParam(name, _) => name.to_string(),
         }
     }
@@ -1432,6 +1486,7 @@ impl Ty {
             Ty::UShort => Ty::Short,
             Ty::UInt => Ty::Int,
             Ty::ULong => Ty::Long,
+            Ty::TyParam(_, bound) => return bound.scalar_value_repr(),
             _ => return None,
         })
     }
@@ -1476,6 +1531,16 @@ impl Ty {
     }
 }
 
+/// The source spelling carried by a semantic type-parameter key. Local declarations are alpha-
+/// renamed because two nested declarations may legally use the same spelling; diagnostics still
+/// show the written name. Class and top-level declaration keys are already unique in every signature
+/// that owns them and therefore remain their source spelling.
+pub(crate) fn type_parameter_source_name(name: &str) -> &str {
+    name.strip_prefix("$local$")
+        .and_then(|key| key.rsplit_once('$'))
+        .map_or(name, |(_, source)| source)
+}
+
 /// Whether `ty` mentions any of the named type parameters (`T` itself, `List<T>`, `(T) -> T`,
 /// `T?`). A pure `Ty` predicate shared by the checker (generic-shape classification) and lowering
 /// (generic-shape gates).
@@ -1492,7 +1557,10 @@ pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
                 .any(|parameter| ty_mentions_param(*parameter, names))
                 || ty_mentions_param(signature.ret, names)
         }
-        Ty::Nullable(inner) => ty_mentions_param(*inner, names),
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner) => ty_mentions_param(*inner, names),
         _ => false,
     }
 }
@@ -1509,6 +1577,109 @@ pub enum Visibility {
     Internal,
     Protected,
     Private,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TypeVariance {
+    #[default]
+    Invariant,
+    In,
+    Out,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TypeParameterView<B> {
+    pub(crate) type_params: Vec<String>,
+    pub(crate) type_param_bounds: B,
+    pub(crate) type_param_variances: Vec<TypeVariance>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TypeParameters<B>(TypeParameterView<B>);
+
+impl<B> std::ops::Deref for TypeParameters<B> {
+    type Target = TypeParameterView<B>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub trait TypeParameterBounds {
+    fn valid_for(&self, names: &[String]) -> bool;
+}
+
+impl<T> TypeParameterBounds for Vec<Vec<T>> {
+    fn valid_for(&self, names: &[String]) -> bool {
+        self.len() == names.len()
+    }
+}
+
+impl TypeParameterBounds for Vec<Ty> {
+    fn valid_for(&self, names: &[String]) -> bool {
+        self.len() == names.len()
+    }
+}
+
+impl<T> TypeParameterBounds for Vec<(String, T)> {
+    fn valid_for(&self, _names: &[String]) -> bool {
+        true
+    }
+}
+
+impl<B: TypeParameterBounds> TypeParameters<B> {
+    pub fn new(
+        type_params: Vec<String>,
+        type_param_bounds: B,
+        type_param_variances: Vec<TypeVariance>,
+    ) -> Self {
+        assert_eq!(type_params.len(), type_param_variances.len());
+        assert!(type_param_bounds.valid_for(&type_params));
+        Self(TypeParameterView {
+            type_params,
+            type_param_bounds,
+            type_param_variances,
+        })
+    }
+
+    pub fn type_params(&self) -> &Vec<String> {
+        &self.0.type_params
+    }
+
+    pub fn type_param_bounds(&self) -> &B {
+        &self.0.type_param_bounds
+    }
+
+    pub fn type_param_variances(&self) -> &Vec<TypeVariance> {
+        &self.0.type_param_variances
+    }
+
+    pub fn replace(&mut self, names: Vec<String>, bounds: B, variances: Vec<TypeVariance>) {
+        *self = Self::new(names, bounds, variances);
+    }
+
+    pub fn map_bounds(&mut self, map: impl FnOnce(&mut B))
+    where
+        B: Clone,
+    {
+        let mut bounds = self.0.type_param_bounds.clone();
+        map(&mut bounds);
+        self.replace(
+            self.0.type_params.clone(),
+            bounds,
+            self.0.type_param_variances.clone(),
+        );
+    }
+}
+
+impl<B> TypeParameters<B>
+where
+    B: Default + TypeParameterBounds,
+{
+    pub fn invariant(type_params: Vec<String>, type_param_bounds: B) -> Self {
+        let type_param_variances = vec![TypeVariance::Invariant; type_params.len()];
+        Self::new(type_params, type_param_bounds, type_param_variances)
+    }
 }
 
 impl Visibility {
@@ -1576,7 +1747,7 @@ fn substitute_type_parameters(
             .get(name)
             .copied()
             .map(|binding| {
-                if bound.is_nullable() {
+                if bound.admits_null() {
                     binding
                 } else {
                     binding.non_null()
@@ -1610,6 +1781,16 @@ fn substitute_type_parameters(
             bindings,
             preserve_unbound,
         )),
+        Ty::InProjection(inner) => Ty::in_projection(substitute_type_parameters(
+            *inner,
+            bindings,
+            preserve_unbound,
+        )),
+        Ty::OutProjection(inner) => Ty::out_projection(substitute_type_parameters(
+            *inner,
+            bindings,
+            preserve_unbound,
+        )),
         Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
@@ -1630,6 +1811,40 @@ pub(crate) fn ty_subst_all(
     bindings: &std::collections::HashMap<String, Ty>,
 ) -> Vec<Ty> {
     types.iter().map(|ty| ty_subst(*ty, bindings)).collect()
+}
+
+/// Replace the inline bounds carried by type-parameter references throughout a type shape. Signature
+/// decoders first discover formal declarations and type uses independently; this single type-model
+/// operation joins them without each decoder growing its own recursive walk.
+pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &std::collections::HashMap<String, Ty>) -> Ty {
+    match ty {
+        Ty::TyParam(name, current) => {
+            Ty::ty_param(name, bounds.get(name).copied().unwrap_or(*current))
+        }
+        Ty::Fun(signature) => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|parameter| ty_with_param_bounds(*parameter, bounds))
+                .collect(),
+            ty_with_param_bounds(signature.ret, bounds),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
+        Ty::Nullable(inner) => Ty::nullable(ty_with_param_bounds(*inner, bounds)),
+        Ty::PlatformNullable(inner) => Ty::platform_nullable(ty_with_param_bounds(*inner, bounds)),
+        Ty::InProjection(inner) => Ty::in_projection(ty_with_param_bounds(*inner, bounds)),
+        Ty::OutProjection(inner) => Ty::out_projection(ty_with_param_bounds(*inner, bounds)),
+        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            name,
+            &arguments
+                .iter()
+                .map(|argument| ty_with_param_bounds(*argument, bounds))
+                .collect::<Vec<_>>(),
+        ),
+        _ => ty,
+    }
 }
 
 pub(crate) fn ty_subst_keep_unbound(

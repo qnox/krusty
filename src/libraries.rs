@@ -102,7 +102,7 @@ impl ClassifierAccess {
 /// extension emits the receiver as a leading JVM argument, and a `suspend` fun emits a trailing
 /// `Continuation`, are EMIT concerns the backend adds — they are absent here. `params` therefore holds
 /// only the source value parameters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenericSig {
     pub formals: Vec<String>,
     /// Declared upper bounds, parallel to [`Self::formals`].
@@ -146,6 +146,8 @@ impl GenericSig {
         }
     }
 }
+
+pub use crate::types::{TypeParameterBounds, TypeParameterView, TypeParameters, TypeVariance};
 
 /// Bit-packed boolean flags for a [`LibraryMember`], collapsing `ret_nullable`/`is_interface`/
 /// `suspend`/`is_operator`/`is_extension`/`is_abstract` into one byte. Read through the `LibraryMember` accessors of the same
@@ -250,6 +252,8 @@ pub struct LibraryMember {
     /// treat the Object-erased result as `ret`.
     pub flags: LmFlags,
     pub inline: InlineKind,
+    /// Structural expansion decoded from this exact member's inline body.
+    pub inline_body_plan: Option<Box<InlineBodyPlan>>,
     /// The member's Kotlin visibility, from its bytecode access flags/`@Metadata`. A `Protected` member
     /// is surfaced (not dropped) so a subclass can reach an inherited classpath member; the emit is
     /// identical to a public one. `Public` by default.
@@ -348,6 +352,9 @@ pub enum InlineBodyPlan {
     InvokeLambda {
         lambda_parameter: usize,
         argument_parameters: Vec<usize>,
+        /// A callable parameter returned after the invocation (`apply` returns its receiver). `None`
+        /// means the invocation result itself is returned (`let`, `run`, `with`).
+        return_parameter: Option<usize>,
     },
     /// Invoke a suspending member on the extension receiver, invoke one lambda parameter, and invoke a
     /// cleanup member with the same state argument on normal and exceptional exits.
@@ -355,8 +362,8 @@ pub enum InlineBodyPlan {
         lambda_parameter: usize,
         state_parameter: usize,
         state_default: DefaultValue,
-        enter: LibraryMember,
-        cleanup: LibraryMember,
+        enter: Box<LibraryMember>,
+        cleanup: Box<LibraryMember>,
     },
 }
 
@@ -608,6 +615,7 @@ impl LibraryMember {
             generic_sig: None,
             flags: LmFlags::default(),
             inline: InlineKind::None,
+            inline_body_plan: None,
             visibility: Visibility::Public,
             call_sig: CallSig::default(),
             context_count: 0,
@@ -1183,6 +1191,12 @@ pub fn map_call_args<T: Copy>(
 }
 
 impl CallSig {
+    /// Apply declaration-owned parameter constraints after generic substitution. Every overload
+    /// path uses this predicate so `@Exact` cannot drift between candidate families.
+    pub fn parameter_admits(&self, index: usize, expected: Ty, actual: Ty) -> bool {
+        !self.exact_params.get(index).copied().unwrap_or(false) || expected == actual
+    }
+
     /// The call shape after parameters supplied outside the source argument list have been removed.
     pub fn suffix(&self, start: usize) -> Self {
         let start = start.min(self.param_names.len());
@@ -1348,10 +1362,10 @@ impl CallSig {
         defaults: Vec<bool>,
         vararg_index: Option<usize>,
     ) -> Self {
-        let mut names = vec_for_arity(names, param_count);
-        if names.iter().any(String::is_empty) {
-            names.clear();
-        }
+        // Legacy context receivers are unnamed but precede ordinary value parameters. Retain their
+        // empty slots so the named suffix stays positionally aligned; consumers already hide the
+        // leading context slots from explicit argument mapping.
+        let names = vec_for_arity(names, param_count);
         let defaults = vec_for_arity(defaults, param_count);
         let defaults = if defaults.iter().any(|d| *d) {
             defaults
@@ -1402,9 +1416,13 @@ impl ReturnInfo {
 
     pub fn apply_with_class(self, class: Option<Ty>, fallback: Ty) -> Ty {
         let ret = match class {
-            Some(meta) if meta.type_args().is_empty() && !fallback.type_args().is_empty() => {
-                let name = meta.name();
-                Ty::obj_args(&name, fallback.type_args())
+            Some(meta) if !fallback.type_args().is_empty() => {
+                let specialized = Ty::obj_args(&meta.name(), fallback.type_args());
+                if matches!(meta, Ty::PlatformNullable(_)) {
+                    Ty::platform_nullable(specialized)
+                } else {
+                    specialized
+                }
             }
             Some(meta) => meta,
             None => fallback,
@@ -1495,6 +1513,16 @@ impl FunctionInfo {
         &params[self.context_count.min(params.len())..]
     }
 
+    /// Parameters after overload selection has applied receiver, argument, and expected-result
+    /// constraints. Raw declaration parameters remain available through [`Self::semantic_params`].
+    pub fn applied_params(&self) -> &[Ty] {
+        if self.is_extension() {
+            self.callable.params.get(1..).unwrap_or(&[])
+        } else {
+            &self.callable.params
+        }
+    }
+
     pub fn semantic_signature(&self) -> Cow<'_, GenericSig> {
         self.generic_sig.as_ref().map_or_else(
             || {
@@ -1551,6 +1579,7 @@ impl FunctionInfo {
         callable.signature = member.signature.clone();
         callable.generic_sig = member.generic_sig.clone().map(Box::new);
         callable.inline = member.inline;
+        callable.inline_body_plan = member.inline_body_plan.clone();
         callable.suspend = member.suspend();
         callable.owner_is_interface = member.is_interface();
         callable.member_realization = member.realization;
@@ -1880,6 +1909,19 @@ pub struct ResolvedSymbols {
     pub callables: Callables,
 }
 
+#[derive(Clone, Debug)]
+pub enum ValueIdentity {
+    Lexical,
+    ImplicitReceiver { receiver: Ty },
+    Symbol,
+}
+
+#[derive(Clone, Default)]
+pub struct ScopedSymbols {
+    pub records: Vec<std::rc::Rc<ResolvedSymbols>>,
+    pub value: Option<ValueIdentity>,
+}
+
 impl ResolvedSymbols {
     /// Nothing resolves this name (both namespaces empty).
     pub fn is_empty(&self) -> bool {
@@ -1962,11 +2004,10 @@ pub struct LibraryType {
     /// non-generic type. With the constructors' [`LibraryMember::generic_sig`], lets a caller infer a
     /// construction's type arguments by unifying the ctor's generic parameter signatures against the
     /// actual argument types.
-    pub type_params: Vec<String>,
+    pub type_parameters: TypeParameters<Vec<Vec<Ty>>>,
     /// Declared upper bounds parallel to [`Self::type_params`]. Star projections are expanded from
     /// this classifier metadata (`Box<*>` for `Box<T : CharSequence>` reads as the bound), never from
     /// a provider-specific query or an unconditional `Any?` fallback.
-    pub type_param_bounds: Vec<Vec<Ty>>,
     /// The direct subclasses (JVM internal names) of a `sealed` type, from its `@Metadata`; empty for a
     /// non-sealed type. Lets an exhaustive `when` over a classpath sealed subject be proven exhaustive.
     pub sealed_subclasses: TypeNameList,
@@ -1985,6 +2026,28 @@ pub struct LibraryType {
     /// the annotation is emitted `RuntimeVisibleAnnotations` (RUNTIME) / `RuntimeInvisibleAnnotations`
     /// (CLASS = Kotlin BINARY) / dropped (SOURCE).
     pub retention: Option<String>,
+}
+
+impl std::ops::Deref for LibraryType {
+    type Target = TypeParameters<Vec<Vec<Ty>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.type_parameters
+    }
+}
+
+impl LibraryType {
+    pub fn type_params(&self) -> &Vec<String> {
+        &self.type_parameters.type_params
+    }
+
+    pub fn type_param_bounds(&self) -> &Vec<Vec<Ty>> {
+        &self.type_parameters.type_param_bounds
+    }
+
+    pub fn type_param_variances(&self) -> &Vec<TypeVariance> {
+        &self.type_parameters.type_param_variances
+    }
 }
 
 /// What a library type *is*. Mutually exclusive at the source level; at the JVM level an `Annotation`
@@ -2028,8 +2091,7 @@ impl LibraryType {
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,
-            type_params: Vec::new(),
-            type_param_bounds: Vec::new(),
+            type_parameters: crate::types::TypeParameters::default(),
             sealed_subclasses: TypeNameList::new(),
             enum_entries: Vec::new(),
             enum_entries_accessor: None,
@@ -2269,8 +2331,8 @@ impl EmptySymbolSource {
         let mut classifier = LibraryType::declaration_header();
         if name == "Function" {
             classifier.kind = TypeKind::Interface;
-            classifier.type_params.push("R".to_string());
-            classifier.type_param_bounds.push(Vec::new());
+            classifier.type_parameters =
+                TypeParameters::invariant(vec!["R".to_string()], vec![Vec::new()]);
         }
         if name == "Unit" {
             classifier.kind = TypeKind::Object;
@@ -2579,8 +2641,7 @@ mod tests {
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,
-            type_params: vec![],
-            type_param_bounds: vec![],
+            type_parameters: crate::types::TypeParameters::default(),
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: vec![],
             enum_entries_accessor: None,
@@ -2640,6 +2701,18 @@ mod tests {
 
         assert!(signature.vararg);
         assert_eq!(signature.vararg_index, Some(1));
+    }
+
+    #[test]
+    fn metadata_call_signature_retains_names_after_unnamed_context_receiver() {
+        let signature = CallSig::metadata_member(
+            3,
+            vec![String::new(), "first".into(), "second".into()],
+            vec![false; 3],
+            None,
+        );
+
+        assert_eq!(signature.param_names, ["", "first", "second"]);
     }
 
     #[test]

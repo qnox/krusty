@@ -206,9 +206,9 @@ fn referential_equality_on_mismatched_primitive_types() {
 }
 
 #[test]
-fn nested_try_with_finally() {
+fn nested_try_with_finally_is_accepted() {
     let d = diags("fun box(): Int { try { try { return 1 } finally {} } finally {}; return 0 }");
-    assert_rejected(&d, "nested try combined with finally");
+    assert!(d.is_empty(), "nested try/finally is valid Kotlin: {d:?}");
 }
 
 #[test]
@@ -231,13 +231,14 @@ fn empty_array_of_without_type() {
 }
 
 #[test]
-fn non_dispatchable_operator_extension_on_nullable_primitive() {
-    // Operator names whose call paths never dispatch by receiver nullability (`get`, `equals`, …)
-    // stay rejected on a nullable primitive — accepting them would silently keep the builtin.
-    let d = diags("operator fun Int?.get(i: Int): Int = 0\nfun box(): Int = 0");
-    assert_rejected(
-        &d,
-        "non-dispatchable operator extension on a nullable primitive receiver",
+fn operator_extension_on_nullable_primitive_is_accepted() {
+    let d = diags(
+        "operator fun Int?.get(i: Int): Int = this ?: i\n\
+         fun box(): Int { val value: Int? = null; return value[7] }",
+    );
+    assert!(
+        d.is_empty(),
+        "nullable receivers are valid extension targets: {d:?}"
     );
 }
 
@@ -287,15 +288,21 @@ fn type_parameter_primitive_upper_bound() {
 }
 
 #[test]
-fn secondary_constructor_in_enum() {
-    let d = parse_diags("enum class E { A; constructor() { } }\nfun box(): Int = 0");
-    assert_rejected(&d, "secondary constructor in an enum class");
+fn secondary_constructor_in_enum_is_accepted() {
+    let d = diags("enum class E { A; constructor() { } }\nfun box(): Int = 0");
+    assert!(
+        d.is_empty(),
+        "enum classes may declare private secondary constructors: {d:?}"
+    );
 }
 
 #[test]
-fn enum_entry_body_with_nested_class() {
-    let d = parse_diags("enum class E { A { class X } }\nfun box(): Int = 0");
-    assert_rejected(&d, "unsupported member in an enum entry body");
+fn enum_entry_body_with_nested_class_is_accepted() {
+    let d = diags("enum class E { A { class X } }\nfun box(): Int = 0");
+    assert!(
+        d.is_empty(),
+        "an enum-entry class body may contain a nested class: {d:?}"
+    );
 }
 
 #[test]

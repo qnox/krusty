@@ -361,7 +361,8 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             Callee::Intrinsic { operation, .. } => match operation {
                 crate::ir::IrIntrinsic::StringPlus => {
                     let receiver = emit_expr(ir, dispatch_receiver.unwrap(), inst);
-                    format!("({receiver} + {})", emit_expr(ir, args[0], inst))
+                    let argument = emit_expr(ir, args[0], inst);
+                    format!("(String({receiver}) + String({argument}))")
                 }
                 crate::ir::IrIntrinsic::StringLength | crate::ir::IrIntrinsic::ArraySize => {
                     format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst))

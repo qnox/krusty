@@ -41,6 +41,37 @@ fn assert_accepted(src: &str) {
     );
 }
 
+fn assert_argument_mismatch(src: &str) {
+    let Some(d) = diags(src) else {
+        return;
+    };
+    assert!(
+        d.iter()
+            .any(|message| message.contains("argument type mismatch")),
+        "expected an argument mismatch for {src:?}, got {d:?}"
+    );
+}
+
+fn assert_inapplicable(src: &str) {
+    let Some(d) = diags(src) else {
+        return;
+    };
+    assert!(
+        d.iter().any(|message| {
+            message.contains("argument type mismatch")
+                || message.starts_with("none of the following candidates is applicable:")
+                || message.starts_with("too many arguments for")
+                || message.starts_with("function '")
+        }),
+        "expected an inapplicable-call diagnostic for {src:?}, got {d:?}"
+    );
+    assert!(
+        d.iter()
+            .all(|message| !message.contains("unresolved reference")),
+        "an existing member must not be called unresolved: {d:?}"
+    );
+}
+
 /// The reported shape: a statically-`null` receiver. The always-null fold must not buy the program
 /// out of member resolution.
 #[test]
@@ -119,13 +150,13 @@ fn unselectable_but_existing_members_are_not_called_unresolved() {
     assert_accepted("fun f(x: Int?): Boolean? = x?.equals(1)\n");
     assert_accepted("fun f(x: UInt?): UInt? = x?.plus(1u)\n");
     assert_accepted("fun f(g: ((Int) -> Int)?): Int? = g?.invoke(1)\n");
-    // An ARITY/overload mismatch is also not a missing name: the member exists, so the silent
-    // `Ty::Error` stands and the backend reports the gap.
-    assert_accepted("fun f(s: String?): Any? = s?.let(1)\n");
-    assert_accepted("fun f(s: String?): Any? = s?.substring(9, 9, 9)\n");
+    // Existing-but-inapplicable members get overload diagnostics, never "unresolved reference".
+    assert_argument_mismatch("fun f(s: String?): Any? = s?.let(1)\n");
+    assert_inapplicable("fun f(s: String?): Any? = s?.substring(9, 9, 9)\n");
+    // `Int.toString(radix)` is a real stdlib extension and is therefore applicable.
     assert_accepted("fun f(i: Int?): Any? = i?.toString(1)\n");
-    assert_accepted("fun f(i: Int?): Any? = i?.hashCode(1)\n");
-    assert_accepted("fun f(i: Int?): Any? = i?.equals()\n");
+    assert_inapplicable("fun f(i: Int?): Any? = i?.hashCode(1)\n");
+    assert_inapplicable("fun f(i: Int?): Any? = i?.equals()\n");
 }
 
 /// The classpath-less `String` table stands in for stdlib EXTENSIONS (`kotlin.String` has no

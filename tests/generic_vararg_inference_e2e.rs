@@ -46,14 +46,17 @@ fun box(): String {\n\
 }
 
 #[test]
-fn generic_vararg_spread_stays_unsupported() {
+fn generic_vararg_spread_runs() {
     const SRC: &str = "class Entry(val text: String)\n\
 fun <T> last(vararg values: T): T = values[values.size - 1]\n\
 fun box(): String {\n\
     val values = arrayOf(Entry(\"OK\"))\n\
     return last(*values).text\n\
 }\n";
-    assert_eq!(run(SRC), None);
+    let (reference_code, stderr) =
+        common::kotlinc_source_result("GenericVarargSpread", SRC).expect("pinned kotlinc");
+    assert_eq!(reference_code, 0, "kotlinc rejected fixture: {stderr}");
+    assert_eq!(run(SRC).as_deref(), Some("OK"));
 }
 
 #[test]

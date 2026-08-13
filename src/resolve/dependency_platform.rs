@@ -246,8 +246,7 @@ fn merge_type(
     primary.access = source.access;
     primary.source_file = source.source_file;
     if !source.type_params.is_empty() {
-        primary.type_params = source.type_params.clone();
-        primary.type_param_bounds = source.type_param_bounds.clone();
+        primary.type_parameters = source.type_parameters.clone();
     }
     if primary.enum_entries_accessor.is_none() {
         primary.enum_entries_accessor = source.enum_entries_accessor.clone();
@@ -544,8 +543,7 @@ mod tests {
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,
-            type_params: Vec::new(),
-            type_param_bounds: Vec::new(),
+            type_parameters: crate::types::TypeParameters::default(),
             sealed_subclasses: Default::default(),
             enum_entries: Vec::new(),
             enum_entries_accessor: None,

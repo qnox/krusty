@@ -1393,10 +1393,10 @@ fn kotlin_codegen_box_conformance() {
         fs::write(&path, conformance_report(files.len(), passed))
             .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
     }
+    let applicable = files.len() - not_applicable;
     assert!(
-        passed * 100 >= files.len() * 50,
-        "box conformance is below 50%: {passed}/{} passed; {} failed",
-        files.len(),
+        passed * 100 >= applicable * 63,
+        "box conformance is below 63% of backend-applicable cases: {passed}/{applicable} passed; {} failed; {not_applicable} not applicable",
         failures.len()
     );
     assert!(

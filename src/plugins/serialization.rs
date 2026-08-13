@@ -1314,11 +1314,38 @@ impl IrPlugin for SerializationPlugin {
             return;
         }
         let serializer = type_name(KSERIALIZER_FQ);
+        let parameters = ctx
+            .type_parameters
+            .type_params()
+            .iter()
+            .zip(ctx.type_parameters.type_param_bounds())
+            .map(|(name, &bound)| Ty::ty_param(name, bound))
+            .collect::<Vec<_>>();
+        let class = Ty::obj_args_name(ctx.classifier, &parameters);
+        let params = parameters
+            .iter()
+            .map(|&parameter| Ty::obj_args_name(serializer, &[parameter]))
+            .collect::<Vec<_>>();
+        let ret = Ty::obj_args_name(serializer, &[class]);
+        let generic_sig = (!parameters.is_empty()).then(|| crate::libraries::GenericSig {
+            formals: ctx.type_parameters.type_params().clone(),
+            formal_bounds: ctx
+                .type_parameters
+                .type_param_bounds()
+                .iter()
+                .map(|&bound| vec![bound])
+                .collect(),
+            receiver: None,
+            params: params.clone(),
+            ret,
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        });
         members.push(FrontendCallable {
             owner: FrontendCallableOwner::Companion,
             name: "serializer".to_string(),
-            params: vec![Ty::obj_name(serializer); ctx.type_parameter_count],
-            ret: Ty::obj_args_name(serializer, &[Ty::obj_name(ctx.classifier)]),
+            params,
+            ret,
+            generic_sig,
             plugin_expression: Some(crate::libraries::PluginExpressionDeclaration {
                 plugin: "serialization",
                 operation: "serializer",
@@ -2887,7 +2914,11 @@ mod tests {
         SerializationPlugin::default().generate_frontend_declarations(
             &FrontendClassContext {
                 classifier,
-                type_parameter_count: 1,
+                type_parameters: &crate::types::TypeParameters::new(
+                    vec!["T".to_string()],
+                    vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+                    vec![crate::types::TypeVariance::Invariant],
+                ),
                 annotations: &annotation,
             },
             &mut members,
@@ -2898,8 +2929,34 @@ mod tests {
             vec![FrontendCallable {
                 owner: FrontendCallableOwner::Companion,
                 name: "serializer".to_string(),
-                params: vec![Ty::obj(KSERIALIZER_FQ)],
-                ret: Ty::obj_args_name(type_name(KSERIALIZER_FQ), &[Ty::obj_name(classifier)]),
+                params: vec![Ty::obj_args(
+                    KSERIALIZER_FQ,
+                    &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
+                )],
+                ret: Ty::obj_args_name(
+                    type_name(KSERIALIZER_FQ),
+                    &[Ty::obj_args_name(
+                        classifier,
+                        &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
+                    )],
+                ),
+                generic_sig: Some(crate::libraries::GenericSig {
+                    formals: vec!["T".to_string()],
+                    formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
+                    receiver: None,
+                    params: vec![Ty::obj_args(
+                        KSERIALIZER_FQ,
+                        &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
+                    )],
+                    ret: Ty::obj_args_name(
+                        type_name(KSERIALIZER_FQ),
+                        &[Ty::obj_args_name(
+                            classifier,
+                            &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
+                        )],
+                    ),
+                    return_policy: crate::libraries::GenericReturnPolicy::Exact,
+                }),
                 plugin_expression: Some(crate::libraries::PluginExpressionDeclaration {
                     plugin: "serialization",
                     operation: "serializer",

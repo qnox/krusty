@@ -69,8 +69,9 @@ invocation separately because each is a separate process with its own wall time.
 CI builds the conformance test binary once and runs that artifact against every version in
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
 runtime reference toolchain, so the matrix does not rebuild Rust code per Kotlin version. Each leg
-must score at least 50% of all scanned cases before a release can publish. Unsupported or
-miscompiled cases both count against that floor.
+must score at least 63% of backend-applicable cases before a release can publish. Unsupported and
+miscompiled applicable cases count against that floor; cases excluded solely by the selected
+backend do not.
 
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.

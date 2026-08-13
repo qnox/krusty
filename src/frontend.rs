@@ -21,8 +21,8 @@ pub use crate::resolve::{
     AnonymousObjectCaptureSource, CompoundAssignmentTarget, SourceConstructorMatcher,
 };
 pub(crate) use crate::resolve::{
-    classifier_over_default, function_import_scope, typeref_leaf, AdaptedRefArgument,
-    CallableReferenceBinding, CallableReferenceTarget, ClassNames, CtorDefaultValue,
+    check_preinferred_file_in_source_set, function_import_scope, AdaptedRefArgument,
+    CallableReferenceBinding, CallableReferenceTarget, ConstructorReferenceOuter, CtorDefaultValue,
     DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FunctionImportScope,
     ImplicitPropertyWriteTarget, ImplicitReceiverSelection, InlineCall, InvokeKind,
     IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ResolvedCall,
@@ -543,7 +543,7 @@ fn check_source_set_skipping(
                 None
             } else {
                 diags.set_file(index as u32);
-                Some(check_file_in_source_set(
+                Some(check_preinferred_file_in_source_set(
                     files,
                     index as u32,
                     symbols,
@@ -796,8 +796,7 @@ mod tests {
                     value_underlying: None,
                     value_underlying_property: None,
                     alias_target: None,
-                    type_params: Vec::new(),
-                    type_param_bounds: Vec::new(),
+                    type_parameters: crate::types::TypeParameters::default(),
                     sealed_subclasses: TypeNameList::new(),
                     enum_entries: Vec::new(),
                     enum_entries_accessor: None,

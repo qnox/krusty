@@ -348,7 +348,7 @@ conformance-bin:
     printf '%s\n' "$bin"
 
 # Run the codegen/box conformance suite and print "<pct> <passed> <scanned>". The suite's native
-# exit status enforces the 50% scanned-corpus floor; the report exposes the exact score.
+# exit status enforces the 63% backend-applicable floor; the report exposes the exact score.
 conformance VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail

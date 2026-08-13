@@ -72,6 +72,26 @@ fn member_extensions_imported_from_an_object_or_companion_resolve_and_run() {
 }
 
 #[test]
+fn member_extension_imported_from_a_named_source_companion_uses_its_declared_field() {
+    let source = "package lib\n\
+        import lib.Holder.Factory.quadrupled\n\
+        class Holder { companion object Factory { fun Int.quadrupled(): Int = this * 4 } }\n\
+        fun box(): String = if (5.quadrupled() == 20) \"OK\" else \"fail\"\n";
+    let result = common::compile_and_run_with_stdlib(source, "NamedCompanion");
+    assert_eq!(
+        result.unwrap_or_else(|| panic!(
+            "named source companion import: {:?}",
+            common::front_end_diagnostics(
+                source,
+                std::slice::from_ref(&common::stdlib_jar()),
+                Some(common::jdk_modules().as_path()),
+            )
+        )),
+        "OK"
+    );
+}
+
+#[test]
 fn a_stdlib_companion_extension_property_resolves_and_runs() {
     // The real-world instance, against the actual stdlib rather than a fixture. `Duration.Companion`
     // declares `val Int.minutes`, and its accessor is both value-class mangled (`getMinutes-UwyO8pc`)

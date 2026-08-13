@@ -77,6 +77,31 @@ fn constructor_infers_nested_function_type() {
 }
 
 #[test]
+fn generic_method_result_binds_outer_type_parameter() {
+    common::expect_front_end_ok_files_with_stdlib(
+        &["class C { fun <T> get(value: Any): T = value as T }\n\
+           fun <T> outer(c: C, value: Any): T = c.get(value)"],
+        "generic method result binds outer type parameter",
+    );
+}
+
+#[test]
+fn where_constraint_subject_diagnostic_matches_kotlinc() {
+    let source = "class C<T> where U : Any";
+    let (code, stderr) =
+        common::kotlinc_source_result("InvalidWhereSubject", source).expect("kotlinc harness");
+    assert_ne!(code, 0, "kotlinc unexpectedly accepted invalid constraint");
+    assert!(
+        stderr.contains("'U' does not refer to a type parameter of 'C'."),
+        "unexpected kotlinc diagnostic: {stderr}"
+    );
+    assert_eq!(
+        common::front_end_diagnostics(source, &[], None),
+        ["'U' does not refer to a type parameter of 'C'."]
+    );
+}
+
+#[test]
 fn callable_reference_bound_failure_is_inference_error() {
     let diagnostics = common::front_end_diagnostics(
         "interface Bound\n\
@@ -151,7 +176,9 @@ fn errors_match_kotlinc_in_text_and_location() {
         // The same rule applies to a top-level property root: package lookup is considered only when
         // the expression/value scope has no winning declaration named `java`.
         "val java = 1\nfun f() { val file = java.io.File(\"A\") }",
+        "class Producer<out T>\nfun bad(value: Producer<in String>) = value",
         "fun f(a: Int): String = a",
+        "class Box<T>\nfun <T> bad(x: Box<String>): Box<T> = x",
         "fun f(): String = null",
         "val x: String = null",
         "fun f(x: String): String = x\nfun g(): String = f(null)",
@@ -252,6 +279,10 @@ fn errors_match_kotlinc_in_text_and_location() {
         "fun f(p: Any) = p is (DefinitelyAbsentClassifier) -> String",
         "fun f(p: Any) = p is Function1<DefinitelyAbsentClassifier, String>",
         "fun f(p: Any) = p is Function1<Any?, Any?>",
+        "fun f(p: Any) = p is Array",
+        "fun f(p: Any) = p is Array<Nothing>",
+        "fun f(p: Any) = p as Array",
+        "fun f(p: Any) = p as Array<Nothing>",
         // Casts permit an erased function shape, so an unresolved parameter remains the primary
         // diagnostic. (`is` is different and is pinned by the unsupported-shape test below.)
         "fun f(p: Any) = p as (DefinitelyAbsentClassifier) -> String",
@@ -471,34 +502,6 @@ fn kotlin_internal_exact_can_require_two_arguments_to_have_the_same_type() {
         stderr.contains("argument type mismatch"),
         "unexpected kotlinc diagnostic: {stderr}"
     );
-}
-
-#[test]
-fn resolved_but_unsupported_is_as_shapes_are_not_called_unresolved() {
-    // `resolve_ty` also returns `Ty::Error` for a KNOWN classifier whose shape the backend cannot
-    // implement. That is distinct from an absent classifier: the unresolved-reference helper must
-    // decline these so the existing supported-shape diagnostic remains authoritative.
-    for source in [
-        "fun f(p: Any) = p is Array",
-        "fun f(p: Any) = p is Array<Nothing>",
-        "fun f(p: Any) = p as Array",
-        "fun f(p: Any) = p as Array<Nothing>",
-    ] {
-        let diagnostics = common::front_end_diagnostics(source, &[], None);
-        assert!(
-            diagnostics
-                .iter()
-                .all(|message| !message.contains("unresolved reference")),
-            "a resolved or precedence-suppressed shape was mislabeled unresolved for \
-             {source:?}: {diagnostics:?}"
-        );
-        assert!(
-            diagnostics
-                .iter()
-                .any(|message| message.contains("not supported")),
-            "the resolved unsupported-shape diagnostic disappeared for {source:?}: {diagnostics:?}"
-        );
-    }
 }
 
 #[test]

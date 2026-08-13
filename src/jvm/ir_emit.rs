@@ -833,12 +833,41 @@ fn build_class_metadata(
                     });
                 let (name, params, ret) =
                     declared.unwrap_or((f.name.as_str(), f.params.as_slice(), f.ret));
+                let semantic_signature = ir.signatures.get(&fid);
+                let metadata_params = semantic_signature
+                    .map(|signature| signature.params.as_slice())
+                    .unwrap_or(params);
+                let metadata_ret = semantic_signature
+                    .and_then(|signature| signature.ret)
+                    .unwrap_or(ret);
                 // A parameter's declared `?` lives in a side-table, not in `params` (which stays
                 // non-null so the value-class mangle is undisturbed) — re-apply it for `@Metadata`.
                 let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
+                let function_type_params = ir
+                    .signatures
+                    .get(&fid)
+                    .map(|signature| {
+                        signature
+                            .type_params
+                            .iter()
+                            .map(|parameter| parameter.name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let function_type_param_bounds = semantic_signature
+                    .map(|signature| {
+                        signature
+                            .type_params
+                            .iter()
+                            .map(|parameter| {
+                                parameter.bounds.iter().map(|(bound, _)| *bound).collect()
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 Some(FnMeta {
                     name: name.to_string(),
-                    params: params
+                    params: metadata_params
                         .iter()
                         .enumerate()
                         .map(|(i, t)| {
@@ -857,7 +886,9 @@ fn build_class_metadata(
                             (n, ty)
                         })
                         .collect(),
-                    ret,
+                    ret: metadata_ret,
+                    type_params: function_type_params,
+                    type_param_bounds: function_type_param_bounds,
                     flags: function_flags(ir, fid, f) | if is_suspend { FN_IS_SUSPEND } else { 0 },
                     params_have_defaults: false,
                     jvm_sig: declared
@@ -877,6 +908,8 @@ fn build_class_metadata(
                 name: format!("component{}", i + 1),
                 params: vec![],
                 ret: f.ty,
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: boxed_fn_sig(&[], f.ty),
@@ -891,6 +924,8 @@ fn build_class_metadata(
                     .map(|f| (f.name.clone(), f.ty))
                     .collect(),
                 ret: class_ty,
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: COPY_FN_FLAGS,
                 params_have_defaults: true,
                 jvm_sig: boxed_fn_sig(&field_tys, class_ty),
@@ -901,6 +936,8 @@ fn build_class_metadata(
             name: "equals".into(),
             params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
             ret: Ty::Boolean,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
             flags: EQUALS_FN_FLAGS,
             params_have_defaults: false,
             jvm_sig: None,
@@ -910,6 +947,8 @@ fn build_class_metadata(
             name: "hashCode".into(),
             params: vec![],
             ret: Ty::Int,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
             flags: HASHCODE_TOSTRING_FN_FLAGS,
             params_have_defaults: false,
             jvm_sig: None,
@@ -919,6 +958,8 @@ fn build_class_metadata(
             name: "toString".into(),
             params: vec![],
             ret: Ty::String,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
             flags: HASHCODE_TOSTRING_FN_FLAGS,
             params_have_defaults: false,
             jvm_sig: None,
@@ -935,6 +976,8 @@ fn build_class_metadata(
                 name: "equals".into(),
                 params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
                 ret: Ty::Boolean,
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: EQUALS_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: Some(format!("({u}Ljava/lang/Object;)Z")),
@@ -944,6 +987,8 @@ fn build_class_metadata(
                 name: "hashCode".into(),
                 params: vec![],
                 ret: Ty::Int,
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: Some(format!("({u})I")),
@@ -953,6 +998,8 @@ fn build_class_metadata(
                 name: "toString".into(),
                 params: vec![],
                 ret: Ty::String,
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: Some(format!("({u})Ljava/lang/String;")),
@@ -990,6 +1037,10 @@ fn build_class_metadata(
     let sealed_descs: Vec<String> = sealed_sorted.iter().map(|s| format!("L{s};")).collect();
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
     let sealed_refs: Vec<&str> = sealed_descs.iter().map(String::as_str).collect();
+    let class_type_parameters = ir
+        .class_signature(&c.fq_name())
+        .map(|signature| signature.type_params.as_slice())
+        .unwrap_or_default();
     // Metadata lists the declared superclass before interfaces.
     let super_internal = c.superclass.render();
     let mut supertypes = ir
@@ -1012,6 +1063,7 @@ fn build_class_metadata(
         &enum_entry_names,
         &ClassTail {
             type_params: &c.type_params,
+            type_param_bounds: class_type_parameters,
             ctor_param_tparams: &ctor_param_tparams,
             flags: class_metadata_flags(c),
             // An `enum class`'s primary ctor is private too — entries are the only instances.
@@ -1082,7 +1134,11 @@ fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool
 /// value class but the transitive check independently admits it, a mentioning class publishes a type
 /// a downstream compiler reads as an ordinary box.
 fn class_metadata_common_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
-    !(c.is_annotation
+    // Local/anonymous classifiers cannot be named by another compilation unit. Their lexical type
+    // parameters are not declarations of the generated class, so publishing a class metadata record
+    // would require falsely redeclaring them; omit the non-observable record instead.
+    !(c.is_local_class
+        || c.is_annotation
         || c.enum_entry_of.is_some()
         || c.prop_ref.is_some()
         || c.func_ref.is_some()
@@ -1787,6 +1843,55 @@ fn inner_class_access(c: &IrClass) -> u16 {
     access
 }
 
+fn add_companion_field(cw: &mut ClassWriter, class: &IrClass) {
+    let Some(companion) = class.companion_class else {
+        return;
+    };
+    cw.add_field(
+        0x0019,
+        companion.nested_segment_ref(),
+        &format!("L{};", companion.render()),
+    );
+}
+
+fn emit_companion_init(cw: &mut ClassWriter, code: &mut CodeBuilder, owner: &str, class: &IrClass) {
+    let Some(companion) = class.companion_class else {
+        return;
+    };
+    let companion_name = companion.render();
+    let descriptor = format!("L{companion_name};");
+    let classifier = cw.class_ref(&companion_name);
+    code.new_obj(classifier);
+    code.dup();
+    code.aconst_null();
+    let constructor = cw.methodref(
+        &companion_name,
+        "<init>",
+        "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+    );
+    code.invokespecial(constructor, 1, 0);
+    let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
+    code.putstatic(field, 1);
+}
+
+fn add_singleton_instance_field(cw: &mut ClassWriter, class: &str) {
+    cw.add_field(0x0019, "INSTANCE", &format!("L{class};"));
+}
+
+fn emit_singleton_instance_clinit(cw: &mut ClassWriter, class: &str) {
+    let descriptor = format!("L{class};");
+    let classifier = cw.class_ref(class);
+    let constructor = cw.methodref(class, "<init>", "()V");
+    let field = cw.fieldref(class, "INSTANCE", &descriptor);
+    let mut code = CodeBuilder::new(0);
+    code.new_obj(classifier);
+    code.dup();
+    code.invokespecial(constructor, 0, 0);
+    code.putstatic(field, 1);
+    code.ret_void();
+    finish_code::<0x0008>(cw, "<clinit>", "()V", &mut code, 0);
+}
+
 fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
     use crate::jvm::classfile::InnerClassSpec;
     for c in &ir.classes {
@@ -1805,7 +1910,9 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
             cw.add_inner_class(InnerClassSpec {
                 inner: comp,
                 outer: Some(c.fq_name()),
-                name: Some("Companion".to_string()),
+                name: c
+                    .companion_class
+                    .map(|companion| companion.nested_segment_ref().to_string()),
                 access: c
                     .companion_class
                     .and_then(|name| {
@@ -1845,7 +1952,7 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
             continue; // top-level class — not nested
         };
         let name = &fq[pos + 1..];
-        if name == "Companion" {
+        if c.is_companion {
             continue; // handled above
         }
         let anonymous = is_coroutine_state_machine(c);
@@ -2463,16 +2570,21 @@ fn emit_pass(
 /// `kotlin/jvm/functions/Function0..22`; a function type or lambda of higher arity needs a different
 /// vararg representation krusty doesn't emit, so such a file is skipped — never miscompiled. This is a
 /// JVM constraint (the language allows any arity), so it lives in the JVM emitter, not common lowering.
-/// Map every `IrExpr::Variable`'s declaration index → its JVM type, across the whole file. `value_ty`
-/// consults this so a `GetValue` of a slot whose `Variable` hasn't been emit-registered yet (e.g. an
-/// inline-expansion result/`this` temp queried by a comparison before its block emits) still types
-/// correctly, instead of falling back to `Ty::Error` and picking the wrong (reference) operator path.
-fn collect_var_types(ir: &IrFile) -> HashMap<u32, Ty> {
+/// Map each reachable `IrExpr::Variable` declaration index to its JVM type for one emitted body.
+/// Value indices are body-local and intentionally restart between functions, constructors, and
+/// initializers, so a file-wide map lets an unrelated body overwrite the active slot's type.
+fn collect_var_types(ir: &IrFile, roots: impl IntoIterator<Item = u32>) -> HashMap<u32, Ty> {
     let mut m = HashMap::new();
-    for e in &ir.exprs {
-        if let IrExpr::Variable { index, ty, .. } = e {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = roots.into_iter().collect::<Vec<_>>();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Variable { index, ty, .. } = ir.expr(expression) {
             m.insert(*index, ir_ty_to_jvm(ty));
         }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
     m
 }
@@ -2631,7 +2743,6 @@ fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool {
 }
 
 fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) {
-    let bodies = env.bodies;
     // Statics OWNED by a specific class (a companion `const val`) are emitted on that class, not the
     // facade — see `emit_owned_consts`.
     let facade_statics: Vec<&crate::ir::IrStatic> =
@@ -2791,24 +2902,15 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
             );
         }
     }
-    let mut e = Emitter {
+    let mut e = Emitter::new(
         ir,
         cw,
-        bodies,
-        run: env.run,
-        owner: facade.to_string(),
-        facade: facade.to_string(),
-        slots: HashMap::new(),
-        var_types: collect_var_types(ir),
-        next_slot: 0,
-        ret: Ty::Unit,
-        loop_stack: Vec::new(),
-        pending_stack: Vec::new(),
-        open_locals: Vec::new(),
-        block_depth: 0,
-        record_locals: false,
-        this_uninitialized: false,
-    };
+        env,
+        facade,
+        facade,
+        Ty::Unit,
+        facade_statics.iter().map(|property| property.init),
+    );
     let mut code = CodeBuilder::new(0);
     let mut any_init = false;
     for s in &facade_statics {
@@ -3191,7 +3293,6 @@ fn emit_class(
     class_meta: Option<&KotlinMetadata>,
     extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
-    let bodies = env.bodies;
     if !c.enum_entries.is_empty() {
         return emit_enum_class(ir, c, facade, env, opts);
     }
@@ -3424,24 +3525,17 @@ fn emit_class(
         let max_slot;
         let mut init_diverges = false;
         {
-            let mut e = Emitter {
+            let mut e = Emitter::new(
                 ir,
-                cw: &mut cw,
-                bodies,
-                run: env.run,
-                owner: fq_name.clone(),
-                facade: facade.to_string(),
-                slots: HashMap::new(),
-                var_types: collect_var_types(ir),
-                next_slot: 1 + params_words,
-                ret: Ty::Unit,
-                loop_stack: Vec::new(),
-                pending_stack: Vec::new(),
-                open_locals: Vec::new(),
-                block_depth: 0,
-                record_locals: false,
-                this_uninitialized: true,
-            };
+                &mut cw,
+                env,
+                &fq_name,
+                facade,
+                Ty::Unit,
+                c.super_args.iter().copied().chain(c.init_body),
+            );
+            e.next_slot = 1 + params_words;
+            e.this_uninitialized = true;
             e.slots.insert(0, (0, Ty::obj(&fq_name)));
             let mut s = 1u16;
             for (vi, t) in param_tys.iter().enumerate() {
@@ -3696,24 +3790,21 @@ fn emit_class(
         let sec_max;
         let mut sec_diverges = false;
         {
-            let mut e = Emitter {
+            let mut e = Emitter::new(
                 ir,
-                cw: &mut cw,
-                bodies,
-                run: env.run,
-                owner: fq_name.clone(),
-                facade: facade.to_string(),
-                slots: HashMap::new(),
-                var_types: collect_var_types(ir),
-                next_slot: 1 + sc_words,
-                ret: Ty::Unit,
-                loop_stack: Vec::new(),
-                pending_stack: Vec::new(),
-                open_locals: Vec::new(),
-                block_depth: 0,
-                record_locals: false,
-                this_uninitialized: true,
-            };
+                &mut cw,
+                env,
+                &fq_name,
+                facade,
+                Ty::Unit,
+                sc.delegate_prelude
+                    .iter()
+                    .chain(&sc.delegate_args)
+                    .copied()
+                    .chain(sc.body),
+            );
+            e.next_slot = 1 + sc_words;
+            e.this_uninitialized = true;
             e.slots.insert(0, (0, Ty::obj(&fq_name)));
             let mut s = 1u16;
             for (vi, t) in sc_param_tys.iter().enumerate() {
@@ -3839,46 +3930,19 @@ fn emit_class(
                 s.owner_matches(&fq_name) && !(s.is_const && const_value_idx_peek(ir, s.init))
             })
             .collect();
-        if let Some(comp_fq) = c.companion_class() {
-            cw.add_field(0x0019, "Companion", &format!("L{comp_fq};")); // PUBLIC | STATIC | FINAL
-        }
+        add_companion_field(&mut cw, c);
         if c.companion_class.is_some() || !clinit_statics.is_empty() {
-            let mut e = Emitter {
+            let mut e = Emitter::new(
                 ir,
-                cw: &mut cw,
-                bodies,
-                run: env.run,
-                owner: fq_name.clone(),
-                facade: facade.to_string(),
-                slots: HashMap::new(),
-                var_types: collect_var_types(ir),
-                next_slot: 0,
-                ret: Ty::Unit,
-                loop_stack: Vec::new(),
-                pending_stack: Vec::new(),
-                open_locals: Vec::new(),
-                block_depth: 0,
-                record_locals: false,
-                this_uninitialized: false,
-            };
+                &mut cw,
+                env,
+                &fq_name,
+                facade,
+                Ty::Unit,
+                clinit_statics.iter().map(|property| property.init),
+            );
             let mut clinit = CodeBuilder::new(0);
-            if let Some(comp_fq) = c.companion_class() {
-                let comp_desc = format!("L{comp_fq};");
-                let ci = e.cw.class_ref(&comp_fq);
-                clinit.new_obj(ci);
-                clinit.dup();
-                // The companion's real ctor is PRIVATE (kotlinc); construct through its
-                // PUBLIC|SYNTHETIC `(DefaultConstructorMarker)` accessor with a null marker.
-                clinit.aconst_null();
-                let init = e.cw.methodref(
-                    &comp_fq,
-                    "<init>",
-                    "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-                );
-                clinit.invokespecial(init, 1, 0);
-                let fref = e.cw.fieldref(&fq_name, "Companion", &comp_desc);
-                clinit.putstatic(fref, 1);
-            }
+            emit_companion_init(e.cw, &mut clinit, &fq_name, c);
             for s in &clinit_statics {
                 e.emit_value(s.init, &mut clinit);
                 let jt = ir_ty_to_jvm(&s.ty);
@@ -4055,7 +4119,6 @@ fn emit_enum_entry_subclass(
     opts: &EmitOptions,
     user_tys: &[Ty],
 ) -> Vec<u8> {
-    let bodies = env.bodies;
     let superclass = c.superclass();
     let fq_name = c.fq_name();
     let mut cw = new_writer(&fq_name, &superclass, opts);
@@ -4091,24 +4154,8 @@ fn emit_enum_entry_subclass(
     ctor.invokespecial(super_init, argw, 0);
     let mut ctor_max = 1 + ctor_words;
     if let Some(init_body) = c.init_body {
-        let mut e = Emitter {
-            ir,
-            cw: &mut cw,
-            bodies,
-            run: env.run,
-            owner: fq_name.clone(),
-            facade: facade.to_string(),
-            slots: HashMap::new(),
-            var_types: collect_var_types(ir),
-            next_slot: 1 + ctor_words,
-            ret: Ty::Unit,
-            loop_stack: Vec::new(),
-            pending_stack: Vec::new(),
-            open_locals: Vec::new(),
-            block_depth: 0,
-            record_locals: false,
-            this_uninitialized: false,
-        };
+        let mut e = Emitter::new(ir, &mut cw, env, &fq_name, facade, Ty::Unit, [init_body]);
+        e.next_slot = 1 + ctor_words;
         e.slots.insert(0, (0, Ty::obj(&fq_name))); // `this`
         e.emit(init_body, &mut ctor);
         ctor_max = e.next_slot;
@@ -4212,6 +4259,118 @@ struct PropertyCallTarget<'a> {
     boxed_value_class: Option<TypeName>,
 }
 
+struct PropertyReferenceTarget {
+    owner: String,
+    call_owner: String,
+    facade: Option<String>,
+    array_length: bool,
+    getter_descriptor: String,
+    getter_params: Vec<Ty>,
+    getter_ret: Ty,
+    signature: String,
+}
+
+impl PropertyReferenceTarget {
+    fn new(property: &crate::ir::PropRef, facade: &str) -> Self {
+        let semantic_owner = property.owner().expect("property reference owner");
+        let array_owner = crate::jvm::names::array_class_descriptor(&semantic_owner);
+        let owner = array_owner.clone().unwrap_or_else(|| {
+            crate::jvm::jvm_class_map::to_jvm_internal(&semantic_owner).to_string()
+        });
+        let semantic_call_owner = property
+            .call_owner()
+            .expect("property reference call owner");
+        let call_owner = crate::jvm::names::array_class_descriptor(&semantic_call_owner)
+            .unwrap_or_else(|| {
+                crate::jvm::jvm_class_map::to_jvm_internal(&semantic_call_owner).to_string()
+            });
+        let facade = property.ext_facade_or_facade(facade);
+        let getter_descriptor = property_getter_descriptor(property, &owner, facade.is_some());
+        let (getter_params, getter_ret) = parse_physical_method_desc(&getter_descriptor)
+            .expect("validated property getter descriptor");
+        Self {
+            owner,
+            call_owner,
+            array_length: array_owner.is_some() && facade.is_none(),
+            signature: format!("{}{}", property.getter_name, getter_descriptor),
+            facade,
+            getter_descriptor,
+            getter_params,
+            getter_ret: ir_ty_to_jvm(&getter_ret),
+        }
+    }
+
+    fn getter<'a>(&'a self, property: &'a crate::ir::PropRef) -> PropertyCallTarget<'a> {
+        PropertyCallTarget {
+            owner: &self.call_owner,
+            facade: self.facade.as_deref(),
+            array_length: self.array_length,
+            name: &property.getter_name,
+            descriptor: &self.getter_descriptor,
+            params: &self.getter_params,
+            owner_is_interface: property.owner_is_interface,
+            boxed_value_class: property.boxed_value_class,
+        }
+    }
+
+    fn setter<'a>(
+        &'a self,
+        property: &'a crate::ir::PropRef,
+        name: &'a str,
+        descriptor: &'a str,
+        params: &'a [Ty],
+    ) -> PropertyCallTarget<'a> {
+        PropertyCallTarget {
+            owner: &self.call_owner,
+            facade: self.facade.as_deref(),
+            array_length: false,
+            name,
+            descriptor,
+            params,
+            owner_is_interface: property.owner_is_interface,
+            boxed_value_class: property.boxed_value_class,
+        }
+    }
+}
+
+fn emit_property_reference_constructor(
+    cw: &mut ClassWriter,
+    superclass: &str,
+    property: &crate::ir::PropRef,
+    target: &PropertyReferenceTarget,
+    bound: bool,
+) {
+    let mut code = CodeBuilder::new(if bound { 2 } else { 1 });
+    code.aload(0);
+    if bound {
+        code.aload(1);
+    }
+    code.ldc_class(target.facade.as_deref().unwrap_or(&target.owner), cw);
+    code.push_string(&property.prop_name, cw);
+    code.push_string(&target.signature, cw);
+    code.push_int(target.facade.is_some() as i32, cw);
+    let descriptor = if bound {
+        "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+    } else {
+        "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+    };
+    let constructor = cw.methodref(superclass, "<init>", descriptor);
+    code.invokespecial(constructor, if bound { 5 } else { 4 }, 0);
+    code.ret_void();
+    let own_descriptor = if bound {
+        "(Ljava/lang/Object;)V"
+    } else {
+        "()V"
+    };
+    finish_code::<0x0000>(
+        cw,
+        "<init>",
+        own_descriptor,
+        &mut code,
+        if bound { 2 } else { 1 },
+    );
+}
+
 impl PropertyCallTarget<'_> {
     fn emit_get(&self, cw: &mut ClassWriter, code: &mut CodeBuilder, ret: Ty) {
         if self.array_length {
@@ -4288,62 +4447,20 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str, opts: &EmitOptions)
         return emit_bound_prop_ref_class(c, pr, facade, opts);
     }
     let fq = c.fq_name();
-    let self_desc = format!("L{fq};");
     let superclass = c.superclass();
     let mut cw = new_writer(&fq, &superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
-    cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
+    add_singleton_instance_field(&mut cw, &fq);
 
-    let semantic_owner = pr.owner().expect("unbound property reference owner");
-    let array_owner = crate::jvm::names::array_class_descriptor(&semantic_owner);
-    let owner_internal = array_owner
-        .clone()
-        .unwrap_or_else(|| crate::jvm::jvm_class_map::to_jvm_internal(&semantic_owner).to_string());
-    let semantic_call_owner = pr
-        .call_owner()
-        .expect("unbound property reference call owner");
-    let call_owner_internal = crate::jvm::names::array_class_descriptor(&semantic_call_owner)
-        .unwrap_or_else(|| {
-            crate::jvm::jvm_class_map::to_jvm_internal(&semantic_call_owner).to_string()
-        });
-    let ext = pr.ext_facade_or_facade(facade);
-    let getter_desc = property_getter_descriptor(pr, &owner_internal, ext.is_some());
-    let (getter_params, getter_ret) =
-        parse_physical_method_desc(&getter_desc).expect("validated property getter descriptor");
-    let getter_ret = ir_ty_to_jvm(&getter_ret);
-    let signature = format!("{}{}", pr.getter_name, getter_desc);
-    let reflection_owner = ext.as_deref().unwrap_or(&owner_internal);
-
-    // `<init>()V`: super(owner.class, "name", "getName()desc", 0).
-    let mut ctor = CodeBuilder::new(1);
-    ctor.aload(0);
-    ctor.ldc_class(reflection_owner, &mut cw);
-    ctor.push_string(&pr.prop_name, &mut cw);
-    ctor.push_string(&signature, &mut cw);
-    ctor.push_int(ext.is_some() as i32, &mut cw);
-    let sup = cw.methodref(
-        &superclass,
-        "<init>",
-        "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
-    );
-    ctor.invokespecial(sup, 4, 0);
-    ctor.ret_void();
-    finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
+    let target = PropertyReferenceTarget::new(pr, facade);
+    emit_property_reference_constructor(&mut cw, &superclass, pr, &target, false);
 
     let mut get = CodeBuilder::new(2);
     get.aload(1);
-    PropertyCallTarget {
-        owner: &call_owner_internal,
-        facade: ext.as_deref(),
-        array_length: array_owner.is_some() && ext.is_none(),
-        name: &pr.getter_name,
-        descriptor: &getter_desc,
-        params: &getter_params,
-        owner_is_interface: pr.owner_is_interface,
-        boxed_value_class: pr.boxed_value_class,
-    }
-    .emit_get(&mut cw, &mut get, getter_ret);
-    box_property_reference_value(&mut cw, &mut get, pr, getter_ret);
+    target
+        .getter(pr)
+        .emit_get(&mut cw, &mut get, target.getter_ret);
+    box_property_reference_value(&mut cw, &mut get, pr, target.getter_ret);
     get.areturn();
     finish_code::<0x0001>(
         &mut cw,
@@ -4354,22 +4471,15 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str, opts: &EmitOptions)
     );
 
     if pr.mutable {
-        let (setter, setter_desc) = property_setter_target(pr, &owner_internal, ext.is_some());
+        let (setter, setter_desc) =
+            property_setter_target(pr, &target.owner, target.facade.is_some());
         let (setter_params, _) =
             parse_physical_method_desc(&setter_desc).expect("validated property setter descriptor");
         let mut set = CodeBuilder::new(3);
         set.aload(1);
-        PropertyCallTarget {
-            owner: &call_owner_internal,
-            facade: ext.as_deref(),
-            array_length: false,
-            name: &setter,
-            descriptor: &setter_desc,
-            params: &setter_params,
-            owner_is_interface: pr.owner_is_interface,
-            boxed_value_class: pr.boxed_value_class,
-        }
-        .emit_set(&mut cw, &mut set, 2);
+        target
+            .setter(pr, &setter, &setter_desc, &setter_params)
+            .emit_set(&mut cw, &mut set, 2);
         set.ret_void();
         finish_code::<0x0001>(
             &mut cw,
@@ -4380,17 +4490,7 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str, opts: &EmitOptions)
         );
     }
 
-    // `<clinit>`: INSTANCE = new.
-    let mut clinit = CodeBuilder::new(0);
-    let cls = cw.class_ref(&fq);
-    clinit.new_obj(cls);
-    clinit.dup();
-    let init = cw.methodref(&fq, "<init>", "()V");
-    clinit.invokespecial(init, 0, 0);
-    let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
-    clinit.putstatic(fref, 1);
-    clinit.ret_void();
-    finish_code::<0x0008>(&mut cw, "<clinit>", "()V", &mut clinit, 0);
+    emit_singleton_instance_clinit(&mut cw, &fq);
     cw.finish()
 }
 
@@ -4409,44 +4509,8 @@ fn emit_bound_prop_ref_class(
     let mut cw = new_writer(&fq, &superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
 
-    let semantic_owner = pr.owner().expect("bound property reference owner");
-    let array_owner = crate::jvm::names::array_class_descriptor(&semantic_owner);
-    let owner_internal = array_owner
-        .clone()
-        .unwrap_or_else(|| crate::jvm::jvm_class_map::to_jvm_internal(&semantic_owner).to_string());
-    let semantic_call_owner = pr
-        .call_owner()
-        .expect("bound property reference call owner");
-    let call_owner_internal = crate::jvm::names::array_class_descriptor(&semantic_call_owner)
-        .unwrap_or_else(|| {
-            crate::jvm::jvm_class_map::to_jvm_internal(&semantic_call_owner).to_string()
-        });
-    // An EXTENSION property: get/set dispatch to a STATIC accessor `getName(Recv)`/`setName(Recv, v)`
-    // on the facade, with the captured receiver passed as the first argument.
-    let ext = pr.ext_facade_or_facade(facade);
-    let getter_desc = property_getter_descriptor(pr, &owner_internal, ext.is_some());
-    let (getter_params, getter_ret) =
-        parse_physical_method_desc(&getter_desc).expect("validated property getter descriptor");
-    let getter_ret = ir_ty_to_jvm(&getter_ret);
-    let signature = format!("{}{}", pr.getter_name, getter_desc);
-    let reflection_owner = ext.as_deref().unwrap_or(&owner_internal);
-
-    // `<init>(Object)V`: super(receiver, owner.class, name, "getName()desc", 0).
-    let mut ctor = CodeBuilder::new(2);
-    ctor.aload(0);
-    ctor.aload(1);
-    ctor.ldc_class(reflection_owner, &mut cw);
-    ctor.push_string(&pr.prop_name, &mut cw);
-    ctor.push_string(&signature, &mut cw);
-    ctor.push_int(ext.is_some() as i32, &mut cw);
-    let sup = cw.methodref(
-        &superclass,
-        "<init>",
-        "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
-    );
-    ctor.invokespecial(sup, 5, 0);
-    ctor.ret_void();
-    finish_code::<0x0000>(&mut cw, "<init>", "(Ljava/lang/Object;)V", &mut ctor, 2);
+    let target = PropertyReferenceTarget::new(pr, facade);
+    emit_property_reference_constructor(&mut cw, &superclass, pr, &target, true);
 
     // `get()Object`: for a member ref `((Owner) this.receiver).getName()`; for an extension ref
     // `Facade.getName((Owner) this.receiver)`. Boxed if primitive.
@@ -4454,42 +4518,27 @@ fn emit_bound_prop_ref_class(
     get.aload(0);
     let recv_f = cw.fieldref(&superclass, "receiver", "Ljava/lang/Object;");
     get.getfield(recv_f, 1);
-    PropertyCallTarget {
-        owner: &call_owner_internal,
-        facade: ext.as_deref(),
-        array_length: array_owner.is_some() && ext.is_none(),
-        name: &pr.getter_name,
-        descriptor: &getter_desc,
-        params: &getter_params,
-        owner_is_interface: pr.owner_is_interface,
-        boxed_value_class: pr.boxed_value_class,
-    }
-    .emit_get(&mut cw, &mut get, getter_ret);
-    box_property_reference_value(&mut cw, &mut get, pr, getter_ret);
+    target
+        .getter(pr)
+        .emit_get(&mut cw, &mut get, target.getter_ret);
+    box_property_reference_value(&mut cw, &mut get, pr, target.getter_ret);
     get.areturn();
     finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
 
     // `set(Object)V` (a bound `var` reference): `((Owner) this.receiver).setName(v)` after
     // casting/unboxing the argument to the property type.
     if pr.mutable {
-        let (setter, setter_desc) = property_setter_target(pr, &owner_internal, ext.is_some());
+        let (setter, setter_desc) =
+            property_setter_target(pr, &target.owner, target.facade.is_some());
         let (setter_params, _) =
             parse_physical_method_desc(&setter_desc).expect("validated property setter descriptor");
         let mut set = CodeBuilder::new(2);
         set.aload(0);
         let recv_f = cw.fieldref(&superclass, "receiver", "Ljava/lang/Object;");
         set.getfield(recv_f, 1);
-        PropertyCallTarget {
-            owner: &call_owner_internal,
-            facade: ext.as_deref(),
-            array_length: false,
-            name: &setter,
-            descriptor: &setter_desc,
-            params: &setter_params,
-            owner_is_interface: pr.owner_is_interface,
-            boxed_value_class: pr.boxed_value_class,
-        }
-        .emit_set(&mut cw, &mut set, 1);
+        target
+            .setter(pr, &setter, &setter_desc, &setter_params)
+            .emit_set(&mut cw, &mut set, 1);
         set.ret_void();
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
     }
@@ -4509,11 +4558,10 @@ fn emit_toplevel_prop_ref_class(
 ) -> Vec<u8> {
     let owner = pr.owner_or_facade(facade);
     let fq = c.fq_name();
-    let self_desc = format!("L{fq};");
     let superclass = c.superclass();
     let mut cw = new_writer(&fq, &superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
-    cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
+    add_singleton_instance_field(&mut cw, &fq);
 
     let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
     let prop_desc = type_descriptor(prop_jvm);
@@ -4573,17 +4621,7 @@ fn emit_toplevel_prop_ref_class(
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
     }
 
-    // `<clinit>`: INSTANCE = new.
-    let mut clinit = CodeBuilder::new(0);
-    let cls = cw.class_ref(&fq);
-    clinit.new_obj(cls);
-    clinit.dup();
-    let init = cw.methodref(&fq, "<init>", "()V");
-    clinit.invokespecial(init, 0, 0);
-    let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
-    clinit.putstatic(fref, 1);
-    clinit.ret_void();
-    finish_code::<0x0008>(&mut cw, "<clinit>", "()V", &mut clinit, 0);
+    emit_singleton_instance_clinit(&mut cw, &fq);
     cw.finish()
 }
 
@@ -4622,7 +4660,6 @@ fn emit_func_ref_class(
     let call_owner = fr.call_owner_or_facade(facade);
     let call_owner = crate::jvm::jvm_class_map::to_jvm_internal(&call_owner).to_string();
     let fq = c.fq_name();
-    let self_desc = format!("L{fq};");
     let superclass = c.superclass();
     let mut cw = new_writer(&fq, &superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
@@ -4712,8 +4749,8 @@ fn emit_func_ref_class(
         ctor.ret_void();
         finish_code::<0x0000>(&mut cw, "<init>", "(Ljava/lang/Object;)V", &mut ctor, 2);
     } else {
-        cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC|STATIC|FINAL
-                                                      // `<init>()V`: super(arity, owner.class, name, sig, flags).
+        add_singleton_instance_field(&mut cw, &fq);
+        // `<init>()V`: super(arity, owner.class, name, sig, flags).
         let mut ctor = CodeBuilder::new(1);
         ctor.aload(0);
         ctor.push_int(fr.arity as i32, &mut cw);
@@ -4729,17 +4766,7 @@ fn emit_func_ref_class(
         ctor.invokespecial(sup, 5, 0);
         ctor.ret_void();
         finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
-        // `<clinit>`: INSTANCE = new <self>().
-        let mut clinit = CodeBuilder::new(0);
-        let cls = cw.class_ref(&fq);
-        clinit.new_obj(cls);
-        clinit.dup();
-        let init = cw.methodref(&fq, "<init>", "()V");
-        clinit.invokespecial(init, 0, 0);
-        let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
-        clinit.putstatic(fref, 1);
-        clinit.ret_void();
-        finish_code::<0x0008>(&mut cw, "<clinit>", "()V", &mut clinit, 0);
+        emit_singleton_instance_clinit(&mut cw, &fq);
     }
 
     // The erased `invoke(Object×arity)Object`.
@@ -5750,7 +5777,6 @@ fn emit_interface_class(
     class_meta: Option<&KotlinMetadata>,
     extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
-    let bodies = env.bodies;
     let fq_name = c.fq_name();
     let mut cw = new_writer(&fq_name, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
@@ -5847,50 +5873,24 @@ fn emit_interface_class(
     }
     // A `companion object` with methods: a `public static final Companion` field of the synthesized
     // `C$Companion` type, constructed in the interface's `<clinit>` (alongside any non-const statics).
-    if let Some(comp_fq) = c.companion_class() {
-        cw.add_field(0x0019, "Companion", &format!("L{comp_fq};"));
-    }
+    add_companion_field(&mut cw, c);
     let clinit_statics: Vec<&crate::ir::IrStatic> = ir
         .statics
         .iter()
         .filter(|s| s.owner_matches(&fq_name) && !(s.is_const && const_value_idx_peek(ir, s.init)))
         .collect();
     if c.companion_class.is_some() || !clinit_statics.is_empty() {
-        let mut e = Emitter {
+        let mut e = Emitter::new(
             ir,
-            cw: &mut cw,
-            bodies,
-            run: env.run,
-            owner: fq_name.clone(),
-            facade: facade.to_string(),
-            slots: HashMap::new(),
-            var_types: collect_var_types(ir),
-            next_slot: 0,
-            ret: Ty::Unit,
-            loop_stack: Vec::new(),
-            pending_stack: Vec::new(),
-            open_locals: Vec::new(),
-            block_depth: 0,
-            record_locals: false,
-            this_uninitialized: false,
-        };
+            &mut cw,
+            env,
+            &fq_name,
+            facade,
+            Ty::Unit,
+            clinit_statics.iter().map(|property| property.init),
+        );
         let mut clinit = CodeBuilder::new(0);
-        if let Some(comp_fq) = c.companion_class() {
-            let comp_desc = format!("L{comp_fq};");
-            let ci = e.cw.class_ref(&comp_fq);
-            clinit.new_obj(ci);
-            clinit.dup();
-            // Through the companion's `(DefaultConstructorMarker)` accessor — its real ctor is private.
-            clinit.aconst_null();
-            let init = e.cw.methodref(
-                &comp_fq,
-                "<init>",
-                "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-            );
-            clinit.invokespecial(init, 1, 0);
-            let fref = e.cw.fieldref(&fq_name, "Companion", &comp_desc);
-            clinit.putstatic(fref, 1);
-        }
+        emit_companion_init(e.cw, &mut clinit, &fq_name, c);
         for s in &clinit_statics {
             e.emit_value(s.init, &mut clinit);
             let jt = ir_ty_to_jvm(&s.ty);
@@ -5928,7 +5928,6 @@ fn emit_enum_class(
     env: &EmitEnv,
     opts: &EmitOptions,
 ) -> Vec<u8> {
-    let bodies = env.bodies;
     const ACC_ENUM: u16 = 0x4000;
     const ACC_SYNTHETIC: u16 = 0x1000;
     let fq = c.fq_name();
@@ -6055,9 +6054,7 @@ fn emit_enum_class(
     // A `@Serializable enum`'s serializer machinery: a `public static final Companion` field + any
     // owner-scoped statics the serialization plugin synthesized (`$cachedSerializer$delegate`), both
     // initialized in `<clinit>` below.
-    if let Some(comp_fq) = c.companion_class() {
-        cw.add_field(0x0019, "Companion", &format!("L{comp_fq};")); // PUBLIC | STATIC | FINAL
-    }
+    add_companion_field(&mut cw, c);
     let owner_statics: Vec<&crate::ir::IrStatic> =
         ir.statics.iter().filter(|s| s.owner_matches(&fq)).collect();
     for s in &owner_statics {
@@ -6095,24 +6092,8 @@ fn emit_enum_class(
     // slots 3+ (after the synthetic `name`/`ordinal`), in declaration order. Otherwise hand-store just
     // the property-param fields (a plain param has no field), reading each at its own slot.
     if let Some(init_body) = c.init_body.filter(|_| c.fields.len() > n_params) {
-        let mut e = Emitter {
-            ir,
-            cw: &mut cw,
-            bodies,
-            run: env.run,
-            owner: fq.clone(),
-            facade: facade.to_string(),
-            slots: HashMap::new(),
-            var_types: collect_var_types(ir),
-            next_slot: 1 + ctor_words,
-            ret: Ty::Unit,
-            loop_stack: Vec::new(),
-            pending_stack: Vec::new(),
-            open_locals: Vec::new(),
-            block_depth: 0,
-            record_locals: false,
-            this_uninitialized: false,
-        };
+        let mut e = Emitter::new(ir, &mut cw, env, &fq, facade, Ty::Unit, [init_body]);
+        e.next_slot = 1 + ctor_words;
         e.slots.insert(0, (0, Ty::obj(&fq)));
         let mut s = 3u16;
         for (i, t) in all_param_tys.iter().enumerate() {
@@ -6164,24 +6145,17 @@ fn emit_enum_class(
     let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
     let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
     let clinit = {
-        let mut e = Emitter {
+        let mut e = Emitter::new(
             ir,
-            cw: &mut cw,
-            bodies,
-            run: env.run,
-            owner: fq.clone(),
-            facade: facade.to_string(),
-            slots: HashMap::new(),
-            var_types: collect_var_types(ir),
-            next_slot: 0,
-            ret: Ty::Unit,
-            loop_stack: Vec::new(),
-            pending_stack: Vec::new(),
-            open_locals: Vec::new(),
-            block_depth: 0,
-            record_locals: false,
-            this_uninitialized: false,
-        };
+            &mut cw,
+            env,
+            &fq,
+            facade,
+            Ty::Unit,
+            c.enum_entries
+                .iter()
+                .flat_map(|entry| entry.args.iter().copied()),
+        );
         let mut clinit = CodeBuilder::new(0);
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
         // Consecutive enum entries on one source line share one LNT entry.
@@ -6252,21 +6226,7 @@ fn emit_enum_class(
             let fref = e.cw.fieldref(&fq, &s.name, &type_descriptor(jt));
             clinit.putstatic(fref, slot_words(jt) as i32);
         }
-        if let Some(comp_fq) = c.companion_class() {
-            let comp_desc = format!("L{comp_fq};");
-            let ci = e.cw.class_ref(&comp_fq);
-            clinit.new_obj(ci);
-            clinit.dup();
-            clinit.aconst_null();
-            let init = e.cw.methodref(
-                &comp_fq,
-                "<init>",
-                "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-            );
-            clinit.invokespecial(init, 1, 0);
-            let fref = e.cw.fieldref(&fq, "Companion", &comp_desc);
-            clinit.putstatic(fref, 1);
-        }
+        emit_companion_init(e.cw, &mut clinit, &fq, c);
         clinit.ret_void();
         // `max_locals` is exactly what the body allocated — entry-arg spills bump `next_slot`, and a
         // `<clinit>` that spills nothing has no locals at all (kotlinc writes 0, not a floor of 2).
@@ -6455,29 +6415,11 @@ fn emit_method_inner(
     instance: bool,
     env: &EmitEnv,
 ) {
-    let bodies = env.bodies;
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
     let param_tys = jvm_tys(&f.params);
     let ret = ir_ty_to_jvm(&f.ret);
-    let mut e = Emitter {
-        ir,
-        cw,
-        bodies,
-        run: env.run,
-        owner: owner.to_string(),
-        facade: facade.to_string(),
-        slots: HashMap::new(),
-        var_types: collect_var_types(ir),
-        next_slot: 0,
-        ret,
-        loop_stack: Vec::new(),
-        pending_stack: Vec::new(),
-        open_locals: Vec::new(),
-        block_depth: 0,
-        record_locals: false,
-        this_uninitialized: false,
-    };
+    let mut e = Emitter::new(ir, cw, env, owner, facade, ret, [body]);
     // Suspend lowering does not preserve source-local expression IDs.
     e.record_locals = ir.fn_decl_lines.contains_key(&fid) && !ir.suspend_funs.contains(&fid);
     if instance {
@@ -6510,7 +6452,7 @@ fn emit_method_inner(
     // kotlinc annotates neither it nor a parameter in that position.
     let gsig = ir.signatures.get(&fid);
     let ret_ann = gsig
-        .is_none_or(|g| g.ret_tparam.is_none())
+        .is_none_or(|g| !matches!(g.ret, Some(Ty::TyParam(..))))
         .then(|| ann_of(f.ret))
         .flatten();
     // A parameter's declared `?` lives in a side-table (not in `f.params`, which stays non-null for the
@@ -6521,11 +6463,7 @@ fn emit_method_inner(
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let is_tparam = gsig.is_some_and(|g| {
-                g.param_tparams
-                    .get(i)
-                    .is_some_and(std::option::Option::is_some)
-            });
+            let is_tparam = gsig.is_some_and(|g| matches!(g.params.get(i), Some(Ty::TyParam(..))));
             if is_tparam {
                 None
             } else if declared_nullable
@@ -6680,17 +6618,12 @@ fn emit_method_inner(
 fn jvm_method_signature(g: &crate::ir::IrGenericSig, f: &crate::ir::IrFunction) -> Option<String> {
     let mut s = jvm_type_params(g)?;
     s.push('(');
-    for (i, pt) in g.param_tparams.iter().enumerate() {
-        match pt {
-            Some(name) => s.push_str(&format!("T{name};")),
-            None => s.push_str(&ir_type_desc(&f.params[i])),
-        }
+    for parameter in &g.params {
+        s.push_str(&ty_generic_sig(parameter).unwrap_or_else(|| ir_type_desc(parameter)));
     }
     s.push(')');
-    match &g.ret_tparam {
-        Some(name) => s.push_str(&format!("T{name};")),
-        None => s.push_str(&ir_type_desc(&f.ret)),
-    }
+    let ret = g.ret.as_ref().unwrap_or(&f.ret);
+    s.push_str(&ty_generic_sig(ret).unwrap_or_else(|| ir_type_desc(ret)));
     Some(s)
 }
 
@@ -6714,6 +6647,12 @@ fn jvm_class_signature(g: &crate::ir::IrGenericSig) -> Option<String> {
 /// (`Int` → `Ljava/lang/Integer;`), a reference maps its internal (`kotlin/Any` → `java/lang/Object`) and
 /// carries its (recursively formatted) type arguments. `None` for a shape not representable here.
 fn ty_generic_sig(t: &Ty) -> Option<String> {
+    if let Ty::Nullable(inner) | Ty::PlatformNullable(inner) = t {
+        return ty_generic_sig(inner);
+    }
+    if let Ty::TyParam(name, _) = t {
+        return Some(format!("T{name};"));
+    }
     if t.non_null().is_jvm_scalar() {
         // A scalar in a generic position is a reference. In particular, an unsigned classifier uses
         // its own inline-class box (`UInt`), never its signed carrier (`Integer`) and never bare `I`.
@@ -6722,6 +6661,8 @@ fn ty_generic_sig(t: &Ty) -> Option<String> {
     match *t {
         Ty::String => Some("Ljava/lang/String;".to_string()),
         Ty::Unit => Some("Lkotlin/Unit;".to_string()),
+        Ty::InProjection(inner) => Some(format!("-{}", ty_generic_sig(inner)?)),
+        Ty::OutProjection(inner) => Some(format!("+{}", ty_generic_sig(inner)?)),
         Ty::Obj(internal, args) => {
             let internal = internal.render();
             let jvm = crate::jvm::names::classfile_internal_name(&internal);
@@ -6890,10 +6831,16 @@ fn jvm_type_params(g: &crate::ir::IrGenericSig) -> Option<String> {
         return Some(String::new());
     }
     let mut s = String::from("<");
-    for (name, bound) in &g.type_params {
-        s.push_str(name);
-        s.push(':');
-        s.push_str(&jvm_bound_descriptor(bound)?);
+    for parameter in &g.type_params {
+        s.push_str(&parameter.name);
+        let bounds = parameter.bounds.iter();
+        if bounds.clone().all(|(_, is_interface)| *is_interface) {
+            s.push(':');
+        }
+        for (bound, _) in bounds {
+            s.push(':');
+            s.push_str(&jvm_bound_descriptor(bound)?);
+        }
     }
     s.push('>');
     Some(s)
@@ -6902,24 +6849,13 @@ fn jvm_type_params(g: &crate::ir::IrGenericSig) -> Option<String> {
 /// A type-parameter upper bound as a JVM signature element: `kotlin/Any` → `Ljava/lang/Object;`, a
 /// primitive → its boxed wrapper (`kotlin/Int` → `Ljava/lang/Integer;`). `None` for anything else.
 fn jvm_bound_descriptor(bound: &Ty) -> Option<String> {
-    let ty = ir_ty_to_jvm(bound);
-    if ty == Ty::obj("kotlin/Any") {
+    if *bound == Ty::obj("kotlin/Any") {
         return Some("Ljava/lang/Object;".to_string());
     }
-    if ty.is_jvm_scalar() {
-        return ty.nullable_boxed().map(type_descriptor);
+    if bound.is_jvm_scalar() {
+        return bound.nullable_boxed().map(type_descriptor);
     }
-    // A reference bound — `T : Foo`, `T : CharSequence` (ir_lower already suppressed parameterized
-    // bounds) — emits its erased class descriptor `L<internal>;`, mapping a Kotlin built-in
-    // (`kotlin/CharSequence` → `java/lang/CharSequence`) the same way the emitter maps any owner.
-    match ty {
-        Ty::String => Some("Ljava/lang/String;".to_string()),
-        Ty::Obj(n, _) => Some(format!(
-            "L{};",
-            crate::jvm::jvm_class_map::to_jvm_internal(&n.render())
-        )),
-        _ => None,
-    }
+    ty_generic_sig(bound)
 }
 
 /// Emit the JVM `<name>$default(self, params…, mask: int, marker: Object)` synthetic stub for an
@@ -6937,7 +6873,6 @@ fn emit_default_stub(
     env: &EmitEnv,
     is_interface: bool,
 ) {
-    let bodies = env.bodies;
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
     // The REAL (base-method) param types unbox every value class. `stub_param_tys` is the `$default`
@@ -6957,24 +6892,15 @@ fn emit_default_stub(
     let ret = ir_ty_to_jvm(&f.ret);
     let owner_ty = Ty::obj(owner);
 
-    let mut e = Emitter {
+    let mut e = Emitter::new(
         ir,
         cw,
-        bodies,
-        run: env.run,
-        owner: owner.to_string(),
-        facade: facade.to_string(),
-        slots: HashMap::new(),
-        var_types: collect_var_types(ir),
-        next_slot: 0,
+        env,
+        owner,
+        facade,
         ret,
-        loop_stack: Vec::new(),
-        pending_stack: Vec::new(),
-        open_locals: Vec::new(),
-        block_depth: 0,
-        record_locals: false,
-        this_uninitialized: false,
-    };
+        defaults.iter().flatten().copied(),
+    );
     // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
     e.slots.insert(0, (0, owner_ty));
     let mut slot = 1u16;
@@ -7162,30 +7088,20 @@ fn emit_facade_default_stub(
     env: &EmitEnv,
     marker: Ty,
 ) {
-    let bodies = env.bodies;
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
     let real_params = jvm_tys(&f.params);
     let ret = ir_ty_to_jvm(&f.ret);
 
-    let mut e = Emitter {
+    let mut e = Emitter::new(
         ir,
         cw,
-        bodies,
-        run: env.run,
-        owner: facade.to_string(),
-        facade: facade.to_string(),
-        slots: HashMap::new(),
-        var_types: collect_var_types(ir),
-        next_slot: 0,
+        env,
+        facade,
+        facade,
         ret,
-        loop_stack: Vec::new(),
-        pending_stack: Vec::new(),
-        open_locals: Vec::new(),
-        block_depth: 0,
-        record_locals: false,
-        this_uninitialized: false,
-    };
+        defaults.iter().flatten().copied(),
+    );
     // No `self`: value-index `i` = the i-th real parameter (the static layout the defaults were lowered
     // with); then mask + marker (not value-indexed).
     let mut slot = 0u16;
@@ -7257,31 +7173,19 @@ fn emit_ctor_default_stub(
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
-    let bodies = env.bodies;
     let n = real_params.len();
-    let mut e = Emitter {
+    // The FILE facade, not the class. A default initializer is ordinary file-level code that happens
+    // to run inside the constructor; same-file top-level calls still belong to the facade.
+    let mut e = Emitter::new(
         ir,
         cw,
-        bodies,
-        run: env.run,
-        owner: owner.to_string(),
-        // The FILE facade, not the class. A default initializer is ordinary file-level code that
-        // happens to be evaluated inside the constructor, so a same-file top-level call in it
-        // (`val a: String = ev()`) belongs to the facade. Resolving it against the class emitted
-        // `P.ev()` for a function living in `UKt` — a reference to nothing, which verifies fine and
-        // dies as a NoSuchMethodError the first time the defaulted constructor runs.
-        facade: facade.to_string(),
-        slots: HashMap::new(),
-        var_types: collect_var_types(ir),
-        next_slot: 0,
-        ret: Ty::Unit,
-        loop_stack: Vec::new(),
-        pending_stack: Vec::new(),
-        open_locals: Vec::new(),
-        block_depth: 0,
-        record_locals: false,
-        this_uninitialized: true,
-    };
+        env,
+        owner,
+        facade,
+        Ty::Unit,
+        defaults.iter().flatten().copied(),
+    );
+    e.this_uninitialized = true;
     let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
     // `this` at slot 0 = value-index 0; real params at value-index 1..=n.
     e.slots.insert(0, (0, Ty::obj(owner)));
@@ -7466,6 +7370,35 @@ fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
 }
 
 impl<'a> Emitter<'a> {
+    fn new(
+        ir: &'a IrFile,
+        cw: &'a mut ClassWriter,
+        env: &EmitEnv<'a>,
+        owner: &str,
+        facade: &str,
+        ret: Ty,
+        roots: impl IntoIterator<Item = u32>,
+    ) -> Self {
+        Self {
+            ir,
+            cw,
+            bodies: env.bodies,
+            run: env.run,
+            owner: owner.to_string(),
+            facade: facade.to_string(),
+            slots: HashMap::new(),
+            var_types: collect_var_types(ir, roots),
+            next_slot: 0,
+            ret,
+            loop_stack: Vec::new(),
+            pending_stack: Vec::new(),
+            open_locals: Vec::new(),
+            block_depth: 0,
+            record_locals: false,
+            this_uninitialized: false,
+        }
+    }
+
     /// Emit a lambda's `inline_body` (its value-producing form) INLINE at a stdlib-inline-fn splice:
     /// bind its parameter value-indices `0..` to the given JVM slots (captures → caller slots, lambda
     /// params → the on-stack args), then emit the body as a value — leaving the result on the stack. A
@@ -8389,7 +8322,7 @@ impl<'a> Emitter<'a> {
         self.emit_value_node(e, node, code);
         // A `Nothing`-returning call leaves a physical `Void` and must terminate the path (it would
         // otherwise fall through with a stray value); the throw replaces the discard.
-        if self.terminate_if_nothing_call(node, code) {
+        if self.terminate_if_nothing_call(e, node, code) {
             return;
         }
         // A successfully spliced bottom-typed expression has already transferred control (for
@@ -8405,7 +8338,7 @@ impl<'a> Emitter<'a> {
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
-        self.terminate_if_nothing_call(&node, code);
+        self.terminate_if_nothing_call(e, &node, code);
     }
 
     /// Emit `e` and then narrow it to the CONSUMPTION type `expected` — the `checkcast` kotlinc inserts
@@ -9150,8 +9083,20 @@ impl<'a> Emitter<'a> {
     /// `Nothing` call used in a branch (`if (c) … else exit()`, a diverging `catch`) terminates instead of
     /// leaking a `Void` into the merge/handler frame. Inline-spliced `Nothing` calls (`error(...)`) already
     /// end in `athrow` and are excluded. Returns whether the terminating throw was emitted.
-    fn terminate_if_nothing_call(&mut self, node: &IrExpr, code: &mut CodeBuilder) -> bool {
-        if !self.is_real_nothing_call(node) {
+    fn terminate_if_nothing_call(
+        &mut self,
+        expression: u32,
+        node: &IrExpr,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let declared_nothing = self.is_real_nothing_call(node);
+        let inferred_nothing = self.is_real_call(node)
+            && self
+                .ir
+                .logical_types
+                .get(&expression)
+                .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing);
+        if !declared_nothing && !inferred_nothing {
             return false;
         }
         // The invoke was emitted with ZERO result words — `slot_words(Nothing)` is 0 because a
@@ -9160,7 +9105,9 @@ impl<'a> Emitter<'a> {
         // the invoke onwards, `max_stack` is undercounted by whatever this path pushes on top
         // (`println(boom())` needs the `PrintStream` receiver underneath), and the JVM rejects the
         // method with "Operand stack overflow".
-        code.set_stack((code.stack_height().max(0) + 1) as u16);
+        if declared_nothing {
+            code.set_stack((code.stack_height().max(0) + 1) as u16);
+        }
         code.pop();
         let cls = self.cw.class_ref("kotlin/KotlinNothingValueException");
         code.new_obj(cls);
@@ -9197,6 +9144,21 @@ impl<'a> Emitter<'a> {
                 Callee::Static {
                     descriptor, inline, ..
                 } => !inline.can_inline() && descriptor.ends_with(")Ljava/lang/Void;"),
+                Callee::Intrinsic { .. } => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether this node emitted a real invocation that physically returns one reference word.
+    /// Inline/intrinsic calls realize their own control flow and must not receive a synthetic throw.
+    fn is_real_call(&self, node: &IrExpr) -> bool {
+        match node {
+            IrExpr::MethodCall { .. } => true,
+            IrExpr::Call { callee, .. } => match callee {
+                Callee::Local(_) | Callee::LocalDefault(_) | Callee::CrossFile { .. } => true,
+                Callee::Special { .. } | Callee::Virtual { .. } => true,
+                Callee::Static { inline, .. } => !inline.can_inline(),
                 Callee::Intrinsic { .. } => false,
             },
             _ => false,
@@ -10094,8 +10056,21 @@ impl<'a> Emitter<'a> {
                 };
                 crate::trace_compiler!(
                     "value_classes",
-                    "emit type op={op:?} arg={arg} operand={type_operand:?} jvm={jvm_ty:?} internal={internal}"
+                    "emit type op={op:?} arg={arg} {:?} arg_ty={:?} operand={type_operand:?} jvm={jvm_ty:?} internal={internal}",
+                    self.ir.expr(*arg),
+                    self.value_ty(*arg),
                 );
+                if let IrExpr::Block { stmts, value } = self.ir.expr(*arg) {
+                    crate::trace_compiler!(
+                        "value_classes",
+                        "type op block arg={arg} stmts={:?} value={:?}",
+                        stmts
+                            .iter()
+                            .map(|&expression| (expression, self.ir.expr(expression)))
+                            .collect::<Vec<_>>(),
+                        value.map(|expression| (expression, self.ir.expr(expression))),
+                    );
+                }
                 self.emit_value(*arg, code);
                 match op {
                     IrTypeOp::InstanceOf => {
@@ -11215,7 +11190,7 @@ impl<'a> Emitter<'a> {
         ops.extend(args.iter().copied());
         let mut physical = Vec::with_capacity(physical_params.len() + 1);
         let owner_ty = Ty::obj(owner);
-        physical.push(if owner_ty.is_unsigned() {
+        physical.push(if owner_ty.scalar_value_repr().is_some() {
             Ty::nullable(owner_ty)
         } else {
             owner_ty

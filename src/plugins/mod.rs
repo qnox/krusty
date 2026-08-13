@@ -79,6 +79,7 @@ pub struct FrontendCallable {
     pub name: String,
     pub params: Vec<Ty>,
     pub ret: Ty,
+    pub generic_sig: Option<crate::libraries::GenericSig>,
     pub plugin_expression: Option<crate::libraries::PluginExpressionDeclaration>,
 }
 
@@ -91,7 +92,7 @@ pub enum FrontendCallableOwner {
 /// The resolved source-class information available to frontend declaration generation.
 pub struct FrontendClassContext<'a> {
     pub classifier: TypeName,
-    pub type_parameter_count: usize,
+    pub type_parameters: &'a crate::types::TypeParameters<Vec<Ty>>,
     pub annotations: &'a [TypeName],
 }
 

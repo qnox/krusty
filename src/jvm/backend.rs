@@ -589,23 +589,6 @@ pub fn facade_package_metadata(
             .cloned()
             .zip(declared_params.iter().copied())
             .collect();
-        // Per-parameter receiver function types (`Recv.(…) -> R`): the reader recovers lambda `this`
-        // binding from the `@kotlin.ExtensionFunctionType` mark this drives.
-        let param_fun_recvs: Vec<Option<Ty>> = sig
-            .lambda_recv
-            .iter()
-            .enumerate()
-            .map(|(i, &is_recv)| {
-                is_recv
-                    .then(|| {
-                        sig.lambda_param_types
-                            .get(i)
-                            .and_then(|t| t.first())
-                            .copied()
-                    })
-                    .flatten()
-            })
-            .collect();
         // A `suspend fun`'s PHYSICAL method appends a `Continuation` and erases the return; record
         // the emit handle so a reader aligns the logical signature with the CPS method. An inline
         // fn needs the handle too: its erased descriptor (receiver + erased params + erased return)
@@ -652,7 +635,6 @@ pub fn facade_package_metadata(
             params,
             ret: declared_ret,
             receiver,
-            param_fun_recvs,
             param_defaults: sig.param_defaults.clone(),
             suspend: f.is_suspend(),
             jvm_desc,
@@ -662,6 +644,9 @@ pub fn facade_package_metadata(
                 .iter()
                 .map(|tp| (tp.clone(), f.reified_type_params.contains(tp)))
                 .collect(),
+            type_param_bounds: generic
+                .map(|signature| signature.formal_bounds.clone())
+                .unwrap_or_default(),
             // Resolve the contract's source type references once, against this module: a type
             // parameter stays a `Type.type_parameter` reference; a class becomes its internal
             // name. Unresolvable references stay `Source` (the emitter degrades them to `Any`).

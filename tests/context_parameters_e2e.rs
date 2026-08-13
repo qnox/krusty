@@ -586,7 +586,7 @@ fn functional_interface_member_context_is_implicit() {
         }\n\
         fun consume(action: Action): String = with(C()) { action.accept(\"OK\") }\n";
     assert_eq!(
-        common::front_end_diagnostics(SRC, &[], None),
+        common::front_end_diagnostics_with_stdlib(SRC),
         Vec::<String>::new()
     );
 }
@@ -716,7 +716,7 @@ fn context_local_function_maps_reordered_named_arguments() {
         \x20 return with(C()) { combine(b = \"K\", a = \"O\") }\n\
         }\n";
     assert_eq!(
-        common::front_end_diagnostics(SRC, &[], None),
+        common::front_end_diagnostics_with_stdlib(SRC),
         Vec::<String>::new()
     );
     assert_eq!(run(SRC).expect("local context named arguments"), "OK");
@@ -728,7 +728,7 @@ fn context_top_level_function_maps_named_argument_past_default() {
         context(c: C) fun choose(a: Int = 7, b: String): String = b\n\
         fun box(): String = with(C()) { choose(b = \"OK\") }\n";
     assert_eq!(
-        common::front_end_diagnostics(SRC, &[], None),
+        common::front_end_diagnostics_with_stdlib(SRC),
         Vec::<String>::new()
     );
     assert_eq!(run(SRC).expect("context named argument past default"), "OK");
@@ -742,7 +742,7 @@ fn context_local_function_maps_named_argument_past_default() {
         \x20 return with(C()) { choose(b = \"OK\") }\n\
         }\n";
     assert_eq!(
-        common::front_end_diagnostics(SRC, &[], None),
+        common::front_end_diagnostics_with_stdlib(SRC),
         Vec::<String>::new()
     );
     assert_eq!(
@@ -760,7 +760,7 @@ fn context_local_default_cannot_bind_same_named_caller_local() {
         \x20 val actual = with(C()) { combine(a = 1) }\n\
         \x20 return if (actual == 11) \"OK\" else actual.toString()\n\
         }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
     assert!(
         diagnostics.iter().any(|message| message.contains(
             "local function default argument that references another parameter is not supported"
@@ -778,7 +778,7 @@ fn context_local_positional_default_cannot_bind_same_named_caller_local() {
         \x20 val actual = with(C()) { combine(1) }\n\
         \x20 return if (actual == 11) \"OK\" else actual.toString()\n\
         }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
     assert!(
         diagnostics.iter().any(|message| message.contains(
             "local function default argument that references another parameter is not supported"
