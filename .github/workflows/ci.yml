@@ -25,9 +25,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: install coverage tooling
-        run: |
-          rustup toolchain install nightly --profile minimal --component llvm-tools-preview
-          cargo install cargo-llvm-cov --locked
+        run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
+      # Prebuilt binary: `cargo install cargo-llvm-cov` compiled it from source on every run
+      # (~75s of the ci job).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v4
       - uses: actions/setup-java@v5.7.0

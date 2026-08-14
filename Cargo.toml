@@ -66,6 +66,21 @@ debug-assertions = false
 debug = false
 incremental = true
 
+# Instrumented-coverage profile (scripts/coverage.sh). The e2e suite compiles every dependency-lib
+# fixture with krusty in-process, so the instrumented binary IS the compiler under measurement:
+# at `dev` (opt 0 + debuginfo + checks) the branch-instrumented run costs ~4x the gate and dominated
+# CI wall clock. `opt-level = 1` keeps coverage counters exact (instrumentation happens in MIR,
+# before optimization) while roughly halving the instrumented run; checks match `gate` semantics
+# (krusty relies on wrapping arithmetic); coverage mapping does not need debuginfo. The coverage
+# target dir is rebuilt from scratch each run, so incremental only adds overhead.
+[profile.coverage]
+inherits = "dev"
+opt-level = 1
+overflow-checks = false
+debug-assertions = false
+debug = false
+incremental = false
+
 # Integration test binaries are explicit because Cargo otherwise treats every tests/*.rs file
 # as a separate executable. Product e2e tests are grouped into one e2e binary, while external
 # corpus/reference-toolchain suites are grouped into one conformance binary that fast/coverage

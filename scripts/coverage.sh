@@ -76,17 +76,19 @@ mkdir -p target/coverage
 rm -f "$coverage_target"/*.profraw target/coverage/*.profdata target/coverage/*.profraw
 
 # Compile the compiler and LSP coverage workloads without running them, then read each test
-# executable's path from Cargo's JSON build output.
-cargo +nightly build -p krusty-cli
-export KRUSTY_BIN="$coverage_target/debug/krusty"
+# executable's path from Cargo's JSON build output. The dedicated `coverage` profile (Cargo.toml)
+# builds at opt-level 1 with gate-matching checks: the e2e suite runs krusty in-process for every
+# dependency-lib fixture, and instrumenting that at `dev` made the coverage run dominate CI.
+cargo +nightly build --profile coverage -p krusty-cli
+export KRUSTY_BIN="$coverage_target/coverage/krusty"
 if [ ! -x "$KRUSTY_BIN" ]; then
   echo "coverage: compiler binary missing after workspace build: $KRUSTY_BIN" >&2
   exit 1
 fi
 mapfile -t bins < <(
   {
-    cargo +nightly test --no-run --lib --test e2e --message-format=json 2>/dev/null
-    cargo +nightly test --no-run -p krusty-lsp --all-targets --message-format=json 2>/dev/null
+    cargo +nightly test --no-run --profile coverage --lib --test e2e --message-format=json 2>/dev/null
+    cargo +nightly test --no-run --profile coverage -p krusty-lsp --all-targets --message-format=json 2>/dev/null
   } | jq -r 'select(.profile.test == true and .executable != null) | .executable'
 )
 
@@ -144,9 +146,9 @@ rm -rf "$status_dir"
 # Cargo package selection also controls which instrumented objects `llvm-cov report` discovers.
 # Export each product package separately, then combine their totals for the repository gate.
 IGNORE='(^|/)tests/|(^|/)src/main\.rs|(^|/)src/bin/'
-cargo +nightly llvm-cov report --branch --ignore-filename-regex "$IGNORE" \
+cargo +nightly llvm-cov report --branch --profile coverage --ignore-filename-regex "$IGNORE" \
   --json --output-path "$compiler_raw_out"
-cargo +nightly llvm-cov report --branch -p krusty-lsp --ignore-filename-regex "$IGNORE" \
+cargo +nightly llvm-cov report --branch --profile coverage -p krusty-lsp --ignore-filename-regex "$IGNORE" \
   --json --output-path "$lsp_raw_out"
 
 # Reduce both exports to the combined totals the gate compares against.
