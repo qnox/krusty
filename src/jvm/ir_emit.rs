@@ -32,6 +32,46 @@ fn property_visibility(ir: &IrFile, owner: &str, name: &str) -> Visibility {
         .unwrap_or_default()
 }
 
+/// kotlinc realizes a NAMED `object` declaration's property backing fields as STATIC fields on the
+/// object class: accessors read/write `getstatic`/`putstatic`, initializers run in `<clinit>` after
+/// the `INSTANCE` store, and `<init>` is a bare `super()` call. Companions hoist their fields to the
+/// OUTER class instead (not modeled yet), and local/anonymous objects keep instance fields.
+fn object_static_storage(c: &IrClass) -> bool {
+    c.is_object && !c.is_companion && !c.is_local_class && c.enum_entry_of.is_none()
+}
+
+/// Whether a static-storage object's `init_body` reads `this` (`GetValue(0)`) anywhere OTHER than
+/// as the receiver of a store to its own (now static) field — those receivers are dropped by the
+/// `putstatic` lowering, so only remaining reads force materializing INSTANCE into a local.
+fn init_body_reads_this(ir: &IrFile, body: crate::ir::ExprId) -> bool {
+    fn walk(ir: &IrFile, e: crate::ir::ExprId, skip_self: bool) -> bool {
+        use crate::ir::IrExpr;
+        match ir.expr(e) {
+            IrExpr::GetValue(v) => *v == 0 && !skip_self,
+            IrExpr::SetField {
+                receiver, value, ..
+            } => {
+                let receiver_is_this = matches!(ir.expr(*receiver), IrExpr::GetValue(0));
+                (!receiver_is_this && walk(ir, *receiver, false)) || walk(ir, *value, false)
+            }
+            IrExpr::Block { stmts, value } => {
+                stmts.iter().any(|&s| walk(ir, s, false))
+                    || value.is_some_and(|v| walk(ir, v, false))
+            }
+            _ => {
+                let mut found = false;
+                crate::ir::for_each_child(&ir.exprs, e, &mut |child| {
+                    if walk(ir, child, false) {
+                        found = true;
+                    }
+                });
+                found
+            }
+        }
+    }
+    walk(ir, body, false)
+}
+
 fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
     class.has_primary_ctor
         && (class.is_sealed || class.is_companion || ir.has_value_param_ctor(&class.fq_name()))
@@ -3510,10 +3550,14 @@ fn emit_declared_property_accessors(
         };
         if !occupied(&getter, &format!("(){accessor_desc}")) {
             let mut g = CodeBuilder::new(1);
-            g.aload(0);
             let physical_name = instance_field_jvm_name(ir, c, field);
             let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
-            g.getfield(fref, slot_words(field_jt) as i32);
+            if object_static_storage(c) {
+                g.getstatic(fref, slot_words(field_jt) as i32);
+            } else {
+                g.aload(0);
+                g.getfield(fref, slot_words(field_jt) as i32);
+            }
             // A `lateinit var` read throws while the field is still null — kotlinc inserts this at every
             // access, and the accessor is an access like any other.
             if field.is_lateinit() {
@@ -3582,7 +3626,10 @@ fn emit_declared_property_accessors(
                     );
                     st.invokestatic(m, 2, 0);
                 }
-                st.aload(0);
+                let statics_storage = object_static_storage(c);
+                if !statics_storage {
+                    st.aload(0);
+                }
                 load(accessor_jt, 1, &mut st);
                 emit_backing_field_write_adaptation(
                     ir,
@@ -3594,7 +3641,11 @@ fn emit_declared_property_accessors(
                 );
                 let physical_name = instance_field_jvm_name(ir, c, field);
                 let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
-                st.putfield(fref, slot_words(field_jt) as i32);
+                if statics_storage {
+                    st.putstatic(fref, slot_words(field_jt) as i32);
+                } else {
+                    st.putfield(fref, slot_words(field_jt) as i32);
+                }
                 st.ret_void();
                 st.ensure_locals(1 + words);
                 st.link();
@@ -3821,7 +3872,9 @@ fn emit_class(
                 _ => 0x0000,
             }
         } else {
-            (if private { 0x0002 } else { 0x0001 }) | if field.is_final() { 0x0010 } else { 0 }
+            (if private { 0x0002 } else { 0x0001 })
+                | if field.is_final() { 0x0010 } else { 0 }
+                | if object_static_storage(c) { 0x0008 } else { 0 }
         };
         // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`); a
         // PARAMETERIZED concrete type (`val xs: List<String>`) carries its full generic signature. Both
@@ -4010,7 +4063,7 @@ fn emit_class(
                     slot += slot_words(*t);
                 }
             }
-            if let Some(init_body) = c.init_body {
+            if let Some(init_body) = c.init_body.filter(|_| !object_static_storage(c)) {
                 // kotlinc gives the ctor one LineNumberTable entry per body-property initializer, on
                 // that property's own source line. Emit the initializer statements one at a time so
                 // each one's real start pc is known; only for a pure list of `SetField` stores (the
@@ -4334,8 +4387,33 @@ fn emit_class(
         clinit.dup();
         clinit.invokespecial(init, 0, 0);
         clinit.putstatic(fref, 1);
+        // A static-storage object runs its property initializers + `init {}` blocks HERE, after the
+        // INSTANCE store (kotlinc's shape — `<init>` is a bare super() call). `this` references in
+        // initializer expressions read the just-stored INSTANCE; a pure list of own-field stores
+        // (the common shape) needs no local at all, matching kotlinc's `ldc; putstatic` sequence.
+        let mut clinit_max = 0u16;
+        if let Some(init_body) = c.init_body.filter(|_| object_static_storage(c)) {
+            let mut e = Emitter::new(
+                ir,
+                &mut cw,
+                env,
+                &fq_name,
+                facade,
+                Ty::Unit,
+                std::iter::once(init_body),
+            );
+            if init_body_reads_this(ir, init_body) {
+                let iref = e.cw.fieldref(&fq_name, "INSTANCE", &self_desc);
+                clinit.getstatic(iref, 1);
+                store(Ty::obj(&fq_name), 0, &mut clinit);
+                e.slots.insert(0, (0, Ty::obj(&fq_name)));
+                e.next_slot = 1;
+            }
+            e.emit(init_body, &mut clinit);
+            clinit_max = e.next_slot;
+        }
         clinit.ret_void();
-        clinit.ensure_locals(0);
+        clinit.ensure_locals(clinit_max);
         clinit.link();
         cw.add_method(0x0008, "<clinit>", "()V", &clinit);
     }
@@ -8820,22 +8898,34 @@ impl<'a> Emitter<'a> {
                 let fty = c.fields[index as usize].ty.clone();
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name();
-                // A branchy value emits a merge frame; with the receiver already on the stack the
-                // verifier sees a non-empty baseline it can't reconcile (krusty's frames carry no stack
-                // prefix). Spill the value to a temp first — its branches then run on a clean stack —
-                // then load the receiver and the temp. (Plain values keep the direct receiver,value order.)
-                if self.records_frame(value) {
-                    let temps = self.spill_to_temps(&[value], code);
-                    self.emit_value(receiver, code);
-                    let (slot, t, key) = temps[0];
-                    load(t, slot, code);
-                    self.slots.remove(&key);
-                } else {
-                    self.emit_value(receiver, code);
+                if object_static_storage(c) {
+                    // A static-storage object field: no instance operand (evaluate the receiver only
+                    // for its effects), and a branchy value runs on an already-clean stack.
+                    if !matches!(self.ir.expr(receiver), crate::ir::IrExpr::GetValue(_)) {
+                        self.emit_value(receiver, code);
+                        code.pop();
+                    }
                     self.emit_value(value, code);
+                    let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
+                    code.putstatic(fref, slot_words(jt) as i32);
+                } else {
+                    // A branchy value emits a merge frame; with the receiver already on the stack the
+                    // verifier sees a non-empty baseline it can't reconcile (krusty's frames carry no stack
+                    // prefix). Spill the value to a temp first — its branches then run on a clean stack —
+                    // then load the receiver and the temp. (Plain values keep the direct receiver,value order.)
+                    if self.records_frame(value) {
+                        let temps = self.spill_to_temps(&[value], code);
+                        self.emit_value(receiver, code);
+                        let (slot, t, key) = temps[0];
+                        load(t, slot, code);
+                        self.slots.remove(&key);
+                    } else {
+                        self.emit_value(receiver, code);
+                        self.emit_value(value, code);
+                    }
+                    let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
+                    code.putfield(fref, slot_words(jt) as i32);
                 }
-                let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
-                code.putfield(fref, slot_words(jt) as i32);
             }
             IrExpr::SetStatic { index, value } => {
                 let s = &self.ir.statics[index as usize];
@@ -9363,7 +9453,8 @@ impl<'a> Emitter<'a> {
             owner: owner.to_string(),
             name: instance_field_jvm_name(self.ir, class, field),
             descriptor: type_descriptor(ir_ty_to_jvm(&field.ty)),
-            is_static: false,
+            // A static-storage object's backing fields are JVM statics (kotlinc's shape).
+            is_static: object_static_storage(class),
         })
     }
 
@@ -9472,7 +9563,8 @@ impl<'a> Emitter<'a> {
             owner: owner.to_string(),
             name: instance_field_jvm_name(self.ir, class, field),
             descriptor: type_descriptor(ir_ty_to_jvm(&field.ty)),
-            is_static: false,
+            // A static-storage object's backing fields are JVM statics (kotlinc's shape).
+            is_static: object_static_storage(class),
         })
     }
 
@@ -9928,9 +10020,20 @@ impl<'a> Emitter<'a> {
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name();
                 let is_lateinit = c.fields[*index as usize].is_lateinit();
-                self.emit_value(*receiver, code);
-                let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
-                code.getfield(fref, slot_words(jt) as i32);
+                if object_static_storage(c) {
+                    // A static-storage object field: no instance operand. The receiver is `this`
+                    // (or the INSTANCE read) — evaluate it only if it could have effects.
+                    if !matches!(self.ir.expr(*receiver), crate::ir::IrExpr::GetValue(_)) {
+                        self.emit_value(*receiver, code);
+                        code.pop();
+                    }
+                    let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
+                    code.getstatic(fref, slot_words(jt) as i32);
+                } else {
+                    self.emit_value(*receiver, code);
+                    let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
+                    code.getfield(fref, slot_words(jt) as i32);
+                }
                 // A `lateinit var` read throws `UninitializedPropertyAccessException` while the field is
                 // still null (kotlinc inserts this at every access): `dup; ifnonnull L; ldc name;
                 // invokestatic Intrinsics.throwUninitializedPropertyAccessException; L:`.

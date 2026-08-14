@@ -5636,3 +5636,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Byte-parity probes: `Holder`/`Overloaded` metadata byte-identical to kotlinc 2.4.0. Tests:
   build688, enum_regex_vc, nested_ctor_reordered_named_valueclass, synthetic_ctor,
   value_class_default, value_class_nullable_widen_return — all krusty-built by default now.
+
+- **Named `object` properties realize as JVM static fields, kotlinc's shape.** A named (non-local,
+  non-companion) `object`'s property backing fields are `static` on the object class: accessors are
+  instance methods reading/writing `getstatic`/`putstatic`, property initializers and `init {}`
+  blocks run in `<clinit>` AFTER the `INSTANCE` store, and `<init>` is a bare `super()` call —
+  byte-comparable to kotlinc (probe: `object Counter { var slot = "" }` code-identical; residual
+  divergence is constant-pool/method order only). Reads/writes route statically at every level:
+  the synthesized accessors, `IrExpr::GetField`/`SetField` (receiver evaluated only for effects),
+  and the declared-property direct-field path (`PropertyAccess::Field { is_static }`). A pure list
+  of own-field stores needs no local (kotlinc's `ldc; putstatic` sequence); only an initializer
+  actually reading `this` materializes INSTANCE into slot 0 (`init_body_reads_this`).
+  Local/anonymous objects and companions keep instance fields (companion static hoisting to the
+  outer class is a separate, upcoming relayout).
