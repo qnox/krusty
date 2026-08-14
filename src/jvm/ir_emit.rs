@@ -1621,6 +1621,10 @@ fn seed_plain_class_pool(
     let body_consts = init_body_string_consts(ir, c);
     let body_value_class_ctors = init_body_value_class_ctors(ir, c);
     let stored = init_body_stored_fields(ir, c);
+    // A static-storage object's `<init>` stores nothing (initializers run in `<clinit>`, emitted
+    // last) — its fields first appear at their GETTERS, which the seeder already orders correctly
+    // for never-stored fields.
+    let statics_storage = object_static_storage(c);
     let fields: Vec<crate::jvm::classfile::SeedField> = c
         .fields
         .iter()
@@ -1630,8 +1634,12 @@ fn seed_plain_class_pool(
             desc: desc(f.ty),
             ann_kind: ann_kind(&f.name, f.ty),
             is_ctor_param: i < c.ctor_param_count as usize,
-            stores_in_ctor: i < c.ctor_param_count as usize || stored.contains(&(i as u32)),
-            string_const: body_consts.get(&(i as u32)).cloned(),
+            stores_in_ctor: !statics_storage
+                && (i < c.ctor_param_count as usize || stored.contains(&(i as u32))),
+            string_const: body_consts
+                .get(&(i as u32))
+                .filter(|_| !statics_storage)
+                .cloned(),
             value_class_ctor: body_value_class_ctors.get(&(i as u32)).cloned(),
         })
         .collect();
@@ -3846,7 +3854,13 @@ fn emit_class(
     // an ABI refinement, not a runtime difference).
     // Backing fields are private; access goes through the synthesized `getX()`/`setX()` accessors
     // (kotlinc does the same) — for both normal classes and objects.
-    let mut field_order: Vec<&crate::ir::IrField> = c.fields.iter().collect();
+    // A static-storage object's field table leads with INSTANCE (kotlinc's order) — its backing
+    // fields are added in the object block below, after the INSTANCE field.
+    let mut field_order: Vec<&crate::ir::IrField> = if object_static_storage(c) {
+        Vec::new()
+    } else {
+        c.fields.iter().collect()
+    };
     if is_continuation {
         field_order.sort_by_key(|field| match field.name.as_str() {
             "result" => 1,
@@ -4370,53 +4384,6 @@ fn emit_class(
             e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
         }
     }
-    // A singleton `object`: a `public static final INSTANCE` built in `<clinit>`.
-    if c.is_object {
-        let self_desc = format!("L{};", fq_name);
-        // kotlinc reaches `<clinit>` before the INSTANCE field, so the pool follows its BODY: the
-        // method name, the `<init>` Methodref of `new demo/O`, then the field entries at the
-        // `putstatic`, and only then the field's `@NotNull`.
-        cw.reserve_method_name("<clinit>");
-        let ci = cw.class_ref(&fq_name);
-        let init = cw.methodref(&fq_name, "<init>", "()V");
-        let fref = cw.fieldref(&fq_name, "INSTANCE", &self_desc);
-        cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
-        cw.set_field_nullability("INSTANCE", "Lorg/jetbrains/annotations/NotNull;");
-        let mut clinit = CodeBuilder::new(0);
-        clinit.new_obj(ci);
-        clinit.dup();
-        clinit.invokespecial(init, 0, 0);
-        clinit.putstatic(fref, 1);
-        // A static-storage object runs its property initializers + `init {}` blocks HERE, after the
-        // INSTANCE store (kotlinc's shape — `<init>` is a bare super() call). `this` references in
-        // initializer expressions read the just-stored INSTANCE; a pure list of own-field stores
-        // (the common shape) needs no local at all, matching kotlinc's `ldc; putstatic` sequence.
-        let mut clinit_max = 0u16;
-        if let Some(init_body) = c.init_body.filter(|_| object_static_storage(c)) {
-            let mut e = Emitter::new(
-                ir,
-                &mut cw,
-                env,
-                &fq_name,
-                facade,
-                Ty::Unit,
-                std::iter::once(init_body),
-            );
-            if init_body_reads_this(ir, init_body) {
-                let iref = e.cw.fieldref(&fq_name, "INSTANCE", &self_desc);
-                clinit.getstatic(iref, 1);
-                store(Ty::obj(&fq_name), 0, &mut clinit);
-                e.slots.insert(0, (0, Ty::obj(&fq_name)));
-                e.next_slot = 1;
-            }
-            e.emit(init_body, &mut clinit);
-            clinit_max = e.next_slot;
-        }
-        clinit.ret_void();
-        clinit.ensure_locals(clinit_max);
-        clinit.link();
-        cw.add_method(0x0008, "<clinit>", "()V", &clinit);
-    }
     // Instance methods (concrete emitted; abstract declared with `ACC_ABSTRACT`, no Code).
     // kotlinc emits a property's ACCESSORS before the class's declared functions (source order: ctor
     // properties precede the body). The IR appends synthesized accessors after the declared methods, so
@@ -4483,6 +4450,109 @@ fn emit_class(
         }
     }
     emit_bridges(c, &mut cw);
+    // A singleton `object` (emitted AFTER the instance methods — kotlinc's method order, which
+    // also matches its constant-pool interning sequence): a `public static final INSTANCE` built in `<clinit>`.
+    if c.is_object {
+        let self_desc = format!("L{};", fq_name);
+        // kotlinc reaches `<clinit>` before the INSTANCE field, so the pool follows its BODY: the
+        // method name, the `<init>` Methodref of `new demo/O`, then the field entries at the
+        // `putstatic`, and only then the field's `@NotNull`.
+        cw.reserve_method_name("<clinit>");
+        let ci = cw.class_ref(&fq_name);
+        let init = cw.methodref(&fq_name, "<init>", "()V");
+        let fref = cw.fieldref(&fq_name, "INSTANCE", &self_desc);
+        cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
+        cw.set_field_nullability("INSTANCE", "Lorg/jetbrains/annotations/NotNull;");
+        // The backing fields FOLLOW the INSTANCE entry in the field table (kotlinc's order); their
+        // Utf8s were interned by the accessor bodies, so the pool is undisturbed.
+        if object_static_storage(c) {
+            for field in &c.fields {
+                let private = field.is_private();
+                let acc = (if private { 0x0002 } else { 0x0001 })
+                    | if field.is_final() { 0x0010 } else { 0 }
+                    | 0x0008;
+                let field_sig = ir
+                    .field_signatures(&fq_name)
+                    .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
+                    .map(|(_, tp)| format!("T{tp};"))
+                    .or_else(|| parameterized_sig(&signature_formatter, &field.ty));
+                let physical_name = instance_field_jvm_name(ir, c, field);
+                cw.add_field_sig(
+                    acc,
+                    &physical_name,
+                    &ir_type_desc(&field.ty),
+                    field_sig.as_deref(),
+                );
+            }
+        }
+        let mut clinit = CodeBuilder::new(0);
+        clinit.new_obj(ci);
+        clinit.dup();
+        clinit.invokespecial(init, 0, 0);
+        clinit.putstatic(fref, 1);
+        // A static-storage object runs its property initializers + `init {}` blocks HERE, after the
+        // INSTANCE store (kotlinc's shape — `<init>` is a bare super() call). `this` references in
+        // initializer expressions read the just-stored INSTANCE; a pure list of own-field stores
+        // (the common shape) needs no local at all, matching kotlinc's `ldc; putstatic` sequence.
+        let mut clinit_max = 0u16;
+        let mut clinit_line_entries: Vec<(u16, u32)> = Vec::new();
+        if let Some(init_body) = c.init_body.filter(|_| object_static_storage(c)) {
+            let mut e = Emitter::new(
+                ir,
+                &mut cw,
+                env,
+                &fq_name,
+                facade,
+                Ty::Unit,
+                std::iter::once(init_body),
+            );
+            if init_body_reads_this(ir, init_body) {
+                let iref = e.cw.fieldref(&fq_name, "INSTANCE", &self_desc);
+                clinit.getstatic(iref, 1);
+                store(Ty::obj(&fq_name), 0, &mut clinit);
+                e.slots.insert(0, (0, Ty::obj(&fq_name)));
+                e.next_slot = 1;
+            }
+            // Per-initializer line numbers (kotlinc maps each store to its property's source line;
+            // applied after add_method below) — only for the pure store-list shape.
+            let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
+            let stmts: Option<Vec<crate::ir::ExprId>> = match ir.expr(init_body) {
+                crate::ir::IrExpr::Block { stmts, value } if value.is_none() => stmts
+                    .iter()
+                    .all(|&st| matches!(ir.expr(st), crate::ir::IrExpr::SetField { .. }))
+                    .then(|| stmts.clone()),
+                _ => None,
+            };
+            match stmts {
+                Some(stmts) => {
+                    for st in stmts {
+                        let pc = clinit.bytes.len() as u16;
+                        if let crate::ir::IrExpr::SetField { index, .. } = ir.expr(st) {
+                            let name = &c.fields[*index as usize].name;
+                            if let Some(&pl) = ir.prop_decl_lines.get(&(c.fq_name(), name.clone()))
+                            {
+                                if pl != 0 {
+                                    clinit_lines.push((pc, pl));
+                                }
+                            }
+                        }
+                        e.emit(st, &mut clinit);
+                    }
+                }
+                None => e.emit(init_body, &mut clinit),
+            }
+            clinit_max = e.next_slot;
+            clinit_lines.dedup_by_key(|(_, l)| *l);
+            clinit_line_entries = clinit_lines;
+        }
+        clinit.ret_void();
+        clinit.ensure_locals(clinit_max);
+        clinit.link();
+        cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+        if !clinit_line_entries.is_empty() {
+            cw.set_method_lines("<clinit>", "()V", &clinit_line_entries);
+        }
+    }
     cw.set_runtime_annotations(&c.applied_annotations);
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
