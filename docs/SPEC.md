@@ -5722,3 +5722,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   failsWith(...) { try { ... } catch ... }`) a real facade method + `$default`, so the
   fully-qualified no-import spelling resolves against krusty-built libs. Test:
   `tests/fq_targ_trailing_lambda_e2e.rs` (krusty-built by default).
+
+- **Expected-seeded constructor bindings survive interface-implementing argument evidence.** For
+  `fun entries(): Bag<String, Entry> = Bag(listOf(Item("OK")))` the expected type seeds `V = Entry`,
+  but the argument-evidence merge joins types over superclass chains only, so joining the `Item`
+  argument (a class IMPLEMENTING Entry) collapsed `V` to `Any` — and the invariant result then
+  mismatched the very expectation that seeded it. After the merge, a seeded binding is restored
+  whenever every argument constraint is assignable to it; arguments genuinely outside the seed keep
+  the merged join and its ordinary diagnostics. Test:
+  `tests/build840_collection_property_element_e2e.rs` (krusty-built by default).

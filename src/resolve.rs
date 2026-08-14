@@ -29516,6 +29516,24 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // An EXPECTED-seeded binding survives argument evidence that FITS it: the merge join walks
+        // superclass chains only, so `Entry`-seeded `V` joined with an `Item` argument (a class
+        // IMPLEMENTING Entry) collapsed to `Any` and the invariant result then mismatched the very
+        // expectation that seeded it. Arguments outside the seed keep the merged join (and its
+        // ordinary diagnostics).
+        for (index, parameter) in class.type_params.iter().enumerate().skip(explicit_count) {
+            let Some(&seed) = seeded.get(parameter) else {
+                continue;
+            };
+            if bindings[index] != seed
+                && !inferred_constraints[index].is_empty()
+                && inferred_constraints[index]
+                    .iter()
+                    .all(|(constraint, _)| self.receiver_is_assignable(*constraint, seed))
+            {
+                bindings[index] = seed;
+            }
+        }
         // Prefer the declared bound over an unconstrained `Any` join.
         for type_parameter in explicit_count..bindings.len() {
             let Some(&declared_bound) = class
