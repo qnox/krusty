@@ -13877,6 +13877,17 @@ impl<'a> Lower<'a> {
             "$fnref$"
         };
         let synth_fq = class_internal(self.afile, &format!("{}{marker}{}", self.cur_fn_name, uniq));
+        // A reference synthesized inside an INLINE function's body is copied by the splicer into
+        // arbitrary other packages/modules — the class must be PUBLIC there (kotlinc's rule; see
+        // `IrFile::public_synthetics`).
+        if self.afile.decls.iter().any(|&d| {
+            matches!(self.afile.decl(d), ast::Decl::Fun(f)
+                if f.name == self.cur_fn_name && f.is_inline())
+        }) {
+            self.ir
+                .public_synthetics
+                .insert(crate::types::type_name(&synth_fq));
+        }
         // Synthetic private accessors are invocation-only, not reflection declarations.
         let reflection_name = (matches!(
             &dispatch,

@@ -632,9 +632,19 @@ fn build_class_metadata(
             .iter()
             .zip(f.params.iter())
             .any(|(declared, erased)| declared != erased && erased.non_null().is_erased_top());
-        let ret_erased = (!is_cps || cps_boxes_value_class_return)
-            && *declared_ret != f.ret
-            && f.ret.non_null().is_erased_top();
+        // Per-kind rule. CLASS members: only a CPS return krusty BOXES diverges — a non-suspend
+        // member returns the raw carrier byte-identically to kotlinc (verified:
+        // `constructor-impl; areturn`, same mangle hash), so it is described. INTERFACE members
+        // keep the ORIGINAL decline for the non-CPS case: a consumer resolving a mangled operator
+        // through an interface record misencodes the call owner (corpus kt50974:
+        // IncompatibleClassChangeError "found interface, but class was expected") — while a CPS
+        // abstract member (no body, never in the boxed table) stays admitted, as it always was.
+        let ret_diverges = if c.is_interface {
+            !is_cps || cps_boxes_value_class_return
+        } else {
+            is_cps && cps_boxes_value_class_return
+        };
+        let ret_erased = ret_diverges && *declared_ret != f.ret && f.ret.non_null().is_erased_top();
         param_erased || ret_erased
     };
     let has_object_erased_value_class_member =
@@ -642,6 +652,11 @@ fn build_class_metadata(
     if has_object_erased_value_class_member
         || (!c.is_value && ir.has_value_param_ctor(&c.fq_name()))
     {
+        crate::trace_compiler!(
+            "emit",
+            "class {} metadata declined: object-erased value-class member / value-param ctor",
+            c.fq_name()
+        );
         return None;
     }
     // …and a class cannot be described in terms of a value class a downstream compilation cannot READ
@@ -4842,7 +4857,19 @@ fn emit_func_ref_class(
     let fq = c.fq_name();
     let superclass = c.superclass();
     let mut cw = new_writer(&fq, &superclass, opts);
-    cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
+    // Package-private, kotlinc's shape — EXCEPT when the class lands cross-package (an
+    // INLINE-SPLICED reference regenerates the callee module's adapter under the callee's package
+    // while the caller lives elsewhere) or is referenced from a PUBLIC INLINE body
+    // (`IrFile::public_synthetics`) — package-private there is an IllegalAccessError (corpus
+    // `adaptedSuspendFunctionReference.kt`).
+    let cross_package =
+        fq.rsplit_once('/').map(|(p, _)| p) != facade.rsplit_once('/').map(|(p, _)| p);
+    let inline_reachable = ir.public_synthetics.contains(&c.fq_name_id());
+    cw.set_access(if cross_package || inline_reachable {
+        0x0001 | 0x0010 | 0x0020 // PUBLIC | FINAL | SUPER
+    } else {
+        0x0010 | 0x0020 // FINAL | SUPER
+    });
     cw.add_interface(&format!("kotlin/jvm/functions/Function{}", fr.arity));
     if fr.is_suspend || matches!(fr.dispatch, FrDispatch::SuspendConvert) {
         // The suspend-conversion adapter also carries kotlinc's suspend-function marker interface.
@@ -4927,7 +4954,13 @@ fn emit_func_ref_class(
         );
         ctor.invokespecial(sup, 6, 0);
         ctor.ret_void();
-        finish_code::<0x0000>(&mut cw, "<init>", "(Ljava/lang/Object;)V", &mut ctor, 2);
+        // The ctor's access mirrors the class's: a PUBLIC synthetic is constructed from other
+        // packages by spliced code.
+        if cross_package || inline_reachable {
+            finish_code::<0x0001>(&mut cw, "<init>", "(Ljava/lang/Object;)V", &mut ctor, 2);
+        } else {
+            finish_code::<0x0000>(&mut cw, "<init>", "(Ljava/lang/Object;)V", &mut ctor, 2);
+        }
     } else {
         add_singleton_instance_field(&mut cw, &fq);
         // `<init>()V`: super(arity, owner.class, name, sig, flags).
@@ -4945,7 +4978,11 @@ fn emit_func_ref_class(
         );
         ctor.invokespecial(sup, 5, 0);
         ctor.ret_void();
-        finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
+        if cross_package || inline_reachable {
+            finish_code::<0x0001>(&mut cw, "<init>", "()V", &mut ctor, 1);
+        } else {
+            finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
+        }
         emit_singleton_instance_clinit(&mut cw, &fq);
     }
 

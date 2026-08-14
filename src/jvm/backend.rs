@@ -524,9 +524,9 @@ impl Backend for JvmBackend {
     fn finalize(&self, state: JvmState, module_name: &str) -> Vec<Artifact> {
         // META-INF/<module>.kotlin_module — maps packages to their file-facade classes so Kotlin
         // consumers can resolve top-level declarations from the compiled module.
-        if state.module_packages.is_empty() {
-            return Vec::new();
-        }
+        // kotlinc writes the module file even for a CLASS-ONLY module (empty parts list), so emit
+        // it unconditionally — omitting it byte-diverges the artifact set from the reference
+        // compiler.
         let packages: Vec<(String, Vec<String>)> = state.module_packages.into_iter().collect();
         let module_bytes = crate::metadata::module::build_kotlin_module(&packages);
         vec![(
