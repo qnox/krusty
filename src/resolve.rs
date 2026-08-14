@@ -1257,11 +1257,23 @@ struct MemberLambdaShape {
 
 #[derive(Default)]
 struct PostponedCallConstraints {
+    formals: Vec<String>,
     lower: crate::symbol_resolver::GSigBinds,
     upper: HashMap<String, Vec<Ty>>,
 }
 
 impl PostponedCallConstraints {
+    fn for_formals(formals: &[String]) -> Self {
+        Self {
+            formals: formals.to_vec(),
+            ..Self::default()
+        }
+    }
+
+    fn mentions_formal(&self, ty: Ty) -> bool {
+        ty_mentions_param(ty, &self.formals)
+    }
+
     fn constrain_assignable(&mut self, expected: Ty, actual: Ty) {
         crate::trace_compiler!(
             "lambda_apply",
@@ -1269,7 +1281,10 @@ impl PostponedCallConstraints {
         );
         let mut lower = crate::symbol_resolver::GSigBinds::new();
         crate::symbol_resolver::unify_inferred_ty(expected, actual, &mut lower);
-        for (formal, actual) in lower {
+        for (formal, actual) in lower
+            .into_iter()
+            .filter(|(formal, _)| self.formals.contains(formal))
+        {
             let merged =
                 crate::symbol_resolver::merge_inferred_ty(self.lower.get(&formal).copied(), actual);
             self.lower.insert(formal, merged);
@@ -1277,12 +1292,18 @@ impl PostponedCallConstraints {
 
         let mut upper = crate::symbol_resolver::GSigBinds::new();
         crate::symbol_resolver::unify_inferred_ty(actual, expected, &mut upper);
-        for (formal, expected) in upper {
+        for (formal, expected) in upper
+            .into_iter()
+            .filter(|(formal, _)| self.formals.contains(formal))
+        {
             self.upper.entry(formal).or_default().push(expected);
         }
     }
 
     fn constrain_equal(&mut self, formal: &str, actual: Ty) {
+        if !self.formals.iter().any(|allowed| allowed == formal) {
+            return;
+        }
         let merged =
             crate::symbol_resolver::merge_inferred_ty(self.lower.get(formal).copied(), actual);
         self.lower.insert(formal.to_string(), merged);
@@ -12163,6 +12184,14 @@ struct LambdaShape<'a> {
     value_types: &'a [Ty],
 }
 
+#[derive(Clone, Copy)]
+struct FunctionLambdaShape<'a> {
+    signature: &'static crate::types::FnSig,
+    specialized_params: &'a [Ty],
+    has_receiver: bool,
+    fixed_expected_return: bool,
+}
+
 /// A call's argument expressions with their checked types — parallel slices that must stay the
 /// same length, so they are passed as one value rather than two.
 #[derive(Clone, Copy)]
@@ -12769,6 +12798,20 @@ impl CheckerScope<'_> {
             });
         }
         out
+    }
+
+    fn lexical_tparam_identities(&self) -> Vec<String> {
+        let mut identities = std::collections::HashSet::new();
+        for rung in self.classifier_rungs() {
+            rung.own_bindings(Ns::Classifier, |_, binding| {
+                if let ScopeBinding::TypeParam { bound, .. } = binding {
+                    if let Some(identity) = bound.non_null().ty_param_name() {
+                        identities.insert(identity.to_string());
+                    }
+                }
+            });
+        }
+        identities.into_iter().collect()
     }
 
     /// Whether `name` is a type parameter in scope.
@@ -19138,6 +19181,7 @@ impl<'a> Checker<'a> {
         let (argument_map, whole_array_varargs) = mapped_arguments;
         let mut shape = crate::symbol_resolver::LambdaCallShape::default();
         let semantic = overload.semantic_signature();
+        shape.generic_formals = semantic.formals.clone();
         let mut binds = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
         let mut fixed_expectation_formals = semantic
             .formals
@@ -19310,15 +19354,37 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         let fixed_expected_types = expected_types
             .iter()
-            .map(|expected| {
+            .enumerate()
+            .map(|(argument, expected)| {
                 (*expected).filter(|parameter| {
                     let Ty::Fun(function) = parameter.non_null() else {
                         return false;
                     };
-                    semantic.formals.iter().all(|formal| {
-                        !ty_mentions_param(function.ret, std::slice::from_ref(formal))
-                            || fixed_expectation_formals.contains(formal)
-                    })
+                    let declared_return = argument_map
+                        .get(argument)
+                        .and_then(|parameter| semantic.params.get(*parameter))
+                        .and_then(|parameter| match parameter.non_null() {
+                            Ty::Fun(function) => Some(function.ret),
+                            _ => None,
+                        });
+                    let result_formals = semantic
+                        .formals
+                        .iter()
+                        .filter(|formal| {
+                            declared_return.is_some_and(|declared_return| {
+                                ty_mentions_param(declared_return, std::slice::from_ref(formal))
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    // A fixed *callee formal* is authoritative contextual information (explicit
+                    // type arguments, invariant receiver evidence, or the call's expected result).
+                    // A concrete return baked into one overload is not: the lambda body must still
+                    // participate in choosing among `sumOf`-style overloads with identical inputs.
+                    !result_formals.is_empty()
+                        && result_formals
+                            .into_iter()
+                            .all(|formal| fixed_expectation_formals.contains(formal))
+                        && !ty_mentions_param(function.ret, &semantic.formals)
                 })
             })
             .collect::<Vec<_>>();
@@ -19479,13 +19545,14 @@ impl<'a> Checker<'a> {
         }
         let mut bindings = crate::symbol_resolver::GSigBinds::new();
         for (formal, actual) in symbolic.bindings {
-            let shapes_lambda_input = signature.params.iter().any(|parameter| {
+            let shapes_lambda_expectation = signature.params.iter().any(|parameter| {
                 matches!(parameter.non_null(), Ty::Fun(function)
-                if function.params.iter().any(|input| {
-                    ty_mentions_param(*input, std::slice::from_ref(&formal))
-                }))
+                if ty_mentions_param(function.ret, std::slice::from_ref(&formal))
+                    || function.params.iter().any(|input| {
+                        ty_mentions_param(*input, std::slice::from_ref(&formal))
+                    }))
             });
-            if shapes_lambda_input {
+            if shapes_lambda_expectation {
                 bindings.entry(formal).or_insert(actual);
             }
         }
@@ -29461,9 +29528,9 @@ impl<'a> Checker<'a> {
         if expected == Ty::Error || actual == Ty::Error {
             return;
         }
-        let postponed_symbolic_constraint = !self.postponed_call_constraints.is_empty()
-            && (expected.mentions_ty_param() || actual.mentions_ty_param());
-        if let Some(constraints) = self.postponed_call_constraints.last_mut() {
+        let postponed_symbolic_constraint =
+            self.postponed_call_mentions(expected) || self.postponed_call_mentions(actual);
+        for constraints in &mut self.postponed_call_constraints {
             constraints.constrain_assignable(expected, actual);
             crate::trace_compiler!(
                 "resolve",
@@ -29611,6 +29678,21 @@ impl<'a> Checker<'a> {
         ) {
             self.report_assignability_error(expected, actual, span, ctx);
         }
+    }
+
+    fn postponed_call_mentions(&self, ty: Ty) -> bool {
+        self.postponed_call_constraints
+            .iter()
+            .any(|constraints| constraints.mentions_formal(ty))
+    }
+
+    fn apply_postponed_call_bindings(&self, ty: Ty) -> Ty {
+        self.postponed_call_constraints
+            .iter()
+            .rev()
+            .fold(ty, |ty, constraints| {
+                crate::symbol_resolver::ty_subst_keep_unbound(ty, &constraints.lower)
+            })
     }
 
     fn report_assignability_error(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
@@ -30454,6 +30536,7 @@ impl<'a> Checker<'a> {
         });
         let member_extension_shape =
             member_extension_plan.map(|plan| crate::symbol_resolver::LambdaCallShape {
+                generic_formals: Vec::new(),
                 param_types: Some(plan.param_types),
                 expected_types: None,
                 fixed_expected_types: None,
@@ -35692,12 +35775,7 @@ impl<'a> Checker<'a> {
             args,
             arg_tys,
         } = call_args;
-        let rt = self
-            .postponed_call_constraints
-            .last()
-            .map_or(rt, |constraints| {
-                crate::symbol_resolver::ty_subst_keep_unbound(rt, &constraints.lower)
-            });
+        let rt = self.apply_postponed_call_bindings(rt);
         if rt == Ty::String || matches!(rt, Ty::Obj(..)) {
             match self.record_member_call_with_slots(scope, call, rt, name, args, true, expected) {
                 MemberSlotCall::Resolved(ret) => {
@@ -36146,6 +36224,54 @@ impl<'a> Checker<'a> {
         has_receiver: bool,
         label: Option<&str>,
     ) -> Ty {
+        self.check_lambda_with_function_type_and_params_mode_labeled(
+            scope,
+            e,
+            FunctionLambdaShape {
+                signature,
+                specialized_params,
+                has_receiver,
+                fixed_expected_return: false,
+            },
+            label,
+        )
+    }
+
+    fn check_lambda_with_fixed_function_type_and_params_labeled(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        signature: &'static crate::types::FnSig,
+        specialized_params: &[Ty],
+        has_receiver: bool,
+        label: Option<&str>,
+    ) -> Ty {
+        self.check_lambda_with_function_type_and_params_mode_labeled(
+            scope,
+            e,
+            FunctionLambdaShape {
+                signature,
+                specialized_params,
+                has_receiver,
+                fixed_expected_return: true,
+            },
+            label,
+        )
+    }
+
+    fn check_lambda_with_function_type_and_params_mode_labeled(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        shape: FunctionLambdaShape<'_>,
+        label: Option<&str>,
+    ) -> Ty {
+        let FunctionLambdaShape {
+            signature,
+            specialized_params,
+            has_receiver,
+            fixed_expected_return,
+        } = shape;
         let context_count = signature.context_count.min(specialized_params.len());
         let context_types = &specialized_params[..context_count];
         let remaining = &specialized_params[context_count..];
@@ -36169,8 +36295,9 @@ impl<'a> Checker<'a> {
         // An unbound result variable is an inference output, not a contextual expected type. Its
         // upper bound (`Any`) must not coerce the body before the enclosing call can bind `R` from
         // the body's real type.
-        let expected_return =
-            (!Self::ty_mentions_type_param(signature.ret)).then_some(signature.ret);
+        let expected_return = (fixed_expected_return
+            || !Self::ty_mentions_type_param(signature.ret))
+        .then_some(signature.ret);
         self.check_lambda_with_implicit_receivers_and_return_labeled(
             scope,
             e,
@@ -40048,14 +40175,12 @@ impl<'a> Checker<'a> {
             return Some(4);
         }
         if actual == Ty::Null {
-            if !self.postponed_call_constraints.is_empty() && expected.mentions_ty_param() {
+            if self.postponed_call_mentions(expected) {
                 return Some(0);
             }
             return matches!(expected, Ty::Nullable(_) | Ty::PlatformNullable(_)).then_some(1);
         }
-        if !self.postponed_call_constraints.is_empty()
-            && (expected.mentions_ty_param() || actual.mentions_ty_param())
-        {
+        if self.postponed_call_mentions(expected) || self.postponed_call_mentions(actual) {
             return Some(0);
         }
         if expected.is_erased_top()
@@ -41029,12 +41154,11 @@ impl<'a> Checker<'a> {
             inferred.retain(|formal, _| signature.formals.contains(formal));
             (!inferred.is_empty()).then_some(inferred)
         });
-        if let (Some(frame), Some(inferred)) = (
-            self.postponed_call_constraints.last_mut(),
-            expected_bindings.as_ref(),
-        ) {
+        if let Some(inferred) = expected_bindings.as_ref() {
             for (formal, actual) in inferred {
-                frame.constrain_equal(formal, *actual);
+                for frame in &mut self.postponed_call_constraints {
+                    frame.constrain_equal(formal, *actual);
+                }
             }
         }
         let full_params = self
@@ -41166,12 +41290,7 @@ impl<'a> Checker<'a> {
                 }
             }
         };
-        let ret = self
-            .postponed_call_constraints
-            .last()
-            .map_or(ret, |constraints| {
-                crate::symbol_resolver::ty_subst_keep_unbound(ret, &constraints.lower)
-            });
+        let ret = self.apply_postponed_call_bindings(ret);
         let owner = fi.owner.unwrap_or(internal_name);
         let projected_return_hazard = self
             .syms
@@ -42492,30 +42611,39 @@ impl<'a> Checker<'a> {
                                 if pts.get(i).is_some()
                                     && matches!(c.file.expr(a), Expr::Lambda { .. })
                                 {
-                                    // An input-only shape contains no context for a zero-argument
-                                    // lambda body. Use the complete callable expectation only when
-                                    // shape derivation proved its result formals fixed by explicit,
-                                    // invariant-receiver, or contextual-result constraints. A
-                                    // widenable receiver constraint stays postponed for final overload
-                                    // inference (`(() -> Nothing).recover { "OK" }`).
-                                    if pts[i].is_empty() {
-                                        if let Some(expected) = ext_literal_callable_types
-                                            .as_ref()
-                                            .and_then(|types| types.get(i))
-                                            .copied()
-                                            .flatten()
-                                        {
-                                            return c.check_argument_expected(
+                                    // Use the complete callable expectation when shape derivation
+                                    // proved its result formals fixed by explicit,
+                                    // invariant-receiver, or contextual-result constraints. Keep
+                                    // the independently specialized input shape: it may still carry
+                                    // postponed callee formals. A widenable receiver constraint stays
+                                    // postponed for final overload inference
+                                    // (`(() -> Nothing).recover { "OK" }`).
+                                    if let Some(expected) = ext_literal_callable_types
+                                        .as_ref()
+                                        .and_then(|types| types.get(i))
+                                        .copied()
+                                        .flatten()
+                                    {
+                                        if let Ty::Fun(signature) = expected.non_null() {
+                                            return c.check_lambda_with_fixed_function_type_and_params_labeled(
                                                 scope,
                                                 a,
-                                                expected,
-                                                matches!(
-                                                    expected.non_null(),
-                                                    Ty::Fun(signature) if signature.has_receiver
-                                                ),
+                                                signature,
+                                                &pts[i],
+                                                signature.has_receiver,
                                                 call_fn_name.as_deref(),
                                             );
                                         }
+                                        return c.check_argument_expected(
+                                            scope,
+                                            a,
+                                            expected,
+                                            matches!(
+                                                expected.non_null(),
+                                                Ty::Fun(signature) if signature.has_receiver
+                                            ),
+                                            call_fn_name.as_deref(),
+                                        );
                                     }
                                     let receiver = ext_lambda_recvs
                                         .as_ref()
@@ -43923,6 +44051,13 @@ impl<'a> Checker<'a> {
                 let toplevel_lambda_expected: Option<Vec<Option<Ty>>> = toplevel_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.expected_types.clone());
+                let toplevel_lambda_fixed_expected: Option<Vec<Option<Ty>>> = toplevel_lambda_shape
+                    .as_ref()
+                    .and_then(|shape| shape.fixed_expected_types.clone());
+                let toplevel_lambda_formals = toplevel_lambda_shape
+                    .as_ref()
+                    .map(|shape| shape.generic_formals.clone())
+                    .unwrap_or_default();
                 // Per-param RECEIVER function type for a classpath top-level HOF (`NavHost(builder:
                 // NGB.()->Unit){…}`) — a lambda to such a param binds its implicit `this` to the receiver.
                 // From `@Metadata`'s `@ExtensionFunctionType` (no JVM `Signature` needed, so this also
@@ -44414,16 +44549,36 @@ impl<'a> Checker<'a> {
                                                 matches!(expected.non_null(), Ty::Fun(_))
                                             })
                                     });
-                                let collect_postponed =
-                                    expected_type.is_some_and(Ty::mentions_ty_param);
+                                let postponed_formals = toplevel_lambda_formals.as_slice();
+                                let collect_postponed = expected_type.is_some_and(|expected| {
+                                    ty_mentions_param(expected, postponed_formals)
+                                });
                                 if collect_postponed {
                                     self.postponed_call_constraints
-                                        .push(PostponedCallConstraints::default());
+                                        .push(PostponedCallConstraints::for_formals(
+                                            postponed_formals,
+                                        ));
                                 }
                                 let checked = self.with_lambda_mutation(
                                     toplevel_inline && !materialized,
                                     |c| {
                                         if let Some(Ty::Fun(signature)) = expected_type {
+                                            if toplevel_lambda_fixed_expected
+                                                .as_ref()
+                                                .and_then(|types| types.get(i))
+                                                .copied()
+                                                .flatten()
+                                                == expected_type
+                                            {
+                                                return c.check_lambda_with_fixed_function_type_and_params_labeled(
+                                                    scope,
+                                                    a,
+                                                    signature,
+                                                    &pts[i],
+                                                    recv_i.is_some(),
+                                                    call_fn_name.as_deref(),
+                                                );
+                                            }
                                             return c
                                                 .check_lambda_with_function_type_and_params_labeled(
                                                     scope,
@@ -44648,21 +44803,58 @@ impl<'a> Checker<'a> {
                                     "lambda_apply",
                                     "call={fname} lambda_argument={i} parameter={pi} semantic={expected_function:?} bindings={known_generic_bindings:?}",
                                 );
-                                let collect_postponed = sig.generic_sig.as_ref().is_some_and(
+                                let postponed_formals = sig
+                                    .generic_sig
+                                    .as_ref()
+                                    .map(|generic| generic.formals.as_slice())
+                                    .unwrap_or_default();
+                                let collect_postponed = ty_mentions_param(
+                                    Ty::Fun(expected_function),
+                                    postponed_formals,
+                                );
+                                let callee_return_is_fixed = sig.generic_sig.as_ref().is_none_or(
                                     |generic| {
-                                        ty_mentions_param(
-                                            Ty::Fun(expected_function),
+                                        !ty_mentions_param(
+                                            expected_function.ret,
                                             &generic.formals,
                                         )
                                     },
                                 );
+                                let lexical_bindings = scope
+                                    .lexical_tparam_identities()
+                                    .into_iter()
+                                    .map(|formal| (formal, Ty::obj("kotlin/Any")))
+                                    .collect::<crate::symbol_resolver::GSigBinds>();
+                                let return_without_lexical_formals =
+                                    crate::symbol_resolver::ty_subst_keep_unbound(
+                                        expected_function.ret,
+                                        &lexical_bindings,
+                                    );
+                                // A caller declaration's visible `<T>` is universally quantified
+                                // and therefore a fixed expectation. A symbolic result introduced
+                                // by a surrounding generic call (`getResult(...): B1`) is still an
+                                // inference variable and must remain postponed with that call.
+                                let fixed_expected_return = callee_return_is_fixed
+                                    && !return_without_lexical_formals.mentions_ty_param();
                                 if collect_postponed {
                                     self.postponed_call_constraints
-                                        .push(PostponedCallConstraints::default());
+                                        .push(PostponedCallConstraints::for_formals(
+                                            postponed_formals,
+                                        ));
                                 }
                                 let has_receiver =
                                     sig.lambda_recv.get(pi).copied().unwrap_or(false);
                                 let checked = self.with_lambda_mutation(sig.is_inline(), |c| {
+                                    if fixed_expected_return {
+                                        return c.check_lambda_with_fixed_function_type_and_params_labeled(
+                                            scope,
+                                            a,
+                                            expected_function,
+                                            &expected_function.params,
+                                            has_receiver,
+                                            call_fn_name.as_deref(),
+                                        );
+                                    }
                                     c.check_lambda_with_function_type_labeled(
                                         scope,
                                         a,
@@ -45029,15 +45221,7 @@ impl<'a> Checker<'a> {
                 }
                 let implicit_receivers = self.implicit_receivers(scope);
                 for implicit_receiver in implicit_receivers.iter().copied() {
-                    let receiver = self.postponed_call_constraints.last().map_or(
-                        implicit_receiver.ty,
-                        |constraints| {
-                            crate::symbol_resolver::ty_subst_keep_unbound(
-                                implicit_receiver.ty,
-                                &constraints.lower,
-                            )
-                        },
-                    );
+                    let receiver = self.apply_postponed_call_bindings(implicit_receiver.ty);
                     if let Some(ret) = self.check_applicable_module_member_call(
                         scope, call, receiver, &fname, args, &arg_tys, expected,
                     ) {
