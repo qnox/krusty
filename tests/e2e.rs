@@ -680,10 +680,10 @@ mod lambda_vs_block_fun_type_e2e;
 mod lateinit_local_e2e;
 #[path = "lateinit_operand_stack_e2e.rs"]
 mod lateinit_operand_stack_e2e;
+#[path = "lib_dep_harness_e2e.rs"]
+mod lib_dep_harness_e2e;
 #[path = "lib_fixture_parallel_e2e.rs"]
 mod lib_fixture_parallel_e2e;
-#[path = "libcache_semantics_e2e.rs"]
-mod libcache_semantics_e2e;
 #[path = "library_fun_type_lambda_param_e2e.rs"]
 mod library_fun_type_lambda_param_e2e;
 #[path = "list_fold_e2e.rs"]

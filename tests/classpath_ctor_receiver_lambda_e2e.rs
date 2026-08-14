@@ -18,7 +18,7 @@ fn a_lambda_passed_to_a_classpath_receiver_lambda_constructor_binds_this() {
         \x20 Base({ set(42) }).init(c)\n\
         \x20 return if (c.v == 42) \"OK\" else \"v=${c.v}\"\n\
         }\n";
-    common::expect_box_ok_against("cp_ctor_recv_lambda", LIB, main);
+    common::expect_box_ok_against_ref("cp_ctor_recv_lambda", LIB, main);
 }
 
 /// The same shape through a SUPER-constructor delegation in a class header — the other route that
@@ -33,7 +33,7 @@ fn a_class_header_super_call_binds_the_receiver_lambda_this() {
         \x20 A().init(c)\n\
         \x20 return if (c.v == 7) \"OK\" else \"v=${c.v}\"\n\
         }\n";
-    common::expect_box_ok_against("cp_super_ctor_recv_lambda", LIB, main);
+    common::expect_box_ok_against_ref("cp_super_ctor_recv_lambda", LIB, main);
 }
 
 /// A class with SEVERAL constructors of the same arity, only one of which takes a receiver lambda.

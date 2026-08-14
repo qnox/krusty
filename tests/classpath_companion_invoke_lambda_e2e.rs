@@ -64,7 +64,7 @@ fn companion_invoke_receiver_lambda_resolves() {
         \x20 val d = TwoCtor { req -> mark() + req.path }\n\
         \x20 f.tag.length + d.config\n\
         }\n";
-    let Some(diagnostics) = common::checker_diags_against("companion_invoke_lambda", LIB, MAIN)
+    let Some(diagnostics) = common::checker_diags_against_ref("companion_invoke_lambda", LIB, MAIN)
     else {
         return;
     };
@@ -82,7 +82,8 @@ fn companion_invoke_receiver_lambda_box_runs() {
         \x20 val f = Factory { req -> mark() + req.path }\n\
         \x20 return if (f.tag == \"m/p\") \"OK\" else \"F:\" + f.tag\n\
         }\n";
-    if let Some(out) = common::expect_box_run_against("companion_invoke_lambda_box", LIB, MAIN) {
+    if let Some(out) = common::expect_box_run_against_ref("companion_invoke_lambda_box", LIB, MAIN)
+    {
         assert_eq!(out, "OK");
     }
 }
@@ -96,7 +97,9 @@ fn concrete_function_parameter_shape_crosses_the_compiled_provider_boundary() {
         \x20 val factory = PlainFactory { request -> request.path }\n\
         \x20 return if (factory.result == \"/plain\") \"OK\" else factory.result\n\
         }\n";
-    if let Some(output) = common::expect_box_run_against("semantic_function_parameter", LIB, MAIN) {
+    if let Some(output) =
+        common::expect_box_run_against_ref("semantic_function_parameter", LIB, MAIN)
+    {
         assert_eq!(output, "OK");
     }
 }
@@ -119,7 +122,7 @@ fn suspend_receiver_function_shape_survives_metadata_erasure() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
     let coroutines = common::coroutines_jar();
-    let Some(library) = common::compile_lib("semantic_suspend_function_parameter", LIB) else {
+    let Some(library) = common::compile_lib_ref("semantic_suspend_function_parameter", LIB) else {
         return;
     };
     let output = common::expect_box_run(
@@ -141,7 +144,7 @@ fn explicit_continuation_function_is_not_reclassified_as_suspend() {
         \x20 ContinuationFactory { request, continuation -> request.path + continuation.toString() }\n\
         }\n";
     let Some(diagnostics) =
-        common::checker_diags_against("semantic_continuation_function_parameter", LIB, MAIN)
+        common::checker_diags_against_ref("semantic_continuation_function_parameter", LIB, MAIN)
     else {
         return;
     };

@@ -19,7 +19,7 @@ fn an_imported_classpath_top_level_property_reads() {
         \x20 if (plugin.tag != \"installed\") return \"fail: \" + plugin.tag\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cptoplevelprop", LIB, main);
+    common::expect_box_ok_against_ref("cptoplevelprop", LIB, main);
 }
 
 #[test]
@@ -29,7 +29,7 @@ fn a_star_imported_classpath_top_level_property_reads() {
         \x20 if (counter != 7) return \"fail: \" + counter\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cptoplevelpropstar", LIB, main);
+    common::expect_box_ok_against_ref("cptoplevelpropstar", LIB, main);
 }
 
 #[test]
@@ -40,7 +40,7 @@ fn a_classpath_top_level_property_keeps_its_declared_nullability() {
         \x20 if (length != -1) return \"fail: \" + length\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cptoplevelpropnullable", LIB, main);
+    common::expect_box_ok_against_ref("cptoplevelpropnullable", LIB, main);
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn a_classpath_top_level_property_is_an_argument_and_a_receiver() {
         \x20 if (plugin.tag.uppercase() != \"INSTALLED\") return \"fail receiver\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cptoplevelpropuse", LIB, main);
+    common::expect_box_ok_against_ref("cptoplevelpropuse", LIB, main);
 }
 
 /// Kotlin `internal` is SOURCE visibility even though its file-facade getter is public JVM bytecode.

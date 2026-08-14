@@ -15,7 +15,7 @@ use super::common;
 #[test]
 fn member_property_getter_and_setter_from_metadata() {
     let stdlib = common::stdlib_jar();
-    let Some(dir) = common::compile_lib(
+    let Some(dir) = common::compile_lib_ref(
         "propquery",
         "class Holder(val label: String) { var count: Int = 0 }\n\
          val Holder.tag: String get() = \"t\"\n\
@@ -130,7 +130,7 @@ fn classpath_jvmname_var_setter_assigns_via_metadata() {
                @JvmName(\"grab\") get() = raw\n    @JvmName(\"stash\") set(v) { raw = v }\n}";
     let main = "import lib.Box\nfun box(): String {\n  val b = Box(1)\n  b.n = 7\n  \
                 return if (b.n == 7) \"OK\" else \"f:${b.n}\"\n}";
-    let Some(out) = common::expect_box_run_against("varsetterjvmname", lib, main) else {
+    let Some(out) = common::expect_box_run_against_ref("varsetterjvmname", lib, main) else {
         return; // toolchain not provisioned
     };
     assert_eq!(

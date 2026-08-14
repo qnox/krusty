@@ -30,7 +30,7 @@ fun withScope(label: String = "-", budget: Int = 7, body: suspend Scope.() -> Un
 /// An empty body needs no receiver, and always lowered.
 #[test]
 fn classpath_suspend_receiver_lambda_empty_body() {
-    common::expect_box_ok_against(
+    common::expect_box_ok_against_ref(
         "csrl-empty",
         LIB,
         "import lib.withScope\n\
@@ -44,7 +44,7 @@ fn classpath_suspend_receiver_lambda_empty_body() {
 /// Non-capturing body that READS the receiver's property through the implicit `this`.
 #[test]
 fn classpath_suspend_receiver_lambda_reads_receiver() {
-    common::expect_box_ok_against(
+    common::expect_box_ok_against_ref(
         "csrl-read",
         LIB,
         "import lib.withScope\n\
@@ -58,7 +58,7 @@ fn classpath_suspend_receiver_lambda_reads_receiver() {
 /// Capturing body: the lambda closes over a local AND reads the receiver.
 #[test]
 fn classpath_suspend_receiver_lambda_captures() {
-    common::expect_box_ok_against(
+    common::expect_box_ok_against_ref(
         "csrl-capture",
         LIB,
         "import lib.withScope\n\
@@ -73,7 +73,7 @@ fn classpath_suspend_receiver_lambda_captures() {
 /// A named argument ahead of the trailing lambda, with one default omitted.
 #[test]
 fn classpath_suspend_receiver_lambda_named_arg() {
-    common::expect_box_ok_against(
+    common::expect_box_ok_against_ref(
         "csrl-named",
         LIB,
         "import lib.withScope\n\

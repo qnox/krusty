@@ -42,7 +42,7 @@ fn valueclass_param_extension_no_explicit_type_arg() {
         @JvmInline value class Id(val v: String)\n\
         class Reg { fun tag(id: Id): String = id.v }\n\
         inline fun Reg.mk(id: Id): String = tag(id)\n";
-    let Some(diags) = common::checker_diags_against(
+    let Some(diags) = common::checker_diags_against_ref(
         "ee1_noexpl",
         LIB,
         "import lib.Reg\nimport lib.Id\nimport lib.mk\n\

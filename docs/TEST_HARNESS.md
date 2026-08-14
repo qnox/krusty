@@ -134,9 +134,14 @@ wait, `box` JVM round-trip) to stderr — run the e2e binary with `--nocapture` 
 
 Performance-relevant harness state:
 
-- Reference-compiled dependency libs are cached content-addressed under `target/libcache/` (key:
-  compiler jar + stdlib jar + sources). Entries never go stale; delete the dir to force recompiles.
-  CI persists it across runs.
+- e2e dependency libs are compiled BY KRUSTY, in-process (`tests/common::compile_libs`), memoized
+  per run — no reference-compiler round-trip and deliberately no on-disk cache: every run rebuilds
+  its deps with the compiler under test. A lib krusty can't build fails the test with krusty's
+  diagnostics; tests whose CONTRACT is consuming kotlinc-emitted metadata declare it with the
+  explicit `*_ref` helpers (`compile_lib_ref`, `run_box_against_ref`, `Fixture::reference_lib`) —
+  grep `_ref(` for the current emission/consumption gap inventory.
+- `KRUSTY_LIB_CROSSCHECK=1` additionally compiles every krusty-built lib with the reference kotlinc
+  and asserts the same `box()` result against both — the opt-in differential for dependency libs.
 - Persistent JVM pools (kotlinc compiler servers, JavaRunner) scale with the host: `ncpu/2` clamped
   to `[1, 6]`. `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
 - Directory classpath entries are shipped into the box runner's per-request classloader, so lib

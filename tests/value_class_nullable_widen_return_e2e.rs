@@ -24,6 +24,15 @@ fn run(tag: &str, main: &str) -> Option<String> {
     common::compile_and_run_box(main, "Main", &[lo, sl, jdk.clone()], Some(jdk.as_path()))
 }
 
+/// Reference-compiled dependency variant: these cases consume kotlinc-emitted metadata
+/// shapes krusty does not produce yet (see `common::compile_lib_ref`).
+fn run_ref(tag: &str, main: &str) -> Option<String> {
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let lo = common::compile_lib_ref(tag, LIB)?;
+    common::compile_and_run_box(main, "Main", &[lo, sl, jdk.clone()], Some(jdk.as_path()))
+}
+
 #[test]
 fn non_null_value_class_widens_to_nullable_return() {
     // Every `when` branch is a non-null `SampleId` (a field read, or a member call returning the
@@ -44,7 +53,7 @@ fn non_null_value_class_widens_to_nullable_return() {
             return if (a == \"stored\" && b == \"sample-seed\") \"OK\" else \"FAIL:$a|$b\"\n\
         }\n";
     assert_eq!(
-        run("vcwiden_anonymized", MAIN)
+        run_ref("vcwiden_anonymized", MAIN)
             .expect("non-null value class widening to a nullable return compiles + runs"),
         "OK"
     );

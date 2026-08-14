@@ -33,7 +33,7 @@ fn named_and_anonymous_classes_extend_an_abstract_classpath_class() {
 fn unsafe_abstract_classpath_bases_are_declined() {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
-    let Some(libout) = common::compile_lib(
+    let Some(libout) = common::compile_lib_ref(
         "unsafeabsbase",
         "package lib\n\
          abstract class RequiresOverride { abstract fun value(): String }\n\

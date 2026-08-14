@@ -135,7 +135,7 @@ fn classpath_reordered_named_args_with_trailing_lambda() {
     let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
-    let Some(libout) = common::compile_lib(
+    let Some(libout) = common::compile_lib_ref(
         "named_tl",
         "package lib\n\
          fun host(prefix: String, sep: String, block: (StringBuilder) -> Unit): String {\n\
@@ -285,7 +285,7 @@ fn named_args_to_classpath_extension_fn_omitted_default_uses_slots() {
     let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
-    let Some(libout) = common::compile_lib(
+    let Some(libout) = common::compile_lib_ref(
         "named_args_ext_default",
         "package lib\n\
          fun String.tag(a: String = \"A\", b: String = \"B\"): String = this + \"/\" + a + \"/\" + b\n",
@@ -318,7 +318,7 @@ fn implicit_receiver_classpath_extension_default_uses_slots() {
     let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
-    let Some(libout) = common::compile_lib(
+    let Some(libout) = common::compile_lib_ref(
         "named_args_ext_default_implicit",
         "package lib\n\
          fun String.tag(a: String = \"A\", b: String = \"B\"): String = this + \"/\" + a + \"/\" + b\n",

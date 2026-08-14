@@ -46,7 +46,7 @@ fn kotlinc_compiled_nullable_and_unbounded_generic_extensions_accept_nullable_va
 #[test]
 fn kotlinc_compiled_explicit_any_bound_rejects_nullable_receiver() {
     let stdlib_path = common::stdlib_jar();
-    let Some(libout) = common::compile_lib(
+    let Some(libout) = common::compile_lib_ref(
         "non_null_generic_extension_receiver",
         "package fixture\nfun <T : Any> T.nonNullGeneric(): Int = 1\n",
     ) else {
