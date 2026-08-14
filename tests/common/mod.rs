@@ -1662,9 +1662,9 @@ pub fn compile_lib(tag: &str, lib_src: &str) -> Option<PathBuf> {
 /// dependencies, which also exercises krusty's classfile/`@Metadata` EMISSION on every lib fixture.
 /// A lib krusty cannot build FAILS the test with krusty's diagnostics — there is deliberately no
 /// reference-compiler fallback and no silent skip: a dependency gap is a product gap and must be
-/// visible. The reference kotlinc appears only under the OPTIONAL `KRUSTY_LIB_CROSSCHECK=1`
-/// differential, which compiles every lib with BOTH compilers and asserts the same `box()` result
-/// against each (see [`LibBuild::cross_check_box`]). There is NO on-disk cache of compiled
+/// visible. The reference kotlinc appears through the DEFAULT-ON cross-check (disable explicitly
+/// with `KRUSTY_LIB_CROSSCHECK=0`), which compiles every lib with BOTH compilers and asserts the
+/// same `box()` result against each (see [`LibBuild::cross_check_box`]). There is NO on-disk cache of compiled
 /// dependencies — only a per-run memo, so every run rebuilds its deps with the compiler under
 /// test. The memo also keeps the returned PATH stable within a run: `run_box` keys its persistent
 /// runner JVMs by classpath, so per-call scratch dirs would spawn a runner JVM per test.
@@ -1705,7 +1705,7 @@ impl LibBuild {
             .as_deref()
     }
 
-    /// Optional differential check (`KRUSTY_LIB_CROSSCHECK=1`): the same `main`, compiled and run
+    /// Default-on differential check (opt out: `KRUSTY_LIB_CROSSCHECK=0`): the same `main`, run
     /// against the kotlinc-built lib, must produce the same `box()` result the krusty-built lib
     /// produced. A `main` that compiles against the krusty-built dependency but NOT against the
     /// reference one means krusty's emitted metadata invented surface — that fails hard too.
@@ -1716,6 +1716,24 @@ impl LibBuild {
         let Some(reference) = self.reference_out() else {
             return; // no kotlinc provisioned — nothing to compare against
         };
+        if std::env::var("KRUSTY_LIB_BYTEDIFF_REPORT").is_ok() {
+            let mut kmap = std::collections::BTreeMap::new();
+            collect_rel_files(&self.krusty, &self.krusty, &mut kmap);
+            let mut rmap = std::collections::BTreeMap::new();
+            collect_rel_files(reference, reference, &mut rmap);
+            for (name, bytes) in &kmap {
+                match rmap.get(name) {
+                    Some(rb) if rb == bytes => eprintln!("LIBDIFF\tidentical\t{name}"),
+                    Some(_) => eprintln!("LIBDIFF\tdivergent\t{name}"),
+                    None => eprintln!("LIBDIFF\tkrusty-only\t{name}"),
+                }
+            }
+            for name in rmap.keys() {
+                if !kmap.contains_key(name) {
+                    eprintln!("LIBDIFF\tkotlinc-only\t{name}");
+                }
+            }
+        }
         let jdk = jdk_modules();
         let mut cp = vec![reference.to_path_buf()];
         cp.extend_from_slice(extra_cp);
@@ -1739,14 +1757,37 @@ impl LibBuild {
     }
 }
 
-/// `KRUSTY_LIB_CROSSCHECK=1` turns on the optional both-compilers differential for dependency libs.
+#[allow(dead_code)]
+fn collect_rel_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_rel_files(root, &p, out);
+        } else if let (Ok(rel), Ok(bytes)) = (p.strip_prefix(root), std::fs::read(&p)) {
+            out.insert(rel.to_string_lossy().into_owned(), bytes);
+        }
+    }
+}
+
+/// The both-compilers differential for dependency libs is ON BY DEFAULT — every krusty-built lib
+/// is also built with the reference kotlinc and the same `main` must produce the same `box()`
+/// result against both. Disable EXPLICITLY with `KRUSTY_LIB_CROSSCHECK=0` (e.g. a fast local loop
+/// or a host with no kotlinc dist); any other value, or unset, keeps it on.
 #[allow(dead_code)]
 fn lib_crosscheck_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("KRUSTY_LIB_CROSSCHECK")
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false)
+        !matches!(
+            std::env::var("KRUSTY_LIB_CROSSCHECK").as_deref(),
+            Ok("0") | Ok("false") | Ok("off")
+        )
     })
 }
 
@@ -2128,7 +2169,7 @@ impl Fixture {
 
 /// Compile `main` against a `lib_src` dependency and run its `box()` on the persistent JVM. The lib
 /// is krusty-built when krusty can build AND `main` can consume it, with the reference kotlinc as a
-/// lazy fallback for either gap (see [`compile_libs`]); `KRUSTY_LIB_CROSSCHECK=1` additionally runs
+/// lazy fallback for either gap (see [`compile_libs`]); the default-on cross-check additionally runs
 /// `main` against the kotlinc-built lib and asserts the same result. `None` (→ skip) when the
 /// toolchain is unavailable. stdlib + JDK modules are on both the compile and run classpath.
 #[allow(dead_code)]
@@ -2141,8 +2182,8 @@ pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
 
 /// The shared consumption path of every `*_against` box helper: `main` compiles and runs against
 /// the krusty-built lib — no reference fallback; a gap surfaces at the caller as a descriptive
-/// failure. Under `KRUSTY_LIB_CROSSCHECK=1` the result is also compared against the
-/// kotlinc-built lib.
+/// failure. Under the default-on cross-check the result is also compared against the
+/// kotlinc-built lib (opt out: `KRUSTY_LIB_CROSSCHECK=0`).
 #[allow(dead_code)]
 fn box_against_build(
     tag: &str,

@@ -140,8 +140,13 @@ Performance-relevant harness state:
   diagnostics; tests whose CONTRACT is consuming kotlinc-emitted metadata declare it with the
   explicit `*_ref` helpers (`compile_lib_ref`, `run_box_against_ref`, `Fixture::reference_lib`) —
   grep `_ref(` for the current emission/consumption gap inventory.
-- `KRUSTY_LIB_CROSSCHECK=1` additionally compiles every krusty-built lib with the reference kotlinc
-  and asserts the same `box()` result against both — the opt-in differential for dependency libs.
+- The dependency-lib differential is ON BY DEFAULT: every krusty-built lib is also compiled with
+  the reference kotlinc and the same `box()` result is asserted against both classpaths. Disable
+  explicitly with `KRUSTY_LIB_CROSSCHECK=0` for a fast local loop. The assertion is BEHAVIORAL
+  (same `box()` result), not byte-identity: lib classfiles still diverge from kotlinc's bytes
+  (constant-pool ordering, `.kotlin_module` emission). `KRUSTY_LIB_BYTEDIFF_REPORT=1` (with
+  `--nocapture`) prints a `LIBDIFF\t<identical|divergent|krusty-only|kotlinc-only>\t<entry>` line
+  per lib entry — the convergence inventory for making byte equality the assertion.
 - Persistent JVM pools (kotlinc compiler servers, JavaRunner) scale with the host: `ncpu/2` clamped
   to `[1, 6]`. `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
 - Directory classpath entries are shipped into the box runner's per-request classloader, so lib
