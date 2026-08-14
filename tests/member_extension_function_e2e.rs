@@ -386,12 +386,10 @@ fn arity_inapplicable_member_falls_through_to_reified_extension() {
         fun entries(catalog: Catalog): List<Entry> = catalog.loadAll<Entry>()
     "#;
 
-    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
-        return;
-    };
-    assert!(
-        diagnostics.is_empty(),
-        "expected no diagnostics, got: {diagnostics:?}"
+    common::expect_true_e2e(
+        "arity_inapplicable_member_falls_through_to_reified_extension",
+        SOURCE,
+        &[],
     );
 }
 
@@ -409,12 +407,10 @@ fn arity_inapplicable_member_falls_through_to_reified_extension_implicit_receive
             with(catalog) { loadAll<Entry>() }
     "#;
 
-    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
-        return;
-    };
-    assert!(
-        diagnostics.is_empty(),
-        "expected no diagnostics, got: {diagnostics:?}"
+    common::expect_true_e2e(
+        "arity_inapplicable_member_falls_through_to_reified_extension_implicit_receiver",
+        SOURCE,
+        &[],
     );
 }
 
@@ -521,12 +517,10 @@ fn safe_call_ordinary_member_keeps_precedence_over_member_extension() {
         }
     "#;
 
-    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
-        return;
-    };
-    assert!(
-        diagnostics.is_empty(),
-        "expected no diagnostics, got: {diagnostics:?}"
+    common::expect_true_e2e(
+        "safe_call_ordinary_member_keeps_precedence_over_member_extension",
+        SOURCE,
+        &[],
     );
 }
 
@@ -555,12 +549,10 @@ fn generic_extension_chain_preserves_non_null_element_type() {
         }
     "#;
 
-    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
-        return;
-    };
-    assert!(
-        diagnostics.is_empty(),
-        "expected no diagnostics, got: {diagnostics:?}"
+    common::expect_true_e2e(
+        "generic_extension_chain_preserves_non_null_element_type",
+        SOURCE,
+        &[],
     );
 }
 

@@ -228,9 +228,9 @@ fn explicit_context_arguments_map_dependency_metadata() {
         import dependency.combine
         fun box() = combine(first = "O", second = "K")
     "#;
-    let diagnostics = common::diagnostics_against_ref("explicitcontextdependency", LIBRARY, CALLER)
+    let out = common::expect_box_run_against_ref("explicitcontextdependency", LIBRARY, CALLER)
         .expect("reference compiler unavailable");
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(out, "OK");
 }
 
 #[test]
@@ -245,9 +245,9 @@ fn package_qualified_context_call_maps_dependency_defaults() {
         // LANGUAGE: +ContextParameters
         fun box() = with("O") { dependency.choose(false) + dependency.choose(true) }
     "#;
-    let diagnostics = common::diagnostics_against_ref("contextdependencydefaults", LIBRARY, CALLER)
+    let out = common::expect_box_run_against_ref("contextdependencydefaults", LIBRARY, CALLER)
         .expect("reference compiler unavailable");
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(out, "OK");
 }
 
 #[test]
