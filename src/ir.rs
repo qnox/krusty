@@ -2153,11 +2153,11 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
     };
     let vc_params: Vec<TypeName> = f.params.iter().filter_map(vc_of).collect();
     if f.name.contains('-') || !vc_params.is_empty() {
-        // A `suspend` function's CPS rewrite appends a `Continuation` parameter the stub shape
-        // doesn't model — reject a suspend function whose name/params show value-class mangling.
-        if ir.suspend_funs.contains(&fid) {
-            return false;
-        }
+        // A `suspend` function's CPS rewrite appends a trailing `Continuation` — for the stub it is
+        // just another loaded parameter (kotlinc: `pick-<hash>$default(int, String, Continuation,
+        // int, Object)` delegating to the CPS method). The mask covers only the DECLARED defaulted
+        // parameters, and the stub-safe gate already restricts defaults to simple constants, which
+        // cannot suspend — so the shape is modeled.
         // A NULLABLE-underlying value-class param stays BOXED in kotlinc's stub signature; the plain
         // facade stub emits fully erased params — not modeled. Post-pass evidence: the value-class
         // pass recorded the boxed stub params (`vc_underlying_nullable`, which also recurses through

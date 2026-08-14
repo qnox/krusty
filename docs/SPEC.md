@@ -5682,3 +5682,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a reference-typed parameter — before skipping; all-primitive-parameter suspend overrides of
   generic supertypes compile and run. Test: `tests/generic_suspend_member_return_e2e.rs`
   (krusty-built by default).
+
+- **Value-class-mangled suspend functions emit their `$default` synthetic.** The CPS-appended
+  `Continuation` is just another loaded parameter in the stub (kotlinc:
+  `pick-<hash>$default(int, String, Continuation, int, Object)` delegating to the CPS method); the
+  mask covers only the DECLARED defaulted parameters, and the stub-safe gate already restricts
+  defaults to simple constants, which cannot suspend — so the previously-rejected shape is modeled
+  by the ordinary facade stub emitter unchanged. Tests: `tests/metadata_kept_params.rs`,
+  `tests/unsigned_classpath_call_e2e.rs` (both krusty-built by default).
