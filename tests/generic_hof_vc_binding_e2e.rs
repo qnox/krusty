@@ -100,6 +100,63 @@ fn generic_extension_result_uses_a_library_lambda_expectation() {
 }
 
 #[test]
+fn generic_extension_result_uses_a_fun_interface_expectation() {
+    const MAIN: &str = "@JvmInline value class IC(val value: String)\n\
+        fun interface Mapper<T, R> { fun call(value: T): R }\n\
+        fun <T, R> bar(value: T, mapper: Mapper<T, R>): R = mapper.call(value)\n\
+        @Suppress(\"UNCHECKED_CAST\")\n\
+        fun <T> IC.extensionValue(): T = value as T\n\
+        fun <T> extension(value: IC): T = bar(value) { it.extensionValue() }\n\
+        fun box(): String = extension<String>(IC(\"OK\"))\n";
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("FunInterfaceExtensionResultReference", MAIN);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected the fun-interface expected-result fixture: {reference_stderr}"
+    );
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::expect_box_run(
+            MAIN,
+            "fun_interface_extension_result",
+            &[stdlib, jdk.clone()],
+            Some(jdk.as_path()),
+        ),
+        "OK"
+    );
+}
+
+#[test]
+fn overloaded_fun_interface_result_uses_the_candidate_expectation() {
+    const MAIN: &str = "@JvmInline value class IC(val value: String)\n\
+        fun interface Mapper<T, R> { fun call(value: T): R }\n\
+        fun <T, R> bar(value: T, mapper: Mapper<T, R>): R = mapper.call(value)\n\
+        fun bar(value: String, mapper: (String) -> Int): Int = mapper(value)\n\
+        @Suppress(\"UNCHECKED_CAST\")\n\
+        fun <T> IC.extensionValue(): T = value as T\n\
+        fun <T> extension(value: IC): T = bar(value) { it.extensionValue() }\n\
+        fun box(): String = extension<String>(IC(\"OK\"))\n";
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("OverloadedFunInterfaceResultReference", MAIN);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected the overloaded fun-interface result fixture: {reference_stderr}"
+    );
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::expect_box_run(
+            MAIN,
+            "overloaded_fun_interface_result",
+            &[stdlib, jdk.clone()],
+            Some(jdk.as_path()),
+        ),
+        "OK"
+    );
+}
+
+#[test]
 fn postponed_callee_formal_does_not_capture_enclosing_result_parameter() {
     const MAIN: &str = "fun <A, R> select(f: (A) -> R): R = TODO()\n\
         fun <T> bad(): T = select { _: String -> \"bad\" }\n";
@@ -121,6 +178,32 @@ fn postponed_callee_formal_does_not_capture_enclosing_result_parameter() {
                 && diagnostic.contains("T")
         }),
         "callee inference must not solve the enclosing T: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn fun_interface_callee_formal_does_not_capture_enclosing_result_parameter() {
+    const MAIN: &str = "fun interface Mapper<A, R> { fun call(value: A): R }\n\
+        fun <A, R> select(mapper: Mapper<A, R>): R = TODO()\n\
+        fun <T> bad(): T = select { _: String -> \"bad\" }\n";
+    let (reference_code, _) =
+        common::kotlinc_source_result("FunInterfaceCalleeFormalOwnershipReference", MAIN);
+    assert_ne!(
+        reference_code, 0,
+        "kotlinc unexpectedly accepted a concrete String as universally quantified T"
+    );
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics =
+        common::front_end_diagnostics(MAIN, &[stdlib, jdk.clone()], Some(jdk.as_path()));
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("type mismatch")
+                && diagnostic.contains("String")
+                && diagnostic.contains("T")
+        }),
+        "fun-interface inference must not solve the enclosing T: {diagnostics:?}"
     );
 }
 

@@ -19543,15 +19543,28 @@ impl<'a> Checker<'a> {
                 .cloned()
                 .unwrap_or_else(|| "?".to_string()));
         }
+        let lambda_expectations = signature
+            .params
+            .iter()
+            .map(|parameter| match parameter.non_null() {
+                Ty::Fun(function) => Some((function.params.clone(), function.ret)),
+                _ => self
+                    .semantic_sam_signature(*parameter)
+                    .map(|sam| (sam.params, sam.ret)),
+            })
+            .collect::<Vec<_>>();
         let mut bindings = crate::symbol_resolver::GSigBinds::new();
         for (formal, actual) in symbolic.bindings {
-            let shapes_lambda_expectation = signature.params.iter().any(|parameter| {
-                matches!(parameter.non_null(), Ty::Fun(function)
-                if ty_mentions_param(function.ret, std::slice::from_ref(&formal))
-                    || function.params.iter().any(|input| {
-                        ty_mentions_param(*input, std::slice::from_ref(&formal))
-                    }))
-            });
+            let shapes_lambda_expectation =
+                lambda_expectations
+                    .iter()
+                    .flatten()
+                    .any(|(inputs, result)| {
+                        ty_mentions_param(*result, std::slice::from_ref(&formal))
+                            || inputs.iter().any(|input| {
+                                ty_mentions_param(*input, std::slice::from_ref(&formal))
+                            })
+                    });
             if shapes_lambda_expectation {
                 bindings.entry(formal).or_insert(actual);
             }
@@ -28590,10 +28603,15 @@ impl<'a> Checker<'a> {
         sig: &Signature,
         parameter: usize,
         actuals: &[(usize, Ty)],
+        fixed_bindings: &crate::symbol_resolver::GSigBinds,
     ) -> Option<crate::symbol_resolver::SamSignature> {
         let generic_sig = sig.generic_sig.as_ref()?;
-        let bindings =
+        let inferred =
             crate::symbol_resolver::infer_generic_bindings(generic_sig, actuals.iter().copied());
+        let mut bindings = fixed_bindings.clone();
+        for (formal, actual) in inferred {
+            bindings.entry(formal).or_insert(actual);
+        }
         if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
             generic_sig,
             &bindings,
@@ -29693,6 +29711,52 @@ impl<'a> Checker<'a> {
             .fold(ty, |ty, constraints| {
                 crate::symbol_resolver::ty_subst_keep_unbound(ty, &constraints.lower)
             })
+    }
+
+    fn lambda_return_is_lexically_fixed(scope: &CheckerScope<'_>, ret: Ty) -> bool {
+        let lexical_bindings = scope
+            .lexical_tparam_identities()
+            .into_iter()
+            .map(|formal| (formal, Ty::obj("kotlin/Any")))
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        !crate::symbol_resolver::ty_subst_keep_unbound(ret, &lexical_bindings).mentions_ty_param()
+    }
+
+    fn check_lambda_with_sam_signature_labeled(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        signature: &crate::symbol_resolver::SamSignature,
+        label: Option<&str>,
+    ) -> Ty {
+        let params = signature.params.clone();
+        let Ty::Fun(expected_function) = Ty::fun_with_shape(
+            params.clone(),
+            signature.ret,
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ) else {
+            unreachable!("function shape constructor")
+        };
+        if Self::lambda_return_is_lexically_fixed(scope, signature.ret) {
+            return self.check_lambda_with_fixed_function_type_and_params_labeled(
+                scope,
+                expression,
+                expected_function,
+                &params,
+                signature.has_receiver,
+                label,
+            );
+        }
+        self.check_lambda_with_function_type_and_params_labeled(
+            scope,
+            expression,
+            expected_function,
+            &params,
+            signature.has_receiver,
+            label,
+        )
     }
 
     fn report_assignability_error(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
@@ -40206,6 +40270,7 @@ enum TopLevelSamSelection {
     /// `FunctionInfo` dwarfs the `Ambiguous` payload.
     Picked(
         Box<crate::libraries::FunctionInfo>,
+        crate::symbol_resolver::GSigBinds,
         Vec<Option<crate::symbol_resolver::SamSignature>>,
     ),
     /// A tie for the best candidate involving at least one SAM-converted lambda — kotlinc's
@@ -40219,6 +40284,12 @@ enum TopLevelSamSelection {
 struct CallCandidateScore {
     rank: (usize, std::cmp::Reverse<usize>, bool),
     sam_signatures: Vec<Option<crate::symbol_resolver::SamSignature>>,
+}
+
+struct SamSelectionGenerics<'a> {
+    type_args: &'a [Ty],
+    fixed_bindings: &'a crate::symbol_resolver::GSigBinds,
+    expected_result: Option<Ty>,
 }
 
 /// The source-visible portion of a contextual member signature.
@@ -40314,7 +40385,7 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[ExprId],
         partial_arg_tys: Option<&[Option<Ty>]>,
-        type_args: &[Ty],
+        generics: SamSelectionGenerics<'_>,
     ) -> Option<TopLevelSamSelection> {
         let partial = partial_arg_tys?;
         let overloads = self.resolver().top_level_candidates(name);
@@ -40323,7 +40394,13 @@ impl<'a> Checker<'a> {
         }
         let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let mut fitted: Vec<(CallCandidateScore, usize, Vec<Ty>, Ty)> = Vec::new();
+        let mut fitted: Vec<(
+            CallCandidateScore,
+            usize,
+            Vec<Ty>,
+            Ty,
+            crate::symbol_resolver::GSigBinds,
+        )> = Vec::new();
         for (overload_index, candidate) in overloads.iter().enumerate() {
             // Context arguments are supplied by a different scope search. Keep them on that path;
             // value-argument varargs are safe because the shared scorer uses the semantic slot map.
@@ -40331,7 +40408,8 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let signature = candidate.semantic_signature();
-            if !type_args.is_empty() && signature.formals.len() != type_args.len() {
+            if !generics.type_args.is_empty() && signature.formals.len() != generics.type_args.len()
+            {
                 continue;
             }
             let Some(indices) = call_argument_parameter_indices(
@@ -40343,7 +40421,30 @@ impl<'a> Checker<'a> {
             ) else {
                 continue;
             };
-            let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&signature, type_args);
+            let mut bindings =
+                crate::symbol_resolver::seeded_gsig_binds(&signature, generics.type_args);
+            for (formal, actual) in generics.fixed_bindings {
+                if signature.formals.contains(formal) {
+                    bindings.insert(formal.clone(), *actual);
+                }
+            }
+            let contextual_result_is_bound = signature
+                .formals
+                .iter()
+                .filter(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
+                .all(|formal| bindings.contains_key(formal));
+            if !contextual_result_is_bound {
+                if let Some(expected) = generics.expected_result {
+                    let Ok(contextual) =
+                        self.contextual_lambda_result_bindings(&signature, expected)
+                    else {
+                        continue;
+                    };
+                    for (formal, actual) in contextual {
+                        bindings.entry(formal).or_insert(actual);
+                    }
+                }
+            }
             for (&parameter, actual) in indices.iter().zip(partial) {
                 if let (Some(parameter), Some(actual)) = (signature.params.get(parameter), actual) {
                     crate::symbol_resolver::unify_ty(*parameter, *actual, &mut bindings);
@@ -40370,7 +40471,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let ret = crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings);
-            fitted.push((score, overload_index, params, ret));
+            fitted.push((score, overload_index, params, ret, bindings));
         }
         if fitted
             .iter()
@@ -40396,7 +40497,7 @@ impl<'a> Checker<'a> {
                     )
                 });
         };
-        let (score, index, params, ret) = best;
+        let (score, index, params, ret, bindings) = best;
         let specialized = || {
             let mut selected = overloads[*index].clone();
             selected.callable.params = params.clone();
@@ -40406,13 +40507,20 @@ impl<'a> Checker<'a> {
         if score.uses_sam_conversion() {
             return Some(TopLevelSamSelection::Picked(
                 Box::new(specialized()),
+                bindings.clone(),
                 score.sam_signatures.clone(),
             ));
         }
         fitted
             .iter()
             .any(|(candidate, other, ..)| candidate.uses_sam_conversion() && other != index)
-            .then(|| TopLevelSamSelection::Picked(Box::new(specialized()), vec![None; args.len()]))
+            .then(|| {
+                TopLevelSamSelection::Picked(
+                    Box::new(specialized()),
+                    bindings.clone(),
+                    vec![None; args.len()],
+                )
+            })
     }
 
     /// Whether `actual` fits a FUNCTION-typed parameter whose signature reached the checker ERASED.
@@ -44086,7 +44194,11 @@ impl<'a> Checker<'a> {
                             &fname,
                             args,
                             toplevel_partial.as_deref(),
-                            &explicit_type_args,
+                            SamSelectionGenerics {
+                                type_args: &explicit_type_args,
+                                fixed_bindings: &known_generic_bindings,
+                                expected_result: expected,
+                            },
                         )
                     } else {
                         None
@@ -44494,15 +44606,15 @@ impl<'a> Checker<'a> {
                         // A selected SAM target is authoritative. Type the lambda once from its
                         // specialized method signature; syntax-derived lambda shapes are only a
                         // fallback when overload selection did not produce a SAM expectation.
-                        if let Some(TopLevelSamSelection::Picked(_, sam_signatures)) =
+                        if let Some(TopLevelSamSelection::Picked(_, _, sam_signatures)) =
                             top_level_sam.as_ref()
                         {
                             if matches!(self.file.expr(a), Expr::Lambda { .. }) {
                                 if let Some(Some(signature)) = sam_signatures.get(i) {
-                                    return self.check_lambda_with_types_labeled(
+                                    return self.check_lambda_with_sam_signature_labeled(
                                         scope,
                                         a,
-                                        &signature.params,
+                                        signature,
                                         call_fn_name.as_deref(),
                                     );
                                 }
@@ -44820,22 +44932,15 @@ impl<'a> Checker<'a> {
                                         )
                                     },
                                 );
-                                let lexical_bindings = scope
-                                    .lexical_tparam_identities()
-                                    .into_iter()
-                                    .map(|formal| (formal, Ty::obj("kotlin/Any")))
-                                    .collect::<crate::symbol_resolver::GSigBinds>();
-                                let return_without_lexical_formals =
-                                    crate::symbol_resolver::ty_subst_keep_unbound(
-                                        expected_function.ret,
-                                        &lexical_bindings,
-                                    );
                                 // A caller declaration's visible `<T>` is universally quantified
                                 // and therefore a fixed expectation. A symbolic result introduced
                                 // by a surrounding generic call (`getResult(...): B1`) is still an
                                 // inference variable and must remain postponed with that call.
                                 let fixed_expected_return = callee_return_is_fixed
-                                    && !return_without_lexical_formals.mentions_ty_param();
+                                    && Self::lambda_return_is_lexically_fixed(
+                                        scope,
+                                        expected_function.ret,
+                                    );
                                 if collect_postponed {
                                     self.postponed_call_constraints
                                         .push(PostponedCallConstraints::for_formals(
@@ -44906,16 +45011,27 @@ impl<'a> Checker<'a> {
                                             })
                                             .unwrap_or_default();
                                         if let Some(signature) =
-                                            self.specialized_sam_signature(sig, pi, &actuals)
+                                            self.specialized_sam_signature(
+                                                sig,
+                                                pi,
+                                                &actuals,
+                                                &known_generic_bindings,
+                                            )
                                         {
-                                            let params = signature.params.clone();
-                                            known_sam_signatures.borrow_mut()[i] = Some(signature);
-                                            return self.check_lambda_with_types_labeled(
-                                                scope,
-                                                a,
-                                                &params,
-                                                call_fn_name.as_deref(),
+                                            crate::trace_compiler!(
+                                                "lambda_apply",
+                                                "call={fname} sam_argument={i} parameter={pi} ret={:?} bindings={known_generic_bindings:?}",
+                                                signature.ret,
                                             );
+                                            let checked =
+                                                self.check_lambda_with_sam_signature_labeled(
+                                                    scope,
+                                                    a,
+                                                    &signature,
+                                                    call_fn_name.as_deref(),
+                                                );
+                                            known_sam_signatures.borrow_mut()[i] = Some(signature);
+                                            return checked;
                                         }
                                         if let Some(signature) =
                                             self.semantic_sam_signature(sig.params[pi])
@@ -45285,7 +45401,9 @@ impl<'a> Checker<'a> {
                 // spelling; an implicit-receiver member still gets the closer tower position below.
                 let known_sam_signatures = known_sam_signatures.into_inner();
                 let top_level_sam_signatures = match top_level_sam.as_ref() {
-                    Some(TopLevelSamSelection::Picked(_, signatures)) => Some(signatures.clone()),
+                    Some(TopLevelSamSelection::Picked(_, _, signatures)) => {
+                        Some(signatures.clone())
+                    }
                     Some(TopLevelSamSelection::Ambiguous(_)) | None => None,
                 }
                 .or_else(|| {
@@ -45295,7 +45413,9 @@ impl<'a> Checker<'a> {
                         .then_some(known_sam_signatures)
                 });
                 let (top_level_sam_pick, top_level_sam_ambiguous) = match top_level_sam {
-                    Some(TopLevelSamSelection::Picked(candidate, _)) => (Some(*candidate), None),
+                    Some(TopLevelSamSelection::Picked(candidate, bindings, _)) => {
+                        (Some((*candidate, bindings)), None)
+                    }
                     Some(TopLevelSamSelection::Ambiguous(candidates)) => (None, Some(candidates)),
                     None => (None, None),
                 };
@@ -45321,10 +45441,10 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 let top_level = top_level_sam_pick
-                    .map(|info| {
+                    .map(|(info, bindings)| {
                         CallableCandidateSelection::Selected(Box::new(SelectedCallable {
                             info,
-                            bindings: crate::symbol_resolver::GSigBinds::new(),
+                            bindings,
                         }))
                     })
                     .or_else(|| {
