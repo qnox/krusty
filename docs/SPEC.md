@@ -639,6 +639,70 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   helper` lib, then krusty resolves + runs a caller against it → 43
   (`tests/suspend_e2e.rs::krusty_compiled_suspend_dep_is_consumable`); the real kotlinc 2.4.0 also reads
   the annotation and compiles the same caller without error.
+- **`@Metadata` writer — plain top-level PROPERTY records.** The facade `Package` proto used to
+  record extension properties only; plain top-level `val`/`var`s resolved through krusty's OWN
+  static-field fallback, but the REAL kotlinc resolves an `import demo.greeting` exclusively from a
+  `Package.property` record, so it reported `unresolved reference` against krusty-built libs.
+  Every plain top-level property now gets a record mirroring kotlinc's observed encoding (verified
+  by decoding kotlinc 2.4.0 output; matrix in `docs/METADATA_NOTES.md`): `flags` (f11, elided at
+  the 518 wire default) composed from visibility bits, `IS_VAR|HAS_SETTER`, `IS_CONST|HAS_CONSTANT`
+  for `const val`, `HAS_CONSTANT` for a `val` with a compile-time-constant initializer (never for a
+  `var`), `IS_LATEINIT`; `getter_flags`/`setter_flags` (f7/f8) only for CUSTOM accessor bodies
+  (visibility | `isNotDefault`); a custom setter's value parameter (f6); and a
+  `JvmPropertySignature` naming exactly the accessors the emitter really produces — none for
+  `const` (inlined) or `private` (direct field access; the synthetic `access$…$p` bridges are not
+  metadata surface), and a backing-field entry (f100.f1) present iff the property has an
+  initializer or is `lateinit`, carrying an explicit desc only when a nullable primitive boxes the
+  stored type (`var e: Double?` → `Ljava/lang/Double;`). Extension-property records were aligned to
+  the same observed shape (no backing-field entry, not-default accessor flags, f11 elided for a
+  plain `val`). Delegated properties (`by lazy`) still emit no record — a tracked gap. Proven by
+  `tests/top_level_property_e2e.rs::kotlinc_consumes_krusty_top_level_property_metadata`
+  (previously `#[ignore]`): kotlinc 2.4.0 imports, compiles and runs against the krusty-built lib.
+- **`@Metadata` writer — top-level `typealias` records.** A `typealias Name = Target` exists ONLY
+  in metadata (`Package.typeAlias` = 5, `{name=2, underlying_type=4, expanded_type=6}` — decoded
+  from kotlinc 2.4.0); krusty emitted nothing, so a consumer reported `unresolved reference` for
+  the alias. Plain classifier aliases now emit records (underlying = expanded, the resolved
+  target); a facade with ONLY aliases gets its `@Metadata` too. Function-type aliases
+  (`type_alias_fun`) remain a tracked gap. The builder's class-id interning is now DEDUPED
+  (repeated references share one d2 slot, as kotlinc does).
+- **Generic-value-class members: the object-erased decline is narrowed to the real miscompile.**
+  `build_class_metadata` declined ANY member whose value-class type erases its carrier to `Object`
+  (a generic `TokenBox<T>`), so `class Factory { operator fun invoke(): TokenBox<String> }` got NO
+  class `@Metadata` at all and a consumer reported "expression is not callable". The recorded
+  rationale applies specifically to krusty's CPS BOXING divergence
+  (`suspend_boxed_value_class_returns`): a NON-suspend member returns the raw carrier
+  byte-identically to kotlinc (verified: `constructor-impl; areturn` on both sides, same mangle
+  hash), so those members are now described; only a CPS return krusty boxes still disqualifies
+  (and erased PARAMS keep declining pending the same verification). All four decline branches now
+  emit a `trace_compiler!("emit", …)` reason — the silent-None debugging cost an hour.
+- **Declared visibility reaches `@Metadata` (and ctor JVM access).** krusty hardcoded PUBLIC into
+  every metadata flags word, so a consuming module could not enforce `internal`/`protected`
+  boundaries against krusty-built libs. Now carried per declaration: `Class.flags` (an
+  `internal class` writes explicit visibility 0 — `IrFile::class_visibilities`), `Function.flags`
+  for top-level fns (`FnMeta::visibility` from the signature) and members
+  (`IrFile::internal_methods`, alongside the dispatch-relevant `private_methods`),
+  `Constructor.flags` for a DECLARED primary-ctor visibility (`class C protected constructor(…)` →
+  4, private → 2 — `IrFile::ctor_visibilities`), and `TypeAlias.flags` (`internal typealias`,
+  parser now keeps the modifier in `File::type_alias_visibility`). A declared ctor visibility also
+  reaches the JVM `<init>` access flags (protected/private; `internal` stays JVM-public, the
+  boundary lives in metadata alone), including the all-defaults convenience `<init>()`, which
+  mirrors the primary's visibility exactly as kotlinc emits it.
+- **Companion member properties — accessors + records.** A companion property's backing field is a
+  static on the OUTER class; kotlinc realizes the property as `public final` INSTANCE accessors on
+  `C$Companion` (via `access$…$cp` bridges over its private fields) and records it on the
+  COMPANION's `@Metadata` (kind 390 class). krusty emitted only the outer static — no accessors,
+  no records — so a cross-module WRITE of a companion `var` had no setter to resolve. Every
+  companion property now registers under `declared_class_statics[C$Companion]`: the companion's
+  class metadata gets a Property record per member (accessor signatures for non-const,
+  `hasConstant` for constant-initialized `val`s — matching kotlinc's 8710/1798 words, d2
+  byte-identical on the probe), and emission synthesizes the delegating accessors (direct
+  `getstatic`/`putstatic` of the outer field, which krusty still emits public — the `access$…$cp`
+  bridge + private-field shape is the remaining byte-parity delta). `const val`s stay
+  accessor-less (inlined), as before. The module index's version
+  words now match the reference toolchain (`[2,4,0]`, was the 1.9.24-era `[1,9,0]` — readable but
+  byte-divergent), and the file is written UNCONDITIONALLY: kotlinc emits it with an empty parts
+  list for a class-only module, so omitting it diverged the artifact set. Byte-identical against
+  kotlinc for both the with-parts and empty shapes (unit tests pin the exact bytes).
 - **`@Metadata` writer — the CLASS round-trip (a `@Metadata` on every emitted class, not just the
   facade).** A file facade's `@Metadata` describes that file's TOP-LEVEL declarations only, so krusty
   used to emit nothing at all for a CLASS — and a krusty-compiled class was therefore unreadable by
@@ -1155,9 +1219,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   defaults exactly as kotlinc: a synthetic `name$default(self, params…, int mask, Object marker)` stub
   that, for each defaulted parameter, does `if ((mask & (1<<i)) != 0) param = <default>;` then tail-calls
   the real method; a call with holes passes the computed mask + null marker. Byte-identical to kotlinc
-  for data-class `copy` and instance methods. Not yet modeled (such files are skipped, never
-  miscompiled): interface defaults (kotlinc routes them through `$DefaultImpls`) and >31 parameters
-  (kotlinc's multi-`int` mask).
+  for data-class `copy` and instance methods. **Mask bits are LOGICAL**: kotlinc numbers them over
+  the DECLARED value parameters, so an EXTENSION's receiver — physically the leading parameter of
+  the static realization — does not shift them (`fun Host.tag(name, port = 9)` → `port` is bit 2
+  = 1<<1, decoded from kotlinc 2.4.0; krusty once numbered physically, bit 4, so a kotlinc-convention
+  caller's omitted `port` silently kept the zero placeholder). The stub emitters slice the receiver
+  prefix off the registered defaults and offset the parameter slots; member-`$default` call sites
+  subtract the member-extension receiver from the bit index the same way. Not yet modeled (such
+  files are skipped, never miscompiled): interface defaults (kotlinc routes them through
+  `$DefaultImpls`) and >31 parameters (kotlinc's multi-`int` mask).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration
@@ -2001,6 +2071,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor is package-private so the outer `<clinit>` can call it (kotlinc uses a private constructor
   plus a `DefaultConstructorMarker` synthetic — a byte-parity gap, not a behavioural one). Companion
   properties are not yet modeled.
+- A NAMED `companion object Default { … }`: the parser now keeps the declared name
+  (`ClassDecl::companion_name` → `ClassSig::companion_name`), and both the checker and the lowerer
+  resolve `Fmt.Default` exactly like `Fmt.Companion` (same singleton; kotlinc additionally REJECTS
+  the `Companion` spelling when a name is declared — krusty is permissive there for now). The
+  synthesized class/field keep the `$Companion`/`Companion` spelling; kotlinc names them
+  `Fmt$Default`/`Default` — a tracked byte-parity gap. A companion whose base-class clause carries
+  EXPLICIT full-arity arguments (`companion object Default : Fmt(Cfg(false), "default")`) is now
+  modeled: the checker types the args (static context, outer `this` masked) so their calls are
+  resolved, and the lowerer lowers each against the declared base parameter type into the
+  synthesized `super(…)`; partial-arity explicit args (rest defaulted) still bail
+  (`tests/classpath_ctor_vs_same_named_function_e2e.rs` exercises the whole shape krusty-built).
 - Non-null reference primary-constructor parameters are guarded with `Intrinsics.checkNotNullParameter`
   at the start of `<init>` (before `super()`), matching kotlinc.
 - Constructing a classpath (non-IR) class (`RuntimeException("x")`, an imported Java type): `new` +

@@ -863,7 +863,7 @@ fn protected_java_member_is_not_visible_through_base_value() {
 
 #[test]
 fn dependency_internal_member_is_not_visible() {
-    let Some(diagnostics) = common::diagnostics_against_ref(
+    let Some(diagnostics) = common::diagnostics_against(
         "internal_member_visibility",
         "package fixtures\n\
          class PublicApi {\n\

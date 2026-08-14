@@ -87,6 +87,32 @@ String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over
 record per string (no range compression) ⇒ semantically equivalent, not byte-identical, to
 kotlinc — accepted by the reader, which is the ABI goal.
 
+## Package property records (k=2) — kotlinc 2.4.0 observed encoding
+Decoded from kotlinc output over a top-level property shape matrix (`Package.property` = f4;
+`Property`: `name`=2, `return_type`=3, `receiver_type`=5, `setter_value_parameter`=6,
+`getter_flags`=7, `setter_flags`=8, `flags`=11, `JvmPropertySignature` ext=100).
+
+| shape | f11 flags | notes |
+|---|---|---|
+| `val a = "hi"` | 8710 | 518 base + `hasConstant`(1<<13); const-literal initializer only |
+| `val b = run { … }` | omitted (=518) | computed initializer ⇒ no `hasConstant`; f11 elided at wire default |
+| `const val c = 7` | 10758 | + `isConst`(1<<11); f100 = field entry ONLY (no getter method exists) |
+| `val d get() = 5L` | omitted | f7 (getter_flags) = 70 = public·final·`isNotDefault`(1<<6); NO field entry |
+| `var e: Double? = null` | 1798 | `isVar`(1<<8)+`hasSetter`(1<<10); field entry records desc `Ljava/lang/Double;` (boxed) |
+| `lateinit var f: String` | 5894 | + `isLateinit`(1<<12) |
+| `private val p1 = 3` | 8706 | visibility bits (f>>1)&7: INTERNAL=0, PRIVATE=1, PUBLIC=3; NO getter sig |
+| `internal val p2` | 8704 | getter sig present, unmangled |
+| `var s1 … set(v){…}` | 1798 | f6 = setter value parameter `{name,type}`; f8 = 70 |
+| `val String.doubled get()` | omitted | f5 receiver; f7 = 70; NO field entry |
+| `val lz by lazy { … }` | 33286 | + `isDelegated`(1<<15); field entry `{name="lz$delegate", desc="Lkotlin/Lazy;"}` |
+
+Flag layout (property word): bit0 hasAnnotations · 1-3 visibility · 4-5 modality · 6-7 kind ·
+8 isVar · 9 hasGetter · 10 hasSetter · 11 isConst · 12 isLateinit · 13 hasConstant · 15 isDelegated.
+Accessor word: bit0 hasAnnotations · 1-3 visibility · 4-5 modality · 6 isNotDefault.
+String interning is SOURCE-DECL order (a property's setter-param name interns before a later
+property's name; function names may intern after property strings even though `Package.function`=3
+serializes before f4) — relevant only to byte identity, not to consumption.
+
 ## Status — round-trips PASSING
 Encoding chain ✅, schema + builtin table ✅, `UTF8_MODE_MARKER` ✅. **Both round-trips pass**: a
 *Kotlin consumer* compiled by the real kotlinc resolves krusty's top-level functions (facade

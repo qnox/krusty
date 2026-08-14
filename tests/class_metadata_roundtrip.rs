@@ -251,6 +251,8 @@ fn package_value_param_defaults_round_trip() {
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         context_count: 0,
+        vararg_index: None,
+        visibility: krusty::types::Visibility::Public,
     }];
     let (d1, d2) = build_package(&funcs, &[], &[]);
     let ci = class_info("com/example/HostKt", d1, d2);
@@ -329,6 +331,8 @@ fn package_extension_receiver_round_trips() {
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         context_count: 0,
+        vararg_index: None,
+        visibility: krusty::types::Visibility::Public,
     }];
     let (d1, d2) = build_package(&funcs, &[], &[]);
     let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
@@ -383,6 +387,8 @@ fn package_receiver_function_type_param_round_trips() {
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         context_count: 0,
+        vararg_index: None,
+        visibility: krusty::types::Visibility::Public,
     }];
     let (d1, d2) = build_package(&funcs, &[], &[]);
     let ci = class_info("com/example/NavHostKt", d1, d2);

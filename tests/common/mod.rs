@@ -466,6 +466,14 @@ pub fn compile_to_dir(
     out_dir: &Path,
 ) -> Option<()> {
     let classes = compile_in_process(src, stem, cp_jars, jdk_modules)?;
+    // The facade's internal name gives the package → facade mapping for the module index below.
+    // (`emit_all` outputs only classes; the `META-INF/<module>.kotlin_module` is a whole-module
+    // artifact `compiler::compile` writes, so this dir-shaped helper reconstructs it — the real
+    // kotlinc DISCOVERS a package's top-level declarations exclusively through that index, so a
+    // classpath dir without one makes every facade `@Metadata` record invisible to it.)
+    let facade =
+        krusty::jvm::names::file_class_name(stem, parse_package_of_first_file(src).as_deref());
+    let facade_emitted = classes.iter().any(|(name, _)| *name == facade);
     for (name, bytes) in classes {
         let path = out_dir.join(format!("{name}.class"));
         if let Some(parent) = path.parent() {
@@ -473,7 +481,29 @@ pub fn compile_to_dir(
         }
         std::fs::write(path, bytes).ok()?;
     }
+    // kotlinc writes the module file even for a class-only compilation — with an EMPTY parts list
+    // (a facade that was never emitted must not be listed).
+    let packages: Vec<(String, Vec<String>)> = if facade_emitted {
+        let (pkg, short) = match facade.rsplit_once('/') {
+            Some((p, s)) => (p.replace('/', "."), s.to_string()),
+            None => (String::new(), facade),
+        };
+        vec![(pkg, vec![short])]
+    } else {
+        Vec::new()
+    };
+    let module_bytes = krusty::metadata::module::build_kotlin_module(&packages);
+    let meta_inf = out_dir.join("META-INF");
+    std::fs::create_dir_all(&meta_inf).ok()?;
+    std::fs::write(meta_inf.join("main.kotlin_module"), module_bytes).ok()?;
     Some(())
+}
+
+/// The `package` declaration of a single-file source, via the real parser (no textual scraping).
+fn parse_package_of_first_file(src: &str) -> Option<String> {
+    let mut diags = krusty::diag::DiagSink::new();
+    let files = parse_source_set(&[src], &mut diags)?;
+    files.first().and_then(|f| f.package.clone())
 }
 
 /// Run the same checked-file → JVM-backend pipeline as the CLI, but report whether the already
@@ -1962,6 +1992,11 @@ pub fn compile_lib_ref(tag: &str, lib_src: &str) -> Option<PathBuf> {
 /// Multi-file form of [`compile_lib_ref`].
 #[allow(dead_code)]
 pub fn compile_libs_ref(_tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
+    // Diagnostic mode (KRUSTY_REF_SELF=1): route the reference-compiled dependency through the
+    // krusty build instead, to measure which `_ref` sites can already flip back to the default.
+    if std::env::var("KRUSTY_REF_SELF").as_deref() == Ok("1") {
+        return compile_libs(_tag, sources);
+    }
     type RefMemo = Mutex<HashMap<u64, Arc<OnceLock<Option<PathBuf>>>>>;
     static MEMO: OnceLock<RefMemo> = OnceLock::new();
 

@@ -1314,6 +1314,16 @@ pub struct IrFile {
     /// the `@NotNull`/`@Nullable` parameter annotations, which DO need the declared nullability, consult
     /// this side-table instead. Empty ⇒ treat every parameter as non-null (the prior behavior).
     pub fn_param_declared_nullable: std::collections::HashMap<u32, Vec<bool>>,
+    /// Function ids of MEMBER EXTENSION functions (`class C { operator fun String.invoke(…) }`):
+    /// lowering realizes the extension receiver as `params[0]`, which erases receiver-ness from
+    /// [`IrFunction`]. Class `@Metadata` needs it back — the member's record must carry
+    /// `Function.receiver_type` (f5) and EXCLUDE the receiver from its value parameters, or a
+    /// consumer sees an ordinary member with one extra parameter.
+    pub member_ext_receiver_fns: std::collections::HashSet<u32>,
+    /// Function ids declared `operator` — `@Metadata` marks `Function.flags` bit 8 (`isOperator`)
+    /// so a consumer admits the conventional call form (`recv(args)` for `invoke`, `a[i]` for
+    /// `get`, …); the JVM method itself carries no such bit.
+    pub operator_fns: std::collections::HashSet<u32>,
     /// Value-class internal name → the lowered default expression of its single primary-constructor
     /// property, when it has one (`value class ItemId(val value: String = IdGen.next())`).
     /// Lowered in the STATIC `constructor-impl` frame (the sole param is value-index 0, no `this`); the
@@ -1436,6 +1446,27 @@ pub struct IrFile {
     /// Kotlin declaration visibility by `(class internal name, property name)`. This is distinct from
     /// the backing field's JVM visibility.
     pub prop_visibilities: std::collections::HashMap<(String, String), crate::types::Visibility>,
+    /// Kotlin declaration visibility per CLASS — `@Metadata` `Class.flags` must carry it
+    /// (`internal class Hidden` writes explicit visibility 0) so a consumer enforces the module
+    /// boundary; absent = public (the historical assumption).
+    pub class_visibilities: std::collections::HashMap<TypeName, crate::types::Visibility>,
+    /// Function ids of `internal` members — `@Metadata` `Function.flags` visibility 0 (the JVM
+    /// method stays public; only metadata carries the module boundary). `private_methods` keeps
+    /// its own set because privacy ALSO changes dispatch (`invokespecial`).
+    pub internal_methods: std::collections::HashSet<u32>,
+    /// Declared PRIMARY-constructor visibility per class (`class C protected constructor(…)`);
+    /// absent = public. `@Metadata` `Constructor.flags` carries it so a consumer rejects a
+    /// construction the declaration forbids.
+    pub ctor_visibilities: std::collections::HashMap<TypeName, crate::types::Visibility>,
+    /// SOURCE index of a member function's `vararg` parameter (receiver excluded) — class
+    /// `@Metadata` must emit `ValueParameter.vararg_element_type` (f4) or a consumer demands one
+    /// literal array (`too many arguments`).
+    pub fn_vararg_index: std::collections::HashMap<u32, usize>,
+    /// Synthesized classes (function-reference/suspend-conversion adapters) that must be PUBLIC:
+    /// they are referenced from a PUBLIC INLINE function's body, whose splice copies the reference
+    /// into arbitrary other packages/modules (kotlinc marks such synthetics public for the same
+    /// reason). Package-private would be an IllegalAccessError at every cross-package splice site.
+    pub public_synthetics: std::collections::HashSet<TypeName>,
     /// Declaring class to indices in `statics` for class properties whose JVM field is static.
     pub declared_class_statics: std::collections::HashMap<TypeName, Vec<u32>>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.

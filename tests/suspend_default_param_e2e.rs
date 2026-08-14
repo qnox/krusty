@@ -31,7 +31,7 @@ fn run_ref(tag: &str, lib: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
     let corou = common::coroutines_jar();
-    let libout = common::compile_lib_ref(tag, lib)?;
+    let libout = common::compile_lib(tag, lib)?;
     let cp = [libout, sl, corou, jdk.clone()];
     Some(common::expect_box_run(
         main,
