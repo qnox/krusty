@@ -94,6 +94,12 @@ pub struct HoverOccurrence {
     pub value: String,
 }
 
+enum SelectedNavigation {
+    Source(DefinitionTarget),
+    Library(LibraryRef),
+    Unavailable,
+}
+
 pub(crate) fn hover_wire_cost(value: &str, new_value: bool) -> usize {
     32usize.saturating_add(if new_value {
         16usize.saturating_add(value.len().saturating_mul(6))
@@ -1912,8 +1918,8 @@ impl<'a> SemanticClassifier<'a> {
                     (HighlightKind::Variable, 0)
                 };
                 self.mark_exact(span, kind, modifiers);
-                if let Some(target) = self.name_definition(name, span.lo, id) {
-                    self.push_definition(span, target);
+                if let Some(selected) = self.name_definition(name, span.lo, id) {
+                    self.push_selected_navigation(span, selected);
                 } else {
                     let kind = if self.callees.contains_key(&id) {
                         MemberKind::StaticFunction
@@ -2140,38 +2146,37 @@ impl<'a> SemanticClassifier<'a> {
         classes
     }
 
-    fn name_definition(&self, name: &str, at: u32, expression: ExprId) -> Option<DefinitionTarget> {
+    fn name_definition(
+        &self,
+        name: &str,
+        at: u32,
+        expression: ExprId,
+    ) -> Option<SelectedNavigation> {
         let resolved_expression = self.callees.get(&expression).copied().unwrap_or(expression);
-        let member_kind = if self.callees.contains_key(&expression) {
-            MemberKind::InstanceFunction
-        } else {
-            MemberKind::InstanceValue
-        };
-        if let Some(target) = self.checked_companion_target(
-            resolved_expression,
-            name,
-            if self.callees.contains_key(&expression) {
-                MemberKind::StaticFunction
-            } else {
-                MemberKind::StaticValue
-            },
-        ) {
-            return Some(target);
+        if let Some(selected) = self.selected_companion_navigation(resolved_expression, name) {
+            return Some(selected);
         }
-        if let Some(target) = self.checked_member_target(resolved_expression, name, member_kind) {
-            return Some(target);
+        if let Some(selected) = self
+            .type_info
+            .and_then(|types| types.resolved_member(resolved_expression))
+            .filter(|member| member.member.name == name)
+        {
+            return Some(self.selected_member_navigation(
+                resolved_expression,
+                selected.member.source_member,
+                matches!(selected.origin, krusty::libraries::Origin::Library),
+            ));
         }
         if let Some(&call) = self.callees.get(&expression) {
             if let Some((file, declaration)) = self
                 .type_info
                 .and_then(|types| types.resolved_source_call(call))
             {
-                if let Some(target) = self
-                    .definition_symbols
-                    .declaration_target(file, declaration)
-                {
-                    return Some(target);
-                }
+                return Some(
+                    self.definition_symbols
+                        .declaration_target(file, declaration)
+                        .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Source),
+                );
             }
             if let Some(resolved) = self
                 .type_info
@@ -2185,15 +2190,35 @@ impl<'a> SemanticClassifier<'a> {
                         &function.name,
                         false,
                     ) {
-                        return Some(DefinitionTarget {
+                        return Some(SelectedNavigation::Source(DefinitionTarget {
                             file: self.file_index,
                             span,
-                        });
+                        }));
                     }
                 }
+                return Some(SelectedNavigation::Unavailable);
+            }
+            if self
+                .type_info
+                .and_then(|types| types.resolved_top_level_call(call))
+                .is_some()
+                || self
+                    .type_info
+                    .and_then(|types| types.resolved_extension(call))
+                    .is_some()
+            {
+                return Some(
+                    self.library_ref_at(call)
+                        .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Library),
+                );
             }
             if self.is_constructor_call(call, name) {
-                return self.contextual_class_target(name, at);
+                return Some(
+                    self.contextual_class_target(name, at)
+                        .map(SelectedNavigation::Source)
+                        .or_else(|| self.library_ref_at(call).map(SelectedNavigation::Library))
+                        .unwrap_or(SelectedNavigation::Unavailable),
+                );
             }
         }
         if self
@@ -2205,13 +2230,17 @@ impl<'a> SemanticClassifier<'a> {
                 .bound_class(self.symbols, name)
                 .is_some()
         {
-            return self.contextual_class_target(name, at);
+            return self
+                .contextual_class_target(name, at)
+                .map(SelectedNavigation::Source);
         }
         self.binding_at_kind(name, at, self.callees.contains_key(&expression))
             .and_then(|binding| binding.definition)
-            .map(|span| DefinitionTarget {
-                file: self.file_index,
-                span,
+            .map(|span| {
+                SelectedNavigation::Source(DefinitionTarget {
+                    file: self.file_index,
+                    span,
+                })
             })
     }
 
@@ -2353,6 +2382,16 @@ impl<'a> SemanticClassifier<'a> {
         }
     }
 
+    fn push_selected_navigation(&mut self, span: Span, selected: SelectedNavigation) {
+        match selected {
+            SelectedNavigation::Source(target) => self.push_definition(span, target),
+            SelectedNavigation::Library(library_ref) => {
+                self.push_library_definition(span, library_ref)
+            }
+            SelectedNavigation::Unavailable => {}
+        }
+    }
+
     fn library_ref_at(&self, expression: ExprId) -> Option<LibraryRef> {
         let types = self.type_info?;
         let expression = self.callees.get(&expression).copied().unwrap_or(expression);
@@ -2416,57 +2455,46 @@ impl<'a> SemanticClassifier<'a> {
         self.hovers.push(HoverOccurrence { span, value });
     }
 
-    fn checked_member_target(
+    fn selected_member_navigation(
         &self,
         expression: ExprId,
-        name: &str,
-        kind: MemberKind,
-    ) -> Option<DefinitionTarget> {
-        let selected = self.type_info?.resolved_member(expression)?;
-        if !matches!(selected.origin, krusty::libraries::Origin::Module { .. }) {
-            return None;
+        source: Option<krusty::libraries::SourceMember>,
+        library: bool,
+    ) -> SelectedNavigation {
+        if let Some(source) = source {
+            return self
+                .definition_symbols
+                .source_member_target(source)
+                .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Source);
         }
-        let owner = selected.member.owner?;
-        (selected.member.name == name)
-            .then(|| {
-                self.definition_symbols.member_target(
-                    &owner.render(),
-                    name,
-                    kind,
-                    &selected.member.params,
-                )
-            })
-            .flatten()
+        if library {
+            return self
+                .library_ref_at(expression)
+                .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Library);
+        }
+        SelectedNavigation::Unavailable
     }
 
-    fn checked_companion_target(
+    fn selected_companion_navigation(
         &self,
         expression: ExprId,
         name: &str,
-        kind: MemberKind,
-    ) -> Option<DefinitionTarget> {
+    ) -> Option<SelectedNavigation> {
         let types = self.type_info?;
         if let Some(member) = types.resolved_companion(expression) {
             if member.name != name {
                 return None;
             }
-            let owner = member.owner?.render();
-            let owner = owner.strip_suffix("$Companion").unwrap_or(&owner);
-            return self
-                .definition_symbols
-                .member_target(owner, name, kind, &member.params);
+            return Some(if let Some(source) = member.source_member {
+                self.definition_symbols
+                    .source_member_target(source)
+                    .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Source)
+            } else {
+                self.library_ref_at(expression)
+                    .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Library)
+            });
         }
-
-        let selected = types.resolved_member(expression)?;
-        if !matches!(selected.origin, krusty::libraries::Origin::Module { .. })
-            || selected.member.name != name
-        {
-            return None;
-        }
-        let owner = selected.member.owner?.render();
-        let owner = owner.strip_suffix("$Companion")?;
-        self.definition_symbols
-            .member_target(owner, name, kind, &selected.member.params)
+        None
     }
 
     fn record_member_definitions(
@@ -2479,92 +2507,74 @@ impl<'a> SemanticClassifier<'a> {
     ) {
         let definitions_before = self.definitions.len();
         if let Some(expression) = resolved_expression {
-            if let Some(target) = self
+            if let Some((file, declaration)) = self
                 .type_info
                 .and_then(|types| types.resolved_source_call(expression))
-                .and_then(|(file, declaration)| {
-                    self.definition_symbols
-                        .declaration_target(file, declaration)
-                })
             {
-                self.push_definition(source_span, target);
+                let selected = self
+                    .definition_symbols
+                    .declaration_target(file, declaration)
+                    .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Source);
+                self.push_selected_navigation(source_span, selected);
                 return;
             }
-            if let Some(target) = self
+            if let Some(resolved) = self
                 .type_info
                 .and_then(|types| types.resolved_super_call(expression))
-                .and_then(|resolved| {
-                    self.definition_symbols.member_target(
-                        &resolved.owner.render(),
-                        name,
-                        MemberKind::InstanceFunction,
-                        &resolved.params,
-                    )
-                })
             {
-                self.push_definition(source_span, target);
+                let selected = if let Some(source) = resolved.source_member {
+                    self.definition_symbols
+                        .source_member_target(source)
+                        .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Source)
+                } else {
+                    SelectedNavigation::Library(LibraryRef {
+                        fqn: resolved.owner.render(),
+                        member_name: resolved.name.clone(),
+                        member_desc: resolved.descriptor.clone(),
+                    })
+                };
+                self.push_selected_navigation(source_span, selected);
                 return;
             }
-            if let Some(target) = self.checked_companion_target(expression, name, kind) {
-                self.push_definition(source_span, target);
+            if let Some(selected) = self.selected_companion_navigation(expression, name) {
+                self.push_selected_navigation(source_span, selected);
                 return;
             }
-            if let Some(target) = self
+            if let Some((file, declaration)) = self
                 .type_info
                 .and_then(|types| types.callable_reference_source_key(expression))
-                .and_then(|(file, declaration)| {
-                    self.definition_symbols
-                        .declaration_target(file, declaration)
-                })
             {
-                self.push_definition(source_span, target);
+                let selected = self
+                    .definition_symbols
+                    .declaration_target(file, declaration)
+                    .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Source);
+                self.push_selected_navigation(source_span, selected);
                 return;
             }
             if let Some(selected) = self
                 .type_info
                 .and_then(|types| types.resolved_member(expression))
-                .filter(|member| matches!(member.origin, krusty::libraries::Origin::Module { .. }))
             {
                 if selected.member.name == name {
-                    let Some(owner) = selected.member.owner else {
-                        return;
-                    };
-                    if let Some(target) = self.definition_symbols.member_target(
-                        &owner.render(),
-                        name,
-                        kind,
-                        &selected.member.params,
-                    ) {
-                        let nested = matches!(self.file.expr(expression), Expr::Call { .. })
-                            .then(|| self.receiver_definition_owner(receiver))
-                            .flatten()
-                            .and_then(|owner| {
-                                self.definition_symbols.nested_class_target(&owner, name)
-                            })
-                            .and_then(|target| {
-                                self.definition_symbols
-                                    .hover_value(target)
-                                    .map(|value| (target, value.to_owned()))
-                            });
-                        let selected_hover = self
-                            .definition_symbols
-                            .hover_value(target)
-                            .map(str::to_owned);
-                        if let (Some((nested_target, nested)), Some(selected)) =
-                            (nested, selected_hover)
-                        {
-                            let span = self.push_definition_only(source_span, nested_target);
-                            self.push_definition_only(source_span, target);
-                            self.push_hover(
-                                span,
-                                format!("{nested}\n````\n\n---\n````kotlin\n{selected}"),
-                            );
-                        } else {
-                            self.push_definition(source_span, target);
-                        }
-                    }
+                    let selected = self.selected_member_navigation(
+                        expression,
+                        selected.member.source_member,
+                        matches!(selected.origin, krusty::libraries::Origin::Library),
+                    );
+                    self.push_selected_navigation(source_span, selected);
                     return;
                 }
+            }
+            if self
+                .type_info
+                .and_then(|types| types.resolved_extension(expression))
+                .is_some()
+            {
+                let selected = self
+                    .library_ref_at(expression)
+                    .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Library);
+                self.push_selected_navigation(source_span, selected);
+                return;
             }
         }
         let Some(owner) = self.receiver_definition_owner(receiver) else {

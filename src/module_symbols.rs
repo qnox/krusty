@@ -1049,6 +1049,7 @@ fn source_property(
         owner,
         receiver_rank,
         source_key: None,
+        source_member: property.source_member,
     }
 }
 
@@ -1258,6 +1259,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                             owner,
                             receiver_rank: 0,
                             source_key: None,
+                            source_member: None,
                         });
                     }
                 }
@@ -1309,6 +1311,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 owner,
                 receiver_rank: 0,
                 source_key: Some(source),
+                source_member: None,
             });
         }
         for ((_, property_name), signatures) in &self.syms.ext_props {
@@ -1357,6 +1360,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     owner,
                     receiver_rank: 0,
                     source_key: Some(property.source),
+                    source_member: None,
                 });
             }
         }
@@ -1558,6 +1562,7 @@ mod tests {
                 has_custom_getter: false,
                 is_open: false,
                 context_params: Vec::new(),
+                source_member: None,
             },
         );
         companion
@@ -1784,6 +1789,7 @@ mod tests {
                 has_custom_getter: false,
                 is_open: false,
                 context_params: Vec::new(),
+                source_member: None,
             },
         );
         let mut sub = class("demo/Sub");

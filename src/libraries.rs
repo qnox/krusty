@@ -318,12 +318,19 @@ pub enum SourceMember {
         entry: u32,
         method: u32,
     },
+    ClassProperty {
+        file: u32,
+        owner: u32,
+        property: u32,
+    },
 }
 
 impl SourceMember {
     pub fn file(self) -> u32 {
         match self {
-            Self::Class { file, .. } | Self::EnumEntry { file, .. } => file,
+            Self::Class { file, .. }
+            | Self::EnumEntry { file, .. }
+            | Self::ClassProperty { file, .. } => file,
         }
     }
 }
@@ -1854,6 +1861,8 @@ pub struct PropertyInfo {
     pub receiver_rank: u32,
     /// Source declaration key for a property from the current compilation module.
     pub source_key: Option<(u32, u32)>,
+    /// Exact AST-backed member property from the current compilation module.
+    pub source_member: Option<SourceMember>,
 }
 
 /// ALL properties of one name applicable to an access — members AND extensions AND top-level, in one
@@ -2322,6 +2331,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             owner,
             receiver_rank: 0,
             source_key: None,
+            source_member: None,
         };
         classifier
             .declared_callables
@@ -2444,6 +2454,7 @@ impl EmptySymbolSource {
                 owner,
                 receiver_rank: 0,
                 source_key: None,
+                source_member: None,
             }],
         })
     }
@@ -2541,6 +2552,7 @@ impl EmptySymbolSource {
                 owner: crate::types::type_name("kotlin/coroutines/intrinsics/IntrinsicsKt"),
                 receiver_rank: 0,
                 source_key: None,
+                source_member: None,
             }],
         })
     }

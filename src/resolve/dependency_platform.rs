@@ -568,6 +568,7 @@ mod tests {
             owner,
             receiver_rank: 0,
             source_key: None,
+            source_member: None,
         }
     }
 

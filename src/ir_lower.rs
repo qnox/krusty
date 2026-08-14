@@ -11697,6 +11697,7 @@ impl<'a> Lower<'a> {
                     .get(method as usize)
                     .cloned()
             }
+            SourceMember::ClassProperty { .. } => None,
         }
     }
 

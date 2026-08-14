@@ -1018,6 +1018,7 @@ impl JvmLibraries {
                 owner,
                 receiver_rank: 0,
                 source_key: None,
+                source_member: None,
             });
         }
     }
@@ -3683,6 +3684,7 @@ impl JvmLibraries {
                     owner: cn,
                     receiver_rank: 0,
                     source_key: None,
+                    source_member: None,
                 });
             }
         }
@@ -3717,6 +3719,7 @@ impl JvmLibraries {
                     owner: function.callable.owner,
                     receiver_rank: 0,
                     source_key: None,
+                    source_member: None,
                 });
             }
         }
@@ -3781,6 +3784,7 @@ impl JvmLibraries {
                         owner,
                         receiver_rank: 0,
                         source_key: None,
+                        source_member: None,
                     });
                 }
             }
@@ -4279,6 +4283,7 @@ impl JvmLibraries {
                     owner: facade,
                     receiver_rank: 0,
                     source_key: None,
+                    source_member: None,
                 });
             }
         }

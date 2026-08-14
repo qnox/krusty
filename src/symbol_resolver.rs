@@ -11,7 +11,7 @@
 
 use crate::libraries::{
     Callables, FnKind, FunctionInfo, FunctionSet, GenericSig, LibraryCallable, LibraryMember,
-    Origin, ParamList, PropKind, PropertyInfo, PropertySet, SemanticPlatform,
+    Origin, ParamList, PropKind, PropertyInfo, PropertySet, SemanticPlatform, SourceMember,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName, Visibility};
@@ -3305,6 +3305,7 @@ impl Symbol {
 pub struct ResolvedPropertySetter {
     pub callable: LibraryCallable,
     pub visibility: crate::types::Visibility,
+    pub source_member: Option<SourceMember>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3887,39 +3888,6 @@ impl<'a> SymbolResolver<'a> {
         self.select_symbol(recv, name, &args, type_args)
     }
 
-    /// Whether ordinary member overload selection found multiple equally applicable declarations.
-    /// This exposes the selector's outcome to diagnostics without making the checker reconstruct or
-    /// re-score provider candidates.
-    pub(crate) fn member_call_is_ambiguous(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-    ) -> bool {
-        if receiver.kotlin_class_internal().is_none() {
-            return false;
-        }
-        if receiver.is_nullable() {
-            return false;
-        }
-        let mut ambiguous = false;
-        let _ = select_overload_tracking(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            FnKind::Member,
-            ExtCtx {
-                fn_scope: None,
-                source: &self.src,
-            },
-            &mut ambiguous,
-        );
-        ambiguous
-    }
-
     /// Select a callable referenced through a classifier (`Type::name`). Expected function
     /// parameters select the overload exactly as call arguments would; without an expected shape the
     /// name must denote one unique classifier callable. The returned declaration is the same model
@@ -4084,8 +4052,21 @@ impl<'a> SymbolResolver<'a> {
                 // Java zero-arg method is a property read AND a callable). Each facet is exactly the
                 // former per-use resolution, so the caller's chosen facet behaves as before.
                 let callables = self.receiver_callables(ty, name);
-                let selected_call =
-                    self.select_receiver_function(ty, name, args, type_args, &callables);
+                let mut call_ambiguous = false;
+                let selected_call = select_overload_tracking_with_functions(
+                    self.lib,
+                    ty,
+                    name,
+                    args,
+                    type_args,
+                    SelectionMode::Receiver,
+                    ExtCtx {
+                        fn_scope: self.fn_scope,
+                        source: &self.src,
+                    },
+                    Some(callables.functions()),
+                    &mut call_ambiguous,
+                );
                 let call = selected_call
                     .as_ref()
                     .filter(|selected| selected.kind == FnKind::Member)
@@ -5648,6 +5629,7 @@ fn member_property_read_from_declaration(
     member.set_suspend(callable.suspend);
     member.inline = callable.inline;
     member.visibility = declaration.visibility;
+    member.source_member = declaration.source_member;
     Some(ResolvedMember {
         receiver: recv,
         ret: declaration.ty,
@@ -5667,6 +5649,7 @@ fn member_property_write_from_declaration(
     (setter.params.len() == 1 && setter.ret == Ty::Unit).then_some(ResolvedPropertySetter {
         callable: setter,
         visibility: declaration.setter_visibility,
+        source_member: declaration.source_member,
     })
 }
 

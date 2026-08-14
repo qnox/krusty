@@ -5862,7 +5862,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_prefers_a_selected_member_over_a_same_named_inner_class() {
+    fn hover_and_definition_use_the_selected_member_over_a_same_named_inner_class() {
         let mut server = LspService::new(super::super::analyze_for_lsp);
         server.handle(request(1, "initialize", json!({})));
         server.handle(notification(
@@ -5890,7 +5890,7 @@ mod tests {
             json!({
                 "contents": {
                     "kind": "markdown",
-                    "value": "````kotlin\ninner class Item\n````\n\n---\n````kotlin\nfun Item(): Int\n````\n"
+                    "value": "````kotlin\nfun Item(): Int\n````\n"
                 },
                 "range": {
                     "start": {"line": 1, "character": 35},
@@ -5909,22 +5909,13 @@ mod tests {
         ));
         assert_eq!(
             definition.messages[0]["result"],
-            json!([
-                {
-                    "uri": "file:///main.kt",
-                    "range": {
-                        "start": {"line": 0, "character": 26},
-                        "end": {"line": 0, "character": 30}
-                    }
-                },
-                {
-                    "uri": "file:///main.kt",
-                    "range": {
-                        "start": {"line": 0, "character": 36},
-                        "end": {"line": 0, "character": 40}
-                    }
+            json!([{
+                "uri": "file:///main.kt",
+                "range": {
+                    "start": {"line": 0, "character": 36},
+                    "end": {"line": 0, "character": 40}
                 }
-            ])
+            }])
         );
     }
 }

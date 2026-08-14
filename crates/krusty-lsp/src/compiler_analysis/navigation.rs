@@ -9,6 +9,7 @@ use krusty::diag::{DiagSink, Span};
 use krusty::frontend::{
     lex_name_tokens, FrontendNameToken, FrontendNameTokenKind, FrontendSymbols,
 };
+use krusty::libraries::SourceMember;
 use krusty::types::{Ty, TypeName, Visibility};
 
 use super::{
@@ -109,6 +110,7 @@ pub struct DefinitionSymbols {
     class_types: HashMap<TypeName, DefinitionTarget>,
     declarations: HashMap<(u32, u32), DefinitionTarget>,
     source_classes: HashMap<String, SourceClass>,
+    source_members: HashMap<SourceMember, DefinitionTarget>,
     members: HashMap<(String, String), Vec<MemberDefinition>>,
     member_parents: HashMap<String, Vec<ParentDefinition>>,
     object_owners: HashSet<String>,
@@ -176,12 +178,20 @@ impl DefinitionSymbols {
                             .source_classes
                             .insert(owner.clone(), source_class);
                         let class_symbols = symbols.class_by_internal(&owner);
-                        for parameter in &class.props {
+                        for (property_index, parameter) in class.props.iter().enumerate() {
                             if parameter.is_property && parameter.span.lo < parameter.span.hi {
                                 let target = DefinitionTarget {
                                     file: file_index as u32,
                                     span: definition_name_span(source, parameter.span),
                                 };
+                                definitions.source_members.insert(
+                                    SourceMember::ClassProperty {
+                                        file: file_index as u32,
+                                        owner: declaration.0,
+                                        property: property_index as u32,
+                                    },
+                                    target,
+                                );
                                 definitions.insert_hover(
                                     target,
                                     format!(
@@ -205,7 +215,7 @@ impl DefinitionSymbols {
                                     });
                             }
                         }
-                        for property in &class.body_props {
+                        for (body_property_index, property) in class.body_props.iter().enumerate() {
                             if let Some(span) = declaration_name_span(
                                 &tokens,
                                 source,
@@ -217,6 +227,14 @@ impl DefinitionSymbols {
                                     file: file_index as u32,
                                     span,
                                 };
+                                definitions.source_members.insert(
+                                    SourceMember::ClassProperty {
+                                        file: file_index as u32,
+                                        owner: declaration.0,
+                                        property: (class.props.len() + body_property_index) as u32,
+                                    },
+                                    target,
+                                );
                                 definitions.insert_hover(
                                     target,
                                     render_property_hover(
@@ -298,6 +316,14 @@ impl DefinitionSymbols {
                                     file: file_index as u32,
                                     span,
                                 };
+                                definitions.source_members.insert(
+                                    SourceMember::Class {
+                                        file: file_index as u32,
+                                        owner: declaration.0,
+                                        method: method_index as u32,
+                                    },
+                                    target,
+                                );
                                 definitions.insert_hover(
                                     target,
                                     render_function_hover(
@@ -333,7 +359,7 @@ impl DefinitionSymbols {
                             let companion_symbols = class_symbols
                                 .and_then(|class| class.companion_internal)
                                 .and_then(|internal| symbols.class_by_type_name(internal));
-                            for function in &companion.methods {
+                            for (method_index, function) in companion.methods.iter().enumerate() {
                                 if let Some(span) = declaration_name_span(
                                     &tokens,
                                     source,
@@ -348,6 +374,17 @@ impl DefinitionSymbols {
                                         file: file_index as u32,
                                         span,
                                     };
+                                    definitions.source_members.insert(
+                                        SourceMember::Class {
+                                            file: file_index as u32,
+                                            owner: class
+                                                .companion
+                                                .expect("companion declaration was resolved")
+                                                .0,
+                                            method: method_index as u32,
+                                        },
+                                        target,
+                                    );
                                     definitions.insert_hover(
                                         target,
                                         render_function_hover(
@@ -373,7 +410,9 @@ impl DefinitionSymbols {
                                         });
                                 }
                             }
-                            for property in &companion.body_props {
+                            for (body_property_index, property) in
+                                companion.body_props.iter().enumerate()
+                            {
                                 if let Some(span) = declaration_name_span(
                                     &tokens,
                                     source,
@@ -385,6 +424,18 @@ impl DefinitionSymbols {
                                         file: file_index as u32,
                                         span,
                                     };
+                                    definitions.source_members.insert(
+                                        SourceMember::ClassProperty {
+                                            file: file_index as u32,
+                                            owner: class
+                                                .companion
+                                                .expect("companion declaration was resolved")
+                                                .0,
+                                            property: (companion.props.len() + body_property_index)
+                                                as u32,
+                                        },
+                                        target,
+                                    );
                                     definitions.insert_hover(
                                         target,
                                         render_property_hover(
@@ -414,7 +465,7 @@ impl DefinitionSymbols {
                                 }
                             }
                         }
-                        for entry in &class.enum_entries {
+                        for (entry_index, entry) in class.enum_entries.iter().enumerate() {
                             let target = DefinitionTarget {
                                 file: file_index as u32,
                                 span: definition_name_span(source, entry.span),
@@ -435,6 +486,30 @@ impl DefinitionSymbols {
                                     is_override: false,
                                     is_inheritable: false,
                                 });
+                            for (method_index, method) in entry.methods.iter().enumerate() {
+                                let Some(span) = declaration_name_span(
+                                    &tokens,
+                                    source,
+                                    method.span,
+                                    &method.name,
+                                    false,
+                                ) else {
+                                    continue;
+                                };
+                                let target = DefinitionTarget {
+                                    file: file_index as u32,
+                                    span,
+                                };
+                                definitions.source_members.insert(
+                                    SourceMember::EnumEntry {
+                                        file: file_index as u32,
+                                        owner: declaration.0,
+                                        entry: entry_index as u32,
+                                        method: method_index as u32,
+                                    },
+                                    target,
+                                );
+                            }
                         }
                     }
                     Decl::Fun(function) => {
@@ -553,13 +628,19 @@ impl DefinitionSymbols {
         }
         definitions.build_implementation_targets(files, symbols, implementation_limit);
         let mut self_targets = vec![Vec::new(); files.len()];
-        for target in definitions.declarations.values().copied().chain(
-            definitions
-                .members
-                .values()
-                .flatten()
-                .map(|definition| definition.target),
-        ) {
+        for target in definitions
+            .declarations
+            .values()
+            .copied()
+            .chain(
+                definitions
+                    .members
+                    .values()
+                    .flatten()
+                    .map(|definition| definition.target),
+            )
+            .chain(definitions.source_members.values().copied())
+        {
             if let Some(targets) = self_targets.get_mut(target.file as usize) {
                 targets.push(target);
             }
@@ -1076,21 +1157,8 @@ impl DefinitionSymbols {
         self.object_owners.contains(owner)
     }
 
-    pub(crate) fn member_target(
-        &self,
-        owner: &str,
-        name: &str,
-        kind: MemberKind,
-        params: &[Ty],
-    ) -> Option<DefinitionTarget> {
-        self.members
-            .get(&(owner.to_owned(), name.to_owned()))
-            .and_then(|definitions| {
-                definitions.iter().find(|definition| {
-                    definition.kind == kind && definition.params.as_deref() == Some(params)
-                })
-            })
-            .map(|definition| definition.target)
+    pub(crate) fn source_member_target(&self, source: SourceMember) -> Option<DefinitionTarget> {
+        self.source_members.get(&source).copied()
     }
 
     pub(crate) fn extension_value_target(

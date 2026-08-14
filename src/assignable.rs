@@ -288,7 +288,7 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
             {
                 crate::types::TypeVariance::Out => assignable_inner(cx, oracle, a, p),
                 crate::types::TypeVariance::In => assignable_inner(cx, oracle, p, a),
-                crate::types::TypeVariance::Invariant => same_type_argument(
+                crate::types::TypeVariance::Invariant => same_flexible_type_argument(
                     normalized_type_argument(cx, a),
                     normalized_type_argument(cx, p),
                 ),
@@ -305,12 +305,12 @@ fn same_type_argument(left: Ty, right: Ty) -> bool {
                 && aa
                     .iter()
                     .zip(ba)
-                    .all(|(&left, &right)| same_type_argument(left, right))
+                    .all(|(&left, &right)| same_flexible_type_argument(left, right))
         }
         (Ty::Nullable(a), Ty::Nullable(b))
         | (Ty::PlatformNullable(a), Ty::PlatformNullable(b))
         | (Ty::InProjection(a), Ty::InProjection(b))
-        | (Ty::OutProjection(a), Ty::OutProjection(b)) => same_type_argument(*a, *b),
+        | (Ty::OutProjection(a), Ty::OutProjection(b)) => same_flexible_type_argument(*a, *b),
         (Ty::Fun(a), Ty::Fun(b)) => {
             a.context_count == b.context_count
                 && a.has_receiver == b.has_receiver
@@ -319,10 +319,25 @@ fn same_type_argument(left: Ty, right: Ty) -> bool {
                 && a.params
                     .iter()
                     .zip(&b.params)
-                    .all(|(&left, &right)| same_type_argument(left, right))
-                && same_type_argument(a.ret, b.ret)
+                    .all(|(&left, &right)| same_flexible_type_argument(left, right))
+                && same_flexible_type_argument(a.ret, b.ret)
         }
         _ => left == right,
+    }
+}
+
+fn same_flexible_type_argument(left: Ty, right: Ty) -> bool {
+    match (left, right) {
+        (Ty::PlatformNullable(left), Ty::PlatformNullable(right)) => {
+            same_type_argument(*left, *right)
+        }
+        (Ty::PlatformNullable(inner), right) => {
+            same_type_argument(*inner, right) || same_type_argument(Ty::nullable(*inner), right)
+        }
+        (left, Ty::PlatformNullable(inner)) => {
+            same_type_argument(left, *inner) || same_type_argument(left, Ty::nullable(*inner))
+        }
+        _ => same_type_argument(left, right),
     }
 }
 
@@ -486,6 +501,10 @@ mod tests {
         assert!(ok(dog, platform_dog));
         assert!(ok(Ty::nullable(dog), platform_dog));
         assert!(ok(Ty::Null, platform_dog));
+        assert!(ok(
+            Ty::array(dog),
+            Ty::platform_nullable(Ty::array(platform_dog))
+        ));
     }
 
     #[test]
