@@ -4479,16 +4479,50 @@ impl JvmLibraries {
         if !callable.inline.can_inline() {
             return None;
         }
+        let body_descriptor = inline_body_descriptor(callable)?;
+        // Every candidate overload the provider builds computes a plan, so the decode below —
+        // body read, disassembly, invoke-site analysis — is memoized per declaration. The key must
+        // carry EVERY input the decode reads: besides the bytecode locator, the callable's
+        // physical slot layout and `$default` bridge — the same JVM method surfaces through
+        // several provider channels (plain, suspend facade, extension) whose plans differ in
+        // exactly those parameter indexes.
+        let parameter_slots = callable_parameter_slots(&callable.physical_params);
+        let default_descriptor = callable
+            .default_realization
+            .as_deref()
+            .map(|realization| realization.descriptor.as_str());
+        if let Some(plan) = self.cp.cached_inline_plan(
+            callable.owner,
+            &callable.name,
+            &body_descriptor,
+            &parameter_slots,
+            default_descriptor,
+        ) {
+            return plan.map(|boxed| *boxed);
+        }
+        let plan = self.inline_body_plan_uncached(callable, &body_descriptor);
+        self.cp.memoize_inline_plan(
+            callable.owner,
+            &callable.name,
+            &body_descriptor,
+            &parameter_slots,
+            default_descriptor,
+            plan.clone().map(Box::new),
+        );
+        plan
+    }
+
+    fn inline_body_plan_uncached(
+        &self,
+        callable: &LibraryCallable,
+        body_descriptor: &str,
+    ) -> Option<InlineBodyPlan> {
         let owner = callable.owner.render();
         let inline_name = format!("{}$$forInline", callable.name);
-        let body_descriptor = inline_body_descriptor(callable)?;
         let body = self
             .cp
-            .method_code(&owner, &inline_name, &body_descriptor)
-            .or_else(|| {
-                self.cp
-                    .method_code(&owner, &callable.name, &body_descriptor)
-            })?;
+            .method_code(&owner, &inline_name, body_descriptor)
+            .or_else(|| self.cp.method_code(&owner, &callable.name, body_descriptor))?;
         let instructions = crate::jvm::inline::disassemble(&body.code)?;
         let parameter_slots = callable_parameter_slots(&callable.physical_params);
         let parameter_at = |slot: u16| {

@@ -488,6 +488,7 @@ struct CacheStats {
     symbols_memo: CacheCounter,
     bodies: CacheCounter,
     builtin_members: CacheCounter,
+    inline_plans: CacheCounter,
 }
 
 #[cfg(feature = "trace")]
@@ -516,6 +517,7 @@ pub fn trace_cache_stats() {
             s.bodies.line("hits"),
             s.builtin_members.line("hits"),
         );
+        crate::trace_compiler!("cache", "inline plans {}", s.inline_plans.line("hits"),);
     }
 }
 
@@ -830,6 +832,25 @@ type BodyMap = HashMap<(TypeName, String, String), Option<MethodCode>>;
 type BodyCache = std::sync::Arc<std::sync::RwLock<BodyMap>>;
 fn global_entry_body_cache(key: &EntryKey) -> BodyCache {
     static CACHE: std::sync::OnceLock<EntryCache<std::sync::RwLock<BodyMap>>> =
+        std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(EntryCache::new)
+        .get_or_build(key, Default::default)
+}
+
+/// Process-global memoized inline-body plans, one [`EntryCache`] slot per jar/jimage entry, keyed by
+/// [`PlanKey`]. Under that full key a plan is decoded purely from the owning entry's bytecode, so —
+/// exactly like the body cache above — it is identical wherever the jar appears and survives the
+/// per-case `Classpath` instances the conformance/e2e harnesses build for scratch-dir classpaths.
+/// The full input set a plan decode reads: owner + source name + body descriptor locate the
+/// bytecode, but the SAME method surfaces through several provider channels (plain, suspend
+/// facade, extension) whose `physical_params` slot layouts and `$default` bridges differ — and the
+/// decoded plan's parameter INDEXES depend on both. Two channels must therefore never share a slot.
+type PlanKey = (TypeName, String, String, Vec<u16>, Option<String>);
+type PlanMap = HashMap<PlanKey, Option<Box<crate::libraries::InlineBodyPlan>>>;
+type PlanCache = std::sync::Arc<std::sync::RwLock<PlanMap>>;
+fn global_entry_plan_cache(key: &EntryKey) -> PlanCache {
+    static CACHE: std::sync::OnceLock<EntryCache<std::sync::RwLock<PlanMap>>> =
         std::sync::OnceLock::new();
     CACHE
         .get_or_init(EntryCache::new)
@@ -1594,6 +1615,9 @@ pub struct Classpath {
     /// `entries`); `None` for directory entries, which are per-test/module-local and never shared.
     entry_body_caches: Vec<Option<BodyCache>>,
     entry_builtins_caches: Vec<Option<BuiltinsCache>>,
+    /// Per-entry global inline-plan cache slots (parallel to `entries`, jar/jimage only) — see
+    /// [`global_entry_plan_cache`].
+    entry_plan_caches: Vec<Option<PlanCache>>,
     /// Open archives are hard-capped because each entry owns a file descriptor.
     archives: RefCell<crate::lru::LruCache<PathBuf, zip::ZipArchive<File>>>,
     /// Per-entry ext contributions (each cached process-globally by its path), fetched once per
@@ -1614,6 +1638,12 @@ pub struct Classpath {
     /// Cache of lazily-read method bodies (`(internal-name, name, descriptor) → MethodCode`), so the inline
     /// expander reads each inline function's body once even when it's called many times.
     bodies: RefCell<crate::lru::LruCache<(TypeName, String, String), Option<MethodCode>>>,
+    /// Memoized inline-body plans (`(owner, source name, body descriptor) → plan`). A plan is decoded
+    /// purely from the owner's compiled bytecode, so it is stable for the classpath this instance
+    /// snapshots — but every candidate overload the provider builds asks for one, which without this
+    /// memo re-reads and re-disassembles the same stdlib bodies for every compiled file.
+    inline_plans:
+        RefCell<crate::lru::LruCache<PlanKey, Option<Box<crate::libraries::InlineBodyPlan>>>>,
     /// Cache of each class's decoded `@Metadata` functions (facade parts merged) — the single decode the
     /// return-type / receiver / nullability / kept-param lookups all project over (see [`MetaFnsCache`]).
     meta_fns: MetaFnsCache,
@@ -1738,6 +1768,14 @@ impl Classpath {
                 Entry::Dir(_) => None,
             })
             .collect();
+        let entry_plan_caches: Vec<Option<PlanCache>> = entries
+            .iter()
+            .zip(&cache_key)
+            .map(|(entry, key)| match entry {
+                Entry::Jar(_) | Entry::Jimage(_) => Some(global_entry_plan_cache(key)),
+                Entry::Dir(_) => None,
+            })
+            .collect();
         let entry_builtins_caches: Vec<Option<BuiltinsCache>> = entries
             .iter()
             .zip(&cache_key)
@@ -1755,6 +1793,7 @@ impl Classpath {
             entry_caches: cache_key.iter().map(global_entry_class_cache).collect(),
             entry_body_caches,
             entry_builtins_caches,
+            entry_plan_caches,
             archives: RefCell::new(crate::lru::LruCache::new_fixed(OPEN_ARCHIVE_CAP)),
             ext: RefCell::new(None),
             types: RefCell::new(None),
@@ -1762,6 +1801,7 @@ impl Classpath {
             pkg_tree: RefCell::new(None),
             jimage: RefCell::new(None),
             bodies: RefCell::new(crate::lru::LruCache::new(BODY_CAP)),
+            inline_plans: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_fns: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             resolved_types: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
@@ -3441,6 +3481,91 @@ impl Classpath {
             self.bodies.borrow_mut().insert(key, code.clone());
         }
         code
+    }
+
+    /// The memoized inline-body plan for `(owner, name, body_descriptor)`, or `None` on a cold miss
+    /// (the caller decodes the plan and stores it with [`Self::memoize_inline_plan`]). `Some(None)`
+    /// is a REMEMBERED "this callable has no expandable plan" — the dominant answer, and exactly the
+    /// one that must not be recomputed per candidate. Gated on a complete catalog like the body
+    /// cache: an incomplete catalog cannot promise the bytecode this instance reads is stable.
+    pub(crate) fn cached_inline_plan(
+        &self,
+        owner: TypeName,
+        name: &str,
+        body_descriptor: &str,
+        parameter_slots: &[u16],
+        default_descriptor: Option<&str>,
+    ) -> Option<Option<Box<crate::libraries::InlineBodyPlan>>> {
+        if !self.plan_owner_is_cacheable(owner) {
+            cache_stat!(inline_plans, false);
+            return None;
+        }
+        let key = (
+            owner,
+            name.to_string(),
+            body_descriptor.to_string(),
+            parameter_slots.to_vec(),
+            default_descriptor.map(str::to_string),
+        );
+        if let Some(hit) = self.inline_plans.borrow_mut().get(&key) {
+            cache_stat!(inline_plans, true);
+            return Some(hit.clone());
+        }
+        // L1 miss → the owning entry's process-global map, which survives the fresh per-case
+        // `Classpath` instances scratch-dir classpaths force the harnesses to build.
+        if let Some(global) = self.owning_plan_cache(owner) {
+            if let Some(hit) = global.read().unwrap().get(&key).cloned() {
+                self.inline_plans.borrow_mut().insert(key, hit.clone());
+                cache_stat!(inline_plans, true);
+                return Some(hit);
+            }
+        }
+        cache_stat!(inline_plans, false);
+        None
+    }
+
+    /// Store one decoded inline-body plan (or its absence) for [`Self::cached_inline_plan`].
+    pub(crate) fn memoize_inline_plan(
+        &self,
+        owner: TypeName,
+        name: &str,
+        body_descriptor: &str,
+        parameter_slots: &[u16],
+        default_descriptor: Option<&str>,
+        plan: Option<Box<crate::libraries::InlineBodyPlan>>,
+    ) {
+        if !self.plan_owner_is_cacheable(owner) {
+            return;
+        }
+        let key = (
+            owner,
+            name.to_string(),
+            body_descriptor.to_string(),
+            parameter_slots.to_vec(),
+            default_descriptor.map(str::to_string),
+        );
+        if let Some(global) = self.owning_plan_cache(owner) {
+            global.write().unwrap().insert(key.clone(), plan.clone());
+        }
+        self.inline_plans.borrow_mut().insert(key, plan);
+    }
+
+    /// Whether a plan under `owner` may be remembered at all. An overlay class is per-request,
+    /// in-memory bytecode: two compiles can overlay DIFFERENT classes under the same internal name,
+    /// so caching its plan even instance-locally would leak one compile's bytecode facts into the
+    /// next (the same reason `own_method_code` special-cases the overlay before its caches). An
+    /// incomplete catalog cannot promise a stable owner→entry mapping.
+    fn plan_owner_is_cacheable(&self, owner: TypeName) -> bool {
+        let jvm_id = super::jvm_class_map::to_jvm_type_name(owner);
+        self.catalog_complete() && !self.stub_overlay.borrow().contains_key(&jvm_id)
+    }
+
+    /// The owning jar/jimage entry's process-global plan cache — `None` when the owner lives in a
+    /// directory entry (per-case scratch classes must not outlive their case).
+    fn owning_plan_cache(&self, owner: TypeName) -> Option<&PlanCache> {
+        let jvm_id = super::jvm_class_map::to_jvm_type_name(owner);
+        let entry_index = self.owning_entry(jvm_id)?;
+        self.entry_plan_caches.get(entry_index)?.as_ref()
     }
 
     /// One class's own body read (no facade super-chain walk), served from the process-global
