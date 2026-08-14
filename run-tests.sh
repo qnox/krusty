@@ -10,7 +10,40 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # the pre-push gate). Give the test threads a generous stack, matching `scripts/coverage.sh`.
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}" # 128 MiB
 
+# Bound every test-binary process, not just the corpus pass. A resolver/checker loop must terminate
+# with the binary name, exact filter, and captured diagnostics instead of wedging the gate. Healthy
+# local binaries finish well inside two minutes; slow systems can raise the explicit override.
+export KRUSTY_TEST_TIMEOUT_SECONDS="${KRUSTY_TEST_TIMEOUT_SECONDS:-120}"
+
 cd "$(dirname "$0")"
+
+# Shared with instrumented coverage, which executes the already-built test binaries directly.
+source "$(dirname "$0")/scripts/test-deadline.sh"
+
+# Frontend/corpus diagnosis is part of the test workflow, not a separate release-build path. Keep it
+# behind this harness so it receives the same provisioned Kotlin version and global deadline as the
+# conformance gate. Extra arguments are passed directly to `survey` (`--frontend-only`, `--file`,
+# `--samples`, `--report`).
+if [ "${1:-}" = "--survey" ]; then
+  shift
+  command -v just >/dev/null 2>&1 || {
+    echo "run-tests.sh --survey: just is required to provision the pinned Kotlin corpus" >&2
+    exit 2
+  }
+  survey_version="$(just max-version)"
+  export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$survey_version")}"
+  survey_box="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$survey_version")}"
+  cargo build --profile gate --bin survey
+  survey_target="${CARGO_TARGET_DIR:-$PWD/target}"
+  [[ "$survey_target" = /* ]] || survey_target="$PWD/$survey_target"
+  survey_bin="$survey_target/gate/survey"
+  [[ -x "$survey_bin" ]] || {
+    echo "run-tests.sh --survey: survey binary missing: $survey_bin" >&2
+    exit 1
+  }
+  run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$survey_bin" "$survey_box" "$@"
+  exit $?
+fi
 
 if command -v just >/dev/null 2>&1; then
   v="$(just max-version)"
@@ -33,11 +66,66 @@ for a in "$@"; do
   esac
 done
 
-# Filtered/profile-specific runs are single-purpose; defer to cargo's normal runner. They may not need
-# a JVM at all, so the toolchain preflight below deliberately sits after this and guards only the full
-# suite; a filtered run that does need one still gets the same diagnosis from `common::jdk_modules`.
+# Filtered/profile-specific runs are single-purpose. They still receive the global deadline: these are
+# exactly the runs used while diagnosing a resolver loop, so letting the focused path hang would make
+# the guard least effective where it matters most. Print the full cargo selection before `exec`; if the
+# alarm fires, the last line identifies the active test/filter without relying on buffered test output.
 if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
-  exec cargo test $profile_arg "$@"
+  focused_timeout="$KRUSTY_TEST_TIMEOUT_SECONDS"
+  test_target=""
+  read_test_target=0
+  for a in "$@"; do
+    if [ "$read_test_target" -eq 1 ]; then
+      test_target="$a"
+      read_test_target=0
+      continue
+    fi
+    case "$a" in
+      --test) read_test_target=1 ;;
+      --test=*) test_target="${a#--test=}" ;;
+    esac
+  done
+  if [ "$test_target" = "e2e" ]; then
+    focused_timeout="${KRUSTY_E2E_TIMEOUT_SECONDS:-300}"
+  elif [ "$test_target" = "conformance" ]; then
+    focused_timeout="${KRUSTY_CONFORMANCE_TIMEOUT_SECONDS:-$focused_timeout}"
+  fi
+  echo "run-tests.sh: focused test timeout=${focused_timeout}s: cargo test $profile_arg $*" >&2
+  focused_log="$(mktemp)"
+  trap 'rm -f "$focused_log"' EXIT
+  set +e
+  run_with_deadline "$focused_timeout" cargo test $profile_arg "$@" 2>&1 | tee "$focused_log"
+  focused_status="${PIPESTATUS[0]}"
+  set -e
+  if [ "$focused_status" -ne 0 ]; then
+    exit "$focused_status"
+  fi
+
+  # libtest treats a filter matching zero tests as success. For a focused run that is always a broken
+  # filter, not a successful verification. Sum every test-binary summary because `cargo test FILTER`
+  # can execute several binaries, most of which legitimately select zero tests.
+  selected_tests="$(awk '
+    /^test result: / {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "passed;" || $i == "failed;" || $i == "measured;") {
+          selected += $(i - 1)
+        }
+      }
+      summaries++
+    }
+    END {
+      if (summaries == 0) exit 2
+      print selected + 0
+    }
+  ' "$focused_log")" || {
+    echo "run-tests.sh: focused cargo run produced no test summary" >&2
+    exit 1
+  }
+  if [ "$selected_tests" -eq 0 ]; then
+    echo "run-tests.sh: test filter matched zero tests: $*" >&2
+    exit 1
+  fi
+  exit 0
 fi
 
 # Hundreds of e2e tests resolve `java.*` against the JDK's `lib/modules` jimage. Without it they all
@@ -153,7 +241,7 @@ run_label() {
 export -f run_label
 
 run_one() {
-  local b="${2%%::*}" extra="" name slug
+  local b="${2%%::*}" extra="" name slug status=0
   if [ "$2" != "$b" ]; then extra="${2#*::}"; fi
   name="$(basename "$b")"
   slug="$(run_label "$extra")"
@@ -171,12 +259,18 @@ run_one() {
   name="$uniq"
   local start end ms
   start="$(epoch_ms)"
-  if "$b" $extra >"$1/$name.log" 2>&1; then
+  if run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$b" $extra >"$1/$name.log" 2>&1; then
     :
   else
+    status=$?
+  fi
+  if [ "$status" -ne 0 ]; then
     # Log name first so the report reads the failing pass's own output; the description carries the
     # filter so two passes of one binary are told apart on sight.
     printf '%s\t%s\n' "$name" "$b${extra:+ [$extra]}" >>"$1/FAILED"
+    if [ "$status" -eq 124 ]; then
+      printf '%s\t%s\n' "$name" "$b${extra:+ [$extra]}" >>"$1/TIMED_OUT"
+    fi
   fi
   end="$(epoch_ms)"
   ms=$((end - start))
@@ -219,7 +313,8 @@ done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
 pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
 if [ -n "$e2e_bin" ]; then
-  KRUSTY_BOX_RUNNER_POOL="$pool" run_one "$logdir" "$e2e_bin::--test-threads=$ncpu"
+  KRUSTY_TEST_TIMEOUT_SECONDS="${KRUSTY_E2E_TIMEOUT_SECONDS:-300}" \
+    KRUSTY_BOX_RUNNER_POOL="$pool" run_one "$logdir" "$e2e_bin::--test-threads=$ncpu"
 fi
 
 # Everything except conformance and e2e — small suites parallelized across binaries.
@@ -237,10 +332,22 @@ if [ -f "$logdir/FAILED" ]; then
   echo "=== FAILED TEST BINARIES ==="
   while IFS=$'\t' read -r name desc; do
     echo "----- $desc -----"
-    # Never let a missing log abort the report under `set -e` — that would hide every failure after
-    # this one, which is the same class of blindness this reporting path already had.
-    cat "$logdir/$name.log" || echo "(log missing: $name)"
+    log="$logdir/$name.log"
+    if [ ! -f "$log" ]; then
+      echo "(log missing: $name)"
+      continue
+    fi
+    # Libtest repeats captured panics and the complete failed-test list after its `failures:` marker.
+    # Printing that suffix preserves actionable diagnostics without replaying thousands of passing
+    # test lines and truncating the actual summary out of CI logs.
+    if grep -q '^failures:' "$log"; then
+      sed -n '/^failures:/,$p' "$log"
+    else
+      tail -200 "$log"
+    fi
   done <"$logdir/FAILED"
+  echo "=== SLOWEST TEST BINARIES ==="
+  sort -rn "$logdir/TIMINGS" | awk 'NR <= 20 {printf "%7.2fs  %s\n", $1 / 1000, $2}'
   exit 1
 fi
 

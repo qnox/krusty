@@ -34,16 +34,16 @@ fn mixed_spread_vararg_accepted() {
     ));
 }
 
-// --- Delegated properties (`by`) — not lowered yet; src/ir_lower.rs deep-bails. Several distinct
-//     delegate providers (custom operator, `lazy`, a `Map`) all take the same bail path. ---
+// --- Delegated properties (`by`). ---
 
 #[test]
-fn delegated_property_observable_rejected() {
-    assert!(rejects(
+fn delegated_property_observable_runs() {
+    common::expect_box_ok_with_stdlib(
         "import kotlin.properties.Delegates\n\
          class C { var x: Int by Delegates.observable(0) { _, _, _ -> } }\n\
-         fun main() { val c = C(); c.x = 5; println(c.x) }\n"
-    ));
+         fun box(): String { val c = C(); c.x = 5; return if (c.x == 5) \"OK\" else \"fail\" }\n",
+        "ObservableDelegate",
+    );
 }
 
 #[test]
@@ -294,6 +294,19 @@ fn unrelated_concrete_value_class_parameter_does_not_trigger_suspend_gate() {
 
 #[test]
 fn cross_file_projected_generic_return_with_concrete_inference_is_accepted() {
+    let (reference_code, reference_stderr) = common::kotlinc_source_result(
+        "ProjectedGenericReturn",
+        "fun <T> something(): T = \"OK\" as T\n\
+         class Context<T>\n\
+         fun <T> Any.decodeIn(typeFrom: Context<in T>): T = something()\n\
+         fun <T> Any?.decodeOut(typeFrom: Context<out T>): T =\n\
+             this?.decodeIn(typeFrom) ?: throw AssertionError()\n\
+         fun box(): String = \"value\".decodeOut(Context<Any>()).toString()\n",
+    );
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected fixture: {reference_stderr}"
+    );
     let sources = [
         (
             "Decode",
@@ -308,21 +321,29 @@ fn cross_file_projected_generic_return_with_concrete_inference_is_accepted() {
              fun box(): String = \"value\".decodeOut(Context<Any>()).toString()\n",
         ),
     ];
+    let result = common::compile_and_run_files_with_stdlib(&sources);
     assert_eq!(
-        common::compile_and_run_files_with_stdlib(&sources).as_deref(),
-        Some("OK")
+        result.as_deref(),
+        Some("OK"),
+        "frontend diagnostics: {:?}",
+        common::module_front_end_diagnostics(&sources)
     );
 }
 
 #[test]
-fn projected_generic_member_return_inference_rejected() {
-    assert!(rejects(
-        "class Context<T>\n\
+fn projected_generic_member_return_inference_matches_kotlinc() {
+    const SOURCE: &str = "class Context<T>\n\
          fun <T> something(): T = Any() as T\n\
          class Decoder { fun <T> decodeIn(typeFrom: Context<in T>): T = something() }\n\
          fun <T> Decoder.decodeOut(typeFrom: Context<out T>): T = decodeIn(typeFrom)\n\
-         fun box(): String = Decoder().decodeOut(Context<Any>()).toString()\n"
-    ));
+         fun box(): String = Decoder().decodeOut(Context<Any>()).toString()\n";
+    let (reference_code, stderr) = common::kotlinc_source_result("ProjectedMemberReturn", SOURCE);
+    assert_eq!(reference_code, 0, "kotlinc rejected fixture: {stderr}");
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SOURCE);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected frontend diagnostics: {diagnostics:?}"
+    );
 }
 
 #[test]

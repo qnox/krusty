@@ -34,7 +34,7 @@ fun box(): String = if (selected().value == 42) \"OK\" else \"fail\"\n";
 }
 
 #[test]
-fn unsupported_value_class_return_shapes_are_rejected() {
+fn value_class_return_shapes_run() {
     const LABELED: &str = "@JvmInline\n\
 value class Meter(val value: Long)\n\
 fun selected(): Meter? {\n\
@@ -45,11 +45,11 @@ fun selected(): Meter? {\n\
     }\n\
 }\n\
 fun box(): String = if (selected()!!.value == 2L) \"OK\" else \"fail\"\n";
-    assert_eq!(run(LABELED), None);
+    assert_eq!(run(LABELED).expect("labeled value-class return"), "OK");
 
     const GENERIC_CAST: &str = "@JvmInline\n\
 value class Wrapper<T : Int>(val value: T)\n\
 fun <T : Int> read(value: Any?): Int = ((value as Wrapper<T>?) as Wrapper<T>).value\n\
 fun box(): String = if (read<Int>(Wrapper(1)) == 1) \"OK\" else \"fail\"\n";
-    assert_eq!(run(GENERIC_CAST), None);
+    assert_eq!(run(GENERIC_CAST).expect("generic value-class cast"), "OK");
 }

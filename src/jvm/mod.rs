@@ -17,3 +17,12 @@ pub mod suspend;
 pub mod value_classes;
 
 pub use backend::{prepare_module_symbols, JvmBackend};
+
+/// Kotlin distribution artifacts used by JVM command-line defaults.
+pub fn kotlin_stdlib_jar() -> Option<std::path::PathBuf> {
+    crate::toolchain::stdlib_jar()
+}
+
+pub fn kotlin_dist_jar(name: &str) -> Option<std::path::PathBuf> {
+    crate::toolchain::dist_jar(name)
+}

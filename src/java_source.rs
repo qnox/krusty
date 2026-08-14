@@ -1,7 +1,6 @@
 //! Java source syntax shared by compiler stubs and editor analysis.
 
 use crate::diag::Span;
-use crate::names::nested_internal_name_candidates;
 use std::collections::HashSet;
 
 const ACC_PUBLIC: u16 = 0x0001;
@@ -193,7 +192,11 @@ pub struct JavaSourceFile {
 }
 
 impl JavaSourceFile {
-    pub fn resolve_type(&self, name: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> {
+    pub fn resolve_reference_path(
+        &self,
+        name: &str,
+        exists: &dyn Fn(&str) -> bool,
+    ) -> Option<String> {
         resolve_internal_name(&self.package, &self.imports, name, exists)
     }
 
@@ -217,7 +220,7 @@ impl JavaSourceFile {
                     .and_then(|declaration| declaration.outer_internal.as_deref());
             }
         }
-        self.resolve_type(&reference.path, exists)
+        self.resolve_reference_path(&reference.path, exists)
     }
 }
 
@@ -1126,10 +1129,27 @@ fn explicit_body_type_refs(tokens: &[Tok], spans: &[Span]) -> Vec<SrcType> {
 
 // --- Resolution + emission -------------------------------------------------
 
-fn nested_candidate(name: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> {
-    nested_internal_name_candidates(&name.replace('.', "/"))
-        .into_iter()
-        .find(|candidate| exists(candidate))
+fn classifier_path(name: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> {
+    let segments = name
+        .split(['.', '/'])
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    for classifier_end in 1..=segments.len() {
+        let classifier = segments[..classifier_end].join("/");
+        if !exists(&classifier) {
+            continue;
+        }
+        let mut resolved = classifier;
+        for nested in &segments[classifier_end..] {
+            resolved.push('$');
+            resolved.push_str(nested);
+            if !exists(&resolved) {
+                return None;
+            }
+        }
+        return Some(resolved);
+    }
+    None
 }
 
 fn existing_candidates(
@@ -1138,7 +1158,7 @@ fn existing_candidates(
 ) -> Vec<String> {
     let mut matches = candidates
         .into_iter()
-        .filter_map(|candidate| nested_candidate(&candidate, exists))
+        .filter_map(|candidate| classifier_path(&candidate, exists))
         .collect::<Vec<_>>();
     matches.sort_unstable();
     matches.dedup();
@@ -1153,15 +1173,16 @@ pub(crate) fn resolve_internal_name(
 ) -> Option<String> {
     let (head, tail) = name
         .split_once('.')
-        .map_or((name, String::new()), |(head, tail)| {
-            (head, format!("${}", tail.replace('.', "$")))
-        });
+        .map_or((name, None), |(head, tail)| (head, Some(tail)));
     let explicit = imports
         .iter()
         .filter(|import| {
             !import.is_static && !import.wildcard && import.path.rsplit('.').next() == Some(head)
         })
-        .map(|import| format!("{}{tail}", import.path.replace('.', "/")))
+        .map(|import| match tail {
+            Some(tail) => format!("{}.{}", import.path, tail),
+            None => import.path.clone(),
+        })
         .collect::<Vec<_>>();
     if !explicit.is_empty() {
         let mut matches = existing_candidates(explicit, exists);
@@ -1169,8 +1190,8 @@ pub(crate) fn resolve_internal_name(
     }
 
     if !package.is_empty() {
-        let candidate = format!("{package}/{head}{tail}");
-        if let Some(candidate) = nested_candidate(&candidate, exists) {
+        let candidate = format!("{package}/{name}");
+        if let Some(candidate) = classifier_path(&candidate, exists) {
             return Some(candidate);
         }
     }
@@ -1178,7 +1199,7 @@ pub(crate) fn resolve_internal_name(
     let wildcard = imports
         .iter()
         .filter(|import| !import.is_static && import.wildcard)
-        .map(|import| format!("{}/{head}{tail}", import.path.replace('.', "/")));
+        .map(|import| format!("{}/{name}", import.path));
     let mut wildcard_matches = existing_candidates(wildcard, exists);
     match wildcard_matches.len() {
         1 => return wildcard_matches.pop(),
@@ -1186,16 +1207,10 @@ pub(crate) fn resolve_internal_name(
         _ => {}
     }
 
-    let root = format!("{head}{tail}");
-    if let Some(candidate) = nested_candidate(&root, exists) {
+    if let Some(candidate) = classifier_path(name, exists) {
         return Some(candidate);
     }
-    if name.contains('.') {
-        if let Some(candidate) = nested_candidate(name, exists) {
-            return Some(candidate);
-        }
-    }
-    nested_candidate(&format!("java/lang/{head}{tail}"), exists)
+    classifier_path(&format!("java/lang/{name}"), exists)
 }
 
 pub(crate) fn primitive_desc(name: &str) -> Option<&'static str> {

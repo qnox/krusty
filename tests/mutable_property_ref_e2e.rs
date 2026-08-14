@@ -67,6 +67,68 @@ fn unbound_mutable_property_ref_get_and_set() {
 }
 
 #[test]
+fn unbound_mutable_property_ref_set_accepts_declared_nullable_value() {
+    const MAIN: &str = "class MutableRefValue(var item: Int?)\n\
+        fun box(): String {\n\
+        \x20 val receiver = MutableRefValue(1)\n\
+        \x20 MutableRefValue::item.set(receiver, null)\n\
+        \x20 return if (receiver.item == null) \"OK\" else \"Fail\"\n\
+        }\n";
+    assert_eq!(
+        run(MAIN).expect("nullable unbound mutable property ref"),
+        "OK"
+    );
+}
+
+#[test]
+fn generic_nullable_extension_property_ref_keeps_nullable_type_argument() {
+    let diagnostics = common::front_end_diagnostics_with_stdlib(
+        r#"
+var <T> T.payload: T
+    get() = this
+    set(value) {}
+
+fun use() {
+    String?::payload.set(null, null)
+}
+"#,
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
+fn generic_function_reference_can_receive_a_generic_extension_property_reference() {
+    let diagnostics = common::front_end_diagnostics_with_stdlib(
+        r#"
+class Items<T>(val item: T)
+
+val <T> ((Items<T>) -> T).value: T
+    get() = this(Items(null as T))
+
+fun <T> Items<T>.read(): T = item
+
+fun <T> reference(): () -> T = Items<T>::read::value
+"#,
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
+fn generic_local_property_reference_is_invokable() {
+    const MAIN: &str = "import kotlin.reflect.KProperty1\n\
+        fun <T> readPayload(value: T): T {\n\
+        \x20 class Cell(val payload: T)\n\
+        \x20 val property: KProperty1<Cell, T> = Cell::payload\n\
+        \x20 return property(Cell(value))\n\
+        }\n\
+        fun box(): String = readPayload(\"OK\")\n";
+    assert_eq!(
+        run(MAIN).expect("generic local property reference invoke"),
+        "OK"
+    );
+}
+
+#[test]
 fn unbound_mutable_property_ref_on_protected() {
     // A `protected var` reference works (protected is not the blocker; a name clash is).
     const MAIN: &str = "class Foo {\n\
@@ -83,10 +145,10 @@ fn unbound_mutable_property_ref_on_protected() {
 }
 
 #[test]
-fn property_ref_declines_on_accessor_name_clash() {
-    // A user `fun getX()` collides with the `var x` accessor `getX()`; the ref would dispatch to a
-    // `getX()` that isn't reliably emitted, so the reference is DECLINED (the file skips) rather than
-    // miscompiled into a NoSuchMethodError.
+fn property_ref_uses_exact_descriptor_on_accessor_name_clash() {
+    // A user `fun getX()` and the `var x` accessor share a name but have distinct JVM descriptors.
+    // The selected property reference carries the accessor descriptor and must not fall back to a
+    // name-only lookup.
     const MAIN: &str = "class Foo {\n\
         \x20 var x = 0\n\
         \x20 fun getX() = Foo::x\n\
@@ -97,10 +159,7 @@ fn property_ref_declines_on_accessor_name_clash() {
         \x20 r.set(foo, 42)\n\
         \x20 return if (r.get(foo) == 42) \"OK\" else \"Fail\"\n\
         }\n";
-    assert!(
-        run(MAIN).is_none(),
-        "accessor name clash must decline (skip), not miscompile"
-    );
+    assert_eq!(run(MAIN).expect("exact property accessor target"), "OK");
 }
 
 #[test]
@@ -246,17 +305,15 @@ fn bound_object_method_ref() {
 }
 
 #[test]
-fn nullable_typeparam_tostring_ref_declines() {
-    // t::toString where t: T may be null needs kotlinc's null-safe intrinsic; krusty declines (skip)
-    // rather than NPE on the captured null.
+fn nullable_typeparam_tostring_ref_is_null_safe() {
     const MAIN: &str = "fun <T> get(t: T): () -> String = t::toString\n\
         fun box(): String {\n\
         \x20 if (get(null).invoke() != \"null\") return \"Fail null\"\n\
         \x20 return get(\"OK\").invoke()\n\
         }\n";
-    assert!(
-        run(MAIN).is_none(),
-        "nullable-typeparam toString ref must decline, not NPE"
+    assert_eq!(
+        run(MAIN).expect("nullable type-parameter toString ref"),
+        "OK"
     );
 }
 

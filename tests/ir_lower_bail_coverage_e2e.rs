@@ -20,32 +20,16 @@
 
 use super::common;
 
-use std::path::PathBuf;
-
 // ---------------------------------------------------------------------------------------------------
 // box_ok: compile + run a supported snippet, expect "OK".
 // ---------------------------------------------------------------------------------------------------
 
-/// The `<stdlib jar>` + JDK `lib/modules` compile classpath, or `None` when the toolchain is absent.
-fn box_cp() -> Option<(Vec<PathBuf>, Option<PathBuf>)> {
-    let jh = common::java_home();
-    let stdlib = common::stdlib_jar();
-    let jdk = PathBuf::from(format!("{jh}/lib/modules"));
-    if !jdk.exists() {
-        return None;
-    }
-    Some((vec![stdlib], Some(jdk)))
-}
-
-/// Compile `src` and run its `box()`; assert `"OK"`. Skips clean when the toolchain is unavailable.
+/// Compile `src` and run its `box()`; assert `"OK"` and report the phase on failure.
 fn box_ok(src: &str) {
-    let Some((cp, jdk)) = box_cp() else {
-        return;
-    };
-    match common::compile_and_run_box(src, "Main", &cp, jdk.as_deref()) {
-        Some(out) => assert_eq!(out, "OK", "box() returned {out:?} for src:\n{src}"),
-        None => panic!("krusty failed to compile+run a supported construct:\n{src}"),
-    }
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let out = common::expect_box_run(src, "Main", &[stdlib], Some(jdk.as_path()));
+    assert_eq!(out, "OK", "box() returned {out:?} for src:\n{src}");
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -530,7 +514,7 @@ fn inline_lambda_call() {
 #[test]
 fn lambda_labeled_return() {
     box_ok(
-        "fun box(): String { val f = { x: Int -> if (x > 0) return@f \"OK\"; \"F\" }; return f(5) }\n",
+        "fun box(): String { val f = f@{ x: Int -> if (x > 0) return@f \"OK\"; \"F\" }; return f(5) }\n",
     );
 }
 
@@ -567,36 +551,37 @@ fn jvm_inline_value_class() {
 // ===================================================================================================
 
 #[test]
-fn context_property_rejected_until_accessor_abi_is_supported() {
-    assert!(rejects(
-        "class Scope\n\
+fn context_property_accessor_round_trips() {
+    box_ok(
+        "class Scope(val value: String)\n\
          context(scope: Scope)\n\
          val current: Scope get() = scope\n\
-         fun main() {}\n"
-    ));
+         fun box(): String { val scope = Scope(\"OK\"); return current.value }\n",
+    );
 }
 
 #[test]
-fn member_context_property_rejected_until_accessor_abi_is_supported() {
-    assert!(rejects(
-        "class Scope\n\
+fn member_context_property_accessor_round_trips() {
+    box_ok(
+        "class Scope(val value: String)\n\
          class Owner {\n\
              context(scope: Scope)\n\
              val current: Scope get() = scope\n\
+             fun read(scope: Scope): String = current.value\n\
          }\n\
-         fun main() {}\n"
-    ));
+         fun box(): String = Owner().read(Scope(\"OK\"))\n",
+    );
 }
 
-// --- delegated properties: distinct providers all deep-bail in ir_lower ---
+// --- delegated properties ---
 
 #[test]
-fn delegated_property_notnull_rejected() {
-    assert!(rejects(
+fn delegated_property_notnull_round_trips() {
+    box_ok(
         "import kotlin.properties.Delegates\n\
          class C { var x: Int by Delegates.notNull() }\n\
-         fun main() { val c = C(); c.x = 5; println(c.x) }\n"
-    ));
+         fun box(): String { val c = C(); c.x = 5; return if (c.x == 5) \"OK\" else \"fail\" }\n",
+    );
 }
 
 #[test]

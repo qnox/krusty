@@ -4,7 +4,7 @@
 //! Kotlin's rule: importing a member of an object brings that name into scope WITH the object as its
 //! implicit dispatch receiver; for an extension member the use site supplies the extension receiver and
 //! the singleton is the dispatch receiver. krusty's callable namespace is keyed by fully-qualified
-//! name, and `resolve_symbols_name` only ever treated the parent of that name as a PACKAGE — so an
+//! name, and `symbols` only ever treated the parent of that name as a PACKAGE — so an
 //! object or companion parent surfaced nothing. The one shape that worked, `import Obj.memberFun`, did
 //! so through a separate special case, not the namespace.
 //!
@@ -69,6 +69,26 @@ fn member_extensions_imported_from_an_object_or_companion_resolve_and_run() {
         );
     };
     assert_eq!(out, "OK");
+}
+
+#[test]
+fn member_extension_imported_from_a_named_source_companion_uses_its_declared_field() {
+    let source = "package lib\n\
+        import lib.Holder.Factory.quadrupled\n\
+        class Holder { companion object Factory { fun Int.quadrupled(): Int = this * 4 } }\n\
+        fun box(): String = if (5.quadrupled() == 20) \"OK\" else \"fail\"\n";
+    let result = common::compile_and_run_with_stdlib(source, "NamedCompanion");
+    assert_eq!(
+        result.unwrap_or_else(|| panic!(
+            "named source companion import: {:?}",
+            common::front_end_diagnostics(
+                source,
+                std::slice::from_ref(&common::stdlib_jar()),
+                Some(common::jdk_modules().as_path()),
+            )
+        )),
+        "OK"
+    );
 }
 
 #[test]

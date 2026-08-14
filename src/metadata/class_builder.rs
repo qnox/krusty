@@ -11,6 +11,10 @@
 //! String table: a class id uses operation `DESC_TO_CLASS_ID` (Record.f3=2) over `Lpkg/Name;`;
 //! builtin types use `predefined_index` (Record.f2); everything else is a verbatim d2 entry.
 
+use crate::metadata::type_encoder::{
+    encode_indexed_type_parameter, encode_metadata_type_parameter, encode_type,
+    semantic_type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
+};
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::{Ty, Visibility};
 
@@ -28,6 +32,9 @@ pub struct PropMeta {
     /// modality in `Property.flags` and, since there is no backing field, omits the
     /// `JvmPropertySignature.field` entry entirely.
     pub is_abstract: bool,
+    /// Whether this declaration owns a backing field. A concrete computed property has accessor code
+    /// but no field, just like an abstract property has no field, so modality cannot encode this fact.
+    pub has_backing_field: bool,
     /// Index of the class type parameter this property is declared as (`class C<T>(val a: T)` → 0).
     /// `None` for an ordinary type.
     pub tparam: Option<u32>,
@@ -49,6 +56,12 @@ pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
+    /// Function-owned type parameters. Class parameters are inherited from the enclosing class
+    /// table; these are emitted on the function with ids following that inherited prefix.
+    pub type_params: Vec<String>,
+    /// Semantic identities parallel to `type_params`.
+    pub semantic_type_params: Vec<String>,
+    pub type_param_bounds: Vec<Vec<Ty>>,
     /// `Function.flags` (f9): e.g. operator (`componentN`) or the data-class `copy`. 0 ⇒ omitted.
     pub flags: u64,
     /// Mark every value parameter `DECLARES_DEFAULT_VALUE` (so a Kotlin caller may omit it) — used
@@ -72,6 +85,9 @@ impl FnMeta {
             name,
             params,
             ret,
+            type_params: Vec::new(),
+            semantic_type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
             flags: DEFAULT_FUNCTION_FLAGS,
             params_have_defaults: false,
             jvm_sig: None,
@@ -106,28 +122,6 @@ pub const OBJECT_CTOR_FLAGS: u64 = 2;
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE`.
 const DECLARES_DEFAULT_VALUE: u64 = 2;
 
-/// `predefinedIndex` of a builtin fq-name in `JvmNameResolverBase.PREDEFINED_STRINGS`.
-fn predefined_index(t: Ty) -> u64 {
-    match t {
-        Ty::Unit => 2,
-        Ty::Byte => 5,
-        Ty::Double => 6,
-        Ty::Float => 7,
-        Ty::Int => 8,
-        Ty::Long => 9,
-        Ty::Short => 10,
-        Ty::Boolean => 11,
-        Ty::Char => 12,
-        Ty::String => 14,
-        // `UInt`/`ULong` are value classes over Int/Long — their @Metadata class name is the unsigned
-        // type itself (a class-id, not a builtin), so they fall through to the class-id path elsewhere.
-        _ => 0, // kotlin/Any fallback
-    }
-}
-const ANY_PREDEFINED: u64 = 0;
-/// `kotlin/Enum`'s slot in kotlinc's predefined-strings table — an enum's supertype.
-const ENUM_PREDEFINED: u64 = 16;
-
 fn property_flags(prop: &PropMeta) -> u64 {
     let visibility = match prop.visibility {
         Visibility::Internal => 0,
@@ -159,163 +153,60 @@ fn property_flags(prop: &PropMeta) -> u64 {
         }
 }
 
-#[derive(Default)]
-struct StringTable {
-    strings: Vec<String>,
-    records: Vec<Pb>,
-    /// Dedup by (d2 string, record bytes) — kotlinc reuses an existing entry when the same string with
-    /// the same record (verbatim / builtin-index / class-id operation) is interned again.
-    dedup: std::collections::HashMap<(String, Vec<u8>), u32>,
-}
-
-impl StringTable {
-    /// Intern `(string, record)`, returning an existing index for an identical prior entry (kotlinc's
-    /// `JvmStringTable` dedup) or appending a new one.
-    fn intern(&mut self, s: String, record: Pb) -> u32 {
-        let key = (s.clone(), record.as_bytes().to_vec());
-        if let Some(&i) = self.dedup.get(&key) {
-            return i;
-        }
-        let i = self.strings.len() as u32;
-        self.strings.push(s);
-        self.records.push(record);
-        self.dedup.insert(key, i);
-        i
-    }
-    /// A verbatim source string (empty `Record` → use the d2 entry as-is).
-    fn local(&mut self, s: &str) -> u32 {
-        self.intern(s.to_string(), Pb::new())
-    }
-    /// A builtin fq-name via predefinedIndex (Record.f2). The d2 slot is empty.
-    fn builtin(&mut self, predefined: u64) -> u32 {
-        let mut r = Pb::new();
-        r.field_varint(2, predefined);
-        self.intern(String::new(), r)
-    }
-    /// A class id from a type descriptor `Lpkg/Name;` via operation DESC_TO_CLASS_ID (Record.f3=2).
-    fn class_id_from_desc(&mut self, descriptor: &str) -> u32 {
-        let mut r = Pb::new();
-        r.field_varint(3, 2); // operation = DESC_TO_CLASS_ID
-        self.intern(descriptor.to_string(), r)
-    }
-    fn serialize_types(&self) -> Pb {
-        crate::metadata::serialize_string_table_types(&self.records)
-    }
-}
-
-/// `predefinedIndex` of a builtin fq-NAME (used when a builtin arrives as `Ty::Obj`, e.g. `kotlin/Any`
-/// as an `equals` param) — kotlinc encodes these via `builtin`, NOT a class-id descriptor.
-fn builtin_name_index(internal: &str) -> Option<u64> {
-    match internal {
-        "kotlin/Any" => Some(0),
-        "kotlin/Nothing" => Some(1),
-        "kotlin/Unit" => Some(2),
-        "kotlin/Int" => Some(8),
-        "kotlin/Long" => Some(9),
-        "kotlin/Boolean" => Some(11),
-        "kotlin/CharSequence" => Some(13),
-        "kotlin/String" => Some(14),
-        "kotlin/Enum" => Some(16),
-        // Common collection interfaces from `JvmNameResolverBase.PREDEFINED_STRINGS` (kotlinc encodes
-        // these via `predefinedIndex`, an EMPTY d2 slot — not a class-id descriptor). Indices verified
-        // against kotlinc's emitted record (List = 32).
-        "kotlin/collections/Iterable" => Some(28),
-        "kotlin/collections/MutableIterable" => Some(29),
-        "kotlin/collections/Collection" => Some(30),
-        "kotlin/collections/MutableCollection" => Some(31),
-        "kotlin/collections/List" => Some(32),
-        "kotlin/collections/MutableList" => Some(33),
-        "kotlin/collections/Set" => Some(34),
-        "kotlin/collections/MutableSet" => Some(35),
-        "kotlin/collections/Map" => Some(36),
-        "kotlin/collections/MutableMap" => Some(37),
-        _ => None,
-    }
-}
-
-fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
-    type_pb_tp(st, t, None)
+fn type_pb(st: &mut StringTable, t: Ty, type_parameters: &TypeParameters) -> Pb {
+    encode_type(st, t, type_parameters)
+        .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
 
 /// [`type_pb`], but a `Some(id)` encodes the type as `Type.typeParameter` (f7) — a bare type parameter
 /// (`val a: T`), which kotlinc records by INDEX rather than by the erased `java/lang/Object` class name.
-fn type_pb_tp(st: &mut StringTable, t: Ty, tparam: Option<u32>) -> Pb {
-    if let Some(id) = tparam {
-        let mut p = Pb::new();
-        p.field_varint(7, id as u64); // Type.type_parameter = 7
-        return p;
+fn type_pb_tp(
+    st: &mut StringTable,
+    t: Ty,
+    tparam: Option<u32>,
+    type_parameters: &TypeParameters,
+) -> Pb {
+    match tparam {
+        Some(index) => encode_indexed_type_parameter(st, t, index),
+        None => encode_type(st, t, type_parameters),
     }
-    let mut p = Pb::new();
-    // `T?` sets `Type.nullable` (f3) and encodes the underlying type's class-name.
-    let (nullable, base) = match t {
-        Ty::Nullable(inner) => (true, *inner),
-        other => (false, other),
-    };
-    // Generic arguments (`List<String>` → one `Type.argument`). A boxed `Array<T>`/primitive-array
-    // encodes its element in the class-name descriptor and carries NO proto argument (matching kotlinc).
-    let args: &[Ty] = match base {
-        Ty::Obj(n, _) if n.matches("kotlin/Array") => &[],
-        Ty::Obj(_, a) => a,
-        _ => &[],
-    };
-    let class_name = match base {
-        Ty::Obj(internal, _) => {
-            let internal = internal.render();
-            match builtin_name_index(&internal) {
-                Some(idx) => st.builtin(idx),
-                None => st.class_id_from_desc(&format!("L{internal};")),
-            }
-        }
-        _ => st.builtin(predefined_index(base)),
-    };
-    // `Type.Argument` (each interning its own type). An INVARIANT projection is the proto default and
-    // omitted, so an argument is just `{ type = f2 }`. `Type.argument` and `Argument.type` are both f2.
-    let arg_pbs: Vec<Pb> = args
-        .iter()
-        .map(|a| {
-            let mut arg = Pb::new();
-            arg.field_message(2, &type_pb(st, *a)); // Type.Argument.type = 2
-            arg
-        })
-        .collect();
-    for arg in &arg_pbs {
-        p.field_message(2, arg); // Type.argument = 2 (repeated), before nullable/class_name
-    }
-    if nullable {
-        p.field_varint(3, 1); // Type.nullable = 3 (written before class_name, matching kotlinc)
-    }
-    p.field_varint(6, class_name as u64); // Type.class_name = 6
-    p
+    .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
 
 /// Build one `Class.constructor` message: `flags` (f1, omitted if 0), value parameters (f2), and the
 /// JvmProtoBuf constructor signature (f100, name `<init>` + `desc`).
-fn build_ctor(
-    st: &mut StringTable,
-    params: &[(String, Ty)],
-    desc: &str,
+struct CtorShape<'a> {
+    params: &'a [(String, Ty)],
+    desc: &'a str,
     flags: u64,
-    param_defaults: &[bool],
-    param_tparams: &[Option<u32>],
-    sig_name: Option<&str>,
-) -> Pb {
+    param_defaults: &'a [bool],
+    param_tparams: &'a [Option<u32>],
+    sig_name: Option<&'a str>,
+}
+
+fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &TypeParameters) -> Pb {
     let mut ctor = Pb::new();
-    if flags != 0 {
-        ctor.field_varint(1, flags); // Constructor.flags = 1
+    if shape.flags != 0 {
+        ctor.field_varint(1, shape.flags); // Constructor.flags = 1
     }
-    for (i, (pname, pty)) in params.iter().enumerate() {
+    for (i, (pname, pty)) in shape.params.iter().enumerate() {
         let mut vp = Pb::new();
         // `ValueParameter.flags` (f1) with DECLARES_DEFAULT_VALUE for a param that declares a default —
         // written before the name, matching kotlinc.
-        if param_defaults.get(i).copied().unwrap_or(false) {
+        if shape.param_defaults.get(i).copied().unwrap_or(false) {
             vp.field_varint(1, DECLARES_DEFAULT_VALUE);
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
-        let ty = type_pb_tp(st, *pty, param_tparams.get(i).copied().flatten());
+        let ty = type_pb_tp(
+            st,
+            *pty,
+            shape.param_tparams.get(i).copied().flatten(),
+            type_parameters,
+        );
         vp.field_message(3, &ty); // ValueParameter.type = 3
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
-    let sig = jvm_method_sig(st, Some(sig_name.unwrap_or("<init>")), desc);
+    let sig = jvm_method_sig(st, Some(shape.sig_name.unwrap_or("<init>")), shape.desc);
     ctor.field_message(100, &sig); // JvmProtoBuf.constructorSignature = 100
     ctor
 }
@@ -380,10 +271,16 @@ pub struct ClassTail<'a> {
     /// Declared type-parameter names in order (`class C<T>` → `["T"]`), recorded as
     /// `Class.typeParameter` so the metadata describes the class as generic.
     pub type_params: &'a [String],
+    pub type_param_bounds: &'a [crate::ir::IrTypeParameter],
+    /// Enclosing declaration parameters referenced by this class's members. Kotlin metadata does
+    /// not repeat their declarations, but reserves their IDs before this class's own parameters.
+    pub captured_type_params: &'a [String],
     /// Direct sealed subtypes as JVM descriptors.
     pub sealed_subclasses: &'a [&'a str],
-    /// Declared supertypes as JVM descriptors.
-    pub supertype_descs: &'a [&'a str],
+    /// Declared semantic supertypes, including applied type arguments. Physical erasure belongs to
+    /// the classfile `super_class`/`interfaces` entries; Kotlin metadata must retain `H<A>` so
+    /// reflection and downstream type substitution do not see a raw `H`.
+    pub supertypes: &'a [Ty],
 }
 
 impl Default for ClassTail<'_> {
@@ -402,8 +299,10 @@ impl Default for ClassTail<'_> {
             emit_primary_ctor: true,
             primary_ctor_flags: 0,
             type_params: &[],
+            type_param_bounds: &[],
+            captured_type_params: &[],
             sealed_subclasses: &[],
-            supertype_descs: &[],
+            supertypes: &[],
         }
     }
 }
@@ -432,52 +331,85 @@ pub fn build_class(
 
     // f5 = typeParameter: `{ id, name }` per declared parameter, in order. kotlinc interns the names
     // right after the fq_name, before any member signature.
-    let tparam_msgs: Vec<Pb> = tail
+    assert_eq!(
+        tail.type_param_bounds.len(),
+        tail.type_params.len(),
+        "metadata class type parameters require semantic identities"
+    );
+    let captured_count = tail.captured_type_params.len();
+    let mut class_type_parameters = TypeParameters::new();
+    for (index, semantic) in tail.captured_type_params.iter().enumerate() {
+        class_type_parameters.insert(semantic.clone(), index as u64);
+    }
+    for (index, (source, parameter)) in tail
         .type_params
         .iter()
+        .zip(tail.type_param_bounds)
         .enumerate()
-        .map(|(i, name)| {
-            let mut tp = Pb::new();
-            tp.field_varint(1, i as u64); // TypeParameter.id = 1
-            tp.field_varint(2, st.local(name) as u64); // TypeParameter.name = 2
-            tp
+    {
+        let id = (captured_count + index) as u64;
+        class_type_parameters.insert(source.clone(), id);
+        class_type_parameters.insert(parameter.semantic_name.clone(), id);
+    }
+    let tparam_msgs: Vec<Pb> = tail
+        .type_param_bounds
+        .iter()
+        .enumerate()
+        .map(|(i, parameter)| {
+            encode_metadata_type_parameter(
+                &mut st,
+                captured_count + i,
+                &MetadataTypeParameter {
+                    name: parameter.name.clone(),
+                    reified: false,
+                    variance: parameter.variance,
+                    upper_bounds: parameter.bounds.iter().map(|(bound, _)| *bound).collect(),
+                },
+                &class_type_parameters,
+            )
+            .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"))
         })
         .collect();
 
     // Enums use `Enum<E>`; classes without declarations use `Any`.
     let mut supertype_msgs: Vec<Pb> = Vec::new();
     if !enum_entries.is_empty() {
-        let mut arg_ty = Pb::new();
-        arg_ty.field_varint(6, fq as u64);
-        let mut arg = Pb::new();
-        arg.field_message(2, &arg_ty); // Type.Argument.type = 2
-        let mut st_msg = Pb::new();
-        st_msg.field_message(2, &arg); // Type.argument = 2
-        st_msg.field_varint(6, st.builtin(ENUM_PREDEFINED) as u64);
-        supertype_msgs.push(st_msg);
-    } else if tail.supertype_descs.is_empty() {
-        let mut st_msg = Pb::new();
-        st_msg.field_varint(6, st.builtin(ANY_PREDEFINED) as u64);
-        supertype_msgs.push(st_msg);
+        supertype_msgs.push(type_pb(
+            &mut st,
+            Ty::obj_args("kotlin/Enum", &[Ty::obj(class_internal)]),
+            &class_type_parameters,
+        ));
+    } else if tail.supertypes.is_empty() {
+        supertype_msgs.push(type_pb(
+            &mut st,
+            Ty::obj("kotlin/Any"),
+            &class_type_parameters,
+        ));
     } else {
-        for desc in tail.supertype_descs {
-            let mut st_msg = Pb::new();
-            st_msg.field_varint(6, st.class_id_from_desc(desc) as u64); // Type.className via DESC_TO_CLASS_ID
-            supertype_msgs.push(st_msg);
+        for supertype in tail.supertypes {
+            supertype_msgs.push(type_pb(&mut st, *supertype, &class_type_parameters));
         }
     }
 
     // f8 = constructors: the primary (flags 0), then any secondary constructors — each interning in
     // order (kotlinc emits the ctor JVM name `<init>` explicitly, not omitted).
+    let ctor_param_tparams = tail
+        .ctor_param_tparams
+        .iter()
+        .map(|parameter| parameter.map(|index| index + captured_count as u32))
+        .collect::<Vec<_>>();
     let mut ctor_msgs = if tail.emit_primary_ctor {
         vec![build_ctor(
             &mut st,
-            ctor_params,
-            ctor_desc,
-            tail.primary_ctor_flags,
-            tail.ctor_param_defaults,
-            tail.ctor_param_tparams,
-            tail.ctor_sig_name,
+            CtorShape {
+                params: ctor_params,
+                desc: ctor_desc,
+                flags: tail.primary_ctor_flags,
+                param_defaults: tail.ctor_param_defaults,
+                param_tparams: &ctor_param_tparams,
+                sig_name: tail.ctor_sig_name,
+            },
+            &class_type_parameters,
         )]
     } else {
         Vec::new()
@@ -485,12 +417,15 @@ pub fn build_class(
     for sc in tail.secondary_ctors {
         ctor_msgs.push(build_ctor(
             &mut st,
-            sc.params,
-            sc.desc,
-            sc.flags,
-            &[],
-            &[],
-            None,
+            CtorShape {
+                params: sc.params,
+                desc: sc.desc,
+                flags: sc.flags,
+                param_defaults: &[],
+                param_tparams: &[],
+                sig_name: None,
+            },
+            &class_type_parameters,
         ));
     }
 
@@ -500,7 +435,12 @@ pub fn build_class(
         .map(|p| {
             let mut prop = Pb::new();
             prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
-            let ty = type_pb_tp(&mut st, p.ty, p.tparam);
+            let ty = type_pb_tp(
+                &mut st,
+                p.ty,
+                p.tparam.map(|index| index + captured_count as u32),
+                &class_type_parameters,
+            );
             prop.field_message(3, &ty); // Property.return_type = 3
             let pflags = property_flags(p);
             if pflags != property_flags::DEFAULT {
@@ -522,19 +462,23 @@ pub fn build_class(
                 .as_ref()
                 .map(|(sn, sd)| jvm_method_sig(&mut st, Some(sn), sd));
             let boxed_field_desc = p.field_desc.clone().or(match p.ty {
-                Ty::Nullable(
-                    Ty::Int
-                    | Ty::Long
-                    | Ty::Double
-                    | Ty::Float
-                    | Ty::Byte
-                    | Ty::Short
-                    | Ty::Char
-                    | Ty::Boolean,
-                ) => p
-                    .getter
-                    .as_ref()
-                    .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
+                Ty::Nullable(inner)
+                    if matches!(
+                        *inner,
+                        Ty::Int
+                            | Ty::Long
+                            | Ty::Double
+                            | Ty::Float
+                            | Ty::Byte
+                            | Ty::Short
+                            | Ty::Char
+                            | Ty::Boolean
+                    ) =>
+                {
+                    p.getter
+                        .as_ref()
+                        .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string))
+                }
                 // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
                 // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
                 // same way it does for a boxed nullable primitive.
@@ -550,7 +494,7 @@ pub fn build_class(
             }
             // An abstract property has no backing field at all — kotlinc omits the entry rather than
             // writing an empty one (which is what a concrete property's derived field looks like).
-            if !p.is_abstract {
+            if p.has_backing_field {
                 jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
             }
             if let Some(getter) = &getter {
@@ -570,7 +514,45 @@ pub fn build_class(
         .map(|m| {
             let mut func = Pb::new();
             func.field_varint(2, st.local(&m.name) as u64);
-            let ret = type_pb(&mut st, m.ret);
+            let mut function_type_parameters = class_type_parameters.clone();
+            assert_eq!(
+                m.semantic_type_params.len(),
+                m.type_params.len(),
+                "metadata member type parameters require semantic identities"
+            );
+            let semantic_names = &m.semantic_type_params;
+            let own_type_parameters = semantic_type_parameters(
+                m.type_params.iter().map(String::as_str),
+                semantic_names.iter().map(String::as_str),
+            );
+            for (index, name) in m.type_params.iter().enumerate() {
+                let id = captured_count + tail.type_params.len() + index;
+                for key in own_type_parameters
+                    .iter()
+                    .filter_map(|(key, own)| (*own == index as u64).then_some(key))
+                {
+                    function_type_parameters.insert(key.clone(), id as u64);
+                }
+                let parameter = encode_metadata_type_parameter(
+                    &mut st,
+                    id,
+                    &MetadataTypeParameter {
+                        name: name.clone(),
+                        reified: false,
+                        variance: crate::types::TypeVariance::Invariant,
+                        upper_bounds: m.type_param_bounds.get(index).cloned().unwrap_or_default(),
+                    },
+                    &function_type_parameters,
+                )
+                .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"));
+                func.repeated_message(4, &parameter);
+            }
+            let ret = encode_type(&mut st, m.ret, &function_type_parameters).unwrap_or_else(|error| {
+                panic!(
+                    "invalid emitted metadata return type for '{class_internal}.{}': {error}",
+                    m.name
+                )
+            });
             func.field_message(3, &ret);
             for (pname, pty) in &m.params {
                 let mut vp = Pb::new();
@@ -578,7 +560,14 @@ pub fn build_class(
                     vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
                 }
                 vp.field_varint(2, st.local(pname) as u64);
-                let ty = type_pb(&mut st, *pty);
+                let ty = encode_type(&mut st, *pty, &function_type_parameters).unwrap_or_else(
+                    |error| {
+                        panic!(
+                            "invalid emitted metadata parameter '{pname}' for '{class_internal}.{}': {error}",
+                            m.name
+                        )
+                    },
+                );
                 vp.field_message(3, &ty);
                 func.repeated_message(6, &vp); // Function.value_parameter = 6
             }
@@ -612,7 +601,7 @@ pub fn build_class(
     // members (before the companion/nested tail) so the d2 order matches kotlinc.
     let inline_underlying: Option<(u32, Pb)> = tail
         .inline_underlying
-        .map(|(name, ty)| (st.local(name), type_pb(&mut st, ty)));
+        .map(|(name, ty)| (st.local(name), type_pb(&mut st, ty, &class_type_parameters)));
 
     // Companion + nested class names intern LAST (kotlinc's d2 places them after all members).
     let companion_idx = companion_name.map(|c| st.local(c));
@@ -689,7 +678,7 @@ pub fn build_class(
     bytes.extend_from_slice(&prefix.into_bytes());
     bytes.extend_from_slice(stt.as_bytes());
     bytes.extend_from_slice(class.as_bytes());
-    (bytes, st.strings)
+    (bytes, st.into_strings())
 }
 
 #[cfg(test)]
@@ -707,6 +696,7 @@ mod tests {
                 has_constant: true,
                 is_const: true,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: None,
                 setter: None,
@@ -761,6 +751,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
@@ -801,6 +792,9 @@ mod tests {
                 name: "component1".into(),
                 params: vec![],
                 ret: Ty::Int,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: None,
@@ -810,6 +804,9 @@ mod tests {
                 name: "component2".into(),
                 params: vec![],
                 ret: Ty::String,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: None,
@@ -819,6 +816,9 @@ mod tests {
                 name: "copy".into(),
                 params: vec![("x".into(), Ty::Int), ("y".into(), Ty::String)],
                 ret: Ty::obj("demo/Point"),
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: COPY_FN_FLAGS,
                 params_have_defaults: true,
                 jvm_sig: None,
@@ -828,6 +828,9 @@ mod tests {
                 name: "equals".into(),
                 params: vec![("other".into(), any_q)],
                 ret: Ty::Boolean,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: EQUALS_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: None,
@@ -837,6 +840,9 @@ mod tests {
                 name: "hashCode".into(),
                 params: vec![],
                 ret: Ty::Int,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: None,
@@ -846,6 +852,9 @@ mod tests {
                 name: "toString".into(),
                 params: vec![],
                 ret: Ty::String,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: None,
@@ -861,6 +870,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
@@ -874,6 +884,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
@@ -936,6 +947,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getR".into(), "()Ljava/util/List;".into())),
                 setter: None,
@@ -1044,6 +1056,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
@@ -1093,6 +1106,7 @@ mod tests {
                 is_const: false,
                 visibility: Visibility::Public,
                 is_abstract: false,
+                has_backing_field: true,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
@@ -1146,6 +1160,7 @@ mod tests {
                     is_const: false,
                     visibility: Visibility::Public,
                     is_abstract: false,
+                    has_backing_field: true,
                     tparam: None,
                     getter: Some(("getX".into(), "()I".into())),
                     setter: None,
@@ -1159,6 +1174,7 @@ mod tests {
                     is_const: false,
                     visibility: Visibility::Public,
                     is_abstract: false,
+                    has_backing_field: true,
                     tparam: None,
                     getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),

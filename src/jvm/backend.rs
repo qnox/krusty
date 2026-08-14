@@ -66,7 +66,7 @@ pub fn run_backend_passes_with_metadata(
     syms: &FrontendSymbols,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
 ) -> Result<(), SkipReason> {
-    let resolve_class_name = |name: &str| syms.class_names.get(name).map(|name| name.render());
+    let resolve_class_name = |name: &str| syms.class_names.get(name);
     crate::plugins::run_enabled(
         ir,
         file,
@@ -335,7 +335,7 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
 
     let mut fns: Vec<(u32, u32, Option<String>, String)> = Vec::new();
     let mut unemitted_fns: Vec<(u32, crate::ast::DeclId)> = Vec::new();
-    let mut props: Vec<(String, String)> = Vec::new();
+    let mut props: Vec<(u32, u32, String, String)> = Vec::new();
     let mut ext_props: Vec<(u32, u32, String)> = Vec::new();
     for (i, (file, stem)) in files.iter().zip(stems).enumerate() {
         let facade = file_class_name(stem, file.package.as_deref());
@@ -348,7 +348,7 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
                     // The semantic handoff says whether a callable body exists; this JVM boundary
                     // owns only its representation as a facade static. Common IR lowering consumes
                     // the same answer, so registration cannot promise a body that lowering omits.
-                    let emitted = syms.source_fn_has_callable_body(file, i as u32, d, f);
+                    let emitted = syms.source_fn_has_callable_body(file, i as u32, f);
                     if emitted {
                         fns.push((
                             i as u32,
@@ -364,7 +364,7 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
                     }
                 }
                 Decl::Property(p) if p.receiver.is_none() => {
-                    props.push((p.name.clone(), facade.clone()))
+                    props.push((i as u32, d.0, p.name.clone(), facade.clone()))
                 }
                 Decl::Property(_) => ext_props.push((i as u32, d.0, facade.clone())),
                 _ => {}
@@ -382,7 +382,9 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
     for (file_index, declaration) in unemitted_fns {
         syms.record_fn_facade(file_index, declaration, None);
     }
-    for (name, facade) in props {
+    for (file, declaration, name, facade) in props {
+        syms.prop_facades_by_decl
+            .insert((file, declaration), type_name(&facade));
         if let Some(&(ty, is_var, is_const)) = syms.props.get(&name) {
             syms.prop_facades
                 .insert(name, (type_name(&facade), ty, is_var, is_const));
@@ -469,16 +471,23 @@ impl Backend for JvmBackend {
             &ir,
             &facade_name,
             &*self.cp,
-            metadata.as_ref(),
+            crate::jvm::ir_emit::EmitMetadata {
+                facade: metadata.as_ref(),
+                continuations: &continuation_metadata,
+            },
             &emit_opts,
             &run,
-            &continuation_metadata,
+            syms,
         ) else {
             if let Some(reason) = run.inline_bail() {
                 diags.error(
                     crate::diag::Span::new(0, 0),
                     format!("krusty: JVM backend inline error: {reason}"),
                 );
+                return outputs;
+            }
+            if let Some(reason) = run.emit_error() {
+                diags.error(crate::diag::Span::new(0, 0), reason);
                 return outputs;
             }
             diags.error(
@@ -587,23 +596,6 @@ pub fn facade_package_metadata(
             .cloned()
             .zip(declared_params.iter().copied())
             .collect();
-        // Per-parameter receiver function types (`Recv.(…) -> R`): the reader recovers lambda `this`
-        // binding from the `@kotlin.ExtensionFunctionType` mark this drives.
-        let param_fun_recvs: Vec<Option<Ty>> = sig
-            .lambda_recv
-            .iter()
-            .enumerate()
-            .map(|(i, &is_recv)| {
-                is_recv
-                    .then(|| {
-                        sig.lambda_param_types
-                            .get(i)
-                            .and_then(|t| t.first())
-                            .copied()
-                    })
-                    .flatten()
-            })
-            .collect();
         // A `suspend fun`'s PHYSICAL method appends a `Continuation` and erases the return; record
         // the emit handle so a reader aligns the logical signature with the CPS method. An inline
         // fn needs the handle too: its erased descriptor (receiver + erased params + erased return)
@@ -637,12 +629,19 @@ pub fn facade_package_metadata(
             };
             format!("({p}{cont}){ret_desc}")
         });
+        crate::trace_compiler!(
+            "metadata",
+            "emit facade metadata function={} params={:?} context={} contract={}",
+            f.name,
+            params,
+            sig.context_count,
+            sig.contract.is_some(),
+        );
         metas.push(crate::metadata::builder::FnMeta {
             name: f.name.clone(),
             params,
             ret: declared_ret,
             receiver,
-            param_fun_recvs,
             param_defaults: sig.param_defaults.clone(),
             suspend: f.is_suspend(),
             jvm_desc,
@@ -652,6 +651,12 @@ pub fn facade_package_metadata(
                 .iter()
                 .map(|tp| (tp.clone(), f.reified_type_params.contains(tp)))
                 .collect(),
+            semantic_type_params: generic
+                .map(|signature| signature.formals.clone())
+                .unwrap_or_default(),
+            type_param_bounds: generic
+                .map(|signature| signature.formal_bounds.clone())
+                .unwrap_or_default(),
             // Resolve the contract's source type references once, against this module: a type
             // parameter stays a `Type.type_parameter` reference; a class becomes its internal
             // name. Unresolvable references stay `Source` (the emitter degrades them to `Any`).
@@ -679,46 +684,102 @@ pub fn facade_package_metadata(
             }),
         });
     }
-    // Extension PROPERTIES (`val String.doubled`): the accessor is a static `getName(Recv)` whose
-    // descriptor cannot mark receiver-ness — only `Property.receiver_type` in the metadata does.
-    // Plain top-level properties keep resolving through the facade's static fields (unrecorded, as
-    // before).
+    // Package properties share one metadata list. An extension accessor's leading JVM parameter does
+    // not identify receiver-ness, so its semantic receiver is recorded separately; a plain top-level
+    // property has no receiver but still needs a declaration record for Kotlin consumers (`::value`,
+    // imports, mutability, and its Kotlin type). Accessor descriptors are realization data only.
     let mut prop_metas: Vec<crate::metadata::builder::PropMeta> = Vec::new();
     for &d in &file.decls {
         let Decl::Property(p) = file.decl(d) else {
             continue;
         };
-        if p.receiver.is_none() {
-            continue;
-        }
-        // Match by the SOURCE declaration, not the name — two extension properties may share a name
-        // on different receivers (`val String.x` / `val Int.x`); the source key picks this decl's.
-        let Some(prop_sig) = syms.source_extension_property((file_index, d.0)) else {
-            continue;
-        };
-        let (ty, is_var) = (prop_sig.ty, prop_sig.is_var);
-        let recv = prop_sig.receiver;
         let cap = {
             let mut c = p.name.chars();
             c.next()
                 .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
                 .unwrap_or_default()
         };
-        let recv_desc = crate::jvm::names::type_descriptor(recv);
+        let (ty, is_var, type_params, receiver, mut accessor_params) = if p.receiver.is_some() {
+            // Match by declaration, not name: extension properties may share a spelling on
+            // different receivers and still denote different declarations.
+            let Some(property) = syms.source_extension_property((file_index, d.0)) else {
+                continue;
+            };
+            (
+                property.ty,
+                property.is_var,
+                property.formals.clone(),
+                Some(property.receiver),
+                std::iter::once(property.receiver)
+                    .chain(property.context_params.iter().copied())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            let Some(property) = syms.source_props.get(&(file_index, d.0)) else {
+                continue;
+            };
+            (
+                property.ty,
+                property.is_var,
+                Vec::new(),
+                None,
+                property.context_params.clone(),
+            )
+        };
+        let descriptor_params = accessor_params
+            .iter()
+            .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+            .collect::<String>();
         let ty_desc = crate::jvm::names::type_descriptor(ty);
-        let getter = (format!("get{cap}"), format!("({recv_desc}){ty_desc}"));
-        let setter = is_var.then(|| (format!("set{cap}"), format!("({recv_desc}{ty_desc})V")));
+        let getter = (
+            format!("get{cap}"),
+            format!("({descriptor_params}){ty_desc}"),
+        );
+        let setter = is_var.then(|| {
+            accessor_params.push(ty);
+            let params = accessor_params
+                .iter()
+                .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+                .collect::<String>();
+            (format!("set{cap}"), format!("({params})V"))
+        });
         prop_metas.push(crate::metadata::builder::PropMeta {
             name: p.name.clone(),
             ty,
             is_var,
-            receiver: Some(recv),
+            type_params,
+            receiver,
             getter,
             setter,
         });
     }
-    (!metas.is_empty() || !prop_metas.is_empty()).then(|| {
-        let (d1_bytes, d2) = crate::metadata::builder::build_package(&metas, &prop_metas);
+    let package = file
+        .package
+        .as_deref()
+        .unwrap_or_default()
+        .replace('.', "/");
+    let alias_metas = file
+        .type_aliases
+        .iter()
+        .filter_map(|(alias, _)| {
+            let qualified = if package.is_empty() {
+                alias.clone()
+            } else {
+                format!("{package}/{alias}")
+            };
+            let target = syms
+                .source_alias_fqns
+                .get(&crate::types::type_name(&qualified))
+                .copied()?;
+            Some(crate::metadata::builder::TypeAliasMeta {
+                name: alias.clone(),
+                target: Ty::obj_name(target),
+            })
+        })
+        .collect::<Vec<_>>();
+    (!metas.is_empty() || !prop_metas.is_empty() || !alias_metas.is_empty()).then(|| {
+        let (d1_bytes, d2) =
+            crate::metadata::builder::build_package(&metas, &prop_metas, &alias_metas);
         // `d1` is the protobuf payload with one byte per `char` (the constant pool writes it as
         // modified-UTF-8, which the reader decodes back to the same bytes).
         let d1: String = d1_bytes.iter().map(|&b| b as char).collect();
@@ -839,6 +900,42 @@ mod tests {
             "registration must preserve the negative outcome so checker-only absence is distinct"
         );
         assert!(!syms.fn_facades_by_decl.contains_key(&(0, splice_only.0)));
+    }
+
+    #[test]
+    fn facade_metadata_round_trips_plain_top_level_properties() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_source_with_detected_features(
+            "package a\nvar topLevel: Int = 42",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        prepare_module_symbols(&files, &["A".to_string()], &mut symbols);
+
+        let metadata = facade_package_metadata(&files[0], 0, &symbols)
+            .expect("a package property requires facade metadata");
+        let decoded = crate::jvm::metadata::decode_metadata(
+            &metadata.d1,
+            &metadata.d2,
+            Some(metadata.k),
+            "a/AKt",
+            &[],
+        );
+
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+        let [property] = decoded.package_properties.as_ref() else {
+            panic!(
+                "expected one package property, got {:?}",
+                decoded.package_properties
+            );
+        };
+        assert_eq!(property.name, "topLevel");
+        assert!(property.is_var);
+        assert_eq!(
+            property.ret_class,
+            Some(crate::types::type_name("kotlin/Int"))
+        );
     }
 
     /// JVM post-lowering passes must run through `run_backend_passes`.

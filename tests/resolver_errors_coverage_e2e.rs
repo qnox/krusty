@@ -199,13 +199,16 @@ fn for_over_boolean() {
 }
 
 // ---------------------------------------------------------------------------
-// Generic local function (unsupported)
+// Generic local function
 // ---------------------------------------------------------------------------
 
 #[test]
-fn generic_local_function() {
+fn generic_local_function_is_accepted() {
     let d = diags("fun box(): Int { fun <T> id(x: T): T = x; return id(1) }");
-    assert_rejected(&d, "generic local function");
+    assert!(
+        d.is_empty(),
+        "generic local functions are valid Kotlin: {d:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +397,20 @@ fn multiply_two_strings() {
 fn compare_string_with_int() {
     let d = diags("fun box(): Int { val b = \"a\" < 1; return 0 }");
     assert_rejected(&d, "comparing a String with an Int");
+}
+
+#[test]
+fn generic_extension_receiver_binding_is_not_widened_by_an_argument() {
+    let d = diags(
+        "interface Holder<T>\n\
+         class TextHolder : Holder<String>\n\
+         fun <T> Holder<T>.accept(value: T): T = value\n\
+         fun box(): Int { TextHolder().accept(1); return 0 }",
+    );
+    assert_rejected(
+        &d,
+        "an argument inconsistent with the generic receiver binding",
+    );
 }
 
 // ---------------------------------------------------------------------------

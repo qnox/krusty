@@ -17,17 +17,13 @@ fn valueclass_param_reified_extension_resolves() {
     const LIB: &str = "package lib\n\
         @JvmInline value class Id(val v: String)\n\
         class Prov\n\
-        class Reg { fun getFor(id: Id): Any = TODO() }\n\
+        class Reg\n\
         inline fun <reified T> Reg.getFor(id: Id): T = TODO()\n";
-    // Explicit type argument — resolves to the reified extension (the member is not generic).
-    let Some(diags) = common::checker_diags_against(
-        "ee1_expl",
-        LIB,
-        "import lib.Reg\nimport lib.Id\nimport lib.Prov\n\
-         fun f(r: Reg, id: Id): Prov = r.getFor<Prov>(id)\nfun box(): String = \"OK\"\n",
-    ) else {
-        return;
-    };
+    // Explicit type argument — resolves to the reified extension.
+    let main = "import lib.Reg\nimport lib.Id\nimport lib.Prov\nimport lib.getFor\n\
+         fun f(r: Reg, id: Id): Prov = r.getFor<Prov>(id)\nfun box(): String = \"OK\"\n";
+    let diags = common::checker_diags_against_ref("ee1_expl", LIB, main)
+        .expect("reference compiler unavailable");
     assert_eq!(
         diags,
         Vec::<String>::new(),

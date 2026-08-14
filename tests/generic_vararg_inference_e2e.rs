@@ -46,18 +46,20 @@ fun box(): String {\n\
 }
 
 #[test]
-fn generic_vararg_spread_stays_unsupported() {
+fn generic_vararg_spread_runs() {
     const SRC: &str = "class Entry(val text: String)\n\
 fun <T> last(vararg values: T): T = values[values.size - 1]\n\
 fun box(): String {\n\
     val values = arrayOf(Entry(\"OK\"))\n\
     return last(*values).text\n\
 }\n";
-    assert_eq!(run(SRC), None);
+    let (reference_code, stderr) = common::kotlinc_source_result("GenericVarargSpread", SRC);
+    assert_eq!(reference_code, 0, "kotlinc rejected fixture: {stderr}");
+    assert_eq!(run(SRC).as_deref(), Some("OK"));
 }
 
 #[test]
-fn generic_value_class_storage_stays_unsupported() {
+fn generic_value_class_storage_runs() {
     const SRC: &str = "@JvmInline\n\
 value class Wrapper<T : Int>(val value: T)\n\
 fun <T> last(vararg values: T): T = values[values.size - 1]\n\
@@ -67,5 +69,5 @@ fun <T : Int> read(first: Wrapper<T>, optional: Wrapper<T>?): Int {\n\
     return left.value + right.value\n\
 }\n\
 fun box(): String = if (read(Wrapper(1), Wrapper(2)) == 3) \"OK\" else \"fail\"\n";
-    assert_eq!(run(SRC), None);
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }

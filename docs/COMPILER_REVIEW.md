@@ -1,5 +1,14 @@
 # Compiler architecture review
 
+The mandatory implementation/review invariants and first-pass smell scan live in the repository
+root `AGENTS.md`. Keep that checklist current when a review discovers a recurring architectural
+failure; this document provides the longer rationale and migration history.
+
+Review order is deliberate: establish symbol identity and provider normalization first, inspect the
+single candidate/overload path next, and only then inspect lowering and JVM realization. A defect in
+an earlier phase must be fixed there; reviewers should reject a later-phase retry that merely hides
+the missing decision.
+
 This review focuses on why adding individual Kotlin features has not translated into broad
 conformance coverage. The recurring pattern is not lack of feature code. It is duplicated resolution
 paths, JVM representation leaking above the backend boundary, and per-feature side tables that make

@@ -30,3 +30,32 @@ fn const_val_in_object_read_from_method_and_externally() {
         }\n";
     assert_eq!(run(SRC).expect("object const val"), "OK");
 }
+
+#[test]
+fn const_member_read_still_evaluates_its_value_receiver() {
+    const SRC: &str = "var observed = 0\n\
+        object Config { const val VALUE = 42 }\n\
+        fun config(): Config { observed = 123; return Config }\n\
+        fun box(): String {\n\
+        \x20 val value = config().VALUE\n\
+        \x20 return if (value == 42 && observed == 123) \"OK\" else \"FAIL\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("constant receiver evaluation"), "OK");
+}
+
+#[test]
+fn const_value_receiver_corpus_cases() {
+    if !common::corpus_ready() {
+        return;
+    }
+    for case in [
+        "inline/propertyAccessorInline.kt",
+        "properties/const/constPropertyAccessor.kt",
+    ] {
+        assert_eq!(
+            common::run_box_corpus_case(case).as_deref(),
+            Some("OK"),
+            "{case}"
+        );
+    }
+}

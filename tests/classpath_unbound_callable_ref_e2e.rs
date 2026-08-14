@@ -563,7 +563,7 @@ fn unimported_source_extension_reference_is_not_visible() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.contains("callable references are not supported")),
+            .any(|diagnostic| diagnostic.contains("unresolved reference 'label'")),
         "{diagnostics:?}"
     );
 }

@@ -261,7 +261,13 @@ pub fn symbols_from_ir(ir: &IrFile, ctx: &super::PluginContext<'_>) -> Vec<KsCla
             annotations: ctx
                 .class_annotations
                 .get(&(i as u32))
-                .map(|annotations| annotations.as_slice().to_vec())
+                .map(|annotations| {
+                    annotations
+                        .as_slice()
+                        .iter()
+                        .map(|annotation| annotation.render())
+                        .collect()
+                })
                 .unwrap_or_default(),
             properties: c
                 .fields

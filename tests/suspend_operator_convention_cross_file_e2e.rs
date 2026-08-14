@@ -101,13 +101,10 @@ fn compare_to_and_contains_cross_file_execute() {
     );
 }
 
-/// `invoke` IS still out of reach across the file boundary, so the SPEC entry keeps a residual gap —
-/// just a narrower one than it used to claim, and for a different reason. Both halves are pinned:
-/// the same declaration reached from its OWN file emits and runs, so this is a cross-file resolution
-/// gap and not a property of `invoke` or of `suspend`. Without `suspend` the refusal is SILENT (no
-/// diagnostic), which is the part worth noticing if anyone lifts this.
+/// `invoke` uses the same exact selected extension target across file boundaries as the other operator
+/// conventions. Pin both the ordinary and suspending forms so neither can regress into a silent skip.
 #[test]
-fn invoke_convention_cross_file_is_the_residual_gap() {
+fn invoke_convention_cross_file_executes() {
     const LIB: &str = "class Box(var v: Int)\n\
                        operator fun Box.invoke(): Int = v\n";
     const MAIN: &str = "fun box(): String {\n\
@@ -122,41 +119,16 @@ fn invoke_convention_cross_file_is_the_residual_gap() {
             std::slice::from_ref(&stdlib),
             Some(jdk.as_path())
         ),
-        None,
-        "cross-file `invoke` convention: if this now compiles, assert the box() answer instead of \
-         deleting the check, and drop the residual gap from docs/SPEC.md"
+        Some("OK".to_string()),
+        "cross-file `invoke` convention"
     );
 
-    // A failed compile alone cannot support the SPEC's diagnostic distinction: the runner returns
-    // `None` for both a silent refusal and an ordinary front-end error. Ask the same module-prepared
-    // front end used by compilation and pin that the plain convention currently declines WITHOUT a
-    // diagnostic. This is deliberately checked before the suspend spelling below, so a future fix
-    // cannot accidentally trade the silent gap for a newly noisy one while leaving the runtime
-    // assertion above unchanged.
-    let plain_diagnostics =
-        common::module_front_end_diagnostics(&[("Lib.kt", LIB), ("Main.kt", MAIN)])
-            .expect("the JVM toolchain is provisioned for the runtime assertion above");
-    assert!(
-        plain_diagnostics.is_empty(),
-        "the non-suspend cross-file invoke gap is currently silent, got {plain_diagnostics:?}"
-    );
-
-    // The suspend form reaches a different explicit guard: extension-operator `invoke` lowering
-    // cannot thread a continuation yet, so checker selection declines and the call is diagnosed.
-    // Pin the exact public diagnostic promised by the SPEC instead of inferring it from another
-    // `None` result. Both declarations are otherwise the same provider-neutral module shapes.
     const SUSPEND_LIB: &str = "class Box(var v: Int)\n\
                                suspend operator fun Box.invoke(): Int = v\n";
-    const SUSPEND_MAIN: &str = "suspend fun drive(a: Box): Int = a()\n";
-    let suspend_diagnostics =
-        common::module_front_end_diagnostics(&[("Lib.kt", SUSPEND_LIB), ("Main.kt", SUSPEND_MAIN)])
-            .expect("the JVM toolchain is provisioned for the runtime assertion above");
-    assert!(
-        suspend_diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic == "unresolved function 'a'"),
-        "the suspend cross-file invoke gap must stay loud and attributable, got \
-         {suspend_diagnostics:?}"
+    let suspend_main = main_driving("r = b() + 1");
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", SUSPEND_LIB), ("Main.kt", suspend_main.as_str())],
+        "suspend_invoke_cross_file",
     );
 
     const SAME_FILE: &str = "class Box(var v: Int)\n\
@@ -172,6 +144,6 @@ fn invoke_convention_cross_file_is_the_residual_gap() {
             Some(jdk.as_path())
         ),
         Some("OK".to_string()),
-        "the same `invoke` extension must run within its own file — the gap is the file boundary"
+        "the same `invoke` extension must run within its own file"
     );
 }

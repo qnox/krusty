@@ -7,6 +7,8 @@ parameters.
 
 - Use `./run-tests.sh` for the full suite; it provisions kotlinc and the Kotlin codegen/box corpus.
 - Use focused harness runs, not raw `cargo test`, while iterating. Standalone suites still use `./run-tests.sh --test <name> -- --nocapture`; grouped e2e tests use a test-name filter, e.g. `./run-tests.sh --test e2e lambda_e2e::lambdas_run -- --nocapture`.
+- Use `./run-tests.sh --survey --frontend-only` to audit parser/signature/checker skips against the
+  pinned corpus without building or running the backend.
 - Do not pass `--release`; the gate profile is the intended fast edit/build/test loop.
 - For Kotlin box conformance changes, run `./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture` and keep `FAIL: 0`.
 - For performance work, start with the harness timing output or `KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1`.
@@ -67,7 +69,12 @@ invocation separately because each is a separate process with its own wall time.
 CI builds the conformance test binary once and runs that artifact against every version in
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
 runtime reference toolchain, so the matrix does not rebuild Rust code per Kotlin version. Each leg
-must retain zero accepted-case miscompiles and score at least 40% before a release can publish.
+must score at least 55% of backend-applicable cases before a release can publish. Unsupported and
+miscompiled applicable cases count against that floor; cases excluded solely by the selected
+backend do not.
+
+The general and corpus test-binary deadlines default to 120 seconds. The larger product e2e binary
+defaults to 300 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.
 
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.
@@ -154,6 +161,11 @@ Performance-relevant harness state:
 
 Optional profiling knobs:
 
+- `KRUSTY_TEST_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline applied to every test
+  binary except e2e; raise it explicitly on slow systems.
+- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 300-second deadline for both focused and full
+  e2e runs.
+- `KRUSTY_CORPUS_TIMEOUT_SECONDS=<seconds>` overrides that deadline for the dedicated corpus pass.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
@@ -187,11 +199,14 @@ skips JVM execution and must not be reported as runtime conformance.
 For corpus triage, use the survey binary through the gate profile:
 
 ```sh
-cargo run --profile gate --bin survey -- target/cache/box-corpus/2.4.0/compiler/testData/codegen/box
-cargo run --profile gate --bin survey -- target/cache/box-corpus/2.4.0/compiler/testData/codegen/box --samples "inline splice failed"
+./run-tests.sh --survey
+./run-tests.sh --survey --frontend-only --report /tmp/krusty-frontend-survey.tsv
+./run-tests.sh --survey --frontend-only --file coroutines/example.kt
+./run-tests.sh --survey --samples "inline splice failed"
 ```
 
-The survey reuses the same provisioned toolchain/cache paths as the harness and reports specific
+The harness builds the survey with the normal `gate` profile, applies the configurable
+`KRUSTY_TEST_TIMEOUT_SECONDS` deadline, provisions the same toolchain/corpus, and reports specific
 inline splice bail callees when available. It covers the full corpus shape set the gate compiles:
 single-file, `// FILE:`-split multi-file (with the generated `// WITH_COROUTINES` helpers), and
 `// MODULE:` multi-module tests (each build unit compiled against its dependency modules' emitted

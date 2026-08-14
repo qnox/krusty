@@ -18,6 +18,13 @@
 //! The category is the first macro argument (a string literal). The canonical set — keep new sites to
 //! these so `KRUSTY_TRACE=<cat>` stays predictable (see [`CATEGORIES`]):
 //! - `resolve` — name/overload/type resolution in the checker.
+//! - `name_type` — lexical/implicit-receiver inputs to a bare-name type decision.
+//! - `diagnostic` — the exact file/span and message at the point a diagnostic is emitted.
+//! - `callable_ref` — callable-reference expectation and selection.
+//! - `expected_call` — expected-result inference between nested selected calls.
+//! - `revisit` — the first repeated checker visit to each expression id; use this to find duplicate
+//!   semantic traversal instead of masking it with a scope/type cache.
+//! - `package_lookup` — package-prefix catalog decisions during qualified-name resolution.
 //! - `lower` — frontend-to-IR lowering decisions and bail reasons.
 //! - `suspend` — coroutine / suspend-function lowering (`jvm/suspend.rs`).
 //! - `value_classes` — inline/value-class transform (`jvm/value_classes.rs`).
@@ -28,6 +35,12 @@
 /// place; `KRUSTY_TRACE=all` enables every category regardless.
 pub const CATEGORIES: &[&str] = &[
     "resolve",
+    "name_type",
+    "diagnostic",
+    "callable_ref",
+    "expected_call",
+    "revisit",
+    "package_lookup",
     "lower",
     "suspend",
     "value_classes",

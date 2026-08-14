@@ -55,5 +55,5 @@ fn a_same_arity_constructor_set_keeps_its_plain_function_parameter() {
         \x20 Dual(\"s\") { n -> seen = n }\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cp_ctor_same_arity", AMBIGUOUS_LIB, main);
+    common::expect_box_ok_against_ref("cp_ctor_same_arity", AMBIGUOUS_LIB, main);
 }

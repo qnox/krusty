@@ -40,20 +40,19 @@ return \"OK\"\n\
     common::expect_box_ok_with_stdlib(src, "G");
 }
 
-/// A value class specialized through an erased generic PROPERTY boundary must remain a safe skip
-/// until property construction/accessor realization emits the required box. The checker correctly
-/// recovers `Result<String>` through the inherited owner; treating the stored underlying `String` as
-/// an already-boxed `Result` would instead compile and fail with `ClassCastException`.
+/// A value class specialized through an erased generic property boundary is physically boxed in the
+/// `Object` slot while retaining its specialized semantic type at the read.
 #[test]
-fn inherited_generic_property_specialized_to_value_class_stays_skipped() {
+fn inherited_generic_property_specialized_to_value_class_runs() {
     let src = r#"
 open class BaseWrapper<T>(val response: T)
 class Wrapper(result: Result<String>) : BaseWrapper<Result<String>>(result)
 fun box(): String = Wrapper(Result.success("OK")).response.getOrThrow()
 "#;
-    assert!(
-        common::compile_and_run_with_stdlib(src, "GenericPropertyValueClassBoundary").is_none(),
-        "an unboxed value must never be cast to the value-class wrapper at a generic property boundary"
+    assert_eq!(
+        common::compile_and_run_with_stdlib(src, "GenericPropertyValueClassBoundary")
+            .expect("inherited generic value-class property"),
+        "OK"
     );
 }
 

@@ -6,11 +6,75 @@ fn run(src: &str) -> Option<String> {
 }
 
 #[test]
+fn classpath_fun_interface_with_inherited_concrete_property_is_a_sam() {
+    let library = r#"
+package lib
+interface Marker { val marker: Boolean get() = false }
+fun interface Action : Marker { fun run() }
+class Consumer { fun accept(action: Action) { action.run() } }
+"#;
+    let main = r#"
+import lib.Consumer
+fun forward(consumer: Consumer, callback: () -> Unit) {
+    consumer.accept(callback)
+}
+"#;
+    let diagnostics = common::checker_diags_against_ref(
+        "classpath_fun_interface_with_inherited_concrete_property_is_a_sam",
+        library,
+        main,
+    )
+    .expect("reference compiler unavailable");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn adapt_trailing_default_argument() {
     const SRC: &str = "fun foo(x: String, y: String = \"K\"): String = x + y\n\
         fun call(f: (String) -> String, x: String): String = f(x)\n\
         fun box(): String = call(::foo, \"O\")\n";
     assert_eq!(run(SRC).expect("adapt trailing default"), "OK");
+}
+
+#[test]
+fn explicit_invoke_uses_callable_references_semantic_signature() {
+    const SRC: &str = "fun foo(x: String): String = x + \"K\"\n\
+        fun box(): String { val ref = ::foo; return ref.invoke(\"O\") }\n";
+    assert_eq!(run(SRC).as_deref(), Some("OK"));
+}
+
+#[test]
+fn reflection_type_selects_overloaded_constructor_from_metadata_signature() {
+    const SRC: &str = "import kotlin.reflect.KFunction1\n\
+        class C {\n\
+            val value: String\n\
+            constructor(value: String) { this.value = value }\n\
+            constructor(value: Int) { this.value = value.toString() }\n\
+        }\n\
+        fun box(): String { val ref: KFunction1<String, C> = ::C; return ref(\"OK\").value }\n";
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics =
+        common::front_end_diagnostics(SRC, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        common::backend_outcome_in_process(
+            SRC,
+            "Main",
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path()),
+        ),
+        Some(common::BackendOutcome::Emitted),
+    );
+    assert_eq!(run(SRC).as_deref(), Some("OK"));
+}
+
+#[test]
+fn reflection_type_selects_primary_from_primary_and_secondary_constructors() {
+    const SRC: &str = "import kotlin.reflect.KFunction1\n\
+        class C(val value: String) { constructor(value: Int): this(value.toString()) }\n\
+        fun box(): String { val ref: KFunction1<String, C> = ::C; return ref(\"OK\").value }\n";
+    assert_eq!(run(SRC).as_deref(), Some("OK"));
 }
 
 #[test]
@@ -230,7 +294,7 @@ fn cross_file_value_class_reference_coerces_return_to_unit() {
             "Target",
             "package sample\n\
              @JvmInline value class Id(val value: String)\n\
-             fun consume(id: Id): String = if (id.value == \"OK\") id.value else error(\"bad\")\n",
+             fun consume(id: Id): String = if (id.value == \"OK\") id.value else \"bad\"\n",
         ),
         (
             "Use",
@@ -321,6 +385,76 @@ fn generic_bound_constrains_adapted_reference() {
         fun bad(): String = hold(::foo)\n";
     let diagnostics = common::front_end_diagnostics(SRC, &[], None);
     assert!(!diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn concrete_expected_shape_satisfies_generic_callable_reference_bound() {
+    const SRC: &str = "class Holder<T : CharSequence>\n\
+        fun <T : CharSequence> identity(value: T): T = value\n\
+        fun <T : CharSequence> Holder<T>.identity(value: T): T = value\n\
+        fun box(): String {\n\
+            val selected: (String) -> String = ::identity\n\
+            val extension = Holder<String>::identity\n\
+            val projected = Holder<*>::identity\n\
+            return selected(\"OK\")\n\
+        }\n";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[SRC],
+        "concrete generic callable-reference bound",
+    );
+}
+
+#[test]
+fn inferred_composite_return_preserves_generic_callable_shape() {
+    const SRC: &str = "fun <T> T.paired(value: Int) = this to value\n\
+        fun use() {\n\
+            val first = String::paired\n\
+            val nested = first::paired\n\
+            val (callback, number) = nested(1)\n\
+            callback(\"OK\", number)\n\
+        }\n";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[SRC],
+        "inferred composite generic callable-reference return",
+    );
+}
+
+#[test]
+fn natural_callable_reference_shape_keeps_defaults_and_vararg_array() {
+    const SRC: &str =
+        "fun String.collect(prefix: String = \"K\", vararg values: Int): String = this + prefix\n\
+        fun use() {\n\
+            val reference = String::collect\n\
+            reference(\"O\", \"K\", intArrayOf(1, 2))\n\
+        }\n";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[SRC],
+        "natural callable-reference defaults and vararg shape",
+    );
+}
+
+#[test]
+fn sam_accepts_callable_reference_with_defaulted_and_vararg_parameters() {
+    const SRC: &str = "fun interface Action { fun invoke() }\n\
+        fun accept(action: Action): Any = action\n\
+        fun target(prefix: String? = \"\", vararg values: Int): Int = 0\n\
+        fun use() { accept(::target) }\n";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[SRC],
+        "SAM callable-reference default and vararg adaptation",
+    );
+}
+
+#[test]
+fn library_hof_contextually_shapes_property_reference() {
+    const SRC: &str = "fun use(): Int {\n\
+            val values = intArrayOf(1, 2, 3)\n\
+            return with(values, IntArray::size)\n\
+        }\n";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[SRC],
+        "library HOF property-reference expectation",
+    );
 }
 
 #[test]

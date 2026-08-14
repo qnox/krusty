@@ -72,7 +72,7 @@ pub fn materialize(
         }
     }
     let libraries = JvmLibraries::new(classpath.clone());
-    let mut lib = libraries.resolve_type(internal)?;
+    let mut lib = (*libraries.classifier(type_name(internal))?).clone();
     let mut meta = classpath
         .find(internal)
         .map(|class| class.meta.clone())
@@ -113,9 +113,9 @@ pub fn render_library_class(
     text.push_str(&class_name);
     let type_hi = text.len() as u32;
 
-    if !lib.type_params.is_empty() {
+    if !lib.type_params().is_empty() {
         text.push('<');
-        text.push_str(&lib.type_params.join(", "));
+        text.push_str(&lib.type_params().join(", "));
         text.push('>');
     }
 

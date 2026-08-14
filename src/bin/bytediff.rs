@@ -49,7 +49,7 @@ fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(Stri
     let mut ir = lower_file(&files[0], &info, &syms, &runtime)?;
     // Shared post-lowering pass pipeline (jvm/backend.rs).
     krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms).ok()?;
-    let out = emit_all(&ir, &facade, &**cp, None)?;
+    let out = emit_all(&ir, &facade, &**cp, None, &syms)?;
     if out.is_empty() {
         None
     } else {
@@ -121,20 +121,6 @@ fn write_class(dir: &Path, internal: &str, bytes: &[u8]) -> Option<PathBuf> {
     Some(path)
 }
 
-fn collect_kt(dir: &Path, out: &mut Vec<PathBuf>) {
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        let mut es: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-        es.sort();
-        for p in es {
-            if p.is_dir() {
-                collect_kt(&p, out);
-            } else if p.extension().is_some_and(|e| e == "kt") {
-                out.push(p);
-            }
-        }
-    }
-}
-
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
@@ -170,8 +156,7 @@ fn main() {
     let kdir = tmp.join("krusty");
     let rdir = tmp.join("ref");
 
-    let mut files = Vec::new();
-    collect_kt(Path::new(&box_dir), &mut files);
+    let files = krusty::conformance::kotlin_files(Path::new(&box_dir));
 
     let (mut files_diffed, mut cls_total, mut cls_equal, mut cls_missing) =
         (0u32, 0u32, 0u32, 0u32);

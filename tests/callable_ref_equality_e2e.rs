@@ -49,3 +49,30 @@ fun box(): String {\n\
     let out = run(SRC).expect("function references should still invoke");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn suspend_top_level_reference_keeps_identity_and_continuation_shape() {
+    const SRC: &str = "import kotlin.coroutines.*\n\
+suspend fun twice(x: Int): Int = x * 2\n\
+class SuspendAcc(private val base: Int) { suspend fun plus(x: Int): Int = base + x }\n\
+fun ckEq(x: Any, y: Any) { if (x != y || x.hashCode() != y.hashCode()) throw AssertionError(\"$x != $y\") }\n\
+suspend fun probe(): String {\n\
+    ckEq(::twice, ::twice)\n\
+    val acc = SuspendAcc(1)\n\
+    ckEq(acc::plus, acc::plus)\n\
+    val reference = ::twice\n\
+    val bound = acc::plus\n\
+    val unbound = SuspendAcc::plus\n\
+    val a = reference(10)\n\
+    val b = bound(10)\n\
+    val c = unbound(acc, 10)\n\
+    val result = a + b + c\n\
+    return if (result == 42) \"OK\" else \"fail: $result\"\n\
+}\n";
+    common::expect_suspend_result(
+        "SuspendCallableReferenceIdentity",
+        SRC,
+        "probe(continuation)",
+        "OK",
+    );
+}

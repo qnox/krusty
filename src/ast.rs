@@ -57,6 +57,32 @@ pub fn is_computed_companion_prop(p: &PropDecl) -> bool {
         }
 }
 
+/// A field-less member property whose value is entirely supplied by its accessor body.
+///
+/// This is a source declaration shape shared by semantic checking and IR construction. Keeping it
+/// beside [`PropDecl`] prevents those phases from independently deciding which declarations own
+/// instance storage.
+pub fn is_computed_member_prop(p: &PropDecl) -> bool {
+    p.receiver.is_none()
+        && !p.is_lateinit
+        && p.init.is_none()
+        && p.getter.is_some()
+        && (!p.is_var
+            || p.setter
+                .as_ref()
+                .is_some_and(|setter| setter.body.is_some()))
+        && !p.getter_reads_field
+}
+
+/// Whether this member-property declaration contributes one instance-storage slot.
+pub fn has_instance_backing_field(p: &PropDecl) -> bool {
+    !p.is_const
+        && !is_computed_member_prop(p)
+        && !p.is_abstract
+        && p.delegate.is_none()
+        && p.receiver.is_none()
+}
+
 pub fn setter_param_or_value(param: Option<&String>) -> String {
     param.cloned().unwrap_or_else(|| "value".to_string())
 }
@@ -300,6 +326,9 @@ pub struct CatchClause {
 pub struct WhenArm {
     /// Empty ⇒ the `else` arm.
     pub conditions: Vec<ExprId>,
+    /// Optional `if` condition evaluated after a subject condition matches and within the
+    /// smart-cast scope established by that condition.
+    pub guard: Option<ExprId>,
     pub body: ExprId,
 }
 
@@ -356,11 +385,12 @@ pub enum Stmt {
         /// re-reads and pops), so it's kept for byte parity.
         prefix: bool,
     },
-    /// `receiver.name = value` — write a (mutable) property via its setter.
+    /// `receiver.name = value` / `receiver?.name = value` — write a mutable property via its setter.
     AssignMember {
         receiver: ExprId,
         name: String,
         value: ExprId,
+        safe: bool,
     },
     /// `array[i] = value` / `receiver[i, j, …] = value` — a subscript store (an array element store for
     /// a single index, else the `set(i, j, …, value)` operator). `indices` always has at least one.
@@ -415,8 +445,9 @@ pub enum Stmt {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RangeKind {
-    Through, // a..b   (inclusive)
-    Until,   // a until b (exclusive)
+    Through, // a..b (inclusive)
+    OpenEnd, // a..<b (exclusive operator)
+    Until,   // a until b (exclusive infix function)
     DownTo,  // a downTo b (descending, inclusive)
 }
 
@@ -498,8 +529,9 @@ pub struct TypeRef {
     pub name: String,
     /// Nullability, function-type shape, and use-site projection flags.
     pub flags: TrFlags,
-    /// The first generic type argument, captured for `Array<T>` (element) and function types
-    /// (the return type). General class type arguments live in `targs`.
+    /// The return type of function syntax. Classifier type arguments, including `Array<T>`, live in
+    /// `targs`; keeping one generic classifier in a second representation loses projections and makes
+    /// every type decoder grow an Array-only branch.
     pub arg: Option<Box<TypeRef>>,
     /// All generic type arguments on a class type (`Map<K, V>` → `[K, V]`). Empty for non-generic
     /// types. JVM-erased in descriptors but kept so the front end recovers member/element types.
@@ -563,18 +595,26 @@ impl TypeRef {
 }
 
 #[derive(Clone, Debug)]
+pub struct AnnotationRef {
+    /// Source spelling used only as input to name resolution.
+    pub name: String,
+    /// Exact classifier-reference span; resolved identities are keyed by this occurrence.
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
 pub struct Param {
     pub name: String,
     pub ty: TypeRef,
     /// `true` for a `vararg` parameter — its runtime type is `Array<ty>` and callers pack the
     /// trailing arguments into a fresh array.
     pub is_vararg: bool,
-    /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted trailing
-    /// arguments. Defaults that reference another parameter are rejected (see resolve.rs).
+    /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted arguments. A
+    /// default may reference parameters declared before it, matching Kotlin's left-to-right scope.
     pub default: Option<ExprId>,
     /// Simple names of annotations applied to the parameter (`@IntroducedAt("1") b: String` →
     /// `["IntroducedAt"]`). Used by the compiler-extension surface.
-    pub annotations: Vec<String>,
+    pub annotations: Vec<AnnotationRef>,
     /// The argument expressions of each annotation in `annotations` (same order/length): an extension
     /// that needs an annotation's value (`@SerialName("foo")`) reads `annotation_args[i][0]`. An empty
     /// inner vec for a no-arg annotation.
@@ -588,25 +628,24 @@ pub enum FunBody {
     None,          // (no body — not valid for v0 top-level, but parseable)
 }
 
-/// Bit-packed boolean modifiers for a [`FunDecl`], collapsing its eight `is_*` modifier bytes into one
-/// `u8` (a real 8-byte-per-decl saving). Read through the `FunDecl` accessors of the same names;
-/// `is_open`/`is_override`/`is_operator` are mutated through the matching `set_*` methods; built with
-/// the `with_*` chain. All eight bits are in use — a ninth flag needs a wider field.
+/// Bit-packed boolean modifiers for a [`FunDecl`]. Read through the `FunDecl` accessors of the same
+/// names and build with the `with_*` chain.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FdFlags(u8);
+pub struct FdFlags(u16);
 
 impl FdFlags {
-    const IS_INLINE: u8 = 1 << 0;
-    const IS_FINAL: u8 = 1 << 1;
-    const IS_OPEN: u8 = 1 << 2;
-    const IS_OVERRIDE: u8 = 1 << 3;
-    const IS_ABSTRACT: u8 = 1 << 4;
-    const IS_SUSPEND: u8 = 1 << 5;
-    const IS_TAILREC: u8 = 1 << 6;
-    const IS_OPERATOR: u8 = 1 << 7;
+    const IS_INLINE: u16 = 1 << 0;
+    const IS_FINAL: u16 = 1 << 1;
+    const IS_OPEN: u16 = 1 << 2;
+    const IS_OVERRIDE: u16 = 1 << 3;
+    const IS_ABSTRACT: u16 = 1 << 4;
+    const IS_SUSPEND: u16 = 1 << 5;
+    const IS_TAILREC: u16 = 1 << 6;
+    const IS_OPERATOR: u16 = 1 << 7;
+    const IS_INFIX: u16 = 1 << 8;
 
     #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
+    const fn with(mut self, mask: u16, on: bool) -> Self {
         if on {
             self.0 |= mask;
         } else {
@@ -615,7 +654,7 @@ impl FdFlags {
         self
     }
     #[inline]
-    const fn has(self, mask: u8) -> bool {
+    const fn has(self, mask: u16) -> bool {
         self.0 & mask != 0
     }
 
@@ -650,6 +689,10 @@ impl FdFlags {
     #[inline]
     pub const fn with_is_operator(self, on: bool) -> Self {
         self.with(Self::IS_OPERATOR, on)
+    }
+    #[inline]
+    pub const fn with_is_infix(self, on: bool) -> Self {
+        self.with(Self::IS_INFIX, on)
     }
 }
 
@@ -690,7 +733,7 @@ pub struct FunDecl {
     /// same parser post-pass as `decl_line`.
     pub body_close_line: u32,
     /// Bit-packed `is_inline`/`is_final`/`is_open`/`is_override`/`is_abstract`/`is_suspend`/`is_tailrec`/
-    /// `is_operator` (read via the accessors below; `is_open`/`is_override`/`is_operator` set via `set_*`).
+    /// `is_operator`/`is_infix` (read via the accessors below).
     /// `is_final` — `final`, cannot be overridden. `is_open` — `open`/`override` without `final`, so the
     /// JVM backend must NOT emit `ACC_FINAL`. `is_override` — the member MUST match a supertype member.
     /// `is_abstract` — no body, only valid in an abstract class/interface. `is_suspend` — a coroutine,
@@ -704,33 +747,13 @@ pub struct FunDecl {
     /// Simple names of annotations applied to this function (`@Composable fun f()` → `["Composable"]`),
     /// mirroring `ClassDecl.annotations`. Used by the compiler-extension surface (`crate::plugins`) to
     /// find annotated functions.
-    pub annotations: Vec<String>,
+    pub annotations: Vec<AnnotationRef>,
     /// The argument expressions of each annotation in [`Self::annotations`] (same order/length),
     /// mirroring `ClassDecl::annotation_args`. `@JvmName("gNullable")` reads its bytecode name here.
     pub annotation_args: Vec<Vec<ExprId>>,
 }
 
 impl FunDecl {
-    /// The bytecode method name this function is emitted under: the `@JvmName("…")` spelling when the
-    /// annotation is present with a constant string argument, otherwise the source name.
-    ///
-    /// The JVM name — not the source name — is the identity that decides a platform declaration
-    /// clash, so two overloads erasing to the same descriptor (`g(String)` / `g(String?)`) are legal
-    /// exactly when `@JvmName` separates them, as in kotlinc.
-    pub fn jvm_name(&self, file: &File) -> String {
-        self.annotations
-            .iter()
-            .position(|a| a.rsplit(['/', '.']).next().unwrap_or(a) == "JvmName")
-            .and_then(|i| self.annotation_args.get(i)?.first())
-            .and_then(|&arg| match file.expr(arg) {
-                // A JVM method NAME: an unpaired surrogate has no name form, so fall back to the
-                // declared name rather than corrupt the descriptor.
-                Expr::StringLit(s) => s.as_str().map(str::to_string),
-                _ => None,
-            })
-            .unwrap_or_else(|| self.name.clone())
-    }
-
     pub(crate) fn has_callable_inline_extension_body(&self) -> bool {
         // Emit the inline fn as a REAL (static) method too, like kotlinc does — a separate
         // compilation can then resolve and splice it. Type parameters (incl. `reified`) are fine:
@@ -780,16 +803,8 @@ impl FunDecl {
         self.flags.has(FdFlags::IS_OPERATOR)
     }
     #[inline]
-    pub fn set_is_open(&mut self, on: bool) {
-        self.flags = self.flags.with_is_open(on);
-    }
-    #[inline]
-    pub fn set_is_override(&mut self, on: bool) {
-        self.flags = self.flags.with_is_override(on);
-    }
-    #[inline]
-    pub fn set_is_operator(&mut self, on: bool) {
-        self.flags = self.flags.with_is_operator(on);
+    pub fn is_infix(&self) -> bool {
+        self.flags.has(FdFlags::IS_INFIX)
     }
 }
 
@@ -818,7 +833,7 @@ pub struct PropParam {
     pub default: Option<ExprId>,
     /// Simple names of annotations on this constructor parameter (`@SerialName("x") val a` →
     /// `["SerialName"]`); empty for none. Read by the compiler-extension surface.
-    pub annotations: Vec<String>,
+    pub annotations: Vec<AnnotationRef>,
     /// The argument expressions of each annotation in `annotations` (same order/length) — kept so an
     /// extension can const-fold a value (`@SerialName("$prefix.bar")`). Empty inner vec for a no-arg
     /// annotation.
@@ -845,7 +860,7 @@ pub struct AstEnumEntry {
     pub decl_line: u32,
     /// Simple names of annotations on this constant (`@SerialName("x") RED` → `["SerialName"]`),
     /// parallel to `annotation_args`. Emitted onto the enum's static field (per JVM retention).
-    pub annotations: Vec<String>,
+    pub annotations: Vec<AnnotationRef>,
     /// The argument expressions of each annotation in `annotations` (same order/length).
     pub annotation_args: Vec<Vec<ExprId>>,
     /// Constructor arguments (`RED(0xFF0000)` → the two arg expr ids); empty for `RED` with no args.
@@ -859,6 +874,18 @@ pub struct AstEnumEntry {
     /// Per-entry class-body properties (`RED { val y = … }`) — backing fields + getters on the
     /// `Enum$RED` subclass. Empty when the entry has none.
     pub props: Vec<PropDecl>,
+    /// Source-ordered property initializers and `init` blocks of the entry's anonymous subclass.
+    pub init_order: Vec<ClassInit>,
+}
+
+pub type ClassTypeParameters = crate::types::TypeParameters<Vec<(String, TypeRef)>>;
+
+impl std::ops::Deref for ClassDecl {
+    type Target = ClassTypeParameters;
+
+    fn deref(&self) -> &Self::Target {
+        &self.type_parameters
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -868,34 +895,22 @@ pub struct ClassDecl {
     pub visibility: Visibility,
     /// Simple names of annotations applied to the class (`@Serializable` → `["Serializable"]`).
     /// Used by the compiler-extension surface (`crate::plugins`) to find annotated declarations.
-    pub annotations: Vec<String>,
+    pub annotations: Vec<AnnotationRef>,
     /// The argument expressions of each annotation in `annotations` (same order/length) — kept so an
     /// extension can read an annotation's value (`@Serializable(with = X::class)`). Empty inner vec for
     /// a no-arg annotation.
     pub annotation_args: Vec<Vec<ExprId>>,
     /// Generic type-parameter names (`class C<T>`), erased to `Any`/`Object`.
-    pub type_params: Vec<String>,
+    pub type_parameters: ClassTypeParameters,
     /// Declared non-`Any` upper bounds (`<T: String>` → `("T", String)`). A value class's underlying
     /// type parameter erases to its bound (`value class S<T: String>(val x: T)` → `String`), like kotlinc.
-    pub type_param_bounds: Vec<(String, TypeRef)>,
     pub props: Vec<PropParam>,
     /// Member functions declared in the class body (instance methods). v0: no secondary ctors.
     pub methods: Vec<FunDecl>,
-    /// `companion object { … }` member functions — emitted as `static` methods on this class and
-    /// called as `ClassName.fn(...)`.
-    pub companion_methods: Vec<FunDecl>,
-    /// `companion object { … }` properties (`const val`/`val`) — emitted as `static final` fields and
-    /// read as `ClassName.PROP`.
-    pub companion_props: Vec<PropDecl>,
-    /// A `companion object`'s declared base CLASS (`companion object : Base(args)`), if any — the
-    /// synthesized `C$Companion` extends it (instead of `kotlin/Any`) and its ctor calls `super(args)`.
-    pub companion_base: Option<String>,
-    /// The `super(args)` arguments for [`companion_base`].
-    pub companion_base_args: Vec<ExprId>,
-    /// A `companion object`'s declared interface supertypes (`companion object : I1, I2`).
-    pub companion_supertypes: Vec<String>,
-    /// Source line of the `companion object` declaration (0 when absent).
-    pub companion_decl_line: u32,
+    /// The nested singleton declaration introduced by `companion object`, if present. Its members,
+    /// properties, initialization, and supertypes live on that ordinary [`ClassDecl`]; this edge only
+    /// records Kotlin's outer-class-to-companion-value relationship.
+    pub companion: Option<DeclId>,
     /// Properties declared in the class *body* (`class C { val x = … }`) — backing field + accessor,
     /// initialized in the primary constructor.
     pub body_props: Vec<PropDecl>,
@@ -905,6 +920,9 @@ pub struct ClassDecl {
     /// The declaration kind (plain class / interface / object / enum / annotation). One field instead
     /// of parallel `is_*` booleans; read it through the `is_*` accessor methods.
     pub kind: ClassKind,
+    /// This classifier has exactly one language-level value. `object` is not a separate classifier
+    /// kind; it is an ordinary class declaration with a singleton instance capability.
+    pub singleton: bool,
     /// `data class` — synthesizes equals/hashCode/toString/componentN/copy.
     pub is_data: bool,
     /// `@JvmInline value class` — an inline class. krusty currently compiles it as a regular final
@@ -944,11 +962,9 @@ pub struct ClassDecl {
     pub base_args: Vec<ExprId>,
     /// Secondary constructors: `constructor(params) : this/super(args) { body }`.
     pub secondary_ctors: Vec<SecondaryCtor>,
-    /// `false` when the class declares NO primary constructor (`class A { constructor(...) }`): every
-    /// constructor is a secondary, and a `super(...)`/implicit-delegating one (not `this(...)`) runs the
-    /// field initializers + `init {}` blocks. `true` for an implicit/explicit primary (`class A`,
-    /// `class A()`, `class A(...)`), including a `class A() { constructor(...) : this(...) }`.
-    pub has_primary_ctor: bool,
+    /// Annotation names on the primary constructor. `None` means there is no primary constructor;
+    /// `Some([])` is an implicit or unannotated primary constructor.
+    pub primary_ctor_annotations: Option<Vec<AnnotationRef>>,
     pub span: Span,
     /// 1-based source line of the class declaration (from `span.lo`), for the `LineNumberTable` of
     /// kotlinc's synthesized members (ctor/accessors), which all map to the class's declaration line.
@@ -964,8 +980,6 @@ pub struct ClassDecl {
 pub enum ClassKind {
     Class,
     Interface,
-    /// `object Name { … }` — a singleton (one `INSTANCE`, private constructor).
-    Object,
     /// `enum class Name { A, B }` — extends `java/lang/Enum`.
     Enum,
     /// `annotation class` — emitted as an interface extending `java/lang/annotation/Annotation`;
@@ -1009,6 +1023,18 @@ impl Modality {
 }
 
 impl ClassDecl {
+    pub fn type_params(&self) -> &Vec<String> {
+        &self.type_parameters.type_params
+    }
+
+    pub fn type_param_bounds(&self) -> &Vec<(String, TypeRef)> {
+        &self.type_parameters.type_param_bounds
+    }
+
+    pub fn type_param_variances(&self) -> &Vec<crate::types::TypeVariance> {
+        &self.type_parameters.type_param_variances
+    }
+
     /// `abstract` or `sealed` (both carry `ACC_ABSTRACT`).
     pub fn is_abstract(&self) -> bool {
         self.modality.is_abstract()
@@ -1027,8 +1053,8 @@ impl ClassDecl {
     pub fn is_interface(&self) -> bool {
         self.kind == ClassKind::Interface
     }
-    pub fn is_object(&self) -> bool {
-        self.kind == ClassKind::Object
+    pub fn is_singleton(&self) -> bool {
+        self.singleton
     }
     pub fn is_enum(&self) -> bool {
         self.kind == ClassKind::Enum
@@ -1041,6 +1067,8 @@ impl ClassDecl {
 /// A secondary constructor `constructor(params) [: this(args) | : super(args)] [{ body }]`.
 #[derive(Clone, Debug)]
 pub struct SecondaryCtor {
+    pub annotations: Vec<AnnotationRef>,
+    pub annotation_args: Vec<Vec<ExprId>>,
     pub params: Vec<Param>,
     pub delegation: CtorDelegation,
     pub body: Option<ExprId>,
@@ -1076,7 +1104,7 @@ pub fn parenless_base_supertype(
     class: &ClassDecl,
     mut is_base_class: impl FnMut(&str) -> bool,
 ) -> Option<&str> {
-    if class.has_primary_ctor || class.base_class.is_some() {
+    if class.primary_ctor_annotations.is_some() || class.base_class.is_some() {
         return None;
     }
     let delegates_to_super = class.secondary_ctors.iter().any(|constructor| {
@@ -1111,6 +1139,9 @@ pub struct ExplicitBackingField {
 #[derive(Clone, Debug)]
 pub struct PropDecl {
     pub name: String,
+    /// Annotations on the property declaration. Their source spelling is retained only until the
+    /// signature pass resolves each occurrence to a classifier identity.
+    pub annotations: Vec<AnnotationRef>,
     /// Parameters from a preceding `context(...)` clause.
     pub context_params: Vec<Param>,
     /// 1-based source line of the declaration, filled by the parser post-pass (0 = unknown).
@@ -1142,6 +1173,9 @@ pub struct PropDecl {
     /// `field` reference it is a computed property (no backing field); with an initializer or a
     /// `field` reference it reads the backing field.
     pub getter: Option<FunBody>,
+    /// An explicit getter return type (`get(): T`). Kept apart from the property's annotation so
+    /// the checker can validate that both declarations agree.
+    pub getter_ty: Option<TypeRef>,
     /// `true` when the custom getter body references `field` — the property then has a real backing
     /// field even without an initializer (assignable once in a constructor), per Kotlin semantics.
     pub getter_reads_field: bool,
@@ -1159,6 +1193,13 @@ pub struct PropDecl {
     pub delegate: Option<ExprId>,
     pub explicit_backing_field: Option<ExplicitBackingField>,
     pub span: Span,
+}
+
+impl PropDecl {
+    /// The type explicitly declared by either the property or its getter.
+    pub fn declared_ty(&self) -> Option<&TypeRef> {
+        self.ty.as_ref().or(self.getter_ty.as_ref())
+    }
 }
 
 /// A property setter (or, in future, a non-default getter): its parameter name, optional body
@@ -1191,6 +1232,10 @@ pub struct File {
     /// Classifier references that are not retained by another AST node. Import entries are candidates
     /// until semantic resolution confirms that the imported declaration is a type.
     pub detached_type_refs: Vec<TypeRef>,
+    /// Suppression names in force for a declaration annotation reference, keyed by its source offset.
+    /// This keeps access diagnostics attached to the exact annotation occurrence instead of treating
+    /// one declaration's `@Suppress` as file-wide.
+    pub detached_type_ref_suppressions: std::collections::HashMap<u32, Vec<String>>,
     /// Number of source lines, including a final empty line after a trailing newline.
     pub source_line_count: u32,
     pub decls: Vec<DeclId>,
@@ -1238,6 +1283,10 @@ pub struct File {
     /// backticked members and safe calls with argument lists. Kept sparse rather than widening every
     /// expression node.
     pub exact_member_name_spans: std::collections::HashMap<u32, Span>,
+    /// Callable references whose classifier receiver was written nullable (`A?::member`). The
+    /// receiver expression still names classifier `A`; this sparse marker preserves the source type
+    /// so extension-reference selection does not silently narrow it to `A`.
+    pub nullable_callable_ref_receivers: std::collections::HashSet<u32>,
     /// Dot spans for member expressions with trivia between `.` and the member name.
     pub non_adjacent_member_dot_spans: Vec<(u32, Span)>,
     /// `ExprId`s of `Expr::Call`s whose LAST argument is a SYNTACTIC trailing lambda (`f(a) { … }` /
@@ -1275,6 +1324,13 @@ pub struct File {
     /// a LOCAL return (from the anonymous function itself), so the lowerer must compile its body's
     /// `return` as the closure method's own return rather than a non-local return of the enclosing fn.
     pub anon_fun_lambdas: std::collections::HashSet<u32>,
+    /// Number of leading named context parameters on an anonymous function expression
+    /// (`context(x: C) fun () = …`). They are physical leading parameters and ordinary named values
+    /// in the body, while this count preserves the function type's context-receiver shape.
+    pub anon_fun_context_count: std::collections::HashMap<u32, u32>,
+    /// Declared receiver type of an anonymous extension function (`fun R.(x: A) { … }`), keyed by
+    /// the desugared lambda's `ExprId.0`.
+    pub anon_fun_receivers: std::collections::HashMap<u32, TypeRef>,
     /// `ExprId.0` of each lambda literal carrying the `suspend` modifier (`suspend { … }`). The
     /// checker types it as a `suspend (…) -> …` function type; the lowerer builds a
     /// `SuspendLambda` state machine for it instead of a plain `FunctionN` closure.
@@ -1317,15 +1373,22 @@ pub struct File {
     /// type's start offset (`TypeRef.span.lo`). The parser consumes leading `@Foo` before a type and
     /// records the simple names here; a plugin recovers them via the type's span (e.g. to detect a
     /// composable function type) without bloating every `TypeRef`. Absent ⇒ the type had no annotations.
-    pub type_annotations: std::collections::HashMap<u32, Vec<String>>,
-    /// Original projected argument keyed by the enclosing type's start offset.
-    pub type_projection_args: std::collections::HashMap<u32, TypeRef>,
+    /// Annotation references applied to a type, keyed by the annotated type's start offset. Each
+    /// reference retains its complete source spelling and own span until name resolution commits it
+    /// to a canonical classifier identity.
+    pub type_annotations: std::collections::HashMap<u32, Vec<AnnotationRef>>,
     /// `// ASSERTIONS_MODE: always-enable` — `assert(...)` is emitted UNGUARDED (always checks + throws),
     /// not behind the per-class `desiredAssertionStatus()` guard. From the test directive / `-Xassertions`.
     pub assert_always_enabled: bool,
     /// `// ASSERTIONS_MODE: always-disable` — `assert(...)` is elided entirely (the condition is not even
     /// evaluated). Mutually exclusive with `assert_always_enabled`; both unset ⇒ the per-class guard.
     pub assert_always_disabled: bool,
+    /// `+ExplicitContextArguments`: named context parameters may be supplied at a call site instead
+    /// of being selected from the implicit receiver and lexical scope.
+    pub explicit_context_arguments: bool,
+    /// Whether signed integer constant expressions may adapt to unsigned parameters explicitly
+    /// marked with `kotlin.internal.ImplicitIntegerCoercion`.
+    pub implicit_signed_to_unsigned_integer_conversion: bool,
 }
 
 fn retain_default_span(
@@ -1359,7 +1422,7 @@ fn retain_class_default_spans(
     for param in &class.props {
         retain_default_span(param.default, expr_spans, retained);
     }
-    for function in class.methods.iter().chain(&class.companion_methods) {
+    for function in &class.methods {
         retain_param_default_spans(&function.params, expr_spans, retained);
     }
     for constructor in &class.secondary_ctors {
@@ -1400,6 +1463,7 @@ impl File {
         self.call_arg_name_spans = Default::default();
         self.empty_call_open_paren_spans = Default::default();
         self.exact_member_name_spans = Default::default();
+        self.nullable_callable_ref_receivers = Default::default();
         self.non_adjacent_member_dot_spans = Default::default();
         self.call_has_trailing_lambda = Default::default();
         self.trailing_call_close_paren_ends = Default::default();
@@ -1410,6 +1474,8 @@ impl File {
         self.local_class_nested = Default::default();
         self.lambda_param_types = Default::default();
         self.anon_fun_lambdas = Default::default();
+        self.anon_fun_context_count = Default::default();
+        self.anon_fun_receivers = Default::default();
         self.suspend_lambdas = Default::default();
         self.lambda_labels = Default::default();
         self.destructure_source_props = Default::default();
@@ -1606,7 +1672,7 @@ impl File {
             | Expr::Break { .. }
             | Expr::Continue { .. }
             | Expr::Name(_) => false,
-            Expr::CallableRef { receiver, .. } => receiver.map_or(false, |r| fe(r)),
+            Expr::CallableRef { receiver, .. } => receiver.is_some_and(&mut *fe),
             Expr::Return { value, .. } => match value {
                 Some(v) => fe(*v),
                 None => false,
@@ -1627,7 +1693,7 @@ impl File {
             Expr::Index { array, indices } => fe(*array) || indices.iter().any(|&i| fe(i)),
             Expr::Call { callee, args } => fe(*callee) || args.iter().any(|&a| fe(a)),
             Expr::SafeCall { receiver, args, .. } => {
-                fe(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| fe(x)))
+                fe(*receiver) || args.as_ref().is_some_and(|a| a.iter().any(|&x| fe(x)))
             }
             Expr::Template(parts) => parts
                 .iter()
@@ -1636,22 +1702,22 @@ impl File {
                 cond,
                 then_branch,
                 else_branch,
-            } => fe(*cond) || fe(*then_branch) || else_branch.map_or(false, |x| fe(x)),
+            } => fe(*cond) || fe(*then_branch) || else_branch.is_some_and(&mut *fe),
             Expr::Block { stmts, trailing } => {
-                stmts.iter().any(|&s| fs(s)) || trailing.map_or(false, |t| fe(t))
+                stmts.iter().any(|&s| fs(s)) || trailing.is_some_and(&mut *fe)
             }
             Expr::Try {
                 body,
                 catches,
                 finally,
-            } => {
-                fe(*body) || catches.iter().any(|c| fe(c.body)) || finally.map_or(false, |f| fe(f))
-            }
+            } => fe(*body) || catches.iter().any(|c| fe(c.body)) || finally.is_some_and(&mut *fe),
             Expr::When { subject, arms } => {
-                subject.map_or(false, |s| fe(s))
-                    || arms
-                        .iter()
-                        .any(|a| a.conditions.iter().any(|&c| fe(c)) || fe(a.body))
+                subject.is_some_and(&mut *fe)
+                    || arms.iter().any(|a| {
+                        a.conditions.iter().any(|&c| fe(c))
+                            || a.guard.is_some_and(&mut *fe)
+                            || fe(a.body)
+                    })
             }
         }
     }
@@ -1772,11 +1838,6 @@ fn any_class_decl_expr(class: &ClassDecl, predicate: &mut impl FnMut(ExprId) -> 
                     .copied()
                     .any(&mut *predicate)
         })
-        || class
-            .companion_base_args
-            .iter()
-            .copied()
-            .any(&mut *predicate)
         || class.base_args.iter().copied().any(&mut *predicate)
         || class
             .delegation_exprs
@@ -1796,6 +1857,10 @@ fn any_class_decl_expr(class: &ClassDecl, predicate: &mut impl FnMut(ExprId) -> 
                 .copied()
                 .chain(entry.args.iter().copied())
                 .any(&mut *predicate)
+                || entry.init_order.iter().any(|step| match step {
+                    ClassInit::Block(body) => predicate(*body),
+                    ClassInit::PropInit(_) => false,
+                })
         })
     {
         return true;
@@ -1817,7 +1882,6 @@ fn any_class_decl_expr(class: &ClassDecl, predicate: &mut impl FnMut(ExprId) -> 
     class
         .methods
         .iter()
-        .chain(&class.companion_methods)
         .chain(
             class
                 .enum_entries
@@ -1828,7 +1892,6 @@ fn any_class_decl_expr(class: &ClassDecl, predicate: &mut impl FnMut(ExprId) -> 
         || class
             .body_props
             .iter()
-            .chain(&class.companion_props)
             .chain(
                 class
                     .enum_entries
@@ -1932,9 +1995,9 @@ impl File {
                 out.push(')');
             }
             Decl::Class(c) => {
-                let keyword = match c.kind {
-                    ClassKind::Object => "object",
-                    ClassKind::Annotation => "annotation",
+                let keyword = match (c.singleton, c.kind) {
+                    (true, _) => "object",
+                    (_, ClassKind::Annotation) => "annotation",
                     _ => "class",
                 };
                 out.push_str(&format!("({} {}", keyword, c.name));
@@ -2109,6 +2172,7 @@ impl File {
                 self.write_expr(*value, out);
                 let op = match kind {
                     RangeKind::Through => "..",
+                    RangeKind::OpenEnd => "..<",
                     RangeKind::Until => "until",
                     RangeKind::DownTo => "downTo",
                 };
@@ -2121,7 +2185,8 @@ impl File {
             Expr::RangeTo { lo, hi, kind } => {
                 let op = match kind {
                     RangeKind::Through => "..",
-                    RangeKind::Until => "..<",
+                    RangeKind::OpenEnd => "..<",
+                    RangeKind::Until => "until",
                     RangeKind::DownTo => "downTo",
                 };
                 out.push_str(&format!("({op} "));
@@ -2225,6 +2290,10 @@ impl File {
                     if arm.conditions.is_empty() {
                         out.push_str(" else");
                     }
+                    if let Some(guard) = arm.guard {
+                        out.push_str(" if ");
+                        self.write_expr(guard, out);
+                    }
                     out.push_str(" => ");
                     self.write_expr(arm.body, out);
                     out.push(')');
@@ -2295,6 +2364,7 @@ impl File {
                 receiver,
                 name,
                 value,
+                ..
             } => {
                 out.push_str("(set-member ");
                 self.write_expr(*receiver, out);
@@ -2359,6 +2429,7 @@ impl File {
             } => {
                 let op = match range.kind {
                     crate::ast::RangeKind::Through => "..",
+                    crate::ast::RangeKind::OpenEnd => "..<",
                     crate::ast::RangeKind::Until => "until",
                     crate::ast::RangeKind::DownTo => "downTo",
                 };

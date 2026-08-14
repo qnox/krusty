@@ -2,9 +2,8 @@
 //! The speculative narrowing type resolver `resolve_ty_no_diag` only resolved same-module (user) classes,
 //! type parameters, and a sibling nested type of the enclosing class — a classpath / imported type erased to
 //! `Ty::Error`, so the narrowing was dropped and `v` kept its (parent) type, failing with "member … on
-//! <parent>". `resolve_ty_no_diag` now also resolves an imported classpath type and a qualified nested one
-//! (`imported_type_internal` / `resolve_qualified_nested`, the same resolvers `resolve_ty` uses), so the
-//! smart-cast narrows. Runnable end-to-end.
+//! <parent>". `resolve_ty_no_diag` now uses the same committed classifier-segment walk as `resolve_ty`, and
+//! lowering consumes the recorded target identity, so the smart-cast narrows. Runnable end-to-end.
 use super::common;
 
 fn run(tag: &str, lib: &str, main: &str) -> Option<String> {

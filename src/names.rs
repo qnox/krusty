@@ -1,20 +1,8 @@
 //! Kotlin source/metadata naming helpers shared across compiler phases.
 
-/// Return every JVM internal-name spelling obtained by progressively treating trailing path
-/// segments as nested classifiers. The package-first order is deliberate: callers that merely need
-/// the first existing binary name use `a/b/C`, `a/b$C`, `a$b$C`, while Kotlin source lookup reverses
-/// it because a classifier prefix shadows an otherwise identical package prefix.
-pub(crate) fn nested_internal_name_candidates(internal: &str) -> Vec<String> {
-    let mut candidates =
-        Vec::with_capacity(internal.bytes().filter(|&byte| byte == b'/').count() + 1);
-    let mut candidate = internal.to_string();
-    candidates.push(candidate.clone());
-    while let Some(separator) = candidate.rfind('/') {
-        candidate.replace_range(separator..=separator, "$");
-        candidates.push(candidate.clone());
-    }
-    candidates
-}
+/// Kotlin's conventional name for an unnamed companion object, used for both the nested classifier
+/// segment (`Outer$Companion`) and the singleton field (`Outer.Companion`).
+pub(crate) const COMPANION_OBJECT_NAME: &str = "Companion";
 
 /// Getter name for a Kotlin property: `x` -> `getX`; `isOpen` keeps `isOpen`.
 pub fn property_getter_name(prop: &str) -> String {
@@ -56,14 +44,6 @@ mod tests {
         assert_eq!(property_setter_name("isOpen"), "setOpen");
         assert_eq!(property_getter_name("island"), "getIsland");
         assert_eq!(property_setter_name("island"), "setIsland");
-    }
-
-    #[test]
-    fn nested_internal_candidates_replace_separators_from_the_right() {
-        assert_eq!(
-            nested_internal_name_candidates("a/b/C"),
-            ["a/b/C", "a/b$C", "a$b$C"]
-        );
-        assert_eq!(nested_internal_name_candidates("C"), ["C"]);
+        assert_eq!(property_getter_name("äpfel"), "getÄpfel");
     }
 }

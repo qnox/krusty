@@ -10,7 +10,7 @@ mod semantic;
 mod signature_help;
 mod source_scan;
 
-use krusty::ast::{Decl, File, FunBody, FunDecl, PropDecl, Stmt};
+use krusty::ast::{ClassDecl, Decl, File, FunBody, FunDecl, PropDecl, Stmt};
 use krusty::diag::{DiagSink, Diagnostic, DiagnosticKind, Severity};
 use krusty::features::LangFeatures;
 use krusty::frontend;
@@ -49,6 +49,16 @@ pub struct FileAnalysis {
 pub struct SourceSetAnalysis {
     pub files: Vec<FileAnalysis>,
     pub symbols: FrontendSymbols,
+}
+
+/// Follow the AST's outer-class-to-companion edge. A companion is an ordinary nested singleton
+/// declaration; editor consumers must inspect that declaration instead of depending on flattened
+/// companion/static member copies.
+fn companion_class<'a>(file: &'a File, class: &ClassDecl) -> Option<&'a ClassDecl> {
+    match file.decl(class.companion?) {
+        Decl::Class(companion) => Some(companion),
+        _ => None,
+    }
 }
 
 fn checked_property_type(
@@ -249,8 +259,16 @@ fn add_unused_extension_receiver_inspections(
                 add_unused_extension_receiver_inspection(types, function, &mut inspections);
             }
             Decl::Class(class) => {
-                for function in class.methods.iter().chain(&class.companion_methods) {
+                for function in &class.methods {
                     add_unused_extension_receiver_inspection(types, function, &mut inspections);
+                }
+                if let Some(companion) = companion_class(file, class) {
+                    for function in &companion.methods {
+                        add_unused_extension_receiver_inspection(types, function, &mut inspections);
+                    }
+                    for property in &companion.body_props {
+                        add_unused_extension_property_inspection(types, property, &mut inspections);
+                    }
                 }
                 for entry in &class.enum_entries {
                     for function in &entry.methods {
@@ -260,7 +278,7 @@ fn add_unused_extension_receiver_inspections(
                         add_unused_extension_property_inspection(types, property, &mut inspections);
                     }
                 }
-                for property in class.body_props.iter().chain(&class.companion_props) {
+                for property in &class.body_props {
                     add_unused_extension_property_inspection(types, property, &mut inspections);
                 }
             }
@@ -329,7 +347,7 @@ fn add_unused_extension_property_inspection(
 
 #[cfg(test)]
 pub fn analyze_standalone_source_set(sources: &[&str]) -> SourceSetAnalysis {
-    analyze_source_set(sources, Box::new(krusty::libraries::EmptySymbolSource))
+    analyze_source_set(sources, Box::new(StandaloneKotlinSymbols))
 }
 
 pub(crate) fn analyze_standalone_source_inputs(inputs: &[SourceInput<'_>]) -> SourceSetAnalysis {
@@ -339,6 +357,43 @@ pub(crate) fn analyze_standalone_source_inputs(inputs: &[SourceInput<'_>]) -> So
         &LangFeatures::new(),
     )
 }
+
+/// Minimal semantic dependency used by standalone LSP analysis. It is an ordinary symbol provider,
+/// so annotations still resolve through default imports to canonical identities; no production path
+/// treats the source spelling `Deprecated` specially.
+#[cfg(test)]
+struct StandaloneKotlinSymbols;
+
+#[cfg(test)]
+impl krusty::symbol_source::SymbolSource for StandaloneKotlinSymbols {
+    fn package_exists(&self, parent: krusty::types::TypeName, name: &str) -> bool {
+        krusty::libraries::EmptySymbolSource.package_exists(parent, name)
+    }
+
+    fn symbols(
+        &self,
+        namespace: krusty::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<krusty::libraries::ResolvedSymbols> {
+        if namespace
+            != krusty::symbol_source::SymbolNamespace::Package(krusty::types::type_name("kotlin"))
+            || name != "Deprecated"
+        {
+            return krusty::libraries::EmptySymbolSource.symbols(namespace, name);
+        }
+        let mut classifier = krusty::libraries::LibraryType::declaration_header();
+        classifier.kind = krusty::libraries::TypeKind::Annotation;
+        let identity = krusty::types::type_name("kotlin/Deprecated");
+        std::rc::Rc::new(krusty::libraries::ResolvedSymbols {
+            classifier_name: Some(identity),
+            classifier: Some(std::rc::Rc::new(classifier)),
+            callables: krusty::libraries::Callables::None,
+        })
+    }
+}
+
+#[cfg(test)]
+impl SemanticPlatform for StandaloneKotlinSymbols {}
 
 #[cfg(test)]
 mod tests {
@@ -489,7 +544,7 @@ mod tests {
                       fun Parser.decode(value: Int): Any = value\n\
                       fun String.topLevelPropertyOnly(): Int = ANSWER\n\
                       fun String.implicitLambdaParameterOnly(): Int = applyValue(1) { it }\n\
-                      fun String.nestedReceiverOnly(): Int = Used(1).run { length }\n\
+                      fun String.nestedReceiverOnly(): Int = Used(1).scopeValue { length }\n\
                       fun String.labelledOuterUse(): Int = 1.scopeValue { this@labelledOuterUse.length }\n\
                       fun Used.explicitUse(): Int = this.length\n\
                       fun Used.implicitPropertyUse(): Int = length\n\
@@ -506,11 +561,14 @@ mod tests {
         let diagnostics = &analysis.files[0].diagnostics;
 
         assert_eq!(diagnostics.len(), 10, "{diagnostics:?}");
-        assert!(diagnostics.iter().all(|diagnostic| {
-            diagnostic.severity == Severity::Warning
-                && diagnostic.kind == DiagnosticKind::Inspection
-                && diagnostic.msg == "Receiver parameter is never used"
-        }));
+        assert!(
+            diagnostics.iter().all(|diagnostic| {
+                diagnostic.severity == Severity::Warning
+                    && diagnostic.kind == DiagnosticKind::Inspection
+                    && diagnostic.msg == "Receiver parameter is never used"
+            }),
+            "{diagnostics:?}"
+        );
         assert_eq!(
             diagnostics
                 .iter()

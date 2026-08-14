@@ -275,7 +275,7 @@ fun result() = Derived.choose(1)
         outcome: Outcome::Error("cannot access 'choose': it is protected"),
     },
     Case {
-        name: "plugin static fallback",
+        name: "an annotation does not synthesize an inactive plugin callable",
         sources: &[(
             "Main",
             r#"
@@ -287,7 +287,7 @@ object Token {
 fun result() = Token.serializer()
 "#,
         )],
-        outcome: Outcome::Clean,
+        outcome: Outcome::Error("none of the following candidates is applicable"),
     },
 ];
 

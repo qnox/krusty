@@ -8,8 +8,11 @@ use crate::features::LangFeatures;
 pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 pub(crate) use crate::resolve::class_internal_resolver;
+pub use crate::resolve::ClassFlags as FrontendClassFlags;
+pub(crate) use crate::resolve::ClassModel as FrontendClassModel;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
 pub(crate) use crate::resolve::DeclaredPropertySig as FrontendDeclaredPropertySig;
+pub use crate::resolve::ExtPropSig as FrontendExtPropSig;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
 pub use crate::resolve::{
@@ -18,12 +21,15 @@ pub use crate::resolve::{
     AnonymousObjectCaptureSource, CompoundAssignmentTarget, SourceConstructorMatcher,
 };
 pub(crate) use crate::resolve::{
-    classifier_over_default, function_import_scope, pick_overload, qualified_path, typeref_leaf,
-    ClassNames, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget, ExprLowering,
-    FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo,
-    ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall, ResolvedConstructor,
-    ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedModuleTopLevelCall, SigFlags, Signature, StaticPropertyStorage, StmtLowering,
+    check_preinferred_file_in_source_set, function_import_scope, AdaptedRefArgument,
+    CallableReferenceBinding, CallableReferenceTarget, ConstructorReferenceOuter, CtorDefaultValue,
+    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FunctionImportScope,
+    ImplicitPropertyWriteTarget, ImplicitReceiverSelection, InlineCall, InvokeKind,
+    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ResolvedCall,
+    ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
+    ResolvedExtensionCall, ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess,
+    ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags,
+    Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
@@ -483,13 +489,17 @@ where
         strip_matched_expects(&mut files);
     }
     let platform = if inferred_count < files.len() {
-        let mut fallback_diags = DiagSink::new();
-        let mut fallback =
-            collect_signatures_with_cp(&files[inferred_count..], platform, &mut fallback_diags);
-        fallback.offset_source_files(inferred_count as u32);
-        let platform = std::mem::replace(&mut fallback.libraries, Box::new(EmptySymbolSource));
-        Box::new(crate::resolve::SourceFallbackPlatform::new(
-            platform, fallback,
+        let mut dependency_diags = DiagSink::new();
+        let mut dependency_symbols =
+            collect_signatures_with_cp(&files[inferred_count..], platform, &mut dependency_diags);
+        dependency_symbols.offset_source_files(inferred_count as u32);
+        let platform = std::mem::replace(
+            &mut dependency_symbols.libraries,
+            Box::new(EmptySymbolSource),
+        );
+        Box::new(crate::resolve::DependencyPlatform::new(
+            platform,
+            dependency_symbols,
         )) as Box<dyn SemanticPlatform>
     } else {
         platform
@@ -533,7 +543,7 @@ fn check_source_set_skipping(
                 None
             } else {
                 diags.set_file(index as u32);
-                Some(check_file_in_source_set(
+                Some(check_preinferred_file_in_source_set(
                     files,
                     index as u32,
                     symbols,
@@ -604,89 +614,221 @@ mod tests {
     use crate::diag::{Diagnostic, Span};
     use crate::libraries::{
         CallSig, Callables, FnKind, FunctionInfo, FunctionSet, GenericSig, LibraryCallable,
-        LibraryMember, LibraryType, PropKind, PropertyInfo, PropertySet, ResolvedSymbols, TypeKind,
+        LibraryType, PropKind, PropertyInfo, PropertySet, ResolvedSymbols, TypeKind,
     };
     use crate::source::SourceInput;
-    use crate::types::{Ty, TypeNameList, Visibility};
+    use crate::types::{Ty, TypeName, TypeNameList, Visibility};
 
     struct ExistingLibrary;
 
-    impl crate::symbol_source::SymbolSource for ExistingLibrary {
-        fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-            matches!(
-                internal,
-                "fixture/Present"
-                    | "fixture/Stable"
-                    | "fixture/Qualified"
-                    | "fixture/Container"
-                    | "fixture/Container$Labels"
-                    | "support/BaseScope"
-                    | "support/BaseTarget"
-                    | "support/Target"
-                    | "fixture/Outer"
-                    | "fixture/Outer$Hidden"
-                    | "fixture/Outer$Hidden$Context"
-                    | "fixture/CollisionEnum"
-            )
-            .then(|| {
+    impl ExistingLibrary {
+        fn classifier_internal(
+            namespace: crate::symbol_source::SymbolNamespace,
+            name: &str,
+        ) -> Option<&'static str> {
+            use crate::symbol_source::SymbolNamespace;
+            match namespace {
+                SymbolNamespace::Package(package) if package.matches("fixture") => match name {
+                    "Present" => Some("fixture/Present"),
+                    "Stable" => Some("fixture/Stable"),
+                    "Qualified" => Some("fixture/Qualified"),
+                    "Container" => Some("fixture/Container"),
+                    "Outer" => Some("fixture/Outer"),
+                    "CollisionEnum" => Some("fixture/CollisionEnum"),
+                    _ => None,
+                },
+                SymbolNamespace::Package(package) if package.matches("support") => match name {
+                    "BaseScope" => Some("support/BaseScope"),
+                    "BaseTarget" => Some("support/BaseTarget"),
+                    "Target" => Some("support/Target"),
+                    _ => None,
+                },
+                SymbolNamespace::Classifier(owner) if owner.matches("fixture/Stable") => {
+                    (name == "Companion").then_some("fixture/Stable$Companion")
+                }
+                SymbolNamespace::Classifier(owner) if owner.matches("fixture/Qualified") => {
+                    (name == "Companion").then_some("fixture/Qualified$Companion")
+                }
+                SymbolNamespace::Classifier(owner) if owner.matches("fixture/Container") => {
+                    (name == "Labels").then_some("fixture/Container$Labels")
+                }
+                SymbolNamespace::Classifier(owner) if owner.matches("fixture/Outer") => {
+                    (name == "Hidden").then_some("fixture/Outer$Hidden")
+                }
+                SymbolNamespace::Classifier(owner) if owner.matches("fixture/Outer$Hidden") => {
+                    (name == "Context").then_some("fixture/Outer$Hidden$Context")
+                }
+                _ => None,
+            }
+        }
+
+        fn classifier_record(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+            let known = [
+                "fixture/Present",
+                "fixture/Stable",
+                "fixture/Stable$Companion",
+                "fixture/Qualified",
+                "fixture/Qualified$Companion",
+                "fixture/Container",
+                "fixture/Container$Labels",
+                "support/BaseScope",
+                "support/BaseTarget",
+                "support/Target",
+                "fixture/Outer",
+                "fixture/Outer$Hidden",
+                "fixture/Outer$Hidden$Context",
+                "fixture/CollisionEnum",
+            ];
+            known.iter().any(|name| internal.matches(name)).then(|| {
                 let mut supertypes = TypeNameList::new();
-                if internal == "support/Target" {
+                if internal.matches("support/Target") {
                     supertypes.push("support/BaseTarget");
                 }
-                LibraryType {
-                    is_public: true,
-                    kind: if internal == "fixture/Container$Labels" {
+                let mut declared_callables = std::collections::HashMap::new();
+                if internal.matches("fixture/Container$Labels") {
+                    let receiver = Ty::obj_name(internal);
+                    declared_callables.insert(
+                        "marker".to_string(),
+                        Callables::Properties(PropertySet {
+                            overloads: vec![PropertyInfo {
+                                name: "marker".to_string(),
+                                kind: PropKind::Member,
+                                receiver: Some(receiver),
+                                formals: Vec::new(),
+                                ty: Ty::Int,
+                                context_count: 0,
+                                getter: LibraryCallable::library(
+                                    internal,
+                                    "getMarker",
+                                    Vec::new(),
+                                    Ty::Int,
+                                    Ty::Int,
+                                    "()I",
+                                ),
+                                setter: None,
+                                setter_visibility: crate::types::Visibility::Public,
+                                is_const: false,
+                                visibility: Visibility::Private,
+                                owner: internal,
+                                receiver_rank: 0,
+                                source_key: None,
+                                source_member: None,
+                            }],
+                        }),
+                    );
+                }
+                if internal.matches("fixture/Stable$Companion") {
+                    let receiver = Ty::obj_name(internal);
+                    let callable = LibraryCallable::library(
+                        internal,
+                        "current",
+                        Vec::new(),
+                        Ty::Int,
+                        Ty::Int,
+                        "()I",
+                    );
+                    declared_callables.insert(
+                        "current".to_string(),
+                        Callables::Functions(FunctionSet {
+                            overloads: vec![FunctionInfo::plain(
+                                FnKind::Member,
+                                Some(receiver),
+                                callable,
+                            )],
+                        }),
+                    );
+                }
+                if internal.matches("fixture/Qualified$Companion") {
+                    let receiver = Ty::obj_name(internal);
+                    let callable = LibraryCallable::library(
+                        internal,
+                        "select",
+                        vec![Ty::obj("right/Token")],
+                        Ty::Int,
+                        Ty::Int,
+                        "(Lright/Token;)I",
+                    );
+                    declared_callables.insert(
+                        "select".to_string(),
+                        Callables::Functions(FunctionSet {
+                            overloads: vec![FunctionInfo::plain(
+                                FnKind::Member,
+                                Some(receiver),
+                                callable,
+                            )],
+                        }),
+                    );
+                }
+                let companion_object = if internal.matches("fixture/Stable") {
+                    Some((
+                        "Companion".to_string(),
+                        crate::types::type_name("fixture/Stable$Companion"),
+                    ))
+                } else if internal.matches("fixture/Qualified") {
+                    Some((
+                        "Companion".to_string(),
+                        crate::types::type_name("fixture/Qualified$Companion"),
+                    ))
+                } else {
+                    None
+                };
+                std::rc::Rc::new(LibraryType {
+                    access: crate::libraries::ClassifierAccess::Public,
+                    source_file: None,
+                    is_nested: internal.contains("$"),
+                    outer_instance: None,
+                    kind: if internal.matches("fixture/Container$Labels") {
                         TypeKind::Object
                     } else {
                         TypeKind::Class
                     },
+                    inheritance: Default::default(),
                     supertypes,
+                    supertype_templates: Vec::new(),
                     constructors: Vec::new(),
                     fields: Vec::new(),
+                    declared_callables,
                     members: Vec::new(),
-                    companion: match internal {
-                        "fixture/Stable" => vec![LibraryMember::new(
-                            "current".to_string(),
-                            Vec::new(),
-                            Ty::Int,
-                            String::new(),
-                        )],
-                        "fixture/Qualified" => vec![LibraryMember::new(
-                            "select".to_string(),
-                            vec![Ty::obj("right/Token")],
-                            Ty::Int,
-                            String::new(),
-                        )],
-                        _ => Vec::new(),
-                    },
-                    companion_consts: std::collections::HashMap::new(),
+                    companion: Vec::new(),
+                    constants: std::collections::HashMap::new(),
                     sam_method: None,
-                    companion_object: None,
+                    callable_signature: None,
+                    companion_object,
                     value_companion_fns: Vec::new(),
                     value_underlying: None,
+                    value_underlying_property: None,
                     alias_target: None,
-                    type_params: Vec::new(),
+                    type_parameters: crate::types::TypeParameters::default(),
                     sealed_subclasses: TypeNameList::new(),
                     enum_entries: Vec::new(),
                     enum_entries_accessor: None,
-                    value_ctor_has_default: false,
                     ctor_named_params: Vec::new(),
-                    value_class_properties: Vec::new(),
                     retention: None,
-                }
+                })
             })
         }
+    }
 
-        fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
-            let classifier = self.resolve_type(fqn).map(std::rc::Rc::new);
-            let Some(name) = fqn
-                .strip_prefix("support/")
-                .filter(|name| matches!(*name, "adjust" | "configure" | "transform"))
-            else {
-                return ResolvedSymbols {
+    impl crate::symbol_source::SymbolSource for ExistingLibrary {
+        fn symbols(
+            &self,
+            namespace: crate::symbol_source::SymbolNamespace,
+            name: &str,
+        ) -> std::rc::Rc<ResolvedSymbols> {
+            let classifier_name =
+                Self::classifier_internal(namespace, name).map(crate::types::type_name);
+            let classifier = classifier_name.and_then(|internal| self.classifier_record(internal));
+            let Some(name) = (namespace
+                == crate::symbol_source::SymbolNamespace::Package(crate::types::type_name(
+                    "support",
+                )))
+            .then_some(name)
+            .filter(|name| matches!(*name, "adjust" | "configure" | "transform")) else {
+                return std::rc::Rc::new(ResolvedSymbols {
+                    classifier_name: classifier.as_ref().and(classifier_name),
                     classifier,
                     ..ResolvedSymbols::default()
-                };
+                });
             };
             let receiver = Ty::obj("support/Target");
             let lambda_receiver = Ty::obj("support/BaseScope");
@@ -694,7 +836,13 @@ mod tests {
             if name == "adjust" {
                 value_params.push(Ty::Int);
             }
-            value_params.push(Ty::fun(vec![lambda_receiver], Ty::Unit));
+            value_params.push(Ty::fun_with_shape(
+                vec![lambda_receiver],
+                Ty::Unit,
+                0,
+                true,
+                false,
+            ));
             let mut physical_params = vec![receiver];
             physical_params.extend(value_params.iter().copied());
             let callable = LibraryCallable::library(
@@ -706,11 +854,15 @@ mod tests {
                 "",
             );
             let mut function = FunctionInfo::plain(FnKind::Extension, Some(receiver), callable);
-            let mut lambda_param_types = vec![Vec::new(); value_params.len()];
-            *lambda_param_types.last_mut().unwrap() = vec![lambda_receiver];
+            let lambda_param_types = vec![Vec::new(); value_params.len()];
+            let mut lambda_receivers = vec![None; value_params.len()];
+            *lambda_receivers.last_mut().unwrap() = Some(lambda_receiver);
+            let mut lambda_receiver_params = vec![false; value_params.len()];
+            *lambda_receiver_params.last_mut().unwrap() = true;
             function.call_sig = CallSig {
                 lambda_param_types,
-                lambda_receivers: vec![None; value_params.len()],
+                lambda_receivers,
+                lambda_receiver_params,
                 required: value_params.len(),
                 ..CallSig::default()
             };
@@ -722,42 +874,17 @@ mod tests {
                 ret: Ty::Unit,
                 return_policy: Default::default(),
             });
-            ResolvedSymbols {
+            std::rc::Rc::new(ResolvedSymbols {
+                classifier_name: classifier.as_ref().map(|classifier| {
+                    classifier
+                        .alias_target
+                        .unwrap_or_else(|| classifier_name.expect("classifier identity"))
+                }),
                 classifier,
                 callables: Callables::Functions(FunctionSet {
                     overloads: vec![function],
                 }),
-            }
-        }
-
-        fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
-            if recv == Ty::obj("fixture/Container$Labels") && name == "marker" {
-                PropertySet {
-                    overloads: vec![PropertyInfo {
-                        kind: PropKind::Member,
-                        receiver: Some(recv),
-                        formals: Vec::new(),
-                        ty: Ty::Int,
-                        context_count: 0,
-                        getter: LibraryCallable::library(
-                            "fixture/Container$Labels",
-                            "getMarker",
-                            Vec::new(),
-                            Ty::Int,
-                            Ty::Int,
-                            "()I",
-                        ),
-                        setter: None,
-                        is_const: false,
-                        visibility: Visibility::Private,
-                        owner: "fixture/Container$Labels".into(),
-                        receiver_rank: 0,
-                        source_key: None,
-                    }],
-                }
-            } else {
-                PropertySet::default()
-            }
+            })
         }
     }
 
@@ -898,10 +1025,17 @@ mod tests {
         // A platform declaration clash is keyed on the EMITTED name. `g(String)` and `g(String?)`
         // erase to the same JVM descriptor, so they clash while both are spelled `g`…
         let clash = |sources: &[&str]| {
-            let inputs = sources
+            // This unit test deliberately uses no platform provider. Supply the annotation as an
+            // ordinary source classifier and import it, so the signature pass exercises resolved
+            // annotation identity instead of recognizing the spelling `JvmName` intrinsically.
+            let mut inputs = vec![SourceInput::kotlin(
+                "package kotlin.jvm\nannotation class JvmName(val name: String)",
+            )];
+            let imported = sources
                 .iter()
-                .map(|source| SourceInput::kotlin(source))
+                .map(|source| format!("import kotlin.jvm.JvmName\n{source}"))
                 .collect::<Vec<_>>();
+            inputs.extend(imported.iter().map(|source| SourceInput::kotlin(source)));
             let mut diagnostics = DiagSink::new();
             analyze_source_set_prefix_with_features(
                 &inputs,
@@ -1112,7 +1246,8 @@ mod tests {
                 .iter()
                 .filter(|message| message.starts_with("no value passed"))
                 .count(),
-            2
+            2,
+            "target diagnostics: {messages:?}"
         );
         let candidates = messages
             .iter()
@@ -1175,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_conflict_display_budget_preserves_qualified_call_fallback() {
+    fn exhausted_conflict_display_budget_preserves_qualified_call_diagnostics() {
         let parameter = "p".repeat(70 * 1024);
         let declarations = [
             format!("package sample\nfun crowded({parameter}: Int): Int = {parameter}"),
@@ -1405,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_fallback_preserves_primary_and_adds_missing_signatures() {
+    fn dependency_symbols_keep_compiled_declarations_and_add_missing_overloads() {
         let features = LangFeatures::new();
         let mut diagnostics = DiagSink::new();
         let analysis = analyze_source_set_prefix_with_features(
@@ -1439,20 +1574,43 @@ mod tests {
             &features,
             &mut diagnostics,
         );
+        let stable = analysis
+            .symbols
+            .libraries
+            .classifier(crate::types::type_name("fixture/Stable$Companion"))
+            .expect("compiled and declaration-only companion");
+        let stable_current = stable
+            .declared_callables
+            .get("current")
+            .expect("current candidates")
+            .functions();
+        assert_eq!(
+            stable_current
+                .iter()
+                .map(|candidate| (candidate.semantic_params().to_vec(), candidate.callable.ret))
+                .collect::<Vec<_>>(),
+            [(Vec::new(), Ty::Int), (vec![Ty::Int], Ty::Int)]
+        );
         assert!(
             analysis.types[0].is_some() && diagnostics.diags.is_empty(),
-            "{:?}",
-            diagnostics.diags
+            "diagnostics={:?}, calls={:?}",
+            diagnostics.diags,
+            analysis.types[0]
+                .as_ref()
+                .map(|types| &types.resolved_calls)
         );
-        let added = analysis.symbols.libraries.resolve_symbols("fixture/added");
-        let Callables::Functions(functions) = added.callables else {
-            panic!("missing source fallback function")
+        let added = analysis.symbols.libraries.symbols(
+            crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+            "added",
+        );
+        let Callables::Functions(functions) = added.callables.clone() else {
+            panic!("missing dependency-source function")
         };
         assert_eq!(functions.overloads[0].source_key.map(|key| key.0), Some(1));
     }
 
     #[test]
-    fn dependency_receiver_shape_beats_stale_library_shape() {
+    fn dependency_callables_use_compiled_shapes_and_add_source_overloads() {
         let inputs = [
             SourceInput::kotlin(
                 "package consumer\n\
@@ -1463,8 +1621,8 @@ mod tests {
                  import support.transform\n\
                  object Owner {\n\
                      fun create(target: Target) = target.configure { assign() }\n\
-                     fun update(target: Target) = target.transform { scope -> scope.assign() }\n\
-                     fun change(target: Target) = target.adjust(1) { scope -> scope.assign() }\n\
+                     fun update(target: Target) = target.transform { assign() }\n\
+                     fun change(target: Target) = target.adjust(1) { assign() }\n\
                      private fun BaseScope.assign() {}\n\
                  }",
             ),
@@ -1536,7 +1694,7 @@ mod tests {
     #[test]
     fn declaration_only_extension_calls_resolve_and_type() {
         // An imported extension from a DECLARATION-ONLY dependency file (beyond the inferred
-        // prefix): its `Signature` lives in the fallback table behind the platform seam, not in
+        // prefix): its `Signature` lives in the dependency table behind the platform seam, not in
         // the checked prefix's symbol table, and the call must still resolve — including an
         // omitted defaulted parameter — and type as the declared return, not `Unit`.
         let inputs = [
@@ -1600,9 +1758,9 @@ mod tests {
     }
 
     #[test]
-    fn local_suspend_functions_are_rejected_cleanly() {
-        // A local `suspend fun` has no CPS lowering for `Stmt::LocalFun` — one clear
-        // diagnostic, never a mis-parsed soft keyword or a backend ICE.
+    fn local_suspend_functions_reach_semantic_analysis() {
+        // Local suspension is part of the function signature. Whether a backend can CPS-lower the
+        // lifted local body must not make otherwise valid Kotlin fail in parsing.
         let inputs = [SourceInput::kotlin(
             "fun outer() {\n\
              \u{20} suspend fun inner() {}\n\
@@ -1618,13 +1776,7 @@ mod tests {
             &LangFeatures::new(),
             &mut diagnostics,
         );
-        assert!(
-            diagnostics.diags.iter().any(|d| d
-                .msg
-                .contains("local 'suspend' functions are not supported")),
-            "{:?}",
-            diagnostics.diags
-        );
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     }
 
     #[test]
@@ -1678,10 +1830,13 @@ mod tests {
             &mut diagnostics,
         );
 
-        assert!(diagnostics
-            .diags
-            .iter()
-            .any(|diagnostic| diagnostic.msg.contains("unresolved reference 'Context'")));
+        assert!(
+            diagnostics.diags.iter().any(|diagnostic| diagnostic
+                .msg
+                .contains("cannot access 'Context': it is internal")),
+            "{:?}",
+            diagnostics.diags
+        );
     }
 
     #[test]
@@ -1708,11 +1863,15 @@ mod tests {
             &mut diagnostics,
         );
 
-        assert!(diagnostics.diags.iter().any(|diagnostic| {
-            diagnostic
-                .msg
-                .contains("unresolved reference 'Outer.Hidden.Context'")
-        }));
+        assert!(
+            diagnostics.diags.iter().any(|diagnostic| {
+                diagnostic
+                    .msg
+                    .contains("cannot access 'Outer.Hidden.Context': it is internal")
+            }),
+            "{:?}",
+            diagnostics.diags
+        );
     }
 
     #[test]
@@ -1736,16 +1895,21 @@ mod tests {
             &mut diagnostics,
         );
 
-        assert!(diagnostics
-            .diags
-            .iter()
-            .any(|diagnostic| diagnostic.msg.contains("unresolved reference 'Present'")));
+        assert!(diagnostics.diags.iter().any(|diagnostic| diagnostic
+            .msg
+            .contains("cannot access 'Present': it is internal")));
         assert!(analysis
             .symbols
             .libraries
-            .resolve_symbols_name(crate::types::type_name("fixture/Present"))
+            .symbols(
+                crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+                "Present",
+            )
             .classifier
-            .is_none());
+            .as_ref()
+            .is_some_and(
+                |classifier| classifier.access == crate::libraries::ClassifierAccess::Internal
+            ));
     }
 
     #[test]
@@ -1775,14 +1939,22 @@ mod tests {
         assert!(diagnostics.diags.iter().any(|diagnostic| {
             diagnostic
                 .msg
-                .contains("unresolved reference 'Outer.Hidden.Context'")
+                .contains("cannot access 'Outer.Hidden.Context': it is internal")
         }));
         assert!(analysis
             .symbols
             .libraries
-            .resolve_symbols_name(crate::types::type_name("fixture/Outer$Hidden$Context"))
+            .symbols(
+                crate::symbol_source::SymbolNamespace::Classifier(crate::types::type_name(
+                    "fixture/Outer$Hidden",
+                )),
+                "Context",
+            )
             .classifier
-            .is_none());
+            .as_ref()
+            .is_some_and(
+                |classifier| classifier.access == crate::libraries::ClassifierAccess::Internal
+            ));
         // Every classifier API must report the enclosing source restriction. Returning the public
         // leaf visibility here would let the resolver's public fast path disagree with the type and
         // package-access queries above.
@@ -1790,23 +1962,18 @@ mod tests {
             analysis
                 .symbols
                 .libraries
-                .classifier_visibility(crate::types::type_name("fixture/Outer$Hidden$Context")),
+                .classifier(crate::types::type_name("fixture/Outer$Hidden$Context"))
+                .map(|classifier| classifier.access.visibility()),
             Some(Visibility::Internal)
         );
         assert_eq!(
             analysis
                 .symbols
                 .libraries
-                .classifier_access(crate::types::type_name("fixture/Outer$Hidden$Context")),
-            Some(crate::symbol_source::ClassifierAccess::Internal)
+                .classifier(crate::types::type_name("fixture/Outer$Hidden$Context"))
+                .map(|classifier| classifier.access),
+            Some(crate::libraries::ClassifierAccess::Internal)
         );
-        assert!(!analysis
-            .symbols
-            .libraries
-            .classifier_accessible_from_package(
-                crate::types::type_name("fixture/Outer$Hidden$Context"),
-                crate::types::type_name("consumer"),
-            ));
     }
 
     #[test]
@@ -1831,32 +1998,54 @@ mod tests {
         );
         let hidden = crate::types::type_name("fixture/Outer$Hidden$Context");
 
-        assert!(diagnostics.diags.iter().any(|diagnostic| {
-            diagnostic
-                .msg
-                .contains("unresolved reference 'Outer.Hidden.Context'")
-        }));
+        assert!(
+            diagnostics.diags.iter().any(|diagnostic| {
+                diagnostic
+                    .msg
+                    .contains("cannot access 'Outer.Hidden.Context': it is internal")
+            }),
+            "{:?}",
+            diagnostics.diags
+        );
         assert!(analysis
             .symbols
             .libraries
-            .resolve_type_name(hidden)
-            .is_none());
+            .classifier(hidden)
+            .is_some_and(
+                |classifier| classifier.access == crate::libraries::ClassifierAccess::Internal
+            ));
         assert!(analysis
             .symbols
             .libraries
-            .resolve_symbols_name(hidden)
+            .symbols(
+                crate::symbol_source::SymbolNamespace::Classifier(crate::types::type_name(
+                    "fixture/Outer$Hidden",
+                )),
+                "Context",
+            )
             .classifier
-            .is_none());
+            .as_ref()
+            .is_some_and(
+                |classifier| classifier.access == crate::libraries::ClassifierAccess::Internal
+            ));
         // Although the leaf exists only on the platform, its source-declared internal owner claims
         // the path. The visibility/access APIs must carry that owner restriction instead of falling
         // through to the platform leaf and describing the same rejected type as public.
         assert_eq!(
-            analysis.symbols.libraries.classifier_visibility(hidden),
+            analysis
+                .symbols
+                .libraries
+                .classifier(hidden)
+                .map(|classifier| classifier.access.visibility()),
             Some(Visibility::Internal)
         );
         assert_eq!(
-            analysis.symbols.libraries.classifier_access(hidden),
-            Some(crate::symbol_source::ClassifierAccess::Internal)
+            analysis
+                .symbols
+                .libraries
+                .classifier(hidden)
+                .map(|classifier| classifier.access),
+            Some(crate::libraries::ClassifierAccess::Internal)
         );
     }
 
@@ -1883,11 +2072,7 @@ mod tests {
         let visible = crate::types::type_name("fixture/Outer$Hidden$Context");
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        assert!(analysis
-            .symbols
-            .libraries
-            .resolve_type_name(visible)
-            .is_some());
+        assert!(analysis.symbols.libraries.classifier(visible).is_some());
     }
 
     #[test]
@@ -1909,7 +2094,11 @@ mod tests {
         let collision = crate::types::type_name("fixture/CollisionEnum");
 
         assert_eq!(
-            analysis.symbols.libraries.classifier_visibility(collision),
+            analysis
+                .symbols
+                .libraries
+                .classifier(collision)
+                .map(|classifier| classifier.access.visibility()),
             Some(Visibility::Internal)
         );
         assert!(analysis
@@ -1949,7 +2138,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_fallback_exposes_inherited_nested_classifier_to_subclass() {
+    fn dependency_symbols_expose_inherited_nested_classifier_to_subclass() {
         let features = LangFeatures::new();
         let mut diagnostics = DiagSink::new();
         let analysis = analyze_source_set_prefix_with_features(
@@ -1988,7 +2177,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_fallback_preserves_protected_classifier_for_subclass_only() {
+    fn dependency_symbols_preserve_protected_classifier_for_subclass_only() {
         let mut diagnostics = DiagSink::new();
         let analysis = analyze_source_set_prefix_with_features(
             &[
@@ -2026,7 +2215,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_fallback_does_not_globally_expose_protected_classifier() {
+    fn dependency_symbols_do_not_globally_expose_protected_classifier() {
         let mut diagnostics = DiagSink::new();
         analyze_source_set_prefix_with_features(
             &[
@@ -2058,7 +2247,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_fallback_does_not_expose_nested_classifier_outside_subclass() {
+    fn dependency_symbols_do_not_expose_nested_classifier_outside_subclass() {
         let features = LangFeatures::new();
         let mut diagnostics = DiagSink::new();
         analyze_source_set_prefix_with_features(
@@ -2091,7 +2280,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_fallback_keeps_a_source_property_missing_from_the_public_api() {
+    fn dependency_symbols_add_a_source_property_missing_from_the_public_api() {
         let features = LangFeatures::new();
         let inputs = [
             SourceInput::kotlin(

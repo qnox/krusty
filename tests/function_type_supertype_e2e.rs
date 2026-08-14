@@ -69,3 +69,15 @@ fn extension_receiver_function_supertype() {
         }\n";
     assert_eq!(run(SRC).expect("extension-receiver fn supertype"), "OK");
 }
+
+#[test]
+fn contextual_extension_function_supertype_called_directly() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters, +FunctionalTypeWithExtensionAsSupertype\n\
+        class Part(val text: String)\n\
+        class Join : context(Part) Part.(Part) -> String {\n\
+        \x20 override fun invoke(context: Part, receiver: Part, value: Part): String =\n\
+        \x20     context.text + receiver.text + value.text\n\
+        }\n\
+        fun box(): String = Join()(Part(\"O\"), Part(\"K\"), Part(\"\"))\n";
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+}

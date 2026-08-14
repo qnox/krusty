@@ -9,10 +9,11 @@ use krusty::diag::{DiagSink, Span};
 use krusty::frontend::{
     lex_name_tokens, FrontendNameToken, FrontendNameTokenKind, FrontendSymbols,
 };
+use krusty::libraries::SourceMember;
 use krusty::types::{Ty, TypeName, Visibility};
 
 use super::{
-    checked_property_type,
+    checked_property_type, companion_class,
     rendering::{render_ty, render_type},
     FileAnalysis,
 };
@@ -109,6 +110,7 @@ pub struct DefinitionSymbols {
     class_types: HashMap<TypeName, DefinitionTarget>,
     declarations: HashMap<(u32, u32), DefinitionTarget>,
     source_classes: HashMap<String, SourceClass>,
+    source_members: HashMap<SourceMember, DefinitionTarget>,
     members: HashMap<(String, String), Vec<MemberDefinition>>,
     member_parents: HashMap<String, Vec<ParentDefinition>>,
     object_owners: HashSet<String>,
@@ -176,12 +178,20 @@ impl DefinitionSymbols {
                             .source_classes
                             .insert(owner.clone(), source_class);
                         let class_symbols = symbols.class_by_internal(&owner);
-                        for parameter in &class.props {
+                        for (property_index, parameter) in class.props.iter().enumerate() {
                             if parameter.is_property && parameter.span.lo < parameter.span.hi {
                                 let target = DefinitionTarget {
                                     file: file_index as u32,
                                     span: definition_name_span(source, parameter.span),
                                 };
+                                definitions.source_members.insert(
+                                    SourceMember::ClassProperty {
+                                        file: file_index as u32,
+                                        owner: declaration.0,
+                                        property: property_index as u32,
+                                    },
+                                    target,
+                                );
                                 definitions.insert_hover(
                                     target,
                                     format!(
@@ -205,7 +215,7 @@ impl DefinitionSymbols {
                                     });
                             }
                         }
-                        for property in &class.body_props {
+                        for (body_property_index, property) in class.body_props.iter().enumerate() {
                             if let Some(span) = declaration_name_span(
                                 &tokens,
                                 source,
@@ -217,6 +227,14 @@ impl DefinitionSymbols {
                                     file: file_index as u32,
                                     span,
                                 };
+                                definitions.source_members.insert(
+                                    SourceMember::ClassProperty {
+                                        file: file_index as u32,
+                                        owner: declaration.0,
+                                        property: (class.props.len() + body_property_index) as u32,
+                                    },
+                                    target,
+                                );
                                 definitions.insert_hover(
                                     target,
                                     render_property_hover(
@@ -298,6 +316,14 @@ impl DefinitionSymbols {
                                     file: file_index as u32,
                                     span,
                                 };
+                                definitions.source_members.insert(
+                                    SourceMember::Class {
+                                        file: file_index as u32,
+                                        owner: declaration.0,
+                                        method: method_index as u32,
+                                    },
+                                    target,
+                                );
                                 definitions.insert_hover(
                                     target,
                                     render_function_hover(
@@ -329,89 +355,117 @@ impl DefinitionSymbols {
                                     });
                             }
                         }
-                        for function in &class.companion_methods {
-                            if let Some(span) = declaration_name_span(
-                                &tokens,
-                                source,
-                                function.span,
-                                &function.name,
-                                false,
-                            ) {
-                                let signature = class_symbols.and_then(|class_symbols| {
-                                    class_symbols.static_methods.get(&function.name)
-                                });
-                                let target = DefinitionTarget {
-                                    file: file_index as u32,
-                                    span,
-                                };
-                                definitions.insert_hover(
-                                    target,
-                                    render_function_hover(
-                                        function,
-                                        signature.map(|signature| signature.ret),
-                                        source_name(source, target.span, &function.name),
-                                        &tokens,
-                                        source,
-                                    ),
-                                );
-                                definitions
-                                    .members
-                                    .entry((owner.clone(), function.name.clone()))
-                                    .or_default()
-                                    .push(MemberDefinition {
-                                        kind: MemberKind::StaticFunction,
-                                        params: signature.map(|signature| signature.params.clone()),
-                                        source_method: None,
-                                        target,
-                                        is_override: false,
-                                        is_inheritable: false,
+                        if let Some(companion) = companion_class(&analysis.file, class) {
+                            let companion_symbols = class_symbols
+                                .and_then(|class| class.companion_internal)
+                                .and_then(|internal| symbols.class_by_type_name(internal));
+                            for (method_index, function) in companion.methods.iter().enumerate() {
+                                if let Some(span) = declaration_name_span(
+                                    &tokens,
+                                    source,
+                                    function.span,
+                                    &function.name,
+                                    false,
+                                ) {
+                                    let signature = companion_symbols.and_then(|class| {
+                                        class.methods_named(&function.name).first()
                                     });
-                            }
-                        }
-                        for property in &class.companion_props {
-                            if let Some(span) = declaration_name_span(
-                                &tokens,
-                                source,
-                                property.span,
-                                &property.name,
-                                false,
-                            ) {
-                                let target = DefinitionTarget {
-                                    file: file_index as u32,
-                                    span,
-                                };
-                                definitions.insert_hover(
-                                    target,
-                                    render_property_hover(
-                                        property,
-                                        checked_property_type(
-                                            property,
-                                            analysis.types.as_ref(),
-                                            class_symbols.and_then(|symbols| {
-                                                symbols
-                                                    .static_props
-                                                    .get(&property.name)
-                                                    .map(|property| property.ty)
-                                            }),
+                                    let target = DefinitionTarget {
+                                        file: file_index as u32,
+                                        span,
+                                    };
+                                    definitions.source_members.insert(
+                                        SourceMember::Class {
+                                            file: file_index as u32,
+                                            owner: class
+                                                .companion
+                                                .expect("companion declaration was resolved")
+                                                .0,
+                                            method: method_index as u32,
+                                        },
+                                        target,
+                                    );
+                                    definitions.insert_hover(
+                                        target,
+                                        render_function_hover(
+                                            function,
+                                            signature.map(|signature| signature.ret),
+                                            source_name(source, target.span, &function.name),
+                                            &tokens,
+                                            source,
                                         ),
-                                        source_name(source, target.span, &property.name),
-                                    ),
-                                );
-                                definitions
-                                    .members
-                                    .entry((owner.clone(), property.name.clone()))
-                                    .or_default()
-                                    .push(MemberDefinition {
-                                        kind: MemberKind::StaticValue,
-                                        params: Some(Vec::new()),
-                                        source_method: None,
+                                    );
+                                    definitions
+                                        .members
+                                        .entry((owner.clone(), function.name.clone()))
+                                        .or_default()
+                                        .push(MemberDefinition {
+                                            kind: MemberKind::StaticFunction,
+                                            params: signature
+                                                .map(|signature| signature.params.clone()),
+                                            source_method: None,
+                                            target,
+                                            is_override: false,
+                                            is_inheritable: false,
+                                        });
+                                }
+                            }
+                            for (body_property_index, property) in
+                                companion.body_props.iter().enumerate()
+                            {
+                                if let Some(span) = declaration_name_span(
+                                    &tokens,
+                                    source,
+                                    property.span,
+                                    &property.name,
+                                    false,
+                                ) {
+                                    let target = DefinitionTarget {
+                                        file: file_index as u32,
+                                        span,
+                                    };
+                                    definitions.source_members.insert(
+                                        SourceMember::ClassProperty {
+                                            file: file_index as u32,
+                                            owner: class
+                                                .companion
+                                                .expect("companion declaration was resolved")
+                                                .0,
+                                            property: (companion.props.len() + body_property_index)
+                                                as u32,
+                                        },
                                         target,
-                                        is_override: false,
-                                        is_inheritable: false,
-                                    });
+                                    );
+                                    definitions.insert_hover(
+                                        target,
+                                        render_property_hover(
+                                            property,
+                                            checked_property_type(
+                                                property,
+                                                analysis.types.as_ref(),
+                                                companion_symbols
+                                                    .and_then(|class| class.prop(&property.name))
+                                                    .map(|(ty, _)| ty),
+                                            ),
+                                            source_name(source, target.span, &property.name),
+                                        ),
+                                    );
+                                    definitions
+                                        .members
+                                        .entry((owner.clone(), property.name.clone()))
+                                        .or_default()
+                                        .push(MemberDefinition {
+                                            kind: MemberKind::StaticValue,
+                                            params: Some(Vec::new()),
+                                            source_method: None,
+                                            target,
+                                            is_override: false,
+                                            is_inheritable: false,
+                                        });
+                                }
                             }
                         }
-                        for entry in &class.enum_entries {
+                        for (entry_index, entry) in class.enum_entries.iter().enumerate() {
                             let target = DefinitionTarget {
                                 file: file_index as u32,
                                 span: definition_name_span(source, entry.span),
@@ -432,6 +486,30 @@ impl DefinitionSymbols {
                                     is_override: false,
                                     is_inheritable: false,
                                 });
+                            for (method_index, method) in entry.methods.iter().enumerate() {
+                                let Some(span) = declaration_name_span(
+                                    &tokens,
+                                    source,
+                                    method.span,
+                                    &method.name,
+                                    false,
+                                ) else {
+                                    continue;
+                                };
+                                let target = DefinitionTarget {
+                                    file: file_index as u32,
+                                    span,
+                                };
+                                definitions.source_members.insert(
+                                    SourceMember::EnumEntry {
+                                        file: file_index as u32,
+                                        owner: declaration.0,
+                                        entry: entry_index as u32,
+                                        method: method_index as u32,
+                                    },
+                                    target,
+                                );
+                            }
                         }
                     }
                     Decl::Fun(function) => {
@@ -550,13 +628,19 @@ impl DefinitionSymbols {
         }
         definitions.build_implementation_targets(files, symbols, implementation_limit);
         let mut self_targets = vec![Vec::new(); files.len()];
-        for target in definitions.declarations.values().copied().chain(
-            definitions
-                .members
-                .values()
-                .flatten()
-                .map(|definition| definition.target),
-        ) {
+        for target in definitions
+            .declarations
+            .values()
+            .copied()
+            .chain(
+                definitions
+                    .members
+                    .values()
+                    .flatten()
+                    .map(|definition| definition.target),
+            )
+            .chain(definitions.source_members.values().copied())
+        {
             if let Some(targets) = self_targets.get_mut(target.file as usize) {
                 targets.push(target);
             }
@@ -873,7 +957,7 @@ impl DefinitionSymbols {
         let Some(parent_class) = source_class(files, parent_source) else {
             return Some(Vec::new());
         };
-        let binding_count = parent_class.type_params.len();
+        let binding_count = parent_class.type_params().len();
         if binding_count > *work_remaining {
             *work_remaining = 0;
             return None;
@@ -1073,21 +1157,8 @@ impl DefinitionSymbols {
         self.object_owners.contains(owner)
     }
 
-    pub(crate) fn member_target(
-        &self,
-        owner: &str,
-        name: &str,
-        kind: MemberKind,
-        params: &[Ty],
-    ) -> Option<DefinitionTarget> {
-        self.members
-            .get(&(owner.to_owned(), name.to_owned()))
-            .and_then(|definitions| {
-                definitions.iter().find(|definition| {
-                    definition.kind == kind && definition.params.as_deref() == Some(params)
-                })
-            })
-            .map(|definition| definition.target)
+    pub(crate) fn source_member_target(&self, source: SourceMember) -> Option<DefinitionTarget> {
+        self.source_members.get(&source).copied()
     }
 
     pub(crate) fn extension_value_target(
@@ -1348,7 +1419,7 @@ fn member_signatures_compatible(
 
 fn source_method_has_type_parameters(files: &[FileAnalysis], source: SourceMethod) -> bool {
     source_method(files, source).is_some_and(|(class, method)| {
-        !class.type_params.is_empty() || !method.type_params.is_empty()
+        !class.type_params().is_empty() || !method.type_params.is_empty()
     })
 }
 
@@ -1378,14 +1449,14 @@ fn root_type_bindings(
     class: &ClassDecl,
     work_remaining: &mut usize,
 ) -> Option<Vec<ImplementationType>> {
-    if class.type_params.len() > *work_remaining {
+    if class.type_params().len() > *work_remaining {
         *work_remaining = 0;
         return None;
     }
-    *work_remaining -= class.type_params.len();
+    *work_remaining -= class.type_params().len();
     Some(
         class
-            .type_params
+            .type_params()
             .iter()
             .enumerate()
             .map(|(index, _)| ImplementationType {
@@ -1485,7 +1556,7 @@ fn implementation_type(
         });
     }
     if let Some(parameter) = current_class
-        .type_params
+        .type_params()
         .iter()
         .position(|parameter| parameter == &reference.name)
     {
@@ -1588,20 +1659,23 @@ fn render_class_hover(class: &ClassDecl, name: &str, source: &str) -> String {
         Modality::Sealed => "sealed ",
         Modality::Final => "",
     };
-    let kind = match class.kind {
-        ClassKind::Interface if class.is_fun_interface => "fun interface",
-        ClassKind::Interface => "interface",
-        ClassKind::Enum => "enum class",
-        ClassKind::Object => "object",
-        ClassKind::Annotation => "annotation class",
-        ClassKind::Class if class.is_value => "@JvmInline\ninline class",
-        ClassKind::Class if class.inner_of.is_some() => "inner class",
-        ClassKind::Class if class.is_data => "data class",
-        ClassKind::Class => "class",
+    let kind = if class.is_singleton() {
+        "object"
+    } else {
+        match class.kind {
+            ClassKind::Interface if class.is_fun_interface => "fun interface",
+            ClassKind::Interface => "interface",
+            ClassKind::Enum => "enum class",
+            ClassKind::Annotation => "annotation class",
+            ClassKind::Class if class.is_value => "@JvmInline\ninline class",
+            ClassKind::Class if class.inner_of.is_some() => "inner class",
+            ClassKind::Class if class.is_data => "data class",
+            ClassKind::Class => "class",
+        }
     };
     let type_parameters = render_type_parameters(
-        &class.type_params,
-        &class.type_param_bounds,
+        class.type_params(),
+        class.type_param_bounds(),
         &HashSet::new(),
         &HashSet::new(),
         "",

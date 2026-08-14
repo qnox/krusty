@@ -113,3 +113,33 @@ fn infix_extension_is_selected_before_a_non_infix_primitive_member() {
     }\n";
     assert_eq!(run(SRC).expect("infix extension selection"), "OK");
 }
+
+#[test]
+fn infix_syntax_rejects_a_plain_extension() {
+    const SRC: &str = "fun Int.rem(other: Int): Int = other\n\
+    fun box(): String = (8 rem 2).toString()\n";
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
+    assert!(
+        !diagnostics.is_empty(),
+        "plain extension must not answer infix syntax"
+    );
+}
+
+#[test]
+fn invalid_infix_declarations_are_rejected() {
+    const SRC: &str = "infix fun top(value: Int) = value\n\
+    infix fun Int.many(a: Int, b: Int) = a + b\n\
+    class C {\n\
+    \x20   infix fun defaulted(value: Int = 0) = value\n\
+    \x20   infix fun spread(vararg value: Int) = value.size\n\
+    }\n";
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.contains("'infix' modifier is inapplicable"))
+            .count(),
+        4,
+        "{diagnostics:#?}"
+    );
+}

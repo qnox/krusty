@@ -464,23 +464,6 @@ class Test {
 fun box(): String = Test().test()
 "#,
         ),
-        // A receiver AND return on the class's own type parameter (`val T.x: T`): the read site's
-        // expected type needs substitution the accessor handoff doesn't carry. (The corpus
-        // `extensionMemberWithTypeParameter.kt` shape — `val T.foo: String` — is gated by the same
-        // check.)
-        (
-            "MemberExtPropTParamRet",
-            r#"
-class Test<T>(val v: T) {
-    val T.foo: T
-        get() = v
-
-    fun test(t: T): T = t.foo
-}
-
-fun box(): String = Test("OK").test("x")
-"#,
-        ),
         // An OPEN member extension property: cross-class extension overrides register nothing.
         (
             "MemberExtPropOpen",
@@ -555,4 +538,21 @@ fun box(): String = with(SyntheticOwner()) { 1.token }
             "{stem}: unsupported member extension property shape must not emit (skip, never miscompile)"
         );
     }
+}
+
+#[test]
+fn class_type_parameter_member_extension_property_runs() {
+    run_box(
+        r#"
+class Test<T>(val v: T) {
+    val T.foo: T
+        get() = v
+
+    fun test(t: T): T = t.foo
+}
+
+fun box(): String = Test("OK").test("x")
+"#,
+        "MemberExtPropTParamRet",
+    );
 }

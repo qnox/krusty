@@ -10,17 +10,14 @@
 //! (`check_builtin_operator_method` is shared), so a builtin member beats a same-named extension
 //! everywhere.
 //!
-//! Deliberately still gated (never miscompile): primitive CONVERSIONS through `?.`
-//! (`l?.toByte()` — not operator methods), `inc`/`dec`/`mod`/`rangeTo` through `?.` (rejected
+//! Deliberately still gated (never miscompile): `mod`/`rangeTo` through `?.` (rejected
 //! like their qualified forms), type-parameter receivers erased to `Any`, operator `invoke`
 //! through `?.`, and LOCAL functions called through `?.`.
 
 use super::common;
 
 fn run_box(src: &str, stem: &str) {
-    let Some(out) = common::compile_and_run_with_stdlib(src, stem) else {
-        panic!("{stem}: expected the box to compile and run");
-    };
+    let out = common::expect_box_run_with_stdlib(src, stem);
     assert_eq!(out, "OK", "{stem}");
 }
 
@@ -374,6 +371,54 @@ fn corpus_safecall_primitives_box_ok() {
     }
 }
 
+#[test]
+fn safecall_primitive_conversion_runs() {
+    run_box(
+        r#"
+fun box(): String {
+    val l: Long? = 230L
+    val b = l?.toByte()
+    return if (b == (-26).toByte()) "OK" else "fail"
+}
+"#,
+        "SafeCallConversion",
+    );
+}
+
+#[test]
+fn safecall_primitive_inc_runs_and_shadows_extensions() {
+    run_box(
+        r#"
+fun Int.inc(): Int = -1
+
+fun box(): String {
+    val nullable: Int? = 0
+    if (nullable?.inc() != 1) return "nullable"
+    if (42?.inc() != 43) return "shadowed"
+    return "OK"
+}
+"#,
+        "SafeCallInc",
+    );
+}
+
+#[test]
+fn safecall_function_any_methods_run() {
+    run_box(
+        r#"
+fun box(): String {
+    val callback: (() -> Int)? = { 1 }
+    if (callback?.toString() == null) return "toString"
+    if (callback?.hashCode() == null) return "hashCode"
+    val absent: (() -> Int)? = null
+    if (absent?.toString() != null) return "null"
+    return "OK"
+}
+"#,
+        "SafeCallFunctionAnyMethods",
+    );
+}
+
 /// REJECTION GUARDS: shapes that must never EMIT. Asserts on the backend outcome, not a run
 /// result — a skip and an emitted-but-crashing class both make a run-based check pass, but only
 /// the former is acceptable.
@@ -381,40 +426,6 @@ fn corpus_safecall_primitives_box_ok() {
 fn unsupported_safecall_shapes_still_rejected() {
     let jdk = common::jdk_modules();
     let cases: &[(&str, &str)] = &[
-        // A primitive CONVERSION through `?.` (`l?.toByte()`) — not an operator method; the
-        // builtin-operator resolution doesn't cover conversions.
-        (
-            "SafeCallConversion",
-            r#"
-fun box(): String {
-    val l: Long? = 230L
-    val b = l?.toByte()
-    return if (b == (-26).toByte()) "OK" else "fail"
-}
-"#,
-        ),
-        // `inc`/`dec` through `?.` — rejected like the qualified form (unmodelled builtin).
-        (
-            "SafeCallInc",
-            r#"
-fun box(): String {
-    val i: Int? = 0
-    return if (i?.inc() == 1) "OK" else "fail"
-}
-"#,
-        ),
-        // A user extension SHADOWED by a builtin member (`fun Int.inc`; kotlinc calls the
-        // builtin — "extension is shadowed by a member"). Selecting the extension would be a
-        // wrong-value miscompile; the builtin itself isn't lowered through `?.` yet, so the
-        // call must stay skipped.
-        (
-            "SafeCallShadowedExt",
-            r#"
-fun Int.inc(): Int = -1
-
-fun box(): String = if (42?.inc() == 43) "OK" else "fail"
-"#,
-        ),
         // A type-parameter receiver erased to `Any` (`t?.toInt()` on `T : Number?`) — needs
         // bound-driven member resolution.
         (
@@ -433,27 +444,6 @@ fun box(): String {
     fun local(x: Int) = x + 1
     val t: Int? = 2
     return if (t?.local(2) == 3) "OK" else "fail"
-}
-"#,
-        ),
-        // Function-object Any methods are deliberately unsupported by the qualified path because
-        // krusty does not yet preserve the singleton identity/structured string semantics. The generic
-        // safe-call lowering must not make the same receiver emittable merely by adding `?.`.
-        (
-            "SafeCallFunctionAnyMethod",
-            r#"
-fun box(): String {
-    val callback: (() -> Int)? = { 1 }
-    return callback?.toString() ?: "OK"
-}
-"#,
-        ),
-        (
-            "SafeCallFunctionHashCode",
-            r#"
-fun box(): String {
-    val callback: (() -> Int)? = { 1 }
-    return if (callback?.hashCode() == null) "OK" else "fail"
 }
 "#,
         ),

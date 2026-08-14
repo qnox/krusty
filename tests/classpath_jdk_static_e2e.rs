@@ -1,5 +1,18 @@
 use super::common;
 
+fn kotlinc_error_against(source: &str, classpath: &std::path::Path) -> String {
+    let (code, stderr) = common::kotlinc_source_result_with_args(
+        "Reference",
+        source,
+        &[
+            "-classpath".to_string(),
+            classpath.to_string_lossy().into_owned(),
+        ],
+    );
+    assert_ne!(code, 0, "reference compiler unexpectedly accepted fixture");
+    stderr
+}
+
 fn numeric_api() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     let source = r#"
         package fixtures;
@@ -191,18 +204,19 @@ fn java_vararg_does_not_omit_fixed_parameters() {
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
+    let source = "import fixtures.NumericApi\nfun value(): String = NumericApi().prefixedJoin()\n";
     let diagnostics = common::front_end_diagnostics(
-        "import fixtures.NumericApi\nfun value(): String = NumericApi().prefixedJoin()\n",
-        &[java_classes],
+        source,
+        std::slice::from_ref(&java_classes),
         Some(jdk.as_path()),
     );
+    let reference = kotlinc_error_against(source, &java_classes);
     let _ = std::fs::remove_dir_all(temp_root);
     assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("none of the following candidates is applicable")),
-        "{diagnostics:?}"
+        reference.contains("no value passed for parameter 'p0'."),
+        "{reference}"
     );
+    assert_eq!(diagnostics, ["no value passed for parameter 'p0'."]);
 }
 
 #[test]
@@ -263,33 +277,31 @@ fn fully_qualified_jdk_vararg_constructor_accepts_expanded_arguments() {
 }
 
 #[test]
-fn function_value_is_not_passed_to_java_sam_without_an_adapter() {
+fn function_value_is_adapted_to_java_sam() {
     let jdk = common::jdk_modules();
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
-    for call in [
-        "NumericApi.transform(1, operation)",
-        "NumericApi().transformInstance(1, operation)",
-    ] {
-        let source = format!(
-            "import fixtures.NumericApi\n\
-             fun f(operation: (Int) -> Int): Int = {call}\n"
-        );
-        let diagnostics = common::front_end_diagnostics(
-            &source,
-            std::slice::from_ref(&java_classes),
-            Some(jdk.as_path()),
-        );
-        assert!(
-            diagnostics.iter().any(|message| {
-                message.contains("unresolved Java static")
-                    || message.contains("none of the following candidates is applicable")
-            }),
-            "{call}: {diagnostics:?}"
-        );
-    }
+    let stdlib = common::stdlib_jar();
+    let classpath = vec![java_classes, stdlib];
+    let source = "import fixtures.NumericApi\n\
+        fun box(): String {\n\
+        \x20 val operation: (Int) -> Int = { it + 1 }\n\
+        \x20 if (NumericApi.transform(1, operation) != 2) return \"static\"\n\
+        \x20 if (NumericApi().transformInstance(2, operation) != 3) return \"instance\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
+        .unwrap_or_else(|| {
+            panic!(
+                "compile function-value SAM adaptation: {:?}",
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
+            )
+        });
+    let output =
+        common::run_box(&classes, "MainKt", &classpath).expect("run function-value SAM adaptation");
     let _ = std::fs::remove_dir_all(temp_root);
+    assert_eq!(output.trim(), "OK");
 }
 
 #[test]
@@ -299,12 +311,21 @@ fn unrelated_instance_sam_overloads_are_ambiguous() {
         return;
     };
     let source = "import fixtures.NumericApi\nfun f(): Int = NumericApi().choose { 1 }\n";
-    let diagnostics = common::front_end_diagnostics(source, &[java_classes], Some(jdk.as_path()));
+    let diagnostics = common::front_end_diagnostics(
+        source,
+        std::slice::from_ref(&java_classes),
+        Some(jdk.as_path()),
+    );
+    let reference = kotlinc_error_against(source, &java_classes);
     let _ = std::fs::remove_dir_all(temp_root);
+    assert!(
+        reference.contains("overload resolution ambiguity between candidates:"),
+        "{reference}"
+    );
     assert!(
         diagnostics
             .iter()
-            .any(|message| message.contains("none of the following candidates is applicable")),
+            .any(|message| message.contains("overload resolution ambiguity between candidates:")),
         "{diagnostics:?}"
     );
 }
@@ -444,8 +465,12 @@ fn generic_java_static_accepts_zero_arg_sam_lambda() {
         }\n";
 
     assert_eq!(
-        common::compile_and_run_with_stdlib(SOURCE, "Main")
-            .expect("generic Java static SAM call compiles and runs"),
+        common::compile_and_run_with_stdlib(SOURCE, "Main").unwrap_or_else(|| {
+            panic!(
+                "generic Java static SAM call failed: {:?}",
+                common::front_end_diagnostics_with_stdlib(SOURCE)
+            )
+        }),
         "OK"
     );
 }
