@@ -13,7 +13,7 @@
 use super::common;
 
 fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "Main")
+    Some(common::expect_box_run_with_stdlib(src, "Main"))
 }
 
 fn assert_rejected(src: &str) {

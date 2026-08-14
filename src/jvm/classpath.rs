@@ -911,6 +911,8 @@ pub struct MetadataCallFacts {
     pub is_inline: bool,
     /// Kotlin's source-level `operator` modifier. The JVM descriptor/name cannot encode it.
     pub is_operator: bool,
+    /// Kotlin's source-level `infix` modifier. The JVM descriptor/name cannot encode it.
+    pub is_infix: bool,
     pub low_priority: bool,
     /// The callable's declared contract, decoded from `@Metadata` (`None` when it has none).
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
@@ -947,6 +949,7 @@ impl MetadataCallFacts {
             suspend: false,
             is_inline: false,
             is_operator: false,
+            is_infix: false,
             low_priority: false,
             contract: None,
             context_count: 0,
@@ -1053,6 +1056,7 @@ struct BuiltinFunction {
     is_inline: bool,
     is_suspend: bool,
     is_operator: bool,
+    is_infix: bool,
     context_count: usize,
 }
 
@@ -1068,6 +1072,7 @@ pub(super) struct BuiltinPackageFunction {
     pub is_inline: bool,
     pub is_suspend: bool,
     pub is_operator: bool,
+    pub is_infix: bool,
     pub context_count: usize,
 }
 
@@ -1107,6 +1112,7 @@ struct BuiltinMember {
     generic_sig: GenericSig,
     is_property: bool,
     is_operator: bool,
+    is_infix: bool,
     ret_nullable: bool,
 }
 
@@ -1230,6 +1236,7 @@ impl BuiltinsFile {
                 is_inline: function.is_inline,
                 is_suspend: function.is_suspend,
                 is_operator: function.is_operator,
+                is_infix: function.is_infix,
                 context_count: function.context_count,
             });
         }
@@ -1274,6 +1281,7 @@ impl BuiltinsFile {
                         },
                         is_property: m.is_property,
                         is_operator: m.is_operator,
+                        is_infix: m.is_infix,
                         ret_nullable: m.ret_nullable,
                     }
                 })
@@ -2089,6 +2097,7 @@ impl Classpath {
             suspend: c.is_suspend(),
             is_inline: c.is_inline(),
             is_operator: c.is_operator(),
+            is_infix: c.is_infix(),
             low_priority: c.low_priority(),
             contract: c.contract.clone(),
             context_count: c.context_count(),
@@ -2309,6 +2318,7 @@ impl Classpath {
                 is_inline: function.is_inline,
                 is_suspend: function.is_suspend,
                 is_operator: function.is_operator,
+                is_infix: function.is_infix,
                 context_count: function.context_count,
             })
             .collect()
@@ -2515,7 +2525,8 @@ impl Classpath {
                         flags: crate::libraries::LmFlags::default()
                             .with_ret_nullable(m.ret_nullable)
                             .with_is_interface(is_iface)
-                            .with_is_operator(m.is_operator),
+                            .with_is_operator(m.is_operator)
+                            .with_is_infix(m.is_infix),
                         inline: crate::libraries::InlineKind::None,
                         inline_body_plan: None,
                         // Builtin (`.kotlin_builtins`) members are all public API.

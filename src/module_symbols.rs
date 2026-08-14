@@ -158,6 +158,7 @@ impl<'a> ModuleSymbols<'a> {
                 member.params.insert(0, extension.receiver_ty());
                 member.set_is_member_extension(true);
                 member.set_is_operator(extension.signature().is_operator());
+                member.set_is_infix(extension.signature().is_infix());
                 members.push(member);
             }
         }
@@ -719,11 +720,27 @@ impl<'a> ModuleSymbols<'a> {
         name: &str,
     ) -> crate::libraries::Callables {
         let internal = class.internal_name();
+        let declared_receiver = Ty::obj_args_name(
+            internal,
+            &class
+                .type_params
+                .iter()
+                .zip(&class.type_param_bounds)
+                .chain(
+                    class
+                        .captured_type_parameters
+                        .type_params
+                        .iter()
+                        .zip(&class.captured_type_parameters.type_param_bounds),
+                )
+                .map(|(name, bound)| Ty::ty_param(name, *bound))
+                .collect::<Vec<_>>(),
+        );
         let mut functions = class
             .methods_named(name)
             .iter()
             .map(|signature| {
-                fn_info(
+                let mut function = fn_info(
                     FnKind::Member,
                     signature,
                     None,
@@ -734,7 +751,12 @@ impl<'a> ModuleSymbols<'a> {
                     name,
                     0,
                     Origin::Module { facade: internal },
-                )
+                );
+                if let Some(generic) = function.generic_sig.as_mut() {
+                    generic.receiver.get_or_insert(declared_receiver);
+                    function.callable.generic_sig = Some(Box::new(generic.clone()));
+                }
+                function
             })
             .collect::<Vec<_>>();
         for property in class.declared_props.values() {
@@ -934,6 +956,7 @@ fn fn_info(
             // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
             suspend: sig.is_suspend(),
             operator: sig.is_operator(),
+            infix: sig.is_infix(),
             is_abstract: sig.is_abstract(),
             low_priority: sig.low_priority(),
         },

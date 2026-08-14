@@ -636,6 +636,8 @@ impl<'a> Pb<'a> {
 const IS_INLINE_BIT: u64 = 1 << 10;
 /// `IS_OPERATOR` immediately follows the 2-bit member-kind field in Kotlin metadata's function flags.
 const IS_OPERATOR_BIT: u64 = 1 << 8;
+/// `IS_INFIX` follows `IS_OPERATOR` in Kotlin metadata's function flags.
+const IS_INFIX_BIT: u64 = 1 << 9;
 
 /// A `JvmMethodSignature`. Both fields are independently optional in the protobuf: an omitted name
 /// means the Kotlin declaration name, while an omitted descriptor is derived from the Kotlin types.
@@ -806,6 +808,7 @@ struct ParsedFunction {
     is_inline: bool,
     is_suspend: bool,
     is_operator: bool,
+    is_infix: bool,
     visibility: crate::types::Visibility,
     name_id: u64,
     jvm_sig: Option<ParsedJvmSignature>,
@@ -1011,6 +1014,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         is_inline: flags & IS_INLINE_BIT != 0,
         is_suspend: flags & IS_SUSPEND_BIT != 0,
         is_operator: flags & IS_OPERATOR_BIT != 0,
+        is_infix: flags & IS_INFIX_BIT != 0,
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
         name_id,
         jvm_sig,
@@ -1831,6 +1835,7 @@ impl MfnFlags {
     const RET_NULLABLE: u8 = 1 << 3;
     const IS_OPERATOR: u8 = 1 << 4;
     const LOW_PRIORITY: u8 = 1 << 5;
+    const IS_INFIX: u8 = 1 << 6;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -1869,6 +1874,10 @@ impl MfnFlags {
     #[inline]
     pub const fn with_low_priority(self, on: bool) -> Self {
         self.with(Self::LOW_PRIORITY, on)
+    }
+    #[inline]
+    pub const fn with_is_infix(self, on: bool) -> Self {
+        self.with(Self::IS_INFIX, on)
     }
 }
 
@@ -1935,6 +1944,10 @@ impl MetaFn {
     #[inline]
     pub fn is_operator(&self) -> bool {
         self.flags.has(MfnFlags::IS_OPERATOR)
+    }
+    #[inline]
+    pub fn is_infix(&self) -> bool {
+        self.flags.has(MfnFlags::IS_INFIX)
     }
     #[inline]
     pub fn ret_nullable(&self) -> bool {
@@ -2765,6 +2778,7 @@ fn decode_functions(
                             .with_is_extension(pf.has_receiver)
                             .with_ret_nullable(ret_ty.is_some_and(Ty::is_nullable))
                             .with_is_operator(pf.is_operator)
+                            .with_is_infix(pf.is_infix)
                             .with_low_priority(has_annotation(
                                 &pf.annotation_bodies,
                                 records,
@@ -3792,6 +3806,8 @@ pub struct BuiltinMember {
     pub is_property: bool,
     /// Kotlin's `operator` modifier from the function flags. Properties never set it.
     pub is_operator: bool,
+    /// Kotlin's `infix` modifier from the function flags. Properties never set it.
+    pub is_infix: bool,
     /// The member's OWN type parameters (`<R>` of `fold`), with their declared upper bounds — kept
     /// apart from the class's so a consumer can build a generic signature whose formals shadow
     /// correctly.
@@ -3817,6 +3833,7 @@ pub struct BuiltinFunction {
     pub is_inline: bool,
     pub is_suspend: bool,
     pub is_operator: bool,
+    pub is_infix: bool,
     /// Old unnamed context receivers followed by named context parameters. Both are leading
     /// implicit parameters in the semantic signature; only the latter have source names.
     pub context_count: usize,
@@ -4239,6 +4256,7 @@ fn parse_builtin_package_functions(
                 is_inline: function.is_inline,
                 is_suspend: function.is_suspend,
                 is_operator: function.is_operator,
+                is_infix: function.is_infix,
                 context_count,
             })
         })
@@ -4555,6 +4573,7 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
                             ret,
                             is_property: false,
                             is_operator: flags & IS_OPERATOR_BIT != 0,
+                            is_infix: flags & IS_INFIX_BIT != 0,
                             formals,
                             ret_nullable,
                         });
@@ -4602,6 +4621,7 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
                         ret,
                         is_property: true,
                         is_operator: false,
+                        is_infix: false,
                         formals,
                         ret_nullable,
                     });

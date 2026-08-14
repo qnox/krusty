@@ -665,6 +665,7 @@ impl JvmLibraries {
                     inline: inline_kind,
                     suspend,
                     operator: meta.is_operator,
+                    infix: meta.is_infix,
                     is_abstract: false,
                     low_priority: meta.low_priority,
                 },
@@ -738,6 +739,7 @@ impl JvmLibraries {
                 inline,
                 suspend: builtin.is_suspend,
                 operator: builtin.is_operator,
+                infix: builtin.is_infix,
                 is_abstract: false,
                 low_priority: false,
             };
@@ -903,6 +905,7 @@ impl JvmLibraries {
                     inline: InlineKind::None,
                     suspend: function.is_suspend(),
                     operator: function.is_operator(),
+                    infix: function.is_infix(),
                     is_abstract: false,
                     low_priority: function.low_priority(),
                 },
@@ -1830,6 +1833,7 @@ impl JvmLibraries {
                     member.contract = declaration.contract.clone();
                     member.set_is_member_extension(declaration.is_extension());
                     member.set_is_operator(declaration.is_operator());
+                    member.set_is_infix(declaration.is_infix());
                     member.call_sig = declaration.member_call_sig();
                     member.declared_ret = metadata_declared_nonnull_nonsuspend_return(declaration);
                 } else if let Some(declaration) = constructor_declaration {
@@ -4141,6 +4145,7 @@ impl JvmLibraries {
                         inline,
                         suspend: mf.is_suspend(),
                         operator: mf.is_operator(),
+                        infix: mf.is_infix(),
                         is_abstract: false,
                         low_priority: mf.low_priority(),
                     },
@@ -4981,6 +4986,7 @@ impl JvmLibraries {
                                 inline: m.inline,
                                 suspend,
                                 operator: m.is_operator(),
+                                infix: m.is_infix(),
                                 is_abstract: m.is_abstract(),
                                 low_priority: m.low_priority,
                             },

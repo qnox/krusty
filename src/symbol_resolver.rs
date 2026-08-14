@@ -2341,6 +2341,7 @@ fn bind_member_return(
     let mut binds = seeded_gsig_binds(gsig, type_args);
     if let Some(declared_receiver) = gsig.receiver {
         unify_ty_from_symbols(source, declared_receiver, receiver, &mut binds);
+        preserve_receiver_identity_bindings(declared_receiver, receiver, &mut binds);
     } else {
         seed_undeclared_return_bindings(gsig.ret, provider_ret, &gsig.formals, &mut binds);
     }
@@ -2361,6 +2362,27 @@ fn bind_member_return(
         ret
     } else {
         merge_specialized_return(provider_ret, ret)
+    }
+}
+
+/// Receiver substitution must preserve a caller's still-symbolic type parameter. General call
+/// inference intentionally ignores `T = T`, but a selected member on `Owner<T>` returning that same
+/// `T` must not erase it to its upper bound while the enclosing generic declaration is being checked.
+fn preserve_receiver_identity_bindings(declared: Ty, actual: Ty, bindings: &mut GSigBinds) {
+    match (declared.non_null(), actual.non_null()) {
+        (Ty::TyParam(declared, _), actual @ Ty::TyParam(found, _)) if declared == found => {
+            bindings.entry(declared.to_string()).or_insert(actual);
+        }
+        (Ty::Obj(declared, declared_args), Ty::Obj(found, actual_args)) if declared == found => {
+            for (&declared, &actual) in declared_args.iter().zip(actual_args) {
+                preserve_receiver_identity_bindings(declared, actual, bindings);
+            }
+        }
+        (Ty::InProjection(declared), Ty::InProjection(actual))
+        | (Ty::OutProjection(declared), Ty::OutProjection(actual)) => {
+            preserve_receiver_identity_bindings(*declared, *actual, bindings);
+        }
+        _ => {}
     }
 }
 
@@ -3673,6 +3695,29 @@ impl<'a> SymbolResolver<'a> {
         selected: FunctionInfo,
     ) -> ResolvedMember {
         resolved_member_from_info(self.lib, &self.src, receiver, args, type_args, selected)
+    }
+
+    /// Convert an already-specialized overload selection into the checker/lowering handoff. The
+    /// contextual selector has completed receiver, argument, and expected-result inference; running
+    /// the legacy argument-only binder here would discard those bindings (notably for zero-argument
+    /// generic members) and replace the selected return with its erased bound.
+    pub(crate) fn commit_selected_member_function(
+        &self,
+        receiver: Ty,
+        selected: FunctionInfo,
+    ) -> ResolvedMember {
+        let ret = selected.callable.ret;
+        let member = selected.member_with_return(ret);
+        ResolvedMember {
+            receiver,
+            ret,
+            member,
+            physical_params: selected.callable.physical_params.clone(),
+            context_args: Vec::new(),
+            projected_return_hazard: selected.projected_return_hazard,
+            suspend: selected.flags.suspend,
+            origin: selected.callable.origin.clone(),
+        }
     }
 
     /// Select the nearest in-scope extension property, rejecting equal-rank candidates.
@@ -6297,10 +6342,11 @@ fn select_overload_tracking_with_functions(
     for o in &overloads {
         crate::trace_compiler!(
             "resolve",
-            "  raw {name} kind={:?} recv={:?} params={:?} context={} required={} vararg={:?} pub={} rank={} origin={:?} owner={}",
+            "  raw {name} kind={:?} recv={:?} params={:?} generic={:?} context={} required={} vararg={:?} pub={} rank={} origin={:?} owner={}",
             o.kind,
             o.semantic_receiver(),
             o.callable.params,
+            o.generic_sig,
             o.context_count,
             o.call_sig.required,
             o.call_sig.vararg_index,
@@ -7254,6 +7300,26 @@ mod tests {
                 any,
             ),
             any
+        );
+
+        let owner_member = GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: Some(Ty::obj_args("demo/Owner", &[parameter])),
+            params: Vec::new(),
+            ret: parameter,
+            return_policy: Default::default(),
+        };
+        assert_eq!(
+            bind_member_return(
+                &EMPTY_SOURCE,
+                &owner_member,
+                Ty::obj_args("demo/Owner", &[parameter]),
+                &[],
+                &[],
+                any,
+            ),
+            parameter
         );
     }
 

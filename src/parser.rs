@@ -1135,15 +1135,7 @@ impl<'a> Parser<'a> {
                     self.file.decls.insert(decls_before, id);
                 }
                 TokenKind::KwFun => {
-                    let mut d = self.parse_fun(
-                        mods.iter().any(|m| m == "inline"),
-                        mods.iter().any(|m| m == "final"),
-                        mods.iter().any(|m| m == "suspend"),
-                        mods.iter().any(|m| m == "tailrec"),
-                        mods.iter().any(|m| m == "abstract"),
-                    );
-                    d.visibility = visibility_of(&mods);
-                    d.set_is_operator(mods.iter().any(|m| m == "operator"));
+                    let d = self.parse_fun(&mods);
                     let id = self.file.add_decl(Decl::Fun(d));
                     self.file.decls.push(id);
                 }
@@ -2223,20 +2215,7 @@ impl<'a> Parser<'a> {
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
-                        let mut function = self.parse_fun(
-                            mods.iter().any(|m| m == "inline"),
-                            mods.iter().any(|m| m == "final"),
-                            mods.iter().any(|m| m == "suspend"),
-                            mods.iter().any(|m| m == "tailrec"),
-                            mods.iter().any(|m| m == "abstract"),
-                        );
-                        function.visibility = visibility_of(&mods);
-                        function.set_is_open(
-                            !function.is_final()
-                                && mods.iter().any(|m| m == "open" || m == "override"),
-                        );
-                        function.set_is_override(mods.iter().any(|m| m == "override"));
-                        function.set_is_operator(mods.iter().any(|m| m == "operator"));
+                        let function = self.parse_fun(&mods);
                         methods.push(function);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -2474,13 +2453,7 @@ impl<'a> Parser<'a> {
                                     }
                                 }
                             } else if self.at(TokenKind::KwFun) {
-                                body.push(self.parse_fun(
-                                    bmods.iter().any(|m| m == "inline"),
-                                    bmods.iter().any(|m| m == "final"),
-                                    bmods.iter().any(|m| m == "suspend"),
-                                    bmods.iter().any(|m| m == "tailrec"),
-                                    bmods.iter().any(|m| m == "abstract"),
-                                ));
+                                body.push(self.parse_fun(&bmods));
                             } else if self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar) {
                                 let property = self.parse_top_property(
                                     bmods.iter().any(|m| m == "lateinit"),
@@ -2538,19 +2511,7 @@ impl<'a> Parser<'a> {
                 }
                 match self.kind() {
                     TokenKind::KwFun => {
-                        let mut f = self.parse_fun(
-                            emods.iter().any(|m| m == "inline"),
-                            emods.iter().any(|m| m == "final"),
-                            emods.iter().any(|m| m == "suspend"),
-                            emods.iter().any(|m| m == "tailrec"),
-                            emods.iter().any(|m| m == "abstract"),
-                        );
-                        f.visibility = visibility_of(&emods);
-                        f.set_is_open(
-                            !f.is_final() && emods.iter().any(|m| m == "open" || m == "override"),
-                        );
-                        f.set_is_override(emods.iter().any(|m| m == "override"));
-                        f.set_is_operator(emods.iter().any(|m| m == "operator"));
+                        let f = self.parse_fun(&emods);
                         methods.push(f);
                     }
                     // A body member property (`enum class C { A; val x = … }`): a field + accessor on
@@ -2774,14 +2735,7 @@ impl<'a> Parser<'a> {
         s
     }
 
-    fn parse_fun(
-        &mut self,
-        is_inline: bool,
-        is_final: bool,
-        is_suspend: bool,
-        is_tailrec: bool,
-        is_abstract: bool,
-    ) -> FunDecl {
+    fn parse_fun(&mut self, modifiers: &[String]) -> FunDecl {
         // Annotations consumed by `skip_decl_prefix` before this function, attached here (mirrors how
         // classes take them) so function-annotation plugins can see them; otherwise they are discarded.
         let annotations = self.take_pending_annotations();
@@ -2890,13 +2844,8 @@ impl<'a> Parser<'a> {
             reified_type_params,
             span: Span::new(start.lo, end.hi),
             signature_span: Span::new(start.lo, signature_end),
-            flags: FdFlags::default()
-                .with_is_inline(is_inline)
-                .with_is_final(is_final)
-                .with_is_abstract(is_abstract)
-                .with_is_suspend(is_suspend)
-                .with_is_tailrec(is_tailrec),
-            visibility: Visibility::Public,
+            flags: function_flags(modifiers),
+            visibility: visibility_of(modifiers),
             annotations,
             annotation_args,
             decl_line: 0, // filled by the parser post-pass
@@ -3383,9 +3332,6 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
                 let lateinit = mods.iter().any(|m| m == "lateinit");
-                let fun_inline = mods.iter().any(|m| m == "inline");
-                let fun_final = mods.iter().any(|m| m == "final");
-                let fun_suspend = mods.iter().any(|m| m == "suspend");
                 let is_abstract = mods.iter().any(|m| m == "abstract");
                 // All representable nested classifier kinds share one registration path. Keeping
                 // this outside the member-kind match prevents class/object/enum syntax branches from
@@ -3396,19 +3342,7 @@ impl<'a> Parser<'a> {
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
-                        let mut f = self.parse_fun(
-                            fun_inline,
-                            fun_final,
-                            fun_suspend,
-                            mods.iter().any(|m| m == "tailrec"),
-                            mods.iter().any(|m| m == "abstract"),
-                        );
-                        f.visibility = visibility_of(&mods);
-                        f.set_is_open(
-                            !f.is_final() && mods.iter().any(|m| m == "open" || m == "override"),
-                        );
-                        f.set_is_override(mods.iter().any(|m| m == "override"));
-                        f.set_is_operator(mods.iter().any(|m| m == "operator"));
+                        let f = self.parse_fun(&mods);
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -3801,19 +3735,7 @@ impl<'a> Parser<'a> {
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
-                        let mut f = self.parse_fun(
-                            imods.iter().any(|m| m == "inline"),
-                            false,
-                            imods.iter().any(|m| m == "suspend"),
-                            imods.iter().any(|m| m == "tailrec"),
-                            imods.iter().any(|m| m == "abstract"),
-                        );
-                        // The interface member's modifiers were consumed into `imods` before `parse_fun`,
-                        // so it never saw `private` — a private interface method is non-virtual (called via
-                        // `invokespecial`), so preserve the flag here.
-                        f.visibility = visibility_of(&imods);
-                        f.set_is_override(imods.iter().any(|m| m == "override"));
-                        f.set_is_operator(imods.iter().any(|m| m == "operator"));
+                        let f = self.parse_fun(&imods);
                         methods.push(f);
                     }
                     // Abstract interface property: `val`/`var x: T` (no initializer/getter).
@@ -3920,25 +3842,10 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
                 let lateinit = mods.iter().any(|m| m == "lateinit");
-                let fun_inline = mods.iter().any(|m| m == "inline");
-                let fun_final = mods.iter().any(|m| m == "final");
-                let fun_suspend = mods.iter().any(|m| m == "suspend");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
-                        let mut f = self.parse_fun(
-                            fun_inline,
-                            fun_final,
-                            fun_suspend,
-                            mods.iter().any(|m| m == "tailrec"),
-                            mods.iter().any(|m| m == "abstract"),
-                        );
-                        f.visibility = visibility_of(&mods);
-                        f.set_is_open(
-                            !f.is_final() && mods.iter().any(|m| m == "open" || m == "override"),
-                        );
-                        f.set_is_override(mods.iter().any(|m| m == "override"));
-                        f.set_is_operator(mods.iter().any(|m| m == "operator"));
+                        let f = self.parse_fun(&mods);
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -4075,9 +3982,6 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
                 let lateinit = mods.iter().any(|m| m == "lateinit");
-                let fun_inline = mods.iter().any(|m| m == "inline");
-                let fun_final = mods.iter().any(|m| m == "final");
-                let fun_suspend = mods.iter().any(|m| m == "suspend");
                 // Named singleton owners use the same classifier-registration invariant as class
                 // owners. The flag only excludes `inner` classes, whose semantics require an
                 // enclosing instance that a singleton cannot supply. Anonymous-object bodies use
@@ -4088,19 +3992,7 @@ impl<'a> Parser<'a> {
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
-                        let mut f = self.parse_fun(
-                            fun_inline,
-                            fun_final,
-                            fun_suspend,
-                            mods.iter().any(|m| m == "tailrec"),
-                            mods.iter().any(|m| m == "abstract"),
-                        );
-                        f.visibility = visibility_of(&mods);
-                        f.set_is_open(
-                            !f.is_final() && mods.iter().any(|m| m == "open" || m == "override"),
-                        );
-                        f.set_is_override(mods.iter().any(|m| m == "override"));
-                        f.set_is_operator(mods.iter().any(|m| m == "operator"));
+                        let f = self.parse_fun(&mods);
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -5278,15 +5170,7 @@ impl<'a> Parser<'a> {
                 let start = self.tok().span;
                 if kind == TokenKind::KwFun {
                     let mods = self.parse_member_decl_prefix();
-                    let mut function = self.parse_fun(
-                        mods.iter().any(|modifier| modifier == "inline"),
-                        mods.iter().any(|modifier| modifier == "final"),
-                        mods.iter().any(|modifier| modifier == "suspend"),
-                        mods.iter().any(|modifier| modifier == "tailrec"),
-                        false,
-                    );
-                    function.visibility = visibility_of(&mods);
-                    function.set_is_operator(mods.iter().any(|modifier| modifier == "operator"));
+                    let function = self.parse_fun(&mods);
                     return self.finish_stmt(Stmt::LocalFun(function), start);
                 }
                 if self.kind() != kind {
@@ -5343,13 +5227,7 @@ impl<'a> Parser<'a> {
         {
             let start = self.tok().span;
             let mods = self.parse_member_decl_prefix();
-            let function = self.parse_fun(
-                false,
-                false,
-                mods.iter().any(|modifier| modifier == "suspend"),
-                false,
-                false,
-            );
+            let function = self.parse_fun(&mods);
             return self.finish_stmt(Stmt::LocalFun(function), start);
         }
         let start = self.tok().span;
@@ -5567,7 +5445,7 @@ impl<'a> Parser<'a> {
                     .get(self.i + 1)
                     .is_some_and(|token| token.kind == TokenKind::LParen) =>
             {
-                let function = self.parse_fun(false, false, false, false, false);
+                let function = self.parse_fun(&[]);
                 self.finish_stmt(Stmt::LocalFun(function), start)
             }
             // Local class declaration inside a function body (`class`/`data class`/`enum class`/
@@ -8192,6 +8070,36 @@ fn visibility_of(mods: &[String]) -> crate::types::Visibility {
         .find(|m| matches!(m.as_str(), "private" | "protected" | "internal" | "public"))
         .map(|m| crate::types::Visibility::from_modifier(m))
         .unwrap_or_default()
+}
+
+fn function_flags(modifiers: &[String]) -> FdFlags {
+    let mut flags = FdFlags::default();
+    let mut is_final = false;
+    let mut is_open = false;
+    for modifier in modifiers {
+        flags = match modifier.as_str() {
+            "inline" => flags.with_is_inline(true),
+            "final" => {
+                is_final = true;
+                flags.with_is_final(true)
+            }
+            "open" => {
+                is_open = true;
+                flags
+            }
+            "override" => {
+                is_open = true;
+                flags.with_is_override(true)
+            }
+            "abstract" => flags.with_is_abstract(true),
+            "suspend" => flags.with_is_suspend(true),
+            "tailrec" => flags.with_is_tailrec(true),
+            "operator" => flags.with_is_operator(true),
+            "infix" => flags.with_is_infix(true),
+            _ => flags,
+        };
+    }
+    flags.with_is_open(is_open && !is_final)
 }
 
 /// Soft modifiers that don't change a declaration's *kind* (so krusty can ignore them). Excludes

@@ -122,8 +122,41 @@ if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
     focused_timeout="${KRUSTY_E2E_TIMEOUT_SECONDS:-300}"
   fi
   echo "run-tests.sh: focused test timeout=${focused_timeout}s: cargo test $profile_arg $*" >&2
-  run_with_deadline "$focused_timeout" cargo test $profile_arg "$@"
-  exit $?
+  focused_log="$(mktemp)"
+  trap 'rm -f "$focused_log"' EXIT
+  set +e
+  run_with_deadline "$focused_timeout" cargo test $profile_arg "$@" 2>&1 | tee "$focused_log"
+  focused_status="${PIPESTATUS[0]}"
+  set -e
+  if [ "$focused_status" -ne 0 ]; then
+    exit "$focused_status"
+  fi
+
+  # libtest treats a filter matching zero tests as success. For a focused run that is always a broken
+  # filter, not a successful verification. Sum every test-binary summary because `cargo test FILTER`
+  # can execute several binaries, most of which legitimately select zero tests.
+  selected_tests="$(awk '
+    /^test result: / {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "passed;" || $i == "failed;" || $i == "measured;") {
+          selected += $(i - 1)
+        }
+      }
+      summaries++
+    }
+    END {
+      if (summaries == 0) exit 2
+      print selected + 0
+    }
+  ' "$focused_log")" || {
+    echo "run-tests.sh: focused cargo run produced no test summary" >&2
+    exit 1
+  }
+  if [ "$selected_tests" -eq 0 ]; then
+    echo "run-tests.sh: test filter matched zero tests: $*" >&2
+    exit 1
+  fi
+  exit 0
 fi
 
 # Hundreds of e2e tests resolve `java.*` against the JDK's `lib/modules` jimage. Without it they all

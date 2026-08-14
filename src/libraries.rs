@@ -170,6 +170,7 @@ impl LmFlags {
     /// a call site must know which, since only a member extension needs its dispatch receiver in scope.
     const IS_EXTENSION: u8 = 1 << 4;
     const IS_ABSTRACT: u8 = 1 << 5;
+    const IS_INFIX: u8 = 1 << 6;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -208,6 +209,10 @@ impl LmFlags {
     #[inline]
     pub const fn with_is_abstract(self, on: bool) -> Self {
         self.with(Self::IS_ABSTRACT, on)
+    }
+    #[inline]
+    pub const fn with_is_infix(self, on: bool) -> Self {
+        self.with(Self::IS_INFIX, on)
     }
 }
 
@@ -690,6 +695,10 @@ impl LibraryMember {
         self.flags.has(LmFlags::IS_OPERATOR)
     }
     #[inline]
+    pub fn is_infix(&self) -> bool {
+        self.flags.has(LmFlags::IS_INFIX)
+    }
+    #[inline]
     pub fn is_member_extension(&self) -> bool {
         self.flags.has(LmFlags::IS_EXTENSION)
     }
@@ -707,6 +716,9 @@ impl LibraryMember {
     }
     pub fn set_is_operator(&mut self, on: bool) {
         self.flags = self.flags.with_is_operator(on);
+    }
+    pub fn set_is_infix(&mut self, on: bool) {
+        self.flags = self.flags.with_is_infix(on);
     }
     pub fn set_is_member_extension(&mut self, on: bool) {
         self.flags = self.flags.with_is_extension(on);
@@ -1221,7 +1233,7 @@ pub fn map_call_args<T: Copy>(
                     name: param_names
                         .get(parameter_index)
                         .cloned()
-                        .unwrap_or_else(|| "?".to_string()),
+                        .unwrap_or_else(|| format!("p{parameter_index}")),
                 });
             }
         }
@@ -1650,6 +1662,7 @@ impl FunctionInfo {
         candidate.flags.inline = member.inline;
         candidate.flags.suspend = member.suspend();
         candidate.flags.operator = member.is_operator();
+        candidate.flags.infix = member.is_infix();
         candidate.flags.is_abstract = member.is_abstract();
         candidate.flags.low_priority = member.low_priority;
         candidate.default_values = member.default_values.clone();
@@ -1692,6 +1705,7 @@ impl FunctionInfo {
         member.visibility = self.visibility;
         member.set_suspend(self.flags.suspend);
         member.set_is_operator(self.flags.operator);
+        member.set_is_infix(self.flags.infix);
         member.set_is_abstract(self.flags.is_abstract);
         // Interface-ness travels with the selected overload for the same reason `suspend` does: it is a
         // fact about the DECLARATION, and the emit site may have no way to re-derive it (a mapped
@@ -1766,6 +1780,10 @@ pub struct FnFlags {
     /// Kotlin's `operator` modifier. Call conventions such as `receiver(args)` must filter on this
     /// semantic flag; JVM method names alone cannot distinguish an explicit `.invoke()` declaration.
     pub operator: bool,
+    /// Kotlin's `infix` modifier. Infix syntax admits only declarations carrying this flag; an
+    /// ordinary same-named member remains callable through dot syntax but does not shadow an infix
+    /// extension.
+    pub infix: bool,
     /// The declaration has no implementation. Ordinary virtual calls may select it because dispatch
     /// reaches a concrete override; a non-virtual `super` call must continue to another direct
     /// supertype instead.

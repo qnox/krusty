@@ -21,6 +21,18 @@ fun box(): String = if (widened == 42L) "OK" else "wrong"
 }
 
 #[test]
+fn selected_generic_member_keeps_its_inferred_return() {
+    let src = r#"
+class C {
+    fun <T> id(value: T) = value
+    fun use() = id("OK").length
+}
+fun box(): String = if (C().use() == 2) "OK" else "FAIL"
+"#;
+    assert_eq!(run(src, "ResolverSelectedGenericMemberReturn"), "OK");
+}
+
+#[test]
 fn chained_generic_extension_call_types_an_inferred_property() {
     let src = r#"
 val values = listOf("a", "b").asSequence()

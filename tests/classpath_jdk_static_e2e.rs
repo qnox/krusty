@@ -1,5 +1,23 @@
 use super::common;
 
+fn kotlinc_error_against(
+    source: &str,
+    classpath: &std::path::Path,
+    root: &std::path::Path,
+) -> Option<String> {
+    let source_path = root.join("Reference.kt");
+    std::fs::write(&source_path, source).ok()?;
+    let args = vec![
+        source_path.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        root.join("reference-out").to_string_lossy().into_owned(),
+        "-classpath".to_string(),
+        classpath.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = common::kotlinc_compile(&args)?;
+    (code != 0).then_some(stderr)
+}
+
 fn numeric_api() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     let source = r#"
         package fixtures;
@@ -191,18 +209,20 @@ fn java_vararg_does_not_omit_fixed_parameters() {
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
+    let source = "import fixtures.NumericApi\nfun value(): String = NumericApi().prefixedJoin()\n";
     let diagnostics = common::front_end_diagnostics(
-        "import fixtures.NumericApi\nfun value(): String = NumericApi().prefixedJoin()\n",
-        &[java_classes],
+        source,
+        std::slice::from_ref(&java_classes),
         Some(jdk.as_path()),
     );
+    let reference = kotlinc_error_against(source, &java_classes, &temp_root);
     let _ = std::fs::remove_dir_all(temp_root);
+    let reference = reference.expect("kotlinc rejected-call diagnostic");
     assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("none of the following candidates is applicable")),
-        "{diagnostics:?}"
+        reference.contains("no value passed for parameter 'p0'."),
+        "{reference}"
     );
+    assert_eq!(diagnostics, ["no value passed for parameter 'p0'."]);
 }
 
 #[test]
@@ -297,12 +317,22 @@ fn unrelated_instance_sam_overloads_are_ambiguous() {
         return;
     };
     let source = "import fixtures.NumericApi\nfun f(): Int = NumericApi().choose { 1 }\n";
-    let diagnostics = common::front_end_diagnostics(source, &[java_classes], Some(jdk.as_path()));
+    let diagnostics = common::front_end_diagnostics(
+        source,
+        std::slice::from_ref(&java_classes),
+        Some(jdk.as_path()),
+    );
+    let reference = kotlinc_error_against(source, &java_classes, &temp_root);
     let _ = std::fs::remove_dir_all(temp_root);
+    let reference = reference.expect("kotlinc SAM ambiguity diagnostic");
+    assert!(
+        reference.contains("overload resolution ambiguity between candidates:"),
+        "{reference}"
+    );
     assert!(
         diagnostics
             .iter()
-            .any(|message| message.contains("none of the following candidates is applicable")),
+            .any(|message| message.contains("overload resolution ambiguity between candidates:")),
         "{diagnostics:?}"
     );
 }

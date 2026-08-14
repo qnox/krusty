@@ -628,25 +628,24 @@ pub enum FunBody {
     None,          // (no body — not valid for v0 top-level, but parseable)
 }
 
-/// Bit-packed boolean modifiers for a [`FunDecl`], collapsing its eight `is_*` modifier bytes into one
-/// `u8` (a real 8-byte-per-decl saving). Read through the `FunDecl` accessors of the same names;
-/// `is_open`/`is_override`/`is_operator` are mutated through the matching `set_*` methods; built with
-/// the `with_*` chain. All eight bits are in use — a ninth flag needs a wider field.
+/// Bit-packed boolean modifiers for a [`FunDecl`]. Read through the `FunDecl` accessors of the same
+/// names and build with the `with_*` chain.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FdFlags(u8);
+pub struct FdFlags(u16);
 
 impl FdFlags {
-    const IS_INLINE: u8 = 1 << 0;
-    const IS_FINAL: u8 = 1 << 1;
-    const IS_OPEN: u8 = 1 << 2;
-    const IS_OVERRIDE: u8 = 1 << 3;
-    const IS_ABSTRACT: u8 = 1 << 4;
-    const IS_SUSPEND: u8 = 1 << 5;
-    const IS_TAILREC: u8 = 1 << 6;
-    const IS_OPERATOR: u8 = 1 << 7;
+    const IS_INLINE: u16 = 1 << 0;
+    const IS_FINAL: u16 = 1 << 1;
+    const IS_OPEN: u16 = 1 << 2;
+    const IS_OVERRIDE: u16 = 1 << 3;
+    const IS_ABSTRACT: u16 = 1 << 4;
+    const IS_SUSPEND: u16 = 1 << 5;
+    const IS_TAILREC: u16 = 1 << 6;
+    const IS_OPERATOR: u16 = 1 << 7;
+    const IS_INFIX: u16 = 1 << 8;
 
     #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
+    const fn with(mut self, mask: u16, on: bool) -> Self {
         if on {
             self.0 |= mask;
         } else {
@@ -655,7 +654,7 @@ impl FdFlags {
         self
     }
     #[inline]
-    const fn has(self, mask: u8) -> bool {
+    const fn has(self, mask: u16) -> bool {
         self.0 & mask != 0
     }
 
@@ -690,6 +689,10 @@ impl FdFlags {
     #[inline]
     pub const fn with_is_operator(self, on: bool) -> Self {
         self.with(Self::IS_OPERATOR, on)
+    }
+    #[inline]
+    pub const fn with_is_infix(self, on: bool) -> Self {
+        self.with(Self::IS_INFIX, on)
     }
 }
 
@@ -730,7 +733,7 @@ pub struct FunDecl {
     /// same parser post-pass as `decl_line`.
     pub body_close_line: u32,
     /// Bit-packed `is_inline`/`is_final`/`is_open`/`is_override`/`is_abstract`/`is_suspend`/`is_tailrec`/
-    /// `is_operator` (read via the accessors below; `is_open`/`is_override`/`is_operator` set via `set_*`).
+    /// `is_operator`/`is_infix` (read via the accessors below).
     /// `is_final` — `final`, cannot be overridden. `is_open` — `open`/`override` without `final`, so the
     /// JVM backend must NOT emit `ACC_FINAL`. `is_override` — the member MUST match a supertype member.
     /// `is_abstract` — no body, only valid in an abstract class/interface. `is_suspend` — a coroutine,
@@ -800,16 +803,8 @@ impl FunDecl {
         self.flags.has(FdFlags::IS_OPERATOR)
     }
     #[inline]
-    pub fn set_is_open(&mut self, on: bool) {
-        self.flags = self.flags.with_is_open(on);
-    }
-    #[inline]
-    pub fn set_is_override(&mut self, on: bool) {
-        self.flags = self.flags.with_is_override(on);
-    }
-    #[inline]
-    pub fn set_is_operator(&mut self, on: bool) {
-        self.flags = self.flags.with_is_operator(on);
+    pub fn is_infix(&self) -> bool {
+        self.flags.has(FdFlags::IS_INFIX)
     }
 }
 

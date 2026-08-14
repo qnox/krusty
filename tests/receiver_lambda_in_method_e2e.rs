@@ -97,7 +97,7 @@ fn nested_generic_receiver_lambda_keeps_inferred_return() {
         }\n\
         fun <A> outer(block: Outer<A>.() -> String) = Outer<A>().block()\n\
         fun box() = outer<Int> { nested<Boolean> { \"OK\" } }\n";
-    assert_eq!(run(SRC), Some("OK".to_string()));
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }
 
 #[test]

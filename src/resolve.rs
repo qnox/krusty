@@ -439,6 +439,7 @@ impl SigFlags {
     const REQUIRES_SPLICE: u16 = 1 << 6;
     const IS_ABSTRACT: u16 = 1 << 7;
     const LOW_PRIORITY: u16 = 1 << 8;
+    const IS_INFIX: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -489,6 +490,10 @@ impl SigFlags {
     #[inline]
     pub const fn with_low_priority(self, on: bool) -> Self {
         self.with(Self::LOW_PRIORITY, on)
+    }
+    #[inline]
+    pub const fn with_is_infix(self, on: bool) -> Self {
+        self.with(Self::IS_INFIX, on)
     }
 }
 
@@ -626,6 +631,10 @@ impl Signature {
         self.flags.has(SigFlags::IS_OPERATOR)
     }
     #[inline]
+    pub fn is_infix(&self) -> bool {
+        self.flags.has(SigFlags::IS_INFIX)
+    }
+    #[inline]
     pub fn is_override(&self) -> bool {
         self.flags.has(SigFlags::IS_OVERRIDE)
     }
@@ -706,6 +715,7 @@ fn signature_from_resolved_function(function: &crate::libraries::FunctionInfo) -
             .with_vararg(function.call_sig.vararg_index.is_some())
             .with_is_inline(function.flags.inline.can_inline())
             .with_is_operator(function.flags.operator)
+            .with_is_infix(function.flags.infix)
             .with_is_suspend(function.flags.suspend)
             .with_low_priority(function.flags.low_priority)
             .with_requires_splice(function.flags.inline.must_inline()),
@@ -1222,7 +1232,20 @@ pub struct GenericMethod {
     pub ret_shape: Ty,
 }
 
-type GenericMemberPlan = (GenericMethod, HashMap<String, Ty>, Vec<Vec<Ty>>);
+struct GenericMemberPlan {
+    method: GenericMethod,
+    class_bindings: HashMap<String, Ty>,
+    call_bindings: HashMap<String, Ty>,
+    lambda_parameter_types: Vec<Vec<Ty>>,
+}
+
+struct GenericMemberQuery<'a> {
+    owner: Option<TypeName>,
+    params: Option<&'a [Ty]>,
+    partial_args: Option<&'a [Option<Ty>]>,
+    partial_arg_names: Option<&'a [Option<String>]>,
+    explicit_type_args: &'a [Ty],
+}
 
 struct MemberLambdaShape {
     param_types: Vec<Option<Vec<Ty>>>,
@@ -1282,9 +1305,12 @@ impl PostponedCallConstraints {
 }
 
 fn generic_member_lambda_params(plan: &GenericMemberPlan, parameter: usize) -> Option<Vec<Ty>> {
-    let (method, _, parameter_types) = plan;
-    matches!(method.param_shapes.get(parameter), Some(Ty::Fun(_)))
-        .then(|| parameter_types.get(parameter).cloned().unwrap_or_default())
+    matches!(plan.method.param_shapes.get(parameter), Some(Ty::Fun(_))).then(|| {
+        plan.lambda_parameter_types
+            .get(parameter)
+            .cloned()
+            .unwrap_or_default()
+    })
 }
 
 fn module_member_lambda_params(
@@ -5277,6 +5303,7 @@ fn collect_signatures_with_cp_impl(
                             .with_vararg(vararg)
                             .with_is_inline(f.is_inline())
                             .with_is_operator(f.is_operator())
+                            .with_is_infix(f.is_infix())
                             .with_is_override(f.is_override())
                             .with_is_final(f.is_final())
                             .with_is_suspend(f.is_suspend())
@@ -7777,10 +7804,17 @@ fn module_member_lambda_shape(
             .iter()
             .map(|&parameter| {
                 generic_member
-                    .and_then(|(method, class_bindings, _)| {
-                        method.param_shapes.get(parameter).copied().map(|shape| {
-                            crate::symbol_resolver::ty_subst_keep_unbound(shape, class_bindings)
-                        })
+                    .and_then(|plan| {
+                        plan.method
+                            .param_shapes
+                            .get(parameter)
+                            .copied()
+                            .map(|shape| {
+                                crate::symbol_resolver::ty_subst_keep_unbound(
+                                    shape,
+                                    &plan.call_bindings,
+                                )
+                            })
                     })
                     .or_else(|| member.params.get(parameter).copied())
                     .filter(|parameter| matches!(parameter, Ty::Fun(_)))
@@ -7790,10 +7824,17 @@ fn module_member_lambda_shape(
             .iter()
             .map(|&parameter| {
                 let semantic = generic_member
-                    .and_then(|(method, class_bindings, _)| {
-                        method.param_shapes.get(parameter).copied().map(|shape| {
-                            crate::symbol_resolver::ty_subst_keep_unbound(shape, class_bindings)
-                        })
+                    .and_then(|plan| {
+                        plan.method
+                            .param_shapes
+                            .get(parameter)
+                            .copied()
+                            .map(|shape| {
+                                crate::symbol_resolver::ty_subst_keep_unbound(
+                                    shape,
+                                    &plan.call_bindings,
+                                )
+                            })
                     })
                     .or_else(|| {
                         member
@@ -9985,6 +10026,7 @@ fn member_signature(
             .with_vararg(m.params.iter().any(|p| p.is_vararg))
             .with_is_inline(m.is_inline())
             .with_is_operator(m.is_operator())
+            .with_is_infix(m.is_infix())
             .with_is_override(m.is_override())
             .with_is_final(m.is_final())
             .with_is_suspend(m.is_suspend())
@@ -13029,6 +13071,7 @@ fn make_checker<'a>(
         inferred_fun_rets: HashMap::new(),
         inferred_ext_fun_rets: HashMap::new(),
         inferred_method_rets: HashMap::new(),
+        inferred_source_member_rets: HashMap::new(),
         inferred_member_ext_fun_rets: HashMap::new(),
         stmt_lowers: HashMap::new(),
         stmt_return_targets: HashMap::new(),
@@ -14278,7 +14321,7 @@ fn preinfer_returns_pass_with_owners(
                 ));
                 pre.this_labels.pop();
             }
-            for m in &cl.methods {
+            for (method_index, m) in cl.methods.iter().enumerate() {
                 if function_needs_return_preinfer(m) {
                     let method_scope = scope.child(ScopeKind::Function { receiver: None });
                     let scope = &method_scope;
@@ -14298,7 +14341,16 @@ fn preinfer_returns_pass_with_owners(
                             ),
                         |name| m.reified_type_params.contains(name),
                     );
-                    pre.check_method(scope, m, &properties);
+                    pre.check_method(
+                        scope,
+                        m,
+                        &properties,
+                        Some(crate::libraries::SourceMember::Class {
+                            file: file_index,
+                            owner: d.0,
+                            method: method_index as u32,
+                        }),
+                    );
                 }
             }
             pre.this_labels.truncate(labels_depth);
@@ -15071,9 +15123,9 @@ impl std::ops::Deref for SelectedCallable {
 }
 
 enum CallableCandidateSelection {
-    Selected(SelectedCallable),
-    MissingContext(SelectedCallable),
-    Ambiguous,
+    Selected(Box<SelectedCallable>),
+    MissingContext(Box<SelectedCallable>),
+    Ambiguous(Vec<crate::libraries::FunctionInfo>),
 }
 
 enum InvokeResolution {
@@ -15091,15 +15143,15 @@ enum ClassifierValueCall {
 impl CallableCandidateSelection {
     fn candidate(self) -> Option<SelectedCallable> {
         match self {
-            Self::Selected(candidate) | Self::MissingContext(candidate) => Some(candidate),
-            Self::Ambiguous => None,
+            Self::Selected(candidate) | Self::MissingContext(candidate) => Some(*candidate),
+            Self::Ambiguous(_) => None,
         }
     }
 
     fn available(self) -> Option<SelectedCallable> {
         match self {
-            Self::Selected(candidate) => Some(candidate),
-            Self::MissingContext(_) | Self::Ambiguous => None,
+            Self::Selected(candidate) => Some(*candidate),
+            Self::MissingContext(_) | Self::Ambiguous(_) => None,
         }
     }
 }
@@ -15385,6 +15437,7 @@ struct Checker<'a> {
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
+    inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_member_ext_fun_rets: HashMap<(TypeName, String, Ty, Vec<Ty>), Ty>,
     /// A class internal name → the base-constructor parameter types its `super(args)` resolved to
     /// (see [`ClassSig::super_ctor_params`]). Stashed during checking (where the argument types are
@@ -15512,7 +15565,12 @@ enum MemberSlotCall {
     Resolved(Ty),
     Ambiguous,
     Rejected,
-    NoMatch,
+    NoMatch(Option<Box<MemberMappingFailure>>),
+}
+
+struct MemberMappingFailure {
+    failure: CallArgMappingFailure,
+    candidate: crate::libraries::FunctionInfo,
 }
 
 struct SourceConstructorBindings<'a> {
@@ -15970,13 +16028,14 @@ impl<'a> Checker<'a> {
         properties: &[ScopedProperty],
         plan: Option<&ClassCapturePlan>,
         method_index: usize,
+        source_member: crate::libraries::SourceMember,
     ) {
         let Some(plan) = plan else {
-            self.check_method(scope, function, properties);
+            self.check_method(scope, function, properties, Some(source_member));
             return;
         };
         match plan.methods.get(method_index) {
-            Some(true) => self.check_method(scope, function, properties),
+            Some(true) => self.check_method(scope, function, properties, Some(source_member)),
             Some(false) => self.reset_body_mutations(fun_body_expr(&function.body)),
             None => {}
         }
@@ -16802,7 +16861,8 @@ impl<'a> Checker<'a> {
                 let name = names
                     .get(index)
                     .filter(|name| !name.is_empty())
-                    .map_or("_", String::as_str);
+                    .cloned()
+                    .unwrap_or_else(|| format!("p{index}"));
                 format!("{name}: {}", parameter.source_name())
             })
             .collect::<Vec<_>>()
@@ -16991,6 +17051,20 @@ impl<'a> Checker<'a> {
             "{suspend}fun {receiver}{name}({parameters}): {}",
             function.callable.ret.source_name()
         )
+    }
+
+    fn report_callable_ambiguity(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) {
+        let mut message = "overload resolution ambiguity between candidates:".to_string();
+        for candidate in candidates {
+            message.push('\n');
+            message.push_str(&Self::callable_candidate_display(name, candidate));
+        }
+        self.diags.error(self.call_callee_name_span(call), message);
     }
 
     fn source_callable_display(&self, function: &crate::libraries::FunctionInfo) -> Option<String> {
@@ -17830,7 +17904,11 @@ impl<'a> Checker<'a> {
                 })
             };
         let mut applicable = Vec::new();
+        let mut sam_converted = std::collections::HashSet::new();
         for (index, mut candidate) in overloads.iter().cloned().enumerate() {
+            if self.file.infix_calls.contains(&call.0) && !candidate.flags.infix {
+                continue;
+            }
             if !self.source_callable_visible(&candidate) {
                 crate::trace_compiler!(
                     "resolve",
@@ -18098,7 +18176,7 @@ impl<'a> Checker<'a> {
             // surrounding declaration. In `fun <T> outer(x: Box<T>) = inner(x, object : I<Box<T>> {})`,
             // the callee binds its own `I` to `Box<T>`; a final substitution that erases every unbound
             // name turns that into raw `Box` and makes the already-valid second argument inapplicable.
-            let params = signature
+            let mut params = signature
                 .params
                 .iter()
                 .map(|parameter| {
@@ -18133,7 +18211,7 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             }
-            let shape = if missing_context {
+            let mut shape = if missing_context {
                 shape_without_implicit_context(
                     &params,
                     &candidate.call_sig,
@@ -18148,7 +18226,7 @@ impl<'a> Checker<'a> {
                     argument_names,
                 )?
             };
-            let Some(score) = self.call_candidate_score(
+            let Some(mut score) = self.call_candidate_score(
                 scope,
                 &shape.params,
                 &shape.call_sig,
@@ -18168,6 +18246,73 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             };
+            if score.uses_sam_conversion() {
+                let mut inferred_from_sam = crate::symbol_resolver::GSigBinds::new();
+                for (sam, actual) in score.sam_signatures.iter().zip(arg_tys) {
+                    let Some(sam) = sam else { continue };
+                    crate::symbol_resolver::unify_ty(
+                        Ty::fun_with_shape(
+                            sam.params.clone(),
+                            sam.ret,
+                            sam.context_count,
+                            sam.has_receiver,
+                            sam.suspend,
+                        ),
+                        *actual,
+                        &mut inferred_from_sam,
+                    );
+                }
+                crate::symbol_resolver::merge_generic_bindings(
+                    &signature,
+                    type_args.len(),
+                    &mut bindings,
+                    inferred_from_sam,
+                );
+                if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+                    &signature,
+                    &bindings,
+                    |actual, bound| self.receiver_is_assignable(actual, bound),
+                ) {
+                    continue;
+                }
+                params = signature
+                    .params
+                    .iter()
+                    .map(|parameter| {
+                        crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
+                    })
+                    .collect();
+                shape = if missing_context {
+                    shape_without_implicit_context(
+                        &params,
+                        &candidate.call_sig,
+                        candidate.context_count,
+                    )?
+                } else {
+                    self.contextual_call_shape(
+                        scope,
+                        &params,
+                        &candidate.call_sig,
+                        candidate.context_count,
+                        argument_names,
+                    )?
+                };
+                let Some(specialized_score) = self.call_candidate_score(
+                    scope,
+                    &shape.params,
+                    &shape.call_sig,
+                    ArgSlots {
+                        args,
+                        partial_arg_tys: &partial,
+                        arg_names: argument_names,
+                        trailing_lambda,
+                    },
+                ) else {
+                    continue;
+                };
+                score = specialized_score;
+                sam_converted.insert(index);
+            }
             let Ok(mapped_slots) = map_call_args(
                 args,
                 argument_names,
@@ -18334,6 +18479,12 @@ impl<'a> Checker<'a> {
                 candidate.kind == crate::libraries::FnKind::Member
             });
         }
+        if applicable
+            .iter()
+            .any(|(_, _, index, ..)| !sam_converted.contains(index))
+        {
+            applicable.retain(|(_, _, index, ..)| !sam_converted.contains(index));
+        }
         let best = applicable
             .iter()
             .filter(|(_, _, _, missing_context, _, _, _)| !has_context || !*missing_context)
@@ -18383,6 +18534,21 @@ impl<'a> Checker<'a> {
                 .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
                 .collect();
         }
+        if maximal.len() > 1
+            && maximal
+                .iter()
+                .all(|(_, _, index, ..)| sam_converted.contains(index))
+            && maximal[1..]
+                .iter()
+                .any(|candidate| candidate.6 != maximal[0].6)
+        {
+            return Some(CallableCandidateSelection::Ambiguous(
+                maximal
+                    .iter()
+                    .map(|(_, _, _, _, _, candidate, _)| candidate.info.clone())
+                    .collect(),
+            ));
+        }
         if extension_receiver.is_some() {
             let concrete_shapes = maximal
                 .iter()
@@ -18428,7 +18594,12 @@ impl<'a> Checker<'a> {
                     })?
                 }
                 crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                    return Some(CallableCandidateSelection::Ambiguous);
+                    return Some(CallableCandidateSelection::Ambiguous(
+                        maximal
+                            .iter()
+                            .map(|(_, _, _, _, _, candidate, _)| candidate.info.clone())
+                            .collect(),
+                    ));
                 }
                 crate::symbol_resolver::CandidateSelection::None => return None,
             }
@@ -18445,9 +18616,9 @@ impl<'a> Checker<'a> {
             selected.callable.descriptor,
         );
         Some(if missing_context {
-            CallableCandidateSelection::MissingContext(selected)
+            CallableCandidateSelection::MissingContext(Box::new(selected))
         } else {
-            CallableCandidateSelection::Selected(selected)
+            CallableCandidateSelection::Selected(Box::new(selected))
         })
     }
 
@@ -18501,6 +18672,34 @@ impl<'a> Checker<'a> {
             return None;
         }
         take_unanimous_mapping_error(&mut failures)
+    }
+
+    fn report_retained_member_mapping_failure(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        retained: MemberMappingFailure,
+    ) {
+        let candidate = retained.candidate;
+        self.report_callable_arg_mapping_error(
+            call,
+            args,
+            DiagnosticFunction {
+                name,
+                params: candidate.semantic_params(),
+                param_names: &candidate.call_sig.param_names,
+                param_defaults: &candidate.call_sig.param_defaults,
+                required: candidate.call_sig.required,
+                vararg: candidate.call_sig.vararg,
+                context_count: candidate.context_count,
+                ret: candidate.callable.ret,
+                source_display: candidate
+                    .source_member
+                    .and_then(|source| self.source_member_display(source, candidate.callable.ret)),
+            },
+            retained.failure,
+        );
     }
 
     fn same_argument_mapping_shape(
@@ -19456,56 +19655,6 @@ impl<'a> Checker<'a> {
         self.resolver()
             .select_symbol(SymRecv::Value(recv), name, args, type_args)
             .and_then(Symbol::call)
-    }
-
-    fn member_result_with_expected(
-        &self,
-        mut selected: crate::symbol_resolver::ResolvedMember,
-        expected: Option<Ty>,
-    ) -> crate::symbol_resolver::ResolvedMember {
-        if let Some(constraints) = self.postponed_call_constraints.last() {
-            let declared = selected
-                .member
-                .generic_sig
-                .as_ref()
-                .map_or(selected.ret, |signature| signature.ret);
-            let ret = crate::symbol_resolver::ty_subst_keep_unbound(declared, &constraints.lower);
-            selected.ret = ret;
-            selected.member.ret = ret;
-        }
-        crate::trace_compiler!(
-            "expected_call",
-            "member candidate {} expected={expected:?} ret={:?} generic={:?}",
-            selected.member.name,
-            selected.ret,
-            selected
-                .member
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.ret),
-        );
-        let Some(expected) = expected.filter(|expected| *expected != Ty::Error) else {
-            return selected;
-        };
-        let Some(generic) = selected.member.generic_sig.as_ref() else {
-            return selected;
-        };
-        let Some(bindings) = crate::symbol_resolver::infer_generic_return_bindings(
-            generic,
-            expected,
-            |actual, bound| self.receiver_is_assignable(actual, bound),
-        ) else {
-            return selected;
-        };
-        let ret = crate::symbol_resolver::ty_subst_keep_unbound(generic.ret, &bindings);
-        crate::trace_compiler!(
-            "expected_call",
-            "member candidate {} bound expected={expected:?} -> {ret:?}",
-            selected.member.name,
-        );
-        selected.ret = ret;
-        selected.member.ret = ret;
-        selected
     }
 
     fn select_property_member(
@@ -22398,30 +22547,41 @@ impl<'a> Checker<'a> {
         expectations
     }
 
-    fn member_source_display(
+    fn source_member_display(
         &self,
-        internal: TypeName,
-        name: &str,
+        source: crate::libraries::SourceMember,
         resolved_ret: Ty,
     ) -> Option<String> {
-        let files = self
-            .source_files
-            .unwrap_or_else(|| std::slice::from_ref(self.file));
-        files.iter().find_map(|file| {
-            file.decls.iter().find_map(|&decl| {
-                let Decl::Class(class) = file.decl(decl) else {
+        let file = if source.file() == self.file_index {
+            self.file
+        } else {
+            self.source_files?.get(source.file() as usize)?
+        };
+        let function = match source {
+            crate::libraries::SourceMember::Class { owner, method, .. } => {
+                let Decl::Class(class) = file.decl(DeclId(owner)) else {
                     return None;
                 };
-                if class_internal(file, &class.name) != internal.render() {
+                class.methods.get(method as usize)?
+            }
+            crate::libraries::SourceMember::EnumEntry {
+                owner,
+                entry,
+                method,
+                ..
+            } => {
+                let Decl::Class(class) = file.decl(DeclId(owner)) else {
                     return None;
-                }
+                };
                 class
+                    .enum_entries
+                    .get(entry as usize)?
                     .methods
-                    .iter()
-                    .find(|method| method.name == name)
-                    .map(|method| source_function_display(file, method, resolved_ret))
-            })
-        })
+                    .get(method as usize)?
+            }
+            crate::libraries::SourceMember::ClassProperty { .. } => return None,
+        };
+        Some(source_function_display(file, function, resolved_ret))
     }
 
     fn source_member_operator_display(
@@ -22569,11 +22729,8 @@ impl<'a> Checker<'a> {
                     None,
                     overloads.clone(),
                 );
-                if matches!(
-                    member_selection,
-                    Some(CallableCandidateSelection::Ambiguous)
-                ) {
-                    return InvokeResolution::Ambiguous(overloads);
+                if let Some(CallableCandidateSelection::Ambiguous(candidates)) = &member_selection {
+                    return InvokeResolution::Ambiguous(candidates.clone());
                 }
                 if let Some(selected) =
                     member_selection.and_then(CallableCandidateSelection::available)
@@ -22684,11 +22841,10 @@ impl<'a> Checker<'a> {
                         None,
                         extensions.clone(),
                     );
-                    if matches!(
-                        extension_selection,
-                        Some(CallableCandidateSelection::Ambiguous)
-                    ) {
-                        return InvokeResolution::Ambiguous(extensions);
+                    if let Some(CallableCandidateSelection::Ambiguous(candidates)) =
+                        &extension_selection
+                    {
+                        return InvokeResolution::Ambiguous(candidates.clone());
                     }
                     let Some(selected) =
                         extension_selection.and_then(CallableCandidateSelection::available)
@@ -25903,7 +26059,45 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn check_infix_declaration(&mut self, function: &FunDecl, member: bool) {
+        if !function.is_infix() {
+            return;
+        }
+        if !member && function.receiver.is_none() {
+            self.diags.error(
+                function.span,
+                "'infix' modifier is inapplicable on this function: must be a member or an extension function"
+                    .to_string(),
+            );
+        }
+        let value_parameters = &function.params[function.context_count..];
+        if value_parameters.len() != 1 {
+            self.diags.error(
+                function.span,
+                "'infix' modifier is inapplicable on this function: must have a single value parameter"
+                    .to_string(),
+            );
+            return;
+        }
+        let parameter = &value_parameters[0];
+        if parameter.default.is_some() {
+            self.diags.error(
+                parameter.ty.span,
+                "'infix' modifier is inapplicable on this function: parameter must have no default value"
+                    .to_string(),
+            );
+        }
+        if parameter.is_vararg {
+            self.diags.error(
+                parameter.ty.span,
+                "'infix' modifier is inapplicable on this function: parameter must not be vararg"
+                    .to_string(),
+            );
+        }
+    }
+
     fn check_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, source_decl: Option<DeclId>) {
+        self.check_infix_declaration(f, false);
         let previous_diagnostic_function = self.diagnostic_function.replace((
             f.name.clone(),
             f.type_params
@@ -26957,13 +27151,18 @@ impl<'a> Checker<'a> {
             }
             let method_capture_plan = class_capture_plan.as_ref();
             let mut method_check_index = 0;
-            for m in &cl.methods {
+            for (method_index, m) in cl.methods.iter().enumerate() {
                 self.check_method_in_capture_plan(
                     scope,
                     m,
                     &props,
                     method_capture_plan,
                     method_check_index,
+                    crate::libraries::SourceMember::Class {
+                        file: self.file_index,
+                        owner: d.0,
+                        method: method_index as u32,
+                    },
                 );
                 method_check_index += 1;
             }
@@ -27078,13 +27277,19 @@ impl<'a> Checker<'a> {
                         class_storage: Some(field as u32),
                     });
                 }
-                for bm in &entry.methods {
+                for (entry_method, bm) in entry.methods.iter().enumerate() {
                     self.check_method_in_capture_plan(
                         entry_scope,
                         bm,
                         &entry_props,
                         method_capture_plan,
                         method_check_index,
+                        crate::libraries::SourceMember::EnumEntry {
+                            file: self.file_index,
+                            owner: d.0,
+                            entry: entry_index as u32,
+                            method: entry_method as u32,
+                        },
                     );
                     method_check_index += 1;
                 }
@@ -27693,7 +27898,14 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_method(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, props: &[ScopedProperty]) {
+    fn check_method(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        f: &FunDecl,
+        props: &[ScopedProperty],
+        source_member: Option<crate::libraries::SourceMember>,
+    ) {
+        self.check_infix_declaration(f, true);
         self.reset_body_mutations(fun_body_expr(&f.body));
         let resolve = class_internal_resolver(self.syms);
         // The method's own type parameters (and its `reified` marks) belong to a rung of its own:
@@ -27828,6 +28040,10 @@ impl<'a> Checker<'a> {
                             } else {
                                 self.inferred_method_rets
                                     .insert((internal, f.name.clone(), params), inferred);
+                                if let Some(source_member) = source_member {
+                                    self.inferred_source_member_rets
+                                        .insert(source_member, inferred);
+                                }
                             }
                         }
                     }
@@ -30058,11 +30274,14 @@ impl<'a> Checker<'a> {
         );
         let generic_member = self.plan_generic_member(
             receiver,
-            None,
             name,
-            None,
-            Some(&partial),
-            arg_names.as_deref(),
+            GenericMemberQuery {
+                owner: None,
+                params: None,
+                partial_args: Some(&partial),
+                partial_arg_names: arg_names.as_deref(),
+                explicit_type_args,
+            },
         );
         let member_extension_plan = method_sig.is_none().then(|| {
             self.member_extension_lambda_param_types(
@@ -31701,7 +31920,7 @@ impl<'a> Checker<'a> {
                         ) {
                             MemberSlotCall::Resolved(ret) => ret,
                             MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => Ty::Error,
-                            MemberSlotCall::NoMatch => self
+                            MemberSlotCall::NoMatch(_) => self
                                 .check_member_extension_function_call(
                                     scope, e, recv, &name, a, arg_tys,
                                 )
@@ -31741,7 +31960,7 @@ impl<'a> Checker<'a> {
                         ) {
                             MemberSlotCall::Resolved(ret) => ret,
                             MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => Ty::Error,
-                            MemberSlotCall::NoMatch => self
+                            MemberSlotCall::NoMatch(_) => self
                                 .check_member_extension_function_call(
                                     scope, e, recv, &name, a, arg_tys,
                                 )
@@ -34541,7 +34760,7 @@ impl<'a> Checker<'a> {
                     );
                     return Some(Ty::Error);
                 }
-                CallableCandidateSelection::Ambiguous => {
+                CallableCandidateSelection::Ambiguous(_) => {
                     self.diags.error(
                         self.call_callee_name_span(e),
                         "overload resolution ambiguity".to_string(),
@@ -34560,7 +34779,7 @@ impl<'a> Checker<'a> {
             rt,
             name,
             type_args,
-            selected,
+            *selected,
         )
     }
 
@@ -35212,26 +35431,21 @@ impl<'a> Checker<'a> {
             );
             return Some(Ty::Error);
         }
-        let ret = selected.ret;
-        let mut semantic_params =
-            self.applied_member_semantic_params(selected.receiver, &selected.member);
-        if selected.member.generic_sig.is_some() {
-            let argument_kinds = self.checked_call_arg_kinds(scope, args);
-            let explicit_type_args = self.resolved_explicit_type_args(scope, call);
-            if let Ok(Some(specialized)) = self.applied_member_call_params(
-                selected.receiver,
-                &selected.member,
-                MemberCallArguments {
-                    values: &argument_kinds,
-                    names: self.file.call_arg_names.get(&call.0).map(Vec::as_slice),
-                    trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
-                    type_arguments: &explicit_type_args,
-                    fixed_bindings: None,
-                },
-            ) {
-                semantic_params = specialized;
-            }
-        }
+        let mut semantic_params = selected.member.params.clone();
+        let ret = if selected.member.generic_sig.is_some() {
+            selected.ret
+        } else {
+            selected
+                .member
+                .source_member
+                .and_then(|source| self.inferred_source_member_rets.get(&source).copied())
+                .unwrap_or(selected.ret)
+        };
+        let receiver_bindings =
+            self.member_receiver_type_bindings(selected.receiver, &selected.member);
+        let ret = crate::symbol_resolver::ty_subst_keep_unbound(ret, &receiver_bindings);
+        selected.ret = ret;
+        selected.member.ret = ret;
         let arg_tys = args
             .iter()
             .map(|argument| self.expr_types[argument.0 as usize])
@@ -35353,7 +35567,7 @@ impl<'a> Checker<'a> {
                 }
                 // No member was applicable at this receiver-tower rung; imported extensions are
                 // the next distinct rung and are selected exactly once below.
-                MemberSlotCall::NoMatch => {}
+                MemberSlotCall::NoMatch(_) => {}
             }
         }
         if let Some(ret) = self.record_extension_call(
@@ -36183,12 +36397,16 @@ impl<'a> Checker<'a> {
     fn plan_generic_member(
         &self,
         rt: Ty,
-        selected_owner: Option<TypeName>,
         name: &str,
-        selected_params: Option<&[Ty]>,
-        partial_args: Option<&[Option<Ty>]>,
-        partial_arg_names: Option<&[Option<String>]>,
+        query: GenericMemberQuery<'_>,
     ) -> Option<GenericMemberPlan> {
+        let GenericMemberQuery {
+            owner: selected_owner,
+            params: selected_params,
+            partial_args,
+            partial_arg_names,
+            explicit_type_args,
+        } = query;
         for (owner, owner_ty, _) in self.syms.applied_type_hierarchy(rt) {
             let Some(class) = self.syms.class_by_type_name(owner) else {
                 continue;
@@ -36259,6 +36477,9 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let mut input_subst = class_binds.clone();
+                    for (formal, actual) in gm.method_tparams.iter().zip(explicit_type_args) {
+                        input_subst.insert(formal.clone(), *actual);
+                    }
                     for (source_index, actual) in
                         partial_args.unwrap_or_default().iter().enumerate()
                     {
@@ -36289,6 +36510,7 @@ impl<'a> Checker<'a> {
                             },
                         );
                     }
+                    let call_bindings = input_subst.clone();
                     for (parameter, bound) in gm.method_tparams.iter().zip(&gm.method_tparam_bounds)
                     {
                         input_subst.entry(parameter.clone()).or_insert(*bound);
@@ -36303,30 +36525,16 @@ impl<'a> Checker<'a> {
                             },
                         )
                         .collect();
-                    return Some((gm, class_binds, lambda_pts));
+                    return Some(GenericMemberPlan {
+                        method: gm,
+                        class_bindings: class_binds,
+                        call_bindings,
+                        lambda_parameter_types: lambda_pts,
+                    });
                 }
             }
         }
         None
-    }
-
-    /// Apply the receiver's class-type arguments to a member's declared semantic parameters.
-    /// `LibraryMember::params` is the physical/linkage shape; overload applicability must instead
-    /// use `generic_sig.params`, with only class formals substituted and method formals left open.
-    fn applied_member_semantic_params(
-        &self,
-        receiver: Ty,
-        member: &crate::libraries::LibraryMember,
-    ) -> Vec<Ty> {
-        let Some(signature) = member.generic_sig.as_ref() else {
-            return member.params.clone();
-        };
-        let bindings = self.member_receiver_type_bindings(receiver, member);
-        signature
-            .params
-            .iter()
-            .map(|parameter| crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings))
-            .collect()
     }
 
     fn applied_member_call_params(
@@ -38839,7 +39047,7 @@ impl<'a> Checker<'a> {
             .cloned()
             .collect::<Vec<_>>();
         if overloads.is_empty() {
-            return MemberSlotCall::NoMatch;
+            return MemberSlotCall::NoMatch(None);
         }
 
         let selected = match self.select_callable_candidate(
@@ -38854,7 +39062,7 @@ impl<'a> Checker<'a> {
             expected,
             overloads.clone(),
         ) {
-            Some(CallableCandidateSelection::Selected(selected)) => selected,
+            Some(CallableCandidateSelection::Selected(selected)) => selected.info.clone(),
             Some(CallableCandidateSelection::MissingContext(_)) => {
                 self.diags.error(
                     self.call_callee_name_span(call),
@@ -38862,27 +39070,32 @@ impl<'a> Checker<'a> {
                 );
                 return MemberSlotCall::Rejected;
             }
-            Some(CallableCandidateSelection::Ambiguous) => {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    format!("overload resolution ambiguity for '{name}'"),
-                );
+            Some(CallableCandidateSelection::Ambiguous(candidates)) => {
+                self.report_callable_ambiguity(call, name, &candidates);
                 return MemberSlotCall::Ambiguous;
             }
             // Applicability failure is not terminal: the next scope-tower rung may contain a
             // member/local/imported extension. The caller reports this retained family only after
             // every nearer and later rung is exhausted; no candidate is selected again.
-            None => return MemberSlotCall::NoMatch,
+            None => {
+                let mapping_failure = self
+                    .unanimous_callable_mapping_failure(
+                        scope,
+                        call,
+                        args,
+                        &type_arguments,
+                        &overloads,
+                    )
+                    .map(|(failure, candidate)| {
+                        Box::new(MemberMappingFailure { failure, candidate })
+                    });
+                return MemberSlotCall::NoMatch(mapping_failure);
+            }
         };
 
-        let argument_kinds = self.checked_call_arg_kinds(scope, args);
-        let member = self.resolver().materialize_member_function(
-            rt,
-            &argument_kinds,
-            &type_arguments,
-            selected.info,
-        );
-        let member = self.member_result_with_expected(member, expected);
+        let member = self
+            .resolver()
+            .commit_selected_member_function(rt, selected);
         match self.record_selected_member_call(scope, call, args, member) {
             Some(Ty::Error) => MemberSlotCall::Rejected,
             Some(ret) => MemberSlotCall::Resolved(ret),
@@ -40348,6 +40561,7 @@ impl<'a> Checker<'a> {
         Option<MemberLambdaShape>,
     ) {
         let argument_names = self.file.call_arg_names.get(&call.0).cloned();
+        let explicit_type_args = self.resolved_explicit_type_args(scope, call);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let member = self
             .best_module_member_candidate(
@@ -40363,11 +40577,14 @@ impl<'a> Checker<'a> {
         let generic = member.as_ref().and_then(|member| {
             self.plan_generic_member(
                 receiver,
-                member.owner,
                 name,
-                Some(&member.params),
-                Some(partial_arg_tys),
-                argument_names.as_deref(),
+                GenericMemberQuery {
+                    owner: member.owner,
+                    params: Some(&member.params),
+                    partial_args: Some(partial_arg_tys),
+                    partial_arg_names: argument_names.as_deref(),
+                    explicit_type_args: &explicit_type_args,
+                },
             )
         });
         let lambda = member.as_ref().and_then(|member| {
@@ -40612,9 +40829,9 @@ impl<'a> Checker<'a> {
                             vararg: member.call_sig.vararg,
                             context_count: member.context_count,
                             ret: member.ret,
-                            source_display: member.owner.and_then(|owner| {
-                                self.member_source_display(owner, name, member.ret)
-                            }),
+                            source_display: member
+                                .source_member
+                                .and_then(|source| self.source_member_display(source, member.ret)),
                         },
                         error,
                     );
@@ -40779,19 +40996,26 @@ impl<'a> Checker<'a> {
                 crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings)
             }
             None => {
-                if let Some((gm, class_binds, _)) = &self.plan_generic_member(
+                if let Some(plan) = &self.plan_generic_member(
                     rt,
-                    fi.owner,
                     name,
-                    Some(&physical_params),
-                    None,
-                    None,
+                    GenericMemberQuery {
+                        owner: fi.owner,
+                        params: Some(&physical_params),
+                        partial_args: None,
+                        partial_arg_names: None,
+                        explicit_type_args: &type_arguments,
+                    },
                 ) {
-                    let inferred = self.generic_member_ret(gm, class_binds, &logical_arg_tys);
+                    let inferred = self.generic_member_ret(
+                        &plan.method,
+                        &plan.class_bindings,
+                        &logical_arg_tys,
+                    );
                     crate::trace_compiler!(
                         "resolve",
                         "generic member return {name} args={logical_arg_tys:?} shape={:?} -> {inferred:?}",
-                        gm.ret_shape,
+                        plan.method.ret_shape,
                     );
                     inferred
                 } else {
@@ -42247,13 +42471,14 @@ impl<'a> Checker<'a> {
                 // Resolve the ordinary-member tower rung once for positional and labelled syntax
                 // alike. Member/local extensions are nearer than imported extensions and are
                 // therefore handled by their own rungs below before the imported-extension family.
-                if rt == Ty::String || matches!(rt, Ty::Obj(..)) || rt.is_nullable() {
+                let mut member_mapping_failure = None;
+                if rt == Ty::String || matches!(rt.non_null(), Ty::Obj(..) | Ty::TyParam(..)) {
                     match self.record_member_call_with_slots(
                         scope, call, rt, &name, args, false, expected,
                     ) {
                         MemberSlotCall::Resolved(ret) => return ret,
                         MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => return Ty::Error,
-                        MemberSlotCall::NoMatch => {}
+                        MemberSlotCall::NoMatch(failure) => member_mapping_failure = failure,
                     }
                 }
                 // A primitive's own operator method (`Int.rem`) is NOT `infix`, so the infix notation
@@ -42267,21 +42492,6 @@ impl<'a> Checker<'a> {
                         .functions()
                         .iter()
                         .any(|function| function.is_extension() && function.receiver_rank == 0);
-                if self.file.infix_calls.contains(&call.0)
-                    && rt.is_numeric_or_char()
-                    && is_builtin_operator_method(&name)
-                {
-                    let call_targs = self.resolved_explicit_type_args(scope, call);
-                    if let Some(ret) = self.record_library_extension_call_with_arg_kinds(
-                        Some(call),
-                        &name,
-                        rt,
-                        &arg_kinds,
-                        &call_targs,
-                    ) {
-                        return ret;
-                    }
-                }
                 if arg_names.is_none()
                     && matches!(
                         (rt, name.as_str(), arg_tys.as_slice()),
@@ -42539,6 +42749,10 @@ impl<'a> Checker<'a> {
                         self.report_nullable_receiver_call(call, rt);
                         return Ty::Error;
                     }
+                }
+                if let Some(failure) = member_mapping_failure {
+                    self.report_retained_member_mapping_failure(call, &name, args, *failure);
+                    return Ty::Error;
                 }
                 let inapplicable_candidates = self
                     .resolver()
@@ -43660,11 +43874,14 @@ impl<'a> Checker<'a> {
                                 )?;
                                 let generic_member = self.plan_generic_member(
                                     receiver,
-                                    member.owner,
                                     &fname,
-                                    Some(&member.params),
-                                    Some(partial),
-                                    arg_names.as_deref(),
+                                    GenericMemberQuery {
+                                        owner: member.owner,
+                                        params: Some(&member.params),
+                                        partial_args: Some(partial),
+                                        partial_arg_names: arg_names.as_deref(),
+                                        explicit_type_args: &explicit_type_args,
+                                    },
                                 );
                                 module_member_lambda_shape(
                                     &*self.syms.libraries,
@@ -44779,10 +44996,10 @@ impl<'a> Checker<'a> {
                 }
                 let top_level = top_level_sam_pick
                     .map(|info| {
-                        CallableCandidateSelection::Selected(SelectedCallable {
+                        CallableCandidateSelection::Selected(Box::new(SelectedCallable {
                             info,
                             bindings: crate::symbol_resolver::GSigBinds::new(),
-                        })
+                        }))
                     })
                     .or_else(|| {
                         self.select_callable_candidate(
@@ -44858,7 +45075,7 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 if let Some(selection) = top_level {
-                    if matches!(selection, CallableCandidateSelection::Ambiguous) {
+                    if matches!(selection, CallableCandidateSelection::Ambiguous(_)) {
                         self.diags.error(
                             self.call_callee_name_span(call),
                             "overload resolution ambiguity".to_string(),
@@ -46824,6 +47041,7 @@ impl<'a> Checker<'a> {
     /// Type-check a local function declaration (`fun` inside a function body). Non-capturing local
     /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
+        self.check_infix_declaration(f, false);
         let class_names = self.syms.class_names.clone();
         let physical_tparams =
             TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &|name| {
@@ -46981,6 +47199,7 @@ impl<'a> Checker<'a> {
                 .with_vararg(f.params.iter().any(|p| p.is_vararg))
                 .with_is_inline(false)
                 .with_is_operator(f.is_operator())
+                .with_is_infix(f.is_infix())
                 .with_is_override(f.is_override())
                 .with_is_final(false)
                 .with_is_suspend(f.is_suspend()),
