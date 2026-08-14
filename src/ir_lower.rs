@@ -7519,9 +7519,10 @@ impl<'a> Lower<'a> {
         )
     }
 
-    /// A `ReifiedClassMarker` node when `ty` is a type parameter of the fn body currently lowered
-    /// as an EMITTED reified method; `None` otherwise (the caller resolves the class normally).
-    fn emitted_reified_marker(&mut self, ty: Ty) -> Option<u32> {
+    /// The JVM marker payload for a declaration-owned type parameter of the function currently
+    /// lowered as an EMITTED reified method. Membership is decided by semantic identity; converting
+    /// that identity to its source parameter name happens only for the marker ABI payload.
+    fn emitted_reified_parameter(&self, ty: Ty) -> Option<(String, TypeName)> {
         let Ty::TyParam(identity, bound) = ty else {
             return None;
         };
@@ -7532,34 +7533,36 @@ impl<'a> Lower<'a> {
             .non_null()
             .obj_internal()
             .unwrap_or_else(crate::types::wk::any);
-        Some(self.ir.add_expr(IrExpr::ReifiedClassMarker {
-            // The JVM marker ABI genuinely requires the source parameter name as text; semantic
-            // membership above is already complete before this boundary conversion.
-            name: crate::types::type_parameter_source_name(identity).to_string(),
+        Some((
+            crate::types::type_parameter_source_name(identity).to_string(),
             erased,
-        }))
+        ))
+    }
+
+    /// A `ReifiedClassMarker` node when `ty` is a type parameter of the fn body currently lowered
+    /// as an EMITTED reified method; `None` otherwise (the caller resolves the class normally).
+    fn emitted_reified_marker(&mut self, ty: Ty) -> Option<u32> {
+        let (name, erased) = self.emitted_reified_parameter(ty)?;
+        Some(
+            self.ir
+                .add_expr(IrExpr::ReifiedClassMarker { name, erased }),
+        )
     }
 
     /// A `ReifiedTypeOp` marker node for `is`/`as` on the emitted fn's own reified parameter.
     fn emitted_reified_type_op(
         &mut self,
-        source: &str,
+        ty: Ty,
         cast: bool,
         negated: bool,
         arg: u32,
     ) -> Option<u32> {
-        let erased = self
-            .cur_tparams
-            .iter()
-            .find(|(name, _, _)| name == source)
-            .map(|(_, bound, _)| *bound)
-            .and_then(|bound| bound.non_null().obj_internal())
-            .unwrap_or_else(crate::types::wk::any);
+        let (name, erased) = self.emitted_reified_parameter(ty)?;
         Some(self.ir.add_expr(IrExpr::ReifiedTypeOp {
             cast,
             negated,
             arg,
-            name: source.to_string(),
+            name,
             erased,
         }))
     }
@@ -23668,8 +23671,15 @@ impl<'a> Lower<'a> {
             let arg = self.box_operand_for_instanceof(operand, raw);
             // `x is T` on the CURRENT fn's own reified parameter, lowered as an EMITTED method:
             // the marker + instanceof placeholder kotlinc emits.
-            if !ty.nullable() && self.cur_emitted_reified.contains(&ty.name) {
-                if let Some(marker) = self.emitted_reified_type_op(&ty.name, false, negated, arg) {
+            let declared_target = match self.info.expr_lowers.get(&source) {
+                Some(ExprLowering::RuntimeTypeOperand(target)) => *target,
+                _ => self.info.resolved_type(&ty)?,
+            };
+            let specialized_target = self.apply_reified_substitution(declared_target);
+            if !ty.nullable() {
+                if let Some(marker) =
+                    self.emitted_reified_type_op(specialized_target, false, negated, arg)
+                {
                     return Some(marker);
                 }
             }
@@ -23680,10 +23690,7 @@ impl<'a> Lower<'a> {
             };
             // A reference target, or a primitive (`x is Int` → `instanceof` the boxed wrapper, which
             // the backend resolves from the primitive type_operand).
-            let target = match self.info.expr_lowers.get(&source) {
-                Some(ExprLowering::RuntimeTypeOperand(target)) => Some(*target),
-                _ => Some(self.resolved_type_ref(&ty)?),
-            }?;
+            let target = specialized_target;
             // An unsigned target tests against its inline-class object (`kotlin/UInt`), not the
             // representation's wrapper (`Integer`).
             let type_operand = if target.is_unsigned() {
@@ -24065,17 +24072,18 @@ impl<'a> Lower<'a> {
         nullable: bool,
     ) -> Option<u32> {
         let t = {
-            // `x as T` on the CURRENT fn's own reified parameter, lowered as an EMITTED method:
-            // the marker + checkcast placeholder kotlinc emits (`as?` stays splice-only).
-            if !nullable && !ty.nullable() && self.cur_emitted_reified.contains(&ty.name) {
-                let raw = self.expr(operand)?;
-                let boxed = self.box_operand_for_instanceof(operand, raw);
-                if let Some(marker) = self.emitted_reified_type_op(&ty.name, true, false, boxed) {
-                    return Some(marker);
-                }
-            }
             let declared_target = self.info.resolved_type(&ty)?;
             let specialized_target = self.apply_reified_substitution(declared_target);
+            // `x as T` on the CURRENT fn's own reified parameter, lowered as an EMITTED method:
+            // the marker + checkcast placeholder kotlinc emits (`as?` stays splice-only).
+            if !nullable
+                && !ty.nullable()
+                && self.emitted_reified_parameter(specialized_target).is_some()
+            {
+                let raw = self.expr(operand)?;
+                let boxed = self.box_operand_for_instanceof(operand, raw);
+                return self.emitted_reified_type_op(specialized_target, true, false, boxed);
+            }
             let reified_target =
                 (specialized_target != declared_target).then_some(specialized_target);
             // `x as? T` (safe cast): `{ val t = x; if (t is T) t as T else null }` — `instanceof`

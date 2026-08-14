@@ -13391,7 +13391,7 @@ impl<'a> Emitter<'a> {
             IrExpr::ReifiedClassMarker { .. } => Ty::obj("java/lang/Class"),
             IrExpr::ReifiedTypeOp { cast, erased, .. } => {
                 if *cast {
-                    Ty::obj(&erased.render())
+                    Ty::obj_name(*erased)
                 } else {
                     Ty::Boolean
                 }
