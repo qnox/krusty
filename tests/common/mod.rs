@@ -2557,8 +2557,11 @@ pub fn kotlin_compiler_jar() -> Option<PathBuf> {
 /// Compile the pure-JDK `KotlincServer.java` driver once (via `javac`) into a stable cache dir; return it.
 /// The driver uses only reflection + `URLClassLoader`, so it needs no compiler jar to compile OR to run.
 fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf> {
+    // The JDK is part of the cache key: a class compiled by a NEWER javac (another session's
+    // JAVA_HOME) is unloadable by an older runtime, and the server-spawn failure then reads as
+    // "kotlinc unavailable" — silently disabling every reference compile and cross-check.
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in KOTLINC_SERVER_SRC.bytes() {
+    for b in KOTLINC_SERVER_SRC.bytes().chain(java_home.bytes()) {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
     let dir =
@@ -2838,8 +2841,10 @@ public class JavaRunner {
 "#;
 
 fn setup_java_runner(java_home: &str) -> Option<PathBuf> {
+    // JDK in the cache key for the same reason as `setup_kotlinc_server`: a newer-javac class
+    // under an older runtime dies at load and the failure masquerades as "toolchain unavailable".
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in JAVA_RUNNER_SRC.bytes() {
+    for b in JAVA_RUNNER_SRC.bytes().chain(java_home.bytes()) {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/java_runner_{hash:016x}"));

@@ -733,12 +733,6 @@ pub fn facade_package_metadata(
         let Decl::Property(p) = file.decl(d) else {
             continue;
         };
-        let cap = {
-            let mut c = p.name.chars();
-            c.next()
-                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
-                .unwrap_or_default()
-        };
         let (ty, is_var, type_params, receiver, mut accessor_params) = if p.receiver.is_some() {
             // Match by declaration, not name: extension properties may share a spelling on
             // different receivers and still denote different declarations.
@@ -771,8 +765,11 @@ pub fn facade_package_metadata(
             .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
             .collect::<String>();
         let ty_desc = crate::jvm::names::type_descriptor(ty);
+        // Kotlin's accessor-name rules (`isTagged` keeps its getter name, `setTagged` for the
+        // setter) — the SAME helper the bytecode emitter uses, so the recorded JvmPropertySignature
+        // always names a method that exists.
         let getter = (
-            format!("get{cap}"),
+            crate::jvm::names::property_getter_name(&p.name),
             format!("({descriptor_params}){ty_desc}"),
         );
         let setter = is_var.then(|| {
@@ -781,7 +778,10 @@ pub fn facade_package_metadata(
                 .iter()
                 .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
                 .collect::<String>();
-            (format!("set{cap}"), format!("({params})V"))
+            (
+                crate::jvm::names::property_setter_name(&p.name),
+                format!("({params})V"),
+            )
         });
         prop_metas.push(crate::metadata::builder::PropMeta {
             name: p.name.clone(),
@@ -791,6 +791,7 @@ pub fn facade_package_metadata(
             receiver,
             getter,
             setter,
+            visibility: p.visibility,
         });
     }
     let package = file

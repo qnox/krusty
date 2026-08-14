@@ -342,6 +342,10 @@ pub struct PropMeta {
     pub receiver: Option<Ty>,
     pub getter: (String, String),
     pub setter: Option<(String, String)>,
+    /// Declaration visibility — `Property.flags` visibility bits (INTERNAL=0, PRIVATE=1, PUBLIC=3).
+    /// An `internal val`'s public JVM getter must not leak the property: a consuming module reads
+    /// the metadata visibility (kotlinc: `internal val` flags `8704` vs public `8710`).
+    pub visibility: crate::types::Visibility,
 }
 
 /// A public top-level typealias declaration in package metadata.
@@ -399,14 +403,18 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         let rt = type_pb_generic(st, recv, &tps);
         p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
     }
-    p.field_varint(
-        11,
-        if m.is_var {
-            PKG_VAR_FLAGS
-        } else {
-            PKG_VAL_FLAGS
-        },
-    ); // flags
+    let vis: u64 = match m.visibility {
+        crate::types::Visibility::Internal => 0,
+        crate::types::Visibility::Private => 1,
+        crate::types::Visibility::Protected => 2,
+        crate::types::Visibility::Public => 3,
+    };
+    let base = if m.is_var {
+        PKG_VAR_FLAGS
+    } else {
+        PKG_VAL_FLAGS
+    };
+    p.field_varint(11, (base & !property_flags::VISIBILITY_MASK) | (vis << 1)); // flags
     let mut jvm = Pb::new();
     jvm.field_message(1, &Pb::new()); // field (empty → derived)
     let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
@@ -502,6 +510,7 @@ mod tests {
         let (d1, d2) = build_package(
             &[],
             &[PropMeta {
+                visibility: crate::types::Visibility::Public,
                 name: "doubled".into(),
                 ty: Ty::String,
                 is_var: false,
@@ -540,6 +549,7 @@ mod tests {
         let (d1, d2) = build_package(
             &[],
             &[PropMeta {
+                visibility: crate::types::Visibility::Public,
                 name: "live".into(),
                 ty: t,
                 is_var: true,
