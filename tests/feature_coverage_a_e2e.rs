@@ -197,6 +197,11 @@ fun box(): String =
     });
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(selected, 2);
+    common::expect_true_e2e(
+        "enum_classifier_callables_are_visible_inside_its_companion",
+        src,
+        &[],
+    );
 }
 
 #[test]
@@ -227,6 +232,11 @@ fun box(): String =
     });
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(selected, 2);
+    common::expect_true_e2e(
+        "enum_classifier_callables_remain_visible_when_it_has_a_companion",
+        src,
+        &[],
+    );
 }
 
 #[test]
@@ -254,6 +264,10 @@ fun box(): String = Color.first.name
     });
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(selected, 1);
+    // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
+    // gap - upgrade to `expect_true_e2e` when the backend admits it (bare `entries` in a
+    // companion types through the companion member rung without an ExprLowering record).
+    assert!(common::front_end_diagnostics_with_stdlib(src).is_empty());
 }
 
 #[test]
@@ -294,6 +308,10 @@ fun use(): String {
     );
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!((references, value_reads), (1, 1));
+    // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
+    // gap - upgrade to `expect_true_e2e` when the backend admits it (bare `entries` in a
+    // companion types through the companion member rung without an ExprLowering record).
+    assert!(common::front_end_diagnostics_with_stdlib(src).is_empty());
 }
 
 #[test]
@@ -332,6 +350,10 @@ fun use(): String {
     });
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(field_reads, 2);
+    // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
+    // gap - upgrade to `expect_true_e2e` when the backend admits it (bare `entries` in a
+    // companion types through the companion member rung without an ExprLowering record).
+    assert!(common::front_end_diagnostics_with_stdlib(src).is_empty());
 }
 
 #[test]
