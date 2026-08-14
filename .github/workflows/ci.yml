@@ -48,6 +48,9 @@ jobs:
           # LLVM branch instrumentation makes the e2e binary ~4.5x slower than the normal gate.
           # Keep the local default strict; only this intentionally slow environment raises it.
           KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1200
+          # Coverage uses an isolated target, so the following plain conformance command rebuilds
+          # before running. Its deadline covers both phases; GitHub needs 31s build + ~89s execution.
+          KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: 180
         run: just ci
 
   build-conformance-bin:

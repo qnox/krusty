@@ -87,6 +87,8 @@ if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
   done
   if [ "$test_target" = "e2e" ]; then
     focused_timeout="${KRUSTY_E2E_TIMEOUT_SECONDS:-300}"
+  elif [ "$test_target" = "conformance" ]; then
+    focused_timeout="${KRUSTY_CONFORMANCE_TIMEOUT_SECONDS:-$focused_timeout}"
   fi
   echo "run-tests.sh: focused test timeout=${focused_timeout}s: cargo test $profile_arg $*" >&2
   focused_log="$(mktemp)"
