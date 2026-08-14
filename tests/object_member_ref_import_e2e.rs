@@ -31,7 +31,6 @@ fn imported_object_vararg_collect_adapt() {
         fun withO(fn: (String) -> String) = fn(\"O\")\n\
         object Host { fun foo(vararg x: String) = x[0] + \"K\" }\n\
         fun box() = withO(::foo)\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    common::expect_true_e2e("imported_object_vararg_collect_adapt", SRC, &[]);
     assert_eq!(run(SRC).expect("imported object vararg collect"), "OK");
 }

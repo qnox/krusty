@@ -151,6 +151,12 @@ impl fmt::Display for TypeEncodeError {
 
 pub(crate) type TypeParameters = HashMap<String, u64>;
 
+/// Marker bit on a [`TypeParameters`] id: the parameter is CAPTURED from an enclosing class. Its
+/// `Type` reference then also records `type_parameter_name` (f9) — the isolated reader has no
+/// enclosing-chain context to resolve a bare joint index. In-scope parameters emit f7 alone,
+/// matching kotlinc's bytes (kotlinc never writes both for them).
+pub(crate) const CAPTURED_TYPE_PARAMETER: u64 = 1 << 32;
+
 #[derive(Clone, Debug, Default)]
 pub struct MetadataTypeParameter {
     pub name: String,
@@ -238,9 +244,15 @@ fn encode_type_with_parameter(
             if nullable {
                 message.field_varint(3, 1);
             }
-            // `type_parameter` (f7) ALONE — kotlinc writes EITHER the in-scope table index or a
-            // `type_parameter_name` (f9), never both; the redundant f9 diverged from its bytes.
-            message.field_varint(7, index);
+            // `type_parameter` (f7) ALONE for an in-scope parameter — kotlinc writes either the
+            // table index or a `type_parameter_name` (f9), never both. A CAPTURED enclosing-class
+            // parameter also records f9: the reader has no enclosing-chain context for its bare
+            // joint index.
+            message.field_varint(7, index & !CAPTURED_TYPE_PARAMETER);
+            if index & CAPTURED_TYPE_PARAMETER != 0 {
+                let source_name = crate::types::type_parameter_source_name(name);
+                message.field_varint(9, strings.local(source_name) as u64);
+            }
         }
         Ty::Obj(classifier, arguments) => {
             // kotlinc interns the enclosing classifier before recursively interning its arguments,

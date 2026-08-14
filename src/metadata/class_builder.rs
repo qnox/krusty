@@ -378,7 +378,10 @@ pub fn build_class(
     let captured_count = tail.captured_type_params.len();
     let mut class_type_parameters = TypeParameters::new();
     for (index, semantic) in tail.captured_type_params.iter().enumerate() {
-        class_type_parameters.insert(semantic.clone(), index as u64);
+        class_type_parameters.insert(
+            semantic.clone(),
+            index as u64 | crate::metadata::type_encoder::CAPTURED_TYPE_PARAMETER,
+        );
     }
     for (index, (source, parameter)) in tail
         .type_params
