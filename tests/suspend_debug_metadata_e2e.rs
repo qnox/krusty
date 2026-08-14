@@ -1,36 +1,17 @@
-use std::process::Command;
-
 use super::common;
 
 fn javap_path() -> Option<String> {
-    let java_home = std::env::var("KRUSTY_REF_JAVA_HOME")
-        .ok()
-        .or_else(|| std::env::var("JAVA_HOME").ok())?;
-    let javap = format!("{java_home}/bin/javap");
-    std::path::Path::new(&javap).exists().then_some(javap)
+    // The pooled JavaRunner carries javap in-process; only a JDK home is required.
+    let _ = common::java_home();
+    Some("pooled".to_string())
 }
 
-fn disassemble(javap: &str, bytes: &[u8], class_file_name: &str, tag: &str) -> String {
-    let dir = std::env::temp_dir().join(format!(
-        "krusty_suspend_metadata_{tag}_{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create javap directory");
+fn disassemble(_javap: &str, bytes: &[u8], class_file_name: &str, _tag: &str) -> String {
+    let dir = common::scratch_dir().expect("scratch dir");
     let class_file = dir.join(class_file_name);
     std::fs::write(&class_file, bytes).expect("write continuation class");
-    let output = Command::new(javap)
-        .args(["-v", "-p"])
-        .arg(&class_file)
-        .output()
-        .expect("run javap");
-    let _ = std::fs::remove_dir_all(dir);
-    assert!(
-        output.status.success(),
-        "javap failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("javap output")
+    common::javap(&["-v", "-p", &class_file.to_string_lossy()])
+        .expect("pooled JavaRunner unavailable")
 }
 
 #[test]

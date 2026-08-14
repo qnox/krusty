@@ -2611,6 +2611,26 @@ public class JavaRunner {
             procPath = readStr(din);
             String result;
             try {
+                if (mainClass.equals("\u0000javap")) {
+                    // Pooled disassembly: `driver` carries the javap argv joined by \n. Runs
+                    // in-process via the javap ToolProvider — no per-call JVM start.
+                    java.util.spi.ToolProvider jp =
+                        java.util.spi.ToolProvider.findFirst("javap").orElse(null);
+                    if (jp == null) {
+                        result = "ERROR:javap:ToolProvider unavailable";
+                    } else {
+                        java.io.StringWriter so = new java.io.StringWriter();
+                        java.io.StringWriter se = new java.io.StringWriter();
+                        int rc = jp.run(new PrintWriter(so, true), new PrintWriter(se, true),
+                                driver.split("\n"));
+                        result = rc == 0 ? so.toString() : "ERROR:javap:" + se + so;
+                    }
+                    byte[] rb0 = result.getBytes(StandardCharsets.UTF_8);
+                    dout.writeInt(rb0.length);
+                    dout.write(rb0);
+                    dout.flush();
+                    continue;
+                }
                 ByteArrayOutputStream jerr = new ByteArrayOutputStream();
                 JavaCompiler jc = ToolProvider.getSystemJavaCompiler();
                 // `driver` is one or more `.java` paths joined by the platform path separator.
@@ -2812,9 +2832,67 @@ pub fn javac_run_proc(
     }
 }
 
+/// Disassemble via the pooled JavaRunner's in-process `javap` ToolProvider — the same persistent
+/// JVM the driver tests use, so a parity test costs no `javap` process (a full JVM start) per
+/// assertion. `args` is the ordinary javap argv (e.g. `["-c", "-p", "/path/To.class"]`). Returns
+/// the disassembly text; panics on a javap error (a malformed class under test is a failure, not a
+/// skip); `None` = JVM unavailable.
+#[allow(dead_code)]
+pub fn javap(args: &[&str]) -> Option<String> {
+    let joined = args.join("\n");
+    let out = javac_run_proc(&joined, "", "", "\u{0}javap", "")?;
+    if let Some(err) = out.strip_prefix("ERROR:javap:") {
+        panic!("pooled javap failed: {err}");
+    }
+    Some(out)
+}
+
 /// A javac compile's output: the class directory (a valid krusty classpath entry: loose `.class`
 /// files) plus every emitted class as `(binary-name-with-slashes, bytes)`.
 pub type JavacOutput = (PathBuf, Vec<(String, Vec<u8>)>);
+
+/// The whole Java-interop e2e idiom in one strict call: javac-compile `java_sources` (pooled
+/// in-process javac), krusty-compile Kotlin `use_src` (file stem `Use`, declaring `fun box()`)
+/// against that classpath in-process, then run a Java driver invoking `UseKt.box()` in the pooled
+/// JavaRunner and return its trimmed stdout. Every step panics with the failing stage — a
+/// misconfigured environment or a krusty gap fails the test, it never skips.
+#[allow(dead_code)]
+pub fn java_interop_box(tag: &str, java_sources: &[(&str, &str)], use_src: &str) -> String {
+    let jdk = jdk_modules(); // panics with JAVA_HOME diagnosis when absent
+    let stdlib = stdlib_jar();
+    let sources: Vec<(String, String)> = java_sources
+        .iter()
+        .map(|(n, s)| ((*n).to_string(), (*s).to_string()))
+        .collect();
+    let (cp, _) = javac_compile(&sources, &[])
+        .unwrap_or_else(|| panic!("{tag}: pooled javac failed on the Java fixture"));
+    let kr = scratch_dir().unwrap_or_else(|| panic!("{tag}: scratch filesystem unavailable"));
+    compile_to_dir(
+        use_src,
+        "Use",
+        std::slice::from_ref(&cp),
+        Some(jdk.as_path()),
+        &kr,
+    )
+    .unwrap_or_else(|| {
+        let diagnostics =
+            front_end_diagnostics(use_src, std::slice::from_ref(&cp), Some(jdk.as_path()));
+        panic!("{tag}: krusty failed against the Java fixture; diagnostics: {diagnostics:?}")
+    });
+    let main =
+        "public class M { public static void main(String[] a) { System.out.println(UseKt.box()); } }";
+    let m_path = kr.join("M.java");
+    std::fs::write(&m_path, main).unwrap_or_else(|e| panic!("{tag}: write driver: {e}"));
+    let kcp = format!(
+        "{}:{}:{}",
+        kr.to_string_lossy(),
+        cp.to_string_lossy(),
+        stdlib.display()
+    );
+    let out = javac_run(&m_path.to_string_lossy(), &kcp, &kr.to_string_lossy(), "M")
+        .unwrap_or_else(|| panic!("{tag}: pooled JavaRunner unavailable"));
+    out.trim().to_string()
+}
 
 /// Compile a set of Java sources `(file_name, source)` against `cp` with the persistent JavaRunner's
 /// in-process javac (no `javac` process spawn — the same JVM the Java-driver e2e suites reuse).

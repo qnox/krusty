@@ -6,10 +6,6 @@ use std::process::Command;
 
 use super::common;
 
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
-
 #[test]
 fn compiles_directory_to_jar_consumable_by_kotlinc() {
     let krusty = common::krusty_binary();
@@ -78,17 +74,14 @@ fn compiles_directory_to_jar_consumable_by_kotlinc() {
         let _ = fs::remove_dir_all(&root);
         return;
     };
-    // A *Kotlin* consumer importing top-level declarations needs krusty's `@Metadata` to fully describe
-    // the facade's functions/properties (a protobuf blob); krusty emits a minimal `@Metadata` so the jar
-    // is JVM-runnable, but full kotlinc-source consumption isn't complete yet. Skip (don't fail) that
-    // step until `@Metadata` is complete — the jar-production assertions above are the kept guarantee.
-    if code != 0 {
-        eprintln!("skip (kotlinc consumer needs complete @Metadata, not emitted yet): {stderr}");
-        let _ = fs::remove_dir_all(&root);
-        return;
-    }
+    // A *Kotlin* consumer importing top-level declarations needs krusty's `@Metadata` to fully
+    // describe the facade's functions (a protobuf blob). This works today — asserted, so a
+    // metadata-emission regression fails here instead of hiding behind a skip.
+    assert_eq!(
+        code, 0,
+        "real kotlinc must consume the krusty-built jar's @Metadata: {stderr}"
+    );
 
-    let java_home = common::java_home();
     let stdlib = common::stdlib_jar();
     let cp = format!(
         "{}:{}:{}",
@@ -96,18 +89,19 @@ fn compiles_directory_to_jar_consumable_by_kotlinc() {
         jar.to_str().unwrap(),
         stdlib.to_string_lossy()
     );
-    let run = Command::new(format!("{java_home}/bin/java"))
-        .args(["-cp", &cp, "ConsumerKt"])
-        .output()
-        .expect("java");
-    if run.status.success() {
-        assert_eq!(
-            String::from_utf8_lossy(&run.stdout),
-            "8\n",
-            "stderr={}",
-            String::from_utf8_lossy(&run.stderr)
-        );
-    }
+    // Run the kotlinc-compiled consumer on the pooled JavaRunner — and ASSERT it: a consumer that
+    // compiled but fails to run against the krusty jar is a failure, not a silent pass.
+    let driver = "public class RunC { public static void main(String[] a) { ConsumerKt.main(); } }";
+    let rc = root.join("RunC.java");
+    fs::write(&rc, driver).unwrap();
+    let out = common::javac_run(
+        rc.to_str().unwrap(),
+        &cp,
+        root.join("rcout").to_string_lossy().as_ref(),
+        "RunC",
+    )
+    .expect("pooled JavaRunner unavailable");
+    assert_eq!(out.trim(), "8");
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -117,15 +111,7 @@ fn compiles_directory_to_jar_consumable_by_kotlinc() {
 /// not a bail. Compile both files with the krusty binary, link via javac, run `box()`.
 #[test]
 fn cross_file_top_level_function_and_property() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        eprintln!("skipping cross_file: set JAVA_HOME");
-        return;
-    };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
+    let _ = common::java_home(); // strict: panics with the JAVA_HOME diagnosis when absent
     let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
@@ -158,37 +144,21 @@ fn cross_file_top_level_function_and_property() {
         "public class M { public static void main(String[] a) { System.out.println(BKt.box()); } }",
     )
     .unwrap();
-    assert!(Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let r = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&r.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&r.stderr)
-    );
+    let out = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    )
+    .expect("pooled JavaRunner unavailable");
+    assert_eq!(out.trim(), "OK");
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn cross_file_nullable_generic_return_remains_null_safe() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        return;
-    };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
+    let _ = common::java_home(); // strict: panics with the JAVA_HOME diagnosis when absent
     let stdlib = common::stdlib_jar();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xgeneric_null_{}", std::process::id()));
@@ -241,27 +211,15 @@ fn cross_file_nullable_generic_return_remains_null_safe() {
         "public class M { public static void main(String[] a) { System.out.println(BKt.box()); } }",
     )
     .unwrap();
-    let javac_output = Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap();
-    assert!(
-        javac_output.status.success(),
-        "javac failed: {}",
-        String::from_utf8_lossy(&javac_output.stderr)
-    );
     let classpath = format!("{}:{}", dir.to_str().unwrap(), stdlib.to_string_lossy());
-    let run = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &classpath, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    let out = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &classpath,
+        dir.to_str().unwrap(),
+        "M",
+    )
+    .expect("pooled JavaRunner unavailable");
+    assert_eq!(out.trim(), "OK");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -270,14 +228,7 @@ fn cross_file_nullable_generic_return_remains_null_safe() {
 /// `setX`), not a bail. Compile both files, run `box()`.
 #[test]
 fn cross_file_class_construct_and_property_read() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        return;
-    };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
+    let _ = common::java_home(); // strict: panics with the JAVA_HOME diagnosis when absent
     let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
@@ -310,24 +261,15 @@ fn cross_file_class_construct_and_property_read() {
         "public class M { public static void main(String[] a) { System.out.println(BKt.box()); } }",
     )
     .unwrap();
-    assert!(Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let r = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&r.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&r.stderr)
-    );
+    let out = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    )
+    .expect("pooled JavaRunner unavailable");
+    assert_eq!(out.trim(), "OK");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -479,14 +421,7 @@ fn cross_file_member_properties_keep_semantic_ir() {
 /// (`Virtual`), like an ordinary cross-file instance call.
 #[test]
 fn cross_file_destructuring() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        return;
-    };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
+    let _ = common::java_home(); // strict: panics with the JAVA_HOME diagnosis when absent
     let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
@@ -519,24 +454,15 @@ fn cross_file_destructuring() {
         "public class M { public static void main(String[] a) { System.out.println(BKt.box()); } }",
     )
     .unwrap();
-    assert!(Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let r = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&r.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&r.stderr)
-    );
+    let out = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    )
+    .expect("pooled JavaRunner unavailable");
+    assert_eq!(out.trim(), "OK");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -589,14 +515,7 @@ fn cross_file_object_inferred_return_element_resolves() {
 /// (`invokevirtual`), rather than bailing ("not yet supported by the IR backend"). Runs `box()`.
 #[test]
 fn cross_file_object_member_call_lowers() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        return;
-    };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
+    let _ = common::java_home(); // strict: panics with the JAVA_HOME diagnosis when absent
     let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
@@ -629,24 +548,15 @@ fn cross_file_object_member_call_lowers() {
         "public class M { public static void main(String[] a) { System.out.println(demo.BKt.box()); } }",
     )
     .unwrap();
-    assert!(Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let r = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&r.stdout).trim(),
-        "hi",
-        "stderr={}",
-        String::from_utf8_lossy(&r.stderr)
-    );
+    let out = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    )
+    .expect("pooled JavaRunner unavailable");
+    assert_eq!(out.trim(), "hi");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -656,14 +566,7 @@ fn cross_file_object_member_call_lowers() {
 /// backend reads the singleton via `getstatic Helper.INSTANCE`. Runs `box()`.
 #[test]
 fn cross_module_object_as_value() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        return;
-    };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
+    let _ = common::java_home(); // strict: panics with the JAVA_HOME diagnosis when absent
     let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
@@ -696,24 +599,15 @@ fn cross_module_object_as_value() {
         "public class M { public static void main(String[] argv) { System.out.println(a.app.BKt.box()); } }",
     )
     .unwrap();
-    assert!(Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let r = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&r.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&r.stderr)
-    );
+    let out = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    )
+    .expect("pooled JavaRunner unavailable");
+    assert_eq!(out.trim(), "OK");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -724,14 +618,7 @@ fn cross_module_object_as_value() {
 /// where a domain `data class` with defaults is constructed. Runs `box()` under `-Xverify:all`.
 #[test]
 fn ctor_omitted_non_const_default_uses_init_default() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        return;
-    };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
+    let _ = common::java_home(); // strict: panics with the JAVA_HOME diagnosis when absent
     let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
@@ -764,24 +651,15 @@ fn ctor_omitted_non_const_default_uses_init_default() {
         "public class M { public static void main(String[] argv) { System.out.println(demo.BKt.box()); } }",
     )
     .unwrap();
-    assert!(Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let r = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&r.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&r.stderr)
-    );
+    let out = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    )
+    .expect("pooled JavaRunner unavailable");
+    assert_eq!(out.trim(), "OK");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -790,14 +668,7 @@ fn ctor_omitted_non_const_default_uses_init_default() {
 /// the physical JVM type rather than the boxed Kotlin type retained in common IR.
 #[test]
 fn cross_file_value_class_property_read_uses_mangled_getter() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        return;
-    };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
+    let _ = common::java_home(); // strict: panics with the JAVA_HOME diagnosis when absent
     let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
@@ -832,23 +703,14 @@ fn cross_file_value_class_property_read_uses_mangled_getter() {
         "public class M { public static void main(String[] argv) { System.out.println(demo.ReadKt.box()); } }",
     )
     .unwrap();
-    assert!(Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let r = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&r.stdout).trim(),
-        "NEXT",
-        "stderr={}",
-        String::from_utf8_lossy(&r.stderr)
-    );
+    let out = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    )
+    .expect("pooled JavaRunner unavailable");
+    assert_eq!(out.trim(), "NEXT");
     let _ = fs::remove_dir_all(&dir);
 }

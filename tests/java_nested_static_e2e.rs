@@ -1,70 +1,22 @@
-use std::fs;
-use std::process::Command;
+//! Nested Java static classes (`Outer.Bus.notify`, `Outer.Bus.Deep.id`) resolved through import
+//! chains, direct nested imports, fully-qualified spellings, and a value shadowing the class name.
+//! Runs through the pooled harness (`java_interop_box`) — no per-test javac/java spawns.
 
 use super::common;
 
-fn write_fixture(cp: &std::path::Path, javac: &str) {
-    fs::create_dir_all(cp.join("lib")).unwrap();
-    fs::write(
-        cp.join("lib/Outer.java"),
-        "package lib;\npublic class Outer {\n\
-         public static class Bus {\n\
-         public static String notify(String s) { return \"n:\" + s; }\n\
-         public static int add(int a, int b) { return a + b; }\n\
-         public static class Deep {\n\
-         public static String id() { return \"deep\"; }\n\
-         }\n\
-         }\n\
-         }\n",
-    )
-    .unwrap();
-    assert!(Command::new(javac)
-        .args(["-d", cp.to_str().unwrap()])
-        .arg(cp.join("lib/Outer.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-}
+const OUTER: &str = "package lib;\npublic class Outer {\n\
+     public static class Bus {\n\
+     public static String notify(String s) { return \"n:\" + s; }\n\
+     public static int add(int a, int b) { return a + b; }\n\
+     public static class Deep {\n\
+     public static String id() { return \"deep\"; }\n\
+     }\n\
+     }\n\
+     }\n";
 
 fn run_box(use_src: &str, tag: &str) {
-    let java_home = common::java_home();
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
-    let jdk = common::jdk_modules();
-    let stdlib = common::stdlib_jar();
-    let root = std::env::temp_dir().join(format!("krusty_jns_{tag}_{}", std::process::id()));
-    let cp = root.join("cp");
-    let _ = fs::remove_dir_all(&root);
-    write_fixture(&cp, &javac);
-
-    let kr = root.join("kr");
-    assert!(
-        common::compile_to_dir(
-            use_src,
-            "Use",
-            std::slice::from_ref(&cp),
-            Some(jdk.as_path()),
-            &kr
-        )
-        .is_some(),
-        "krusty failed on nested Java static call ({tag})"
-    );
-
-    let main = "public class M { public static void main(String[] a) { System.out.println(UseKt.box()); } }";
-    let m_path = kr.join("M.java");
-    fs::write(&m_path, main).unwrap();
-    let kcp = format!(
-        "{}:{}:{}",
-        kr.to_str().unwrap(),
-        cp.to_str().unwrap(),
-        stdlib.display()
-    );
-    let out = common::javac_run(m_path.to_str().unwrap(), &kcp, kr.to_str().unwrap(), "M");
-    assert_eq!(out.as_deref().map(str::trim), Some("OK"), "run={out:?}");
-    let _ = fs::remove_dir_all(&root);
+    let out = common::java_interop_box(tag, &[("Outer.java", OUTER)], use_src);
+    assert_eq!(out, "OK", "{tag}");
 }
 
 #[test]

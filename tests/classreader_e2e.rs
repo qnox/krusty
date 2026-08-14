@@ -2,52 +2,32 @@
 //! and check the recovered public signatures. This is the basis for resolving Java/JDK deps.
 
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
 
 use krusty::jvm::classreader::{parse_class, JavaNullability};
 
 use super::common;
 
-fn javac() -> Option<PathBuf> {
-    Some({
-        let home = common::java_home();
-        PathBuf::from(home).join("bin/javac")
-    })
-}
-
 #[test]
 fn reads_real_javac_class() {
-    let Some(javac_bin) = javac() else {
-        eprintln!("skipping: javac unavailable");
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("krusty_cr_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("J.java"),
-        r#"public class J {
+    let (_, classes) = common::javac_compile(
+        &[(
+            "J.java".to_string(),
+            r#"public class J {
             public static int add(int a, int b) { return a + b; }
             public String hi(String s) { return s; }
             private long secret() { return 0L; }
             public static double scale(double x, int n) { return x * n; }
-        }"#,
+        }"#
+            .to_string(),
+        )],
+        &[],
     )
-    .unwrap();
-
-    let javac = Command::new(javac_bin)
-        .args(["J.java"])
-        .current_dir(&dir)
-        .output()
-        .expect("javac");
-    assert!(
-        javac.status.success(),
-        "javac failed: {}",
-        String::from_utf8_lossy(&javac.stderr)
-    );
-
-    let bytes = fs::read(dir.join("J.class")).unwrap();
+    .expect("pooled javac unavailable");
+    let bytes = classes
+        .iter()
+        .find(|(n, _)| n == "J")
+        .map(|(_, b)| b.clone())
+        .expect("J.class emitted");
     let info = parse_class(&bytes).expect("parse J.class");
 
     assert!(info.this_class_matches("J"));
@@ -69,8 +49,6 @@ fn reads_real_javac_class() {
 
     // javac always emits a default constructor
     assert!(info.method("<init>", "()V").is_some());
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -152,29 +130,19 @@ fn reads_java_parameter_nullability_annotations() {
 
 #[test]
 fn reads_method_body_lazily() {
-    let Some(javac_bin) = javac() else {
-        eprintln!("skipping: javac unavailable");
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("krusty_crb_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("B.java"),
-        "public class B { public static int add(int a, int b) { return a + b; } }",
+    let (_, classes) = common::javac_compile(
+        &[(
+            "B.java".to_string(),
+            "public class B { public static int add(int a, int b) { return a + b; } }".to_string(),
+        )],
+        &[],
     )
-    .unwrap();
-    let javac = Command::new(javac_bin)
-        .args(["B.java"])
-        .current_dir(&dir)
-        .output()
-        .expect("javac");
-    assert!(
-        javac.status.success(),
-        "javac failed: {}",
-        String::from_utf8_lossy(&javac.stderr)
-    );
-    let bytes = fs::read(dir.join("B.class")).unwrap();
+    .expect("pooled javac unavailable");
+    let bytes = classes
+        .iter()
+        .find(|(n, _)| n == "B")
+        .map(|(_, b)| b.clone())
+        .expect("B.class emitted");
 
     // The lazy reader returns the matching method's real bytecode body.
     let code =
@@ -195,31 +163,18 @@ fn reads_method_body_lazily() {
     // A non-existent method / descriptor yields None (no body, not a panic).
     assert!(krusty::jvm::classreader::read_method_code(&bytes, "add", "(I)I").is_none());
     assert!(krusty::jvm::classreader::read_method_code(&bytes, "nope", "()V").is_none());
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn classpath_method_code_caches() {
-    let Some(javac_bin) = javac() else {
-        eprintln!("skipping: javac unavailable");
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("krusty_cpc_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("C.java"),
-        "public class C { public static int id(int a) { return a; } }",
+    let (dir, _) = common::javac_compile(
+        &[(
+            "C.java".to_string(),
+            "public class C { public static int id(int a) { return a; } }".to_string(),
+        )],
+        &[],
     )
-    .unwrap();
-    assert!(Command::new(javac_bin)
-        .args(["C.java"])
-        .current_dir(&dir)
-        .output()
-        .unwrap()
-        .status
-        .success());
+    .expect("pooled javac unavailable");
 
     let cp = krusty::jvm::classpath::Classpath::new(vec![dir.clone()]);
     let a = cp.method_code("C", "id", "(I)I").expect("body");
@@ -231,33 +186,27 @@ fn classpath_method_code_caches() {
 
 #[test]
 fn assembler_round_trips_real_bytecode() {
-    let Some(javac_bin) = javac() else {
-        eprintln!("skipping: javac unavailable");
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("krusty_asm_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
     // A method with a loop (branches) and a switch — exercises Branch + LookupSwitch/TableSwitch.
-    fs::write(
-        dir.join("A.java"),
-        r#"public class A {
+    let (_, classes) = common::javac_compile(
+        &[(
+            "A.java".to_string(),
+            r#"public class A {
         public static int f(int x) {
             int s = 0;
             for (int i = 0; i < x; i++) s += i;
             switch (x) { case 1: return 1; case 5: return 5; case 9: return 9; default: return s; }
         }
-    }"#,
+    }"#
+            .to_string(),
+        )],
+        &[],
     )
-    .unwrap();
-    assert!(Command::new(javac_bin)
-        .args(["A.java"])
-        .current_dir(&dir)
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let bytes = fs::read(dir.join("A.class")).unwrap();
+    .expect("pooled javac unavailable");
+    let bytes = classes
+        .iter()
+        .find(|(n, _)| n == "A")
+        .map(|(_, b)| b.clone())
+        .expect("A.class emitted");
     let body = krusty::jvm::classreader::read_method_code(&bytes, "f", "(I)I").expect("f body");
 
     let insns = krusty::jvm::inline::disassemble(&body.code).expect("disassemble");
@@ -266,6 +215,4 @@ fn assembler_round_trips_real_bytecode() {
         re, body.code,
         "disassemble∘assemble is identity on real bytecode (branches + switch)"
     );
-
-    let _ = fs::remove_dir_all(&dir);
 }
