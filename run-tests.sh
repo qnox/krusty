@@ -184,18 +184,22 @@ run_one() {
 }
 export -f run_one
 
+ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
 # The conformance binary contains external corpus/reference-toolchain suites. Run it alone before
 # the product test binary to avoid core contention and to keep fast/coverage exclusion binary-scoped.
 # The Kotlin codegen corpus test is memory-heavy, so run it in its own process, then run every other
 # conformance test in a fresh process. This still executes the full conformance binary's test set; it
 # just avoids carrying earlier external-suite state into the large corpus pass on small CI machines.
+# Pass 1 is a single #[test] that parallelizes internally (rayon), so --test-threads=1 costs nothing
+# there; pass 2 is ~40 independent JVM-backed tests, so give it real threads (bounded: each can hold
+# a kotlinc-server or runner JVM, so `ncpu` capped at 4 keeps the JVM count sane on big hosts).
+conf_threads="$ncpu"; [ "$conf_threads" -gt 4 ] && conf_threads=4
 gate="$(printf '%s\n' "${bins[@]}" | grep '/conformance-' || true)"
 if [ -n "$gate" ]; then
   run_one "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1"
-  run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=1"
+  run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=$conf_threads"
 fi
-
-ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 jobs="${KRUSTY_TEST_JOBS:-$ncpu}"
 # Per-binary test threads for the SMALL binaries run in the cross-binary xargs pool: keep 1 so `-P jobs`
 # parallelizes ACROSS those fast unit-style suites without each ALSO spawning `ncpu` threads and

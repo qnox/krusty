@@ -1369,6 +1369,52 @@ impl RunnerPool {
     }
 }
 
+/// `(internal_name, bytes)` pairs, the shape BoxRunner's in-memory classloader consumes.
+#[allow(dead_code)]
+type ClassSet = Vec<(String, Vec<u8>)>;
+
+/// Recursively collect `(internal_name, bytes)` for every `.class` under a directory classpath
+/// entry, memoized by directory path. Safe to memoize: cached lib dirs are immutable once published
+/// (`compile_libs`), and per-test scratch dirs are unique per allocation, so a path's contents never
+/// change between calls within one process.
+#[allow(dead_code)]
+fn dir_classes(dir: &Path) -> Option<Arc<ClassSet>> {
+    type DirClassesMemo = Mutex<HashMap<PathBuf, Arc<ClassSet>>>;
+    static MEMO: OnceLock<DirClassesMemo> = OnceLock::new();
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = memo
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(dir)
+        .cloned()
+    {
+        return Some(hit);
+    }
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Option<()> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, out)?;
+            } else if path.extension().is_some_and(|e| e == "class") {
+                let rel = path.strip_prefix(root).ok()?;
+                let name = rel
+                    .to_string_lossy()
+                    .trim_end_matches(".class")
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                out.push((name, std::fs::read(&path).ok()?));
+            }
+        }
+        Some(())
+    }
+    let mut classes = Vec::new();
+    walk(dir, dir, &mut classes)?;
+    let arc = Arc::new(classes);
+    memo.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(dir.to_path_buf(), arc.clone());
+    Some(arc)
+}
+
 /// Run `box()` on already-compiled classes via a persistent JVM keyed by `cp_jars` (the runtime
 /// classpath — typically the stdlib jar so loaded classes resolve `kotlin.jvm.internal.*`). Returns
 /// the `box()` return value (or `ERROR:…`), or `None` if the JVM environment is unavailable.
@@ -1389,11 +1435,30 @@ pub fn run_box(
         return None;
     }
     let runner_dir = setup_runner(&java_home)?;
+    // DIRECTORY classpath entries (kotlinc-built dependency libs) are shipped as bytes into the
+    // per-request TestClassLoader instead of onto the runner JVM's system classpath. Two reasons:
+    // the runner is keyed by its classpath string, so per-lib dirs would spawn a runner JVM per lib
+    // (churn), and system-classpath classes are initialized ONCE per JVM, so a box() that mutates a
+    // lib object's static state would poison every later box() sharing that (now cached) lib. Jars
+    // (stdlib, reflect, coroutines) stay on the system classpath: they are large, shared, and tests
+    // don't assert on their mutable static state.
+    let mut request_classes: Vec<(String, Vec<u8>)> = Vec::new();
     let mut cp = runner_dir.to_string_lossy().into_owned();
     for j in cp_jars {
-        cp.push(':');
-        cp.push_str(&j.to_string_lossy());
+        if j.is_dir() {
+            request_classes.extend(dir_classes(j)?.iter().cloned());
+        } else {
+            cp.push(':');
+            cp.push_str(&j.to_string_lossy());
+        }
     }
+    let classes = if request_classes.is_empty() {
+        std::borrow::Cow::Borrowed(classes)
+    } else {
+        request_classes.extend(classes.iter().cloned());
+        std::borrow::Cow::Owned(request_classes)
+    };
+    let classes: &[(String, Vec<u8>)] = &classes;
     let pool = POOL.get_or_init(|| {
         sweep_stale_temp_dirs();
         Mutex::new(RunnerPool::new())
@@ -1591,28 +1656,187 @@ pub fn compile_lib(tag: &str, lib_src: &str) -> Option<PathBuf> {
     compile_libs(tag, &[("Lib.kt", lib_src)])
 }
 
-/// Compile Kotlin files into a temporary classpath directory.
+/// Compile Kotlin files into a CONTENT-ADDRESSED classpath directory, cached across tests AND runs.
+///
+/// The key is (compiler jar, stdlib jar, file names+contents), so every test whose dependency
+/// sources match — within one run or across repeated gate runs — shares ONE reference-compiler
+/// compile and one stable on-disk classpath. Stability of the returned PATH matters beyond the
+/// compile itself: `run_box` keys its persistent runner JVMs by classpath, so per-call scratch dirs
+/// made every lib test spawn (and prune) its own runner JVM. Measured before caching: 595 kotlinc
+/// round-trips per e2e run totalling ~48 CPU-minutes of queue+compile — the suite's dominant cost.
 #[allow(dead_code)]
 pub fn compile_libs(_tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
+    // In-process memo + coalescing: concurrent tests asking for the same key block on one compile
+    // (OnceLock::get_or_init) instead of racing N identical kotlinc invocations.
+    type LibMemo = Mutex<HashMap<u64, Arc<OnceLock<Option<PathBuf>>>>>;
+    static MEMO: OnceLock<LibMemo> = OnceLock::new();
+
     let stdlib = stdlib_jar();
-    let work = scratch_dir()?;
-    let out = work.join("libout");
-    std::fs::create_dir_all(&out).ok()?;
+    let compiler_jar = kotlin_compiler_jar()?; // absent toolchain → same skip as before
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+        hash = (hash ^ 0xff).wrapping_mul(0x100000001b3); // field separator
+    };
+    feed(compiler_jar.to_string_lossy().as_bytes());
+    feed(stdlib.to_string_lossy().as_bytes());
+    for (name, src) in sources {
+        feed(name.as_bytes());
+        feed(src.as_bytes());
+    }
+
+    let cell = {
+        let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = memo.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(hash).or_default().clone()
+    };
+    cell.get_or_init(|| compile_libs_uncached(hash, sources, &stdlib))
+        .clone()
+}
+
+/// The disk half of the [`compile_libs`] cache: reuse `target/libcache/<key>/libout` when its `.ok`
+/// marker exists, otherwise compile into a process-private tmp dir and publish it with an atomic
+/// rename (concurrent binaries racing the same key: one rename wins, losers adopt the winner's dir).
+#[allow(dead_code)]
+fn compile_libs_uncached(key: u64, sources: &[(&str, &str)], stdlib: &Path) -> Option<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/libcache");
+    let publish = root.join(format!("{key:016x}"));
+    let out = publish.join("libout");
+    if publish.join(".ok").is_file() {
+        return Some(out);
+    }
+    std::fs::create_dir_all(&root).ok()?;
+    let tmp = root.join(format!("{key:016x}.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let tmp_out = tmp.join("libout");
+    std::fs::create_dir_all(&tmp_out).ok()?;
     let mut args = vec![
         "-d".into(),
-        out.to_string_lossy().into_owned(),
+        tmp_out.to_string_lossy().into_owned(),
         "-cp".into(),
         stdlib.to_string_lossy().into_owned(),
     ];
     for (name, src) in sources {
-        let path = work.join(name);
+        let path = tmp.join(name);
         std::fs::write(&path, src).ok()?;
         args.push(path.to_string_lossy().into_owned());
     }
     match kotlinc_compile(&args) {
-        Some((0, _)) => Some(out),
+        Some((0, _)) => {}
         Some((code, err)) => panic!("kotlinc(lib) failed ({code}): {err}"),
-        None => None,
+        None => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return None;
+        }
+    }
+    // Sources doubled as compile inputs only; the published dir carries just classes + the marker.
+    for (name, _) in sources {
+        let _ = std::fs::remove_file(tmp.join(name));
+    }
+    std::fs::write(tmp.join(".ok"), b"").ok()?;
+    match std::fs::rename(&tmp, &publish) {
+        Ok(()) => Some(out),
+        Err(_) if publish.join(".ok").is_file() => {
+            // Another process published this key first — use theirs.
+            let _ = std::fs::remove_dir_all(&tmp);
+            Some(out)
+        }
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            None
+        }
+    }
+}
+
+/// Builder-style fixture for JVM-backed e2e tests that DECLARES its environment requirements and
+/// FAILS LOUDLY — with the exact missing piece and how to provision it — where the older `Option`
+/// helpers silently return `None` and let a misconfigured environment report as "passed".
+///
+/// ```ignore
+/// common::Fixture::new()
+///     .lib("Lib.kt", "package lib\nfun x() = 1\n")
+///     .assert_box_ok("import lib.x\nfun box() = if (x() == 1) \"OK\" else \"fail\"\n");
+/// ```
+///
+/// Prefer this for new tests; the `run_box_against`/`expect_box_ok_against` family stays for the
+/// existing callers until they migrate.
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct Fixture {
+    libs: Vec<(String, String)>,
+    reflect: bool,
+}
+
+#[allow(dead_code)]
+impl Fixture {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a dependency source compiled by the REFERENCE compiler onto the classpath (cached,
+    /// content-addressed — see [`compile_libs`]).
+    pub fn lib(mut self, file_name: &str, src: &str) -> Self {
+        self.libs.push((file_name.to_string(), src.to_string()));
+        self
+    }
+
+    /// Put `kotlin-reflect` on the classpath too.
+    pub fn with_reflect(mut self) -> Self {
+        self.reflect = true;
+        self
+    }
+
+    /// The fixture's runtime/compile classpath, panicking with the precise misconfiguration —
+    /// never skipping — when a required piece is absent.
+    fn classpath(&self) -> Vec<PathBuf> {
+        let mut cp = Vec::new();
+        if !self.libs.is_empty() {
+            let sources: Vec<(&str, &str)> = self
+                .libs
+                .iter()
+                .map(|(n, s)| (n.as_str(), s.as_str()))
+                .collect();
+            let libout = compile_libs("fixture", &sources).unwrap_or_else(|| {
+                panic!(
+                    "this test needs the reference kotlinc dist to compile its dependency lib, \
+                     and none is provisioned.\n\
+                     Run `just kotlinc \"$(just max-version)\"` (or `./run-tests.sh`, which \
+                     self-provisions) — do NOT let this test pass without it."
+                )
+            });
+            cp.push(libout);
+        }
+        cp.push(stdlib_jar()); // panics with provisioning instructions when absent
+        if self.reflect {
+            let reflect = dist_jar("kotlin-reflect.jar")
+                .or_else(|| find_jar("kotlin-reflect-", &["sources"]))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "this test needs kotlin-reflect.jar and the provisioned kotlinc dist \
+                         doesn't carry one.\n\
+                         Run `just kotlinc \"$(just max-version)\"` to fetch the full dist."
+                    )
+                });
+            cp.push(reflect);
+        }
+        cp
+    }
+
+    /// Compile `main` in-process and run its `box()` on the pooled runner JVM. A front-end
+    /// rejection panics with its diagnostics; a missing toolchain panics with the provisioning
+    /// command; there is no silent-skip path.
+    pub fn run_box(&self, main: &str) -> String {
+        let cp = self.classpath();
+        let jdk = jdk_modules(); // panics with JAVA_HOME diagnosis when absent
+        expect_box_run(main, "Main", &cp, Some(jdk.as_path()))
+    }
+
+    /// [`Fixture::run_box`] asserting the canonical `"OK"`.
+    pub fn assert_box_ok(&self, main: &str) {
+        let out = self.run_box(main);
+        assert_eq!(out, "OK");
     }
 }
 
@@ -2029,18 +2253,23 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     }
 }
 
-/// How many persistent compiler-server JVMs to pool per classpath. Default 1: each server is a full ~1 GB
-/// compiler JVM, so on a small/shared-RAM host running several alongside the box-runner JVMs and the test
-/// binary would swap. One server serializes the kotlinc-dependency compiles (each ~0.4s warm) while every
-/// non-kotlinc test still runs N-wide. Override with `KRUSTY_SERVER_POOL` on a large-RAM host to compile
-/// several dependencies concurrently.
+/// How many persistent compiler-server JVMs to pool per classpath. Scales with the host — a single
+/// server serializes every kotlinc-dependency compile AND every java-driver test behind one mutex,
+/// which measured as the e2e suite's dominant wall-clock cost (hundreds of ~0.4s warm compiles all
+/// queueing on one JVM while the other N-1 cores idle). Each kotlinc server is capped at `-Xmx1g`
+/// and each JavaRunner at `-Xmx512m`, so the `ncpu/2` default clamped to [1, 6] bounds worst-case
+/// footprint at ~6 GB on big hosts and 2 servers on a 4-core CI runner. `KRUSTY_SERVER_POOL`
+/// overrides in either direction (e.g. 1 on a swapping shared box).
 #[allow(dead_code)]
 fn server_pool_cap() -> usize {
     std::env::var("KRUSTY_SERVER_POOL")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or(1)
+        .unwrap_or_else(|| {
+            let ncpu = std::thread::available_parallelism().map_or(1, |n| n.get());
+            (ncpu / 2).clamp(1, 6)
+        })
 }
 
 // --- Persistent javac+run server ------------------------------------------

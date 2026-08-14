@@ -35,7 +35,12 @@ summary_out="${1:-target/coverage/summary.json}"
 compiler_raw_out="target/coverage/compiler-full.json"
 lsp_raw_out="target/coverage/lsp-full.json"
 jobs="${KRUSTY_TEST_JOBS:-1}"
-test_threads="${KRUSTY_TEST_THREADS:-3}"
+# Default the per-binary thread count to the host's cores: the e2e binary IS the coverage workload
+# (measured 244s of a ~11min CI job at the old fixed 3), and its tests mostly wait on pooled JVMs,
+# so threads scale it near-linearly. The JVM pools are themselves host-scaled and heap-capped
+# (see tests/common `server_pool_cap`), which bounds the memory pressure that once forced a low
+# fixed value here. Override with KRUSTY_TEST_THREADS to pin it back down on a starved host.
+test_threads="${KRUSTY_TEST_THREADS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 coverage_target="${KRUSTY_COVERAGE_TARGET_DIR:-target/coverage-build}"
 
 # Self-provision the reference kotlinc + box corpus exactly like run-tests.sh, so the kept e2e

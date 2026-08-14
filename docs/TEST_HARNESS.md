@@ -128,6 +128,20 @@ KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test conformance kotlin_cod
 This skips JVM execution in the conformance test, prints phase timing, and writes
 `target/flamegraph.svg`.
 
+The e2e suite has its own built-in phase profiler: `KRUSTY_PROF=1` makes every harness helper print
+`PROF\t<phase>\t<ms>` lines (`krusty` in-process compile, `kotlinc` reference compile incl. queue
+wait, `box` JVM round-trip) to stderr — run the e2e binary with `--nocapture` and aggregate.
+
+Performance-relevant harness state:
+
+- Reference-compiled dependency libs are cached content-addressed under `target/libcache/` (key:
+  compiler jar + stdlib jar + sources). Entries never go stale; delete the dir to force recompiles.
+  CI persists it across runs.
+- Persistent JVM pools (kotlinc compiler servers, JavaRunner) scale with the host: `ncpu/2` clamped
+  to `[1, 6]`. `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
+- Directory classpath entries are shipped into the box runner's per-request classloader, so lib
+  static state is fresh per `box()` call and runner JVMs are shared across tests.
+
 Optional profiling knobs:
 
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.

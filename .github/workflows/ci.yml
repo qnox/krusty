@@ -43,6 +43,15 @@ jobs:
             target/cache/ser-corpus
             target/cache/ksp-corpus
           key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
+      # The e2e suite's kotlinc-built dependency libs are content-addressed (tests/common
+      # `compile_libs`), so entries never go stale — restoring the latest cache skips almost every
+      # reference-compiler round-trip. Keyed per-commit so each run saves its updated cache.
+      - name: cache e2e dependency libs
+        uses: actions/cache@v6
+        with:
+          path: target/libcache
+          key: libcache-${{ github.sha }}
+          restore-keys: libcache-
       - name: just ci
         run: just ci
 
