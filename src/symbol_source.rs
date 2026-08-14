@@ -55,7 +55,7 @@ impl SymbolNamespace {
 pub trait SymbolSource {
     /// Core projection of the classifier half of [`Self::symbols`]. Providers must not override this;
     /// the implementation lives here solely while call sites migrate to reading the record directly.
-    fn classifier(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+    fn classifier(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
         let (namespace, name) = SymbolNamespace::classifier_key(internal);
         self.symbols(namespace, name).classifier.clone()
     }
@@ -194,7 +194,7 @@ mod tests {
     }
 
     impl FakeSource {
-        fn classifier_record(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+        fn classifier_record(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
             if self
                 .typed
                 .as_deref()
@@ -234,7 +234,7 @@ mod tests {
                         ),
                     );
                 }
-                Some(std::rc::Rc::new(LibraryType {
+                Some(std::sync::Arc::new(LibraryType {
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     is_nested: false,

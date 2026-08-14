@@ -155,7 +155,7 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
         if declaration.is_some_and(|declaration| self.declarations.contains(&declaration)) {
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 classifier_name: declaration,
-                classifier: Some(std::rc::Rc::new(
+                classifier: Some(std::sync::Arc::new(
                     crate::libraries::LibraryType::declaration_header(),
                 )),
                 callables: library.callables.clone(),
@@ -2197,8 +2197,9 @@ pub struct SymbolTable {
     /// dependency providers own their caches separately. The optional file component preserves
     /// private top-level visibility.
     pub(crate) module_symbol_cache: std::cell::RefCell<ModuleSymbolCache>,
-    pub(crate) module_shape_cache:
-        std::cell::RefCell<HashMap<TypeName, Option<std::rc::Rc<crate::libraries::LibraryType>>>>,
+    pub(crate) module_shape_cache: std::cell::RefCell<
+        HashMap<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>,
+    >,
     pub(crate) module_package_cache:
         std::cell::RefCell<Option<std::rc::Rc<std::collections::HashSet<TypeName>>>>,
     module_cache_enabled: std::cell::Cell<bool>,
@@ -16087,7 +16088,7 @@ impl<'a> Checker<'a> {
     fn resolved_type_name(
         &self,
         internal: TypeName,
-    ) -> Option<std::rc::Rc<crate::libraries::LibraryType>> {
+    ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
         let source = self.fed_source();
         source.classifier(internal).or_else(|| {
             let rendered = internal.render();
@@ -48183,17 +48184,17 @@ val result = object { fun value(): String = captured }
 
     fn import_classifier(
         internal: crate::types::TypeName,
-    ) -> Option<std::rc::Rc<crate::libraries::LibraryType>> {
+    ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
         if ["fallback/Thing", "distinct_a/Thing", "distinct_b/Thing"]
             .iter()
             .any(|name| internal.matches(name))
         {
-            Some(std::rc::Rc::new(import_test_classifier(None)))
+            Some(std::sync::Arc::new(import_test_classifier(None)))
         } else if ["alias_a/Thing", "alias_b/Thing"]
             .iter()
             .any(|name| internal.matches(name))
         {
-            Some(std::rc::Rc::new(import_test_classifier(Some(
+            Some(std::sync::Arc::new(import_test_classifier(Some(
                 crate::types::type_name("target/Thing"),
             ))))
         } else {
@@ -50294,7 +50295,7 @@ fun box(): String {
         fn classifier_record(
             &self,
             internal: TypeName,
-        ) -> Option<std::rc::Rc<crate::libraries::LibraryType>> {
+        ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
             [
                 "kotlin/String",
                 "BoxedComparable",
@@ -50381,7 +50382,7 @@ fun box(): String {
                             .then(|| ((*name).to_string(), declarations))
                     })
                     .collect();
-                std::rc::Rc::new(crate::libraries::LibraryType {
+                std::sync::Arc::new(crate::libraries::LibraryType {
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     is_nested: false,

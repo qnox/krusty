@@ -25,9 +25,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: install coverage tooling
-        run: |
-          rustup toolchain install nightly --profile minimal --component llvm-tools-preview
-          cargo install cargo-llvm-cov --locked
+        run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
+      # Prebuilt binary: `cargo install cargo-llvm-cov` compiled it from source on every run
+      # (~75s of the ci job).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v4
       - uses: actions/setup-java@v5.7.0
@@ -45,9 +48,10 @@ jobs:
           key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
       - name: just ci
         env:
-          # LLVM branch instrumentation makes the e2e binary ~4.5x slower than the normal gate.
-          # Keep the local default strict; only this intentionally slow environment raises it.
-          KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1200
+          # The instrumented e2e run costs ~2x the normal gate under [profile.coverage] (opt 1
+          # with branch counters). Keep the local default strict; only this intentionally slower
+          # environment raises it — with enough headroom that a hung binary still fails fast.
+          KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 600
           # Coverage uses an isolated target, so the following plain conformance command rebuilds
           # before running. Its deadline covers both phases; GitHub needs 31s build + ~89s execution.
           KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: 180

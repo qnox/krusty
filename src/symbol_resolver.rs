@@ -22,7 +22,7 @@ pub(crate) fn inherited_classifier_shape(
     source: &dyn SymbolSource,
     internal: TypeName,
     inheritor: TypeName,
-) -> Option<std::rc::Rc<crate::libraries::LibraryType>> {
+) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
     use crate::libraries::ClassifierAccess;
 
     let classifier = source.classifier(internal)?;
@@ -483,7 +483,7 @@ mod projected_member_view_tests {
     struct Source;
 
     impl SymbolSource for Source {
-        fn classifier(&self, _internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+        fn classifier(&self, _internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
             None
         }
     }
@@ -3780,7 +3780,7 @@ impl<'a> SymbolResolver<'a> {
     pub fn classifier(
         &self,
         internal: TypeName,
-    ) -> Option<std::rc::Rc<crate::libraries::LibraryType>> {
+    ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
         self.src.classifier(internal)
     }
 
@@ -3808,7 +3808,7 @@ impl<'a> SymbolResolver<'a> {
         // inherited readable field. Providers only report declarations; none performs its own MRO walk.
         let mut queue = std::collections::VecDeque::from([recv]);
         let mut seen = std::collections::HashSet::new();
-        let mut nearer: Vec<(std::rc::Rc<crate::libraries::LibraryType>, Ty)> = Vec::new();
+        let mut nearer: Vec<(std::sync::Arc<crate::libraries::LibraryType>, Ty)> = Vec::new();
         while let Some(current) = queue.pop_front() {
             let Some(internal) = current.kotlin_class_internal() else {
                 continue;
@@ -7470,7 +7470,7 @@ mod tests {
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 classifier_name: classifier.as_ref().and(classifier_name),
-                classifier: classifier.map(std::rc::Rc::new),
+                classifier: classifier.map(std::sync::Arc::new),
                 callables: Callables::None,
             })
         }
@@ -7544,7 +7544,7 @@ mod tests {
     fn fake_classifier_record(
         source: &FakeSource,
         internal: TypeName,
-    ) -> Option<std::rc::Rc<crate::libraries::LibraryType>> {
+    ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
         if internal.matches("demo/Base")
             && source
                 .receiver
@@ -7575,7 +7575,7 @@ mod tests {
                 }),
             );
         }
-        Some(std::rc::Rc::new(ty))
+        Some(std::sync::Arc::new(ty))
     }
 
     impl crate::libraries::SemanticPlatform for FakeSource {

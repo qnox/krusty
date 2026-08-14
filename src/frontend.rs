@@ -662,7 +662,7 @@ mod tests {
             }
         }
 
-        fn classifier_record(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+        fn classifier_record(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
             let known = [
                 "fixture/Present",
                 "fixture/Stable",
@@ -772,7 +772,7 @@ mod tests {
                 } else {
                     None
                 };
-                std::rc::Rc::new(LibraryType {
+                std::sync::Arc::new(LibraryType {
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     is_nested: internal.contains("$"),
