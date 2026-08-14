@@ -11132,6 +11132,19 @@ impl<'a> Emitter<'a> {
                 let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));
                 code.invokestatic(m, 0, 1);
             }
+            IrExpr::ReifiedClassMarker { name, erased } => {
+                // kotlinc's reified placeholder: `reifiedOperationMarker(4, "T")` then the erased
+                // class constant — a splicer patches the pair with the call-site class.
+                code.push_int(4, self.cw);
+                code.push_string(name, self.cw);
+                let m = self.cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "reifiedOperationMarker",
+                    "(ILjava/lang/String;)V",
+                );
+                code.invokestatic(m, 2, 0);
+                code.ldc_class(&erased.render(), self.cw);
+            }
             IrExpr::EnumValueOf { class, arg } => {
                 let fq = self.ir.classes[*class as usize].fq_name();
                 self.emit_value(*arg, code);
@@ -13297,6 +13310,7 @@ impl<'a> Emitter<'a> {
             IrExpr::EnumValues { class } => {
                 Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name()))
             }
+            IrExpr::ReifiedClassMarker { .. } => Ty::obj("java/lang/Class"),
             IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
             IrExpr::TypeOp {
                 op, type_operand, ..

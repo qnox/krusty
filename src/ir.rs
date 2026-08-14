@@ -385,6 +385,14 @@ pub enum IrExpr {
         class: ClassId,
         arg: ExprId,
     },
+    /// A reified-type-parameter CLASS placeholder inside an EMITTED `inline fun <reified T>` body:
+    /// `Intrinsics.reifiedOperationMarker(4, name)` followed by the ERASED class constant — the
+    /// pattern every splicer (kotlinc's and krusty's) patches with the call-site class at inline
+    /// time. Value type: `java.lang.Class`.
+    ReifiedClassMarker {
+        name: String,
+        erased: TypeName,
+    },
     /// A lambda literal — emitted as `invokedynamic` + `LambdaMetafactory`. `impl_fn` is the
     /// synthesized static method holding the body; `captures` are the free-variable values bound into
     /// the call site (empty = non-capturing). `sam` is `None` for a plain Kotlin lambda (target
@@ -2051,6 +2059,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::ExternalStaticInstance { .. }
         | IrExpr::StaticInstance { .. }
         | IrExpr::EnumValues { .. }
+        | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation => {}
     }

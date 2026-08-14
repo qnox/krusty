@@ -248,6 +248,7 @@ fn lower_file_at_reporting_impl(
         inline_active: Vec::new(),
         inline_member_callsites: Vec::new(),
         reified_subst: Vec::new(),
+        cur_emitted_reified: std::collections::HashSet::new(),
         inline_return: Vec::new(),
         inline_lambda_ret: Vec::new(),
         closure_return_target: None,
@@ -2613,6 +2614,7 @@ fn lower_file_at_reporting_impl(
 
     // Pass 2: lower bodies.
     for &d in &file.decls {
+        lo.cur_emitted_reified.clear();
         match file.decl(d) {
             Decl::Fun(f) if !has_callable_body(f, d) => {}
             Decl::Fun(f) => {
@@ -2623,6 +2625,7 @@ fn lower_file_at_reporting_impl(
                 lo.cur_class = None;
                 lo.cur_fn_name = f.name.clone();
                 lo.cur_fn_suspend = f.is_suspend();
+                lo.cur_emitted_reified = f.reified_type_params.clone();
                 let (fid, sig) = if f.receiver.is_some() {
                     // Extension bodies bind `this` to parameter zero.
                     let (recv_ty, sig) = syms.source_extension_function(file_index, d)?;
@@ -5622,6 +5625,10 @@ pub(crate) struct Lower<'a> {
     inline_member_callsites: Vec<Option<TypeName>>,
     /// Active reified type bindings. A stack allows nested inline expansions.
     reified_subst: Vec<std::collections::HashMap<String, Ty>>,
+    /// Reified type parameters of the fn body currently being lowered AS AN EMITTED METHOD (a
+    /// `<reified T>` inline fn admitted for facade emission): `T::class` lowers to the
+    /// `reifiedOperationMarker` placeholder instead of a resolved class constant.
+    cur_emitted_reified: std::collections::HashSet<String>,
     /// Active inline-fn return targets while expanding an `inline fun` whose body has `return`: each is
     /// `(result slot, end label, return type)`. A `return x` in the inlined body lowers to `result = x;
     /// break@end` (the body is wrapped in a `do { … } while(false)` labeled `end`), turning the function
@@ -7581,6 +7588,37 @@ impl<'a> Lower<'a> {
         )
     }
 
+    /// A `ReifiedClassMarker` node when `ty` is a type parameter of the fn body currently lowered
+    /// as an EMITTED reified method; `None` otherwise (the caller resolves the class normally).
+    fn emitted_reified_marker(&mut self, ty: Ty) -> Option<u32> {
+        // The checker records the literal's receiver either as a genuine `TyParam` or as an
+        // unresolved bare `Obj("T")` classifier spelling — both name the reified parameter.
+        let (source, bound) = match ty {
+            Ty::TyParam(name, bound) => (
+                crate::types::type_parameter_source_name(name).to_string(),
+                Some(*bound),
+            ),
+            Ty::Obj(name, []) => (name.render(), None),
+            _ => return None,
+        };
+        if !self.cur_emitted_reified.contains(&source) {
+            return None;
+        }
+        let erased = bound
+            .or_else(|| {
+                self.cur_tparams
+                    .iter()
+                    .find(|(name, _, _)| *name == source)
+                    .map(|(_, bound, _)| *bound)
+            })
+            .and_then(|bound| bound.non_null().obj_internal())
+            .unwrap_or_else(crate::types::wk::any);
+        Some(self.ir.add_expr(IrExpr::ReifiedClassMarker {
+            name: source,
+            erased,
+        }))
+    }
+
     /// Emit the RAW `java.lang.Class` for a class literal `X::class` (`ce` is the `CallableRef`).
     /// UNBOUND `T::class` → a `Class` constant (reified `T` resolved to the call-site type first);
     /// BOUND `expr::class` → `expr.getClass()` (evaluated once). A bare `X::class` wraps this in
@@ -7606,6 +7644,11 @@ impl<'a> Lower<'a> {
                     .find_map(|frame| frame.get(&n).copied())
                     .map(|ty| self.apply_reified_substitution(ty));
                 if let Some(ty) = ty {
+                    // Inside an EMITTED reified body, a nested splice may resolve a reified
+                    // parameter back to the enclosing fn's own `T` — that stays a marker.
+                    if let Some(marker) = self.emitted_reified_marker(ty) {
+                        return Some(marker);
+                    }
                     let internal = self.class_literal_ldc_internal(ty)?;
                     return Some(self.emit_class_const(internal));
                 }
@@ -7613,6 +7656,12 @@ impl<'a> Lower<'a> {
         }
         match unbound {
             Some(ty) => {
+                // `T::class` on the CURRENT fn's own reified parameter, lowered as an EMITTED
+                // method (not a splice): the erased placeholder + reifiedOperationMarker pattern
+                // kotlinc emits, patched by whichever compiler later inlines this body.
+                if let Some(marker) = self.emitted_reified_marker(ty) {
+                    return Some(marker);
+                }
                 let internal = self.class_literal_ldc_internal(ty)?;
                 Some(self.emit_class_const(internal))
             }

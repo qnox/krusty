@@ -100,3 +100,61 @@ fn a_body_needing_class_reification_bails_instead_of_miscompiling() {
         "a needClassReification body must not be emitted as a call that throws at runtime"
     );
 }
+
+/// Real kotlinc must be able to INLINE a krusty-built reified inline function: the emitted method
+/// body carries kotlinc's own `reifiedOperationMarker` placeholder pattern, which its inliner
+/// patches with the call-site class. Self-consumption alone would not prove the bytes are the
+/// convention — kotlinc is the arbiter.
+#[test]
+fn kotlinc_inlines_krusty_reified_method() {
+    let root = common::scratch_dir().expect("scratch dir");
+    let lib = root.join("lib");
+    let lib_src =
+        "package demo\ninline fun <reified T : Any> nameOf(): String = T::class.java.simpleName\n";
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    common::compile_to_dir(
+        lib_src,
+        "Lib",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+        &lib,
+    )
+    .expect("krusty compiles the reified inline fn");
+    std::fs::write(
+        root.join("C.kt"),
+        "import demo.nameOf\nfun main() { println(nameOf<String>()) }\n",
+    )
+    .unwrap();
+    let cout = root.join("cout");
+    let args = vec![
+        root.join("C.kt").to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        lib.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        cout.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = common::kotlinc_compile(&args).expect(
+        "provisioned kotlinc server unavailable — run `just kotlinc \"$(just max-version)\"`",
+    );
+    assert_eq!(
+        code, 0,
+        "real kotlinc must inline krusty's reified method: {stderr}"
+    );
+    let driver = "public class M2 { public static void main(String[] a) { CKt.main(); } }";
+    std::fs::write(root.join("M2.java"), driver).unwrap();
+    let cp = format!(
+        "{}:{}:{}",
+        cout.to_string_lossy(),
+        lib.to_string_lossy(),
+        stdlib.to_string_lossy()
+    );
+    let out = common::javac_run(
+        root.join("M2.java").to_str().unwrap(),
+        &cp,
+        root.join("m2out").to_string_lossy().as_ref(),
+        "M2",
+    )
+    .expect("pooled JavaRunner unavailable");
+    assert_eq!(out.trim(), "String");
+}

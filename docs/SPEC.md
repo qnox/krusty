@@ -5649,3 +5649,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   actually reading `this` materializes INSTANCE into slot 0 (`init_body_reads_this`).
   Local/anonymous objects and companions keep instance fields (companion static hoisting to the
   outer class is a separate, upcoming relayout).
+
+- **Reified inline functions emit real erased methods with reification markers.** A `<reified T>`
+  inline fun whose reified-parameter uses are all CLASS LITERALS (`T::class`/`T::class.java`) now
+  emits a standalone erased method — kotlinc's own realization: each literal lowers to
+  `Intrinsics.reifiedOperationMarker(4, "T")` followed by the ERASED class constant
+  (`IrExpr::ReifiedClassMarker`), the placeholder pattern every inliner (kotlinc's and krusty's)
+  patches with the call-site class. Real kotlinc consuming a krusty-built lib inlines it correctly
+  (pinned by `kotlinc_inlines_krusty_reified_method`). Admission is
+  `reified_uses_are_class_literals`: an `is T`/`as T` (INSTANCEOF/CHECKCAST markers, unmodeled) or
+  a reified name in a nested call's explicit type arguments keeps the function splice-only, as
+  before. Nested splices inside an emitted body that resolve back to the enclosing `T` also emit
+  the marker rather than a resolved class.

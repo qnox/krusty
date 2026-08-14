@@ -2921,6 +2921,49 @@ fn function_bound_names(file: &File, function: &FunDecl) -> std::collections::Ha
 /// to the bound). A lambda passed directly to a call is screened by its body because it can be
 /// emitted as an ordinary closure; a semantically resolved contract-declaration block is erased,
 /// not a closure. Conservative: the file just skips.
+/// `true` when every use of a `reified` type parameter inside `f`'s body is a class literal
+/// (`T::class`), the sole reified realization the EMITTED-method path models. Explicit call type
+/// arguments naming a reified parameter (a nested reified splice would need `is`/`as` markers) and
+/// any other expression-position use reject the function.
+fn reified_uses_are_class_literals(file: &File, f: &FunDecl) -> bool {
+    fn scan(file: &File, e: ExprId, reified: &std::collections::HashSet<String>) -> bool {
+        if let Some(type_args) = file.call_type_args.get(&e.0) {
+            if type_args
+                .iter()
+                .any(|argument| reified.contains(&argument.name))
+            {
+                return false;
+            }
+        }
+        match file.expr(e) {
+            Expr::CallableRef {
+                receiver: Some(receiver),
+                name,
+                ..
+            } if name == "class" => {
+                // The receiver NAME is the sanctioned use; nothing beneath it to scan.
+                if matches!(file.expr(*receiver), Expr::Name(_)) {
+                    return true;
+                }
+                scan(file, *receiver, reified)
+            }
+            Expr::Name(n) if reified.contains(n) => false,
+            Expr::Is { ty, .. } | Expr::As { ty, .. } if reified.contains(&ty.name) => false,
+            _ => {
+                // `any_child_*` short-circuits on `true`, so "any child is BAD" composes directly.
+                !file.any_child_expr(e, &mut |child| !scan(file, child, reified), &mut |stmt| {
+                    file.any_child_stmt(stmt, &mut |child| !scan(file, child, reified))
+                })
+            }
+        }
+    }
+    let reified = &f.reified_type_params;
+    match &f.body {
+        FunBody::Expr(body) | FunBody::Block(body) => scan(file, *body, reified),
+        FunBody::None => false,
+    }
+}
+
 fn inline_body_has_splice_only_shape(
     file: &File,
     f: &FunDecl,
@@ -3027,7 +3070,15 @@ impl SymbolTable {
     /// representation is deliberately absent here: value-class mangling/erasure belongs to the
     /// emission pass, which rewrites the declaration and exact selected call together.
     pub fn inline_fn_facade_emittable(&self, file: &File, file_index: u32, f: &FunDecl) -> bool {
-        if !f.is_inline() || !f.reified_type_params.is_empty() {
+        if !f.is_inline() {
+            return false;
+        }
+        // A REIFIED inline fn emits a real erased method (kotlinc's shape) whose reified-parameter
+        // uses become `reifiedOperationMarker` placeholders — but only the CLASS-LITERAL use
+        // (`T::class`/`T::class.java`) is realized so far. Any other reified use (an `is T`/`as T`
+        // marker, or a reified name flowing into a nested reified call's explicit type argument)
+        // keeps the fn splice-only.
+        if !f.reified_type_params.is_empty() && !reified_uses_are_class_literals(file, f) {
             return false;
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self, file_index);
