@@ -1709,47 +1709,6 @@ pub fn expect_front_end_ok_files_with_stdlib(sources: &[&str], stem: &str) {
     );
 }
 
-/// Assert one Kotlin language feature's gate against the reference compiler: explicit `-Feature`
-/// rejects `source`, while explicit `+Feature` accepts it, and krusty makes the same two decisions.
-pub fn assert_language_feature_gate(source: &str, feature: &str) {
-    let Some(work) = scratch_dir() else {
-        panic!("cannot allocate language-feature fixture");
-    };
-    let source_path = work.join("Feature.kt");
-    std::fs::write(&source_path, source).expect("write language-feature fixture");
-    let stdlib = stdlib_jar();
-    let jdk = jdk_modules();
-
-    for (enabled, expectation) in [(false, "reject"), (true, "accept")] {
-        let sign = if enabled { '+' } else { '-' };
-        let args = vec![
-            source_path.to_string_lossy().into_owned(),
-            "-d".to_string(),
-            work.join(if enabled { "enabled" } else { "disabled" })
-                .to_string_lossy()
-                .into_owned(),
-            format!("-XXLanguage:{sign}{feature}"),
-        ];
-        let Some((reference_code, reference_stderr)) = kotlinc_compile(&args) else {
-            eprintln!("skip: kotlinc unavailable");
-            return;
-        };
-        let source = format!("// LANGUAGE: {sign}{feature}\n{source}");
-        let diagnostics =
-            front_end_diagnostics(&source, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
-        let reference_accepted = reference_code == 0;
-        let krusty_accepted = diagnostics.is_empty();
-        assert_eq!(
-            reference_accepted, enabled,
-            "kotlinc should {expectation} {sign}{feature}: {reference_stderr}"
-        );
-        assert_eq!(
-            krusty_accepted, reference_accepted,
-            "krusty differs for {sign}{feature}: {diagnostics:?}"
-        );
-    }
-}
-
 /// Compile Kotlin source into a temporary classpath directory.
 /// Returns `None` when the Kotlin toolchain is unavailable.
 #[allow(dead_code)]
@@ -2374,76 +2333,6 @@ pub fn expect_box_ok_against(tag: &str, lib_src: &str, main: &str) {
     assert_eq!(output, "OK", "{tag}");
 }
 
-/// Compile and invoke one of the source's synchronously completing suspend functions through the JVM
-/// continuation ABI.
-pub fn expect_suspend_result(tag: &str, main: &str, call: &str, expected: &str) {
-    expect_suspend_result_with_classpath(tag, main, call, expected, Vec::new());
-}
-
-/// The dependency variant of [`expect_suspend_result`].
-pub fn expect_suspend_result_against(
-    tag: &str,
-    lib_src: &str,
-    main: &str,
-    call: &str,
-    expected: &str,
-) {
-    let Some(library) = compile_lib(tag, lib_src) else {
-        return;
-    };
-    expect_suspend_result_with_classpath(tag, main, call, expected, vec![library]);
-}
-
-fn expect_suspend_result_with_classpath(
-    tag: &str,
-    main: &str,
-    call: &str,
-    expected: &str,
-    mut classpath: Vec<PathBuf>,
-) {
-    let stdlib = stdlib_jar();
-    let jdk = jdk_modules();
-    let dir = std::env::temp_dir().join(format!("krusty_suspend_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create suspend test directory");
-    classpath.push(stdlib);
-    compile_to_dir(main, "Main", &classpath, Some(jdk.as_path()), &dir).unwrap_or_else(|| {
-        let diagnostics = front_end_diagnostics(main, &classpath, Some(jdk.as_path()));
-        let backend = backend_outcome_in_process(main, "Main", &classpath, Some(jdk.as_path()));
-        panic!(
-            "{tag}: failed to compile suspend caller; diagnostics: {diagnostics:?}; backend: {backend:?}"
-        )
-    });
-    let driver = format!(
-        "import kotlin.coroutines.*;\n\
-         public class M {{\n\
-           public static void main(String[] args) {{\n\
-             Continuation<Object> continuation = new Continuation<Object>() {{\n\
-               public CoroutineContext getContext() {{ return EmptyCoroutineContext.INSTANCE; }}\n\
-               public void resumeWith(Object result) {{ }}\n\
-             }};\n\
-             Object result = MainKt.{call};\n\
-             System.out.println(String.valueOf(result));\n\
-           }}\n\
-         }}\n"
-    );
-    let driver_path = dir.join("M.java");
-    std::fs::write(&driver_path, driver).expect("write suspend test driver");
-    let runtime_classpath = std::env::join_paths(
-        std::iter::once(dir.as_path()).chain(classpath.iter().map(PathBuf::as_path)),
-    )
-    .expect("build suspend classpath");
-    let output = javac_run(
-        driver_path.to_str().expect("UTF-8 driver path"),
-        runtime_classpath.to_str().expect("UTF-8 classpath"),
-        dir.to_str().expect("UTF-8 output path"),
-        "M",
-    )
-    .unwrap_or_else(|| panic!("{tag}: failed to run suspend caller"));
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(output.trim(), expected, "{tag}");
-}
-
 /// Compile `main` against a kotlinc-built `lib_src` up to the CHECKER only (no lowering/emit), returning
 /// the diagnostic messages (empty = clean). For asserting the RESOLUTION of a shape whose end-to-end
 /// lowering is an orthogonal, not-yet-implemented feature. `None` (→ skip) when the toolchain is absent.
@@ -2465,24 +2354,7 @@ pub fn checker_diags_with_stdlib(main: &str) -> Option<Vec<String>> {
     Some(inspect_checker_with_classpath(main, classpath, |_, _, _| ()).0)
 }
 
-/// Check against the Kotlin stdlib and inspect the checker handoff while its file/symbol storage is
-/// alive. This is the resolver-architecture counterpart of the compile/run harness: tests provide
-/// only source plus the semantic fact they need to inspect.
-pub fn inspect_checker_with_stdlib<T>(
-    main: &str,
-    inspect: impl FnOnce(
-        &krusty::ast::File,
-        &krusty::frontend::FrontendTypeInfo,
-        &krusty::frontend::FrontendSymbols,
-    ) -> T,
-) -> Option<(Vec<String>, T)> {
-    let stdlib = stdlib_jar();
-    let mut classpath = vec![stdlib];
-    classpath.push(jdk_modules());
-    Some(inspect_checker_with_classpath(main, classpath, inspect))
-}
-
-fn inspect_checker_with_classpath<T>(
+pub fn inspect_checker_with_classpath<T>(
     main: &str,
     classpath: Vec<PathBuf>,
     inspect: impl FnOnce(
