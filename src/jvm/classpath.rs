@@ -814,6 +814,60 @@ fn global_entry_class_cache(key: &EntryKey) -> ClassCache {
         .clone()
 }
 
+/// Process-global cache of lazily-read method bodies, keyed per classpath ENTRY exactly like
+/// [`global_entry_class_cache`]. A body is keyed by the OWNING entry, so the classpath-order
+/// shadowing decision stays per-lookup and a body read from the stdlib jar by ANY thread under ANY
+/// classpath set is reused. Without this, every per-test classpath (a scratch lib dir + the same
+/// stdlib jar) re-read and re-disassembled the stdlib's inline bodies from cold — measured at
+/// hundreds of `read_method_code` round-trips per fresh `Classpath`.
+type BodyMap = HashMap<(TypeName, String, String), Option<MethodCode>>;
+type BodyCache = std::sync::Arc<std::sync::RwLock<BodyMap>>;
+fn global_entry_body_cache(key: &EntryKey) -> BodyCache {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<EntryKey, BodyCache>>> =
+        std::sync::OnceLock::new();
+    let m = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut g = m.lock().unwrap();
+    g.entry(key.clone())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())))
+        .clone()
+}
+
+/// Process-global cache of parsed `.kotlin_builtins` fragments, keyed per classpath ENTRY plus the
+/// package id. The parse of the stdlib's builtins (the collection hierarchy + every builtin type's
+/// API) is composition-independent per entry, so per-test classpaths share it instead of re-decoding
+/// it per `Classpath` instance. `None` records "this entry has no fragment for the package".
+fn global_entry_builtins_cache(
+    key: &EntryKey,
+    package: TypeName,
+) -> Option<Option<std::sync::Arc<BuiltinsFile>>> {
+    global_entry_builtins_map()
+        .lock()
+        .unwrap()
+        .get(&(key.clone(), package))
+        .cloned()
+}
+
+fn global_entry_builtins_store(
+    key: &EntryKey,
+    package: TypeName,
+    value: Option<std::sync::Arc<BuiltinsFile>>,
+) {
+    global_entry_builtins_map()
+        .lock()
+        .unwrap()
+        .insert((key.clone(), package), value);
+}
+
+#[allow(clippy::type_complexity)]
+fn global_entry_builtins_map(
+) -> &'static std::sync::Mutex<HashMap<(EntryKey, TypeName), Option<std::sync::Arc<BuiltinsFile>>>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<(EntryKey, TypeName), Option<std::sync::Arc<BuiltinsFile>>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// One resolved extension-function candidate: the owner class (internal name), the JVM method
 /// descriptor, the method name, and the return-type descriptor.
 #[derive(Clone, Debug)]
@@ -1575,7 +1629,7 @@ pub struct Classpath {
     /// `kotlin/collections`), each mapping class internal name → its supertypes + members. Built once
     /// per file on first use — the single source for BOTH the collection read-only/mutable hierarchy AND
     /// every builtin type's API. Empty if no stdlib is on the classpath.
-    builtins: RefCell<HashMap<TypeName, std::rc::Rc<BuiltinsFile>>>,
+    builtins: RefCell<HashMap<TypeName, std::sync::Arc<BuiltinsFile>>>,
     /// Resolved builtin member vectors, keyed by Kotlin internal class name. The raw builtins fragment is
     /// already cached, but mapping it to `LibraryMember`s also resolves JVM owners/interface flags and
     /// allocates descriptors. Classifier metadata reads ask for these repeatedly during member/subtype lookup.
@@ -2254,7 +2308,7 @@ impl Classpath {
     /// A parsed `.kotlin_builtins` fragment by package id (class internal-name id → supertypes+members),
     /// read once and cached. The single builtins entry point — both the collection hierarchy and a
     /// type's member API derive from it.
-    fn builtins_file_for_package(&self, package: TypeName) -> std::rc::Rc<BuiltinsFile> {
+    fn builtins_file_for_package(&self, package: TypeName) -> std::sync::Arc<BuiltinsFile> {
         let tree = self.package_tree();
         let catalog_complete = tree.incomplete_entries.is_empty();
         if catalog_complete {
@@ -2263,28 +2317,56 @@ impl Classpath {
             }
         }
         let path = Self::builtins_path_for_package(package);
-        let mut map = super::metadata::BuiltinPackage::default();
         let mut indices = tree
             .node_for(&package.render())
             .map_or_else(Vec::new, |node| node.builtins_jars.clone());
         indices.extend(tree.incomplete_entries.iter().copied());
         indices.sort_unstable();
         indices.dedup();
+        let mut found = None;
         for i in indices {
             let Some(entry) = self.entries.get(i) else {
                 continue;
             };
-            let bytes = match entry {
-                Entry::Dir(dir) => std::fs::read(dir.join(&path)).ok(),
-                Entry::Jar(jar) => self.jar_entry(jar, &path),
-                Entry::Jimage(_) => None,
+            // Per-entry global cache first: the parse of one entry's fragment is independent of the
+            // classpath composition, so per-test classpath sets share it (see
+            // [`global_entry_builtins_cache`]). The classpath-order walk still decides WHICH entry's
+            // fragment wins.
+            let key = &self.cache_key[i];
+            let cached = if catalog_complete {
+                global_entry_builtins_cache(key, package)
+            } else {
+                None
             };
-            if let Some(bytes) = bytes {
-                map = super::metadata::parse_builtins(&bytes);
+            let parsed = match cached {
+                Some(hit) => hit,
+                None => {
+                    let bytes = match entry {
+                        Entry::Dir(dir) => std::fs::read(dir.join(&path)).ok(),
+                        Entry::Jar(jar) => self.jar_entry(jar, &path),
+                        Entry::Jimage(_) => None,
+                    };
+                    let parsed = bytes.map(|bytes| {
+                        std::sync::Arc::new(BuiltinsFile::from_package(
+                            super::metadata::parse_builtins(&bytes),
+                        ))
+                    });
+                    if catalog_complete {
+                        global_entry_builtins_store(key, package, parsed.clone());
+                    }
+                    parsed
+                }
+            };
+            if let Some(file) = parsed {
+                found = Some(file);
                 break;
             }
         }
-        let rc = std::rc::Rc::new(BuiltinsFile::from_package(map));
+        let rc = found.unwrap_or_else(|| {
+            std::sync::Arc::new(BuiltinsFile::from_package(
+                super::metadata::BuiltinPackage::default(),
+            ))
+        });
         if catalog_complete {
             self.builtins.borrow_mut().insert(package, rc.clone());
         }
@@ -2338,7 +2420,7 @@ impl Classpath {
     }
 
     /// The parsed `collections.kotlin_builtins` fragment (the Kotlin collection hierarchy lives here).
-    fn collection_builtins(&self) -> std::rc::Rc<BuiltinsFile> {
+    fn collection_builtins(&self) -> std::sync::Arc<BuiltinsFile> {
         self.builtins_file_for_package(type_name("kotlin/collections"))
     }
 
@@ -3257,9 +3339,7 @@ impl Classpath {
             }
         }
         cache_stat!(bodies, false);
-        let mut code = self
-            .class_bytes(internal)
-            .and_then(|b| read_method_code(&b, name, descriptor));
+        let mut code = self.own_method_code(internal, name, descriptor, catalog_complete);
         if code.is_none() {
             // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes,
             // which the facade *extends* (a superclass chain: `StandardKt` → `StandardKt__StandardKt`).
@@ -3268,10 +3348,7 @@ impl Classpath {
                 if s == "java/lang/Object" {
                     break;
                 }
-                if let Some(mc) = self
-                    .class_bytes(&s)
-                    .and_then(|b| read_method_code(&b, name, descriptor))
-                {
+                if let Some(mc) = self.own_method_code(&s, name, descriptor, catalog_complete) {
                     code = Some(mc);
                     break;
                 }
@@ -3282,6 +3359,63 @@ impl Classpath {
             self.bodies.borrow_mut().insert(key, code.clone());
         }
         code
+    }
+
+    /// One class's own body read (no facade super-chain walk), served from the process-global
+    /// per-entry body cache (see [`global_entry_body_cache`]) keyed by the OWNING entry — the first
+    /// classpath entry that contains the class, the same shadowing decision `class_bytes` makes.
+    /// Overlay classes bypass the global cache (they are per-request, in-memory, and have no entry).
+    fn own_method_code(
+        &self,
+        internal: &str,
+        name: &str,
+        descriptor: &str,
+        catalog_complete: bool,
+    ) -> Option<MethodCode> {
+        let internal_id = super::jvm_class_map::to_jvm_type_name(type_name(internal));
+        if self.stub_overlay.borrow().contains_key(&internal_id) {
+            return self
+                .class_bytes(internal)
+                .and_then(|b| read_method_code(&b, name, descriptor));
+        }
+        let owner = (catalog_complete)
+            .then(|| self.owning_entry(internal_id))
+            .flatten();
+        let Some(entry_index) = owner else {
+            return self
+                .class_bytes(internal)
+                .and_then(|b| read_method_code(&b, name, descriptor));
+        };
+        let global = global_entry_body_cache(&self.cache_key[entry_index]);
+        let key = (internal_id, name.to_string(), descriptor.to_string());
+        if let Some(hit) = global.read().unwrap().get(&key) {
+            return hit.clone();
+        }
+        let code = self
+            .class_bytes(internal)
+            .and_then(|b| read_method_code(&b, name, descriptor));
+        global.write().unwrap().insert(key, code.clone());
+        code
+    }
+
+    /// The first classpath entry (classpath order) that CONTAINS the class — the entry whose bytes
+    /// `class_bytes` would serve. Ensures the class is parsed (which records per-entry presence in
+    /// the global L2 caches), then reads the answer from those records.
+    fn owning_entry(&self, internal_id: TypeName) -> Option<usize> {
+        // Populate the per-entry L2 records for this class if nothing has looked it up yet.
+        self.find_name(internal_id)?;
+        let tree = self.package_tree();
+        let internal = internal_id.render();
+        for i in self.class_entry_indices(&tree, &internal) {
+            let Some(l2) = self.entry_caches.get(i) else {
+                continue;
+            };
+            match l2.classes.read().unwrap().get(&internal_id) {
+                Some(Some(_)) => return Some(i),
+                _ => continue,
+            }
+        }
+        None
     }
 
     /// Whether the selected JVM callable is `inline`, matching by `(jvm name, descriptor)` through the
@@ -6184,6 +6318,35 @@ mod fq_tests {
             &a.entry_caches[0],
             &b.entry_caches[0]
         ));
+    }
+
+    // Method bodies and `.kotlin_builtins` parses are ALSO keyed per entry, not per classpath set:
+    // a per-test classpath (scratch lib dir + the same stdlib jar) must reuse the stdlib's lazily
+    // read inline bodies and builtins fragments instead of re-reading them per `Classpath` — the
+    // regression that made every lib-backed e2e compile pay a cold-composition tax (measured
+    // 580ms/compile against a warm process, 155ms after sharing these two).
+    #[test]
+    fn entry_body_and_builtins_caches_are_shared_across_classpath_sets() {
+        let shared = PathBuf::from("/nonexistent/shared.jar");
+        let a = Classpath::new(vec![shared.clone()]);
+        let b = Classpath::new(vec![PathBuf::from("/nonexistent/module-out"), shared]);
+        assert!(std::sync::Arc::ptr_eq(
+            &global_entry_body_cache(&a.cache_key[0]),
+            &global_entry_body_cache(&b.cache_key[1])
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            &global_entry_body_cache(&a.cache_key[0]),
+            &global_entry_body_cache(&b.cache_key[0])
+        ));
+        let pkg = type_name("kotlin/collections");
+        let file = std::sync::Arc::new(BuiltinsFile::from_package(
+            super::super::metadata::BuiltinPackage::default(),
+        ));
+        global_entry_builtins_store(&a.cache_key[0], pkg, Some(file.clone()));
+        let hit = global_entry_builtins_cache(&b.cache_key[1], pkg)
+            .flatten()
+            .expect("builtins fragment shared across classpath sets");
+        assert!(std::sync::Arc::ptr_eq(&hit, &file));
     }
 
     fn jar_packages(pkgs: &[(&str, PkgEntry)]) -> std::sync::Arc<JarPackages> {
