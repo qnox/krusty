@@ -1147,7 +1147,6 @@ where
             "jsonrpc": "2.0",
             "id": DIAGNOSTIC_REFRESH_REQUEST_ID,
             "method": "workspace/diagnostic/refresh",
-            "params": {},
         }))
     }
 
@@ -7132,7 +7131,12 @@ mod tests {
         service.client_pulls_diagnostics = true;
         service.client_refreshes_diagnostics = true;
 
-        assert!(service.diagnostic_refresh().is_some());
+        let refresh = service.diagnostic_refresh().unwrap();
+        assert_eq!(refresh["method"], "workspace/diagnostic/refresh");
+        assert!(
+            refresh.get("params").is_none(),
+            "the parameterless LSP request must omit params: {refresh:?}"
+        );
         assert!(service.diagnostic_refresh().is_none());
 
         let response = service.handle(json!({
