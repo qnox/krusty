@@ -42,7 +42,8 @@ jobs="${KRUSTY_TEST_JOBS:-1}"
 # fixed value here. Override with KRUSTY_TEST_THREADS to pin it back down on a starved host.
 test_threads="${KRUSTY_TEST_THREADS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 coverage_target="${KRUSTY_COVERAGE_TARGET_DIR:-target/coverage-build}"
-test_timeout="${KRUSTY_COVERAGE_TEST_TIMEOUT_SECONDS:-300}"
+test_timeout="${KRUSTY_COVERAGE_TEST_TIMEOUT_SECONDS:-120}"
+e2e_timeout="${KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS:-300}"
 source scripts/test-deadline.sh
 
 # Self-provision the reference kotlinc + box corpus exactly like run-tests.sh, so the kept e2e
@@ -96,7 +97,7 @@ for b in "${bins[@]}"; do
   is_excluded "$name" && continue
   run+=("$b")
 done
-echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs, --test-threads=$test_threads, timeout=${test_timeout}s), conformance binary excluded" >&2
+echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs, --test-threads=$test_threads, timeout=${test_timeout}s, e2e-timeout=${e2e_timeout}s), conformance binary excluded" >&2
 
 # Run the binaries in parallel; each writes its own profraw (LLVM_PROFILE_FILE has a %p pid slot).
 # A non-zero exit from any binary (a failing test) fails the whole run — the tests are the workload.
@@ -104,8 +105,12 @@ echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs, --test-t
 # large binary, so forcing it to 1 serializes almost the entire coverage workload; using a small
 # default preserves full coverage while avoiding the memory pressure seen with unbounded parallelism.
 run_coverage_test_binary() {
-  local binary="$1" status_root="$2" threads="$3" seconds="$4"
-  local result="$status_root/$(basename "$binary")"
+  local binary="$1" status_root="$2" threads="$3" seconds="$4" e2e_seconds="$5"
+  local name="$(basename "$binary")"
+  local result="$status_root/$name"
+  if [[ "$name" == e2e-* ]]; then
+    seconds="$e2e_seconds"
+  fi
   mkdir -p "$result"
   if run_with_deadline "$seconds" "$binary" --quiet --test-threads="$threads" \
       >"$result/output.log" 2>&1; then
@@ -124,7 +129,7 @@ export -f run_coverage_test_binary
 
 status_dir="$(mktemp -d)"
 printf '%s\0' "${run[@]}" | xargs -0 -P "$jobs" -I{} \
-  bash -c 'run_coverage_test_binary "$@"' _ {} "$status_dir" "$test_threads" "$test_timeout"
+  bash -c 'run_coverage_test_binary "$@"' _ {} "$status_dir" "$test_threads" "$test_timeout" "$e2e_timeout"
 if compgen -G "$status_dir/*" >/dev/null; then
   echo "coverage: FAIL — test binaries reported failures:" >&2
   for result in "$status_dir"/*; do

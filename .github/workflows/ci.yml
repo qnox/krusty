@@ -44,6 +44,10 @@ jobs:
             target/cache/ksp-corpus
           key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
       - name: just ci
+        env:
+          # LLVM branch instrumentation makes the e2e binary ~4.5x slower than the normal gate.
+          # Keep the local default strict; only this intentionally slow environment raises it.
+          KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1200
         run: just ci
 
   build-conformance-bin:
