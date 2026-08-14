@@ -19,7 +19,7 @@ const LIB: &str = "package lib\n\
 fn value_class_ctor_default_and_data_copy() {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
-    let Some(libout) = common::compile_lib_ref("vcdef", LIB) else {
+    let Some(libout) = common::compile_lib("vcdef", LIB) else {
         return;
     };
     let cp = vec![libout.clone(), sl.clone()];

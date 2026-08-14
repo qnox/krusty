@@ -1204,6 +1204,10 @@ pub struct IrSecondaryCtor {
     pub delegate: CtorDelegateTarget,
     /// kotlinc marks this ctor `ACC_SYNTHETIC` (0x1000) — e.g. a `@Serializable` deserialization ctor.
     pub synthetic: bool,
+    /// A DECLARED parameter was value-class-typed (recorded by the value-class pass before erasure):
+    /// the ctor gets kotlinc's PRIVATE + public synthetic `(…, DefaultConstructorMarker)` ABI, and
+    /// its metadata record names the marker form.
+    pub vc_params: bool,
 }
 
 /// The delegation target of a secondary constructor.
@@ -1422,6 +1426,11 @@ pub struct IrFile {
     /// for a constructor mentioning an inline class. Recorded by the value-class pass BEFORE it erases the
     /// parameter types (which lose the value-class identity).
     value_param_ctors: std::collections::HashSet<TypeName>,
+    /// For a class in `value_param_ctors`: its primary-ctor parameter types AS DECLARED (recorded
+    /// before the value-class pass erased them), positionally parallel to `IrClass::ctor_args`. The
+    /// class `@Metadata` constructor record names these (`id: ItemId`), while the physical
+    /// descriptor spells the erased marker form.
+    vc_ctor_declared_params: std::collections::HashMap<TypeName, Vec<Ty>>,
     /// Lambda impl functions that are INLINE-ONLY — their body has a non-local `return` (returning from
     /// the enclosing function), which is valid only when the lambda is spliced at the call site, never as
     /// a standalone closure method (a non-local return can't compile to a separate method — its `areturn`
@@ -1775,6 +1784,16 @@ impl IrFile {
     pub fn has_value_param_ctor(&self, internal: &str) -> bool {
         self.value_param_ctors
             .contains(&crate::types::type_name(internal))
+    }
+
+    pub fn record_vc_ctor_declared_params(&mut self, internal: TypeName, declared: Vec<Ty>) {
+        self.vc_ctor_declared_params.insert(internal, declared);
+    }
+
+    pub fn vc_ctor_declared_params(&self, internal: &str) -> Option<&[Ty]> {
+        self.vc_ctor_declared_params
+            .get(&crate::types::type_name(internal))
+            .map(Vec::as_slice)
     }
 
     pub fn insert_value_ctor_default(&mut self, internal: &str, expr: u32) {

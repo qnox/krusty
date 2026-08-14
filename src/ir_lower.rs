@@ -4003,6 +4003,7 @@ fn lower_file_at_reporting_impl(
                             body,
                             delegate,
                             synthetic: false,
+                            vc_params: false,
                         });
                     }
                     lo.ir.classes[class_id as usize].secondary_ctors = secs;

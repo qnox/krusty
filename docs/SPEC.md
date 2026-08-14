@@ -5618,3 +5618,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every such function was `unresolved function` from a krusty-built classpath.
   `FnMeta::jvm_name` carries the f1 name (written only when it differs from the Kotlin name).
   Test: `tests/classpath_value_class_param_e2e.rs` (krusty-built by default).
+
+- **Classes with value-class constructor parameters publish full metadata; secondary VC ctors get
+  the marker ABI.** The blanket "no @Metadata for a value-param ctor class" decline is lifted — the
+  bytecode already carried kotlinc's ABI for PRIMARY ctors (private erased `<init>` + public
+  synthetic marker ctor + mangled accessors), so the record now describes it: ctor params keep their
+  DECLARED types (`IrFile::vc_ctor_declared_params`, captured before erasure), the ctor
+  `JvmMethodSignature` names the public marker form (an inner class's leading enclosing-instance
+  param included), member records ride `vc_declared_sigs` (mangled f100), and property records carry
+  the mangled getter + erased field desc (already-existing channels). SECONDARY constructors with
+  value-class params now get the same private+marker realization (`IrSecondaryCtor::vc_params`,
+  recorded by the VC pass pre-erasure) — bytecode, same-module construction routing (`emit_new`
+  matches the erased shape), and the marker-form metadata desc. Also fixed while lifting: the
+  ordinary ctor record desc now spells UNNAMED leading `<init>` params (an inner class's enclosing
+  instance — consumers were one slot short), and `Class.flags` records `IS_INNER` (bit 9, kotlinc's
+  518). Value classes with secondary ctors still decline (static `constructor-impl` overloads).
+  Byte-parity probes: `Holder`/`Overloaded` metadata byte-identical to kotlinc 2.4.0. Tests:
+  build688, enum_regex_vc, nested_ctor_reordered_named_valueclass, synthetic_ctor,
+  value_class_default, value_class_nullable_widen_return — all krusty-built by default now.

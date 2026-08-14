@@ -1676,14 +1676,16 @@ pub fn lower_value_classes(
     //    that erased to a non-reference (a value-class ctor arg `a: Na` → `int` can't be null-checked).
     // A NON-value class whose primary ctor has a value-class-typed param gets kotlinc's private-primary +
     // synthetic marker accessor ABI — recorded BEFORE erasure loses the value-class identity of the param.
-    let mut value_param_ctors: Vec<TypeName> = Vec::new();
+    let mut value_param_ctors: Vec<(TypeName, Vec<Ty>)> = Vec::new();
     for c in &mut ir.classes {
         if !c.is_value
             && !c.is_object
             && !c.is_interface
             && c.ctor_args.iter().any(|a| is_vc_ty(&a.ty))
         {
-            value_param_ctors.push(c.fq_name);
+            // Capture the DECLARED ctor param types before the erase below rewrites them — the
+            // class metadata constructor record must name the value classes.
+            value_param_ctors.push((c.fq_name, c.ctor_args.iter().map(|a| a.ty).collect()));
         }
         for fld in &mut c.fields {
             fld.ty = erase(&fld.ty, &under);
@@ -1701,6 +1703,11 @@ pub fn lower_value_classes(
         // `(String, String)`); a value class's own secondary ctors were already consumed into static
         // `constructor-impl`s by `synth_value_members`, so this only touches regular classes.
         for sc in &mut c.secondary_ctors {
+            // Record the value-class fact BEFORE erasure: it drives kotlinc's private+marker ABI for
+            // this constructor (a synthetic marker-disambiguated ctor keeps its own convention).
+            if !sc.synthetic && sc.params.iter().any(is_vc_ty) {
+                sc.vc_params = true;
+            }
             for p in &mut sc.params {
                 // A SYNTHETIC marker ctor (the serialization deser ctor, disambiguated by a trailing
                 // `DefaultConstructorMarker` rather than `-<hash>` mangling) keeps a nullable-underlying
@@ -1719,8 +1726,9 @@ pub fn lower_value_classes(
             }
         }
     }
-    for internal in value_param_ctors {
+    for (internal, declared) in value_param_ctors {
         ir.mark_value_param_ctor_name(internal);
+        ir.record_vc_ctor_declared_params(internal, declared);
     }
 
     for c in &mut ir.classes {

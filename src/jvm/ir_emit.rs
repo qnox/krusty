@@ -276,6 +276,9 @@ fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
         | (VIS_PUBLIC << 1)
         | (modality << 4)
         | (kind << 6)
+        // `IS_INNER` (bit 9): an `inner class` — the record is how a consumer knows construction
+        // takes the enclosing instance (kotlinc: `inner class Item` flags 518).
+        | (u64::from(c.is_inner_class) << 9)
         | (u64::from(c.is_data) << 10)
         | (u64::from(c.is_value) << 13)
         | (u64::from(c.is_fun_interface) << 14)
@@ -661,9 +664,7 @@ fn build_class_metadata(
     };
     let has_object_erased_value_class_member =
         declared_fids.iter().any(erases_value_class_to_object);
-    if has_object_erased_value_class_member
-        || (!c.is_value && ir.has_value_param_ctor(&c.fq_name()))
-    {
+    if has_object_erased_value_class_member {
         crate::trace_compiler!(
             "emit",
             "class {} metadata declined: object-erased value-class member / value-param ctor",
@@ -914,17 +915,61 @@ fn build_class_metadata(
     // recorded `JvmMethodSignature` is `(Ljava/lang/String;I…)V` — the metadata names the REAL
     // descriptor even though those parameters are not Kotlin-visible.
     let ctor_desc = format!(
-        "({}{})V",
+        "({}{}{})V",
         if c.enum_entries.is_empty() {
             ""
         } else {
             "Ljava/lang/String;I"
         },
+        // The physical `<init>` leads with the UNNAMED lowering-added parameters — an inner class's
+        // enclosing instance (`Llib/Outer;`) — which `ctor_params` (source parameters) never carry.
+        // kotlinc's record spells them (`(Llib/Outer;Ljava/lang/String;I)V`); without them a
+        // consumer's constructor call is one slot short.
+        c.ctor_args
+            .iter()
+            .filter(|arg| arg.name.is_none())
+            .map(|arg| desc(arg.ty))
+            .collect::<String>(),
         ctor_params
             .iter()
             .map(|(_, t)| desc(*t))
             .collect::<String>()
     );
+    // A value-class-parametered primary ctor: the record names the DECLARED types (`id: ItemId` —
+    // the erase pass rewrote `ctor_args` to the underlying), and its physical handle is the PUBLIC
+    // synthetic marker ctor (`(…;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`) — the private
+    // erased `<init>` is not callable cross-class. Both exactly as kotlinc records them.
+    let (ctor_params, ctor_desc) = match ir.vc_ctor_declared_params(&c.fq_name()) {
+        Some(declared) if c.enum_entries.is_empty() => {
+            let named_declared: Vec<Ty> = c
+                .ctor_args
+                .iter()
+                .zip(declared)
+                .filter(|(arg, _)| arg.name.is_some())
+                .map(|(_, ty)| *ty)
+                .collect();
+            let params = if named_declared.len() == ctor_params.len() {
+                ctor_params
+                    .iter()
+                    .zip(&named_declared)
+                    .map(|((name, _), ty)| (name.clone(), *ty))
+                    .collect()
+            } else {
+                ctor_params
+            };
+            // The physical marker ctor spells EVERY parameter — an inner class's leading outer
+            // instance included (`ctor_params` above holds only the NAMED source parameters).
+            let desc = format!(
+                "({}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+                c.ctor_args
+                    .iter()
+                    .map(|arg| desc(arg.ty))
+                    .collect::<String>()
+            );
+            (params, desc)
+        }
+        _ => (ctor_params, ctor_desc),
+    };
     // kotlinc's synthesized data-class methods, in declaration order: componentN, copy, equals,
     // hashCode, toString. Their shapes come entirely from the primary-ctor properties.
     // A boxed nullable primitive (`Int?` → `Ljava/lang/Integer;`): its JVM descriptor is not derivable
@@ -1275,8 +1320,13 @@ fn build_class_metadata(
             (
                 sc.named_params.clone(),
                 format!(
-                    "({})V",
-                    sc.params.iter().map(|&t| desc(t)).collect::<String>()
+                    "({}{})V",
+                    sc.params.iter().map(|&t| desc(t)).collect::<String>(),
+                    if sc.vc_params {
+                        "Lkotlin/jvm/internal/DefaultConstructorMarker;"
+                    } else {
+                        ""
+                    }
                 ),
             )
         })
@@ -1380,7 +1430,7 @@ fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool
 /// these kind/constructor bails in one predicate is correctness-critical: if the writer withholds a
 /// value class but the transitive check independently admits it, a mentioning class publishes a type
 /// a downstream compiler reads as an ordinary box.
-fn class_metadata_common_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
+fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) -> bool {
     // Local/anonymous classifiers cannot be named by another compilation unit. Their lexical type
     // parameters are not declarations of the generated class, so publishing a class metadata record
     // would require falsely redeclaring them; omit the non-observable record instead.
@@ -1398,8 +1448,7 @@ fn class_metadata_common_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> 
             .iter()
             .any(|sc| !sc.synthetic && sc.named_params.len() != sc.params.len())
         || (!c.has_primary_ctor && c.secondary_ctors.is_empty() && !c.is_interface && c.enum_entries.is_empty())
-        || (c.fields.len() as u32) < c.ctor_param_count
-        || (!c.is_value && ir.has_value_param_ctor(&c.fq_name())))
+        || (c.fields.len() as u32) < c.ctor_param_count)
 }
 
 /// The single admission predicate for a VALUE class's own metadata record. Both
@@ -4202,8 +4251,12 @@ fn emit_class(
         sctor.link();
         // A SEALED class's secondary ctor is private too, with its own PUBLIC
         // `(…args, DefaultConstructorMarker)` accessor (kotlinc: EVERY sealed ctor pairs with one).
-        let sc_access =
-            (if c.is_sealed { 0x0002 } else { 0x0001 }) | if sc.synthetic { 0x1000 } else { 0 };
+        // A VALUE-CLASS-parametered secondary ctor gets the same private+marker ABI (kotlinc's).
+        let sc_access = (if c.is_sealed || sc.vc_params {
+            0x0002
+        } else {
+            0x0001
+        }) | if sc.synthetic { 0x1000 } else { 0 };
         cw.add_method(
             sc_access,
             "<init>",
@@ -4221,7 +4274,7 @@ fn emit_class(
                 env,
             );
         }
-        if c.is_sealed {
+        if c.is_sealed || sc.vc_params {
             emit_ctor_marker_accessor(&fq_name, &sc_param_tys, &mut cw);
         }
     }
@@ -9973,9 +10026,23 @@ impl<'a> Emitter<'a> {
                     // ANOTHER class routes through the accessor (a trailing `null`) — JVM `private` is
                     // a per-CLASS boundary (independent of file/package), so the test is `self.owner !=
                     // owner`. Same-class construction (a secondary ctor, `box-impl`) keeps the primary.
-                    let use_accessor = ctor_params.is_none()
-                        && self.owner != owner
-                        && self.ir.has_value_param_ctor(&owner);
+                    // A SECONDARY ctor with value-class params has the same private+marker ABI —
+                    // the checker-selected `ctor_params` identify it by erased shape.
+                    let vc_secondary = ctor_params.as_ref().is_some_and(|ps| {
+                        let want = jvm_tys(ps);
+                        self.ir
+                            .class_id_by_name(*internal)
+                            .map(|cid| &self.ir.classes[cid as usize])
+                            .is_some_and(|target| {
+                                target
+                                    .secondary_ctors
+                                    .iter()
+                                    .any(|sc| sc.vc_params && jvm_tys(&sc.params) == want)
+                            })
+                    });
+                    let use_accessor = self.owner != owner
+                        && ((ctor_params.is_none() && self.ir.has_value_param_ctor(&owner))
+                            || vc_secondary);
                     if use_accessor {
                         field_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
                     }

@@ -1876,6 +1876,7 @@ impl IrPlugin for SerializationPlugin {
                             default_masks: vec![],
                         },
                         synthetic: true,
+                        vc_params: false,
                     });
             }
 
