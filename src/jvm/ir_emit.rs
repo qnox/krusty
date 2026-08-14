@@ -837,6 +837,11 @@ fn build_class_metadata(
                 field_desc: backing
                     .filter(|(_, field)| property.ty != field.ty)
                     .map(|(_, field)| desc(field.ty)),
+                // The PHYSICAL field name when the JVM realization mangles it — an instance
+                // property beside a same-named hoisted companion static (`result` → `result$1`).
+                field_name: backing
+                    .map(|(_, field)| instance_field_jvm_name(ir, c, field))
+                    .filter(|physical| *physical != property.name),
             }
         })
         .collect();
@@ -870,6 +875,7 @@ fn build_class_metadata(
             getter: accessor_sig(ext.getter),
             setter: ext.setter.and_then(accessor_sig),
             field_desc: None,
+            field_name: None,
         });
     }
     for &static_id in ir
@@ -893,6 +899,7 @@ fn build_class_metadata(
             getter: None,
             setter: None,
             field_desc: None,
+            field_name: None,
         });
     }
     let named_ctor_args: Vec<(String, Ty, bool, Option<u32>)> = c
@@ -1311,7 +1318,7 @@ fn build_class_metadata(
     let enum_entry_names: Vec<String> = c.enum_entries.iter().map(|e| e.name.clone()).collect();
     // Metadata keeps nested declarations ordered and sealed subclasses sorted.
     let self_fq = c.fq_name();
-    let nested_names: Vec<String> = ir
+    let mut nested_names: Vec<String> = ir
         .classes
         .iter()
         .filter(|candidate| {
@@ -1326,6 +1333,14 @@ fn build_class_metadata(
                 .map(str::to_string)
         })
         .collect();
+    // kotlinc lists the companion under `nestedClassName` (f7) TOO, alongside its own
+    // `companionObjectName` (f4) record — both reference the same interned string.
+    if let Some(companion) = &c.companion_class {
+        let segment = companion.nested_segment_ref().to_string();
+        if !nested_names.contains(&segment) {
+            nested_names.push(segment);
+        }
+    }
     let sealed_sorted = sorted_sealed_subclasses(c);
     let sealed_descs: Vec<String> = sealed_sorted.iter().map(|s| format!("L{s};")).collect();
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();

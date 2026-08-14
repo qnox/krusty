@@ -52,6 +52,11 @@ pub struct PropMeta {
     /// every ordinary property records. (The boxed-nullable-primitive and bare-type-parameter cases
     /// below are derived from the property itself, since the shape alone determines them.)
     pub field_desc: Option<String>,
+    /// An explicit `JvmFieldSignature.name` when the PHYSICAL backing field's JVM name differs from
+    /// the property name — an instance property mangled to dodge a same-named companion static
+    /// (`result` → `result$1`). `None` leaves the name derived (the property name), which is what
+    /// every ordinary property records.
+    pub field_name: Option<String>,
 }
 
 /// Member-function descriptor for class metadata (`Class.function` = f9). The JVM signature is usually
@@ -539,6 +544,9 @@ pub fn build_class(
                 _ => None,
             });
             let mut field = Pb::new();
+            if let Some(n) = &p.field_name {
+                field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
+            }
             if let Some(d) = &boxed_field_desc {
                 field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
             }
@@ -782,6 +790,7 @@ mod tests {
                 getter: None,
                 setter: None,
                 field_desc: None,
+                field_name: None,
             })
         };
 
@@ -838,6 +847,7 @@ mod tests {
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
+                field_name: None,
             }],
             &[],
             &[],
@@ -976,6 +986,7 @@ mod tests {
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
+                field_name: None,
             },
             PropMeta {
                 name: "y".into(),
@@ -991,6 +1002,7 @@ mod tests {
                 getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                 field_desc: None,
+                field_name: None,
             },
         ];
         let (d1, _d2) = build_class(
@@ -1055,6 +1067,7 @@ mod tests {
                 getter: Some(("getR".into(), "()Ljava/util/List;".into())),
                 setter: None,
                 field_desc: None,
+                field_name: None,
             }],
             &[],
             &[],
@@ -1165,6 +1178,7 @@ mod tests {
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
+                field_name: None,
             }],
             &[],
             &[],
@@ -1216,6 +1230,7 @@ mod tests {
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
+                field_name: None,
             }],
             &[],
             &[],
@@ -1271,6 +1286,7 @@ mod tests {
                     getter: Some(("getX".into(), "()I".into())),
                     setter: None,
                     field_desc: None,
+                    field_name: None,
                 },
                 PropMeta {
                     name: "y".into(),
@@ -1286,6 +1302,7 @@ mod tests {
                     getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                     field_desc: None,
+                    field_name: None,
                 },
             ],
             &[],
