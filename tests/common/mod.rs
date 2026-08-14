@@ -1806,14 +1806,14 @@ impl LibBuild {
             collect_rel_files(reference, reference, &mut rmap);
             for (name, bytes) in &kmap {
                 match rmap.get(name) {
-                    Some(rb) if rb == bytes => eprintln!("LIBDIFF\tidentical\t{name}"),
-                    Some(_) => eprintln!("LIBDIFF\tdivergent\t{name}"),
-                    None => eprintln!("LIBDIFF\tkrusty-only\t{name}"),
+                    Some(rb) if rb == bytes => eprintln!("LIBDIFF\tidentical\t{name}\t{tag}"),
+                    Some(_) => eprintln!("LIBDIFF\tdivergent\t{name}\t{tag}"),
+                    None => eprintln!("LIBDIFF\tkrusty-only\t{name}\t{tag}"),
                 }
             }
             for name in rmap.keys() {
                 if !kmap.contains_key(name) {
-                    eprintln!("LIBDIFF\tkotlinc-only\t{name}");
+                    eprintln!("LIBDIFF\tkotlinc-only\t{name}\t{tag}");
                 }
             }
         }

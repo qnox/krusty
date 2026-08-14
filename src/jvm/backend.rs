@@ -501,11 +501,13 @@ impl Backend for JvmBackend {
         }
 
         // Record the file facade (`<File>Kt`) for the `.kotlin_module` mapping when the file has
-        // top-level functions/props.
+        // top-level functions/props — or TYPEALIASES: an alias-only facade is still emitted (its
+        // `Package.typeAlias` records live there) and kotlinc lists it.
         let has_facade_members = file
             .decls
             .iter()
-            .any(|&d| matches!(file.decl(d), Decl::Fun(_) | Decl::Property(_)));
+            .any(|&d| matches!(file.decl(d), Decl::Fun(_) | Decl::Property(_)))
+            || !file.type_aliases.is_empty();
         if has_facade_members {
             let facade = facade_name
                 .rsplit('/')
