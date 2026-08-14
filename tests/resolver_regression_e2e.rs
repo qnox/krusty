@@ -903,6 +903,34 @@ fun box(): String {
 }
 
 #[test]
+fn anonymous_object_method_keeps_captured_function_parameter_type_identity() {
+    let src = r#"
+interface Sink<T> {
+    fun take(value: T)
+}
+
+fun <T> makeSink(action: (T) -> Unit): Sink<T> = object : Sink<T> {
+    override fun take(value: T) {
+        action(value)
+    }
+}
+
+fun box(): String {
+    var result = "FAIL"
+    makeSink<String> { result = it }.take("OK")
+    return result
+}
+"#;
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("ResolverAnonObjectCapturedGenericReference", src);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected generic anonymous-object capture: {reference_stderr}"
+    );
+    assert_eq!(run(src, "ResolverAnonObjectCapturedGenericIdentity"), "OK");
+}
+
+#[test]
 fn property_first_and_extension_first_call_do_not_collide() {
     let src = r#"
 fun box(): String {
