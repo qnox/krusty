@@ -235,12 +235,12 @@ fn encode_type_with_parameter(
                 .get(name)
                 .copied()
                 .ok_or_else(|| TypeEncodeError::MissingTypeParameter(name.to_owned()))?;
-            let source_name = crate::types::type_parameter_source_name(name);
             if nullable {
                 message.field_varint(3, 1);
             }
+            // `type_parameter` (f7) ALONE — kotlinc writes EITHER the in-scope table index or a
+            // `type_parameter_name` (f9), never both; the redundant f9 diverged from its bytes.
             message.field_varint(7, index);
-            message.field_varint(9, strings.local(source_name) as u64);
         }
         Ty::Obj(classifier, arguments) => {
             // kotlinc interns the enclosing classifier before recursively interning its arguments,

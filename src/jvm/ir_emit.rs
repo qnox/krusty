@@ -7014,10 +7014,11 @@ fn emit_method_inner(
     // A bare type-parameter position erases to `Object` but is NOT a known-non-null reference —
     // kotlinc annotates neither it nor a parameter in that position.
     let gsig = ir.signatures.get(&fid);
-    let ret_ann = gsig
-        .is_none_or(|g| !matches!(g.ret, Some(Ty::TyParam(..))))
-        .then(|| ann_of(f.ret))
-        .flatten();
+    let member_sem = ir.member_semantic_sigs.get(&fid);
+    let ret_ann = (gsig.is_none_or(|g| !matches!(g.ret, Some(Ty::TyParam(..))))
+        && member_sem.is_none_or(|(_, r)| !matches!(r, Ty::TyParam(..))))
+    .then(|| ann_of(f.ret))
+    .flatten();
     // A parameter's declared `?` lives in a side-table (not in `f.params`, which stays non-null for the
     // mangle); consult it so a nullable reference parameter is annotated `@Nullable`, not `@NotNull`.
     let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
@@ -7026,7 +7027,8 @@ fn emit_method_inner(
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let is_tparam = gsig.is_some_and(|g| matches!(g.params.get(i), Some(Ty::TyParam(..))));
+            let is_tparam = gsig.is_some_and(|g| matches!(g.params.get(i), Some(Ty::TyParam(..))))
+                || member_sem.is_some_and(|(ps, _)| matches!(ps.get(i), Some(Ty::TyParam(..))));
             if is_tparam {
                 None
             } else if declared_nullable
@@ -7450,6 +7452,32 @@ fn parameterized_sig(formatter: &JvmSignatureFormatter<'_>, ty: &Ty) -> Option<S
 /// `suspend` CPS shape, or a parameterized concrete parameter/return type. `None` when erasure loses
 /// nothing. Shared by concrete and abstract emission — an abstract method has no body, which is not a
 /// reason to drop its signature.
+/// `Signature` for a member whose SEMANTIC types mention enclosing-class type parameters: each
+/// position is a bare `T<name>;` reference or a plain non-generic descriptor. `None` when any
+/// position needs deeper generic formatting (those flow through the ordinary formatters).
+fn member_semantic_signature(params: &[Ty], ret: Ty) -> Option<String> {
+    fn part(t: Ty) -> Option<String> {
+        match t {
+            Ty::TyParam(name, _) => Some(format!(
+                "T{};",
+                crate::types::type_parameter_source_name(name)
+            )),
+            Ty::Nullable(inner) if matches!(*inner, Ty::TyParam(..)) => part(*inner),
+            t if !crate::types::ty_mentions_any_param(t) && t.type_args().is_empty() => {
+                Some(crate::jvm::names::type_descriptor(ir_ty_to_jvm(&t)))
+            }
+            _ => None,
+        }
+    }
+    let mut out = String::from("(");
+    for &p in params {
+        out.push_str(&part(p)?);
+    }
+    out.push(')');
+    out.push_str(&part(ret)?);
+    Some(out)
+}
+
 fn method_signature(
     formatter: &JvmSignatureFormatter<'_>,
     ir: &IrFile,
@@ -7462,6 +7490,13 @@ fn method_signature(
     // shape. `JvmSignatureFormatter` records a precise emit error for the latter case.
     if let Some(generic) = ir.signatures.get(&fid) {
         return jvm_method_signature(formatter, generic, f);
+    }
+    if let Some((params, ret)) = ir.member_semantic_sigs.get(&fid) {
+        // A member using ENCLOSING-CLASS type parameters signs with bare references (`(TT;)TT;`)
+        // and declares nothing — the parameters belong to the class header's own signature.
+        if let Some(sig) = member_semantic_signature(params, *ret) {
+            return Some(sig);
+        }
     }
     if let Some((params, declared_ret)) = ir.suspend_declared_sigs.get(&fid) {
         // A value-class RETURN survives in the continuation's type argument as the value class
