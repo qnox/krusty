@@ -5568,3 +5568,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   are excluded from the declared-function records and re-emitted as `Property` records with
   `receiver` (`metadata::class_builder::PropMeta::receiver`). Test:
   `tests/classpath_object_member_extension_import_e2e.rs` (krusty-built dependency by default).
+
+- **Declared secondary constructors are described in class `@Metadata`.** A class with secondary
+  constructors previously published NO metadata at all (blanket admission bail), so a krusty-built
+  `class Dual { constructor(a: Int, f: Cfg.() -> Unit); constructor(a: String, g: (Int) -> Unit) }`
+  was not a Kotlin class to consumers — `unresolved function 'Dual'`. Each DECLARED secondary
+  constructor now emits a `Class.constructor` record (flags 22 = public + `IS_SECONDARY`, kotlinc
+  2.4.0) built from `IrSecondaryCtor::named_params` — the SOURCE names paired with checker-resolved
+  SEMANTIC types, recorded at lowering because the erased realization loses fun-type shapes
+  (`Cfg.() -> Unit` erases to a bare `Function1`). Synthetic constructors (`@Serializable`
+  deserialization) get no record, matching kotlinc. A class with ONLY secondary constructors emits
+  no primary record; an `enum class` without a declared constructor still records the implicit
+  private `(String, I)` one (byte-identity test pins this). Value classes with secondary
+  constructors keep declining (static `constructor-impl` overloads unmodeled). Test:
+  `tests/classpath_ctor_receiver_lambda_e2e.rs` (krusty-built dependency by default).

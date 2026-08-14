@@ -3956,6 +3956,12 @@ fn lower_file_at_reporting_impl(
                         };
                         secs.push(crate::ir::IrSecondaryCtor {
                             params: param_irs,
+                            named_params: sc
+                                .params
+                                .iter()
+                                .map(|p| p.name.clone())
+                                .zip(class_sig.secondary_ctors[sc_idx].iter().copied())
+                                .collect(),
                             defaults,
                             delegate_prelude,
                             delegate_args,

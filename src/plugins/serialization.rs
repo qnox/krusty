@@ -1864,6 +1864,7 @@ impl IrPlugin for SerializationPlugin {
                     .secondary_ctors
                     .push(crate::ir::IrSecondaryCtor {
                         params: deser_params,
+                        named_params: Vec::new(),
                         defaults: vec![],
                         delegate_prelude: vec![],
                         delegate_args: vec![],

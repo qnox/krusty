@@ -1238,6 +1238,34 @@ fn build_class_metadata(
         }
         supertypes.extend(c.interfaces.iter_ids().map(Ty::obj_name));
     }
+    // DECLARED secondary constructors → `Class.constructor` records (flags 22 = public secondary),
+    // described from their recorded source names + SEMANTIC types (fun-type parameters keep their
+    // shape — `Cfg.() -> Unit` — where the erased realization is a bare `Function1`). Synthetic
+    // ctors get no record, matching kotlinc.
+    let secondary_ctor_shapes: Vec<(Vec<(String, Ty)>, String)> = c
+        .secondary_ctors
+        .iter()
+        .filter(|sc| !sc.synthetic)
+        .map(|sc| {
+            (
+                sc.named_params.clone(),
+                format!(
+                    "({})V",
+                    sc.params.iter().map(|&t| desc(t)).collect::<String>()
+                ),
+            )
+        })
+        .collect();
+    let secondary_ctor_metas: Vec<crate::metadata::class_builder::CtorMeta> = secondary_ctor_shapes
+        .iter()
+        .map(
+            |(params, ctor_desc)| crate::metadata::class_builder::CtorMeta {
+                params,
+                desc: ctor_desc,
+                flags: crate::metadata::class_builder::SECONDARY_CTOR_FLAGS,
+            },
+        )
+        .collect();
     let (d1_bytes, d2) = build_class(
         &c.fq_name(),
         &ctor_params,
@@ -1268,8 +1296,14 @@ fn build_class_metadata(
                 .then(|| (c.fields[0].name.as_str(), c.fields[0].ty)),
             ctor_sig_name: c.is_value.then_some("constructor-impl"),
             // An interface has no constructor at all, whatever the IR records.
-            emit_primary_ctor: !c.is_interface,
+            // An interface has no constructor; a class with ONLY secondary constructors emits no
+            // primary record either (its `Class.constructor` entries are the secondaries below).
+            // Every other class keeps its (possibly implicit) primary record — an `enum class`
+            // without a declared constructor still records the implicit private `(String, I)` one.
+            emit_primary_ctor: !c.is_interface
+                && (c.has_primary_ctor || c.secondary_ctors.is_empty()),
             jvm_class_flags: c.is_interface.then_some(3),
+            secondary_ctors: &secondary_ctor_metas,
             nested: &nested_refs,
             sealed_subclasses: &sealed_refs,
             supertypes: &supertypes,
@@ -1330,8 +1364,14 @@ fn class_metadata_common_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> 
         || c.prop_ref.is_some()
         || c.func_ref.is_some()
         || c.companion_class.is_some()
-        || !c.secondary_ctors.is_empty()
-        || (!c.has_primary_ctor && !c.is_interface && c.enum_entries.is_empty())
+        // A DECLARED secondary constructor is described (`Class.constructor`, flags 22) from its
+        // recorded source names + semantic types; one without that record (an unmodeled synthesis
+        // path) would be published with wrong parameters, so the class declines instead. Synthetic
+        // ctors (`@Serializable` deserialization) get no record, matching kotlinc.
+        || c.secondary_ctors
+            .iter()
+            .any(|sc| !sc.synthetic && sc.named_params.len() != sc.params.len())
+        || (!c.has_primary_ctor && c.secondary_ctors.is_empty() && !c.is_interface && c.enum_entries.is_empty())
         || (c.fields.len() as u32) < c.ctor_param_count
         || (!c.is_value && ir.has_value_param_ctor(&c.fq_name())))
 }
@@ -1342,6 +1382,9 @@ fn class_metadata_common_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> 
 fn value_class_metadata_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
     c.is_value
         && class_metadata_common_shape_admitted(ir, c)
+        // A value class's ctors realize as mangled static `constructor-impl` overloads, which the
+        // secondary-ctor record path does not model — keep declining that combination.
+        && c.secondary_ctors.is_empty()
         && c.fields.len() == 1
         && c.fields[0].is_final()
         && !ir.has_value_param_ctor(&c.fq_name())

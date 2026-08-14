@@ -132,6 +132,9 @@ pub const FN_IS_SUSPEND: u64 = 8192;
 /// `Class.flags` (f1) for a plain `public final class` — kotlinc's DEFAULT, so the field is OMITTED at
 /// this exact value (an `internal class` writes an explicit `0`, visibility INTERNAL being 0).
 pub const DEFAULT_CLASS_FLAGS: u64 = 6;
+/// `Constructor.flags` (f1) for a DECLARED (public) secondary constructor — visibility PUBLIC (6) plus
+/// the `IS_SECONDARY` bit (16). From kotlinc 2.4.0 (`class Dual { constructor(a: Int, …) }` → 22).
+pub const SECONDARY_CTOR_FLAGS: u64 = 22;
 /// `Constructor.flags` (f1) for a sealed class's primary constructor — kotlinc marks it PROTECTED.
 pub const SEALED_CTOR_FLAGS: u64 = 4;
 /// `Constructor.flags` (f1) for an `object`'s primary constructor — kotlinc marks it PRIVATE
