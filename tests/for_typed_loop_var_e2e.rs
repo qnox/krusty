@@ -99,7 +99,7 @@ fun box(): String {
 
 #[test]
 fn classpath_interface_inheriting_list_preserves_element_type() {
-    let Some(diagnostics) = common::checker_diags_against(
+    let Some(diagnostics) = common::checker_diags_against_ref(
         "classpath_interface_inheriting_list_preserves_element_type",
         LIST_INTERFACE_DECLARATIONS,
         LIST_INTERFACE_USAGE,

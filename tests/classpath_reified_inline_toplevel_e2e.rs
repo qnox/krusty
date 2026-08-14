@@ -41,7 +41,7 @@ const NEEDS_CLASS_REIFICATION: &str = r#"
 
 #[test]
 fn top_level_reified_inline_call_splices_and_runs() {
-    let Some(libout) = common::compile_lib("reified_inline_top_level", LIB) else {
+    let Some(libout) = common::compile_lib_ref("reified_inline_top_level", LIB) else {
         return;
     };
     let stdlib = common::stdlib_jar();
@@ -79,7 +79,8 @@ fn a_body_needing_class_reification_bails_instead_of_miscompiling() {
     // is exactly what `needClassReification` demands. Reusing the erased-`T` copy — or falling back to
     // a direct call, which throws — would both be miscompiles, so the backend REFUSES the call. This
     // pins the refusal: the day class regeneration lands, this test is what says so.
-    let Some(libout) = common::compile_lib("reified_needs_reification", NEEDS_CLASS_REIFICATION)
+    let Some(libout) =
+        common::compile_lib_ref("reified_needs_reification", NEEDS_CLASS_REIFICATION)
     else {
         return;
     };

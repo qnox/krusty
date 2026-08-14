@@ -128,6 +128,30 @@ KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test conformance kotlin_cod
 This skips JVM execution in the conformance test, prints phase timing, and writes
 `target/flamegraph.svg`.
 
+The e2e suite has its own built-in phase profiler: `KRUSTY_PROF=1` makes every harness helper print
+`PROF\t<phase>\t<ms>` lines (`krusty` in-process compile, `kotlinc` reference compile incl. queue
+wait, `box` JVM round-trip) to stderr — run the e2e binary with `--nocapture` and aggregate.
+
+Performance-relevant harness state:
+
+- e2e dependency libs are compiled BY KRUSTY, in-process (`tests/common::compile_libs`), memoized
+  per run — no reference-compiler round-trip and deliberately no on-disk cache: every run rebuilds
+  its deps with the compiler under test. A lib krusty can't build fails the test with krusty's
+  diagnostics; tests whose CONTRACT is consuming kotlinc-emitted metadata declare it with the
+  explicit `*_ref` helpers (`compile_lib_ref`, `run_box_against_ref`, `Fixture::reference_lib`) —
+  grep `_ref(` for the current emission/consumption gap inventory.
+- The dependency-lib differential is ON BY DEFAULT: every krusty-built lib is also compiled with
+  the reference kotlinc and the same `box()` result is asserted against both classpaths. Disable
+  explicitly with `KRUSTY_LIB_CROSSCHECK=0` for a fast local loop. The assertion is BEHAVIORAL
+  (same `box()` result), not byte-identity: lib classfiles still diverge from kotlinc's bytes
+  (constant-pool ordering, `.kotlin_module` emission). `KRUSTY_LIB_BYTEDIFF_REPORT=1` (with
+  `--nocapture`) prints a `LIBDIFF\t<identical|divergent|krusty-only|kotlinc-only>\t<entry>` line
+  per lib entry — the convergence inventory for making byte equality the assertion.
+- Persistent JVM pools (kotlinc compiler servers, JavaRunner) scale with the host: `ncpu/2` clamped
+  to `[1, 6]`. `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
+- Directory classpath entries are shipped into the box runner's per-request classloader, so lib
+  static state is fresh per `box()` call and runner JVMs are shared across tests.
+
 Optional profiling knobs:
 
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.

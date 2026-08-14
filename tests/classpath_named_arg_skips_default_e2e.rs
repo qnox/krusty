@@ -67,7 +67,7 @@ const LAMBDA_LIB: &str = r#"
 
 #[test]
 fn named_argument_skipping_a_default_resolves_and_runs() {
-    let Some(libout) = common::compile_lib("named_skips_default", LIB) else {
+    let Some(libout) = common::compile_lib_ref("named_skips_default", LIB) else {
         return;
     };
     let stdlib = common::stdlib_jar();
@@ -103,7 +103,7 @@ fn trailing_lambda_is_typed_from_the_slot_a_named_argument_leaves_it() {
     // no applicable overload, and left the lambda as a bare `() -> Unit` — which then failed against
     // the erased `Function1`. Naming a parameter that ISN'T skipped over always worked, which is why
     // this looked like a receiver/suspend problem; all three lambda kinds fail identically.
-    let Some(libout) = common::compile_lib("named_skips_default_lambda", LAMBDA_LIB) else {
+    let Some(libout) = common::compile_lib_ref("named_skips_default_lambda", LAMBDA_LIB) else {
         return;
     };
     let stdlib = common::stdlib_jar();

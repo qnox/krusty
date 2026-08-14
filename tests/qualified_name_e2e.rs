@@ -55,10 +55,23 @@ fn classpath_box(tag: &str, main: &str) {
     common::expect_box_ok_against(tag, LIB, main);
 }
 
+/// Reference-compiled dependency variant: these cases consume kotlinc-emitted metadata
+/// shapes krusty does not produce yet (see `common::compile_lib_ref`).
+fn classpath_box_ref(tag: &str, main: &str) {
+    common::expect_box_ok_against_ref(tag, LIB, main);
+}
+
 /// Both origins for one qualified-name spelling.
 fn both(tag: &str, main: &str) {
     module_box(tag, main);
     classpath_box(tag, main);
+}
+
+/// Reference-compiled dependency variant: these cases consume kotlinc-emitted metadata
+/// shapes krusty does not produce yet (see `common::compile_lib_ref`).
+fn both_ref(tag: &str, main: &str) {
+    module_box(tag, main);
+    classpath_box_ref(tag, main);
 }
 
 // ---------------------------------------------------------------- construction
@@ -95,7 +108,7 @@ fn qualified_constructor_under_object() {
 /// follow the same edge or it drops the construction as unresolved.
 #[test]
 fn qualified_typealias_construction() {
-    both(
+    both_ref(
         "fqn_typealias_ctor",
         "fun box(): String = plib.Alias(\"OK\").v\n",
     );
@@ -132,7 +145,7 @@ fn qualified_companion_var_read() {
 /// (`getstatic Cls.Companion; invokevirtual Cls$Companion.setMUT`).
 #[test]
 fn qualified_companion_var_write() {
-    both(
+    both_ref(
         "fqn_comp_var_write",
         "fun box(): String {\n\
          \x20 plib.Cls.MUT = \"OK\"\n\
@@ -399,7 +412,7 @@ fn package_qualified_top_level_function() {
 
 #[test]
 fn package_qualified_top_level_property_read() {
-    both(
+    both_ref(
         "fqn_top_prop",
         "fun box(): String = if (plib.topLevelProp == \"TP\") \"OK\" else \"no\"\n",
     );
@@ -407,7 +420,7 @@ fn package_qualified_top_level_property_read() {
 
 #[test]
 fn package_qualified_top_level_var_write() {
-    both(
+    both_ref(
         "fqn_top_var_write",
         "fun box(): String {\n\
          \x20 plib.topLevelVar = \"OK\"\n\

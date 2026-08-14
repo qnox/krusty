@@ -20,9 +20,22 @@ fn assert_accepted(name: &str, main: &str) {
     );
 }
 
+/// Reference-compiled dependency variant: these cases consume kotlinc-emitted metadata
+/// shapes krusty does not produce yet (see `common::compile_lib_ref`).
+fn assert_accepted_ref(name: &str, main: &str) {
+    let Some(diagnostics) = common::checker_diags_against_ref("default_vararg", LIB, main) else {
+        eprintln!("skipping: no kotlinc/stdlib toolchain");
+        return;
+    };
+    assert!(
+        diagnostics.is_empty(),
+        "{name}: unexpected diagnostics: {diagnostics:?}"
+    );
+}
+
 #[test]
 fn default_and_vararg_omitted_with_type_arg() {
-    assert_accepted(
+    assert_accepted_ref(
         "type arg, no value args",
         "import lib.omittable\nfun box() { omittable<Any>() }\n",
     );
@@ -32,7 +45,7 @@ fn default_and_vararg_omitted_with_type_arg() {
 fn default_and_vararg_omitted_runs_on_jvm() {
     // End-to-end: the `$default` emit shape (omitted vararg slot → empty array, no mask bit) must
     // also lower correctly, not just resolve.
-    common::expect_box_ok_against(
+    common::expect_box_ok_against_ref(
         "default_vararg_box",
         LIB,
         "import lib.omittable\nfun box(): String = if (omittable<Any>() == \"ok\") \"OK\" else \"fail\"\n",
@@ -41,7 +54,7 @@ fn default_and_vararg_omitted_runs_on_jvm() {
 
 #[test]
 fn default_and_vararg_omitted_plain() {
-    assert_accepted(
+    assert_accepted_ref(
         "no args at all",
         "import lib.omittable\nfun box() { omittable() }\n",
     );

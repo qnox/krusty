@@ -3,14 +3,7 @@
 //! `URLClassLoader`), instead of a `javac`+`java` per snippet — the same trick as `box_vendored_e2e`.
 //! Each snippet's `box(): String` must return "OK" under `-Xverify:all`.
 
-use std::fs;
-use std::process::Command;
-
 use super::common;
-
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
 
 fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
@@ -4123,99 +4116,20 @@ fn feature_snippets_run() {
 }
 
 fn feature_snippets_run_impl() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        eprintln!("skipping feature_box_e2e: set JAVA_HOME");
-        return;
-    };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
-    let stdlib = common::stdlib_jar();
-    let stdlib = stdlib.to_str().unwrap().to_string();
-    let jdk_modules = format!("{java_home}/lib/modules");
-    let work = std::env::temp_dir().join(format!("krusty_feat_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    fs::create_dir_all(&work).unwrap();
-
-    // Reflective runner compiled once.
-    let runner = work.join("runner");
-    fs::create_dir_all(&runner).unwrap();
-    let runner_src = r#"import java.io.File; import java.net.URL; import java.net.URLClassLoader;
-public class BoxRun {
-  public static void main(String[] args) throws Exception {
-    for (int i = 0; i + 1 < args.length; i += 2) {
-      String result;
-      try {
-        URLClassLoader cl = new URLClassLoader(new URL[]{ new File(args[i]).toURI().toURL() }, BoxRun.class.getClassLoader());
-        Object r = Class.forName(args[i+1], true, cl).getMethod("box").invoke(null);
-        result = String.valueOf(r);
-      } catch (Throwable t) { result = "EXC:" + t; }
-      System.out.println(args[i+1] + "\t" + result);
-    }
-  }
-}
-"#;
-    fs::write(runner.join("BoxRun.java"), runner_src).unwrap();
-    let jc = Command::new(&javac)
-        .args(["-d", runner.to_str().unwrap()])
-        .arg(runner.join("BoxRun.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "javac(BoxRun): {}",
-        String::from_utf8_lossy(&jc.stderr)
-    );
-
-    // Compile every snippet in-process (sharing the process-global classpath caches) and write its
-    // class bytes into its own dir — a per-snippet dir keeps the JVM runner's class loaders isolated, so
-    // two snippets that both declare e.g. `class C` don't collide. In-process compilation avoids spawning
-    // the krusty binary (and rebuilding the stdlib/jimage indexes) once per snippet.
+    // Strict environment: a missing JDK/stdlib panics with the provisioning diagnosis (see
+    // tests/common) — never a silent pass.
+    let jdk = common::jdk_modules();
+    // Compile every snippet in-process (sharing the process-global classpath caches) and run its
+    // box() on the POOLED runner JVM — per-request classloaders isolate snippets that both declare
+    // e.g. `class C`, and no javac/java process is spawned.
     let cp_jars = common::classpath_jars_for("// WITH_STDLIB");
-    let jdk_modules = std::path::Path::new(&jdk_modules);
-    let modules_opt = jdk_modules.exists().then_some(jdk_modules);
-    let mut cases: Vec<(String, String)> = Vec::new(); // (dir, boxClass)
-    for (i, (stem, src)) in SNIPPETS.iter().enumerate() {
-        let dir = work.join(format!("s{i}"));
-        fs::create_dir_all(&dir).unwrap();
-        let classes = common::compile_in_process(src, stem, &cp_jars, modules_opt)
+    let stdlib = common::stdlib_jar();
+    for (stem, src) in SNIPPETS.iter() {
+        let classes = common::compile_in_process(src, stem, &cp_jars, Some(jdk.as_path()))
             .unwrap_or_else(|| panic!("krusty {stem}: in-process compile failed"));
-        for (internal, bytes) in &classes {
-            let path = dir.join(format!("{internal}.class"));
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).unwrap();
-            }
-            fs::write(&path, bytes).unwrap();
-        }
-        cases.push((dir.to_str().unwrap().to_string(), format!("{stem}Kt")));
+        let box_class = format!("{stem}Kt");
+        let got = common::run_box(&classes, &box_class, std::slice::from_ref(&stdlib))
+            .expect("pooled box runner unavailable");
+        assert_eq!(got, "OK", "{box_class}.box() returned {got:?}");
     }
-
-    // Run all snippets in one JVM.
-    let mut cp = runner.to_str().unwrap().to_string();
-    cp.push(':');
-    cp.push_str(&stdlib);
-    let mut args: Vec<String> = vec!["-Xverify:all".into(), "-cp".into(), cp, "BoxRun".into()];
-    for (dir, class) in &cases {
-        args.push(dir.clone());
-        args.push(class.clone());
-    }
-    let run = Command::new(&java).args(&args).output().unwrap();
-    assert!(
-        run.status.success(),
-        "BoxRun: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    let results: std::collections::HashMap<&str, &str> =
-        stdout.lines().filter_map(|l| l.split_once('\t')).collect();
-    for (_, class) in &cases {
-        let got = results.get(class.as_str()).copied().unwrap_or("<missing>");
-        assert!(
-            got == "OK",
-            "{class}.box() returned {got:?} (all: {stdout})"
-        );
-    }
-    let _ = fs::remove_dir_all(&work);
 }

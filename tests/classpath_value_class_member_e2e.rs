@@ -48,7 +48,7 @@ fn classpath_value_class_param_member_resolves_mangled() {
 fn operator_invoke_uses_declared_value_class_return() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(libout) = common::compile_lib(
+    let Some(libout) = common::compile_lib_ref(
         "vcoperatorreturn",
         "package lib\n\
          @JvmInline value class TokenBox<T>(val value: T)\n\
@@ -76,7 +76,7 @@ fn operator_invoke_uses_declared_value_class_return() {
 fn classpath_value_class_member_property_reads_through_impl_accessor() {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
-    let Some(libout) = common::compile_lib(
+    let Some(libout) = common::compile_lib_ref(
         "vcmemberprop",
         "package lib\n\
          @JvmInline value class Celsius(val degrees: Int) {\n\

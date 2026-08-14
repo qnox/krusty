@@ -7,65 +7,15 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
-
-use krusty::jvm::classreader::parse_class;
 
 use super::common;
 
-fn find_box_class(dir: &Path) -> Option<String> {
-    let mut found = None;
-    fn walk(dir: &Path, found: &mut Option<String>) {
-        if found.is_some() {
-            return;
-        }
-        if let Ok(rd) = fs::read_dir(dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    walk(&p, found);
-                } else if p.extension().is_some_and(|x| x == "class") {
-                    if let Ok(ci) = parse_class(&fs::read(&p).unwrap_or_default()) {
-                        if ci
-                            .method("box", "()Ljava/lang/String;")
-                            .is_some_and(|m| m.is_static())
-                        {
-                            *found = Some(ci.this_class().replace('/', "."));
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    walk(dir, &mut found);
-    found
-}
-
 #[test]
 fn vendored_kotlin_box_cases_return_ok() {
-    let Ok(java_home) =
-        std::env::var("KRUSTY_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME"))
-    else {
-        eprintln!("skipping vendored box cases: set JAVA_HOME");
-        return;
-    };
-    let javac = format!("{java_home}/bin/javac");
-    let java = format!("{java_home}/bin/java");
-    if !Path::new(&javac).exists() {
-        return;
-    }
-    // Kotlin-conforming output references `kotlin/jvm/internal/Intrinsics` (areEqual,
-    // checkNotNullParameter, …), so kotlin-stdlib MUST be on the runtime classpath. Fail loudly if
-    // it's missing rather than silently running without it (which miscompiles into runtime errors).
-    let stdlib = {
-        let p = common::stdlib_jar();
-        p.to_string_lossy().into_owned()
-    };
-    let krusty = common::krusty_binary();
+    // Strict environment: missing JDK/stdlib panics with the provisioning diagnosis (tests/common).
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_data");
-    let work = std::env::temp_dir().join(format!("krusty_vbox_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
 
     let mut cases: Vec<_> = fs::read_dir(&data)
         .unwrap()
@@ -76,90 +26,39 @@ fn vendored_kotlin_box_cases_return_ok() {
     cases.sort();
     assert!(!cases.is_empty(), "no vendored box cases found");
 
-    fs::create_dir_all(&work).unwrap();
-    // Compile a single reflective runner ONCE (instead of a `javac`+`java` per case): it loads each
-    // accepted case's classes through a per-case `URLClassLoader` and invokes its static `box()`,
-    // so all cases run in ONE JVM under `-Xverify:all` (every emitted class is still verified on
-    // load). This collapses dozens of subprocess spawns — the dominant cost — into one.
-    let runner = work.join("runner");
-    fs::create_dir_all(&runner).unwrap();
-    let runner_src = r#"import java.io.File; import java.net.URL; import java.net.URLClassLoader;
-public class BoxRun {
-  public static void main(String[] args) throws Exception {
-    for (int i = 0; i + 1 < args.length; i += 2) {
-      String result;
-      try {
-        URLClassLoader cl = new URLClassLoader(new URL[]{ new File(args[i]).toURI().toURL() }, BoxRun.class.getClassLoader());
-        Object r = Class.forName(args[i+1], true, cl).getMethod("box").invoke(null);
-        result = String.valueOf(r);
-      } catch (Throwable t) { result = "EXC:" + t; }
-      System.out.println(args[i+1] + "\t" + result);
-    }
-  }
-}
-"#;
-    fs::write(runner.join("BoxRun.java"), runner_src).unwrap();
-    let jc = Command::new(&javac)
-        .args(["-d", runner.to_str().unwrap()])
-        .arg(runner.join("BoxRun.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "javac(BoxRun) failed: {}",
-        String::from_utf8_lossy(&jc.stderr)
-    );
-
-    // Compile every case with krusty; collect (output dir, box class) for the accepted ones.
+    // Compile every case in-process (the same pipeline `krusty -d` runs, warm classpath caches) and
+    // run its box() on the POOLED runner JVM — per-request classloaders isolate the cases, so no
+    // javac/java/krusty process is spawned per case.
     let mut skipped = 0usize;
-    let mut accepted: Vec<(String, String, &Path)> = Vec::new();
-    for (i, kt) in cases.iter().enumerate() {
-        let out = work.join(format!("o{i}"));
-        fs::create_dir_all(&out).unwrap();
-        let kc = Command::new(&krusty)
-            .args(["-d", out.to_str().unwrap()])
-            .arg(kt)
-            .output()
-            .expect("krusty");
+    let mut accepted = 0usize;
+    for kt in &cases {
+        let src = fs::read_to_string(kt).unwrap();
+        let stem = kt.file_stem().unwrap().to_string_lossy().into_owned();
         // The IR backend covers a subset; a case it rejects is *skipped*, never a failure. The gate
-        // is: every case krusty *accepts* must run and return "OK" (never miscompile an accepted file).
-        if !kc.status.success() {
+        // is: every case krusty *accepts* must run and return "OK" (never miscompile an accepted
+        // file).
+        let Some(classes) = common::compile_in_process(&src, &stem, &[], Some(jdk.as_path()))
+        else {
             skipped += 1;
             continue;
-        }
-        let box_class =
-            find_box_class(&out).unwrap_or_else(|| panic!("no box() class for {}", kt.display()));
-        accepted.push((out.to_str().unwrap().to_string(), box_class, kt.as_path()));
+        };
+        let box_class = common::find_box_class(&classes)
+            .unwrap_or_else(|| panic!("no box() class for {}", kt.display()));
+        let got = common::run_box(&classes, &box_class, std::slice::from_ref(&stdlib))
+            .expect("pooled box runner unavailable");
+        assert_eq!(got, "OK", "box() did not return OK for {}", kt.display());
+        accepted += 1;
     }
-
-    // Run all accepted cases in a single JVM: classpath is the runner + stdlib (the parent loader,
-    // so `Intrinsics` resolves); each case's own classes load via its `URLClassLoader` argument.
-    let mut cp = runner.to_str().unwrap().to_string();
-    cp.push(':');
-    cp.push_str(&stdlib);
-    let mut args: Vec<String> = vec!["-Xverify:all".into(), "-cp".into(), cp, "BoxRun".into()];
-    for (dir, class, _) in &accepted {
-        args.push(dir.clone());
-        args.push(class.clone());
-    }
-    let run = Command::new(&java).args(&args).output().unwrap();
+    // The corpus is vendored (deterministic per checkout): 2 cases are currently unsupported. A
+    // JUMP in skips means the compile path regressed (e.g. a classpath/jdk wiring change silently
+    // rejecting cases), which must fail loudly — skips otherwise read as green (see
+    // docs/TEST_HARNESS.md on skip semantics).
     assert!(
-        run.status.success(),
-        "BoxRun failed: {}",
-        String::from_utf8_lossy(&run.stderr)
+        skipped <= 2,
+        "vendored box skips regressed: {skipped} skipped, {accepted} accepted"
     );
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    let results: std::collections::HashMap<&str, &str> =
-        stdout.lines().filter_map(|l| l.split_once('\t')).collect();
-    for (_, class, kt) in &accepted {
-        let got = results.get(class.as_str()).copied().unwrap_or("<missing>");
-        assert!(
-            got == "OK",
-            "box() did not return OK for {}: got {:?}",
-            kt.display(),
-            got
-        );
-    }
-    let _ = fs::remove_dir_all(&work);
-    eprintln!("vendored Kotlin box conformance (IR backend): {} OK, {skipped} skipped (unsupported), {} total", accepted.len(), cases.len());
+    eprintln!(
+        "vendored Kotlin box conformance (IR backend): {accepted} OK, {skipped} skipped (unsupported), {} total",
+        cases.len()
+    );
 }

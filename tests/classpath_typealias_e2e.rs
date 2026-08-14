@@ -30,7 +30,7 @@ fn classpath_typealias_ctor_and_type_position() {
         \x20 if (c.get() != 3) return \"fail alias-chain: ${c.get()}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("typealias", LIB, main);
+    common::expect_box_ok_against_ref("typealias", LIB, main);
 }
 
 #[test]
@@ -40,7 +40,7 @@ fn classpath_typealias_visibility_is_enforced() {
         typealias PublicAlias = Real\n\
         internal typealias InternalAlias = Real\n\
         private typealias PrivateAlias = Real\n";
-    let Some(libout) = common::compile_lib("typealias_visibility", VISIBILITY_LIB) else {
+    let Some(libout) = common::compile_lib_ref("typealias_visibility", VISIBILITY_LIB) else {
         return;
     };
     let stdlib = common::stdlib_jar();

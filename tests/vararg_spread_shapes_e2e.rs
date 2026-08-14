@@ -301,7 +301,8 @@ fn classpath_overloaded_vararg_mixed_element_and_spread() {
         \x20 val got = U().seg(\"a\", *xs)\n\
         \x20 return if (got == \"a/b/cfalse\") \"OK\" else \"F:\" + got\n\
         }\n";
-    if let Some(out) = common::expect_box_run_against("cp_overload_vararg_mix", OVERLOAD_LIB, MAIN)
+    if let Some(out) =
+        common::expect_box_run_against_ref("cp_overload_vararg_mix", OVERLOAD_LIB, MAIN)
     {
         assert_eq!(out, "OK", "overloaded classpath mixed element+spread");
     }
@@ -316,7 +317,7 @@ fn classpath_overloaded_vararg_named_after_elements() {
         \x20 return if (got == \"a/btrue\") \"OK\" else \"F:\" + got\n\
         }\n";
     if let Some(out) =
-        common::expect_box_run_against("cp_overload_vararg_named", OVERLOAD_LIB, MAIN)
+        common::expect_box_run_against_ref("cp_overload_vararg_named", OVERLOAD_LIB, MAIN)
     {
         assert_eq!(
             out, "OK",
@@ -347,7 +348,7 @@ fn classpath_extension_mixed_element_and_spread() {
         \x20 val got = B().segd(\"O\", *xs)\n\
         \x20 return if (got == \"OKfalse\") \"OK\" else \"F:\" + got\n\
         }\n";
-    if let Some(out) = common::expect_box_run_against("cp_vararg_mix", LIB, MAIN) {
+    if let Some(out) = common::expect_box_run_against_ref("cp_vararg_mix", LIB, MAIN) {
         assert_eq!(out, "OK", "classpath mixed element+spread");
     }
 }
@@ -360,7 +361,7 @@ fn classpath_extension_named_after_vararg_elements() {
         \x20 val got = B().segd(\"O\", \"K\", flag = true)\n\
         \x20 return if (got == \"OKtrue\") \"OK\" else \"F:\" + got\n\
         }\n";
-    if let Some(out) = common::expect_box_run_against("cp_vararg_named", LIB, MAIN) {
+    if let Some(out) = common::expect_box_run_against_ref("cp_vararg_named", LIB, MAIN) {
         assert_eq!(out, "OK", "classpath named after vararg elements");
     }
 }

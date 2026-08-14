@@ -75,7 +75,7 @@ const FIXTURE: &[(&str, &str)] = &[
 /// with the front-end diagnostics that explain it — folding both into one `Option` (`let Some(x) =
 /// compile(…) else return`) is what let an earlier regression in this file sit green.
 fn expect_box_ok(main: &str, case: &str) {
-    let Some(libout) = common::compile_libs("runprobe", FIXTURE) else {
+    let Some(libout) = common::compile_libs_ref("runprobe", FIXTURE) else {
         return;
     };
     let stdlib = common::stdlib_jar();

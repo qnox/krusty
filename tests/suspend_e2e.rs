@@ -7,7 +7,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::common;
 
@@ -15,39 +14,20 @@ fn java_home() -> String {
     common::java_home()
 }
 
-/// Compile `src` with the krusty binary into a fresh dir; return (dir, java_home) or `None` if javap
-/// is unavailable (test then skips).
+/// Compile `src` in-process (the shared pipeline, warm classpath caches) into a scratch dir;
+/// return (dir, java_home). Panics — never skips — when krusty rejects the source.
 fn krusty_compile(name: &str, src: &str) -> Option<(std::path::PathBuf, String)> {
     let jh = java_home();
-    if !std::path::Path::new(&format!("{jh}/bin/javap")).exists() {
-        return None;
-    }
-    let krusty = common::krusty_binary();
-    let dir = std::env::temp_dir().join(format!("krusty_susp_{name}_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("S.kt"), src).unwrap();
-    let out = Command::new(&krusty)
-        .args(["-d", dir.to_str().unwrap()])
-        .arg(dir.join("S.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{name}: krusty failed to compile:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let dir = common::scratch_dir().expect("scratch dir");
+    let jdk = common::jdk_modules();
+    common::compile_to_dir(src, "S", &[], Some(jdk.as_path()), &dir)
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     Some((dir, jh))
 }
 
-fn javap(jh: &str, class_file: &std::path::Path) -> String {
-    let out = Command::new(format!("{jh}/bin/javap"))
-        .args(["-c", "-p"])
-        .arg(class_file)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "javap failed on {class_file:?}");
-    String::from_utf8_lossy(&out.stdout).to_string()
+fn javap(_jh: &str, class_file: &std::path::Path) -> String {
+    common::javap(&["-c", "-p", &class_file.to_string_lossy()])
+        .expect("pooled JavaRunner unavailable")
 }
 
 /// Locate a real `kotlin-stdlib.jar` (the coroutine intrinsics — `Continuation`, `ContinuationImpl`,
@@ -114,40 +94,29 @@ fn krusty_compiled_suspend_dep_is_consumable() {
         j
     };
     let stdlib = stdlib_jar();
-    let krusty = common::krusty_binary();
-    let dir = std::env::temp_dir().join(format!("krusty_susp_rt_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir().expect("scratch dir");
     let lib = dir.join("lib");
     fs::create_dir_all(&lib).unwrap();
-    // 1) krusty compiles the suspend lib (emits @Metadata).
-    fs::write(dir.join("Lib.kt"), "suspend fun helper(): Int = 42\n").unwrap();
-    let kl = Command::new(&krusty)
-        .args(["-cp", &stdlib, "-d", lib.to_str().unwrap()])
-        .arg(dir.join("Lib.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kl.status.success(),
-        "krusty failed on lib:\n{}",
-        String::from_utf8_lossy(&kl.stderr)
-    );
-    // 2) krusty compiles the caller against the krusty-compiled lib.
-    fs::write(
-        dir.join("Use.kt"),
-        "suspend fun caller(): Int {\n    val a = helper()\n    return a + 1\n}\n",
+    let jdk = common::jdk_modules();
+    let stdlib_pb = std::path::PathBuf::from(&stdlib);
+    // 1) krusty compiles the suspend lib (emits @Metadata) — in-process, warm caches.
+    common::compile_to_dir(
+        "suspend fun helper(): Int = 42\n",
+        "Lib",
+        std::slice::from_ref(&stdlib_pb),
+        Some(jdk.as_path()),
+        &lib,
     )
-    .unwrap();
-    let cp_compile = format!("{}:{}", lib.to_str().unwrap(), stdlib);
-    let ku = Command::new(&krusty)
-        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("Use.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        ku.status.success(),
-        "krusty failed resolving krusty-compiled suspend dep:\n{}",
-        String::from_utf8_lossy(&ku.stderr)
-    );
+    .expect("krusty failed on lib");
+    // 2) krusty compiles the caller against the krusty-compiled lib.
+    common::compile_to_dir(
+        "suspend fun caller(): Int {\n    val a = helper()\n    return a + 1\n}\n",
+        "Use",
+        &[lib.clone(), stdlib_pb.clone()],
+        Some(jdk.as_path()),
+        &dir,
+    )
+    .expect("krusty failed resolving krusty-compiled suspend dep");
     let driver = "import kotlin.coroutines.*;\n\
 public class M {\n\
   public static void main(String[] a) {\n\
@@ -1311,23 +1280,23 @@ fn run_suspend_2(name: &str, lib: &str, user: &str, facade: &str, method: &str, 
         j
     };
     let stdlib = stdlib_jar();
-    let krusty = common::krusty_binary();
-    let dir = std::env::temp_dir().join(format!("krusty_susp_{name}_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("Lib.kt"), lib).unwrap();
-    fs::write(dir.join("Use.kt"), user).unwrap();
-    let kc = Command::new(&krusty)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("Lib.kt"))
-        .arg(dir.join("Use.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "{name}: krusty failed to compile:\n{}",
-        String::from_utf8_lossy(&kc.stderr)
-    );
+    let dir = common::scratch_dir().expect("scratch dir");
+    let stdlib_pb = std::path::PathBuf::from(&stdlib);
+    let jdk = common::jdk_modules();
+    // Both files through the module-wide in-process driver — the same pipeline `krusty -d` runs.
+    let classes = common::compile_in_process_files(
+        &[("Lib", lib), ("Use", user)],
+        std::slice::from_ref(&stdlib_pb),
+        Some(jdk.as_path()),
+    )
+    .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    for (class_name, bytes) in &classes {
+        let path = dir.join(format!("{class_name}.class"));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, bytes).unwrap();
+    }
     let driver = format!(
         "import kotlin.coroutines.*;\n\
 public class M {{\n\

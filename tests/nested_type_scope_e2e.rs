@@ -151,7 +151,7 @@ fn inherited_classifier_precedes_same_package_type_in_subclass_scope() {
 
 #[test]
 fn inherited_classifier_does_not_expose_defaulted_protected_constructor() {
-    let Some(diagnostics) = common::diagnostics_against(
+    let Some(diagnostics) = common::diagnostics_against_ref(
         "protected_default_constructor",
         "package support\n\
          open class Parent {\n\
@@ -177,7 +177,7 @@ fn inherited_classifier_does_not_expose_defaulted_protected_constructor() {
 
 #[test]
 fn classpath_internal_nested_type_does_not_shadow_source_type() {
-    common::expect_box_ok_against(
+    common::expect_box_ok_against_ref(
         "internal_nested_classifier",
         "package fixtures\n\
          open class Parent { internal class Category }",

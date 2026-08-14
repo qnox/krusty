@@ -6,7 +6,6 @@
 //! Run with `JAVA_HOME` set; kotlinc path overrides are optional.
 
 use std::fs;
-use std::process::Command;
 
 use super::common;
 
@@ -18,9 +17,7 @@ fn java_home() -> String {
 /// is unavailable — the test then skips).
 fn krusty_compile(name: &str, src: &str) -> Option<(std::path::PathBuf, String)> {
     let jh = java_home();
-    if !std::path::Path::new(&format!("{jh}/bin/javap")).exists() {
-        return None;
-    }
+
     let dir = std::env::temp_dir().join(format!("krusty_bcp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -42,9 +39,7 @@ fn krusty_compile(name: &str, src: &str) -> Option<(std::path::PathBuf, String)>
 /// `None` if javap/`JAVA_HOME`/the stdlib jar is unavailable — the test then skips.
 fn krusty_compile_stdlib(name: &str, src: &str) -> Option<(std::path::PathBuf, String)> {
     let jh = java_home();
-    if !std::path::Path::new(&format!("{jh}/bin/javap")).exists() {
-        return None;
-    }
+
     let stdlib = common::stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_bcp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -62,14 +57,9 @@ fn krusty_compile_stdlib(name: &str, src: &str) -> Option<(std::path::PathBuf, S
 }
 
 /// `javap -c -p` of one class file.
-fn javap(jh: &str, class_file: &std::path::Path) -> String {
-    let out = Command::new(format!("{jh}/bin/javap"))
-        .args(["-c", "-p"])
-        .arg(class_file)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "javap failed on {class_file:?}");
-    String::from_utf8_lossy(&out.stdout).to_string()
+fn javap(_jh: &str, class_file: &std::path::Path) -> String {
+    common::javap(&["-c", "-p", &class_file.to_string_lossy()])
+        .expect("pooled JavaRunner unavailable")
 }
 
 /// Normalize `javap -c` output so semantically-equal bytecode compares equal: drop the source banner,
@@ -524,13 +514,10 @@ fn data_class_member_order_matches_kotlin() {
     ) else {
         return;
     };
-    let out = Command::new(format!("{jh}/bin/javap"))
-        .arg("-p")
-        .arg(dir.join("P.class"))
-        .output()
-        .unwrap();
+    let _ = jh;
+    let text = common::javap(&["-p", &dir.join("P.class").to_string_lossy()])
+        .expect("pooled JavaRunner unavailable");
     let _ = std::fs::remove_dir_all(&dir);
-    let text = String::from_utf8_lossy(&out.stdout);
     let pos = |needle: &str| text.find(needle);
     let (c2, copy, ts) = (pos("component2"), pos(" copy("), pos("toString("));
     assert!(
@@ -613,13 +600,10 @@ fn data_class_object_overrides_are_not_final() {
     ) else {
         return;
     };
-    let out = Command::new(format!("{jh}/bin/javap"))
-        .arg("-p")
-        .arg(dir.join("D.class"))
-        .output()
-        .unwrap();
+    let _ = jh;
+    let text = common::javap(&["-p", &dir.join("D.class").to_string_lossy()])
+        .expect("pooled JavaRunner unavailable");
     let _ = std::fs::remove_dir_all(&dir);
-    let text = String::from_utf8_lossy(&out.stdout);
     for line in text.lines() {
         let l = line.trim();
         if l.contains(" toString(") || l.contains(" hashCode(") || l.contains(" equals(") {
@@ -1012,17 +996,20 @@ fn diff_refs() -> Option<&'static std::collections::HashMap<String, (String, Str
                 let _ = fs::remove_dir_all(&dir);
                 return None;
             }
-            // krusty — one invocation for every case.
-            let kc = Command::new(common::krusty_binary())
-                .args(["-d", krout.to_str().unwrap()])
-                .args(&files)
-                .output()
-                .unwrap();
-            assert!(
-                kc.status.success(),
-                "krusty batch failed: {}",
-                String::from_utf8_lossy(&kc.stderr)
-            );
+            // krusty — one in-process module compile for every case (same driver as `krusty -d`).
+            let sources: Vec<(&str, &str)> = cases
+                .iter()
+                .map(|c| (c.file.trim_end_matches(".kt"), c.src))
+                .collect();
+            let classes =
+                common::compile_in_process_files(&sources, &[], None).expect("krusty batch failed");
+            for (internal, bytes) in &classes {
+                let path = krout.join(format!("{internal}.class"));
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).unwrap();
+                }
+                fs::write(path, bytes).unwrap();
+            }
             let mut map = std::collections::HashMap::new();
             for c in &cases {
                 let kr = disasm(&jh, &krout.join(format!("{}.class", c.class)), c.marker);

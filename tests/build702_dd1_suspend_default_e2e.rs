@@ -23,7 +23,7 @@ fn run(tag: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
     let coro = common::coroutines_jar();
-    let lo = common::compile_lib(tag, LIB)?;
+    let lo = common::compile_lib_ref(tag, LIB)?;
     common::compile_and_run_box(
         main,
         "Main",

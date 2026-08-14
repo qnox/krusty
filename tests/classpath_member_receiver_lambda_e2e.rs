@@ -40,7 +40,7 @@ fn a_member_receiver_lambda_parameter_binds_its_receiver() {
         \x20 if (host.seen != 7L) return \"fail: \" + host.seen\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cpmemberrecvlambda", LIB, main);
+    common::expect_box_ok_against_ref("cpmemberrecvlambda", LIB, main);
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn a_generic_member_binds_its_receiver_lambda_from_the_argument() {
         \x20 if (host.seen != 9L) return \"fail: \" + host.seen\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cpmemberrecvlambdageneric", LIB, main);
+    common::expect_box_ok_against_ref("cpmemberrecvlambdageneric", LIB, main);
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn a_member_receiver_lambda_binds_through_an_implicit_receiver() {
         \x20 if (seen != 11L) return \"fail: \" + seen\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cpmemberrecvlambdaimplicit", LIB, main);
+    common::expect_box_ok_against_ref("cpmemberrecvlambdaimplicit", LIB, main);
 }
 
 /// A `suspend` member's generic signature carries a trailing `Continuation` its source parameter list
@@ -91,7 +91,7 @@ fn a_suspend_member_receiver_lambda_parameter_binds_its_receiver() {
         \x20 host.configure { millis = 13L }\n\
         }\n";
     if let Some(diagnostics) =
-        common::checker_diags_against("cpmemberrecvlambdasuspend", SUSPEND_LIB, main)
+        common::checker_diags_against_ref("cpmemberrecvlambdasuspend", SUSPEND_LIB, main)
     {
         assert!(
             diagnostics.is_empty(),

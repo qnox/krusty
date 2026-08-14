@@ -34,13 +34,7 @@ fn assert_lnt_identical_sans_lvt(name: &str, src: &str, class: &str) {
 }
 
 fn assert_code_and_lnt_impl(name: &str, src: &str, class: &str, strip_lvt: bool) {
-    let Some(jh) = std::env::var("KRUSTY_REF_JAVA_HOME")
-        .ok()
-        .or_else(|| std::env::var("JAVA_HOME").ok())
-    else {
-        eprintln!("skip ({name}: JAVA_HOME unavailable)");
-        return;
-    };
+    let _jh = common::java_home(); // panics with the JAVA_HOME diagnosis when absent
     let dir = std::env::temp_dir().join(format!("krusty_lntp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     let kref = dir.join("ref");
@@ -67,12 +61,8 @@ fn assert_code_and_lnt_impl(name: &str, src: &str, class: &str, strip_lvt: bool)
         .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
     fs::write(krout.join(format!("{class}.class")), bytes).unwrap();
     let javap = |p: &std::path::Path| -> String {
-        let out = std::process::Command::new(format!("{jh}/bin/javap"))
-            .args(["-c", "-l", "-p"])
-            .arg(p)
-            .output()
-            .expect("javap runs");
-        String::from_utf8_lossy(&out.stdout)
+        common::javap(&["-c", "-l", "-p", &p.to_string_lossy()])
+            .expect("pooled JavaRunner unavailable")
             .lines()
             .filter(|l| !l.starts_with("Compiled from"))
             .collect::<Vec<_>>()

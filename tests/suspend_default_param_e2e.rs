@@ -25,6 +25,22 @@ fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     ))
 }
 
+/// Reference-compiled dependency variant: these cases consume kotlinc-emitted metadata
+/// shapes krusty does not produce yet (see `common::compile_lib_ref`).
+fn run_ref(tag: &str, lib: &str, main: &str) -> Option<String> {
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let corou = common::coroutines_jar();
+    let libout = common::compile_lib_ref(tag, lib)?;
+    let cp = [libout, sl, corou, jdk.clone()];
+    Some(common::expect_box_run(
+        main,
+        "Main",
+        &cp,
+        Some(jdk.as_path()),
+    ))
+}
+
 const LIB: &str = "package lib\n\
     class Filt(val n: Int = 5)\n\
     class S(val r: Int) { suspend fun list(f: Filt = Filt()): Int = r + f.n }\n";
@@ -34,7 +50,7 @@ fn suspend_method_omitting_ctor_default_argument() {
     // `s.list()` omits the `Filt = Filt()` default — the `$default` synthetic fills it (`Filt().n == 5`).
     const MAIN: &str = "import lib.S\nimport kotlinx.coroutines.runBlocking\n\
         fun box(): String = runBlocking { val n = S(10).list(); if (n == 15) \"OK\" else \"fail: $n\" }\n";
-    let Some(r) = run("dd1_omit", LIB, MAIN) else {
+    let Some(r) = run_ref("dd1_omit", LIB, MAIN) else {
         return;
     };
     assert_eq!(r, "OK");

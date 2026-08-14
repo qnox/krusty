@@ -295,7 +295,7 @@ fn named_arguments_on_a_safe_classpath_member_call() {
     \x20   val defaults = w?.defaults(b = \"Y\") ?: \"none\"\n\
     \x20   return if (result == \"tXY\" && trace == \"YX\" && joined == \"ab\" && defaults == \"AY\") \"OK\" else result + \"/\" + trace + \"/\" + joined + \"/\" + defaults\n\
     }\n";
-    common::expect_box_ok_against("safe_call_named_classpath", LIB, MAIN);
+    common::expect_box_ok_against_ref("safe_call_named_classpath", LIB, MAIN);
 }
 
 #[test]

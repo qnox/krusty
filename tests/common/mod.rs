@@ -1369,6 +1369,52 @@ impl RunnerPool {
     }
 }
 
+/// `(internal_name, bytes)` pairs, the shape BoxRunner's in-memory classloader consumes.
+#[allow(dead_code)]
+type ClassSet = Vec<(String, Vec<u8>)>;
+
+/// Recursively collect `(internal_name, bytes)` for every `.class` under a directory classpath
+/// entry, memoized by directory path. Safe to memoize: cached lib dirs are immutable once published
+/// (`compile_libs`), and per-test scratch dirs are unique per allocation, so a path's contents never
+/// change between calls within one process.
+#[allow(dead_code)]
+fn dir_classes(dir: &Path) -> Option<Arc<ClassSet>> {
+    type DirClassesMemo = Mutex<HashMap<PathBuf, Arc<ClassSet>>>;
+    static MEMO: OnceLock<DirClassesMemo> = OnceLock::new();
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = memo
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(dir)
+        .cloned()
+    {
+        return Some(hit);
+    }
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Option<()> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, out)?;
+            } else if path.extension().is_some_and(|e| e == "class") {
+                let rel = path.strip_prefix(root).ok()?;
+                let name = rel
+                    .to_string_lossy()
+                    .trim_end_matches(".class")
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                out.push((name, std::fs::read(&path).ok()?));
+            }
+        }
+        Some(())
+    }
+    let mut classes = Vec::new();
+    walk(dir, dir, &mut classes)?;
+    let arc = Arc::new(classes);
+    memo.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(dir.to_path_buf(), arc.clone());
+    Some(arc)
+}
+
 /// Run `box()` on already-compiled classes via a persistent JVM keyed by `cp_jars` (the runtime
 /// classpath — typically the stdlib jar so loaded classes resolve `kotlin.jvm.internal.*`). Returns
 /// the `box()` return value (or `ERROR:…`), or `None` if the JVM environment is unavailable.
@@ -1389,11 +1435,30 @@ pub fn run_box(
         return None;
     }
     let runner_dir = setup_runner(&java_home)?;
+    // DIRECTORY classpath entries (kotlinc-built dependency libs) are shipped as bytes into the
+    // per-request TestClassLoader instead of onto the runner JVM's system classpath. Two reasons:
+    // the runner is keyed by its classpath string, so per-lib dirs would spawn a runner JVM per lib
+    // (churn), and system-classpath classes are initialized ONCE per JVM, so a box() that mutates a
+    // lib object's static state would poison every later box() sharing that (now cached) lib. Jars
+    // (stdlib, reflect, coroutines) stay on the system classpath: they are large, shared, and tests
+    // don't assert on their mutable static state.
+    let mut request_classes: Vec<(String, Vec<u8>)> = Vec::new();
     let mut cp = runner_dir.to_string_lossy().into_owned();
     for j in cp_jars {
-        cp.push(':');
-        cp.push_str(&j.to_string_lossy());
+        if j.is_dir() {
+            request_classes.extend(dir_classes(j)?.iter().cloned());
+        } else {
+            cp.push(':');
+            cp.push_str(&j.to_string_lossy());
+        }
     }
+    let classes = if request_classes.is_empty() {
+        std::borrow::Cow::Borrowed(classes)
+    } else {
+        request_classes.extend(classes.iter().cloned());
+        std::borrow::Cow::Owned(request_classes)
+    };
+    let classes: &[(String, Vec<u8>)] = &classes;
     let pool = POOL.get_or_init(|| {
         sweep_stale_temp_dirs();
         Mutex::new(RunnerPool::new())
@@ -1591,9 +1656,373 @@ pub fn compile_lib(tag: &str, lib_src: &str) -> Option<PathBuf> {
     compile_libs(tag, &[("Lib.kt", lib_src)])
 }
 
-/// Compile Kotlin files into a temporary classpath directory.
+/// Compile Kotlin files into a classpath directory, memoized per source set for this run only.
+///
+/// The lib is compiled BY KRUSTY, in-process (~tens of ms) — the product compiles its own test
+/// dependencies, which also exercises krusty's classfile/`@Metadata` EMISSION on every lib fixture.
+/// A lib krusty cannot build FAILS the test with krusty's diagnostics — there is deliberately no
+/// reference-compiler fallback and no silent skip: a dependency gap is a product gap and must be
+/// visible. The reference kotlinc appears through the DEFAULT-ON cross-check (disable explicitly
+/// with `KRUSTY_LIB_CROSSCHECK=0`), which compiles every lib with BOTH compilers and asserts the
+/// same `box()` result against each (see [`LibBuild::cross_check_box`]). There is NO on-disk cache of compiled
+/// dependencies — only a per-run memo, so every run rebuilds its deps with the compiler under
+/// test. The memo also keeps the returned PATH stable within a run: `run_box` keys its persistent
+/// runner JVMs by classpath, so per-call scratch dirs would spawn a runner JVM per test.
 #[allow(dead_code)]
-pub fn compile_libs(_tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
+pub fn compile_libs(tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
+    compile_libs_build(tag, sources).map(|b| b.krusty_out().to_path_buf())
+}
+
+/// One dependency build: the krusty-built classpath dir, plus a lazily kotlinc-built reference dir
+/// used only by the opt-in cross-check. Memoized per run and per source set.
+#[allow(dead_code)]
+pub struct LibBuild {
+    sources: Vec<(String, String)>,
+    krusty: PathBuf,
+    reference: OnceLock<Option<PathBuf>>,
+}
+
+#[allow(dead_code)]
+impl LibBuild {
+    /// The krusty-built classpath dir tests consume.
+    pub fn krusty_out(&self) -> &Path {
+        &self.krusty
+    }
+
+    /// The kotlinc-built reference dir, compiled lazily on first request (a default run never pays
+    /// a reference compile). `None` when kotlinc is unavailable. Panics when kotlinc REJECTS the
+    /// sources — krusty accepted invalid Kotlin, which the cross-check exists to catch.
+    pub fn reference_out(&self) -> Option<&Path> {
+        self.reference
+            .get_or_init(|| {
+                let sources: Vec<(&str, &str)> = self
+                    .sources
+                    .iter()
+                    .map(|(n, s)| (n.as_str(), s.as_str()))
+                    .collect();
+                kotlinc_lib_out(&sources)
+            })
+            .as_deref()
+    }
+
+    /// Default-on differential check (opt out: `KRUSTY_LIB_CROSSCHECK=0`): the same `main`, run
+    /// against the kotlinc-built lib, must produce the same `box()` result the krusty-built lib
+    /// produced. A `main` that compiles against the krusty-built dependency but NOT against the
+    /// reference one means krusty's emitted metadata invented surface — that fails hard too.
+    fn cross_check_box(&self, tag: &str, main: &str, extra_cp: &[PathBuf], krusty_result: &str) {
+        if !lib_crosscheck_enabled() {
+            return;
+        }
+        let Some(reference) = self.reference_out() else {
+            return; // no kotlinc provisioned — nothing to compare against
+        };
+        if std::env::var("KRUSTY_LIB_BYTEDIFF_REPORT").is_ok() {
+            let mut kmap = std::collections::BTreeMap::new();
+            collect_rel_files(&self.krusty, &self.krusty, &mut kmap);
+            let mut rmap = std::collections::BTreeMap::new();
+            collect_rel_files(reference, reference, &mut rmap);
+            for (name, bytes) in &kmap {
+                match rmap.get(name) {
+                    Some(rb) if rb == bytes => eprintln!("LIBDIFF\tidentical\t{name}"),
+                    Some(_) => eprintln!("LIBDIFF\tdivergent\t{name}"),
+                    None => eprintln!("LIBDIFF\tkrusty-only\t{name}"),
+                }
+            }
+            for name in rmap.keys() {
+                if !kmap.contains_key(name) {
+                    eprintln!("LIBDIFF\tkotlinc-only\t{name}");
+                }
+            }
+        }
+        let jdk = jdk_modules();
+        let mut cp = vec![reference.to_path_buf()];
+        cp.extend_from_slice(extra_cp);
+        let Some(classes) = compile_in_process(main, "Main", &cp, Some(jdk.as_path())) else {
+            panic!(
+                "{tag}: main compiles against the krusty-built dependency but not against the \
+                 kotlinc-built one — krusty's emitted lib metadata declares surface kotlinc's \
+                 does not"
+            );
+        };
+        let Some(box_class) = find_box_class(&classes) else {
+            return;
+        };
+        let Some(got) = run_box(&classes, &box_class, &cp) else {
+            return;
+        };
+        assert_eq!(
+            got, krusty_result,
+            "{tag}: box() diverged between the krusty-built and kotlinc-built dependency"
+        );
+    }
+}
+
+#[allow(dead_code)]
+fn collect_rel_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_rel_files(root, &p, out);
+        } else if let (Ok(rel), Ok(bytes)) = (p.strip_prefix(root), std::fs::read(&p)) {
+            out.insert(rel.to_string_lossy().into_owned(), bytes);
+        }
+    }
+}
+
+/// The both-compilers differential for dependency libs is ON BY DEFAULT — every krusty-built lib
+/// is also built with the reference kotlinc and the same `main` must produce the same `box()`
+/// result against both. Disable EXPLICITLY with `KRUSTY_LIB_CROSSCHECK=0` (e.g. a fast local loop
+/// or a host with no kotlinc dist); any other value, or unset, keeps it on.
+#[allow(dead_code)]
+fn lib_crosscheck_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("KRUSTY_LIB_CROSSCHECK").as_deref(),
+            Ok("0") | Ok("false") | Ok("off")
+        )
+    })
+}
+
+/// Build (or fetch this run's memoized build of) a dependency source set. Panics — with krusty's
+/// own diagnostics — when krusty cannot compile the sources; never falls back, never skips. `None`
+/// is reserved for a broken scratch filesystem. See [`compile_libs`].
+#[allow(dead_code)]
+pub fn compile_libs_build(tag: &str, sources: &[(&str, &str)]) -> Option<Arc<LibBuild>> {
+    // Per-run memo + coalescing: concurrent tests asking for the same source set block on one
+    // build (OnceLock::get_or_init) instead of racing N identical compiles.
+    type LibMemo = Mutex<HashMap<u64, Arc<OnceLock<Option<Arc<LibBuild>>>>>>;
+    static MEMO: OnceLock<LibMemo> = OnceLock::new();
+
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+        hash = (hash ^ 0xff).wrapping_mul(0x100000001b3); // field separator
+    };
+    for (name, src) in sources {
+        feed(name.as_bytes());
+        feed(src.as_bytes());
+    }
+
+    let cell = {
+        let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = memo.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(hash).or_default().clone()
+    };
+    cell.get_or_init(|| {
+        let krusty = match krusty_lib_out(sources) {
+            Ok(out) => out?,
+            Err(diags) => panic!(
+                "{tag}: krusty failed to compile this test's dependency lib — a product gap, \
+                 surfaced as a failure by design (no reference-compiler fallback).\n{diags}"
+            ),
+        };
+        Some(Arc::new(LibBuild {
+            sources: sources
+                .iter()
+                .map(|(n, s)| ((*n).to_string(), (*s).to_string()))
+                .collect(),
+            krusty,
+            reference: OnceLock::new(),
+        }))
+    })
+    .clone()
+}
+
+/// Compile a dependency source set with KRUSTY, in-process, through the module-wide driver (the
+/// same pipeline `krusty -d` uses), writing every output — classes AND the `.kotlin_module` facade
+/// index — verbatim into a scratch classpath dir. `Err` carries the diagnostics (or the bail
+/// shape) so the caller can fail the test descriptively; `Ok(None)` = scratch dir unavailable.
+#[allow(dead_code)]
+fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
+    use krusty::diag::DiagSink;
+    use krusty::frontend::collect_signatures_with_cp;
+
+    let _pg = ProfGuard::new("krusty_lib");
+    let mut diags = DiagSink::new();
+    let texts: Vec<&str> = sources.iter().map(|(_, s)| *s).collect();
+    let render = |diags: &krusty::diag::DiagSink| {
+        let named: Vec<(&str, &str)> = sources.iter().map(|(n, s)| (*n, *s)).collect();
+        diags.render_all(&named)
+    };
+    let Some(files) = parse_source_set(&texts, &mut diags) else {
+        return Err(render(&diags));
+    };
+    let jdk = krusty::toolchain::jdk_modules();
+    let cp = cached_classpath(&[stdlib_jar()], jdk.as_deref());
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let mut symbols = collect_signatures_with_cp(&files, platform, &mut diags);
+    if diags.has_errors() {
+        return Err(render(&diags));
+    }
+    let stems: Vec<String> = sources
+        .iter()
+        .map(|(name, _)| name.trim_end_matches(".kt").to_string())
+        .collect();
+    krusty::jvm::prepare_module_symbols(&files, &stems, &mut symbols);
+    let backend = krusty::jvm::JvmBackend::new(cp);
+    let outputs =
+        krusty::compiler::compile(&files, &stems, &mut symbols, &backend, "main", &mut diags);
+    if diags.has_errors() {
+        return Err(render(&diags));
+    }
+    if outputs.is_empty() {
+        return Err("backend produced no classes (bail) for the dependency lib".to_string());
+    }
+    let Some(scratch) = scratch_dir() else {
+        return Ok(None);
+    };
+    let out = scratch.join("klibout");
+    for (path, bytes) in &outputs {
+        let dest = out.join(path);
+        if let Some(parent) = dest.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return Ok(None);
+            }
+        }
+        if std::fs::write(dest, bytes).is_err() {
+            return Ok(None);
+        }
+    }
+    Ok(Some(out))
+}
+
+/// EXPLICITLY reference-compiled dependency: for tests whose contract is krusty CONSUMING
+/// kotlinc-emitted classfiles/`@Metadata` — shapes krusty's own emitter doesn't produce (yet or by
+/// design). This is a per-test-site declaration, not a fallback: the default [`compile_lib`] is
+/// krusty-built, and a test spelled `_ref` documents that its dependency MUST come from the
+/// reference compiler. Memoized per run like the krusty builds. `None` = kotlinc unavailable.
+#[allow(dead_code)]
+pub fn compile_lib_ref(tag: &str, lib_src: &str) -> Option<PathBuf> {
+    compile_libs_ref(tag, &[("Lib.kt", lib_src)])
+}
+
+/// Multi-file form of [`compile_lib_ref`].
+#[allow(dead_code)]
+pub fn compile_libs_ref(_tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
+    type RefMemo = Mutex<HashMap<u64, Arc<OnceLock<Option<PathBuf>>>>>;
+    static MEMO: OnceLock<RefMemo> = OnceLock::new();
+
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+        hash = (hash ^ 0xff).wrapping_mul(0x100000001b3);
+    };
+    for (name, src) in sources {
+        feed(name.as_bytes());
+        feed(src.as_bytes());
+    }
+    let cell = {
+        let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = memo.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(hash).or_default().clone()
+    };
+    cell.get_or_init(|| kotlinc_lib_out(sources)).clone()
+}
+
+/// [`run_box_against`] with an EXPLICITLY reference-compiled dependency (see [`compile_lib_ref`]).
+#[allow(dead_code)]
+pub fn run_box_against_ref(tag: &str, lib_src: &str, main: &str) -> Option<String> {
+    let libout = compile_lib_ref(tag, lib_src)?;
+    let stdlib = stdlib_jar();
+    compile_and_run_box(
+        main,
+        "Main",
+        &[libout, stdlib],
+        Some(jdk_modules().as_path()),
+    )
+}
+
+/// [`expect_box_run_against`] with an EXPLICITLY reference-compiled dependency.
+#[allow(dead_code)]
+pub fn expect_box_run_against_ref(tag: &str, lib_src: &str, main: &str) -> Option<String> {
+    let libout = compile_lib_ref(tag, lib_src)?;
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    Some(expect_box_run(
+        main,
+        "Main",
+        &[libout, stdlib],
+        Some(jdk.as_path()),
+    ))
+}
+
+/// [`expect_box_run_against_with_reflect`] with an EXPLICITLY reference-compiled dependency.
+#[allow(dead_code)]
+pub fn expect_box_run_against_with_reflect_ref(
+    tag: &str,
+    lib_src: &str,
+    main: &str,
+) -> Option<String> {
+    let libout = compile_lib_ref(tag, lib_src)?;
+    let stdlib = stdlib_jar();
+    let reflect =
+        dist_jar("kotlin-reflect.jar").or_else(|| find_jar("kotlin-reflect-", &["sources"]))?;
+    let jdk = jdk_modules();
+    Some(expect_box_run(
+        main,
+        "Main",
+        &[libout, stdlib, reflect],
+        Some(jdk.as_path()),
+    ))
+}
+
+/// [`expect_box_ok_against`] with an EXPLICITLY reference-compiled dependency.
+#[allow(dead_code)]
+pub fn expect_box_ok_against_ref(tag: &str, lib_src: &str, main: &str) {
+    let Some(libout) = compile_lib_ref(tag, lib_src) else {
+        return;
+    };
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    let classpath = [libout, stdlib];
+    let output =
+        compile_and_run_box(main, "Main", &classpath, Some(jdk.as_path())).unwrap_or_else(|| {
+            let diagnostics = front_end_diagnostics(main, &classpath, Some(jdk.as_path()));
+            panic!("{tag}: compile/run returned None; diagnostics: {diagnostics:?}")
+        });
+    assert_eq!(output, "OK", "{tag}");
+}
+
+/// [`diagnostics_against`] with an EXPLICITLY reference-compiled dependency.
+#[allow(dead_code)]
+pub fn diagnostics_against_ref(tag: &str, lib_src: &str, main: &str) -> Option<Vec<String>> {
+    let libout = compile_lib_ref(tag, lib_src)?;
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    Some(front_end_diagnostics(
+        main,
+        &[libout, stdlib],
+        Some(jdk.as_path()),
+    ))
+}
+
+/// [`checker_diags_against`] with an EXPLICITLY reference-compiled dependency.
+#[allow(dead_code)]
+pub fn checker_diags_against_ref(tag: &str, lib_src: &str, main: &str) -> Option<Vec<String>> {
+    let libout = compile_lib_ref(tag, lib_src)?;
+    let stdlib = stdlib_jar();
+    let mut classpath = vec![libout, stdlib];
+    classpath.push(jdk_modules());
+    Some(checker_diags_with_classpath(main, classpath))
+}
+
+/// Compile a dependency source set with the REFERENCE kotlinc (pooled server) into a scratch
+/// classpath dir. `None` = toolchain unavailable; kotlinc REJECTING the sources panics — the
+/// fixture is invalid Kotlin, which must never read as a skip.
+#[allow(dead_code)]
+fn kotlinc_lib_out(sources: &[(&str, &str)]) -> Option<PathBuf> {
     let stdlib = stdlib_jar();
     let work = scratch_dir()?;
     let out = work.join("libout");
@@ -1616,19 +2045,158 @@ pub fn compile_libs(_tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
     }
 }
 
-/// Compile `main` against a kotlinc-built `lib_src` (via [`compile_lib`]) and run its `box()` on the
-/// persistent JVM. `None` (→ skip) when the toolchain is unavailable. stdlib + JDK modules are on both
-/// the compile and run classpath.
+/// Builder-style fixture for JVM-backed e2e tests that DECLARES its environment requirements and
+/// FAILS LOUDLY — with the exact missing piece and how to provision it — where the older `Option`
+/// helpers silently return `None` and let a misconfigured environment report as "passed".
+///
+/// ```ignore
+/// common::Fixture::new()
+///     .lib("Lib.kt", "package lib\nfun x() = 1\n")
+///     .assert_box_ok("import lib.x\nfun box() = if (x() == 1) \"OK\" else \"fail\"\n");
+/// ```
+///
+/// Prefer this for new tests; the `run_box_against`/`expect_box_ok_against` family stays for the
+/// existing callers until they migrate.
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct Fixture {
+    libs: Vec<(String, String)>,
+    ref_libs: Vec<(String, String)>,
+    reflect: bool,
+}
+
+#[allow(dead_code)]
+impl Fixture {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a dependency source onto the classpath — krusty-built with kotlinc fallback/cross-check
+    /// (see [`compile_libs`]).
+    pub fn lib(mut self, file_name: &str, src: &str) -> Self {
+        self.libs.push((file_name.to_string(), src.to_string()));
+        self
+    }
+
+    /// Add a dependency source EXPLICITLY compiled by the reference kotlinc — for tests whose
+    /// contract is consuming kotlinc-emitted metadata shapes krusty doesn't produce (see
+    /// [`compile_lib_ref`]).
+    pub fn reference_lib(mut self, file_name: &str, src: &str) -> Self {
+        self.ref_libs.push((file_name.to_string(), src.to_string()));
+        self
+    }
+
+    /// Put `kotlin-reflect` on the classpath too.
+    pub fn with_reflect(mut self) -> Self {
+        self.reflect = true;
+        self
+    }
+
+    /// The dependency build plus the non-lib classpath tail, panicking with the precise
+    /// misconfiguration — never skipping — when a required piece is absent.
+    fn build_and_extra_cp(&self) -> (Option<Arc<LibBuild>>, Vec<PathBuf>) {
+        let build = if self.libs.is_empty() {
+            None
+        } else {
+            let sources: Vec<(&str, &str)> = self
+                .libs
+                .iter()
+                .map(|(n, s)| (n.as_str(), s.as_str()))
+                .collect();
+            Some(compile_libs_build("fixture", &sources).unwrap_or_else(|| {
+                panic!("scratch filesystem unavailable while building this test's dependency lib")
+            }))
+        };
+        let mut extra = Vec::new();
+        if !self.ref_libs.is_empty() {
+            let sources: Vec<(&str, &str)> = self
+                .ref_libs
+                .iter()
+                .map(|(n, s)| (n.as_str(), s.as_str()))
+                .collect();
+            let refout = compile_libs_ref("fixture", &sources).unwrap_or_else(|| {
+                panic!(
+                    "this test's dependency lib is declared reference-compiled and no kotlinc \
+                     dist is provisioned.\n\
+                     Run `just kotlinc \"$(just max-version)\"` (or `./run-tests.sh`, which \
+                     self-provisions) — do NOT let this test pass without it."
+                )
+            });
+            extra.push(refout);
+        }
+        extra.push(stdlib_jar()); // panics with provisioning instructions when absent
+        if self.reflect {
+            let reflect = dist_jar("kotlin-reflect.jar")
+                .or_else(|| find_jar("kotlin-reflect-", &["sources"]))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "this test needs kotlin-reflect.jar and the provisioned kotlinc dist \
+                         doesn't carry one.\n\
+                         Run `just kotlinc \"$(just max-version)\"` to fetch the full dist."
+                    )
+                });
+            extra.push(reflect);
+        }
+        (build, extra)
+    }
+
+    /// Compile `main` in-process and run its `box()` on the pooled runner JVM. A front-end
+    /// rejection panics with its diagnostics; a missing toolchain panics with the provisioning
+    /// command; there is no silent-skip path. Dependency libs follow the krusty-first /
+    /// kotlinc-fallback / optional-cross-check contract of [`compile_libs`].
+    pub fn run_box(&self, main: &str) -> String {
+        let (build, extra) = self.build_and_extra_cp();
+        let jdk = jdk_modules(); // panics with JAVA_HOME diagnosis when absent
+        match build {
+            None => expect_box_run(main, "Main", &extra, Some(jdk.as_path())),
+            Some(build) => {
+                box_against_build("fixture", &build, main, &extra, &jdk).unwrap_or_else(|| {
+                    let mut cp = vec![build.krusty_out().to_path_buf()];
+                    cp.extend_from_slice(&extra);
+                    let diagnostics = front_end_diagnostics(main, &cp, Some(jdk.as_path()));
+                    panic!("fixture: compile/run returned None; diagnostics: {diagnostics:?}")
+                })
+            }
+        }
+    }
+
+    /// [`Fixture::run_box`] asserting the canonical `"OK"`.
+    pub fn assert_box_ok(&self, main: &str) {
+        let out = self.run_box(main);
+        assert_eq!(out, "OK");
+    }
+}
+
+/// Compile `main` against a `lib_src` dependency and run its `box()` on the persistent JVM. The lib
+/// is krusty-built when krusty can build AND `main` can consume it, with the reference kotlinc as a
+/// lazy fallback for either gap (see [`compile_libs`]); the default-on cross-check additionally runs
+/// `main` against the kotlinc-built lib and asserts the same result. `None` (→ skip) when the
+/// toolchain is unavailable. stdlib + JDK modules are on both the compile and run classpath.
 #[allow(dead_code)]
 pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
-    let libout = compile_lib(tag, lib_src)?;
+    let build = compile_libs_build(tag, &[("Lib.kt", lib_src)])?;
     let stdlib = stdlib_jar();
-    compile_and_run_box(
-        main,
-        "Main",
-        &[libout, stdlib],
-        Some(jdk_modules().as_path()),
-    )
+    let jdk = jdk_modules();
+    box_against_build(tag, &build, main, &[stdlib], &jdk)
+}
+
+/// The shared consumption path of every `*_against` box helper: `main` compiles and runs against
+/// the krusty-built lib — no reference fallback; a gap surfaces at the caller as a descriptive
+/// failure. Under the default-on cross-check the result is also compared against the
+/// kotlinc-built lib (opt out: `KRUSTY_LIB_CROSSCHECK=0`).
+#[allow(dead_code)]
+fn box_against_build(
+    tag: &str,
+    build: &LibBuild,
+    main: &str,
+    extra_cp: &[PathBuf],
+    jdk: &Path,
+) -> Option<String> {
+    let mut cp = vec![build.krusty_out().to_path_buf()];
+    cp.extend_from_slice(extra_cp);
+    let result = compile_and_run_box(main, "Main", &cp, Some(jdk))?;
+    build.cross_check_box(tag, main, extra_cp, &result);
+    Some(result)
 }
 
 /// [`run_box_against`] with the strict contract: `None` means ONLY that the kotlinc/JVM toolchain
@@ -1636,34 +2204,41 @@ pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
 /// collapsing into the same `None` and reporting as a passing skip.
 #[allow(dead_code)]
 pub fn expect_box_run_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
-    let libout = compile_lib(tag, lib_src)?;
+    let build = compile_libs_build(tag, &[("Lib.kt", lib_src)])?;
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
-    Some(expect_box_run(
-        main,
-        "Main",
-        &[libout, stdlib],
-        Some(jdk.as_path()),
-    ))
+    match box_against_build(tag, &build, main, std::slice::from_ref(&stdlib), &jdk) {
+        Some(result) => Some(result),
+        None => {
+            // main couldn't consume the krusty-built lib (or the run failed) — surface the
+            // diagnostics, never a silent skip.
+            let cp = [build.krusty_out().to_path_buf(), stdlib];
+            let diagnostics = front_end_diagnostics(main, &cp, Some(jdk.as_path()));
+            panic!("{tag}: compile/run returned None; diagnostics: {diagnostics:?}")
+        }
+    }
 }
 
 /// [`expect_box_run_against`] with `kotlin-reflect` on the classpath.
 #[allow(dead_code)]
 pub fn expect_box_run_against_with_reflect(tag: &str, lib_src: &str, main: &str) -> Option<String> {
-    let libout = compile_lib(tag, lib_src)?;
+    let build = compile_libs_build(tag, &[("Lib.kt", lib_src)])?;
     let stdlib = stdlib_jar();
     let reflect =
         dist_jar("kotlin-reflect.jar").or_else(|| find_jar("kotlin-reflect-", &["sources"]))?;
     let jdk = jdk_modules();
-    Some(expect_box_run(
-        main,
-        "Main",
-        &[libout, stdlib, reflect],
-        Some(jdk.as_path()),
-    ))
+    match box_against_build(tag, &build, main, &[stdlib.clone(), reflect.clone()], &jdk) {
+        Some(result) => Some(result),
+        None => {
+            let cp = [build.krusty_out().to_path_buf(), stdlib, reflect];
+            let diagnostics = front_end_diagnostics(main, &cp, Some(jdk.as_path()));
+            panic!("{tag}: compile/run returned None; diagnostics: {diagnostics:?}")
+        }
+    }
 }
 
-/// Frontend diagnostics for `main` against a kotlinc-built source dependency.
+/// Frontend diagnostics for `main` against a source dependency (krusty-built when possible, else
+/// reference-built — see [`compile_libs`]).
 #[allow(dead_code)]
 pub fn diagnostics_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec<String>> {
     let libout = compile_lib(tag, lib_src)?;
@@ -1679,15 +2254,15 @@ pub fn diagnostics_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec<S
 /// Run a classpath fixture, skipping only when the external toolchain is unavailable.
 #[allow(dead_code)]
 pub fn expect_box_ok_against(tag: &str, lib_src: &str, main: &str) {
-    let Some(libout) = compile_lib(tag, lib_src) else {
+    let Some(build) = compile_libs_build(tag, &[("Lib.kt", lib_src)]) else {
         return;
     };
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
-    let classpath = [libout, stdlib];
-    let output =
-        compile_and_run_box(main, "Main", &classpath, Some(jdk.as_path())).unwrap_or_else(|| {
-            let diagnostics = front_end_diagnostics(main, &classpath, Some(jdk.as_path()));
+    let output = box_against_build(tag, &build, main, std::slice::from_ref(&stdlib), &jdk)
+        .unwrap_or_else(|| {
+            let cp = [build.krusty_out().to_path_buf(), stdlib.clone()];
+            let diagnostics = front_end_diagnostics(main, &cp, Some(jdk.as_path()));
             panic!("{tag}: compile/run returned None; diagnostics: {diagnostics:?}")
         });
     assert_eq!(output, "OK", "{tag}");
@@ -2029,18 +2604,23 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     }
 }
 
-/// How many persistent compiler-server JVMs to pool per classpath. Default 1: each server is a full ~1 GB
-/// compiler JVM, so on a small/shared-RAM host running several alongside the box-runner JVMs and the test
-/// binary would swap. One server serializes the kotlinc-dependency compiles (each ~0.4s warm) while every
-/// non-kotlinc test still runs N-wide. Override with `KRUSTY_SERVER_POOL` on a large-RAM host to compile
-/// several dependencies concurrently.
+/// How many persistent compiler-server JVMs to pool per classpath. Scales with the host — a single
+/// server serializes every kotlinc-dependency compile AND every java-driver test behind one mutex,
+/// which measured as the e2e suite's dominant wall-clock cost (hundreds of ~0.4s warm compiles all
+/// queueing on one JVM while the other N-1 cores idle). Each kotlinc server is capped at `-Xmx1g`
+/// and each JavaRunner at `-Xmx512m`, so the `ncpu/2` default clamped to [1, 6] bounds worst-case
+/// footprint at ~6 GB on big hosts and 2 servers on a 4-core CI runner. `KRUSTY_SERVER_POOL`
+/// overrides in either direction (e.g. 1 on a swapping shared box).
 #[allow(dead_code)]
 fn server_pool_cap() -> usize {
     std::env::var("KRUSTY_SERVER_POOL")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or(1)
+        .unwrap_or_else(|| {
+            let ncpu = std::thread::available_parallelism().map_or(1, |n| n.get());
+            (ncpu / 2).clamp(1, 6)
+        })
 }
 
 // --- Persistent javac+run server ------------------------------------------
@@ -2072,6 +2652,26 @@ public class JavaRunner {
             procPath = readStr(din);
             String result;
             try {
+                if (mainClass.equals("\u0000javap")) {
+                    // Pooled disassembly: `driver` carries the javap argv joined by \n. Runs
+                    // in-process via the javap ToolProvider — no per-call JVM start.
+                    java.util.spi.ToolProvider jp =
+                        java.util.spi.ToolProvider.findFirst("javap").orElse(null);
+                    if (jp == null) {
+                        result = "ERROR:javap:ToolProvider unavailable";
+                    } else {
+                        java.io.StringWriter so = new java.io.StringWriter();
+                        java.io.StringWriter se = new java.io.StringWriter();
+                        int rc = jp.run(new PrintWriter(so, true), new PrintWriter(se, true),
+                                driver.split("\n"));
+                        result = rc == 0 ? so.toString() : "ERROR:javap:" + se + so;
+                    }
+                    byte[] rb0 = result.getBytes(StandardCharsets.UTF_8);
+                    dout.writeInt(rb0.length);
+                    dout.write(rb0);
+                    dout.flush();
+                    continue;
+                }
                 ByteArrayOutputStream jerr = new ByteArrayOutputStream();
                 JavaCompiler jc = ToolProvider.getSystemJavaCompiler();
                 // `driver` is one or more `.java` paths joined by the platform path separator.
@@ -2273,9 +2873,67 @@ pub fn javac_run_proc(
     }
 }
 
+/// Disassemble via the pooled JavaRunner's in-process `javap` ToolProvider — the same persistent
+/// JVM the driver tests use, so a parity test costs no `javap` process (a full JVM start) per
+/// assertion. `args` is the ordinary javap argv (e.g. `["-c", "-p", "/path/To.class"]`). Returns
+/// the disassembly text; panics on a javap error (a malformed class under test is a failure, not a
+/// skip); `None` = JVM unavailable.
+#[allow(dead_code)]
+pub fn javap(args: &[&str]) -> Option<String> {
+    let joined = args.join("\n");
+    let out = javac_run_proc(&joined, "", "", "\u{0}javap", "")?;
+    if let Some(err) = out.strip_prefix("ERROR:javap:") {
+        panic!("pooled javap failed: {err}");
+    }
+    Some(out)
+}
+
 /// A javac compile's output: the class directory (a valid krusty classpath entry: loose `.class`
 /// files) plus every emitted class as `(binary-name-with-slashes, bytes)`.
 pub type JavacOutput = (PathBuf, Vec<(String, Vec<u8>)>);
+
+/// The whole Java-interop e2e idiom in one strict call: javac-compile `java_sources` (pooled
+/// in-process javac), krusty-compile Kotlin `use_src` (file stem `Use`, declaring `fun box()`)
+/// against that classpath in-process, then run a Java driver invoking `UseKt.box()` in the pooled
+/// JavaRunner and return its trimmed stdout. Every step panics with the failing stage — a
+/// misconfigured environment or a krusty gap fails the test, it never skips.
+#[allow(dead_code)]
+pub fn java_interop_box(tag: &str, java_sources: &[(&str, &str)], use_src: &str) -> String {
+    let jdk = jdk_modules(); // panics with JAVA_HOME diagnosis when absent
+    let stdlib = stdlib_jar();
+    let sources: Vec<(String, String)> = java_sources
+        .iter()
+        .map(|(n, s)| ((*n).to_string(), (*s).to_string()))
+        .collect();
+    let (cp, _) = javac_compile(&sources, &[])
+        .unwrap_or_else(|| panic!("{tag}: pooled javac failed on the Java fixture"));
+    let kr = scratch_dir().unwrap_or_else(|| panic!("{tag}: scratch filesystem unavailable"));
+    compile_to_dir(
+        use_src,
+        "Use",
+        std::slice::from_ref(&cp),
+        Some(jdk.as_path()),
+        &kr,
+    )
+    .unwrap_or_else(|| {
+        let diagnostics =
+            front_end_diagnostics(use_src, std::slice::from_ref(&cp), Some(jdk.as_path()));
+        panic!("{tag}: krusty failed against the Java fixture; diagnostics: {diagnostics:?}")
+    });
+    let main =
+        "public class M { public static void main(String[] a) { System.out.println(UseKt.box()); } }";
+    let m_path = kr.join("M.java");
+    std::fs::write(&m_path, main).unwrap_or_else(|e| panic!("{tag}: write driver: {e}"));
+    let kcp = format!(
+        "{}:{}:{}",
+        kr.to_string_lossy(),
+        cp.to_string_lossy(),
+        stdlib.display()
+    );
+    let out = javac_run(&m_path.to_string_lossy(), &kcp, &kr.to_string_lossy(), "M")
+        .unwrap_or_else(|| panic!("{tag}: pooled JavaRunner unavailable"));
+    out.trim().to_string()
+}
 
 /// Compile a set of Java sources `(file_name, source)` against `cp` with the persistent JavaRunner's
 /// in-process javac (no `javac` process spawn — the same JVM the Java-driver e2e suites reuse).

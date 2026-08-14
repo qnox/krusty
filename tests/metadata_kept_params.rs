@@ -62,7 +62,7 @@ fn suspend_fact_is_descriptor_aligned_across_mangled_and_same_named_overloads() 
     // Keep every declaration synthetic while retaining the collision that a name-wide suspend set
     // cannot represent: one source name denotes an ordinary method whose real parameter happens to
     // be `Continuation`, plus a value-class-mangled suspend overload and its `$default` synthetic.
-    let Some(library) = common::compile_libs(
+    let Some(library) = common::compile_libs_ref(
         "SuspendFactLibrary",
         &[(
             "SuspendOverloads.kt",

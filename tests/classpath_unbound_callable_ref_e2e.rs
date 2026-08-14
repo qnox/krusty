@@ -103,12 +103,12 @@ fn unbound_classpath_callables_compile_and_run() {
         }
     "#;
 
-    let output = common::run_box_against("classpath_unbound_refs", library, main);
+    let output = common::run_box_against_ref("classpath_unbound_refs", library, main);
     assert_eq!(
         output.unwrap_or_else(|| {
             panic!(
                 "compile and run unbound classpath callable references: {:?}",
-                common::checker_diags_against("classpath_unbound_refs_diag", library, main)
+                common::checker_diags_against_ref("classpath_unbound_refs_diag", library, main)
             )
         }),
         "OK"
@@ -182,7 +182,7 @@ fn classpath_callable_references_resolve_reflection_targets() {
         }
     "#;
 
-    let Some(output) = common::expect_box_run_against_with_reflect(
+    let Some(output) = common::expect_box_run_against_with_reflect_ref(
         "classpath_extension_reflection",
         library,
         main,

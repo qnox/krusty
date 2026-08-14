@@ -32,7 +32,8 @@ fn classpath_reified_named_default_before_vararg_resolves() {
         \x20 val client = configure<C>(enabled = true)\n\
         \x20 return client.hi()\n\
         }\n";
-    let Some(diagnostics) = common::checker_diags_against("cp_reified_named_default", LIB, MAIN)
+    let Some(diagnostics) =
+        common::checker_diags_against_ref("cp_reified_named_default", LIB, MAIN)
     else {
         return;
     };
@@ -62,7 +63,7 @@ fn classpath_reified_named_default_after_vararg_resolves() {
         \x20 return a.hi() + b.hi()\n\
         }\n";
     let Some(diagnostics) =
-        common::checker_diags_against("cp_reified_named_default_after", LIB, MAIN)
+        common::checker_diags_against_ref("cp_reified_named_default_after", LIB, MAIN)
     else {
         return;
     };
@@ -93,7 +94,8 @@ fn classpath_reified_trailing_receiver_lambda_resolves() {
         \x20 val named = configure<C>(enabled = true) { tag = \"!\" }\n\
         \x20 return plain.tag + named.tag\n\
         }\n";
-    let Some(diagnostics) = common::checker_diags_against("cp_reified_trailing_lambda", LIB, MAIN)
+    let Some(diagnostics) =
+        common::checker_diags_against_ref("cp_reified_trailing_lambda", LIB, MAIN)
     else {
         return;
     };
@@ -143,7 +145,7 @@ fn classpath_named_default_before_vararg_box_runs() {
         \x20 return \"OK\"\n\
         }\n";
     if let Some(out) =
-        common::expect_box_run_against("cp_named_default_vararg_box", RUNTIME_LIB, MAIN)
+        common::expect_box_run_against_ref("cp_named_default_vararg_box", RUNTIME_LIB, MAIN)
     {
         assert_eq!(out, "OK");
     }

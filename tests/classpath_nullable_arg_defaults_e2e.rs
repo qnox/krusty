@@ -25,7 +25,7 @@ fn nullable_argument_with_trailing_default_omitted() {
     let main = "import lib.Eng\n\
         import lib.Tgt\n\
         fun probe(eng: Eng, t: Tgt?): String = eng.run(\"a\", t)\n";
-    if let Some(diags) = common::checker_diags_against("cpnullargdefault", LIB, main) {
+    if let Some(diags) = common::checker_diags_against_ref("cpnullargdefault", LIB, main) {
         assert!(
             diags.is_empty(),
             "expected clean resolution, got: {diags:#?}"
@@ -38,7 +38,7 @@ fn nullable_argument_to_suspend_member_with_trailing_default_omitted() {
     let main = "import lib.Eng\n\
         import lib.Tgt\n\
         suspend fun probe(eng: Eng, t: Tgt?): String = eng.go(\"a\", t)\n";
-    if let Some(diags) = common::checker_diags_against("cpnullargsusp", LIB, main) {
+    if let Some(diags) = common::checker_diags_against_ref("cpnullargsusp", LIB, main) {
         assert!(
             diags.is_empty(),
             "expected clean resolution, got: {diags:#?}"

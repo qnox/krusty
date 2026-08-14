@@ -9,8 +9,8 @@
 //! `KRUSTY_SER_E2E=1`; reuses the `target/cache/ksp-toolchain` (kotlin-compiler + JDK 21) and the serialization
 //! runtime from the gradle cache. Self-skips if prerequisites are missing.
 
+use super::common;
 use std::path::PathBuf;
-use std::process::Command;
 use std::rc::Rc;
 
 /// Recursively locate a `<prefix>*.jar` (no `-sources`) under a root.
@@ -216,7 +216,7 @@ fun main() { println(box()) }
 "#,
     )
     .unwrap();
-    let java = jdk.join("bin/java");
+    let _ = cc;
     let driver_cp = format!(
         "{}:{}:{}:{}",
         classes_dir.display(),
@@ -224,33 +224,39 @@ fun main() { println(box()) }
         json.display(),
         stdlib.display()
     );
-    let compile = Command::new(&java)
-        .arg("-cp")
-        .arg(&cc)
-        .arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler")
-        .args(["-cp", &driver_cp, "-no-stdlib", "-no-reflect", "-d"])
-        .arg(&classes_dir)
-        .arg(&driver)
-        .output()
-        .expect("run kotlinc");
-    assert!(
-        compile.status.success(),
-        "kotlinc could not compile the driver against krusty's Foo:\n{}",
-        String::from_utf8_lossy(&compile.stderr)
+    // Compile the driver on the POOLED kotlinc server (no cold compiler JVM per test).
+    let args = vec![
+        driver.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        driver_cp.clone(),
+        "-no-stdlib".to_string(),
+        "-no-reflect".to_string(),
+        "-d".to_string(),
+        classes_dir.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = common::kotlinc_compile(&args).expect(
+        "provisioned kotlinc server unavailable — run `just kotlinc \"$(just max-version)\"`",
+    );
+    assert_eq!(
+        code, 0,
+        "kotlinc could not compile the driver against krusty's Foo:\n{stderr}"
     );
 
-    // 3. Run box() on the JVM with the runtime; assert the round-trip is correct.
-    let run = Command::new(&java)
-        .arg("-cp")
-        .arg(&driver_cp)
-        .arg("BoxKt")
-        .output()
-        .expect("run box");
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    let stderr = String::from_utf8_lossy(&run.stderr);
+    // 3. Run box() on the pooled JavaRunner with the runtime; assert the round-trip is correct.
+    let runner_driver =
+        "public class RunRt { public static void main(String[] a) { BoxKt.main(); } }";
+    let rd = classes_dir.join("RunRt.java");
+    std::fs::write(&rd, runner_driver).unwrap();
+    let stdout = common::javac_run(
+        &rd.to_string_lossy(),
+        &driver_cp,
+        &classes_dir.to_string_lossy(),
+        "RunRt",
+    )
+    .expect("pooled JavaRunner unavailable");
     assert!(
         stdout.contains("OK"),
-        "serialization encode round-trip failed.\nstdout: {stdout}\nstderr: {stderr}"
+        "serialization encode round-trip failed.\nstdout: {stdout}"
     );
     eprintln!("serialization encode round-trip OK — krusty's $serializer produced correct JSON");
 }
