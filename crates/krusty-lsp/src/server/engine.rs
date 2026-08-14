@@ -187,7 +187,9 @@ pub(crate) enum EngineEvent {
     IndexProgress(IndexBatch),
     /// One chunk of the project-wide symbol index. Published as it completes: the picker is
     /// re-queried on every keystroke, so partial coverage converges without client coordination.
-    SymbolIndexProgress(SymbolIndexBatch),
+    /// Boxed: the batch dwarfs every other variant, and one allocation per chunk keeps the whole
+    /// event enum channel-copy small.
+    SymbolIndexProgress(Box<SymbolIndexBatch>),
     /// Class names from the project's dependencies, published once per project model.
     DependencyIndex {
         generation: u64,
@@ -1087,8 +1089,9 @@ fn run<A: Analysis>(
                     let generation = commands.index_generation();
                     if submitted_sweep_generation != Some(generation) {
                         let dependencies = analyze.dependency_index();
+                        let dependency_class_count = dependencies.class_count();
                         let dependency_incomplete =
-                            dependencies.class_count() > 0 && !dependencies.is_complete();
+                            dependency_class_count > 0 && !dependencies.is_complete();
                         if dependencies.class_count() > 0
                             && events
                                 .send(Incoming::Engine(EngineEvent::DependencyIndex {
@@ -1102,29 +1105,40 @@ fn run<A: Analysis>(
                         submit_workspace_sweep(&mut analyze, &commands);
                         let mut logs = Vec::new();
                         if dependency_incomplete {
+                            logs.push(format!(
+                                "krusty: dependency symbol index reached its class retention \
+                                 limit ({} of {} max classes retained); dependency-wide symbol \
+                                 search is incomplete",
+                                dependency_class_count,
+                                crate::dependency_symbols::MAX_DEPENDENCY_CLASSES,
+                            ));
+                        }
+                        // Two different ceilings deserve two different lines, each carrying the
+                        // numbers of the limit that actually fired.
+                        if analyze.workspace_index_incomplete() {
                             logs.push(
-                                "krusty: dependency symbol index reached its class retention limit; \
-                                 dependency-wide symbol search is incomplete"
+                                "krusty: workspace diagnostic inventory reached its retention \
+                                 limit; background results are incomplete"
                                     .to_string(),
                             );
                         }
-                        if analyze.workspace_index_incomplete()
-                            || commands.index_admission_truncated()
-                        {
-                            logs.push(
-                                "krusty: workspace diagnostic inventory reached its retention or \
-                                 queue limit; background results are incomplete"
-                                    .to_string(),
-                            );
+                        if commands.index_admission_truncated() {
+                            logs.push(format!(
+                                "krusty: workspace diagnostic inventory reached its queue limit \
+                                 ({} max files, {} MiB max queued URIs); background results are \
+                                 incomplete",
+                                MAX_QUEUED_INDEX_FILES,
+                                MAX_QUEUED_INDEX_BYTES / (1024 * 1024),
+                            ));
                         }
                         // The two queues have their own ceilings, so say which one was reached
                         // rather than reporting a symbol shortfall as a diagnostic one.
                         if commands.symbol_admission_truncated() {
-                            logs.push(
-                                "krusty: workspace symbol inventory reached its queue limit; \
-                                 project-wide symbol search is incomplete"
-                                    .to_string(),
-                            );
+                            logs.push(format!(
+                                "krusty: workspace symbol inventory reached its queue limit \
+                                 ({} MiB of queued URIs); project-wide symbol search is incomplete",
+                                MAX_QUEUED_SYMBOL_INDEX_BYTES / (1024 * 1024),
+                            ));
                         }
                         if !logs.is_empty()
                             && events
@@ -1194,11 +1208,11 @@ fn run<A: Analysis>(
                 let symbols = analyze.index_workspace_symbols(&uris);
                 if events
                     .send(Incoming::Engine(EngineEvent::SymbolIndexProgress(
-                        SymbolIndexBatch {
+                        Box::new(SymbolIndexBatch {
                             generation: job.generation,
                             attempted: job.uris,
                             symbols,
-                        },
+                        }),
                     )))
                     .is_err()
                 {
