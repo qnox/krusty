@@ -10450,6 +10450,9 @@ pub struct TypeInfo {
     /// Statement-level synthetic operator calls selected while checking, e.g. `a[i] = v` resolving to
     /// `a.set(i, v)` or `a.put(i, v)`. Lowering reads this table instead of selecting the setter again.
     pub resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
+    /// Checked read/storage/result types for every increment/decrement convention. The selected
+    /// callable, when non-builtin, remains in the corresponding operator-call table.
+    pub(crate) resolved_inc_dec: HashMap<IncDecSite, ResolvedIncDec>,
     /// For classpath-backed `a[i] = v`, the checker-selected `a.get(i)` logical return type. Lowering
     /// uses this only for its primitive narrowing guard and never resolves the getter itself.
     pub resolved_index_store_get_returns: HashMap<StmtId, Ty>,
@@ -11037,6 +11040,35 @@ pub enum SyntheticOperatorCall {
     Inc,
     Dec,
     CompareTo,
+}
+
+/// Source site of a checked increment/decrement convention. Expression and statement forms share
+/// one semantic selection; the split survives only because their selected operator calls live in
+/// the existing expression/statement target tables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum IncDecSite {
+    Statement(StmtId),
+    Expression(ExprId),
+}
+
+#[derive(Clone, Copy)]
+struct IncDecSelection {
+    site: IncDecSite,
+    decrement: bool,
+    prefix: bool,
+}
+
+/// Complete checker/lowerer handoff for `++`/`--` on a binding. A flow-smart-cast may make the type
+/// used to read and resolve `inc`/`dec` narrower than the declared type written back to storage.
+/// Lowering consumes both types and never repeats operator selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedIncDec {
+    pub(crate) decrement: bool,
+    pub(crate) prefix: bool,
+    pub(crate) receiver_ty: Ty,
+    pub(crate) storage_ty: Ty,
+    pub(crate) updated_ty: Ty,
+    pub(crate) result_ty: Ty,
 }
 
 impl SyntheticOperatorCall {
@@ -12158,7 +12190,11 @@ impl TypeInfo {
 
 #[derive(Clone, Copy)]
 struct Local {
+    /// Current read type in this scope. A branch narrowing shadow may replace it.
     ty: Ty,
+    /// Declared type accepted by writes, when this binding is mutable. Kept across narrowing
+    /// shadows so mutation checks never confuse flow stability with `val`-ness.
+    write_ty: Option<Ty>,
     is_var: bool,
     origin: ReceiverFnValueOrigin,
     callable_reference_type: Option<Ty>,
@@ -13133,6 +13169,7 @@ fn make_checker<'a>(
         extension_receiver_stmt_uses: vec![Vec::new(); file.stmt_arena.len()],
         resolved_operator_calls: HashMap::new(),
         resolved_stmt_operator_calls: HashMap::new(),
+        resolved_inc_dec: HashMap::new(),
         resolved_index_store_get_returns: HashMap::new(),
         resolved_destructure_components: HashMap::new(),
         iterator_protocols: HashMap::new(),
@@ -14751,6 +14788,7 @@ fn check_file_at_impl_mode(
         extension_receiver_stmt_uses,
         resolved_operator_calls,
         resolved_stmt_operator_calls,
+        resolved_inc_dec,
         resolved_index_store_get_returns,
         resolved_destructure_components,
         iterator_protocols,
@@ -14929,6 +14967,7 @@ fn check_file_at_impl_mode(
         used_extension_receivers,
         resolved_operator_calls,
         resolved_stmt_operator_calls,
+        resolved_inc_dec,
         resolved_index_store_get_returns,
         resolved_destructure_components,
         iterator_protocols,
@@ -15512,6 +15551,7 @@ struct Checker<'a> {
     extension_receiver_stmt_uses: Vec<Vec<Span>>,
     resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
     resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
+    resolved_inc_dec: HashMap<IncDecSite, ResolvedIncDec>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
     iterator_protocols: HashMap<ExprId, IteratorProtocolTarget>,
@@ -23230,6 +23270,7 @@ impl<'a> Checker<'a> {
             Ns::Value,
             ScopeBinding::Value(Local {
                 ty,
+                write_ty: is_var.then_some(ty),
                 is_var,
                 origin: ReceiverFnValueOrigin::Local,
                 callable_reference_type: Some(function_type),
@@ -23318,11 +23359,16 @@ impl<'a> Checker<'a> {
         // the old one (`if (a.p == null) return; val a = …` — the proof was about the OLD `a`).
         // Narrowing shadows are exempt (`declare_narrowing_shadow`): they re-bind the SAME value.
         scope.invalidate_paths_rooted_at(name);
+        let write_ty = is_var.then_some(match origin {
+            ReceiverFnValueOrigin::DispatchProperty { declared_ty, .. } => declared_ty,
+            _ => ty,
+        });
         scope.rebind(
             name,
             Ns::Value,
             ScopeBinding::Value(Local {
                 ty,
+                write_ty,
                 is_var,
                 origin,
                 callable_reference_type: matches!(ty, Ty::Fun(_)).then_some(ty),
@@ -23339,18 +23385,18 @@ impl<'a> Checker<'a> {
         // `DispatchProperty` origin. Reclassifying its narrowed shadow as a local makes the checker
         // stop recording the receiver/property handoff and leaves lowering no legal operation to
         // consume.
-        let origin = self
-            .lookup(scope, name)
+        let previous = self.lookup(scope, name);
+        let origin = previous
             .map(|local| local.origin)
             .unwrap_or(ReceiverFnValueOrigin::Local);
-        let callable_reference_type = self
-            .lookup(scope, name)
-            .and_then(|local| local.callable_reference_type);
+        let callable_reference_type = previous.and_then(|local| local.callable_reference_type);
+        let write_ty = previous.and_then(|local| local.write_ty);
         scope.rebind(
             name,
             Ns::Value,
             ScopeBinding::Value(Local {
                 ty,
+                write_ty,
                 is_var: false,
                 origin,
                 callable_reference_type,
@@ -23598,6 +23644,18 @@ impl<'a> Checker<'a> {
     /// does NOT walk outward: a narrowing proven before a branch does not hold inside it.
     fn local_narrowing(&self, scope: &CheckerScope<'_>, name: &str) -> Option<Ty> {
         scope.local_narrowing(name)
+    }
+
+    /// The exact read type proven by assigning `actual` into a mutable `storage` binding. Kotlin's
+    /// straight-line data flow is not limited to null removal: `var x: Base; x = Derived()` reads as
+    /// `Derived` until a wider assignment invalidates that fact. Captured writes make the proof
+    /// unstable, so they deliberately clear it.
+    fn assignment_narrowing(&self, name: &str, storage: Ty, actual: Ty) -> Option<Ty> {
+        (actual != storage
+            && !matches!(actual, Ty::Null | Ty::Error | Ty::Nothing)
+            && !self.fn_closure_reassigned.contains(name)
+            && self.receiver_is_assignable(actual, storage))
+        .then_some(actual)
     }
     /// Whether `name` is already declared in the *innermost* (current) scope — a conflicting
     /// redeclaration (kotlinc rejects it). A declaration in an *outer* scope is legal shadowing.
@@ -31983,6 +32041,103 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
+    /// Select one `inc`/`dec` convention across the binding's ranked data-flow receiver types.
+    /// The declared storage type has the first extension/member tower: a nullable-receiver extension
+    /// remains applicable to `var n: Int? = 1`. Only when that tower has no convention does Kotlin
+    /// use the proven narrower read type (`Int`'s builtin, or `Derived.inc()` for `var b: Base`).
+    fn select_inc_dec(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        selection: IncDecSelection,
+        storage_ty: Ty,
+        read_ty: Ty,
+        prefix_result_is_updated: bool,
+        span: Span,
+    ) -> Option<ResolvedIncDec> {
+        let IncDecSelection {
+            site,
+            decrement,
+            prefix,
+        } = selection;
+        let operator_name = if decrement { "dec" } else { "inc" };
+        let operator_key = SyntheticOperatorCall::from_name(operator_name)
+            .expect("increment operator has a synthetic-call key");
+        match site {
+            IncDecSite::Expression(expression) => {
+                self.resolved_operator_calls
+                    .remove(&(expression, operator_key));
+            }
+            IncDecSite::Statement(statement) => {
+                self.resolved_stmt_operator_calls
+                    .remove(&(statement, operator_key));
+            }
+        }
+        self.resolved_inc_dec.remove(&site);
+
+        let mut receivers = vec![storage_ty];
+        if read_ty != storage_ty {
+            receivers.push(read_ty);
+        }
+        let selected = receivers.into_iter().find_map(|receiver_ty| {
+            if receiver_ty.is_numeric_or_char() {
+                return Some((receiver_ty, receiver_ty, None));
+            }
+            self.operator_call_ret(scope, receiver_ty, operator_name, &[], &[], span)
+                .map(|(updated_ty, target)| (receiver_ty, updated_ty, Some(target)))
+        });
+        let Some((receiver_ty, updated_ty, target)) = selected else {
+            let operator_span = if prefix {
+                Span::new(span.lo, span.lo.saturating_add(2))
+            } else {
+                Span::new(span.hi.saturating_sub(2), span.hi)
+            };
+            if !self.report_required_operator_modifier(
+                scope,
+                read_ty,
+                operator_name,
+                &[],
+                operator_span,
+            ) {
+                self.diags.error(
+                    span,
+                    "krusty: '++'/'--' is only supported on a numeric variable".to_string(),
+                );
+            }
+            return None;
+        };
+
+        self.expect_assignable(storage_ty, updated_ty, span, "operator result");
+        if let Some(target) = target {
+            match site {
+                IncDecSite::Expression(expression) => {
+                    self.resolved_operator_calls
+                        .insert((expression, operator_key), target);
+                }
+                IncDecSite::Statement(statement) => {
+                    self.resolved_stmt_operator_calls
+                        .insert((statement, operator_key), target);
+                }
+            }
+        }
+        let resolution = ResolvedIncDec {
+            decrement,
+            prefix,
+            receiver_ty,
+            storage_ty,
+            updated_ty,
+            // A stable lexical local is read after prefix writeback and therefore exposes the exact
+            // `inc`/`dec` result type. Property storage cannot acquire that flow fact, so its prefix
+            // result — and every postfix old-value result — keeps the selected receiver view.
+            result_ty: if prefix_result_is_updated {
+                updated_ty
+            } else {
+                receiver_ty
+            },
+        };
+        self.resolved_inc_dec.insert(site, resolution);
+        Some(resolution)
+    }
+
     fn expr_inner_inc_dec(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -31992,29 +32147,28 @@ impl<'a> Checker<'a> {
         prefix: bool,
     ) -> Ty {
         let t = {
-            // `target++`/`++target` as a value: a simple mutable numeric/Char variable (the built-in
-            // `inc`/`dec`), or a variable whose type has a user `inc`/`dec` operator. The result type
-            // is the variable's type.
-            let mut tt = self.expr(scope, target);
+            // `target++`/`++target` as a value: resolve the binding once, then select the update
+            // convention from its declared storage type and proven read type. Lowering consumes the
+            // resulting `ResolvedIncDec`; it must not repeat this choice from its physical slot.
+            let read_ty = self.expr(scope, target);
             if let Expr::Name(name) = self.file.expr(target).clone() {
-                let local = self
-                    .lookup(scope, &name)
-                    .filter(|local| {
-                        !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
-                    })
-                    .map(|local| (local.ty, local.is_var));
+                let local = self.lookup(scope, &name).filter(|local| {
+                    !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
+                });
+                let local_binding = local
+                    .map(|local| (local.write_ty.unwrap_or(local.ty), local.write_ty.is_some()));
                 let backing_field = matches!(
                     self.expr_lowers.get(&target),
                     Some(ExprLowering::BackingFieldRead)
                 )
-                .then_some((tt, true));
-                let implicit_property = (local.is_none() && backing_field.is_none())
+                .then_some((read_ty, true));
+                let implicit_property = (local_binding.is_none() && backing_field.is_none())
                     .then(|| self.implicit_property_write(scope, &name))
                     .flatten();
                 if let Some(resolution) = &implicit_property {
                     self.record_implicit_property_incdec(e, resolution);
                 }
-                match local
+                match local_binding
                     .or(backing_field)
                     .or_else(|| {
                         implicit_property
@@ -32023,71 +32177,44 @@ impl<'a> Checker<'a> {
                     })
                     .or_else(|| self.syms.props.get(&name).map(|&(t, v, _)| (t, v)))
                 {
-                    Some((vt, is_var)) => {
+                    Some((storage_ty, is_var)) => {
                         if !is_var {
                             self.diags.error(
                                 self.span(target),
                                 "'val' cannot be reassigned.".to_string(),
                             );
                         }
-                        // Dispatch on the variable's BINDING type, not a flow-narrowed use type:
-                        // the update writes back to the variable, and the lowerer keys the
-                        // builtin-vs-operator choice (and the slot representation) on the binding
-                        // (`var i: Int? = 10; i++` calls a user `Int?.inc` on the BOXED slot even
-                        // where a read of `i` is narrowed to `Int`). The expression's type is the
-                        // binding type for the same reason.
-                        if !vt.is_numeric_or_char() {
-                            let operator_name = if dec { "dec" } else { "inc" };
-                            if let Some((ret, target)) = self.operator_call_ret(
-                                scope,
-                                vt,
-                                operator_name,
-                                &[],
-                                &[],
-                                self.span(e),
-                            ) {
-                                self.expect_assignable(vt, ret, self.span(e), "operator result");
-                                self.resolved_operator_calls.insert(
-                                    (
-                                        e,
-                                        SyntheticOperatorCall::from_name(operator_name)
-                                            .expect("increment operator has a synthetic-call key"),
-                                    ),
-                                    target,
+                        let selected = self.select_inc_dec(
+                            scope,
+                            IncDecSelection {
+                                site: IncDecSite::Expression(e),
+                                decrement: dec,
+                                prefix,
+                            },
+                            storage_ty,
+                            read_ty,
+                            prefix && local.is_some(),
+                            self.span(e),
+                        );
+                        if let Some(resolution) = selected {
+                            if local.is_some() {
+                                let narrowing = self.assignment_narrowing(
+                                    &name,
+                                    storage_ty,
+                                    resolution.updated_ty,
                                 );
-                            } else {
-                                let expression_span = self.span(e);
-                                let operator_span = if prefix {
-                                    Span::new(
-                                        expression_span.lo,
-                                        expression_span.lo.saturating_add(2),
-                                    )
-                                } else {
-                                    Span::new(
-                                        expression_span.hi.saturating_sub(2),
-                                        expression_span.hi,
-                                    )
-                                };
-                                if !self.report_required_operator_modifier(
-                                    scope,
-                                    vt,
-                                    operator_name,
-                                    &[],
-                                    operator_span,
-                                ) {
-                                    self.diags.error(
-                                        expression_span,
-                                        "krusty: '++'/'--' is only supported on a numeric variable"
-                                            .to_string(),
-                                    );
-                                }
+                                self.set_local_narrow(scope, &name, narrowing);
                             }
-                            tt = vt;
+                            resolution.result_ty
+                        } else {
+                            Ty::Error
                         }
                     }
-                    None => self
-                        .diags
-                        .error(self.span(e), format!("unresolved reference '{name}'.")),
+                    None => {
+                        self.diags
+                            .error(self.span(e), format!("unresolved reference '{name}'."));
+                        Ty::Error
+                    }
                 }
             } else {
                 self.diags.error(
@@ -32095,8 +32222,8 @@ impl<'a> Checker<'a> {
                     "krusty: '++'/'--' as a value is only supported on a simple variable"
                         .to_string(),
                 );
+                read_ty
             }
-            tt
         };
         self.set(e, t)
     }
@@ -46442,17 +46569,11 @@ impl<'a> Checker<'a> {
         } else {
             self.declare(scope, &name, bound_ty, is_var);
         }
-        // Flow-narrow a nullable `var` whose initializer is a non-null value (`var x: Int? = 10`
-        // reads as `Int`), matching kotlinc's smart-cast, but only when the var is not written
-        // inside a closure that could reset it to null on a deferred path.
-        if bind.is_nullable()
-            && !it.is_nullable()
-            && !matches!(it, Ty::Null | Ty::Error)
-            && it != Ty::Nothing
-            && is_var
-            && !self.fn_closure_reassigned.contains(&name)
-        {
-            self.set_local_narrow(scope, &name, Some(it));
+        // An explicit broader declaration retains its storage type while straight-line reads use the
+        // initializer's proven subtype (`var x: Base = Derived()`, `var n: Int? = 10`).
+        if is_var {
+            let narrowing = self.assignment_narrowing(&name, bind, it);
+            self.set_local_narrow(scope, &name, narrowing);
         }
     }
 
@@ -46590,11 +46711,17 @@ impl<'a> Checker<'a> {
         let local = self
             .lookup(scope, &name)
             .filter(|local| !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. }))
-            .map(|local| (local.ty, local.is_var));
+            .map(|local| {
+                (
+                    local.write_ty.unwrap_or(local.ty),
+                    local.write_ty.is_some(),
+                    local.ty,
+                )
+            });
         let backing_field = (local.is_none() && name == "field")
             .then_some(self.field_ty)
             .flatten()
-            .map(|ty| (ty, true));
+            .map(|ty| (ty, true, ty));
         if backing_field.is_some() {
             self.stmt_lowers.insert(s, StmtLowering::BackingFieldWrite);
         }
@@ -46610,50 +46737,43 @@ impl<'a> Checker<'a> {
         let found = local
             .or(backing_field)
             .or_else(|| {
-                implicit_property
-                    .as_ref()
-                    .map(|resolution| (resolution.property_ty, resolution.is_var))
+                implicit_property.as_ref().map(|resolution| {
+                    (
+                        resolution.property_ty,
+                        resolution.is_var,
+                        resolution.property_ty,
+                    )
+                })
             })
-            .or_else(|| self.syms.props.get(&name).map(|&(t, v, _)| (t, v)));
+            .or_else(|| self.syms.props.get(&name).map(|&(t, v, _)| (t, v, t)));
         match found {
-            Some((ty, is_var)) => {
+            Some((storage_ty, is_var, nominal_read_ty)) => {
                 if !is_var {
                     self.diags
                         .error(target_span, "'val' cannot be reassigned.".to_string());
                 }
-                if !ty.is_numeric_or_char() {
-                    let operator_name = if dec { "dec" } else { "inc" };
-                    if let Some((ret, target)) =
-                        self.operator_call_ret(scope, ty, operator_name, &[], &[], span)
-                    {
-                        self.expect_assignable(ty, ret, span, "operator result");
-                        self.resolved_stmt_operator_calls.insert(
-                            (
-                                s,
-                                SyntheticOperatorCall::from_name(operator_name)
-                                    .expect("increment operator has a synthetic-call key"),
-                            ),
-                            target,
-                        );
-                    } else {
-                        let operator_span = if prefix {
-                            Span::new(span.lo, span.lo.saturating_add(2))
-                        } else {
-                            Span::new(span.hi.saturating_sub(2), span.hi)
-                        };
-                        if !self.report_required_operator_modifier(
-                            scope,
-                            ty,
-                            operator_name,
-                            &[],
-                            operator_span,
-                        ) {
-                            self.diags.error(
-                                span,
-                                "krusty: '++'/'--' is only supported on a numeric variable"
-                                    .to_string(),
-                            );
-                        }
+                let read_ty = if local.is_some() {
+                    self.local_narrowing(scope, &name)
+                        .unwrap_or(nominal_read_ty)
+                } else {
+                    nominal_read_ty
+                };
+                if let Some(resolution) = self.select_inc_dec(
+                    scope,
+                    IncDecSelection {
+                        site: IncDecSite::Statement(s),
+                        decrement: dec,
+                        prefix,
+                    },
+                    storage_ty,
+                    read_ty,
+                    false,
+                    span,
+                ) {
+                    if local.is_some() {
+                        let narrowing =
+                            self.assignment_narrowing(&name, storage_ty, resolution.updated_ty);
+                        self.set_local_narrow(scope, &name, narrowing);
                     }
                 }
             }
@@ -46685,7 +46805,7 @@ impl<'a> Checker<'a> {
         });
         let local = scoped
             .filter(|local| !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. }))
-            .map(|local| (local.ty, local.is_var));
+            .map(|local| (local.write_ty.unwrap_or(local.ty), local.write_ty.is_some()));
         let implicit_property = (deferred_property.is_none() && local.is_none())
             .then(|| self.implicit_property_write(scope, &name))
             .flatten();
@@ -46750,19 +46870,11 @@ impl<'a> Checker<'a> {
                         self.value_diagnostic_span(value, vt),
                         "assignment",
                     );
-                    // Flow-narrow a nullable `var` to the assigned value's non-null type
-                    // (`var x: Int?; x = 10` → reads as `Int`), matching kotlinc's smart-cast.
-                    // Only when the value is genuinely non-null, and the `var` is never written
-                    // inside a closure (which could reset it to null on a deferred path). A
-                    // reassignment that is nullable (or the var is closure-written) clears any
-                    // prior narrowing so a later read widens back to the declared type.
+                    // A write replaces the prior data-flow fact with the assigned value's exact
+                    // subtype, or clears it when the value is as wide as storage / unstable.
                     if is_var {
-                        let narrow = lty.is_nullable()
-                            && !vt.is_nullable()
-                            && !matches!(vt, Ty::Null | Ty::Error)
-                            && vt != Ty::Nothing
-                            && !self.fn_closure_reassigned.contains(&name);
-                        self.set_local_narrow(scope, &name, narrow.then_some(vt));
+                        let narrowing = self.assignment_narrowing(&name, lty, vt);
+                        self.set_local_narrow(scope, &name, narrowing);
                     }
                 }
                 None => {
