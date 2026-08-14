@@ -5677,10 +5677,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter and an `Object` return — so a type parameter appearing only in RETURN position erases
   identically on both sides and no bridge exists to build (probed: kotlinc emits a single
   `byId(int, Continuation)` for `class RealRepo : Repo<Cfg> { override suspend fun byId(id: Int):
-  Cfg? }`). The suspend-erasure-bridge lowering gate and both bridge-derivation refusals
-  (superclass and interface-obligation paths) now require a VALUE-parameter erasure difference —
-  a reference-typed parameter — before skipping; all-primitive-parameter suspend overrides of
-  generic supertypes compile and run. Test: `tests/generic_suspend_member_return_e2e.rs`
+  Cfg? }`). The JVM bridge pass compares the semantic parameter shapes in both its superclass and
+  interface-obligation paths and skips only when a VALUE-parameter erasure difference remains;
+  common lowering does not pre-classify bridge needs from source type spellings. Return-only
+  generic suspend overrides therefore compile and run. Test:
+  `tests/generic_suspend_member_return_e2e.rs`
   (krusty-built by default).
 
 - **Value-class-mangled suspend functions emit their `$default` synthetic.** The CPS-appended
