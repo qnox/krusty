@@ -147,7 +147,8 @@ fn zero_arg_generic_member_binds_from_argument_position() {
         \x20 val direct: String = sink.accept(source.provide())\n\
         \x20 direct.length\n\
         }\n";
-    let Some(diagnostics) = common::checker_diags_against("member_matcher_arg", MATCHER_LIB, MAIN)
+    let Some(diagnostics) =
+        common::checker_diags_against_ref("member_matcher_arg", MATCHER_LIB, MAIN)
     else {
         return;
     };

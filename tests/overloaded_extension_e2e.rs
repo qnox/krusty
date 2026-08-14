@@ -259,7 +259,7 @@ fn internal_extension_is_visible_across_files_in_one_module() {
 
 #[test]
 fn internal_extension_is_not_visible_across_module_boundary() {
-    let Some(library) = common::compile_lib(
+    let Some(library) = common::compile_lib_ref(
         "internal_extension_boundary",
         "package dependency\ninternal fun String.secret(): String = this\n",
     ) else {

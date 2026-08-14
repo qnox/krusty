@@ -29,7 +29,7 @@ fn trailing_lambda_call_picks_the_function_over_the_constructor() {
         \x20 if (!f.configuration.pretty) return \"fail cfg\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cpctorfn", LIB, main);
+    common::expect_box_ok_against_ref("cpctorfn", LIB, main);
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn explicit_constructor_arguments_still_pick_the_constructor() {
         \x20 if (!f.configuration.pretty) return \"fail cfg\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cpctorfnexplicit", LIB, main);
+    common::expect_box_ok_against_ref("cpctorfnexplicit", LIB, main);
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn constructor_arity_error_is_still_reported_without_a_same_named_function() {
         \x20 val s = Solo { }\n\
         \x20 return s.tag\n\
         }\n";
-    if let Some(diags) = common::checker_diags_against("cpctorfnnone", LIB, main) {
+    if let Some(diags) = common::checker_diags_against_ref("cpctorfnnone", LIB, main) {
         assert!(
             diags.iter().any(|d| d.contains("configuration")),
             "expected the constructor's own parameter diagnostic, got: {diags:#?}"
@@ -67,7 +67,7 @@ fn a_call_matching_neither_candidate_is_still_reported() {
         \x20 val f = Fmt(1, 2, 3)\n\
         \x20 return f.tag\n\
         }\n";
-    if let Some(diags) = common::checker_diags_against("cpctorfnneither", LIB, main) {
+    if let Some(diags) = common::checker_diags_against_ref("cpctorfnneither", LIB, main) {
         assert!(
             !diags.is_empty(),
             "a call matching neither the constructor nor the function must be reported"
@@ -89,5 +89,5 @@ fn a_failed_constructor_probe_keeps_the_trailing_lambda_shaped_for_the_function(
         \x20 if (!c.configuration.pretty) return \"fail cfg\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cpctorfnsamearity", LIB, main);
+    common::expect_box_ok_against_ref("cpctorfnsamearity", LIB, main);
 }

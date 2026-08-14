@@ -19,22 +19,13 @@ fn javap_krusty(name: &str, src: &str, class: &str) -> Option<String> {
         .iter()
         .find(|(emitted, _)| emitted == class)
         .unwrap_or_else(|| panic!("{class} was not emitted"));
-    let java_home = std::env::var("KRUSTY_REF_JAVA_HOME")
-        .ok()
-        .or_else(|| std::env::var("JAVA_HOME").ok())?;
-    let dir = std::env::temp_dir().join(format!("krusty_lvt_{name}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch_dir().expect("scratch dir");
     let class_file = dir.join(format!("{class}.class"));
     std::fs::write(&class_file, bytes).unwrap();
-    let out = std::process::Command::new(format!("{java_home}/bin/javap"))
-        .args(["-c", "-l", "-p"])
-        .arg(&class_file)
-        .output()
-        .expect("javap runs");
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(out.status.success(), "javap failed for {class}");
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    Some(
+        common::javap(&["-c", "-l", "-p", &class_file.to_string_lossy()])
+            .expect("pooled JavaRunner unavailable"),
+    )
 }
 
 fn assert_lvt_entry(text: &str, name: &str, descriptor: &str) {

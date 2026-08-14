@@ -48,10 +48,12 @@ const LIB: &str = "package lib\n\
     object M { fun cfg(): Cfg = Cfg(\"ok\")\n\
     \x20 fun cfgOrNull(): Cfg? = Cfg(\"ok\") }\n";
 
-fn run_with_lib(tag: &str, main: &str) -> Option<String> {
+/// Reference-compiled dependency variant: these cases consume kotlinc-emitted metadata
+/// shapes krusty does not produce yet (see `common::compile_lib_ref`).
+fn run_with_lib_ref(tag: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let lib = common::compile_lib(tag, LIB)?;
+    let lib = common::compile_lib_ref(tag, LIB)?;
     common::compile_and_run_box(main, "Main", &[lib, stdlib, jdk.clone()], Some(&jdk))
 }
 
@@ -60,7 +62,8 @@ fn receiver_lambda_param_of_classpath_member_function_type() {
     const MAIN: &str = "import lib.*\n\
         fun box(): String = M.cfg().build { v.uppercase() }\n";
     assert_eq!(
-        run_with_lib("libfun_recv", MAIN).expect("receiver bound from a member's function type"),
+        run_with_lib_ref("libfun_recv", MAIN)
+            .expect("receiver bound from a member's function type"),
         "OK"
     );
 }
@@ -70,7 +73,7 @@ fn value_lambda_param_of_classpath_member_function_type() {
     const MAIN: &str = "import lib.*\n\
         fun box(): String = M.cfg().mapped { s -> s.uppercase() }\n";
     assert_eq!(
-        run_with_lib("libfun_value", MAIN).expect("value parameter bound from a function type"),
+        run_with_lib_ref("libfun_value", MAIN).expect("value parameter bound from a function type"),
         "OK"
     );
 }
@@ -84,7 +87,7 @@ fn trailing_lambda_reads_its_own_parameter_past_an_omitted_default() {
     const MAIN: &str = "import lib.*\n\
         fun box(): String = M.cfg().after { v.uppercase() }\n";
     assert_eq!(
-        run_with_lib("libfun_default", MAIN)
+        run_with_lib_ref("libfun_default", MAIN)
             .expect("trailing lambda shaped from its own parameter"),
         "OK"
     );
@@ -94,7 +97,7 @@ fn trailing_lambda_reads_its_own_parameter_past_an_omitted_default() {
 fn wrong_parameter_shape_is_not_borrowed_for_a_trailing_lambda() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let Some(lib) = common::compile_lib("libfun_default_diag", LIB) else {
+    let Some(lib) = common::compile_lib_ref("libfun_default_diag", LIB) else {
         return;
     };
     // `it` is not in scope in a `Cfg.() -> String` lambda; borrowing `pre`'s `(Int) -> Unit` shape
@@ -134,7 +137,7 @@ fn safe_call_receiver_lambda_param_of_classpath_member_function_type() {
     const MAIN: &str = "import lib.*\n\
         fun box(): String = M.cfgOrNull()?.build { v.uppercase() } ?: \"NULL\"\n";
     assert_eq!(
-        run_with_lib("libfun_safe_recv", MAIN)
+        run_with_lib_ref("libfun_safe_recv", MAIN)
             .expect("safe-call receiver bound from a member's function type"),
         "OK"
     );
@@ -147,7 +150,7 @@ fn safe_call_trailing_lambda_reads_its_own_parameter_past_an_omitted_default() {
     const MAIN: &str = "import lib.*\n\
         fun box(): String = M.cfgOrNull()?.after { v.uppercase() } ?: \"NULL\"\n";
     assert_eq!(
-        run_with_lib("libfun_safe_default", MAIN)
+        run_with_lib_ref("libfun_safe_default", MAIN)
             .expect("safe-call trailing lambda shaped from its own parameter"),
         "OK"
     );
@@ -192,7 +195,7 @@ fn safe_call_lambda_param_of_classpath_java_sam_member() {
 fn safe_call_named_lambda_arguments_resolve_in_frontend() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(lib) = common::compile_lib("libfun_safe_named", LIB) else {
+    let Some(lib) = common::compile_lib_ref("libfun_safe_named", LIB) else {
         return;
     };
     const MAIN: &str = "import lib.*\n\

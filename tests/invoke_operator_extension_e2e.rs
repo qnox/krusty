@@ -142,7 +142,8 @@ fn classpath_super_ctor_receiver_lambda_uses_shared_resolution() {
         }
     "#;
 
-    let Some(output) = common::expect_box_run_against("invoke_classpath_super", LIB, MAIN) else {
+    let Some(output) = common::expect_box_run_against_ref("invoke_classpath_super", LIB, MAIN)
+    else {
         return; // toolchain not provisioned
     };
     assert_eq!(
@@ -178,7 +179,8 @@ fn classpath_member_extension_resolves_in_a_plain_receiver_lambda() {
         }
     "#;
 
-    let Some(output) = common::expect_box_run_against("invoke_classpath_direct", LIB, MAIN) else {
+    let Some(output) = common::expect_box_run_against_ref("invoke_classpath_direct", LIB, MAIN)
+    else {
         return; // toolchain not provisioned
     };
     assert_eq!(output, "OK");
@@ -211,7 +213,7 @@ fn inherited_classpath_member_extension_uses_the_common_dispatch_hierarchy() {
         }
     "#;
 
-    let Some(output) = common::expect_box_run_against("invoke_classpath_inherited", LIB, MAIN)
+    let Some(output) = common::expect_box_run_against_ref("invoke_classpath_inherited", LIB, MAIN)
     else {
         return; // toolchain not provisioned
     };
@@ -240,7 +242,7 @@ fn generic_classpath_dispatch_binds_its_member_extension_receiver() {
     "#;
 
     let Some(output) =
-        common::expect_box_run_against("invoke_classpath_generic_dispatch", LIB, MAIN)
+        common::expect_box_run_against_ref("invoke_classpath_generic_dispatch", LIB, MAIN)
     else {
         return; // toolchain not provisioned
     };
@@ -285,7 +287,8 @@ fn suspend_classpath_member_extension_is_a_suspension_point() {
         }
     "#;
 
-    let Some(output) = common::expect_box_run_against("invoke_classpath_suspend_member", LIB, MAIN)
+    let Some(output) =
+        common::expect_box_run_against_ref("invoke_classpath_suspend_member", LIB, MAIN)
     else {
         return; // toolchain not provisioned
     };
@@ -390,7 +393,7 @@ fn classpath_member_extension_is_not_exposed_as_an_ordinary_dispatch_member() {
     "#;
 
     let Some(diagnostics) =
-        common::checker_diags_against("invoke_classpath_not_plain_member", LIB, MAIN)
+        common::checker_diags_against_ref("invoke_classpath_not_plain_member", LIB, MAIN)
     else {
         return; // toolchain not provisioned
     };

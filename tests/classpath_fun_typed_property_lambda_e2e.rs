@@ -33,7 +33,7 @@ fn a_lambda_assigned_to_a_classpath_receiver_fun_typed_property_binds_shape() {
         \x20 if (r != \"S:T\") return \"fail: \" + r\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cpfuntypedprophandler", LIB, main);
+    common::expect_box_ok_against_ref("cpfuntypedprophandler", LIB, main);
 }
 
 /// The READ side of the same property: `val h = c.handler ?: return` must carry the full shape —
@@ -55,7 +55,7 @@ fn a_read_classpath_receiver_fun_typed_property_invokes_receiver_style() {
         \x20 if (r != \"S:T\") return \"fail: \" + r\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cpfuntypedpropread", LIB, main);
+    common::expect_box_ok_against_ref("cpfuntypedpropread", LIB, main);
 }
 
 /// A SUSPEND fun-typed classpath property (`var onEvent: (suspend (Req) -> Resp)? = null`).
@@ -75,7 +75,7 @@ fn a_lambda_assigned_to_a_classpath_suspend_fun_typed_property_checks_clean() {
         \x20 c.onEvent = { req -> Resp(req.tag) }\n\
         }\n";
     if let Some(diagnostics) =
-        common::checker_diags_against("cpfuntypedpropsuspend", SUSPEND_LIB, main)
+        common::checker_diags_against_ref("cpfuntypedpropsuspend", SUSPEND_LIB, main)
     {
         assert!(
             diagnostics.is_empty(),
@@ -103,7 +103,7 @@ fn a_classpath_member_fun_typed_return_canonicalizes_collections() {
         \x20 if (n != 5) return \"fail: \" + n\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cpfunretcanon", MAKER_LIB, main);
+    common::expect_box_ok_against_ref("cpfunretcanon", MAKER_LIB, main);
 }
 
 #[test]
@@ -120,5 +120,5 @@ fn a_lambda_assigned_to_a_classpath_plain_fun_typed_property_infers_params() {
         \x20 if (b.apply(2, 3) != 5) return \"fail: \" + b.apply(2, 3)\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against("cpfuntypedpropplain", PLAIN_LIB, main);
+    common::expect_box_ok_against_ref("cpfuntypedpropplain", PLAIN_LIB, main);
 }

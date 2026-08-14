@@ -8,7 +8,7 @@ use super::common;
 fn classpath_enum_regex_and_value_class_property() {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
-    let Some(libout) = common::compile_lib(
+    let Some(libout) = common::compile_lib_ref(
         "cervc",
         "package lib\n\
          enum class Kind { PENDING, DONE }\n\

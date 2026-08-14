@@ -111,5 +111,5 @@ fun box(): String {
 }
 "#;
 
-    common::expect_box_ok_against("classpath_iterator_element_parameter", LIBRARY, MAIN);
+    common::expect_box_ok_against_ref("classpath_iterator_element_parameter", LIBRARY, MAIN);
 }

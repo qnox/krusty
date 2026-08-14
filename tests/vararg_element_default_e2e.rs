@@ -45,5 +45,5 @@ fn generic_vararg_element_call_uses_the_declared_slot_before_defaults() {
                 \u{20} return if (numbers == \"1:2\") \"OK\" else \"numbers: \" + numbers\n\
                 }\n";
 
-    common::expect_box_ok_against("generic_vararg_element_default", lib, main);
+    common::expect_box_ok_against_ref("generic_vararg_element_default", lib, main);
 }

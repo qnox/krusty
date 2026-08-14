@@ -229,7 +229,7 @@ fun box(): String {\n\
 #[test]
 fn mangled_suspend_classpath_call_threads_its_continuation() {
     let stdlib = common::stdlib_jar();
-    let Some(lib) = common::compile_libs(
+    let Some(lib) = common::compile_libs_ref(
         "UMangledSuspendLib",
         &[(
             "Lib.kt",
