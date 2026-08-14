@@ -341,43 +341,106 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
 /// resolves where it was written.
 fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
     use crate::ast::{Decl, FunBody, Stmt, StmtId};
-    let mut owners: Vec<(StmtId, String)> = Vec::new();
-    let record = |file: &File, body: &FunBody, owner: String, out: &mut Vec<(StmtId, String)>| {
+    let mut owners: Vec<(StmtId, String, Option<String>)> = Vec::new();
+    let record = |file: &File,
+                  body: &FunBody,
+                  owner: String,
+                  classifier_scope: Option<String>,
+                  out: &mut Vec<(StmtId, String, Option<String>)>| {
         let (FunBody::Expr(root) | FunBody::Block(root)) = body else {
             return;
         };
         for stmt in local_class_stmts(file, *root) {
-            out.push((stmt, owner.clone()));
+            out.push((stmt, owner.clone(), classifier_scope.clone()));
         }
     };
+    let record_property =
+        |file: &File,
+         property: &PropDecl,
+         owner: String,
+         classifier_scope: Option<String>,
+         out: &mut Vec<(StmtId, String, Option<String>)>| {
+            for body in property
+                .init
+                .map(FunBody::Expr)
+                .into_iter()
+                .chain(property.delegate.map(FunBody::Expr))
+                .chain(property.getter.iter().cloned())
+                .chain(
+                    property
+                        .setter
+                        .iter()
+                        .filter_map(|setter| setter.body.clone()),
+                )
+            {
+                record(file, &body, owner.clone(), classifier_scope.clone(), out);
+            }
+        };
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) => record(file, &f.body, f.name.clone(), &mut owners),
+            Decl::Fun(f) => record(file, &f.body, f.name.clone(), None, &mut owners),
             Decl::Class(c) => {
                 for m in &c.methods {
-                    record(file, &m.body, format!("{}.{}", c.name, m.name), &mut owners);
+                    record(
+                        file,
+                        &m.body,
+                        format!("{}.{}", c.name, m.name),
+                        None,
+                        &mut owners,
+                    );
                 }
                 // A class body's `init` blocks and property initializers run in the constructor;
                 // kotlinc names a local class declared there after the CLASS.
                 for step in &c.init_order {
                     if let crate::ast::ClassInit::Block(b) = step {
-                        record(file, &FunBody::Block(*b), c.name.clone(), &mut owners);
+                        record(file, &FunBody::Block(*b), c.name.clone(), None, &mut owners);
                     }
                 }
                 for p in &c.body_props {
-                    if let Some(init) = p.init {
-                        record(file, &FunBody::Expr(init), c.name.clone(), &mut owners);
-                    }
+                    record_property(file, p, c.name.clone(), None, &mut owners);
                 }
                 // A primary-constructor parameter default is evaluated in the constructor too.
                 for d in c.props.iter().filter_map(|p| p.default) {
-                    record(file, &FunBody::Expr(d), c.name.clone(), &mut owners);
+                    record(file, &FunBody::Expr(d), c.name.clone(), None, &mut owners);
+                }
+                // An enum entry's anonymous subclass is a real lexical classifier scope even though
+                // it has no standalone `Decl`. Preserve both its naming path and its exact classifier
+                // owner so a hoisted local class can see entry-local nested declarations.
+                for entry in &c.enum_entries {
+                    let entry_scope = format!("{}.{}", c.name, entry.name);
+                    for method in &entry.methods {
+                        record(
+                            file,
+                            &method.body,
+                            format!("{entry_scope}.{}", method.name),
+                            Some(entry_scope.clone()),
+                            &mut owners,
+                        );
+                    }
+                    for property in &entry.props {
+                        record_property(
+                            file,
+                            property,
+                            entry_scope.clone(),
+                            Some(entry_scope.clone()),
+                            &mut owners,
+                        );
+                    }
+                    for step in &entry.init_order {
+                        if let crate::ast::ClassInit::Block(body) = step {
+                            record(
+                                file,
+                                &FunBody::Block(*body),
+                                entry_scope.clone(),
+                                Some(entry_scope.clone()),
+                                &mut owners,
+                            );
+                        }
+                    }
                 }
             }
             Decl::Property(p) => {
-                if let Some(init) = p.init {
-                    record(file, &FunBody::Expr(init), p.name.clone(), &mut owners);
-                }
+                record_property(file, p, p.name.clone(), None, &mut owners);
             }
         }
     }
@@ -386,10 +449,13 @@ fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
         // two local classes that would otherwise share a name and an (empty) owner.
         let owner = format!("script${:x}", script_scope.unwrap_or_default());
         for stmt in local_class_stmts(file, root) {
-            owners.push((stmt, owner.clone()));
+            owners.push((stmt, owner.clone(), None));
         }
     }
-    let owner_of: std::collections::HashMap<StmtId, String> = owners.into_iter().collect();
+    let owner_of: std::collections::HashMap<StmtId, (String, Option<String>)> = owners
+        .into_iter()
+        .map(|(statement, owner, classifier_scope)| (statement, (owner, classifier_scope)))
+        .collect();
     let hoisted: Vec<(StmtId, crate::ast::ClassDecl)> = file
         .stmt_arena
         .iter()
@@ -404,7 +470,7 @@ fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
     let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (stmt, mut c) in hoisted {
         let mut name = match owner_of.get(&stmt) {
-            Some(owner) => format!("{owner}.{}", c.name),
+            Some((owner, _)) => format!("{owner}.{}", c.name),
             None => format!("loc{}.{}", stmt.0, c.name),
         };
         if !taken.insert(name.clone()) {
@@ -414,6 +480,9 @@ fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
         // A nested type hoisted out of this local class was named from the local class's SOURCE
         // name (`Local.Inner`); requalifying the outer without it would orphan the nested one.
         let qualifier = name.strip_suffix(&c.name).map(str::to_string);
+        let classifier_scope = owner_of
+            .get(&stmt)
+            .and_then(|(_, classifier_scope)| classifier_scope.clone());
         if let (Some(qualifier), Some(nested)) =
             (qualifier, file.local_class_nested.get(&stmt).cloned())
         {
@@ -429,6 +498,10 @@ fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
                         }
                     }
                 }
+                if let Some(classifier_scope) = &classifier_scope {
+                    file.local_class_lexical_classifier_owners
+                        .insert(did, classifier_scope.clone());
+                }
             }
         }
         c.name = name;
@@ -436,6 +509,10 @@ fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
         file.decls.push(id);
         file.mark_local_declaration(id);
         file.local_class_decls.insert(stmt, id);
+        if let Some(classifier_scope) = classifier_scope {
+            file.local_class_lexical_classifier_owners
+                .insert(id, classifier_scope);
+        }
     }
 }
 
@@ -1096,7 +1173,7 @@ impl<'a> Parser<'a> {
                         "file annotations must precede script statements",
                     );
                 }
-                self.skip_annotation();
+                self.parse_annotation();
                 continue;
             }
             let script_file_item =
@@ -1295,13 +1372,21 @@ impl<'a> Parser<'a> {
                 }
                 // `typealias Name[<T,...>] = Type`
                 TokenKind::Ident if self.keyword_text("typealias") => {
+                    let start = self.tok().span;
                     self.bump(); // `typealias`
                     let alias = if self.at(TokenKind::Ident) {
                         self.bump().text(self.src).to_string()
                     } else {
                         String::new()
                     };
-                    let alias_targs = self.parse_type_args(); // `<T, R>` if present
+                    let alias_type_params = if self.at(TokenKind::Lt) {
+                        self.parse_type_params(start.lo).0
+                    } else {
+                        Vec::new()
+                    };
+                    if !alias_type_params.is_empty() {
+                        self.file.type_alias_declaration_starts.insert(start.lo);
+                    }
                     self.eat(TokenKind::Eq);
                     // Parse and retain every alias's complete target shape. The simple target edge
                     // below supports legacy constructor/name lookup; metadata emission and structural
@@ -1313,33 +1398,17 @@ impl<'a> Parser<'a> {
                     // Parse the target type name, including dotted FQNs (e.g. java.lang.Exception).
                     let target = if fn_target {
                         let t = self.parse_type();
-                        // Every declared type parameter must be a SIMPLE name (no bounds/variance are
-                        // parsed into `parse_type_args` results beyond the name; a non-simple entry —
-                        // e.g. a `*` projection — declines recording).
-                        let tparam_names: Option<Vec<String>> = alias_targs
-                            .iter()
-                            .map(|a| {
-                                (a.fun_params.is_empty()
-                                    && a.targs.is_empty()
-                                    && !a.name.is_empty()
-                                    && a.name != "<fun>"
-                                    && a.name != "*")
-                                    .then(|| a.name.clone())
-                            })
-                            .collect();
                         let is_fun = !t.fun_params.is_empty() || t.name == "<fun>";
-                        if let Some(tparam_names) = tparam_names {
-                            // A class target can contain a function type argument. It still needs
-                            // structural expansion so those arguments survive (`Handlers` must mean
-                            // `Map<String, (Int) -> Int>`, not raw `Map`); the presence of the nested
-                            // arrow must not classify the alias itself as a function type.
-                            if !alias.is_empty() {
-                                self.file.type_alias_fun.push((
-                                    alias.clone(),
-                                    tparam_names,
-                                    t.clone(),
-                                ));
-                            }
+                        // A class target can contain a function type argument. It still needs
+                        // structural expansion so those arguments survive (`Handlers` must mean
+                        // `Map<String, (Int) -> Int>`, not raw `Map`); the presence of the nested
+                        // arrow must not classify the alias itself as a function type.
+                        if !alias.is_empty() {
+                            self.file.type_alias_fun.push((
+                                alias.clone(),
+                                alias_type_params.clone(),
+                                t.clone(),
+                            ));
                         }
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
@@ -1357,27 +1426,14 @@ impl<'a> Parser<'a> {
                         // Discarding the arguments made `typealias IntList = List<Int>` an alias for a
                         // raw `List`, so `for (x in xs)` handed back the erased bound.
                         let t = self.parse_type();
-                        let tparam_names: Option<Vec<String>> = alias_targs
-                            .iter()
-                            .map(|a| {
-                                (a.fun_params.is_empty()
-                                    && a.targs.is_empty()
-                                    && !a.name.is_empty()
-                                    && a.name != "<fun>"
-                                    && a.name != "*")
-                                    .then(|| a.name.clone())
-                            })
-                            .collect();
                         // Every alias keeps its structural declaration, including a generic alias over
                         // a non-generic target and a parameterless bare target.
-                        if let Some(tparam_names) = tparam_names {
-                            if !alias.is_empty() {
-                                self.file.type_alias_fun.push((
-                                    alias.clone(),
-                                    tparam_names,
-                                    t.clone(),
-                                ));
-                            }
+                        if !alias.is_empty() {
+                            self.file.type_alias_fun.push((
+                                alias.clone(),
+                                alias_type_params.clone(),
+                                t.clone(),
+                            ));
                         }
                         // Skip any remaining tokens on this line.
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
@@ -1569,7 +1625,7 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_newlines();
             if self.at(TokenKind::At) {
-                let (name, args) = self.skip_annotation();
+                let (name, args) = self.parse_annotation();
                 if let Some(name) = name {
                     self.pending_annotations.push(name);
                     self.pending_annotation_args.push(args);
@@ -1652,7 +1708,7 @@ impl<'a> Parser<'a> {
         let nested = self.parse_nested_type_decl();
         let implements = nested.supertypes.iter().any(|s| s.name == iface)
             || nested.base_class.as_deref() == Some(iface);
-        if nested.is_interface() || implements {
+        if nested.is_interface() || nested.is_annotation() || implements {
             self.register_hoisted_nested_classifier(iface, start, nested, modifiers);
         }
     }
@@ -1675,7 +1731,9 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident if self.keyword_text("annotation") => {
                 self.bump();
-                self.parse_class()
+                let mut declaration = self.parse_class();
+                declaration.kind = ClassKind::Annotation;
+                declaration
             }
             TokenKind::Ident if self.keyword_text("sealed") => {
                 self.bump();
@@ -1685,9 +1743,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Consume one declaration annotation and retain its full interned name. `None` for a use-site
-    /// `@file:`/`@get:` target, which does not apply to the declaration itself.
-    fn skip_annotation(&mut self) -> (Option<AnnotationRef>, Vec<ExprId>) {
+    /// Consume one annotation and retain its complete classifier reference plus arguments. `None` for
+    /// a use-site `@file:`/`@get:` target, which does not apply to the declaration/type parameter itself.
+    fn parse_annotation(&mut self) -> (Option<AnnotationRef>, Vec<ExprId>) {
         self.bump(); // '@'
                      // optional use-site target: `file:`, `get:`, `param:`, ...
         let mut use_site = false;
@@ -1703,6 +1761,31 @@ impl<'a> Parser<'a> {
             self.bump(); // ':'
             use_site = true;
         }
+        let (qname, annotation_span) = self.parse_annotation_reference();
+        let args = self.parse_annotation_args();
+        // A `@file:Foo(args)` annotation applies to the file, not the next declaration — record it for
+        // plugins (e.g. `@file:UseContextualSerialization(MyDate::class)`) rather than dropping it.
+        if target == "file" && !qname.is_empty() {
+            let simple = qname.rsplit('.').next().unwrap_or(&qname).to_string();
+            self.file.file_annotations.push((simple, args.clone()));
+        }
+        if use_site || qname.is_empty() {
+            (None, args)
+        } else {
+            (
+                Some(AnnotationRef {
+                    name: qname,
+                    span: annotation_span,
+                }),
+                args,
+            )
+        }
+    }
+
+    /// Consume the classifier reference (and optional type arguments) shared by declaration, type-use,
+    /// and type-parameter annotations. The source spelling is retained only until the common classifier
+    /// resolver commits the exact annotation identity for this occurrence.
+    fn parse_annotation_reference(&mut self) -> (String, Span) {
         let annotation_span = self.tok().span;
         let qname = self.parse_qualified_name();
         if !qname.is_empty() {
@@ -1731,24 +1814,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.parse_type_args(); // `@Foo<Bar>` (rare) — real type-arg parse
-        let args = self.parse_annotation_args();
-        // A `@file:Foo(args)` annotation applies to the file, not the next declaration — record it for
-        // plugins (e.g. `@file:UseContextualSerialization(MyDate::class)`) rather than dropping it.
-        if target == "file" && !qname.is_empty() {
-            let simple = qname.rsplit('.').next().unwrap_or(&qname).to_string();
-            self.file.file_annotations.push((simple, args.clone()));
-        }
-        if use_site || qname.is_empty() {
-            (None, args)
-        } else {
-            (
-                Some(AnnotationRef {
-                    name: qname,
-                    span: annotation_span,
-                }),
-                args,
-            )
-        }
+        (qname, annotation_span)
     }
 
     /// Parse an annotation argument list `( (name =)? value ,* )` through the real grammar, returning
@@ -1816,7 +1882,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBracket, "']'");
             None
         } else if self.at(TokenKind::At) {
-            self.skip_annotation();
+            self.parse_annotation();
             None
         } else if self.at(TokenKind::Star) {
             // A spread argument in an annotation (`@A(*arrayOf("O"), "K")` — a `vararg` annotation
@@ -1854,7 +1920,7 @@ impl<'a> Parser<'a> {
                      // erased, but retained so they scope over the receiver, type, and accessor bodies.
         let (type_params, _tp_non_null, _tp_reified, type_param_bounds, _) =
             if self.at(TokenKind::Lt) {
-                self.parse_type_params()
+                self.parse_type_params(start.lo)
             } else {
                 Default::default()
             };
@@ -2206,7 +2272,7 @@ impl<'a> Parser<'a> {
         }
         self.skip_plain_newlines();
         while self.at(TokenKind::At) {
-            let _ = self.skip_annotation();
+            let _ = self.parse_annotation();
             self.skip_plain_newlines();
         }
         let name = if self.at(TokenKind::Ident) {
@@ -2456,7 +2522,7 @@ impl<'a> Parser<'a> {
                     let mut entry_ann_names: Vec<AnnotationRef> = Vec::new();
                     let mut entry_ann_args: Vec<Vec<ExprId>> = Vec::new();
                     while self.at(TokenKind::At) {
-                        let (name, args) = self.skip_annotation();
+                        let (name, args) = self.parse_annotation();
                         if let Some(n) = name {
                             entry_ann_names.push(n);
                             entry_ann_args.push(args);
@@ -2855,7 +2921,7 @@ impl<'a> Parser<'a> {
         }
         let (type_params, non_null_type_params, reified_type_params, type_param_bounds, _) =
             if self.at(TokenKind::Lt) {
-                self.parse_type_params()
+                self.parse_type_params(start.lo)
             } else {
                 (
                     Vec::new(),
@@ -3201,6 +3267,18 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident if self.keyword_text("interface") => (self.parse_interface(), false),
             TokenKind::Ident
+                if self.keyword_text("annotation")
+                    && self
+                        .t
+                        .get(self.i + 1)
+                        .is_some_and(|token| token.kind == TokenKind::KwClass) =>
+            {
+                self.bump(); // `annotation`
+                let mut nested = self.parse_class();
+                nested.kind = ClassKind::Annotation;
+                (nested, false)
+            }
+            TokenKind::Ident
                 if self.keyword_text("enum")
                     && self
                         .t
@@ -3286,7 +3364,7 @@ impl<'a> Parser<'a> {
         };
         let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
         {
-            self.parse_type_params()
+            self.parse_type_params(start.lo)
         } else {
             (
                 Vec::new(),
@@ -3785,7 +3863,7 @@ impl<'a> Parser<'a> {
         let name = self.ident_or_error("interface name");
         let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
         {
-            self.parse_type_params()
+            self.parse_type_params(start.lo)
         } else {
             (
                 Vec::new(),
@@ -4244,18 +4322,11 @@ impl<'a> Parser<'a> {
         let mut type_anns = Vec::new();
         while self.at(TokenKind::At) {
             self.bump(); // '@'
-            let annotation_span = self.tok().span;
-            let qname = self.parse_qualified_name();
-            if !qname.is_empty() {
-                self.file
-                    .detached_type_refs
-                    .push(simple_type_ref(&qname, annotation_span));
-            }
-            self.parse_type_args(); // `@Foo<Bar>` — type arguments on the annotation
-                                    // An argument-bearing type annotation `@Ann("a") String`. A following `(` is annotation
-                                    // args ONLY if it is NOT the parameter list of a function type — `@Composable () -> Unit`
-                                    // has the `(` belong to the type. Disambiguate by peeking past the balanced `(…)`: an
-                                    // `->` after it means a function type (leave the `(`), otherwise consume the args.
+            let (qname, annotation_span) = self.parse_annotation_reference();
+            // An argument-bearing type annotation `@Ann("a") String`. A following `(` is annotation
+            // args ONLY if it is NOT the parameter list of a function type — `@Composable () -> Unit`
+            // has the `(` belong to the type. Disambiguate by peeking past the balanced `(…)`: an
+            // `->` after it means a function type (leave the `(`), otherwise consume the args.
             if self.at(TokenKind::LParen) && !self.paren_group_precedes_arrow(self.i) {
                 let _ = self.parse_annotation_args();
             }
@@ -4664,6 +4735,7 @@ impl<'a> Parser<'a> {
     #[allow(clippy::type_complexity)]
     fn parse_type_params(
         &mut self,
+        declaration_start: u32,
     ) -> (
         Vec<String>,
         std::collections::HashSet<String>,
@@ -4680,28 +4752,41 @@ impl<'a> Parser<'a> {
             return (names, non_null, reified, bounds, variances);
         }
         loop {
-            self.skip_newlines();
-            // Skip variance/reified modifiers. `in` is a keyword; `out`/`reified` are idents.
+            self.skip_plain_newlines();
+            // Annotations and variance/reified modifiers may be interleaved. `in` is a keyword;
+            // `out`/`reified` are idents.
             let mut is_reified = false;
             let mut variance = crate::types::TypeVariance::Invariant;
-            while (self.at(TokenKind::Ident) && self.keyword_text_any(&["reified", "out"]))
-                || self.at(TokenKind::KwIn)
-            {
-                if self.at(TokenKind::Ident) && self.keyword_text("reified") {
+            let mut annotations = Vec::new();
+            let mut annotation_args = Vec::new();
+            loop {
+                self.skip_plain_newlines();
+                if self.at(TokenKind::At) {
+                    let (annotation, args) = self.parse_annotation();
+                    if let Some(annotation) = annotation {
+                        annotations.push(annotation);
+                        annotation_args.push(args);
+                    }
+                } else if self.at(TokenKind::Ident) && self.keyword_text("reified") {
                     is_reified = true;
+                    self.bump();
                 } else if self.at(TokenKind::Ident) && self.keyword_text("out") {
                     variance = crate::types::TypeVariance::Out;
+                    self.bump();
                 } else if self.at(TokenKind::KwIn) {
                     variance = crate::types::TypeVariance::In;
+                    self.bump();
+                } else {
+                    break;
                 }
-                self.bump();
             }
-            let tname = if self.at(TokenKind::Ident) {
+            let (tname, tname_span) = if self.at(TokenKind::Ident) {
+                let span = self.tok().span;
                 let n = self.text().to_string();
                 self.bump();
-                n
+                (n, span)
             } else {
-                String::new()
+                (String::new(), self.tok().span)
             };
             if !tname.is_empty() {
                 names.push(tname.clone());
@@ -4709,8 +4794,22 @@ impl<'a> Parser<'a> {
                 if is_reified {
                     reified.insert(tname.clone());
                 }
+                if !annotations.is_empty() {
+                    self.file
+                        .declaration_type_parameter_annotations
+                        .entry(declaration_start)
+                        .or_default()
+                        .push(AnnotatedTypeParameter {
+                            name: tname.clone(),
+                            span: tname_span,
+                            annotations,
+                            annotation_args,
+                        });
+                }
             }
+            self.skip_plain_newlines();
             if self.eat(TokenKind::Colon) {
+                self.skip_plain_newlines();
                 let bound = self.parse_type();
                 // `T: Any` → the type param can't be null (erased to Object but non-null).
                 if bound.name == "Any" && !bound.nullable() && !tname.is_empty() {
@@ -4722,6 +4821,7 @@ impl<'a> Parser<'a> {
                     bounds.push((tname.clone(), bound));
                 }
             }
+            self.skip_plain_newlines();
             if !self.eat(TokenKind::Comma) {
                 break;
             }
@@ -5383,7 +5483,7 @@ impl<'a> Parser<'a> {
         // meaning here — skip them and parse the statement they decorate.
         if self.at(TokenKind::At) {
             while self.at(TokenKind::At) {
-                self.skip_annotation();
+                self.parse_annotation();
                 self.skip_newlines();
             }
             return self.parse_stmt();
@@ -6788,7 +6888,7 @@ impl<'a> Parser<'a> {
         // annotations compose with labels, unary operators, and anonymous functions.
         if self.at(TokenKind::At) {
             while self.at(TokenKind::At) {
-                self.skip_annotation();
+                self.parse_annotation();
                 self.skip_newlines();
             }
             return self.parse_prefix();
@@ -7728,7 +7828,7 @@ impl<'a> Parser<'a> {
                 // Annotations on the catch parameter (`catch (@Marker e: E)`): consume and discard —
                 // a catch parameter is never referenced by annotation, so its markers carry no codegen.
                 while self.at(TokenKind::At) {
-                    self.skip_annotation();
+                    self.parse_annotation();
                     self.skip_newlines();
                 }
                 let name = self.ident_or_error("catch parameter name");
@@ -9356,6 +9456,150 @@ class HeaderHost {
         assert!(
             anns_of("plain").is_empty(),
             "an unannotated function type has no recorded annotations"
+        );
+    }
+
+    #[test]
+    fn parses_annotations_on_declaration_type_parameters() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+package qualified
+
+annotation class Marker(val value: String)
+
+inline fun <
+    @qualified.Marker("function") T,
+    reified @Marker("reified") U : Any,
+> choose(value: T): T = value
+
+class Box<
+    @Marker("class") V,
+>
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+
+        assert!(
+            !diagnostics.has_errors(),
+            "declaration type-parameter annotations should parse: {}",
+            diagnostics.render("test.kt", source)
+        );
+        let choose = file
+            .decl_arena
+            .iter()
+            .find_map(|declaration| match declaration {
+                Decl::Fun(function) if function.name == "choose" => Some(function),
+                _ => None,
+            })
+            .expect("choose function");
+        assert_eq!(choose.type_params, ["T", "U"]);
+        assert!(choose.reified_type_params.contains("U"));
+        let class = file
+            .decl_arena
+            .iter()
+            .find_map(|declaration| match declaration {
+                Decl::Class(class) if class.name == "Box" => Some(class),
+                _ => None,
+            })
+            .expect("Box class");
+        assert_eq!(class.type_params(), &["V"]);
+        assert_eq!(
+            file.declaration_type_parameter_annotations[&choose.signature_span.lo]
+                .iter()
+                .chain(file.declaration_type_parameter_annotations[&class.span.lo].iter(),)
+                .map(|parameter| (
+                    parameter.name.as_str(),
+                    &source[parameter.span.lo as usize..parameter.span.hi as usize],
+                    parameter
+                        .annotations
+                        .iter()
+                        .map(|annotation| annotation.name.as_str())
+                        .collect::<Vec<_>>(),
+                    parameter.annotation_args.len(),
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("T", "T", vec!["qualified.Marker"], 1),
+                ("U", "U", vec!["Marker"], 1),
+                ("V", "V", vec!["Marker"], 1),
+            ]
+        );
+        assert_eq!(
+            file.declaration_type_parameter_annotations[&choose.signature_span.lo]
+                .iter()
+                .chain(file.declaration_type_parameter_annotations[&class.span.lo].iter(),)
+                .map(|parameter| {
+                    file.const_string_value(parameter.annotation_args[0][0])
+                        .expect("string annotation argument")
+                        .to_lossy()
+                })
+                .collect::<Vec<_>>(),
+            ["function", "reified", "class"]
+        );
+    }
+
+    #[test]
+    fn type_parameter_annotation_newlines_are_not_semicolons() {
+        let valid = r#"
+annotation class Marker
+
+class BeforeClose<@Marker T
+>
+
+class BeforeComma<@Marker T
+, U>
+
+class BeforeBound<@Marker T
+: Any>
+
+class AfterBoundColon<@Marker T:
+Any>
+"#;
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(valid, &mut diagnostics);
+        let _ = parse(valid, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "physical newlines in a type-parameter list should parse: {}",
+            diagnostics.render("valid.kt", valid)
+        );
+
+        let invalid = "annotation class Marker\nclass Bad<@Marker; T>";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(invalid, &mut diagnostics);
+        let _ = parse(invalid, &tokens, &mut diagnostics);
+        assert!(
+            diagnostics.has_errors(),
+            "an explicit semicolon cannot stand for NL inside a type-parameter declaration"
+        );
+    }
+
+    #[test]
+    fn typealias_type_parameter_annotations_have_declaration_ownership() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+annotation class Marker
+typealias Box<@Marker T> = List<T>
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "{}",
+            diagnostics.render("test.kt", source)
+        );
+
+        let owner = source.find("typealias").expect("typealias offset") as u32;
+        let parameters = file
+            .declaration_type_parameter_annotations
+            .get(&owner)
+            .expect("typealias type-parameter annotations");
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(parameters[0].name, "T");
+        assert_eq!(parameters[0].annotations[0].name, "Marker");
+        assert!(
+            !file.type_annotations.contains_key(&parameters[0].span.lo),
+            "a declaration annotation must not be recorded as a type-use annotation"
         );
     }
 
