@@ -9702,6 +9702,19 @@ fn infer_lit_ty_p(
                             return *ret;
                         }
                     }
+                    // A FULLY-QUALIFIED constructor (`java.util.concurrent.CopyOnWriteArrayList<
+                    // Item>()`, `pkg.Outer.Nested()`): when the WHOLE callee path names a
+                    // classifier, this is the qualified spelling of the simple-name constructor arm
+                    // above — keep explicit type arguments so an inferred property retains its
+                    // element type instead of failing with "cannot infer". A static/companion call
+                    // (`java.lang.String.valueOf(x)`) never resolves its method segment as a
+                    // classifier and falls through to the receiver-typed paths below.
+                    if let Some(internal) = type_receiver(file, *callee, class_names, props, src) {
+                        if !call_targs.is_empty() {
+                            return Ty::Obj(internal, Box::leak(call_targs.into_boxed_slice()));
+                        }
+                        return Ty::obj_name(internal);
+                    }
                     let arg_tys: Vec<Ty> = args
                         .iter()
                         .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, env))
