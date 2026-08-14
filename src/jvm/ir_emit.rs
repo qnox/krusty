@@ -235,8 +235,17 @@ fn accessor_receiver_ty(access: &crate::jvm::inline::PropertyAccess, owner: &str
     Ty::obj(owner)
 }
 
-fn class_metadata_flags(c: &crate::ir::IrClass) -> u64 {
-    const VIS_PUBLIC: u64 = 3;
+fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
+    // Visibility bits: INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3 — an `internal class` must
+    // record explicit 0 so a consumer enforces the module boundary; synthesized classes without a
+    // recorded visibility stay public.
+    #[allow(non_snake_case)]
+    let VIS_PUBLIC: u64 = match ir.class_visibilities.get(&c.fq_name_id()) {
+        Some(crate::types::Visibility::Internal) => 0,
+        Some(crate::types::Visibility::Private) => 1,
+        Some(crate::types::Visibility::Protected) => 2,
+        _ => 3,
+    };
     let modality: u64 = if c.is_sealed {
         3
     } else if c.is_abstract || c.is_interface {
@@ -282,6 +291,8 @@ fn class_metadata_flags(c: &crate::ir::IrClass) -> u64 {
 fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
     let visibility: u64 = if ir.private_methods.contains(&fid) {
         1
+    } else if ir.internal_methods.contains(&fid) {
+        0 // INTERNAL — only metadata carries the module boundary
     } else {
         3
     };
@@ -292,7 +303,14 @@ fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
     } else {
         0
     };
-    (visibility << 1) | (modality << 4)
+    // `isOperator` (bit 8) — only `@Metadata` carries it; without it a consumer rejects the
+    // conventional call form (`recv(args)`, `a[i]`) with "expression is not callable".
+    let operator: u64 = if ir.operator_fns.contains(&fid) {
+        1 << 8
+    } else {
+        0
+    };
+    (visibility << 1) | (modality << 4) | operator
 }
 
 /// The primary constructor's parameter descriptors. Only the LEADING `ctor_param_count` fields are
@@ -915,33 +933,55 @@ fn build_class_metadata(
                             .collect()
                     })
                     .unwrap_or_default();
+                // A member EXTENSION realized its receiver as `params[0]` — restore it to
+                // `Function.receiver_type` so the record's value parameters are the LOGICAL ones.
+                // Side tables have DIFFERENT indexing: `fn_params` (names, defaults) holds SOURCE
+                // parameters only in registration, while `fn_param_declared_nullable` leads with
+                // the receiver when one exists — align both by the receiver offset.
+                let is_ext =
+                    ir.member_ext_receiver_fns.contains(&fid) && !metadata_params.is_empty();
+                let recv_offset = usize::from(is_ext);
+                let apply_nullable = |i_full: usize, t: crate::types::Ty| {
+                    if declared_nullable
+                        .and_then(|v| v.get(i_full))
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        crate::types::Ty::nullable(t)
+                    } else {
+                        t
+                    }
+                };
+                let receiver = is_ext.then(|| apply_nullable(0, metadata_params[0]));
+                let logical_params: Vec<(String, crate::types::Ty)> = metadata_params
+                    [recv_offset..]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let n = names
+                            .and_then(|ns| ns.get(i).cloned())
+                            .unwrap_or_else(|| format!("p{i}"));
+                        (n, apply_nullable(i + recv_offset, *t))
+                    })
+                    .collect();
+                // Per-parameter DECLARES_DEFAULT_VALUE — recorded so a cross-module caller may
+                // OMIT a defaulted member argument (the `$default` synthetic realizes the call).
+                let param_defaults: Vec<bool> = ir
+                    .param_defaults(fid)
+                    .map(|ds| ds.iter().skip(recv_offset).map(|d| d.is_some()).collect())
+                    .unwrap_or_default();
                 Some(FnMeta {
                     name: name.to_string(),
-                    params: metadata_params
-                        .iter()
-                        .enumerate()
-                        .map(|(i, t)| {
-                            let n = names
-                                .and_then(|ns| ns.get(i).cloned())
-                                .unwrap_or_else(|| format!("p{i}"));
-                            let ty = if declared_nullable
-                                .and_then(|v| v.get(i))
-                                .copied()
-                                .unwrap_or(false)
-                            {
-                                crate::types::Ty::nullable(*t)
-                            } else {
-                                *t
-                            };
-                            (n, ty)
-                        })
-                        .collect(),
+                    params: logical_params,
                     ret: metadata_ret,
+                    receiver,
                     type_params: function_type_params,
                     semantic_type_params: semantic_function_type_params,
                     type_param_bounds: function_type_param_bounds,
                     flags: function_flags(ir, fid, f) | if is_suspend { FN_IS_SUSPEND } else { 0 },
                     params_have_defaults: false,
+                    param_defaults,
+                    vararg_index: ir.fn_vararg_index.get(&fid).copied(),
                     jvm_sig: declared
                         .map(|_| crate::jvm::names::method_descriptor(&f.params, f.ret)),
                     jvm_sig_name: (name != f.name).then(|| f.name.clone()),
@@ -964,6 +1004,9 @@ fn build_class_metadata(
                 type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: boxed_fn_sig(&[], f.ty),
                 jvm_sig_name: None,
             })
@@ -981,6 +1024,9 @@ fn build_class_metadata(
                 type_param_bounds: Vec::new(),
                 flags: COPY_FN_FLAGS,
                 params_have_defaults: true,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: boxed_fn_sig(&field_tys, class_ty),
                 jvm_sig_name: None,
             });
@@ -994,6 +1040,9 @@ fn build_class_metadata(
             type_param_bounds: Vec::new(),
             flags: EQUALS_FN_FLAGS,
             params_have_defaults: false,
+            receiver: None,
+            param_defaults: Vec::new(),
+            vararg_index: None,
             jvm_sig: None,
             jvm_sig_name: None,
         });
@@ -1006,6 +1055,9 @@ fn build_class_metadata(
             type_param_bounds: Vec::new(),
             flags: HASHCODE_TOSTRING_FN_FLAGS,
             params_have_defaults: false,
+            receiver: None,
+            param_defaults: Vec::new(),
+            vararg_index: None,
             jvm_sig: None,
             jvm_sig_name: None,
         });
@@ -1018,6 +1070,9 @@ fn build_class_metadata(
             type_param_bounds: Vec::new(),
             flags: HASHCODE_TOSTRING_FN_FLAGS,
             params_have_defaults: false,
+            receiver: None,
+            param_defaults: Vec::new(),
+            vararg_index: None,
             jvm_sig: None,
             jvm_sig_name: None,
         });
@@ -1037,6 +1092,9 @@ fn build_class_metadata(
                 type_param_bounds: Vec::new(),
                 flags: EQUALS_FN_FLAGS,
                 params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: Some(format!("({u}Ljava/lang/Object;)Z")),
                 jvm_sig_name: Some("equals-impl".into()),
             },
@@ -1049,6 +1107,9 @@ fn build_class_metadata(
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: Some(format!("({u})I")),
                 jvm_sig_name: Some("hashCode-impl".into()),
             },
@@ -1061,6 +1122,9 @@ fn build_class_metadata(
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: Some(format!("({u})Ljava/lang/String;")),
                 jvm_sig_name: Some("toString-impl".into()),
             },
@@ -1125,14 +1189,16 @@ fn build_class_metadata(
             type_param_bounds: class_type_parameters,
             captured_type_params: &c.captured_type_params,
             ctor_param_tparams: &ctor_param_tparams,
-            flags: class_metadata_flags(c),
+            flags: class_metadata_flags(ir, c),
             // An `enum class`'s primary ctor is private too — entries are the only instances.
-            primary_ctor_flags: if c.is_sealed {
-                SEALED_CTOR_FLAGS
-            } else if c.is_singleton() || !c.enum_entries.is_empty() {
-                OBJECT_CTOR_FLAGS
-            } else {
-                0
+            // A DECLARED constructor visibility (`class C protected constructor(…)`) takes
+            // precedence: the consumer must reject constructions the declaration forbids.
+            primary_ctor_flags: match ir.ctor_visibilities.get(&c.fq_name_id()) {
+                Some(crate::types::Visibility::Protected) => SEALED_CTOR_FLAGS,
+                Some(crate::types::Visibility::Private) => OBJECT_CTOR_FLAGS,
+                _ if c.is_sealed => SEALED_CTOR_FLAGS,
+                _ if c.is_singleton() || !c.enum_entries.is_empty() => OBJECT_CTOR_FLAGS,
+                _ => 0,
             },
             module_name: opts.module_name.as_deref(),
             ctor_param_defaults: &ctor_param_defaults,
@@ -3826,7 +3892,15 @@ fn emit_class(
             // A continuation class's ctor is package-private (constructed only by its own file).
             0x0000
         } else {
-            0x0001
+            // A DECLARED protected constructor reaches the JVM method too (kotlinc emits `<init>`
+            // protected). A declared PRIVATE ctor stays JVM-public for now: a companion factory
+            // calls it cross-class, which kotlinc routes through the `DefaultConstructorMarker`
+            // accessor — until krusty models that route, ACC_PRIVATE would be an
+            // IllegalAccessError; `@Metadata` still records the declared privacy.
+            match ir.ctor_visibilities.get(&c.fq_name_id()) {
+                Some(crate::types::Visibility::Protected) => 0x0004,
+                _ => 0x0001,
+            }
         };
         cw.add_method_sig(
             ctor_access,
@@ -7235,10 +7309,15 @@ fn emit_default_stub(
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
+    // A MEMBER EXTENSION's physical params — and its registered defaults — lead with the extension
+    // receiver: slice that prefix off (the receiver never defaults) and offset the slots, so the
+    // mask bits stay LOGICAL (kotlinc's convention).
+    let recv_offset = usize::from(ir.member_ext_receiver_fns.contains(&fid));
     emit_default_param_overwrites(
         &mut e,
         &mut code,
-        defaults,
+        &defaults[recv_offset.min(defaults.len())..],
+        recv_offset,
         &param_slots,
         &mask_slots,
         &boxed,
@@ -7302,17 +7381,27 @@ fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
     vis | 0x1008 // ACC_STATIC | ACC_SYNTHETIC
 }
 
+/// `defaults` is LOGICAL (Kotlin value parameters, extension receiver excluded); `recv_offset`
+/// counts the leading physical receiver slots. The MASK bit index is the LOGICAL parameter index —
+/// kotlinc numbers `$default` mask bits over the declared value parameters, so an extension's
+/// receiver does not shift them (verified against kotlinc 2.4.0: `fun Host.tag(name, port = 9)` →
+/// port checks bit 2, not bit 4).
 fn emit_default_param_overwrites(
     e: &mut Emitter<'_>,
     code: &mut CodeBuilder,
     defaults: &[Option<u32>],
+    recv_offset: usize,
     param_slots: &[(u16, Ty)],
     mask_slots: &[u16],
     boxed: &HashMap<usize, Ty>,
 ) {
-    for (i, def) in defaults.iter().enumerate().take(param_slots.len()) {
+    for (i, def) in defaults
+        .iter()
+        .enumerate()
+        .take(param_slots.len().saturating_sub(recv_offset))
+    {
         if let Some(def_expr) = def {
-            let (pslot, pty) = param_slots[i];
+            let (pslot, pty) = param_slots[i + recv_offset];
             code.iload(mask_slots[i / 32]);
             code.push_int(default_mask_bit(i), e.cw);
             code.iand();
@@ -7322,7 +7411,7 @@ fn emit_default_param_overwrites(
             // The default is computed in the (erased) UNDERLYING form; a slot typed by a nullable-
             // underlying value class boxes it (`box-impl`) so the slot holds the value class.
             e.emit_value(*def_expr, code);
-            if let Some(vc) = boxed.get(&i) {
+            if let Some(vc) = boxed.get(&(i + recv_offset)) {
                 emit_box_impl(e.ir, e.cw, vc, code);
             }
             store(pty, pslot, code);
@@ -7434,10 +7523,17 @@ fn emit_facade_default_stub(
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
+    // A top-level EXTENSION's registered defaults/names carry a leading `$receiver` slot; the mask
+    // bits stay LOGICAL (kotlinc's convention), so slice the receiver prefix off and offset slots.
+    let recv_offset = ir
+        .param_names(fid)
+        .map(|ns| ns.iter().take_while(|n| n.as_str() == "$receiver").count())
+        .unwrap_or(0);
     emit_default_param_overwrites(
         &mut e,
         &mut code,
-        defaults,
+        &defaults[recv_offset.min(defaults.len())..],
+        recv_offset,
         &param_slots,
         &mask_slots,
         &HashMap::new(),
@@ -9776,6 +9872,10 @@ impl<'a> Emitter<'a> {
                         .collect();
                     let args = args.clone();
                     self.emit_value(*receiver, code);
+                    // Mask bits are LOGICAL (kotlinc numbers them over the declared value
+                    // parameters) — a member EXTENSION's physical receiver at params[0] does not
+                    // shift them, and is never omitted.
+                    let recv_offset = usize::from(self.ir.member_ext_receiver_fns.contains(&fid));
                     let mut masks = vec![0i32; default_mask_count(param_tys.len())];
                     for (i, arg) in args.iter().enumerate() {
                         match arg {
@@ -9787,7 +9887,8 @@ impl<'a> Emitter<'a> {
                             }
                             None => {
                                 push_zero(stub_param_tys[i], code, self.cw);
-                                masks[i / 32] |= default_mask_bit(i);
+                                let li = i.saturating_sub(recv_offset);
+                                masks[li / 32] |= default_mask_bit(li);
                             }
                         }
                     }

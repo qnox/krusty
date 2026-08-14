@@ -661,6 +661,8 @@ pub fn facade_package_metadata(
             // parameter stays a `Type.type_parameter` reference; a class becomes its internal
             // name. Unresolvable references stay `Source` (the emitter degrades them to `Any`).
             context_count: sig.context_count,
+            vararg_index: sig.vararg_index,
+            visibility: sig.visibility,
             contract: sig.contract.as_ref().map(|c| {
                 // Source-level class name → JVM internal name — the SAME lookup the checker uses
                 // (`class_internal_resolver`, shared via `frontend`), so contract types resolve
@@ -774,6 +776,11 @@ pub fn facade_package_metadata(
             Some(crate::metadata::builder::TypeAliasMeta {
                 name: alias.clone(),
                 target: Ty::obj_name(target),
+                visibility: file
+                    .type_alias_visibility
+                    .get(alias)
+                    .copied()
+                    .unwrap_or(crate::types::Visibility::Public),
             })
         })
         .collect::<Vec<_>>();

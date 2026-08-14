@@ -1091,6 +1091,16 @@ fn lower_file_at_reporting_impl(
                     }
                 })
                 .collect();
+            // Declaration visibility for `Class.flags` — `internal class` must survive into
+            // `@Metadata` so a consuming module enforces the boundary.
+            lo.ir
+                .class_visibilities
+                .insert(type_name(&internal), c.visibility);
+            if c.primary_ctor_visibility != crate::types::Visibility::Public {
+                lo.ir
+                    .ctor_visibilities
+                    .insert(type_name(&internal), c.primary_ctor_visibility);
+            }
             let id = lo.ir.add_class(IrClass {
                 fq_name: type_name(&internal),
                 is_inner_class: inner_outer.is_some(),
@@ -1321,6 +1331,18 @@ fn lower_file_at_reporting_impl(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks,
                 });
+                // A member EXTENSION realizes its extension receiver as `params[0]` — record the
+                // fid so class `@Metadata` can restore `Function.receiver_type` (f5) instead of
+                // publishing the receiver as an ordinary value parameter.
+                if extension_receiver.is_some() {
+                    lo.ir.member_ext_receiver_fns.insert(fid);
+                }
+                if m.is_operator() {
+                    lo.ir.operator_fns.insert(fid);
+                }
+                if let Some(vi) = m.params.iter().position(|p| p.is_vararg) {
+                    lo.ir.fn_vararg_index.insert(fid, vi);
+                }
                 // Record the declared nullability of each parameter for `@Metadata`/annotations (see
                 // `IrFile::fn_param_declared_nullable`) — kept off `IrFunction::params` so the mangle
                 // is untouched. Only when at least one parameter is nullable (else the non-null default).
@@ -1343,6 +1365,9 @@ fn lower_file_at_reporting_impl(
                 // foo() }` called on a `B : A` with its own private `foo` would wrongly run `B.foo`).
                 if m.visibility.is_private() {
                     lo.ir.private_methods.insert(fid);
+                }
+                if m.visibility == crate::types::Visibility::Internal {
+                    lo.ir.internal_methods.insert(fid);
                 }
                 // An `open`/`override` member is overridable — kotlinc's member modality stays OPEN
                 // (no `ACC_FINAL`) even when nothing in this module extends the class: a separately
@@ -10449,7 +10474,13 @@ impl<'a> Lower<'a> {
         bind_names: Vec<String>,
     ) -> Option<u32> {
         let arity = params.len();
-        if self.cur_class.is_some() {
+        // A suspend lambda inside a CLASS body is admitted only when its body does not itself
+        // SUSPEND: the state machine then never threads the enclosing instance through a
+        // continuation, which is the part this path does not model (a member suspend call from the
+        // lambda — corpus kt44221 — miscompiled with a verifier error when admitted). Non-suspending
+        // suspend lambdas (the classpath builder-DSL shape, `AsyncFactory { mark() }`) lower fine —
+        // `reparent_lambda_impls` places the state-machine class.
+        if self.cur_class.is_some() && self.ast_body_suspends(body) {
             self.set_bail("gate:suspend-lambda-in-class");
             return None;
         }

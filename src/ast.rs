@@ -911,6 +911,10 @@ pub struct ClassDecl {
     /// properties, initialization, and supertypes live on that ordinary [`ClassDecl`]; this edge only
     /// records Kotlin's outer-class-to-companion-value relationship.
     pub companion: Option<DeclId>,
+    /// The PRIMARY constructor's declared visibility (`class C protected constructor(…)`) —
+    /// `Public` when unmodified. Carried into `@Metadata` `Constructor.flags`; a protected one
+    /// also reaches the JVM `<init>` access flags.
+    pub primary_ctor_visibility: Visibility,
     /// Properties declared in the class *body* (`class C { val x = … }`) — backing field + accessor,
     /// initialized in the primary constructor.
     pub body_props: Vec<PropDecl>,
@@ -1357,6 +1361,9 @@ pub struct File {
     /// `typealias Name = Target` — maps alias simple name → target simple name.
     /// Generic type aliases are stored with the raw target name (type args erased).
     pub type_aliases: Vec<(String, String)>,
+    /// Declared visibility of a `typealias` when NON-public (`internal typealias A = …`) — public
+    /// aliases are absent. Feeds `@Metadata` `TypeAlias.flags`.
+    pub type_alias_visibility: std::collections::HashMap<String, Visibility>,
     /// `typealias Name<T…> = (A) -> R` — aliases whose target is a FUNCTION type: the alias name,
     /// its declared type-parameter names (empty for a non-generic alias), and the full target
     /// `TypeRef` (parameters, return, `suspend`, receiver). A generic alias expands by substituting

@@ -272,6 +272,7 @@ fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
 /// empty body gives the later passes nothing to recurse over.
 fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
     ClassDecl {
+        primary_ctor_visibility: Visibility::Public,
         name: "<error>".to_string(),
         visibility: Visibility::Public,
         annotations: Vec::new(),
@@ -1342,7 +1343,13 @@ impl<'a> Parser<'a> {
                         String::new()
                     };
                     if !alias.is_empty() && !target.is_empty() {
-                        self.file.type_aliases.push((alias, target));
+                        self.file.type_aliases.push((alias.clone(), target));
+                        // The alias's declared visibility survives into `@Metadata`
+                        // (`internal typealias` must stay module-bound for consumers).
+                        let vis = visibility_of(&mods);
+                        if vis != Visibility::Public {
+                            self.file.type_alias_visibility.insert(alias, vis);
+                        }
                     }
                 }
                 _ => {
@@ -2255,6 +2262,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         let declaration = ClassDecl {
+            primary_ctor_visibility: Visibility::Public,
             name,
             visibility: visibility_of(modifiers),
             annotations,
@@ -2612,6 +2620,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
+            primary_ctor_visibility: Visibility::Public,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -3232,10 +3241,14 @@ impl<'a> Parser<'a> {
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         let mut primary_constructor_annotations = Vec::new();
         // An explicit constructor prefix may continue across physical newlines.
+        let mut primary_ctor_visibility = Visibility::Public;
         if self.primary_constructor_header_follows() {
             self.skip_newlines();
             if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                self.skip_decl_prefix();
+                let ctor_mods = self.skip_decl_prefix();
+                // The declared constructor visibility survives into `@Metadata` (and, for
+                // `protected`, the JVM `<init>` access flags).
+                primary_ctor_visibility = visibility_of(&ctor_mods);
                 primary_constructor_annotations = self.take_pending_annotations();
                 let _ = self.take_pending_annotation_args();
             }
@@ -3458,6 +3471,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         self.pop_lexical_type_params(lexical_type_param_lens);
         ClassDecl {
+            primary_ctor_visibility,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -3794,6 +3808,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
+            primary_ctor_visibility: Visibility::Public,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -3916,6 +3931,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         let name = format!("Anon$anon${}", span.lo);
         let synth = ClassDecl {
+            primary_ctor_visibility: Visibility::Public,
             name: name.clone(),
             visibility: Visibility::Public,
             annotations: Vec::new(),
@@ -4047,6 +4063,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
+            primary_ctor_visibility: Visibility::Public,
             name,
             visibility: Visibility::Public,
             annotations,

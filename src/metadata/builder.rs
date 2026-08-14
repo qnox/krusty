@@ -48,6 +48,15 @@ pub struct FnMeta {
     /// `Function.context_parameter` (field 13) so a caller fills them implicitly from the
     /// enclosing context instead of positionally.
     pub context_count: usize,
+    /// Index into `params` of a `vararg` parameter. Emits `ValueParameter.vararg_element_type`
+    /// (field 4) carrying the ELEMENT type next to the declared array type — the only place
+    /// vararg-ness survives (`ACC_VARARGS` is not part of `@Metadata`), so a reader admits
+    /// element-form and spread arguments instead of demanding one literal array.
+    pub vararg_index: Option<usize>,
+    /// Declaration visibility — `Function.flags` visibility bits (INTERNAL=0, PRIVATE=1,
+    /// PUBLIC=3); an `internal fun`'s flags word differs from the omitted public-final default (6),
+    /// so it is written explicitly and a consuming module enforces the boundary.
+    pub visibility: crate::types::Visibility,
 }
 
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
@@ -206,9 +215,15 @@ fn flatten_condition<'a>(
 fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     let mut p = Pb::new();
     // Function.flags = 9 — emitted only when non-default (`6` = public final is the proto default).
-    // Bit 13 = IS_SUSPEND, bit 10 = IS_INLINE; the visibility/modality bits (`0x06`) ride along so
-    // the reader keeps public-final. kotlinc orders `flags` before `name`.
-    let flags = 0x06u64 | (u64::from(f.suspend) << 13) | (u64::from(f.inline) << 10);
+    // Bit 13 = IS_SUSPEND, bit 10 = IS_INLINE; the visibility bits ride along (final modality = 0).
+    // The field is elided at the public-final default (6) — an `internal fun`'s 0 is explicit.
+    let vis: u64 = match f.visibility {
+        crate::types::Visibility::Internal => 0,
+        crate::types::Visibility::Private => 1,
+        crate::types::Visibility::Protected => 2,
+        crate::types::Visibility::Public => 3,
+    };
+    let flags = (vis << 1) | (u64::from(f.suspend) << 13) | (u64::from(f.inline) << 10);
     if flags != 0x06 {
         p.field_varint(9, flags);
     }
@@ -262,6 +277,17 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
         let ty = type_pb_generic(st, *pty, &tps);
         vp.field_message(3, &ty); // ValueParameter.type = 3
+                                  // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
+                                  // kotlinc's declared type stays the array.
+        if f.vararg_index == Some(i) {
+            let elem = pty
+                .array_elem()
+                .or_else(|| pty.type_args().first().copied());
+            if let Some(elem) = elem {
+                let et = type_pb_generic(st, elem, &tps);
+                vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
+            }
+        }
         if i < f.context_count {
             // Leading context parameters → Function.context_parameter = 13 (filled implicitly
             // by callers), NOT the positional value_parameter list.
@@ -305,10 +331,22 @@ pub struct PropMeta {
 pub struct TypeAliasMeta {
     pub name: String,
     pub target: Ty,
+    /// Declared visibility — `TypeAlias.flags` (f1) carries it; elided at the public default so an
+    /// `internal typealias` writes an explicit 0 and stays module-bound for consumers.
+    pub visibility: crate::types::Visibility,
 }
 
 fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
     let mut p = Pb::new();
+    let vis: u64 = match alias.visibility {
+        crate::types::Visibility::Internal => 0,
+        crate::types::Visibility::Private => 1,
+        crate::types::Visibility::Protected => 2,
+        crate::types::Visibility::Public => 3,
+    };
+    if vis != 3 {
+        p.field_varint(1, vis << 1); // TypeAlias.flags = 1 (elided at the public default 6)
+    }
     p.field_varint(2, st.local(&alias.name) as u64); // TypeAlias.name = 2
     let target = type_pb(st, alias.target);
     p.field_message(4, &target); // TypeAlias.underlying_type = 4
@@ -428,6 +466,8 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 context_count: 0,
+                vararg_index: None,
+                visibility: crate::types::Visibility::Public,
             }],
             &[],
             &[],
@@ -549,6 +589,8 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 contract: Some(std::sync::Arc::new(contract.clone())),
                 context_count: 0,
+                vararg_index: None,
+                visibility: crate::types::Visibility::Public,
             }],
             &[],
             &[],
@@ -582,6 +624,8 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 context_count: 0,
+                vararg_index: None,
+                visibility: crate::types::Visibility::Public,
             }],
             &[],
             &[],

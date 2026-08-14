@@ -139,7 +139,10 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         flags: krusty::metadata::class_builder::DEFAULT_FUNCTION_FLAGS,
+        receiver: None,
         params_have_defaults: false,
+        param_defaults: Vec::new(),
+        vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
     }];
@@ -194,7 +197,10 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
         flags: krusty::metadata::class_builder::DEFAULT_FUNCTION_FLAGS,
+        receiver: None,
         params_have_defaults: false,
+        param_defaults: Vec::new(),
+        vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
     }];
@@ -291,6 +297,8 @@ fn package_function_type_parameter_bound_round_trips() {
         semantic_type_params: vec!["T".to_string()],
         type_param_bounds: vec![vec![Ty::obj("kotlin/CharSequence")]],
         context_count: 0,
+        vararg_index: None,
+        visibility: krusty::types::Visibility::Public,
     }];
     let (d1, d2) = build_package(&funcs, &[], &[]);
     let ci = class_info("com/example/HostKt", d1, d2);

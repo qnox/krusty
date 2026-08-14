@@ -56,6 +56,10 @@ pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
+    /// Extension-receiver type (`Function.receiver_type` = f5) for a MEMBER EXTENSION
+    /// (`class C { operator fun String.invoke(…) }`) — recorded separately from `params` (the
+    /// LOGICAL value parameters, receiver excluded). `None` for an ordinary member.
+    pub receiver: Option<Ty>,
     /// Function-owned type parameters. Class parameters are inherited from the enclosing class
     /// table; these are emitted on the function with ids following that inherited prefix.
     pub type_params: Vec<String>,
@@ -67,6 +71,12 @@ pub struct FnMeta {
     /// Mark every value parameter `DECLARES_DEFAULT_VALUE` (so a Kotlin caller may omit it) — used
     /// for the synthesized `copy`.
     pub params_have_defaults: bool,
+    /// Per-parameter `DECLARES_DEFAULT_VALUE` for a DECLARED member (`fun f(a: Int, b: Int = 2)`),
+    /// parallel to `params` (empty = none default). Composes with `params_have_defaults`.
+    pub param_defaults: Vec<bool>,
+    /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type`
+    /// (f4), the only place vararg-ness survives into metadata.
+    pub vararg_index: Option<usize>,
     /// The JVM method descriptor for a `JvmMethodSignature` (f100), emitted only when the signature is
     /// not derivable from the proto types — a boxed nullable-primitive param/return on a synthesized
     /// `componentN`/`copy`, or a value class's `equals`/`hashCode`/`toString` (which dispatch to a
@@ -90,6 +100,9 @@ impl FnMeta {
             type_param_bounds: Vec::new(),
             flags: DEFAULT_FUNCTION_FLAGS,
             params_have_defaults: false,
+            receiver: None,
+            param_defaults: Vec::new(),
+            vararg_index: None,
             jvm_sig: None,
             jvm_sig_name: None,
         }
@@ -554,9 +567,22 @@ pub fn build_class(
                 )
             });
             func.field_message(3, &ret);
-            for (pname, pty) in &m.params {
+            if let Some(recv) = m.receiver {
+                // Function.receiver_type = 5 — a MEMBER EXTENSION's receiver, restored from the
+                // physical `params[0]` realization so consumers see the LOGICAL shape.
+                let rt = encode_type(&mut st, recv, &function_type_parameters).unwrap_or_else(
+                    |error| {
+                        panic!(
+                            "invalid emitted metadata receiver for '{class_internal}.{}': {error}",
+                            m.name
+                        )
+                    },
+                );
+                func.field_message(5, &rt);
+            }
+            for (i, (pname, pty)) in m.params.iter().enumerate() {
                 let mut vp = Pb::new();
-                if m.params_have_defaults {
+                if m.params_have_defaults || m.param_defaults.get(i).copied().unwrap_or(false) {
                     vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
                 }
                 vp.field_varint(2, st.local(pname) as u64);
@@ -569,6 +595,23 @@ pub fn build_class(
                     },
                 );
                 vp.field_message(3, &ty);
+                if m.vararg_index == Some(i) {
+                    // ValueParameter.vararg_element_type = 4 — the ELEMENT next to the array type.
+                    let elem = pty
+                        .array_elem()
+                        .or_else(|| pty.type_args().first().copied());
+                    if let Some(elem) = elem {
+                        let et = encode_type(&mut st, elem, &function_type_parameters)
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "invalid emitted metadata vararg element for \
+                                     '{class_internal}.{}': {error}",
+                                    m.name
+                                )
+                            });
+                        vp.field_message(4, &et);
+                    }
+                }
                 func.repeated_message(6, &vp); // Function.value_parameter = 6
             }
             // Omitted at the public-final-declaration default, exactly like `Class.flags`.
@@ -797,6 +840,9 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
             },
@@ -809,6 +855,9 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
             },
@@ -821,6 +870,9 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 flags: COPY_FN_FLAGS,
                 params_have_defaults: true,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
             },
@@ -833,6 +885,9 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 flags: EQUALS_FN_FLAGS,
                 params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
             },
@@ -845,6 +900,9 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
             },
@@ -857,6 +915,9 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
+                receiver: None,
+                param_defaults: Vec::new(),
+                vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
             },

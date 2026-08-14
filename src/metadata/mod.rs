@@ -17,20 +17,11 @@ pub(crate) mod property_flags {
     /// Public, final property with a default getter; protobuf omits field 11 at this value.
     pub const DEFAULT: u64 = 518;
     pub const VISIBILITY_MASK: u64 = 0b1110;
-    pub const VIS_INTERNAL: u64 = 0 << 1;
-    pub const VIS_PRIVATE: u64 = 1 << 1;
-    pub const VIS_PUBLIC: u64 = 3 << 1;
     pub const IS_VAR: u64 = 1 << 8;
     pub const HAS_SETTER: u64 = 1 << 10;
     pub const IS_CONST: u64 = 1 << 11;
-    pub const IS_LATEINIT: u64 = 1 << 12;
     pub const HAS_CONSTANT: u64 = 1 << 13;
     pub const MODALITY_ABSTRACT: u64 = 1 << 5;
-
-    /// Accessor flags (`Property.getter_flags` = 7 / `setter_flags` = 8) for a CUSTOM accessor
-    /// body: visibility bits | final modality | `isNotDefault`. kotlinc omits the field entirely
-    /// for a default accessor, so the writer only ever emits the not-default form.
-    pub const ACCESSOR_NOT_DEFAULT: u64 = 1 << 6;
 }
 
 pub(crate) fn serialize_string_table_types(records: &[Pb]) -> Pb {
