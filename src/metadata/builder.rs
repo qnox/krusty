@@ -35,6 +35,11 @@ pub struct FnMeta {
     /// a suspend fn) recorded as the `JvmMethodSignature` extension, so a kotlinc reader maps the
     /// metadata function to its bytecode method. `None` omits the extension.
     pub jvm_desc: Option<String>,
+    /// The PHYSICAL JVM method NAME (`JvmMethodSignature.name`, f1) when it differs from the Kotlin
+    /// one — a value-class-parametered function's mangled `taggedOnly-rnqsQGE`. `None` ⇒ omitted
+    /// (the name defaults to the function's), kotlinc's usual shape. Only read when `jvm_desc` is
+    /// recorded.
+    pub jvm_name: Option<String>,
     /// `inline fun` — sets `Function.flags` `IS_INLINE` (bit 10) so a reader resolves the function
     /// as inline (splice candidate), not a plain callable.
     pub inline: bool,
@@ -323,6 +328,9 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     // name defaults to the function's, exactly as kotlinc emits for a top-level function.
     if let Some(desc) = &f.jvm_desc {
         let mut sig = Pb::new();
+        if let Some(name) = &f.jvm_name {
+            sig.field_varint(1, st.local(name) as u64); // JvmMethodSignature.name = 1 (mangled)
+        }
         sig.field_varint(2, st.local(desc) as u64); // JvmMethodSignature.desc = 2
         p.field_message(100, &sig); // Function.methodSignature = 100
     }
@@ -479,6 +487,7 @@ mod tests {
         let (d1, d2) = build_package(
             &[FnMeta {
                 annotations: Vec::new(),
+                jvm_name: None,
                 name: "f".into(),
                 params: vec![("a".into(), Ty::Int)],
                 ret: Ty::Int,
@@ -602,6 +611,7 @@ mod tests {
         let (d1, d2) = build_package(
             &[FnMeta {
                 annotations: Vec::new(),
+                jvm_name: None,
                 name: "validate".into(),
                 params: vec![("value".into(), Ty::obj("kotlin/Any"))],
                 ret: Ty::Boolean,
@@ -641,6 +651,7 @@ mod tests {
         let (_d1, d2) = build_package(
             &[FnMeta {
                 annotations: Vec::new(),
+                jvm_name: None,
                 name: "g".into(),
                 params: vec![("x".into(), Ty::Int)],
                 ret: Ty::Int,

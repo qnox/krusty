@@ -245,6 +245,7 @@ fn package_value_param_defaults_round_trip() {
     // module can omit `b` (the reader's `metadata_param_defaults` drives classpath default-omission).
     let funcs = vec![PkgFnMeta {
         annotations: Vec::new(),
+        jvm_name: None,
         name: "host".to_string(),
         params: vec![("a".to_string(), Ty::String), ("b".to_string(), Ty::Int)],
         ret: Ty::String,
@@ -286,6 +287,7 @@ fn package_function_type_parameter_bound_round_trips() {
     let t = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
     let funcs = vec![PkgFnMeta {
         annotations: Vec::new(),
+        jvm_name: None,
         name: "identity".to_string(),
         params: vec![("value".to_string(), t)],
         ret: t,
@@ -329,6 +331,7 @@ fn package_extension_receiver_round_trips() {
     // `builder.composable("x")` call.
     let funcs = vec![PkgFnMeta {
         annotations: Vec::new(),
+        jvm_name: None,
         name: "composable".to_string(),
         params: vec![("route".to_string(), Ty::String)],
         ret: Ty::Unit,
@@ -377,6 +380,7 @@ fn package_receiver_function_type_param_round_trips() {
     // dependent recognizes a lambda passed to `builder` binds `this` to NGB (drives classpath lambda_recv).
     let funcs = vec![PkgFnMeta {
         annotations: Vec::new(),
+        jvm_name: None,
         name: "NavHost".to_string(),
         params: vec![(
             "builder".to_string(),

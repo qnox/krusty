@@ -42,7 +42,7 @@ const LIB: &str = r#"
 
 #[test]
 fn top_level_value_class_parameters_resolve_and_run() {
-    let Some(libout) = common::compile_lib_ref("value_class_top_level_param", LIB) else {
+    let Some(libout) = common::compile_lib("value_class_top_level_param", LIB) else {
         return;
     };
     let stdlib = common::stdlib_jar();

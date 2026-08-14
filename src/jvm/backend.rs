@@ -462,7 +462,7 @@ impl Backend for JvmBackend {
             );
             return outputs;
         }
-        let metadata = facade_package_metadata(file, checked.file_index, syms);
+        let metadata = facade_package_metadata_with_ir(file, checked.file_index, syms, Some(&ir));
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct. Inline splice failures
         // are reported separately (via `run.inline_bail`): selected inline calls are required to splice,
         // so those are backend errors to fix rather than silent skips.
@@ -575,6 +575,56 @@ pub fn facade_package_metadata(
     file_index: u32,
     syms: &FrontendSymbols,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
+    facade_package_metadata_with_ir(file, file_index, syms, None)
+}
+
+/// [`facade_package_metadata`] with the POST-PASS IR available: a top-level function with a
+/// value-class parameter/return realizes as a MANGLED method (`taggedOnly-rnqsQGE`) with the erased
+/// descriptor — neither derivable from the declared record — so its `JvmMethodSignature` (name +
+/// desc) is recovered from the value-class pass's declared-sig table. Without it a consumer cannot
+/// map the record to any bytecode method and reports `unresolved function`.
+pub fn facade_package_metadata_with_ir(
+    file: &File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+    ir: Option<&crate::ir::IrFile>,
+) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
+    // Declared name + arity → the physical (JVM name, descriptor) of a value-class-rewritten
+    // top-level function. Overloads differ in arity or vanish on collision (never a wrong record).
+    let mut vc_realizations: std::collections::HashMap<(String, usize), Option<(String, String)>> =
+        std::collections::HashMap::new();
+    if let Some(ir) = ir {
+        for (fid, (declared_name, declared_params, _)) in &ir.vc_declared_sigs {
+            let Some(function) = ir.functions.get(*fid as usize) else {
+                continue;
+            };
+            if !function.is_static {
+                continue;
+            }
+            let physical = (
+                function.name.clone(),
+                crate::jvm::names::method_descriptor(&function.params, function.ret),
+            );
+            vc_realizations
+                .entry((declared_name.clone(), declared_params.len()))
+                .and_modify(|existing| {
+                    if existing.as_ref() != Some(&physical) {
+                        *existing = None;
+                    }
+                })
+                .or_insert(Some(physical));
+        }
+    }
+    facade_package_metadata_inner(file, file_index, syms, &vc_realizations)
+}
+
+#[allow(clippy::type_complexity)]
+fn facade_package_metadata_inner(
+    file: &File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+    vc_realizations: &std::collections::HashMap<(String, usize), Option<(String, String)>>,
+) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let mut metas: Vec<crate::metadata::builder::FnMeta> = Vec::new();
     for &d in &file.decls {
         let Decl::Fun(f) = file.decl(d) else { continue };
@@ -674,10 +724,23 @@ pub fn facade_package_metadata(
             .filter_map(|(annotation, _)| syms.resolved_annotation(file_index, annotation))
             .filter(|&internal| metadata_recorded_annotation(file, file_index, syms, internal))
             .collect();
+        // A value-class-rewritten realization (mangled name + erased descriptor) overrides the
+        // derived handle — nothing in the declared record spells either.
+        let vc_realization = vc_realizations
+            .get(&(f.name.clone(), sig.params.len()))
+            .and_then(|entry| entry.clone());
+        let (jvm_desc, jvm_name) = match vc_realization {
+            Some((physical_name, physical_desc)) => (
+                Some(physical_desc),
+                (physical_name != f.name).then_some(physical_name),
+            ),
+            None => (jvm_desc, None),
+        };
         metas.push(crate::metadata::builder::FnMeta {
             name: f.name.clone(),
             params,
             annotations,
+            jvm_name,
             ret: declared_ret,
             receiver,
             param_defaults: sig.param_defaults.clone(),

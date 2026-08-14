@@ -5607,3 +5607,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is an enclosing-class one. Extension members are excluded (their `params[0]` receiver alignment
   is a separate channel). Also fixed the same way: generic member-extension lambdas and one
   generic-suspend shape. Test: `tests/superclass_bridge_e2e.rs` (krusty-built by default).
+
+- **Value-class-rewritten top-level functions record their mangled JVM handle.** A top-level function
+  with a value-class parameter realizes as a MANGLED method (`taggedOnly(tag: Tag)` →
+  `taggedOnly-rnqsQGE(Ljava/lang/String;)`), neither name nor descriptor derivable from the declared
+  facade record — kotlinc records both in the `JvmMethodSignature` (name f1 + desc f2). The facade
+  writer now recovers them from the value-class pass's `vc_declared_sigs` table (declared name +
+  arity → the post-pass `IrFunction`'s physical name/descriptor;
+  `facade_package_metadata_with_ir`), so a consumer can map the record to bytecode — previously
+  every such function was `unresolved function` from a krusty-built classpath.
+  `FnMeta::jvm_name` carries the f1 name (written only when it differs from the Kotlin name).
+  Test: `tests/classpath_value_class_param_e2e.rs` (krusty-built by default).
