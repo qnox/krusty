@@ -702,6 +702,22 @@ fn global_pkg_tree_cache(
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Process-global composed trees for the FILE (jar/jimage) entries of a classpath, keyed by those
+/// entries WITH their classpath positions. A scratch-directory classpath (per-case module deps in
+/// the harnesses) has a unique full entry set — the whole-classpath cache above never hits — but
+/// its jar/jimage prefix pattern repeats across thousands of cases, so the expensive part of the
+/// compose (re-interning every stdlib + JDK class name) is shared here and each instance only
+/// clones the base and merges its few small directory parts. Positions are part of the key because
+/// a package node's `jars` order is the shadowing order. Distinct (file set × position) patterns
+/// are few, so the map is unbounded like the whole-classpath cache.
+type PkgTreeBaseKey = Vec<(EntryKey, JarId)>;
+type PkgTreeBaseMap = HashMap<PkgTreeBaseKey, std::sync::Arc<PackageTree>>;
+fn global_pkg_tree_base_cache() -> &'static std::sync::Mutex<PkgTreeBaseMap> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<PkgTreeBaseMap>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// The rebuilt candidates for ONE method name, grouped for O(1) receiver lookup so `find_extensions`
 /// doesn't re-scan + re-parse the whole list on every call site (the cost the eager `by_recv` map avoided).
 #[derive(Default)]
@@ -1911,20 +1927,83 @@ impl Classpath {
             *self.pkg_tree.borrow_mut() = Some(t.clone());
             return t.clone();
         }
-        let parts: Vec<std::sync::Arc<JarPackages>> = self
+        let dir_ids: Vec<JarId> = self
             .entries
             .iter()
             .enumerate()
-            .map(|(entry_id, _)| self.entry_packages(entry_id))
+            .filter(|(_, entry)| matches!(entry, Entry::Dir(_)))
+            .map(|(entry_id, _)| entry_id)
             .collect();
-        let tree = std::sync::Arc::new(compose_package_tree(&parts));
+        let tree = if dir_ids.is_empty() {
+            let parts: Vec<std::sync::Arc<JarPackages>> = self
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(entry_id, _)| self.entry_packages(entry_id))
+                .collect();
+            std::sync::Arc::new(compose_package_tree(&parts))
+        } else {
+            // Directory entries make the FULL entry set unique per compile (harness scratch
+            // dirs), so compose the stable jar/jimage portion once process-globally and merge
+            // only the small directory parts into a clone of it.
+            std::sync::Arc::new(self.compose_with_dirs(&dir_ids))
+        };
         if tree.incomplete_entries.is_empty() {
-            global_pkg_tree_cache()
-                .lock()
-                .unwrap()
-                .insert(key, tree.clone());
+            // A dir-bearing key is unique per compile (that is the whole reason for the base
+            // cache), so publishing its full tree process-globally would only grow the map by one
+            // dead entry per test case; the per-instance slot below covers its actual reuse.
+            if dir_ids.is_empty() {
+                global_pkg_tree_cache()
+                    .lock()
+                    .unwrap()
+                    .insert(key, tree.clone());
+            }
             *self.pkg_tree.borrow_mut() = Some(tree.clone());
         }
+        tree
+    }
+
+    /// The base+delta compose for a classpath with directory entries: the jar/jimage parts come
+    /// from [`global_pkg_tree_base_cache`] (composed once per file-entry/position pattern), the
+    /// directory parts are merged into a clone. Equivalent to one in-order compose of all entries:
+    /// entry ids are classpath positions in both paths, and the merge re-sorts any order-sensitive
+    /// vector it appends to.
+    fn compose_with_dirs(&self, dir_ids: &[JarId]) -> PackageTree {
+        let file_key: Vec<(EntryKey, JarId)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .zip(&self.cache_key)
+            .filter(|((_, entry), _)| !matches!(entry, Entry::Dir(_)))
+            .map(|((entry_id, _), key)| (key.clone(), entry_id))
+            .collect();
+        let cached_base = global_pkg_tree_base_cache()
+            .lock()
+            .unwrap()
+            .get(&file_key)
+            .cloned();
+        let base = cached_base.unwrap_or_else(|| {
+            let mut tree = PackageTree::default();
+            for &(_, entry_id) in &file_key {
+                merge_package_tree_part(&mut tree, entry_id, &self.entry_packages(entry_id));
+            }
+            finish_package_tree(&mut tree);
+            let tree = std::sync::Arc::new(tree);
+            // An incomplete file entry (unreadable jar) is a transient condition — never publish
+            // it, exactly like the whole-classpath cache above.
+            if tree.incomplete_entries.is_empty() {
+                global_pkg_tree_base_cache()
+                    .lock()
+                    .unwrap()
+                    .insert(file_key.clone(), tree.clone());
+            }
+            tree
+        });
+        let mut tree = (*base).clone();
+        for &entry_id in dir_ids {
+            merge_package_tree_part(&mut tree, entry_id, &self.entry_packages(entry_id));
+        }
+        finish_package_tree(&mut tree);
         tree
     }
 
@@ -4546,14 +4625,14 @@ impl JarPackages {
 
 /// A node in the composed classpath package table: every jar that declares THIS package (union across the
 /// classpath, in declaration order). One jar sits in many package nodes.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PackageNode {
     jars: Vec<JarId>,
     /// Entries whose catalog records a `.kotlin_builtins` fragment for this package.
     builtins_jars: Vec<JarId>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PackageTree {
     names: NameTree,
     packages: HashMap<NameId, PackageNode>,
@@ -4571,8 +4650,9 @@ pub struct PackageTree {
 impl PackageTree {
     /// Every class the classpath declares, as its slashed internal name and the jar that owns it.
     ///
-    /// Sorted by name and classpath order, which is the order the catalog was composed in: the
-    /// first jar to declare a name is the one that wins resolution, and iteration preserves that.
+    /// Sorted by name id and classpath order. WITHIN one name that is the shadowing order — the
+    /// first entry to declare it wins resolution and iteration preserves that; the order of
+    /// DISTINCT names is name-id (insertion) order, which a base+delta compose is free to permute.
     pub fn classes(&self) -> impl Iterator<Item = (String, JarId)> + '_ {
         self.classes
             .iter()
@@ -4819,37 +4899,69 @@ fn build_jar_packages_dir_visited(
 fn compose_package_tree(parts: &[std::sync::Arc<JarPackages>]) -> PackageTree {
     let mut tree = PackageTree::default();
     for (jar_id, jp) in parts.iter().enumerate() {
-        if !jp.complete {
-            tree.incomplete_entries.push(jar_id);
+        merge_package_tree_part(&mut tree, jar_id, jp);
+    }
+    finish_package_tree(&mut tree);
+    tree
+}
+
+/// Merge ONE entry's catalog into a composed tree under an EXPLICIT entry id. The id is the
+/// entry's position on the classpath: compose order and entry indices must agree, because a
+/// package node's `jars` order IS the shadowing order lookups walk. When a part is merged out of
+/// position order (the base+delta path below), the touched vectors are re-sorted so the result is
+/// indistinguishable from a single in-order compose.
+fn merge_package_tree_part(tree: &mut PackageTree, jar_id: JarId, jp: &JarPackages) {
+    if !jp.complete {
+        tree.incomplete_entries.push(jar_id);
+    }
+    for (&pkg_id, entry) in &jp.packages {
+        let pkg = tree.names.insert_from(&jp.names, pkg_id);
+        let node = tree.packages.entry(pkg).or_default();
+        if !node.jars.contains(&jar_id) {
+            node.jars.push(jar_id);
+            if node
+                .jars
+                .windows(2)
+                .next_back()
+                .is_some_and(|w| w[0] > w[1])
+            {
+                node.jars.sort_unstable();
+            }
         }
-        for (&pkg_id, entry) in &jp.packages {
-            let pkg = tree.names.insert_from(&jp.names, pkg_id);
-            let node = tree.packages.entry(pkg).or_default();
-            if !node.jars.contains(&jar_id) {
-                node.jars.push(jar_id);
-            }
-            if entry.has_builtins && !node.builtins_jars.contains(&jar_id) {
-                node.builtins_jars.push(jar_id);
-            }
-            // Every ancestor of a declared package is itself a package qualifier, even when no jar
-            // declares it directly.
-            let mut ancestor = pkg;
-            while let Some(parent) = tree.names.parent(ancestor) {
-                if parent == NameTree::ROOT || !tree.package_prefixes.insert(parent) {
-                    break;
-                }
-                ancestor = parent;
+        if entry.has_builtins && !node.builtins_jars.contains(&jar_id) {
+            node.builtins_jars.push(jar_id);
+            if node
+                .builtins_jars
+                .windows(2)
+                .next_back()
+                .is_some_and(|w| w[0] > w[1])
+            {
+                node.builtins_jars.sort_unstable();
             }
         }
-        for &class_id in &jp.classes {
-            let class = tree.names.insert_from(&jp.names, class_id);
-            tree.classes.push((class, jar_id));
+        // Every ancestor of a declared package is itself a package qualifier, even when no jar
+        // declares it directly.
+        let mut ancestor = pkg;
+        while let Some(parent) = tree.names.parent(ancestor) {
+            if parent == NameTree::ROOT || !tree.package_prefixes.insert(parent) {
+                break;
+            }
+            ancestor = parent;
         }
     }
+    for &class_id in &jp.classes {
+        let class = tree.names.insert_from(&jp.names, class_id);
+        tree.classes.push((class, jar_id));
+    }
+}
+
+/// Order-normalize a composed tree after the last part: exactly the tail of the original one-shot
+/// compose, plus `incomplete_entries` ordering (the one-shot loop produced it ascending for free).
+fn finish_package_tree(tree: &mut PackageTree) {
     tree.classes
         .sort_unstable_by_key(|&(class, jar)| (class.0, jar));
     tree.classes.dedup();
-    tree
+    tree.incomplete_entries.sort_unstable();
 }
 
 /// The classpath is the JVM realization of the inliner's narrow [`MethodBodies`] capability — the
@@ -6743,6 +6855,103 @@ mod fq_tests {
             entry.has_builtins = e.has_builtins;
         }
         std::sync::Arc::new(jp)
+    }
+
+    #[test]
+    fn base_plus_delta_compose_matches_one_shot() {
+        let mk = |pkgs: &[&str], classes: &[&str], complete: bool, builtins: &[&str]| {
+            let mut jp = JarPackages {
+                complete,
+                ..JarPackages::default()
+            };
+            for p in pkgs {
+                jp.entry_mut(p).has_classes = true;
+            }
+            for b in builtins {
+                jp.entry_mut(b).has_builtins = true;
+            }
+            for c in classes {
+                let id = jp.names.insert(c);
+                jp.classes.push(id);
+            }
+            std::sync::Arc::new(jp)
+        };
+        // jar@0 + jimage@2 are the stable file pattern; the dir@1 sits BETWEEN them, exactly like
+        // the harness order [jars…, dep dir, jimage]. `shared/Dup` is declared by 0 and 1 so the
+        // shadowing pair order is observable; dir1 is incomplete so that flag's path is covered.
+        let jar0 = mk(
+            &["kotlin/collections"],
+            &["kotlin/collections/CollectionsKt", "shared/Dup"],
+            true,
+            &[],
+        );
+        let dir1 = mk(
+            &["mod", "kotlin/collections"],
+            &["mod/AKt", "shared/Dup"],
+            false,
+            // Builtins on the DIR too: merging id 1 into a node whose builtins list already holds
+            // id 2 exercises the out-of-order re-sort branch for `builtins_jars`.
+            &["kotlin/collections"],
+        );
+        let jimage2 = mk(
+            &["java/util", "kotlin/collections"],
+            &["java/util/List"],
+            true,
+            &["kotlin/collections"],
+        );
+
+        let one_shot = compose_package_tree(&[jar0.clone(), dir1.clone(), jimage2.clone()]);
+
+        let mut base = PackageTree::default();
+        merge_package_tree_part(&mut base, 0, &jar0);
+        merge_package_tree_part(&mut base, 2, &jimage2);
+        finish_package_tree(&mut base);
+        let mut delta = base.clone();
+        merge_package_tree_part(&mut delta, 1, &dir1);
+        finish_package_tree(&mut delta);
+
+        // Node jar lists are the shadowing order lookups walk — must match exactly.
+        for pkg in ["kotlin/collections", "mod", "java/util"] {
+            assert_eq!(
+                one_shot.node_for(pkg).unwrap().jars,
+                delta.node_for(pkg).unwrap().jars,
+                "jars order for {pkg}"
+            );
+        }
+        assert_eq!(
+            one_shot
+                .node_for("kotlin/collections")
+                .unwrap()
+                .builtins_jars,
+            delta.node_for("kotlin/collections").unwrap().builtins_jars
+        );
+        assert_eq!(
+            delta.node_for("kotlin/collections").unwrap().builtins_jars,
+            vec![1, 2],
+            "dir builtins id re-sorted into ascending order before the jimage's"
+        );
+        // The actual shadowing-walk consumer: per-name jar ORDER, not just multiset equality.
+        assert_eq!(one_shot.jars_for_class("shared/Dup"), vec![0, 1]);
+        assert_eq!(delta.jars_for_class("shared/Dup"), vec![0, 1]);
+        // Class lists compare RENDERED: NameId numbering legitimately differs between the trees
+        // (insertion order), but the (name, entry) pairs — including the shadowed duplicate — must
+        // be identical.
+        let render = |t: &PackageTree| {
+            let mut v: Vec<(String, JarId)> = t.classes().collect();
+            v.sort();
+            v
+        };
+        assert_eq!(render(&one_shot), render(&delta));
+        // Ancestor package qualifiers fold identically, and the incomplete flag carries through.
+        for parent in ["kotlin", "java", "mod", "shared"] {
+            assert_eq!(
+                one_shot.has_package(TypeName::ROOT, parent),
+                delta.has_package(TypeName::ROOT, parent),
+                "prefix {parent}"
+            );
+        }
+        assert_eq!(one_shot.incomplete_entries, delta.incomplete_entries);
+        assert_eq!(delta.incomplete_entries, vec![1]);
     }
 
     #[test]
