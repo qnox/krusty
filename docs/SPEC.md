@@ -5727,7 +5727,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `fun entries(): Bag<String, Entry> = Bag(listOf(Item("OK")))` the expected type seeds `V = Entry`,
   but the argument-evidence merge joins types over superclass chains only, so joining the `Item`
   argument (a class IMPLEMENTING Entry) collapsed `V` to `Any` — and the invariant result then
-  mismatched the very expectation that seeded it. After the merge, a seeded binding is restored
-  whenever every argument constraint is assignable to it; arguments genuinely outside the seed keep
-  the merged join and its ordinary diagnostics. Test:
+  mismatched the very expectation that seeded it. Constructor constraint collection now preserves
+  the seed as each lower argument constraint is added while that argument remains assignable to it.
+  Once an argument falls outside the seed, ordinary joining takes over; there is no post-merge
+  recovery pass. Test:
   `tests/build840_collection_property_element_e2e.rs` (krusty-built by default).

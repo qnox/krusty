@@ -15843,6 +15843,8 @@ struct SourceConstructorBindings<'a> {
     bindings: &'a mut [Ty],
     lower: &'a mut [Vec<(Ty, ExprId)>],
     upper: &'a mut [Vec<(Ty, ExprId)>],
+    seeded: &'a HashMap<String, Ty>,
+    argument_fits_seed: &'a dyn Fn(Ty, Ty) -> bool,
 }
 
 fn merge_source_constructor_shape_bindings(
@@ -15870,6 +15872,14 @@ fn merge_source_constructor_shape_bindings(
                 inference.lower[index].push((actual, argument_expr));
                 let current =
                     (inference.bindings[index] != Ty::Error).then_some(inference.bindings[index]);
+                // The expected result is already a constraint on this invariant constructor
+                // result. Preserve its seed while each lower argument constraint fits it. Once
+                // one argument falls outside the seed, ordinary joining takes over permanently.
+                if inference.seeded.get(name).is_some_and(|&seed| {
+                    current == Some(seed) && (inference.argument_fits_seed)(actual, seed)
+                }) {
+                    return;
+                }
                 inference.bindings[index] =
                     crate::symbol_resolver::merge_inferred_ty(current, actual);
             } else {
@@ -29486,10 +29496,13 @@ impl<'a> Checker<'a> {
         let mut inferred_constraints = vec![Vec::new(); bindings.len()];
         let mut inferred_upper_constraints = vec![Vec::new(); bindings.len()];
         {
+            let argument_fits_seed = |actual, seed| self.receiver_is_assignable(actual, seed);
             let mut inference = SourceConstructorBindings {
                 bindings: &mut bindings,
                 lower: &mut inferred_constraints,
                 upper: &mut inferred_upper_constraints,
+                seeded: &seeded,
+                argument_fits_seed: &argument_fits_seed,
             };
             for (slot, &(shape, _)) in class.ctor_param_shapes.iter().enumerate() {
                 if let Some((argument, actual)) =
@@ -29514,24 +29527,6 @@ impl<'a> Checker<'a> {
                         &mut inference,
                     );
                 }
-            }
-        }
-        // An EXPECTED-seeded binding survives argument evidence that FITS it: the merge join walks
-        // superclass chains only, so `Entry`-seeded `V` joined with an `Item` argument (a class
-        // IMPLEMENTING Entry) collapsed to `Any` and the invariant result then mismatched the very
-        // expectation that seeded it. Arguments outside the seed keep the merged join (and its
-        // ordinary diagnostics).
-        for (index, parameter) in class.type_params.iter().enumerate().skip(explicit_count) {
-            let Some(&seed) = seeded.get(parameter) else {
-                continue;
-            };
-            if bindings[index] != seed
-                && !inferred_constraints[index].is_empty()
-                && inferred_constraints[index]
-                    .iter()
-                    .all(|(constraint, _)| self.receiver_is_assignable(*constraint, seed))
-            {
-                bindings[index] = seed;
             }
         }
         // Prefer the declared bound over an unconstrained `Any` join.
