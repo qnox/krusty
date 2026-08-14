@@ -1986,7 +1986,7 @@ pub struct ResolvedSymbols {
     /// return exactly the same record and the selection loop does not need an origin-specific branch.
     pub classifier_name: Option<TypeName>,
     /// Shared with the type-name memo, so cloning a record never deep-clones the classifier.
-    pub classifier: Option<std::rc::Rc<LibraryType>>,
+    pub classifier: Option<std::sync::Arc<LibraryType>>,
     pub callables: Callables,
 }
 
@@ -2630,7 +2630,7 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
         };
         std::rc::Rc::new(ResolvedSymbols {
             classifier_name: Some(internal),
-            classifier: Some(std::rc::Rc::new(classifier)),
+            classifier: Some(std::sync::Arc::new(classifier)),
             callables,
         })
     }

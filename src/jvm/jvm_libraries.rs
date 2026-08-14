@@ -151,7 +151,7 @@ pub struct JvmLibraries {
     /// Classifier currently having its exact declaration map materialized. This is construction state,
     /// not a lookup fallback: recursive metadata reads observe the same immutable raw signature.
     building_types:
-        std::cell::RefCell<std::collections::HashMap<TypeName, std::rc::Rc<LibraryType>>>,
+        std::cell::RefCell<std::collections::HashMap<TypeName, std::sync::Arc<LibraryType>>>,
 }
 
 /// JVM-only additions to Kotlin's builtin classifier model.
@@ -3797,7 +3797,7 @@ impl JvmLibraries {
     }
 
     /// Build the classifier half of the provider's unified symbol record.
-    fn classifier_record(&self, internal_name: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+    fn classifier_record(&self, internal_name: TypeName) -> Option<std::sync::Arc<LibraryType>> {
         if let Some(building) = self.building_types.borrow().get(&internal_name) {
             return Some(building.clone());
         }
@@ -3815,7 +3815,7 @@ impl JvmLibraries {
             let built = self.classifier_record(canonical).map(|shape| {
                 let mut shape = (*shape).clone();
                 shape.alias_target = Some(shape.alias_target.unwrap_or(canonical));
-                std::rc::Rc::new(shape)
+                std::sync::Arc::new(shape)
             });
             self.cp
                 .cache_library_type_name(internal_name, built.clone());
@@ -3828,13 +3828,13 @@ impl JvmLibraries {
             self.classifier_record(target).map(|rc| {
                 let mut t = (*rc).clone();
                 t.alias_target = Some(target);
-                std::rc::Rc::new(t)
+                std::sync::Arc::new(t)
             })
         } else {
             self.builtins_customizer
                 .customize(internal_name, self.build_library_type(internal_name))
                 .map(|mut classifier| {
-                    let raw = std::rc::Rc::new(classifier.clone());
+                    let raw = std::sync::Arc::new(classifier.clone());
                     self.building_types.borrow_mut().insert(internal_name, raw);
                     let receiver = Ty::obj_name(internal_name);
                     for name in self.member_scope_names(internal_name, &classifier) {
@@ -3857,7 +3857,7 @@ impl JvmLibraries {
                     }
                     self.building_types.borrow_mut().remove(&internal_name);
                     crate::libraries::add_core_builtin_declarations(&mut classifier, internal_name);
-                    std::rc::Rc::new(classifier)
+                    std::sync::Arc::new(classifier)
                 })
         };
         self.cp

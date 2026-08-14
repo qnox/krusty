@@ -91,7 +91,7 @@ impl<'a> ModuleSymbols<'a> {
 
     /// Build the classifier half of this provider's single symbol record. Kept private so callers
     /// cannot query classifier metadata through a second `SymbolSource` operation.
-    fn classifier_record(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+    fn classifier_record(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
         if self.syms.module_cache_enabled() {
             if let Some(shape) = self.syms.module_shape_cache.borrow().get(&internal) {
                 return shape.clone();
@@ -99,12 +99,12 @@ impl<'a> ModuleSymbols<'a> {
         }
         let shape = self
             .class_by_type_name(internal)
-            .map(|c| std::rc::Rc::new(self.type_shape_for(c)))
+            .map(|c| std::sync::Arc::new(self.type_shape_for(c)))
             .or_else(|| {
                 let target = *self.syms.source_alias_fqns.get(&internal)?;
                 let mut shape = self.type_shape_for(self.class_by_type_name(target)?);
                 shape.alias_target = Some(target);
-                Some(std::rc::Rc::new(shape))
+                Some(std::sync::Arc::new(shape))
             })
             // Signature collection seeds every source classifier identity before it walks any
             // declaration body. Surface that identity through the SAME namespace record as a fully
@@ -114,7 +114,7 @@ impl<'a> ModuleSymbols<'a> {
             .or_else(|| {
                 self.syms
                     .has_source_class_header(internal)
-                    .then(|| std::rc::Rc::new(LibraryType::declaration_header()))
+                    .then(|| std::sync::Arc::new(LibraryType::declaration_header()))
             });
         if self.syms.module_cache_enabled() {
             self.syms
@@ -1640,7 +1640,7 @@ mod tests {
         let first = m.classifier(type_name("demo/Widget")).unwrap();
         let second = m.classifier(type_name("demo/Widget")).unwrap();
         assert!(
-            std::rc::Rc::ptr_eq(&first, &second),
+            std::sync::Arc::ptr_eq(&first, &second),
             "repeated queries must not rebuild the class shape"
         );
     }

@@ -822,6 +822,37 @@ fn global_entry_class_cache(key: &EntryKey) -> ClassCache {
 /// hundreds of `read_method_code` round-trips per fresh `Classpath`.
 type BodyMap = HashMap<(TypeName, String, String), Option<MethodCode>>;
 type BodyCache = std::sync::Arc<std::sync::RwLock<BodyMap>>;
+
+/// Process-global per-entry cache of resolved `LibraryType`s (see
+/// [`Classpath::cached_library_type_name`]), keyed like [`global_entry_body_cache`]: the record is
+/// derived from the owning entry's class plus its own per-entry-cached metadata/builtins
+/// projections, so per-test classpath sets share it across all worker threads.
+type LibraryTypeCache = std::sync::Arc<
+    std::sync::RwLock<HashMap<TypeName, std::sync::Arc<crate::libraries::LibraryType>>>,
+>;
+fn global_entry_library_type_cache(key: &EntryKey) -> LibraryTypeCache {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<EntryKey, LibraryTypeCache>>> =
+        std::sync::OnceLock::new();
+    let m = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut g = m.lock().unwrap();
+    g.entry(key.clone())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())))
+        .clone()
+}
+
+/// Process-global per-entry cache of decoded `@Metadata` function/property projections
+/// ([`ClassMeta`]), keyed like [`global_entry_body_cache`]: the decode derives from the owning
+/// entry's class (multifile facade parts live in the same jar), so per-test classpath sets share it.
+type MetaCache = std::sync::Arc<std::sync::RwLock<HashMap<TypeName, std::sync::Arc<ClassMeta>>>>;
+fn global_entry_meta_cache(key: &EntryKey) -> MetaCache {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<EntryKey, MetaCache>>> =
+        std::sync::OnceLock::new();
+    let m = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut g = m.lock().unwrap();
+    g.entry(key.clone())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())))
+        .clone()
+}
 fn global_entry_body_cache(key: &EntryKey) -> BodyCache {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<EntryKey, BodyCache>>> =
         std::sync::OnceLock::new();
@@ -933,7 +964,7 @@ fn merge_alias_part(aliases: &mut TypeIndex, part: &TypeIndex) {
 /// (with the multifile-facade part classes merged in). This is the SINGLE decode of a class's `d1` for the
 /// function lookups below — `meta_functions`, `metadata_call_facts`, and parameter metadata all project
 /// over it instead of each re-decoding and re-merging.
-type MetaFnsCache = RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<ClassMeta>>>;
+type MetaFnsCache = RefCell<crate::lru::LruCache<TypeName, std::sync::Arc<ClassMeta>>>;
 
 #[derive(Clone)]
 pub struct MetadataCallFacts {
@@ -1077,7 +1108,7 @@ fn jvm_name_hash(name: &str) -> u64 {
 
 /// A refcounted handle to one class's decoded `@Metadata` functions (facade parts segmented) —
 /// what [`Classpath::meta_functions_name`] returns so consumers iterate the shared decode.
-pub struct MetaFns(std::rc::Rc<ClassMeta>);
+pub struct MetaFns(std::sync::Arc<ClassMeta>);
 
 impl MetaFns {
     pub fn iter(&self) -> impl Iterator<Item = &super::metadata::MetaFn> {
@@ -1086,7 +1117,7 @@ impl MetaFns {
 }
 
 /// The property analogue of [`MetaFns`].
-pub struct MetaProps(std::rc::Rc<ClassMeta>);
+pub struct MetaProps(std::sync::Arc<ClassMeta>);
 
 impl MetaProps {
     pub fn iter(&self) -> impl Iterator<Item = &super::metadata::MetaProp> {
@@ -1623,8 +1654,9 @@ pub struct Classpath {
     /// `Classpath` (NOT the per-compile `JvmLibraries`) so repeated classifier metadata reads — which
     /// asks for the same stdlib types across thousands of snippets — warms across compiles instead of
     /// rebuilding each `LibraryType` (descriptor parses + `@Metadata` decodes) from cold every file.
-    resolved_types:
-        RefCell<crate::lru::LruCache<TypeName, Option<std::rc::Rc<crate::libraries::LibraryType>>>>,
+    resolved_types: RefCell<
+        crate::lru::LruCache<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>,
+    >,
     /// Parsed `.kotlin_builtins` fragments, keyed by package-name id (e.g. `kotlin`,
     /// `kotlin/collections`), each mapping class internal name → its supertypes + members. Built once
     /// per file on first use — the single source for BOTH the collection read-only/mutable hierarchy AND
@@ -1898,27 +1930,72 @@ impl Classpath {
     pub fn cached_library_type(
         &self,
         internal: &str,
-    ) -> Option<Option<std::rc::Rc<crate::libraries::LibraryType>>> {
+    ) -> Option<Option<std::sync::Arc<crate::libraries::LibraryType>>> {
         self.cached_library_type_name(type_name(internal))
     }
 
     pub fn cached_library_type_name(
         &self,
         internal: TypeName,
-    ) -> Option<Option<std::rc::Rc<crate::libraries::LibraryType>>> {
+    ) -> Option<Option<std::sync::Arc<crate::libraries::LibraryType>>> {
         if !self.package_tree().incomplete_entries.is_empty() {
             cache_stat!(resolved_types, false);
             return None;
         }
         let hit = self.resolved_types.borrow_mut().get(&internal).cloned();
+        if hit.is_none() {
+            // Thread-lifetime per-entry L2: a `LibraryType` is derived from the owning entry's class
+            // (+ its own metadata/builtins projections, themselves per-entry cached), so per-test
+            // classpath instances on this thread share it. ABSENT results stay per-instance — absence
+            // is a property of the classpath set, not of an entry. `Rc` values keep this per-thread.
+            if let Some(found) = self.global_library_type(internal) {
+                cache_stat!(resolved_types, true);
+                self.resolved_types
+                    .borrow_mut()
+                    .insert(internal, Some(found.clone()));
+                return Some(Some(found));
+            }
+        }
         cache_stat!(resolved_types, hit.is_some());
         hit
+    }
+
+    fn library_type_entry_key(&self, internal: TypeName) -> Option<EntryKey> {
+        let jvm_id = super::jvm_class_map::to_jvm_type_name(internal);
+        if self.stub_overlay.borrow().contains_key(&jvm_id) {
+            return None;
+        }
+        self.owning_entry(jvm_id)
+            .map(|entry_index| self.cache_key[entry_index].clone())
+    }
+
+    fn global_library_type(
+        &self,
+        internal: TypeName,
+    ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
+        let entry_key = self.library_type_entry_key(internal)?;
+        let cache = global_entry_library_type_cache(&entry_key);
+        let hit = cache.read().unwrap().get(&internal).cloned();
+        hit
+    }
+
+    fn global_library_type_store(
+        &self,
+        internal: TypeName,
+        ty: &std::sync::Arc<crate::libraries::LibraryType>,
+    ) {
+        if let Some(entry_key) = self.library_type_entry_key(internal) {
+            global_entry_library_type_cache(&entry_key)
+                .write()
+                .unwrap()
+                .insert(internal, ty.clone());
+        }
     }
 
     pub fn cache_library_type(
         &self,
         internal: &str,
-        ty: Option<std::rc::Rc<crate::libraries::LibraryType>>,
+        ty: Option<std::sync::Arc<crate::libraries::LibraryType>>,
     ) {
         self.cache_library_type_name(type_name(internal), ty);
     }
@@ -1926,21 +2003,24 @@ impl Classpath {
     pub fn cache_library_type_name(
         &self,
         internal: TypeName,
-        ty: Option<std::rc::Rc<crate::libraries::LibraryType>>,
+        ty: Option<std::sync::Arc<crate::libraries::LibraryType>>,
     ) {
         if !self.package_tree().incomplete_entries.is_empty() {
             return;
+        }
+        if let Some(resolved) = &ty {
+            self.global_library_type_store(internal, resolved);
         }
         self.resolved_types.borrow_mut().insert(internal, ty);
     }
 
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
     /// cached. The single `d1` decode that `meta_functions`/`metadata_call_facts` all project over.
-    fn class_meta(&self, internal: &str) -> std::rc::Rc<ClassMeta> {
+    fn class_meta(&self, internal: &str) -> std::sync::Arc<ClassMeta> {
         self.class_meta_name(type_name(internal))
     }
 
-    fn class_meta_name(&self, internal_id: TypeName) -> std::rc::Rc<ClassMeta> {
+    fn class_meta_name(&self, internal_id: TypeName) -> std::sync::Arc<ClassMeta> {
         let catalog_complete = self.catalog_complete();
         if catalog_complete {
             if let Some(m) = self.meta_fns.borrow_mut().get(&internal_id) {
@@ -1949,6 +2029,21 @@ impl Classpath {
             }
         }
         cache_stat!(meta_fns, false);
+        // Per-entry global L2, like bodies/builtins: the decode is derived from the owning entry's
+        // class (a multifile facade's parts live in the same jar), so per-test classpath sets share
+        // it instead of re-deriving per `Classpath` instance. Overlay/incomplete lookups fall
+        // through to the per-instance path below.
+        let jvm_id = super::jvm_class_map::to_jvm_type_name(internal_id);
+        let global = (catalog_complete && !self.stub_overlay.borrow().contains_key(&jvm_id))
+            .then(|| self.owning_entry(jvm_id))
+            .flatten()
+            .map(|entry_index| global_entry_meta_cache(&self.cache_key[entry_index]));
+        if let Some(global) = &global {
+            if let Some(hit) = global.read().unwrap().get(&internal_id) {
+                self.meta_fns.borrow_mut().insert(internal_id, hit.clone());
+                return hit.clone();
+            }
+        }
         let ci = self.find_name(internal_id);
         // SEGMENTS share every decoded slice by refcount — the class's own `Package` functions, or (for
         // a multifile FACADE, which has no function metadata of its own) each PART class's slice. The
@@ -1990,11 +2085,14 @@ impl Classpath {
             .map(|(i, f)| (jvm_name_hash(&f.jvm_name), i as u32))
             .collect();
         by_jvm_name.sort_unstable();
-        let meta = std::rc::Rc::new(ClassMeta {
+        let meta = std::sync::Arc::new(ClassMeta {
             by_jvm_name,
             fn_segments,
             prop_segments,
         });
+        if let Some(global) = &global {
+            global.write().unwrap().insert(internal_id, meta.clone());
+        }
         if catalog_complete {
             self.meta_fns.borrow_mut().insert(internal_id, meta.clone());
         }
