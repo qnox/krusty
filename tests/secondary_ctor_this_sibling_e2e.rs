@@ -143,6 +143,16 @@ fn secondary_constructor_defaults_work_for_calls_and_delegation() {
 }
 
 #[test]
+fn secondary_constructor_vararg_is_an_array_in_its_body() {
+    const SRC: &str = "class A {\n\
+        \x20 var count: Int = -1\n\
+        \x20 constructor(vararg values: String) { count = values.size }\n\
+        }\n\
+        fun box(): String = if (A(\"a\", \"b\").count == 2) \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("secondary constructor vararg"), "OK");
+}
+
+#[test]
 fn branchy_delegation_arguments_keep_this_uninitialized_in_frames() {
     const SRC: &str = "class Label(val text: String) {\n\
         \x20 constructor(ok: Boolean): this(\"O\" + if (ok) \"K\" else \"X\")\n\

@@ -9,14 +9,14 @@
 
 use super::common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "Main")
+fn run(src: &str) -> String {
+    common::expect_box_run_with_stdlib(src, "Main")
 }
 
 #[test]
 fn assert_true_compiles_and_runs() {
     const SRC: &str = "fun box(): String { assert(1 + 1 == 2); return \"OK\" }\n";
-    assert_eq!(run(SRC).expect("assert(true) compiles + runs"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn assert_false_skipped_when_disabled() {
     assert(run { side = true; false })\n\
     return if (!side) \"OK\" else \"FAIL: condition evaluated\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("disabled assert skipped"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -42,13 +42,13 @@ fn fully_qualified_assert_uses_the_same_intrinsic() {
     kotlin.assert(run { side = true; false })\n\
     return if (!side) \"OK\" else \"FAIL: condition evaluated\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("qualified disabled assert skipped"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
 fn assert_with_message_lambda_compiles() {
     const SRC: &str = "fun box(): String { assert(2 > 1) { \"never\" }; return \"OK\" }\n";
-    assert_eq!(run(SRC).expect("assert with message compiles + runs"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -60,5 +60,5 @@ fun no(): Boolean = false\n\
 fun box(): String {\n\
     try { assert(no()); return \"FAIL: no throw\" } catch (e: AssertionError) { return \"OK\" }\n\
 }\n";
-    assert_eq!(run(SRC).expect("always-enable throws"), "OK");
+    assert_eq!(run(SRC), "OK");
 }

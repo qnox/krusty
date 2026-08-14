@@ -10,6 +10,18 @@ fn run(src: &str) -> Option<String> {
 }
 
 #[test]
+fn private_member_invoke_is_not_callable_outside_its_owner() {
+    let source = "class Box { private operator fun invoke(): Int = 1 }\nfun use() = Box()()\n";
+    let diagnostics = common::front_end_diagnostics(source, &[], None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("cannot access 'invoke': it is private")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn member_invoke_binds_a_trailing_lambdas_implicit_it() {
     const SRC: &str = "class Box(val v: Int) {\n\
     operator fun invoke(f: (Int) -> Int): Int = f(v)\n\

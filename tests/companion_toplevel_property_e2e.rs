@@ -134,11 +134,10 @@ fn companion_reads_delegated_toplevel_val() {
     common::expect_box_ok_with_stdlib(SRC, "Main");
 }
 
-/// Regression guard: a bare WRITE shadowed by the companion's OWN property must not silently bind
-/// the top-level `var` — in Kotlin the companion's member wins. krusty can't emit that write yet,
-/// so it must keep rejecting loudly rather than miscompile (reads already bind the companion's).
+/// A bare write follows the same scope order as a read: the companion member wins over the top-level
+/// property and the unrelated top-level storage remains unchanged.
 #[test]
-fn companion_shadowed_toplevel_write_is_rejected_not_misbound() {
+fn companion_property_write_shadows_the_toplevel_property() {
     const SRC: &str = "private var count: Int = 0\n\
         class C {\n\
             companion object {\n\
@@ -146,14 +145,9 @@ fn companion_shadowed_toplevel_write_is_rejected_not_misbound() {
                 fun bump() { count += 1 }\n\
             }\n\
         }\n\
-        fun box(): String = \"OK\"\n";
-    let Some(diagnostics) = common::checker_diags_with_stdlib(SRC) else {
-        return;
-    };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("write to a companion's own property")),
-        "{diagnostics:?}"
-    );
+        fun box(): String {\n\
+            C.bump()\n\
+            return if (C.count == 101 && count == 0) \"OK\" else \"FAIL\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "CompanionWriteShadow");
 }

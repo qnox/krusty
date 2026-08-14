@@ -4,6 +4,61 @@
 //! eligibility decisions and classpaths never drift (which previously let survey over-count by
 //! compiling against libraries a test didn't ask for, and let backend-excluded tests slip through).
 
+use std::path::{Path, PathBuf};
+
+/// Recursively collect Kotlin sources in deterministic path order. A source file is also accepted as
+/// the root, which keeps focused survey/debug invocations on the same discovery path as corpus runs.
+pub fn kotlin_files(root: &Path) -> Vec<PathBuf> {
+    fn collect(path: &Path, files: &mut Vec<PathBuf>) {
+        if path.is_file() {
+            if path.extension().is_some_and(|extension| extension == "kt") {
+                files.push(path.to_path_buf());
+            }
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        entries.sort();
+        for entry in entries {
+            if entry.is_dir() {
+                collect(&entry, files);
+            } else if entry.extension().is_some_and(|extension| extension == "kt") {
+                files.push(entry);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    collect(root, &mut files);
+    files
+}
+
+/// Apply the conformance gate's deterministic, corpus-wide stride sampling.
+pub fn evenly_sample<T>(items: Vec<T>, limit: usize) -> Vec<T> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    if limit >= items.len() {
+        return items;
+    }
+    let total = items.len();
+    let mut sample = 0usize;
+    items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            if sample < limit && index == sample * total / limit {
+                sample += 1;
+                Some(item)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Backend tokens krusty identifies as — it emits the JVM (IR) backend's bytecode.
 pub const BACKENDS: &[&str] = &["JVM", "JVM_IR"];
 
@@ -19,6 +74,29 @@ pub fn directive(src: &str, name: &str) -> bool {
                 .next()
                 == Some(name)
     })
+}
+
+const EXACT_TYPE_HELPER: &str = r#"
+
+@Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER", "UNUSED_PARAMETER")
+private fun <T> checkExactType(value: @kotlin.internal.Exact T) {}
+
+@Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER", "UNUSED_PARAMETER")
+private fun <T> checkTypeEquality(
+    first: @kotlin.internal.Exact T,
+    second: @kotlin.internal.Exact T,
+) {}
+"#;
+
+/// Apply source declarations that Kotlin's codegen-test runner supplies for directives. These are
+/// ordinary Kotlin declarations, not compiler intrinsics; keeping the expansion here makes the gate,
+/// focused corpus helpers, and survey compile the same source program.
+pub fn prepare_test_source(src: &str) -> String {
+    let mut prepared = src.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
+    if directive(src, "CHECK_TYPE_WITH_EXACT") {
+        prepared.push_str(EXACT_TYPE_HELPER);
+    }
+    prepared
 }
 
 /// Whether a box test applies to the backend tokens `names`, per kotlinc's test-runner directives, for
@@ -408,6 +486,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sampling_is_even_and_never_exceeds_the_requested_limit() {
+        assert_eq!(evenly_sample((0..11).collect(), 4), vec![0, 2, 5, 8]);
+        assert_eq!(
+            evenly_sample((0..7_353).collect::<Vec<_>>(), 2_000).len(),
+            2_000
+        );
+        assert_eq!(evenly_sample((0..3).collect(), 8), vec![0, 1, 2]);
+        assert!(evenly_sample((0..3).collect::<Vec<_>>(), 0).is_empty());
+    }
+
+    #[test]
     fn directive_present_when_first_token_matches() {
         assert!(directive(
             "// WITH_REFLECT\nfun box() = \"OK\"",
@@ -429,6 +518,15 @@ mod tests {
     #[test]
     fn directive_absent_returns_false() {
         assert!(!directive("// WITH_COROUTINES\n", "WITH_REFLECT"));
+    }
+
+    #[test]
+    fn exact_type_directive_injects_the_kotlin_test_declaration() {
+        let prepared = prepare_test_source(
+            "// CHECK_TYPE_WITH_EXACT\nfun box(): String { checkExactType<String>(\"OK\"); return \"OK\" }",
+        );
+        assert!(prepared.contains("private fun <T> checkExactType"));
+        assert!(prepared.contains("value: @kotlin.internal.Exact T"));
     }
 
     #[test]

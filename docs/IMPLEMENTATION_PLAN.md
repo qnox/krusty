@@ -4131,11 +4131,14 @@ Remaining, in order:
 
 ## Fully-qualified name references
 
-A dotted reference is resolved by SEGMENT ITERATION over two namespaces (`QualifiedPrefix::Package`
-/ `Classifier`), not by matching spellings against shape-keyed arms. The half that was missing is the
+A dotted reference is resolved by one left-to-right SEGMENT ITERATION with a committed
+`ResolvedQualifier` (`Value`, `Package`, or `Classifier`), not by matching spellings against
+shape-keyed arms. The half that was missing is the
 package namespace: `SymbolSource::package_exists`, answered by the classpath package catalog
 (`PackageTree::has_package` — jars, class dirs, the JDK jimage, plus intermediate packages) and by the
-module's own declarations. Both shadowing rules are the reference compiler's: a VALUE root (including
+module's declared source packages (independent of conflict recovery), including Java stub-overlay
+packages. Signature bootstrap exposes its declaration identities and libraries through the same
+minimal qualifier-source interface; it has no separate source-path resolver. Both shadowing rules are the reference compiler's: a VALUE root (including
 one bound by an explicit or wildcard import) shadows a classifier and a package; an in-scope
 classifier shadows a package path. See `docs/SPEC.md`, "Fully-qualified name references".
 
@@ -4149,9 +4152,9 @@ Every position is now covered for BOTH origins, with no test left ignored. Closi
 meant fixing five things that were never about qualified names, only reached through one:
 
 - A module `typealias` had no fully-qualified classifier identity (`SymbolTable::source_alias_fqns`
-  keys the alias edge by fqn; a per-file key cannot answer a reference from another file), and the
-  LOWERING-side qualified resolver returned the alias spelling instead of its target, so the internal
-  disagreed with the checker's recorded result type and the construction was dropped.
+  keys the alias edge by fqn; a per-file key cannot answer a reference from another file). Alias
+  targets are now ordinary `SymbolSource::resolve_type_name` edges, and lowering consumes the
+  checker-recorded target identity.
 - A cross-file enum's synthetic `values()`/`valueOf()` had no home: the `EnumValues`/`EnumValueOf`
   nodes index this file's own IR classes. The checker now records the owner and lowering emits the
   static call by name.
@@ -4163,7 +4166,8 @@ meant fixing five things that were never about qualified names, only reached thr
 - An unbound method reference needed a same-file `FunId`; cross-file it now invokes by owner and name,
   the shape the `java/lang/Object` methods already used.
 
-One trap worth recording: the qualifier walk must FALL THROUGH when a step fails, never `return`. The
-first version returned `None` from the constructor path as soon as the walk did not reach a
-classifier, which silently pre-empted the older arms that resolve spellings the walk cannot see (a
-classpath `typealias` being exactly one of them).
+The completed cleanup removed every alternate qualified-name reconstruction path:
+`resolve_qualified_nested_name`, `resolve_dotted_classpath_type`, `resolve_nested_internal*`, the
+lowerer's `resolve_qualified_nested`, and the shared right-to-left JVM-name candidate generator. A
+missing segment is a typed `QualifierError`; it is never retried as a package/classifier split.
+Lowering reads `TypeInfo`/resolved-call records and fails closed when a semantic identity is missing.

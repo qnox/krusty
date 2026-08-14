@@ -39,7 +39,7 @@ fn compile(src: &str) -> (Vec<String>, bool) {
             krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms)
                 .expect("backend passes should accept the deep chain");
             let cp = Classpath::new(vec![]);
-            emitted = emit_all(&ir, &facade, &cp, None).is_some();
+            emitted = emit_all(&ir, &facade, &cp, None, &syms).is_some();
         }
     }
     (d.diags.iter().map(|x| x.msg.clone()).collect(), emitted)

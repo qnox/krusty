@@ -2,8 +2,10 @@
 //! top-level functions. Schema/field numbers per `core/metadata/src/metadata.proto`; builtin type
 //! names use `predefinedIndex` into `JvmNameResolverBase.PREDEFINED_STRINGS` (see METADATA_NOTES.md).
 
-use std::collections::HashMap;
-
+use crate::metadata::type_encoder::{
+    encode_metadata_type_parameter, encode_type, encode_type_parameter, semantic_type_parameters,
+    type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
+};
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::Ty;
 
@@ -16,11 +18,6 @@ pub struct FnMeta {
     /// SEPARATELY from `params` (the LOGICAL value params, receiver excluded), so a reader recovers the
     /// extension's true source arity — `fun T.f(a)` is one value param, not two. `None` for a plain fn.
     pub receiver: Option<Ty>,
-    /// Per-parameter: `Some(receiver_ty)` when the parameter is a RECEIVER function type `Recv.(…) -> R`
-    /// (its `Ty` erases to `kotlin/FunctionN`). Emits the `@kotlin.ExtensionFunctionType` type-annotation
-    /// plus the receiver as the function type's first type ARGUMENT, so a reader recognizes a lambda
-    /// passed to this parameter binds `this` to `receiver_ty`. Parallel to `params`; empty = none.
-    pub param_fun_recvs: Vec<Option<Ty>>,
     /// Per-parameter `DECLARES_DEFAULT_VALUE` flags (parallel to `params`; empty = none default). Sets
     /// `ValueParameter.flags` bit 1 so a cross-module caller may OMIT a defaulted argument (the reader's
     /// `metadata_param_defaults` recovers it). A short/empty vec leaves the remaining params required.
@@ -39,6 +36,10 @@ pub struct FnMeta {
     /// table (field 4); their indices are the `Type.type_parameter` ids used by generic
     /// receiver/parameter/return types and `is`-conclusions in the contract.
     pub type_params: Vec<(String, bool)>,
+    /// Semantic identities parallel to `type_params`.
+    pub semantic_type_params: Vec<String>,
+    /// Declared upper bounds, parallel to `type_params`.
+    pub type_param_bounds: Vec<Vec<Ty>>,
     /// The function's decoded contract, emitted as `Function.contract` (field 32) so a separate
     /// compilation applies its effects at call sites. `None` when the function declares none.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
@@ -52,105 +53,17 @@ pub struct FnMeta {
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
 const DECLARES_DEFAULT_VALUE_BIT: u64 = 1 << 1;
 
-/// `predefinedIndex` of a builtin type's fq-name in `PREDEFINED_STRINGS`.
-fn builtin_index(t: Ty) -> Option<u64> {
-    Some(match t {
-        Ty::Unit => 2,
-        Ty::Double => 6,
-        Ty::Int => 8,
-        Ty::Long => 9,
-        Ty::Boolean => 11,
-        Ty::String => 14,
-        _ => return None,
-    })
-}
-
-/// Accumulates d2 strings + the parallel `StringTableTypes.Record` list, deduping builtin entries.
-#[derive(Default)]
-struct StringTable {
-    strings: Vec<String>,
-    records: Vec<Pb>, // one Record per string index
-    builtin_dedup: HashMap<u64, u32>,
-}
-
-impl StringTable {
-    /// Intern a local (source) string; returns its index. (No dedup — names are distinct in v0.)
-    fn local(&mut self, s: &str) -> u32 {
-        let i = self.strings.len() as u32;
-        self.strings.push(s.to_string());
-        self.records.push(Pb::new()); // empty Record => use d2 string verbatim
-        i
-    }
-
-    /// Intern a builtin fq-name via predefinedIndex; deduped. The d2 slot is empty (`""`).
-    fn builtin(&mut self, predefined: u64) -> u32 {
-        if let Some(&i) = self.builtin_dedup.get(&predefined) {
-            return i;
-        }
-        let i = self.strings.len() as u32;
-        self.strings.push(String::new());
-        let mut r = Pb::new();
-        r.field_varint(2, predefined); // Record.predefined_index = 2
-        self.records.push(r);
-        self.builtin_dedup.insert(predefined, i);
-        i
-    }
-
-    /// A class id from a type descriptor `Lpkg/Name;` via operation `DESC_TO_CLASS_ID` (Record.f3=2).
-    fn class_id_from_desc(&mut self, descriptor: &str) -> u32 {
-        let i = self.strings.len() as u32;
-        self.strings.push(descriptor.to_string());
-        let mut r = Pb::new();
-        r.field_varint(3, 2); // operation = DESC_TO_CLASS_ID
-        self.records.push(r);
-        i
-    }
-
-    fn serialize_types(&self) -> Pb {
-        crate::metadata::serialize_string_table_types(&self.records)
-    }
-}
-
 fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
-    type_pb_generic(st, t, &HashMap::new())
+    encode_type(st, t, &TypeParameters::new())
+        .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
 
 /// A `Type` message for `t`, resolving type-parameter NAMES to their `Function.type_parameter`
 /// table ids via `tps`. Handles generic class arguments (`Type.argument` = 2), nullability
 /// (`Type.nullable` = 3), class types (`Type.class_name` = 6), and type parameters
 /// (`Type.type_parameter` = 7).
-fn type_pb_generic(st: &mut StringTable, t: Ty, tps: &HashMap<&str, u64>) -> Pb {
-    let mut p = Pb::new();
-    let (nullable, base) = match t {
-        Ty::Nullable(inner) => (true, *inner),
-        _ => (false, t),
-    };
-    for a in base.type_args() {
-        let mut arg = Pb::new();
-        let at = type_pb_generic(st, *a, tps);
-        arg.field_message(2, &at); // Argument.type = 2
-        p.repeated_message(2, &arg); // Type.argument = 2
-    }
-    if nullable {
-        p.field_varint(3, 1); // Type.nullable = 3
-    }
-    match base {
-        Ty::TyParam(ref name, _) => {
-            // Type.type_parameter = 7 — the id is the parameter's index in the function's table;
-            // Type.type_parameter_name = 9 carries the name for by-name readers (kotlinc emits
-            // both forms depending on context; krusty's reader accepts either).
-            p.field_varint(7, tps.get(name).copied().unwrap_or(0));
-            p.field_varint(9, st.local(name) as u64);
-        }
-        _ => {
-            let class_name = match base {
-                Ty::Obj(internal, _) => st.class_id_from_desc(&format!("L{internal};")),
-                _ => st.builtin(builtin_index(base).unwrap_or(0)), // 0 = kotlin/Any on erroring code
-            };
-            p.field_varint(6, class_name as u64); // Type.class_name = 6
-        }
-    }
-    p
+fn type_pb_generic(st: &mut StringTable, t: Ty, tps: &TypeParameters) -> Pb {
+    encode_type(st, t, tps).unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
 
 /// Serialize a decoded contract as a `Contract` message (`repeated Effect effect` = 1), the exact
@@ -159,7 +72,7 @@ fn type_pb_generic(st: &mut StringTable, t: Ty, tps: &HashMap<&str, u64>) -> Pb 
 fn contract_pb(
     st: &mut StringTable,
     contract: &crate::contracts::Contract,
-    tps: &HashMap<&str, u64>,
+    tps: &TypeParameters,
 ) -> Pb {
     let mut p = Pb::new();
     for e in &contract.effects {
@@ -168,7 +81,7 @@ fn contract_pb(
     p
 }
 
-fn effect_pb(st: &mut StringTable, e: &crate::contracts::Effect, tps: &HashMap<&str, u64>) -> Pb {
+fn effect_pb(st: &mut StringTable, e: &crate::contracts::Effect, tps: &TypeParameters) -> Pb {
     use crate::contracts::Effect;
     let mut p = Pb::new();
     match e {
@@ -195,7 +108,7 @@ fn write_returns_effect(
     st: &mut StringTable,
     rv: &crate::contracts::ReturnsValue,
     conclusion: Option<&crate::contracts::Condition>,
-    tps: &HashMap<&str, u64>,
+    tps: &TypeParameters,
 ) {
     use crate::contracts::ReturnsValue;
     match rv {
@@ -230,11 +143,7 @@ fn expression_param_ref_pb(param: crate::contracts::ParamRef) -> Pb {
     p
 }
 
-fn condition_pb(
-    st: &mut StringTable,
-    c: &crate::contracts::Condition,
-    tps: &HashMap<&str, u64>,
-) -> Pb {
+fn condition_pb(st: &mut StringTable, c: &crate::contracts::Condition, tps: &TypeParameters) -> Pb {
     use crate::contracts::{Condition, ConditionType};
     let mut p = Pb::new();
     match c {
@@ -247,13 +156,10 @@ fn condition_pb(
                 p.field_varint(1, 1);
             }
             p.field_varint(2, param.to_wire());
-            let ty = match ty {
-                ConditionType::Metadata(ty) => *ty,
-                // Source references are resolved to semantic types before emission
-                // (`facade_package_metadata`); an unresolved one degrades to `kotlin/Any`.
-                ConditionType::Source(_) => Ty::obj("kotlin/Any"),
+            let ConditionType::Metadata(ty) = ty else {
+                panic!("unresolved source type reached metadata contract emission");
             };
-            let it = type_pb_generic(st, ty, tps);
+            let it = type_pb_generic(st, *ty, tps);
             p.field_message(4, &it); // Expression.is_instance_type
         }
         Condition::BoolParam(param) => {
@@ -297,25 +203,6 @@ fn flatten_condition<'a>(
     }
 }
 
-/// A `Type` for a RECEIVER function-type parameter (`Recv.(…) -> R`, erased to `fun_class` =
-/// `kotlin/FunctionN`): records `recv` as the function type's FIRST type ARGUMENT (`Type.argument` = 1,
-/// each `Argument.type` = 2) and tags it with the `@kotlin.ExtensionFunctionType` type annotation
-/// (`Type.annotation` = 100, a registered extension; `Annotation.id` = 1 → the annotation class). A reader
-/// recovers the receiver from argument[0] and the receiver-ness from the annotation, exactly as kotlinc
-/// emits for a `Recv.() -> R` parameter.
-fn type_pb_recv_fun(st: &mut StringTable, fun_class: Ty, recv: Ty) -> Pb {
-    let mut p = type_pb(st, fun_class); // Type.class_name = kotlin/FunctionN
-    let recv_ty = type_pb(st, recv);
-    let mut arg = Pb::new();
-    arg.field_message(2, &recv_ty); // Argument.type = 2 (projection INV omitted)
-    p.repeated_message(2, &arg); // Type.argument = 2
-    let ext_id = st.class_id_from_desc("Lkotlin/ExtensionFunctionType;");
-    let mut anno = Pb::new();
-    anno.field_varint(1, ext_id as u64); // Annotation.id = 1
-    p.field_message(100, &anno); // Type.annotation = 100 (extension)
-    p
-}
-
 fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     let mut p = Pb::new();
     // Function.flags = 9 — emitted only when non-default (`6` = public final is the proto default).
@@ -328,21 +215,35 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     p.field_varint(2, st.local(&f.name) as u64); // Function.name = 2
                                                  // The function's type-parameter table (Function.type_parameter = 4): indices are the
                                                  // `Type.type_parameter` ids generic types and contract conclusions reference.
-    let tps: HashMap<&str, u64> = f
-        .type_params
+    assert_eq!(
+        f.semantic_type_params.len(),
+        f.type_params.len(),
+        "metadata function type parameters require semantic identities"
+    );
+    let semantic_names = f
+        .semantic_type_params
         .iter()
-        .enumerate()
-        .map(|(i, (n, _))| (n.as_str(), i as u64))
-        .collect();
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let tps = semantic_type_parameters(
+        f.type_params.iter().map(|(name, _)| name.as_str()),
+        semantic_names.into_iter(),
+    );
     let ret = type_pb_generic(st, f.ret, &tps);
     p.field_message(3, &ret); // Function.return_type = 3
     for (id, (tp_name, reified)) in f.type_params.iter().enumerate() {
-        let mut tp = Pb::new();
-        tp.field_varint(1, id as u64); // TypeParameter.id = 1
-        tp.field_varint(2, st.local(tp_name) as u64); // TypeParameter.name = 2
-        if *reified {
-            tp.field_varint(3, 1); // TypeParameter.reified = 3
-        }
+        let tp = encode_metadata_type_parameter(
+            st,
+            id,
+            &MetadataTypeParameter {
+                name: tp_name.clone(),
+                reified: *reified,
+                variance: crate::types::TypeVariance::Invariant,
+                upper_bounds: f.type_param_bounds.get(id).cloned().unwrap_or_default(),
+            },
+            &tps,
+        )
+        .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"));
         p.repeated_message(4, &tp); // Function.type_parameter = 4
     }
     // Function.receiver_type = 5 (extension functions only) — between return_type and value_parameter,
@@ -359,10 +260,7 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
             vp.field_varint(1, DECLARES_DEFAULT_VALUE_BIT);
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
-        let ty = match f.param_fun_recvs.get(i).and_then(|o| *o) {
-            Some(recv) => type_pb_recv_fun(st, *pty, recv),
-            None => type_pb_generic(st, *pty, &tps),
-        };
+        let ty = type_pb_generic(st, *pty, &tps);
         vp.field_message(3, &ty); // ValueParameter.type = 3
         if i < f.context_count {
             // Leading context parameters → Function.context_parameter = 13 (filled implicitly
@@ -393,11 +291,29 @@ pub struct PropMeta {
     pub name: String,
     pub ty: Ty,
     pub is_var: bool,
+    /// The property's declared type parameters (`val <T> C<T>.value: T`). Their indices are the
+    /// `Type.type_parameter` ids used by the receiver and return type.
+    pub type_params: Vec<String>,
     /// Extension-receiver type (`Property.receiver_type` = 10), `Some` for an extension property —
     /// the same separation from the accessor's JVM parameters as [`FnMeta::receiver`].
     pub receiver: Option<Ty>,
     pub getter: (String, String),
     pub setter: Option<(String, String)>,
+}
+
+/// A public top-level typealias declaration in package metadata.
+pub struct TypeAliasMeta {
+    pub name: String,
+    pub target: Ty,
+}
+
+fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
+    let mut p = Pb::new();
+    p.field_varint(2, st.local(&alias.name) as u64); // TypeAlias.name = 2
+    let target = type_pb(st, alias.target);
+    p.field_message(4, &target); // TypeAlias.underlying_type = 4
+    p.field_message(6, &target); // TypeAlias.expanded_type = 6
+    p
 }
 
 /// Package properties use the same schema word as class properties. A top-level `val` has a backing
@@ -417,10 +333,15 @@ fn jvm_method_sig(st: &mut StringTable, name: &str, desc: &str) -> Pb {
 fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     let mut p = Pb::new();
     p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
-    let ret = type_pb(st, m.ty);
+    let tps = type_parameters(m.type_params.iter().map(String::as_str));
+    let ret = type_pb_generic(st, m.ty, &tps);
     p.field_message(3, &ret); // Property.return_type = 3
+    for (id, name) in m.type_params.iter().enumerate() {
+        let tp = encode_type_parameter(st, id, name, false);
+        p.repeated_message(4, &tp); // Property.type_parameter = 4
+    }
     if let Some(recv) = m.receiver {
-        let rt = type_pb(st, recv);
+        let rt = type_pb_generic(st, recv, &tps);
         p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
     }
     p.field_varint(
@@ -444,7 +365,11 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
 }
 
 /// Build `(d1 bytes, d2 strings)` for a file facade. `d1 = delimited(StringTableTypes) + Package`.
-pub fn build_package(funcs: &[FnMeta], props: &[PropMeta]) -> (Vec<u8>, Vec<String>) {
+pub fn build_package(
+    funcs: &[FnMeta],
+    props: &[PropMeta],
+    aliases: &[TypeAliasMeta],
+) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
     let mut package = Pb::new();
     for f in funcs {
@@ -454,6 +379,10 @@ pub fn build_package(funcs: &[FnMeta], props: &[PropMeta]) -> (Vec<u8>, Vec<Stri
     for m in props {
         let pp = property_pb(&mut st, m);
         package.repeated_message(4, &pp); // Package.property = 4
+    }
+    for alias in aliases {
+        let alias = type_alias_pb(&mut st, alias);
+        package.repeated_message(5, &alias); // Package.type_alias = 5
     }
     let stt = st.serialize_types();
 
@@ -466,7 +395,7 @@ pub fn build_package(funcs: &[FnMeta], props: &[PropMeta]) -> (Vec<u8>, Vec<Stri
     bytes.extend_from_slice(&d1.into_bytes());
     bytes.extend_from_slice(stt.as_bytes());
     bytes.extend_from_slice(package.as_bytes());
-    (bytes, st.strings)
+    (bytes, st.into_strings())
 }
 
 #[cfg(test)]
@@ -490,15 +419,17 @@ mod tests {
                 params: vec![("a".into(), Ty::Int)],
                 ret: Ty::Int,
                 receiver: None,
-                param_fun_recvs: Vec::new(),
                 param_defaults: Vec::new(),
                 suspend: false,
                 jvm_desc: None,
                 contract: None,
                 inline: false,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 context_count: 0,
             }],
+            &[],
             &[],
         );
         assert_eq!(d2, vec!["f".to_string(), "".to_string(), "a".to_string()]);
@@ -516,6 +447,7 @@ mod tests {
                 name: "doubled".into(),
                 ty: Ty::String,
                 is_var: false,
+                type_params: Vec::new(),
                 receiver: Some(Ty::String),
                 getter: (
                     "getDoubled".into(),
@@ -523,6 +455,7 @@ mod tests {
                 ),
                 setter: None,
             }],
+            &[],
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
         let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/Lib1Kt", &[]);
@@ -539,6 +472,43 @@ mod tests {
         assert_eq!(
             props[0].getter.as_ref().map(|g| g.name.as_str()),
             Some("getDoubled")
+        );
+    }
+
+    #[test]
+    fn generic_mutable_extension_property_round_trips() {
+        let t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let receiver = Ty::obj_args("sample/C", &[t]);
+        let (d1, d2) = build_package(
+            &[],
+            &[PropMeta {
+                name: "live".into(),
+                ty: t,
+                is_var: true,
+                type_params: vec!["T".into()],
+                receiver: Some(receiver),
+                getter: ("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into()),
+                setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
+            }],
+            &[],
+        );
+        let d1s: String = d1.iter().map(|&b| b as char).collect();
+        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", &[]);
+        let property = &meta.package_properties[0];
+        let signature = property
+            .generic_sig
+            .as_ref()
+            .expect("generic property signature");
+        assert_eq!(signature.formals, ["T"]);
+        assert_eq!(signature.receiver, Some(receiver));
+        assert_eq!(signature.ret, t);
+        assert_eq!(
+            property.getter.as_ref().map(|it| it.name.as_str()),
+            Some("getLive")
+        );
+        assert_eq!(
+            property.setter.as_ref().map(|it| it.name.as_str()),
+            Some("setLive")
         );
     }
 
@@ -570,15 +540,17 @@ mod tests {
                     "Refinement",
                     &[Ty::ty_param("T", bound), Ty::ty_param("R", bound)],
                 )),
-                param_fun_recvs: Vec::new(),
                 param_defaults: Vec::new(),
                 suspend: false,
                 jvm_desc: Some("(LRefinement;Ljava/lang/Object;)Z".into()),
                 inline: true,
                 type_params: vec![("T".into(), false), ("R".into(), true)],
+                semantic_type_params: vec!["T".into(), "R".into()],
+                type_param_bounds: Vec::new(),
                 contract: Some(std::sync::Arc::new(contract.clone())),
                 context_count: 0,
             }],
+            &[],
             &[],
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
@@ -601,15 +573,17 @@ mod tests {
                 params: vec![("x".into(), Ty::Int)],
                 ret: Ty::Int,
                 receiver: None,
-                param_fun_recvs: Vec::new(),
                 param_defaults: Vec::new(),
                 suspend: false,
                 jvm_desc: None,
                 contract: None,
                 inline: false,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 context_count: 0,
             }],
+            &[],
             &[],
         );
         assert_eq!(d2.iter().filter(|s| s.is_empty()).count(), 1);

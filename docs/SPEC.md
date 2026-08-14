@@ -608,15 +608,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `CompoundAssignmentTarget` dropped the flag entirely, so `Member`/`SourceExtension` now carry
   `suspend` and all three `lower_plus_assign` arms register the node. A cross-file
   `operator fun Box.compareTo` and `contains` are reached too, with and without `suspend` — `a < b`
-  and `x in b` both resolve and run across the file boundary. `invoke` is the one convention still
-  out of reach cross-file: `a()` against an `operator fun Box.invoke` declared in a sibling file is
-  refused — with NO diagnostic without `suspend`, and as "unresolved function 'a'" with it — while
-  the same declaration reached from its own file emits and runs. So the residual gap is `invoke`
-  alone, it is a cross-file RESOLUTION gap rather than a suspend one, and only its `suspend`
-  spelling is loud. Proven:
+  and `x in b` both resolve and run across the file boundary. `invoke` now consumes the same exact
+  checker-selected extension target too: both ordinary and suspending `a()` calls declared in a
+  sibling file resolve, emit, and run. Proven:
   `tests/suspend_operator_convention_cross_file_e2e.rs` (one test per convention, plus
   `::compare_to_and_contains_cross_file_execute` and
-  `::invoke_convention_cross_file_is_the_residual_gap`).
+  `::invoke_convention_cross_file_executes`).
 - **`suspend fun` returning a `@JvmInline value class` — the result crosses the CPS boundary BOXED.**
   A CPS return is `Object`, so a non-null value-class result cannot ride in its erased underlying form:
   kotlinc emits `X.box-impl` before the `areturn` and `checkcast X` + `X.unbox-impl()` on the resume
@@ -2052,9 +2049,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   synthetic` shape — an extension rides the static's arg0) and the caller emits a plain
   `invokestatic` via the existing `Callee::CrossFile` path. Emittability is gated twice —
   syntactically (non-reified, non-suspend) and semantically
-  (`SymbolTable::inline_fn_facade_emittable`: no value class in the signature, receiver
-  included — a cross-file `invokestatic` applies no mangling/erasure — and no splice-only body
-  shape: a lambda that is stored or returned rather than passed to a call, anonymous objects,
+  (`SymbolTable::inline_fn_facade_emittable`: the selected physical signature must be callable —
+  including value-class receiver representation — and there must be no splice-only body shape:
+  a lambda that is stored or returned rather than passed to a call, anonymous objects,
   `try`/`break`/`continue`, a labeled or expression-position `return`, `is`/`as` on a type
   parameter; a `contract { … }` block is erased, not a closure) — with the shared registration
   semantic predicate `SymbolTable::source_fn_has_callable_body` consumed by common IR lowering and
@@ -2738,8 +2735,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   resolving/emitting. Test: `named_args_classpath_e2e` / `interface_supertype_members_e2e`.
 - **Named args / omitted defaults on a QUALIFIED nested-class constructor (`Op.Ext(a = 1, b = "x")`,
   `Op.Ext(a = 1)`, `Op.Ext(4)`).** A qualified nested ctor's receiver names a TYPE, not a value, so the
-  named-argument gate recognizes it via `qualified_nested_ctor_internal` (receiver is an out-of-scope type
-  name and `Outer.Nested` resolves via `resolve_qualified_nested`) WITHOUT typing the receiver as a value
+  named-argument gate resolves it through the committed classifier-segment walk WITHOUT typing the receiver as a value
   (which errored "unresolved reference"). The nested-ctor construction path then maps labels onto positions
   (`constructor_named_params` + `map_call_args`, with `synthetic_default_ctor` for an omitted defaulted
   param) and resolves positional forms via `library_ctor_resolves` (covering the `<init>$default`
@@ -2757,7 +2753,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   top-level properties, so every use site — explicit import, star import, same package — reported
   "unresolved reference". The facade property scan now classifies by the accessors' receiver parameter
   (`PropKind::TopLevel` when the getter takes none, `Extension` when it takes one), the resolver's
-  `resolve_top_level_property` selects it over the import scope (ambiguity across two in-scope packages is
+  the generic symbol query selects it over the import scope (ambiguity across two in-scope packages is
   no resolution), and a read lowers to the declaring facade's static getter (`ExprLowering::
   TopLevelPropertyGet`). It is the LAST value rung: every enclosing scope shadows an imported property.
   READS only so far: a `const val` top-level (no getter — its value inlines from a static field) and a
@@ -2976,8 +2972,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `V.Ok` are classpath types). The speculative narrowing type resolver `resolve_ty_no_diag` resolved only
   same-module (user) classes, type parameters, and a sibling nested type of the enclosing class — a classpath
   / imported type erased to `Ty::Error`, so the narrowing was dropped and `v` kept its parent type ("member
-  … on `<parent>`"). It now also resolves an imported classpath type and a qualified nested one
-  (`imported_type_internal` / `resolve_qualified_nested` — the same resolvers `resolve_ty` uses), so both a
+  … on `<parent>`"). It now uses the same committed classifier-segment walk as `resolve_ty`, so both a
   positive `is` and a negated `!is`/else narrowing work. (`as` casts already resolved classpath types.) Test:
   `tests/classpath_is_smartcast_e2e.rs`.
 - **A classpath EXTENSION whose value parameter is a VALUE CLASS resolves** (`inline fun <reified T>
@@ -3064,19 +3059,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `None`). The real fix (general suspend-inline splicing: inline the lock/try/finally body and splice the user
   lambda into the enclosing CPS state machine, as kotlinc does) is future work; until then this guarantees a
   bail over a miscompile. Test: `tests/suspend_inline_hof_suspending_lambda_reject_e2e.rs`.
-- **A fully-qualified top-level function call `a.b.helper(args)`.** The callee is a dotted path whose prefix
-  is a PACKAGE (its leftmost segment not a value in scope, via `dotted_root`) and whose last segment is a
-  top-level function of that package (compiled to `a/b/<File>Kt`). The checker resolves the overload with
-  `resolve_top_level_callable` and confirms the owning facade sits in the receiver's package
-  (`qualified_path`); the lowerer's `lower_fq_toplevel_call` mirrors this and emits the `invokestatic` to the
-  facade (a vararg/defaulted/inline FQ call bails to a later slice). Test: `tests/fq_toplevel_call_e2e.rs`.
-- **A fully-qualified CONSTRUCTOR call via a package path `a.b.Ctx(x = 1, y = 2)`.** The constructor analog
-  of the FQ top-level call: `a.b` is a package and `Ctx` a top-level class of it. `qualified_nested_ctor_
-  internal` (checker) / `nested_ctor_internal` (lowerer) — which already resolved a two-segment nested type
-  `Outer.Nested` from a bare-`Name` receiver — now also resolve a dotted-package-path receiver (`Expr::Member`)
-  by joining `qualified_path(receiver)` with the name (`a/b/Ctx`), verified via `resolve_type`, then run the
-  existing named/positional/reordered/omitted-default classpath-ctor resolution + `<init>$default` synthetic.
-  Test: `tests/fq_ctor_call_e2e.rs`.
+- **A fully-qualified top-level function call `a.b.helper(args)`.** The shared segment walk must end
+  with prefix `a.b` committed as a package. The checker selects and records the exact callable/facade;
+  lowering consumes that record and never parses the receiver spelling. Test: `tests/fq_toplevel_call_e2e.rs`.
+- **A fully-qualified CONSTRUCTOR call via a package path `a.b.Ctx(x = 1, y = 2)`.** The prefix commits
+  as a package and `Ctx` is one classifier edge. The checker records the selected constructor and
+  result identity; lowering consumes those facts. Test: `tests/fq_ctor_call_e2e.rs`.
 - **`break` / `continue` in EXPRESSION position (`val v = x ?: continue`, a `when` arm).** Kotlin's
   `break`/`continue` are `Nothing`-typed expressions (like `return`/`throw`), not only statements — new
   `Expr::Break`/`Expr::Continue` (parsed in `parse_prefix`, typed `Ty::Nothing`, `expr_diverges`), lowered
@@ -3215,11 +3203,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **Static call on a bare same-package (incl. ROOT-package) classpath class name (`J.greet()`).** Kotlin
   makes same-package declarations visible without an import, and the file's own package — the root
-  package for an unpackaged file — is an implicit wildcard (`import_wildcards`). The checker's
-  static-call receiver path only consulted the EXPLICIT import map, so `J.greet()` failed to resolve even
-  though `J()` (constructor) and `fun f(j: J)` (type position) resolved via the import levels. It now
-  falls back to `imported_type_internal` (the same level-based resolver), keeping shadowing intact: a
-  lexical value or top-level property named `J` still wins (`value_root_shadows_classifier`). Test:
+  package for an unpackaged file — is the first classifier import level. Static-call receivers,
+  constructors, and type positions now use the same committed root selection and left-to-right
+  qualifier walk. A lexical value or top-level property named `J` wins, and a failed member segment
+  never reopens `J` as a package or classifier. Test:
   `java_source_interop_e2e::root_package_static_call_matches_other_positions`; corpus
   `fakeOverride/kt40180*.kt` exercise the sibling type positions.
 
@@ -3413,7 +3400,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the accessor; a pure-Kotlin `getX()` still creates none), but reads as the most-derived SOURCE override's
   return — `catalog.entries` is `Array<RefinedEntry>`, not `BaseEntry[]`. Applied on both the checked
   tier (`resolve_external_inherited_property`) and the declaration-only tier
-  (`SourceFallbackPlatform::property_members`)
+  (`DependencyPlatform::property_members`)
   (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_refines_java_getter_property_via_kotlin_override`).
 
 - **A qualified static call resolves nested types through in-scope outers.** `Outer.Nested.m(args)`
@@ -4132,14 +4119,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java.util.concurrent.atomic.AtomicInteger(1)`. There is no syntax that separates the package part
   from the classifier part: `a.b.C.D` is ambiguous between package `a.b` + class `C` + member `D`,
   package `a` + class `b.C` + …, and so on. So a dotted reference is resolved one segment at a time,
-  and every prefix denotes exactly one of two things — a **package** or a **classifier**
-  (`QualifiedPrefix`, `src/symbol_resolver.rs`). Under a package, the next segment is a classifier of
-  that package or a subpackage; under a classifier, it is a nested classifier. The first segment that
-  is neither ends the walk, and the position that owns the reference (a read, a call, a class
-  literal, a constructor) resolves that segment as a MEMBER of whatever the prefix denoted.
+  and every prefix has one committed meaning — a **value**, **package**, or **classifier**
+  (`ResolvedQualifier`, `src/resolve.rs`). Under a package, the next segment is a classifier of
+  that package or a subpackage; under a classifier, it is a nested classifier. A missing edge ends
+  with a typed `QualifierError`; resolution never flattens the spelling or retries alternative `$`
+  placements. The owning position resolves exactly one terminal edge from the committed prefix.
   This is what makes the qualified spelling end at the SAME resolved identity the imported simple
   name reaches, for a same-module source classifier and a classpath one alike — the walk consults the
   federated module + classpath source at every step, so origin never enters the rule.
+
+  Source package declarations are namespace facts of their own; they do not disappear when every
+  declaration in a package is retained only for conflict diagnostics. Java stub overlays likewise
+  contribute their containing packages. Signature bootstrap presents source declaration identities
+  and libraries through the same qualifier interface, so it does not need a second source-path walk.
 
   Resolving a prefix to a **package** requires a package namespace, which is the half that was
   missing: `SymbolSource::package_exists` (`src/symbol_source.rs`), answered by the classpath's
@@ -4174,13 +4166,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   file), and lowering follows the same edge, because returning the alias spelling made the lowered
   internal disagree with the checker's recorded result type and the construction was dropped.
 
-  The walk must FALL THROUGH when a step fails rather than return: a compiled Kotlin `typealias` is
-  `@Metadata` on a file facade, not a class file, so the package walk cannot see it while the older
-  alias-table arms can. Returning early from the constructor path hid every spelling those arms
-  answer.
+  Alias edges are exposed by `SymbolSource::resolve_type_name`, so they participate in the same walk;
+  there is no alias-table fallback after a segment fails.
 
-  Lowering must end at the identity the checker resolved, not re-derive it: the constructor path now
-  takes the recorded result type, the qualified-path candidate split is the shared one, and a
+  Lowering consumes the identity the checker resolved and never re-derives it from source spelling:
+  type references use `TypeInfo::resolved_type_ref`, constructors use `resolved_constructor`, and a
   `const val` read is a facade FIELD (it has no accessor — calling one threw `NoSuchMethodError`).
   A callable declared in another SOURCE file of the module carries no physical descriptor, so a
   receiver-less static call to one is emitted as `Callee::CrossFile`, which derives the descriptor
@@ -4648,26 +4638,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instances are NOT equal (`dataClasses/equals/intarray.kt`), while `toString` shows the content
   (`dataClasses/toString/primitiveArrays.kt`).
 
-- **Classpath dotted type references (`lib.Thing`, `Wrap.Box`) in type position.** A dotted name in a
-  type position is resolved to a classpath internal by two complementary rules, tried NESTED-first (an
-  in-scope type shadows a package path, as kotlinc resolves): (1) a nested type under a resolvable outer
-  prefix (`Wrap.Box` → `<pkg>/Wrap$Box`), then (2) a fully-qualified package path (`lib.Thing` →
-  `lib/Thing`), each verified via `resolve_type` so a bogus path stays unresolved. The signature phase
-  registers such names into `class_names` (so the checker/lowerer agree), and the checker/lowerer
-  `resolve_qualified_nested` share the ordering — covering both a parameter/return type ref and a
-  qualified constructor call `lib.Thing(5)` (`classpath_type_ref_e2e`).
+- **Dotted type references (`lib.Thing`, `Wrap.Box`) use the same segment walk.** Type position skips
+  only the value namespace: it resolves an in-scope classifier root first, otherwise an absolute root
+  package, then commits left-to-right. `Wrap` therefore shadows a package named `Wrap`; if
+  `Wrap.Box` is absent, resolution fails there and never retries `Wrap/Box`. Signature collection and
+  checking share the single `walk_qualifier` transition loop; lowering reads the recorded type identity.
+
+- **Overload selection begins after qualification.** An unqualified call considers one scope-tower
+  level at a time. Each import/package level supplies candidate FQNs, and the federated `SymbolSource`
+  contributes every module and library overload at those identities. The first level containing an
+  applicable candidate wins; an inapplicable local function therefore allows a top-level candidate,
+  while an applicable local function wins without mixing priorities. The chosen semantic callable is
+  recorded for lowering; overload selection never changes or retries the qualifier.
 
 - **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
   matches a class declared in the same module (a sibling file's package, no `import` needed — as
   kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The
-  import pass tries this after explicit-import and same-package resolution and before the classpath
-  dotted rules; positions the parser stores already internalized (`pkg1/Cls` — supertypes,
-  delegation specs) take the same path. Candidate source forms are tried NESTED-first (`a$b$c`, then
-  `a/b$c`, then `a/b/c`), matching kotlinc's classifier-shadows-package rule — this ordering now
-  applies to explicit-import source paths too. The package-first candidate construction itself is a
-  shared naming primitive used by source resolution, classpath nested-name recovery, object-member
-  import inference, and Java-source analysis; only the source lookup reverses it for classifier-first
-  semantics. Resolving the identity does not widen access: module classifiers carry their declaring
+  import pass uses the same committed segment transitions; positions the parser stores already
+  internalized (`pkg1/Cls` — supertypes, delegation specs) take the same path. No alternate JVM-name
+  candidate list is generated. The same rule applies to explicit-import source paths. Resolving the
+  identity does not widen access: module classifiers carry their declaring
   file, so a top-level `private` FQN remains inaccessible from a sibling file while the declaring file
   can still use it. Covers every signature-pass type position — extension receivers
   (`fun pkg1.Cls.fn()`), parameter/return/property types, type arguments, generic bounds, supertype

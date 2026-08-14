@@ -192,6 +192,40 @@ impl Table {
         }
     }
 
+    #[inline]
+    fn probe_nested(
+        &self,
+        arena: &Arena,
+        parent: NameId,
+        owner: &str,
+        nested: &str,
+        h: u64,
+    ) -> Option<NameId> {
+        let tag = h as u32;
+        let mut i = (h >> 32) as usize & self.mask;
+        loop {
+            let slot = self.slots[i].load(Ordering::Acquire);
+            if slot == 0 {
+                return None;
+            }
+            if slot as u32 == tag {
+                let id = ((slot >> 32) - 1) as u32;
+                let node = arena.get(id);
+                if node.parent == Some(parent) {
+                    let candidate = node.segment.as_bytes();
+                    if candidate.len() == owner.len() + nested.len() + 1
+                        && candidate.get(owner.len()) == Some(&b'$')
+                        && candidate[..owner.len()] == *owner.as_bytes()
+                        && candidate[owner.len() + 1..] == *nested.as_bytes()
+                    {
+                        return Some(NameId(id));
+                    }
+                }
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+
     /// Writer-only: install `child` at the first empty slot of its probe chain.
     fn install(&self, h: u64, child: u32) {
         let value = (u64::from(child) + 1) << 32 | u64::from(h as u32);
@@ -212,6 +246,41 @@ fn child_hash(parent: NameId, segment: &str) -> u64 {
     let mut h = FxHasher::default();
     h.write_u32(parent.0);
     h.write(segment.as_bytes());
+    h.finish()
+}
+
+#[inline]
+fn child_hash_parts(parent: NameId, parts: &[&[u8]]) -> u64 {
+    use std::hash::Hasher;
+    let len = parts.iter().map(|part| part.len()).sum::<usize>();
+    let byte_at = |mut index: usize| {
+        for part in parts {
+            if index < part.len() {
+                return part[index];
+            }
+            index -= part.len();
+        }
+        unreachable!("virtual concatenation index is in bounds")
+    };
+    let mut h = FxHasher::default();
+    h.write_u32(parent.0);
+    let mut offset = 0usize;
+    while offset + 8 <= len {
+        h.add(u64::from_le_bytes(std::array::from_fn(|index| {
+            byte_at(offset + index)
+        })));
+        offset += 8;
+    }
+    if offset + 4 <= len {
+        h.add(u64::from(u32::from_le_bytes(std::array::from_fn(
+            |index| byte_at(offset + index),
+        ))));
+        offset += 4;
+    }
+    while offset < len {
+        h.add(u64::from(byte_at(offset)));
+        offset += 1;
+    }
     h.finish()
 }
 
@@ -316,6 +385,31 @@ impl NameTree {
         self.child_or_insert(parent, sep, segment)
     }
 
+    /// Append a Kotlin/JVM nested-class segment to the current final path segment (`Outer` + `Inner`
+    /// → `Outer$Inner`) without rendering the qualified parent.
+    pub fn nested_child_of(&self, owner: NameId, nested: &str) -> NameId {
+        let owner_node = self.node(owner);
+        let parent = owner_node.parent.unwrap_or(Self::ROOT);
+        let mut segment = String::with_capacity(owner_node.segment.len() + nested.len() + 1);
+        segment.push_str(&owner_node.segment);
+        segment.push('$');
+        segment.push_str(nested);
+        self.child_or_insert(parent, owner_node.sep, &segment)
+    }
+
+    /// Read-only counterpart of [`Self::nested_child_of`].
+    pub fn existing_nested_child_of(&self, owner: NameId, nested: &str) -> Option<NameId> {
+        let owner_node = self.node(owner);
+        let parent = owner_node.parent?;
+        let h = child_hash_parts(
+            parent,
+            &[owner_node.segment.as_bytes(), b"$", nested.as_bytes()],
+        );
+        // SAFETY: see `child_or_insert`.
+        let table = unsafe { &*self.current.load(Ordering::Acquire) };
+        table.probe_nested(&self.arena, parent, &owner_node.segment, nested, h)
+    }
+
     /// The already-interned child of `parent` for `segment`, without inserting.
     pub fn existing_child_of(&self, parent: NameId, segment: &str) -> Option<NameId> {
         self.child(parent, segment)
@@ -334,6 +428,23 @@ impl NameTree {
             parent = self.child_or_insert(parent, sep, segment);
         }
         parent
+    }
+
+    /// Map an identity from another tree when every segment already exists here. Unlike
+    /// [`Self::insert_from`], a miss returns `None` and does not mutate this tree.
+    pub fn existing_from(&self, other: &NameTree, id: NameId) -> Option<NameId> {
+        let mut parts = Vec::new();
+        let mut cur = id;
+        while cur != Self::ROOT {
+            let node = other.node(cur);
+            parts.push(&*node.segment);
+            cur = node.parent.expect("non-root name node has a parent");
+        }
+        let mut parent = Self::ROOT;
+        for segment in parts.into_iter().rev() {
+            parent = self.existing_child_of(parent, segment)?;
+        }
+        Some(parent)
     }
 
     pub fn render(&self, id: NameId) -> String {
@@ -479,6 +590,30 @@ impl NameTree {
             .all(|(idx, (a, b))| {
                 a == b || (idx >= left_nested_start && matches!((a, b), (b'.' | b'$', b'.' | b'$')))
             })
+    }
+
+    /// Whether `candidate` is `owner` itself or a classifier nested directly or transitively in
+    /// `owner`. Nested classifier segments are flattened (`Outer$Inner$Deep`) in the final path
+    /// component, so this compares interned package and segment nodes without rendering either id.
+    pub fn same_or_nested_within(&self, candidate: NameId, owner: NameId) -> bool {
+        if candidate == owner {
+            return true;
+        }
+        let candidate = self.node(candidate);
+        let owner = self.node(owner);
+        candidate.parent == owner.parent
+            && candidate
+                .segment
+                .strip_prefix(&*owner.segment)
+                .is_some_and(|suffix| suffix.starts_with('$'))
+    }
+
+    /// The immediate classifier owner encoded in the final segment (`Outer$Inner` or
+    /// `Outer.Inner` -> `Outer`). Returns an already-interned identity and never creates a spelling.
+    pub fn nested_owner(&self, nested: NameId) -> Option<NameId> {
+        let node = self.node(nested);
+        let split = node.segment.rfind(['$', '.'])?;
+        self.child(node.parent?, &node.segment[..split])
     }
 
     pub fn parent(&self, id: NameId) -> Option<NameId> {
@@ -632,6 +767,21 @@ mod tests {
         assert!(names.package_matches(map, "kotlin/collections"));
         assert!(!names.package_matches(entry, "kotlin"));
         assert_eq!(names.package(entry), "kotlin/collections");
+
+        let nested = names.insert("kotlin/collections/Map$Entry$Key");
+        let sibling = names.insert("kotlin/collections/Mapper");
+        let other_package = names.insert("other/Map$Entry");
+        assert!(names.same_or_nested_within(map, map));
+        assert!(names.same_or_nested_within(entry, map));
+        assert!(names.same_or_nested_within(nested, map));
+        assert!(!names.same_or_nested_within(sibling, map));
+        assert!(!names.same_or_nested_within(other_package, map));
+        assert_eq!(names.nested_owner(entry), Some(map));
+        assert_eq!(names.nested_owner(nested), Some(entry));
+        assert_eq!(names.nested_owner(map), None);
+
+        let dotted = names.insert("kotlin/collections/Map.Entry");
+        assert_eq!(names.nested_owner(dotted), Some(map));
     }
 
     #[test]
@@ -679,6 +829,28 @@ mod tests {
         assert_eq!(dst.insert_from(&src, NameTree::ROOT), NameTree::ROOT);
         // Re-inserting the same source id is idempotent in the destination.
         assert_eq!(dst.insert_from(&src, id), moved);
+    }
+
+    #[test]
+    fn existing_from_maps_only_preexisting_paths() {
+        let src = NameTree::default();
+        let present = src.insert("a/b");
+        let missing = src.insert("a/c");
+        let dst = NameTree::default();
+        let expected = dst.insert("a/b");
+        let before = dst.len();
+
+        assert_eq!(dst.existing_from(&src, present), Some(expected));
+        assert_eq!(dst.existing_from(&src, missing), None);
+        assert_eq!(
+            dst.existing_from(&src, NameTree::ROOT),
+            Some(NameTree::ROOT)
+        );
+        assert_eq!(
+            dst.len(),
+            before,
+            "read-only transfer must not insert a miss"
+        );
     }
 
     #[test]

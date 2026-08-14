@@ -64,3 +64,49 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "P");
 }
+
+#[test]
+fn unchecked_cast_type_param_uses_nullable_to_string_only_when_needed() {
+    const SRC: &str = "// WITH_STDLIB\n\
+val sb = StringBuilder()\n\
+fun <T> direct(x: Any?) { val y = x as T; sb.append(y.toString()) }\n\
+fun <T> safe(x: Any?) { val y = x as? T; sb.append(y.toString()) }\n\
+fun box(): String {\n\
+    direct<String>(\"17\")\n\
+    direct<String>(42)\n\
+    safe<String>(\"17\")\n\
+    safe<String>(42)\n\
+    safe<String>(null)\n\
+    val s = sb.toString()\n\
+    return if (s == \"17421742null\") \"OK\" else s\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "P");
+}
+
+#[test]
+fn nullable_string_plus_named_null_uses_builtin_declaration() {
+    const SRC: &str = "// WITH_STDLIB\n\
+fun box(): String {\n\
+    val receiver: String? = null\n\
+    return receiver.plus(other = null)\n\
+}\n";
+    let (code, diagnostics) = common::kotlinc_source_result("NullableStringPlusNamedNull", SRC);
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected nullable String.plus: {diagnostics}"
+    );
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SRC, "NullableStringPlusNamedNull"),
+        "nullnull"
+    );
+}
+
+#[test]
+fn string_plus_boxes_unsigned_argument_at_any_boundary() {
+    const SRC: &str = "// WITH_STDLIB\n\
+fun box(): String = \"\".plus(UInt.MAX_VALUE) + \"/\" + \"\".plus(ULong.MAX_VALUE)\n";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SRC, "StringPlusUnsigned"),
+        "4294967295/18446744073709551615"
+    );
+}

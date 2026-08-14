@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
 
 use krusty::ast::{Decl, Expr, ExprId, File, FunBody, Stmt, StmtId};
 use krusty::diag::DiagSink;
@@ -12,18 +11,6 @@ use krusty::frontend::{check_file, collect_signatures};
 use krusty::ir_lower::lower_file;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-
-fn collect_kt(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            collect_kt(&p, out);
-        } else if p.extension().is_some_and(|x| x == "kt") {
-            out.push(p);
-        }
-    }
-}
 
 /// Names of AST expr/stmt variants the IR lowering does NOT yet handle (the rest are supported).
 fn unsupported(file: &File) -> Vec<&'static str> {
@@ -72,7 +59,7 @@ fn decl_blockers(file: &File) -> Vec<&'static str> {
                 if c.is_data {
                     out.push("class: data");
                 }
-                if c.is_object() {
+                if c.is_singleton() {
                     out.push("class: object");
                 }
                 if c.is_enum() {
@@ -96,7 +83,7 @@ fn decl_blockers(file: &File) -> Vec<&'static str> {
                 if !c.body_props.is_empty() {
                     out.push("class: body properties");
                 }
-                if !c.companion_methods.is_empty() {
+                if c.companion.is_some() {
                     out.push("class: companion");
                 }
                 if !c.secondary_ctors.is_empty() {
@@ -138,8 +125,7 @@ fn run() {
     let Some(box_dir) = krusty::toolchain::box_corpus_dir() else {
         return;
     };
-    let mut files = Vec::new();
-    collect_kt(&box_dir, &mut files);
+    let files = krusty::conformance::kotlin_files(&box_dir);
 
     let (mut total, mut lowered, mut nearmiss) = (0u32, 0u32, 0u32);
     // count of files that contain each unsupported variant (once per file), and files with classes/decls.

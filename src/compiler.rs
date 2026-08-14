@@ -210,7 +210,8 @@ mod tests {
         let mut diags = DiagSink::new();
         let files = vec![
             parse_source_with_detected_features(
-                "class Scope\n\
+                "fun <T, R> with(receiver: T, block: T.() -> R): R = receiver.block()\n\
+                 class Scope\n\
                  fun use(scope: Scope): Int = with(scope) { hidden(1) }",
                 &mut diags,
             ),
@@ -230,7 +231,15 @@ mod tests {
             &mut diags,
         );
 
-        assert!(diags.has_errors());
+        assert_eq!(
+            diags
+                .diags
+                .iter()
+                .filter(|diagnostic| diagnostic.file == 0)
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            ["cannot access 'hidden': it is private in its file"]
+        );
         assert!(outputs.is_empty());
     }
 

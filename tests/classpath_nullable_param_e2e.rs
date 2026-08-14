@@ -80,9 +80,10 @@ fn non_null_member_parameter_remains_strict() {
         }\n";
     if let Some(diags) = common::checker_diags_against("cpnullparamstrict", LIB, main) {
         assert!(
-            diags.iter().any(
-                |message| message.starts_with("none of the following candidates is applicable")
-            ),
+            diags.iter().any(|message| {
+                message
+                == "argument type mismatch: actual type is 'lib.Tgt?', but 'lib.Tgt' was expected."
+            }),
             "{diags:?}"
         );
     }

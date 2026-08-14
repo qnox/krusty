@@ -35,3 +35,12 @@ fn extension_get_set_operator() {
         }\n";
     assert_eq!(run(SRC).expect("extension get/set"), "OK");
 }
+
+#[test]
+fn extension_vararg_get_operator() {
+    const SRC: &str = "operator fun String.get(vararg values: Any): String =\n\
+        if (values[0] == 44 && values[1] == \"example\") this else \"fail\"\n\
+        fun box(): String = \"OK\"[44, \"example\"]\n";
+
+    assert_eq!(run(SRC).expect("extension vararg get"), "OK");
+}

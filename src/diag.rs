@@ -85,12 +85,18 @@ impl DiagSink {
     }
 
     pub fn error_kind(&mut self, span: Span, kind: DiagnosticKind, msg: impl Into<String>) {
+        let msg = msg.into();
+        crate::trace_compiler!(
+            "diagnostic",
+            "file={} span={span:?} kind={kind:?} message={msg}",
+            self.current_file,
+        );
         self.diags.push(Diagnostic {
             span,
             editor_span: None,
             severity: Severity::Error,
             kind,
-            msg: msg.into(),
+            msg,
             identity: None,
             file: self.current_file,
         });

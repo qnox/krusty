@@ -2,7 +2,15 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
-mod common;
+#[path = "common/mod.rs"]
+mod common_core;
+#[path = "common/e2e.rs"]
+mod e2e_support;
+
+mod common {
+    pub use super::common_core::*;
+    pub use super::e2e_support::*;
+}
 
 #[path = "abstract_instantiation_check_e2e.rs"]
 mod abstract_instantiation_check_e2e;
@@ -558,6 +566,8 @@ mod generic_static_field_e2e;
 mod generic_suspend_member_return_e2e;
 #[path = "generic_vararg_inference_e2e.rs"]
 mod generic_vararg_inference_e2e;
+#[path = "implicit_integer_coercion_e2e.rs"]
+mod implicit_integer_coercion_e2e;
 #[path = "implicit_receiver_named_args_e2e.rs"]
 mod implicit_receiver_named_args_e2e;
 #[path = "implicit_this_callable_ref_e2e.rs"]

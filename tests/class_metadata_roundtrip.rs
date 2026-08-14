@@ -8,11 +8,15 @@
 use krusty::jvm::classreader::ClassInfo;
 use krusty::jvm::metadata::{class_functions, decode_metadata, package_functions};
 use krusty::metadata::class_builder::{build_class, ClassTail, FnMeta};
-use krusty::types::{type_name, Ty};
+use krusty::types::{type_name, Ty, TypeVariance};
 
 /// Wrap built `(d1_bytes, d2)` into a `ClassInfo` the reader consumes. `d1` is the protobuf payload with
 /// one byte per `char` (the constant pool writes it as modified-UTF-8, the reader decodes it back).
 fn class_info(internal: &str, d1: Vec<u8>, d2: Vec<String>) -> ClassInfo {
+    class_info_kind(internal, d1, d2, None)
+}
+
+fn class_info_kind(internal: &str, d1: Vec<u8>, d2: Vec<String>, kind: Option<i32>) -> ClassInfo {
     let d1_strings = vec![d1.iter().map(|&b| b as char).collect()];
     ClassInfo {
         major: 52,
@@ -22,7 +26,7 @@ fn class_info(internal: &str, d1: Vec<u8>, d2: Vec<String>) -> ClassInfo {
         interfaces: Vec::<String>::new().into(),
         fields: Vec::new(),
         methods: Vec::new(),
-        meta: decode_metadata(&d1_strings, &d2, None, internal, &[]),
+        meta: decode_metadata(&d1_strings, &d2, kind, internal, &[]),
         signature: None,
         retention: None,
         inner_classes: Vec::new(),
@@ -70,6 +74,164 @@ fn class_member_value_params_round_trip() {
 }
 
 #[test]
+fn class_type_parameter_bound_and_variance_round_trip() {
+    let parameter = krusty::ir::IrTypeParameter {
+        name: "T".to_string(),
+        semantic_name: "T".to_string(),
+        bounds: vec![(Ty::obj("kotlin/CharSequence"), true)],
+        variance: TypeVariance::Out,
+    };
+    let names = vec!["T".to_string()];
+    let (d1, d2) = build_class(
+        "com/example/Producer",
+        &[],
+        "()V",
+        &[],
+        &[],
+        &[],
+        &ClassTail {
+            type_params: &names,
+            type_param_bounds: std::slice::from_ref(&parameter),
+            ..Default::default()
+        },
+    );
+    let ci = class_info_kind("com/example/Producer", d1, d2, Some(1));
+    assert_eq!(
+        ci.meta.class_type_parameters.type_param_variances(),
+        &vec![TypeVariance::Out]
+    );
+    assert_eq!(
+        ci.meta.class_type_parameters.type_param_bounds(),
+        &vec![vec![Ty::obj("kotlin/CharSequence")]]
+    );
+}
+
+#[test]
+fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids() {
+    let outer = "outer-semantic".to_string();
+    let own = "inner-semantic".to_string();
+    let own_parameter = krusty::ir::IrTypeParameter {
+        name: "U".to_string(),
+        semantic_name: own.clone(),
+        bounds: vec![(Ty::obj("kotlin/Any"), false)],
+        variance: TypeVariance::Invariant,
+    };
+    let methods = vec![FnMeta {
+        name: "pair".to_string(),
+        params: vec![
+            (
+                "outer".to_string(),
+                Ty::ty_param(&outer, Ty::obj("kotlin/Any")),
+            ),
+            (
+                "inner".to_string(),
+                Ty::ty_param(&own, Ty::obj("kotlin/Any")),
+            ),
+        ],
+        ret: Ty::obj_args(
+            "kotlin/Pair",
+            &[
+                Ty::ty_param(&outer, Ty::obj("kotlin/Any")),
+                Ty::ty_param(&own, Ty::obj("kotlin/Any")),
+            ],
+        ),
+        type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
+        flags: krusty::metadata::class_builder::DEFAULT_FUNCTION_FLAGS,
+        params_have_defaults: false,
+        jvm_sig: None,
+        jvm_sig_name: None,
+    }];
+    let own_names = vec!["U".to_string()];
+    let captured = vec![outer];
+    let (d1, d2) = build_class(
+        "sample/Outer$Inner",
+        &[],
+        "(Lsample/Outer;)V",
+        &[],
+        &methods,
+        &[],
+        &ClassTail {
+            type_params: &own_names,
+            type_param_bounds: std::slice::from_ref(&own_parameter),
+            captured_type_params: &captured,
+            ..Default::default()
+        },
+    );
+    let ci = class_info_kind("sample/Outer$Inner", d1, d2, Some(1));
+    assert_eq!(ci.meta.class_type_parameters.type_params(), &["U"]);
+    let pair = class_functions(&ci)
+        .iter()
+        .find(|function| function.jvm_name == "pair")
+        .expect("pair metadata");
+    let signature = pair.generic_sig.as_ref().expect("generic member signature");
+    assert!(matches!(
+        signature.params[0],
+        Ty::TyParam("outer-semantic", _)
+    ));
+    assert!(matches!(signature.params[1], Ty::TyParam("U", _)));
+}
+
+#[test]
+fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
+    let outer = "outer-semantic".to_string();
+    let middle = "middle-semantic".to_string();
+    let own = "inner-semantic".to_string();
+    let bound = Ty::obj("kotlin/Any");
+    let own_parameter = krusty::ir::IrTypeParameter {
+        name: "V".to_string(),
+        semantic_name: own.clone(),
+        bounds: vec![(bound, false)],
+        variance: TypeVariance::Invariant,
+    };
+    let parameter = |name: &str| (name.to_string(), Ty::ty_param(name, bound));
+    let methods = vec![FnMeta {
+        name: "triple".to_string(),
+        params: vec![parameter(&outer), parameter(&middle), parameter(&own)],
+        ret: Ty::Unit,
+        type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
+        flags: krusty::metadata::class_builder::DEFAULT_FUNCTION_FLAGS,
+        params_have_defaults: false,
+        jvm_sig: None,
+        jvm_sig_name: None,
+    }];
+    let own_names = vec!["V".to_string()];
+    let captured = vec![outer, middle];
+    let (d1, d2) = build_class(
+        "sample/Outer$Middle$Inner",
+        &[],
+        "(Lsample/Outer$Middle;)V",
+        &[],
+        &methods,
+        &[],
+        &ClassTail {
+            type_params: &own_names,
+            type_param_bounds: std::slice::from_ref(&own_parameter),
+            captured_type_params: &captured,
+            ..Default::default()
+        },
+    );
+    let ci = class_info_kind("sample/Outer$Middle$Inner", d1, d2, Some(1));
+    let signature = class_functions(&ci)
+        .iter()
+        .find(|function| function.jvm_name == "triple")
+        .and_then(|function| function.generic_sig.as_ref())
+        .expect("triple metadata signature");
+    assert!(matches!(
+        signature.params[0],
+        Ty::TyParam("outer-semantic", _)
+    ));
+    assert!(matches!(
+        signature.params[1],
+        Ty::TyParam("middle-semantic", _)
+    ));
+    assert!(matches!(signature.params[2], Ty::TyParam("V", _)));
+}
+
+#[test]
 fn package_value_param_defaults_round_trip() {
     use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
     // A top-level `fun host(a: String, b: Int = 7): String` — only `b` DECLARES_DEFAULT_VALUE. The
@@ -80,16 +242,17 @@ fn package_value_param_defaults_round_trip() {
         params: vec![("a".to_string(), Ty::String), ("b".to_string(), Ty::Int)],
         ret: Ty::String,
         receiver: None,
-        param_fun_recvs: Vec::new(),
         param_defaults: vec![false, true],
         suspend: false,
         jvm_desc: None,
         contract: None,
         inline: false,
         type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
         context_count: 0,
     }];
-    let (d1, d2) = build_package(&funcs, &[]);
+    let (d1, d2) = build_package(&funcs, &[], &[]);
     let ci = class_info("com/example/HostKt", d1, d2);
 
     let fns = package_functions(&ci);
@@ -108,6 +271,43 @@ fn package_value_param_defaults_round_trip() {
 }
 
 #[test]
+fn package_function_type_parameter_bound_round_trips() {
+    use krusty::jvm::metadata::package_functions;
+    use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
+    let t = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
+    let funcs = vec![PkgFnMeta {
+        name: "identity".to_string(),
+        params: vec![("value".to_string(), t)],
+        ret: t,
+        receiver: None,
+        param_defaults: Vec::new(),
+        suspend: false,
+        jvm_desc: Some("(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;".to_string()),
+        contract: None,
+        inline: false,
+        type_params: vec![("T".to_string(), false)],
+        semantic_type_params: vec!["T".to_string()],
+        type_param_bounds: vec![vec![Ty::obj("kotlin/CharSequence")]],
+        context_count: 0,
+    }];
+    let (d1, d2) = build_package(&funcs, &[], &[]);
+    let ci = class_info("com/example/HostKt", d1, d2);
+    let function = package_functions(&ci)
+        .iter()
+        .find(|function| function.kotlin_name == "identity")
+        .expect("identity metadata");
+    assert_eq!(
+        function
+            .generic_sig
+            .as_ref()
+            .expect("generic signature")
+            .formal_bounds
+            .as_slice(),
+        &[vec![Ty::obj("kotlin/CharSequence")]],
+    );
+}
+
+#[test]
 fn package_extension_receiver_round_trips() {
     use krusty::jvm::metadata::package_functions;
     use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
@@ -120,16 +320,17 @@ fn package_extension_receiver_round_trips() {
         params: vec![("route".to_string(), Ty::String)],
         ret: Ty::Unit,
         receiver: Some(Ty::obj("androidx/navigation/NavGraphBuilder")),
-        param_fun_recvs: Vec::new(),
         param_defaults: Vec::new(),
         suspend: false,
         jvm_desc: None,
         contract: None,
         inline: false,
         type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
         context_count: 0,
     }];
-    let (d1, d2) = build_package(&funcs, &[]);
+    let (d1, d2) = build_package(&funcs, &[], &[]);
     let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
 
     let f = package_functions(&ci)
@@ -161,19 +362,29 @@ fn package_receiver_function_type_param_round_trips() {
     // dependent recognizes a lambda passed to `builder` binds `this` to NGB (drives classpath lambda_recv).
     let funcs = vec![PkgFnMeta {
         name: "NavHost".to_string(),
-        params: vec![("builder".to_string(), Ty::obj("kotlin/Function1"))],
+        params: vec![(
+            "builder".to_string(),
+            Ty::fun_with_shape(
+                vec![Ty::obj("androidx/navigation/NavGraphBuilder")],
+                Ty::Unit,
+                0,
+                true,
+                false,
+            ),
+        )],
         ret: Ty::Unit,
         receiver: None,
-        param_fun_recvs: vec![Some(Ty::obj("androidx/navigation/NavGraphBuilder"))],
         param_defaults: Vec::new(),
         suspend: false,
         jvm_desc: None,
         contract: None,
         inline: false,
         type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
         context_count: 0,
     }];
-    let (d1, d2) = build_package(&funcs, &[]);
+    let (d1, d2) = build_package(&funcs, &[], &[]);
     let ci = class_info("com/example/NavHostKt", d1, d2);
 
     let f = package_functions(&ci)

@@ -128,7 +128,7 @@ fn remove_at_override_satisfies_the_java_util_abstract() {
     // override under the Kotlin name, so `java.util.List.remove(int)` stays abstract without a bridge —
     // an `AbstractMethodError` at the first call through the interface. The primitive element type also
     // exercises the bridge's boxing (`removeAt(Int): Int` behind the erased `(I)Ljava/lang/Object;`).
-    let Some(output) = common::compile_and_run_with_stdlib(
+    let output = common::expect_box_run_with_stdlib(
         r#"
         class Ints : MutableList<Int> {
             private val b: MutableList<Int> = mutableListOf(1, 2, 3)
@@ -164,9 +164,7 @@ fn remove_at_override_satisfies_the_java_util_abstract() {
         }
         "#,
         "Main",
-    ) else {
-        panic!("compile/run returned None");
-    };
+    );
     assert_eq!(output, "100 200 [3]");
 }
 

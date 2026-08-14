@@ -94,6 +94,47 @@ fun box(): String {\n\
 }
 
 #[test]
+fn covariant_extension_receiver_and_argument_infer_common_supertype() {
+    const SRC: &str = "interface Producer<out T>\n\
+class Strings : Producer<String>\n\
+fun <T> Producer<T>.merge(value: T): T = value\n\
+fun box(): String {\n\
+    val receiver: Producer<String> = Strings()\n\
+    val result: Any = receiver.merge(Any())\n\
+    return if (result.toString().isNotEmpty()) \"OK\" else \"FAIL\"\n\
+}\n";
+    assert_eq!(run(SRC, "VarianceInference"), "OK");
+}
+
+#[test]
+fn contravariant_extension_receiver_uses_argument_bound() {
+    const SRC: &str = "interface Consumer<in T>\n\
+class AnyConsumer : Consumer<Any>\n\
+fun <T> Consumer<T>.take(value: T): T = value\n\
+fun box(): String {\n\
+    val receiver: Consumer<Any> = AnyConsumer()\n\
+    val result: String = receiver.take(\"OK\")\n\
+    return result\n\
+}\n";
+    assert_eq!(run(SRC, "ContravarianceInference"), "OK");
+}
+
+#[test]
+fn nested_covariant_extension_receiver_composes_variance() {
+    const SRC: &str = "interface Producer<out T>\n\
+interface Boxed<out T>\n\
+class StringBox : Boxed<String>\n\
+class BoxProducer : Producer<Boxed<String>>\n\
+fun <T> Producer<Boxed<T>>.merge(value: T): T = value\n\
+fun box(): String {\n\
+    val receiver: Producer<Boxed<String>> = BoxProducer()\n\
+    val result: Any = receiver.merge(Any())\n\
+    return if (result.toString().isNotEmpty()) \"OK\" else \"FAIL\"\n\
+}\n";
+    assert_eq!(run(SRC, "NestedVarianceInference"), "OK");
+}
+
+#[test]
 fn nullable_generic_params() {
     const SRC: &str = "fun <T> firstOrElse(xs: List<T?>, dflt: T): T {\n\
     for (x in xs) if (x != null) return x\n\
@@ -125,6 +166,157 @@ fun box(): String {\n\
     return \"OK\"\n\
 }\n";
     assert_eq!(run(SRC, "FnTypes"), "OK");
+}
+
+#[test]
+fn generic_higher_order_call_preserves_the_argument_type() {
+    const SRC: &str =
+        "// LANGUAGE: +JvmInlineMultiFieldValueClasses, +GenericInlineClassParameter\n\
+fun <T : Any> unwrap(value: Wrapper<T>): T = applyOne(value) { it.item }\n\
+fun <T, R> applyOne(value: T, transform: (T) -> R): R = transform(value)\n\
+@JvmInline\n\
+value class Wrapper<T : Any>(val item: T)\n\
+fun box(): String = unwrap(Wrapper(\"OK\"))\n";
+    assert_eq!(run(SRC, "GenericHigherOrderCall"), "OK");
+}
+
+#[test]
+fn generic_object_literal_preserves_its_applied_interface() {
+    const SRC: &str =
+        "// LANGUAGE: +JvmInlineMultiFieldValueClasses, +GenericInlineClassParameter\n\
+interface Converter<I, O> { fun convert(input: I): O }\n\
+@JvmInline value class Wrapped<T : Any>(val item: T)\n\
+fun <I, O> applyOne(input: I, converter: Converter<I, O>): O = converter.convert(input)\n\
+fun <T : Any> unwrap(value: Wrapped<T>): T = applyOne(value, object : Converter<Wrapped<T>, T> {\n\
+    override fun convert(input: Wrapped<T>): T = input.item\n\
+})\n\
+fun box(): String = unwrap(Wrapped(\"OK\"))\n";
+    assert_eq!(run(SRC, "GenericObjectLiteral"), "OK");
+}
+
+#[test]
+fn bounded_generic_extension_on_anonymous_interface_parameter() {
+    const SRC: &str =
+        "// LANGUAGE: +JvmInlineMultiFieldValueClasses, +GenericInlineClassParameter\n\
+interface Action<I, O> { fun apply(input: I): O }\n\
+@JvmInline value class IntBox<T : Int>(val item: T)\n\
+fun <T : Int> IntBox<T>.unbox(): T = item\n\
+fun <I, O> applyOne(input: I, action: Action<I, O>): O = action.apply(input)\n\
+fun <T : Int> read(value: IntBox<T>): T = applyOne(value, object : Action<IntBox<T>, T> {\n\
+    override fun apply(input: IntBox<T>): T = input.unbox()\n\
+})\n\
+fun box(): String = if (read(IntBox(42)) == 42) \"OK\" else \"fail\"\n";
+    assert!(
+        common::front_end_diagnostics_with_stdlib(SRC).is_empty(),
+        "the bounded symbolic receiver must be accepted"
+    );
+}
+
+#[test]
+fn stdlib_value_class_keeps_lexical_type_in_anonymous_interface() {
+    const SRC: &str = "interface Reader<I, O> { fun read(input: I): O }\n\
+fun <I, O> applyOne(input: I, reader: Reader<I, O>): O = reader.read(input)\n\
+fun <T> unwrap(value: Result<T>): T = applyOne(value, object : Reader<Result<T>, T> {\n\
+    override fun read(input: Result<T>): T = input.getOrThrow()\n\
+})\n\
+fun box(): String = unwrap(Result.success(\"OK\"))\n";
+    assert!(
+        common::front_end_diagnostics_with_stdlib(SRC).is_empty(),
+        "a stdlib value-class classifier must retain its semantic type arguments"
+    );
+}
+
+#[test]
+fn stdlib_with_preserves_builder_inference_for_a_class_type_parameter() {
+    const SRC: &str = "class Value\n\
+class Builder<C> {\n\
+    fun yield(value: C) {}\n\
+    fun materialize(): C = Value() as C\n\
+}\n\
+fun <T> build(block: Builder<T>.() -> Unit): Builder<T> = Builder<T>()\n\
+@Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+private fun <T> exact(value: @kotlin.internal.Exact T) {}\n\
+class Context<T> {\n\
+    fun consumeCase() {\n\
+        val value: T = Value() as T\n\
+        val built = build { yield(value) }\n\
+        exact<Builder<T>>(built)\n\
+    }\n\
+    fun produceCase() {\n\
+        fun consume(value: T) {}\n\
+        val built = build { consume(materialize()) }\n\
+        exact<Builder<T>>(built)\n\
+    }\n\
+}\n\
+fun box(): String {\n\
+    with(Context<Value>()) { consumeCase(); produceCase() }\n\
+    return \"OK\"\n\
+}\n";
+    assert!(
+        common::front_end_diagnostics_with_stdlib(SRC).is_empty(),
+        "the stdlib scope function must not rebind an enclosing class type parameter"
+    );
+}
+
+#[test]
+fn stdlib_apply_preserves_an_applied_enclosing_builder_type() {
+    const SRC: &str = "class Marker\n\
+class Builder<C> {\n\
+    fun materialize(): C = Context<Marker>() as C\n\
+}\n\
+fun <T> build(block: Builder<T>.() -> Unit): Builder<T> = Builder<T>().apply(block)\n\
+@Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+private fun <T> exact(value: @kotlin.internal.Exact T) {}\n\
+class Context<T> {\n\
+    fun produceCase() {\n\
+        fun nested() {\n\
+            fun <T> shareTypeInfo(from: T, to: T) {}\n\
+            val built = build { shareTypeInfo(this@Context, materialize()) }\n\
+            exact<Builder<Context<T>>>(built)\n\
+        }\n\
+        nested()\n\
+    }\n\
+}\n\
+fun box(): String { Context<Marker>().produceCase(); return \"OK\" }\n";
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
+    assert!(
+        diagnostics.is_empty(),
+        "stdlib apply must preserve the complete postponed builder type: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn stdlib_apply_preserves_nullable_nothing_builder_inference() {
+    const SRC: &str = "class Builder<T> { fun yield(value: T) {} }\n\
+fun <T> build(block: Builder<T>.() -> Unit): Builder<T> = Builder<T>().apply(block)\n\
+@Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+private fun <T> exact(value: @kotlin.internal.Exact T) {}\n\
+fun use() {\n\
+    val built = build { yield(null) }\n\
+    exact<Builder<Nothing?>>(built)\n\
+}\n\
+fun box(): String { use(); return \"OK\" }\n";
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
+    assert!(
+        diagnostics.is_empty(),
+        "stdlib apply must retain nullable-bottom inference: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn generic_identity_argument_preserves_enum_value_of_parameter() {
+    const SRC: &str = "enum class Choice { OK }\n\
+fun <T> identity(value: T): T = value\n\
+fun box(): String = Choice.valueOf(identity(\"OK\")).name\n";
+    assert_eq!(run(SRC, "GenericEnumValueOf"), "OK");
+}
+
+#[test]
+fn kotlin_test_assert_contains_selects_the_string_overload() {
+    const SRC: &str = "fun <K, V> contains(container: Map<K, V>, key: K): String = \"map\"\n\
+fun contains(container: CharSequence, value: CharSequence): String = \"chars\"\n\
+fun box(): String = contains(\"NO\", \"N\")\n";
+    assert_eq!(run(SRC, "ContainsStringOverload"), "chars");
 }
 
 #[test]

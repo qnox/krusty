@@ -100,37 +100,6 @@ fn conflicting_extension_functions() {
     assert_rejected(&d, "conflicting extension functions");
 }
 
-#[test]
-fn companion_member_collides_with_instance() {
-    let d = diags(
-        "class C { fun f(): Int = 1\ncompanion object { fun f(): Int = 2 } }\nfun box(): Int = 0",
-    );
-    assert_rejected(&d, "companion member collides with instance member");
-}
-
-#[test]
-fn companion_method_default_arity_overlap_stays_rejected() {
-    // Different declaration lengths are not necessarily different CALL shapes. The instance method
-    // accepts zero arguments through its default, so an unqualified `f()` inside the class would fit
-    // both it and the companion fallback. Keep the conservative gate until lexical receiver ranking
-    // can distinguish two same-arity families instead of letting the name-only companion arm win.
-    let d = diags(
-        "class C { fun f(value: Int = 1): Int = value\ncompanion object { fun f(): Int = 2 } }\nfun box(): Int = 0",
-    );
-    assert_rejected(&d, "companion member collides with instance member");
-}
-
-#[test]
-fn companion_method_vararg_arity_overlap_stays_rejected() {
-    // A vararg contributes no minimum, even when a defaulted fixed parameter precedes it. Comparing
-    // only `params.len()` (two versus zero), or treating the vararg as one required value, would allow
-    // this pair even though the same zero-argument call can reach both callable families.
-    let d = diags(
-        "class C { fun f(prefix: Int = 1, vararg value: Int): Int = prefix + value.size\ncompanion object { fun f(): Int = 2 } }\nfun box(): Int = 0",
-    );
-    assert_rejected(&d, "companion member collides with instance member");
-}
-
 // ===========================================================================
 // Unsupported-feature rejections (resolve.rs "krusty: ...")
 // ===========================================================================
@@ -153,12 +122,9 @@ fn companion_property_custom_accessor() {
         real.is_empty() || d.iter().any(|m| m.contains("<skip")),
         "expected a computed companion property to type-check clean, got: {real:?}"
     );
-    // An accessor over a real BACKING FIELD still is not: it would be emitted as the default static
-    // accessor with the body ignored, so the front end must keep rejecting it.
-    let d = diags(
-        "class C { companion object { val x: Int = 1\n    get() = field + 1 } }\nfun box(): Int = 0",
-    );
-    assert_rejected(&d, "companion-object backing-field accessor");
+    const SOURCE: &str = "class C { companion object { val x: Int = 1\n    get() = field + 1 } }\n\
+         fun box(): String = if (C.x == 2) \"OK\" else \"FAIL\"";
+    common::expect_box_ok_with_stdlib(SOURCE, "CompanionBackingAccessor");
 }
 
 #[test]
@@ -240,9 +206,9 @@ fn referential_equality_on_mismatched_primitive_types() {
 }
 
 #[test]
-fn nested_try_with_finally() {
+fn nested_try_with_finally_is_accepted() {
     let d = diags("fun box(): Int { try { try { return 1 } finally {} } finally {}; return 0 }");
-    assert_rejected(&d, "nested try combined with finally");
+    assert!(d.is_empty(), "nested try/finally is valid Kotlin: {d:?}");
 }
 
 #[test]
@@ -265,22 +231,14 @@ fn empty_array_of_without_type() {
 }
 
 #[test]
-fn operator_extension_on_nullable_receiver() {
-    // A nullable REFERENCE receiver still collides with the non-null form's erased key (reference
-    // nullability isn't modeled at call sites). A nullable PRIMITIVE receiver (`Int?.plus`) is now
-    // supported for the dispatchable operator names — see `nullable_receiver_operator_ext_e2e`.
-    let d = diags("operator fun String?.plus(o: String): String = \"\"\nfun box(): Int = 0");
-    assert_rejected(&d, "operator extension on a nullable reference receiver");
-}
-
-#[test]
-fn non_dispatchable_operator_extension_on_nullable_primitive() {
-    // Operator names whose call paths never dispatch by receiver nullability (`get`, `equals`, …)
-    // stay rejected on a nullable primitive — accepting them would silently keep the builtin.
-    let d = diags("operator fun Int?.get(i: Int): Int = 0\nfun box(): Int = 0");
-    assert_rejected(
-        &d,
-        "non-dispatchable operator extension on a nullable primitive receiver",
+fn operator_extension_on_nullable_primitive_is_accepted() {
+    let d = diags(
+        "operator fun Int?.get(i: Int): Int = this ?: i\n\
+         fun box(): Int { val value: Int? = null; return value[7] }",
+    );
+    assert!(
+        d.is_empty(),
+        "nullable receivers are valid extension targets: {d:?}"
     );
 }
 
@@ -306,27 +264,45 @@ fn when_with_two_else_branches() {
     assert_rejected(&d, "when with two else branches");
 }
 
+#[test]
+fn when_guard_requires_its_language_feature() {
+    let d = diags(
+        "sealed interface V\nclass A(val ok: Boolean) : V\nfun f(v: V) = when (v) { is A if v.ok -> 1; else -> 0 }",
+    );
+    assert!(
+        d.iter()
+            .any(|message| message.contains("when guards are disabled")),
+        "{d:?}"
+    );
+}
+
 // ===========================================================================
 // Parser: unsupported constructs
 // ===========================================================================
 
 #[test]
 fn type_parameter_primitive_upper_bound() {
-    // A non-specializable primitive upper bound (`Double`) is rejected.
+    // Primitive bounds are source-valid; physical specialization is not parser policy.
     let d = parse_diags("fun <T : Double> f(x: T): Int = 0\nfun box(): Int = 0");
-    assert_rejected(&d, "type parameter with a primitive upper bound");
+    assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]
-fn secondary_constructor_in_enum() {
-    let d = parse_diags("enum class E { A; constructor() { } }\nfun box(): Int = 0");
-    assert_rejected(&d, "secondary constructor in an enum class");
+fn secondary_constructor_in_enum_is_accepted() {
+    let d = diags("enum class E { A; constructor() { } }\nfun box(): Int = 0");
+    assert!(
+        d.is_empty(),
+        "enum classes may declare private secondary constructors: {d:?}"
+    );
 }
 
 #[test]
-fn enum_entry_body_with_nested_class() {
-    let d = parse_diags("enum class E { A { class X } }\nfun box(): Int = 0");
-    assert_rejected(&d, "unsupported member in an enum entry body");
+fn enum_entry_body_with_nested_class_is_accepted() {
+    let d = diags("enum class E { A { class X } }\nfun box(): Int = 0");
+    assert!(
+        d.is_empty(),
+        "an enum-entry class body may contain a nested class: {d:?}"
+    );
 }
 
 #[test]

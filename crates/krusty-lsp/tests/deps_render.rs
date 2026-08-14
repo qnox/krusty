@@ -6,6 +6,7 @@ use krusty::jvm::metadata::KotlinMeta;
 use krusty::libraries::LibraryType;
 use krusty::symbol_source::SymbolSource;
 use krusty::toolchain::stdlib_classpath;
+use krusty::types::type_name;
 use krusty_lsp::deps_render::{
     attached_source, materialize, render_library_class, MaterializedSource,
 };
@@ -17,8 +18,8 @@ fn load(internal: &str) -> Option<(LibraryType, Option<KotlinMeta>)> {
     }
     let meta = cp.find(internal).map(|ci| ci.meta.clone());
     let libs = JvmLibraries::new(cp);
-    let lib = libs.resolve_type(internal)?;
-    Some((lib, meta))
+    let lib = libs.classifier(type_name(internal))?;
+    Some(((*lib).clone(), meta))
 }
 
 #[test]

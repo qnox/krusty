@@ -10,10 +10,7 @@
 use super::common;
 
 fn run_box(src: &str, stem: &str) {
-    let Some(out) = common::compile_and_run_with_stdlib(src, stem) else {
-        panic!("{stem}: expected the box to compile and run");
-    };
-    assert_eq!(out, "OK", "{stem}");
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 /// Inner-class member extension, single default, omitted and provided.
@@ -94,6 +91,28 @@ class A {
 fun box(): String = A().test()
 "#,
         "PrivateExtDefault",
+    );
+}
+
+#[test]
+fn companion_member_ext_defaults() {
+    run_box(
+        r#"
+class Host {
+    companion object {
+        fun Int.pick(value: Int = 1): Int = value
+
+        fun verify(): String {
+            if (0.pick() != 1) return "default"
+            if (0.pick(2) != 2) return "explicit"
+            return "OK"
+        }
+    }
+}
+
+fun box(): String = Host.verify()
+"#,
+        "CompanionExtDefault",
     );
 }
 

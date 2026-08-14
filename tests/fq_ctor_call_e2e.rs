@@ -2,9 +2,9 @@
 //! package and `Ctx` is a top-level class of it (`a/b/Ctx`). Before, the leftmost segment was typed as a
 //! value → "unresolved reference 'a'" (the two-segment `Outer.Nested` ctor path only matched a bare-`Name`
 //! receiver). The constructor analog of the fully-qualified top-level CALL (`a.b.helper()`): the checker
-//! and lowerer's `qualified_nested_ctor_internal` / `nested_ctor_internal` now resolve a dotted package
-//! path `a.b.Ctx` to `a/b/Ctx` (verified on the classpath) and construct it — named, positional, reordered
-//! and omitted-default forms. Built by the real kotlinc via the shared `common::run_box_against` harness.
+//! commits `a.b` as a package, resolves `Ctx` as one classifier edge, and records the constructor identity
+//! consumed by lowering — named, positional, reordered and omitted-default forms. Built by the real kotlinc
+//! via the shared `common::run_box_against` harness.
 use super::common;
 
 const LIB: &str = "package a.b\n\

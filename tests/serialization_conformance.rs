@@ -51,7 +51,7 @@ fn serializer_object_emits_wellformed_bytecode() {
     };
     let cp = Rc::new(Classpath::new(vec![std, core, json, jimage]));
 
-    let src = "@Serializable class Foo(val a: Int, val b: String)";
+    let src = "import kotlinx.serialization.Serializable\n@Serializable class Foo(val a: Int, val b: String)";
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
     let files = vec![parse(src, &toks, &mut d)];
@@ -74,7 +74,7 @@ fn serializer_object_emits_wellformed_bytecode() {
     host.run(&mut ir, &ctx);
 
     let facade = file_class_name("Foo", files[0].package.as_deref());
-    let classes = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None);
+    let classes = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None, &syms);
     let Some(classes) = classes else {
         panic!("EMIT GAP: emit_all returned None for the serializer object (gap #7 — emitter does not yet support this construct)");
     };
@@ -202,7 +202,11 @@ fn binary_compiles_serializable_and_emits_serializer() {
     let _ = std::fs::remove_dir_all(&out);
     std::fs::create_dir_all(&out).unwrap();
     let src = out.join("Foo.kt");
-    std::fs::write(&src, "@Serializable class Foo(val a: Int, val b: String)\n").unwrap();
+    std::fs::write(
+        &src,
+        "import kotlinx.serialization.Serializable\n@Serializable class Foo(val a: Int, val b: String)\n",
+    )
+    .unwrap();
     let cp = format!(
         "{}:{}:{}:{}",
         core.display(),

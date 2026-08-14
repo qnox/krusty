@@ -171,6 +171,18 @@ fn inapplicable_factory_falls_through_to_companion_invoke() {
     );
 }
 
+#[test]
+fn inapplicable_companion_invoke_reports_its_candidate() {
+    let source = "interface Choice { companion object { operator fun invoke(value: Int): Choice = null as Choice } }\n\
+                  fun use(): Choice = Choice(\"wrong\")\n";
+    let diagnostics = common::front_end_diagnostics(source, &[], None);
+    assert_eq!(
+        diagnostics,
+        ["argument type mismatch: actual type is 'String', but 'Int' was expected."],
+        "the rejected companion operator must supply the final call diagnostic"
+    );
+}
+
 /// A dependency-provided interface and a source factory use the same classifier/callable arbitration
 /// as a source interface. The Java fixture is deliberately minimal: it proves that provider origin is
 /// not a resolution branch, while the Kotlin implementation makes the selected factory observable.

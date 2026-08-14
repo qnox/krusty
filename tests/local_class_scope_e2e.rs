@@ -8,14 +8,12 @@
 //! was written in, and lowering carries each captured binding as a leading constructor parameter.
 //! The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in
 //! the chain — and is carried as one capture, first, since lowering identifies it by position.
-//! A reference that is not modelled yet (a local function, a reassigned `var`, or a capture read
-//! during construction) is rejected — the file skips rather than emitting a class without what it
-//! needs. Each test records the reference `kotlinc` (2.4.10) verdict.
+//! Each test records the reference `kotlinc` (2.4.10) verdict.
 
 use super::common;
 
 fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "Main")
+    Some(common::expect_box_run_with_stdlib(src, "Main"))
 }
 
 fn assert_rejected(src: &str) {
@@ -39,6 +37,18 @@ fn a_local_class_can_name_the_enclosing_classs_type_parameter() {
         }\n\
         fun box(): String = A<String>().m()\n";
     assert_eq!(run(SRC).expect("outer type parameter resolves"), "OK");
+}
+
+#[test]
+fn nearest_enclosing_type_parameter_wins_in_a_local_class() {
+    const SRC: &str = "class Outer<T> {\n\
+        \x20   fun <T> read(value: T): T {\n\
+        \x20       class Local(val captured: T) { fun get(): T = captured }\n\
+        \x20       return Local(value).get()\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = Outer<Int>().read(\"OK\")\n";
+    assert_eq!(run(SRC).expect("nearest type parameter is captured"), "OK");
 }
 
 /// kotlinc: accepted.
@@ -104,12 +114,12 @@ fn a_captured_parameter_is_supplied_at_every_construction() {
     assert_eq!(run(SRC).expect("every construction supplies it"), "OK");
 }
 
-/// kotlinc: accepted — krusty limitation, the file skips.
+/// kotlinc: accepted.
 ///
 /// A captured `var` that is reassigned is shared MUTABLE state: copying it into the instance would
 /// freeze the value at construction, so only an effectively-immutable binding is captured.
 #[test]
-fn a_reassigned_captured_var_is_rejected() {
+fn a_reassigned_captured_var_is_shared() {
     const SRC: &str = "fun f(): String {\n\
         \x20   var captured = \"no\"\n\
         \x20   class L { fun read() = captured }\n\
@@ -117,24 +127,27 @@ fn a_reassigned_captured_var_is_rejected() {
         \x20   return L().read()\n\
         }\n\
         fun box(): String = f()\n";
-    assert_rejected(SRC);
+    assert_eq!(run(SRC).expect("reassigned capture is shared"), "OK");
 }
 
-/// kotlinc: accepted — krusty limitation, the file skips.
+/// kotlinc: accepted.
 ///
 /// The capture is read during CONSTRUCTION — here from a primary-constructor parameter default,
 /// which is evaluated in a synthetic constructor that carries no captures at all. Scanning only
 /// member bodies missed this, and the box corpus caught the miscompile
 /// (`localClasses/capturingInDefaultConstructorParameter.kt`).
 #[test]
-fn a_capture_in_a_constructor_parameter_default_is_rejected() {
+fn a_capture_is_available_in_a_constructor_parameter_default() {
     const SRC: &str = "fun f(): String {\n\
         \x20   val captured = \"OK\"\n\
         \x20   class L(val t: String = captured)\n\
         \x20   return L().t\n\
         }\n\
         fun box(): String = f()\n";
-    assert_rejected(SRC);
+    assert_eq!(
+        run(SRC).expect("constructor default captures its scope"),
+        "OK"
+    );
 }
 
 /// kotlinc: accepted.
@@ -191,11 +204,10 @@ fn the_enclosing_instance_precedes_a_captured_local() {
 
 /// kotlinc: accepted — krusty limitation, the file skips.
 ///
-/// A `@JvmInline value class` has no instance to capture: `this` is the bare underlying value, so a
-/// field typed as the class would hold something else entirely. The box corpus caught this as a
-/// `VerifyError` (`codegen/box/inlineClasses/initBlock.kt`).
+/// A local class captures the semantic value-class receiver; backend representation realizes that
+/// capture through the carrier without changing name or member resolution.
 #[test]
-fn capturing_an_unboxed_value_class_receiver_is_rejected() {
+fn local_class_captures_value_class_receiver() {
     const SRC: &str = "@JvmInline\n\
         value class V(val s: String) {\n\
         \x20   fun m(): String {\n\
@@ -204,7 +216,7 @@ fn capturing_an_unboxed_value_class_receiver_is_rejected() {
         \x20   }\n\
         }\n\
         fun box(): String = V(\"OK\").m()\n";
-    assert_rejected(SRC);
+    assert_eq!(run(SRC), Some("OK".to_string()));
 }
 
 /// kotlinc: accepted.

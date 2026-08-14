@@ -22,3 +22,11 @@ fn aliased_same_file_object_member_call() {
         fun box(): String = append(\"O\")\n";
     assert_eq!(run(SRC).expect("aliased object member call"), "OK");
 }
+
+#[test]
+fn imported_same_file_object_property_read() {
+    const SRC: &str = "import Host.answer\n\
+        object Host { val answer = \"OK\" }\n\
+        fun box(): String = answer\n";
+    assert_eq!(run(SRC).expect("imported object property read"), "OK");
+}

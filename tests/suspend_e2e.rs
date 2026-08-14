@@ -2299,6 +2299,7 @@ fn suspend_binary_hoist_preserves_left_to_right_evaluation() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let src = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
 \n\
 fun <T> runBlocking(block: suspend () -> T): T {\n\
     var res: Result<T>? = null\n\
@@ -2316,16 +2317,12 @@ fun box(): String = runBlocking {\n\
     val sum = left() + awaitRight()\n\
     if (trace == \"LR\" && sum == 3) \"OK\" else \"$trace/$sum\"\n\
 }\n";
-    let Some(out) = common::compile_and_run_box(
+    let out = common::expect_box_run(
         src,
         "SuspendBinaryEvaluationOrder",
         &[stdlib],
         Some(jdk.as_path()),
-    ) else {
-        panic!(
-            "SuspendBinaryEvaluationOrder: lowering or emission unexpectedly declined the source"
-        );
-    };
+    );
     assert_eq!(out.trim(), "OK");
 }
 
@@ -2429,17 +2426,9 @@ fun box(): String = runBlocking {{ go() }}\n"
     }
 }
 
-/// A `$default` suspend callee whose operand writes a spilled local is REFUSED, not re-bound.
-///
-/// Operand temps are typed by zipping arguments against the callee's parameters BY INDEX, which is only
-/// sound while the surplus parameter is the trailing one. A suspend `$default` synthetic breaks that: its
-/// descriptor spells the `Continuation` BEFORE the `int mask` + `Object marker` (`append_continuation`
-/// inserts the continuation VALUE two before the end for exactly that reason), so zipping would type the
-/// mask as a `Continuation` and the marker as an `int` — an `astore` of an int, a class that fails
-/// verification. Refusing keeps the shape a skip, as it was before operand temps existed. The SAME callee
-/// without the trigger (`libFoo(i)`) must still compile and run, so the refusal stays narrow.
+/// A `$default` suspend callee whose operands write one spilled local keeps source evaluation order.
 #[test]
-fn suspend_default_callee_whose_argument_writes_a_local_still_skips() {
+fn suspend_default_callee_whose_argument_writes_a_local_runs() {
     let stdlib = stdlib_jar();
     let jdk = common::jdk_modules();
     let Some(_kotlinc) = kotlinc_bin() else {
@@ -2489,25 +2478,23 @@ fun box(): String = builder {{\n\
 }}\n"
         )
     };
-    assert!(
-        common::compile_and_run_box(
-            &body("bars(libFoo(i++), libFoo(i++))"),
-            "SuspendDefaultArgWrites",
-            &jars,
-            Some(jdk.as_path())
-        )
-        .is_none(),
-        "a $default suspension whose argument writes a spilled local must be skipped, never emitted \
-         with its mask typed as a Continuation"
+    let out = common::expect_box_run(
+        &body("bars(libFoo(i++), libFoo(i++))"),
+        "SuspendDefaultArgWrites",
+        &jars,
+        Some(jdk.as_path()),
     );
-    let Some(out) = common::compile_and_run_box(
+    assert_eq!(
+        out.trim(),
+        "1!;2!;",
+        "suspend $default operands must observe both increments in source order"
+    );
+    let out = common::expect_box_run(
         &body("bars(libFoo(i), libFoo(i + 1))"),
         "SuspendDefaultNoWrites",
         &jars,
         Some(jdk.as_path()),
-    ) else {
-        panic!("SuspendDefaultNoWrites: an untriggered $default suspend call must still compile");
-    };
+    );
     assert_eq!(
         out.trim(),
         "1!;2!;",

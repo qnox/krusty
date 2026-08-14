@@ -99,15 +99,12 @@ fun use(value: Any): Int {\n\
 }
 
 #[test]
-fn or_guard_does_not_narrow_to_an_unmodeled_value_class() {
+fn or_guard_narrows_to_value_class() {
     const SRC: &str = "@JvmInline value class Token(val value: Int)\n\
 fun use(value: Any?): Int {\n\
     if (value !is Token || false) return 0\n\
     return value.value\n\
-}\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        !diagnostics.is_empty(),
-        "value-class narrowing must stay rejected"
-    );
+}\n\
+fun box(): String = if (use(Token(7)) == 7 && use(\"x\") == 0) \"OK\" else \"fail\"\n";
+    assert_eq!(run(SRC), Some("OK".to_string()));
 }

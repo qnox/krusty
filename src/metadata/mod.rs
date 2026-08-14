@@ -7,6 +7,7 @@ pub mod class_builder;
 pub mod encoding;
 pub mod module;
 pub mod protobuf;
+mod type_encoder;
 
 /// Canonical `ProtoBuf.Property.flags` layout shared by metadata readers and writers. Property flags
 /// include the declaration's two-bit MEMBER_KIND after MODALITY, so property-specific bits must not be

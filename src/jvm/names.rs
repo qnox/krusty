@@ -25,6 +25,21 @@ pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
 
 pub use crate::names::property_getter_name;
 
+/// Convert a semantic classifier name to its physical JVM classfile name. Kotlin metadata spells
+/// nested classifiers with dots in the class tail (`pkg/Outer.Inner`); class constants use `$`.
+pub fn classfile_internal_name(internal: &str) -> String {
+    if let Some(intrinsic) = crate::jvm::jvm_class_map::intrinsic_companion_to_jvm(internal) {
+        return intrinsic;
+    }
+    let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal);
+    let tail = mapped.rfind('/').map_or(0, |slash| slash + 1);
+    if mapped[tail..].contains('.') {
+        format!("{}{}", &mapped[..tail], mapped[tail..].replace('.', "$"))
+    } else {
+        mapped.to_string()
+    }
+}
+
 /// The `java.util` method name a mapped `kotlin.collections` interface declares for a Kotlin *property*
 /// member (`Map.keys` → `keySet()`, `Collection.size` → `size()`), from `JavaToKotlinClassMap`'s
 /// SpecialBuiltinMembers. `None` for a property with no special stub (its interface method is the plain
@@ -191,6 +206,17 @@ fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static st
     }
 }
 
+/// JVM class-constant spelling for a Kotlin array classifier. Array classes use their descriptor as
+/// the `CONSTANT_Class` name (`IntArray::class.java` → `[I`); ordinary classifiers use an internal
+/// name instead. `Array` is erased here because a classifier-only owner has no element argument.
+pub fn array_class_descriptor(internal: impl InternalName) -> Option<String> {
+    if internal.internal_matches("kotlin/Array") {
+        Some("[Ljava/lang/Object;".to_string())
+    } else {
+        primitive_array_descriptor(internal).map(str::to_string)
+    }
+}
+
 /// A JVM field/type descriptor from a krusty `Ty`.
 pub fn type_descriptor(ty: Ty) -> String {
     // `@Metadata` spells a nested class with a dot (`kotlin/coroutines/CoroutineContext.Key`), and
@@ -200,19 +226,7 @@ pub fn type_descriptor(ty: Ty) -> String {
     // to load the class (ClassFormatError). Normalizing at this one boundary, rather than at the
     // metadata decode sites, leaves the frontend's spelling equilibrium untouched and covers every
     // `Ty` that reaches bytecode.
-    let obj_desc = |internal: &str| {
-        let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal);
-        let slash = mapped.rfind('/').map(|i| i + 1).unwrap_or(0);
-        if mapped[slash..].contains('.') {
-            format!(
-                "L{}{};",
-                &mapped[..slash],
-                mapped[slash..].replace('.', "$")
-            )
-        } else {
-            format!("L{mapped};")
-        }
-    };
+    let obj_desc = |internal: &str| format!("L{};", classfile_internal_name(internal));
     match ty {
         Ty::Int => "I".into(),
         Ty::Byte => "B".into(),
@@ -256,7 +270,10 @@ pub fn type_descriptor(ty: Ty) -> String {
             Ty::ULong => obj_desc("kotlin/ULong"),
             other => type_descriptor(other.boxed_ref().unwrap_or(other)),
         },
-        Ty::TyParam(_, bound) => type_descriptor(*bound),
+        Ty::TyParam(_, bound)
+        | Ty::PlatformNullable(bound)
+        | Ty::InProjection(bound)
+        | Ty::OutProjection(bound) => type_descriptor(*bound),
     }
 }
 

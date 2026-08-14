@@ -8,6 +8,15 @@ use super::classfile::ClassWriter;
 use super::classreader::{utf8_value, MethodCode, C};
 use std::collections::HashMap;
 
+/// A platform realization selected only while emitting an already-resolved semantic member call.
+/// Nothing in checking or common lowering sees this owner/descriptor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaticMemberRealization {
+    pub owner: String,
+    pub name: String,
+    pub descriptor: String,
+}
+
 /// How a compiled class realizes a PROPERTY read. Kotlin source can declare getter/setter behavior, but
 /// a use such as `Dispatchers.IO` denotes the property rather than a JVM method call, so the emitter asks
 /// the class file what that read actually compiles to. `is_static` means the realization takes no receiver
@@ -70,6 +79,16 @@ pub trait MethodBodies {
     /// virtual method); the classpath overrides it.
     fn method_is_static(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
         false
+    }
+    /// Find a static runtime realization for a semantic array member with this exact JVM descriptor.
+    /// The emitter asks only after resolution has selected the member; implementations must return a
+    /// unique metadata-declared top-level function or `None`.
+    fn static_array_member_realization(
+        &self,
+        _name: &str,
+        _descriptor: &str,
+    ) -> Option<StaticMemberRealization> {
+        None
     }
     /// How reading the Kotlin property `property` of `owner` is realized by that class file — the
     /// accessor or field the emitter must use, and whether it takes a receiver. Walks supertypes, since a
@@ -648,6 +667,69 @@ fn methodref_target(src_cp: &[C], idx: u16) -> Option<(&str, &str)> {
     let class = class_name(src_cp, c)?;
     let (name, _) = name_and_type(src_cp, nt)?;
     Some((class, name))
+}
+
+/// The exact method reference carried by one invoke instruction. Used by provider-side inline-body
+/// decoders to retain physical handles without re-resolving source names.
+pub fn invoked_method<'a>(
+    insn: &Insn,
+    source_cp: &'a [C],
+) -> Option<(&'a str, &'a str, &'a str, bool)> {
+    let Insn::Plain { op, operands } = insn else {
+        return None;
+    };
+    let interface = *op == 0xb9;
+    if !matches!(*op, 0xb6..=0xb9) {
+        return None;
+    }
+    let index = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+    let (class, names) = match source_cp.get(index as usize)? {
+        C::Methodref(class, names) | C::InterfaceMethodref(class, names) => (*class, *names),
+        _ => return None,
+    };
+    let owner = class_name(source_cp, class)?;
+    let (name, descriptor) = name_and_type(source_cp, names)?;
+    Some((owner, name, descriptor, interface))
+}
+
+/// Local-variable index read by a JVM load instruction, independent of compact/wide encoding.
+pub fn loaded_local(insn: &Insn) -> Option<u16> {
+    let Insn::Plain { op, operands } = insn else {
+        return None;
+    };
+    match *op {
+        0x1a..=0x1d => Some((*op - 0x1a) as u16),
+        0x1e..=0x21 => Some((*op - 0x1e) as u16),
+        0x22..=0x25 => Some((*op - 0x22) as u16),
+        0x26..=0x29 => Some((*op - 0x26) as u16),
+        0x2a..=0x2d => Some((*op - 0x2a) as u16),
+        0x15..=0x19 => operands.first().copied().map(u16::from),
+        0xc4 if matches!(operands.first(), Some(0x15..=0x19)) => operands
+            .get(1)
+            .zip(operands.get(2))
+            .map(|(&high, &low)| (u16::from(high) << 8) | u16::from(low)),
+        _ => None,
+    }
+}
+
+/// Local-variable index written by a JVM store instruction, independent of compact/wide encoding.
+pub fn stored_local(insn: &Insn) -> Option<u16> {
+    let Insn::Plain { op, operands } = insn else {
+        return None;
+    };
+    match *op {
+        0x3b..=0x3e => Some((*op - 0x3b) as u16),
+        0x3f..=0x42 => Some((*op - 0x3f) as u16),
+        0x43..=0x46 => Some((*op - 0x43) as u16),
+        0x47..=0x4a => Some((*op - 0x47) as u16),
+        0x4b..=0x4e => Some((*op - 0x4b) as u16),
+        0x36..=0x3a => operands.first().copied().map(u16::from),
+        0xc4 if matches!(operands.first(), Some(0x36..=0x3a)) => operands
+            .get(1)
+            .zip(operands.get(2))
+            .map(|(&high, &low)| (u16::from(high) << 8) | u16::from(low)),
+        _ => None,
+    }
 }
 
 /// True for the type-bearing ops a `reifiedOperationMarker` precedes: `anewarray`, `checkcast`,
@@ -2209,6 +2291,10 @@ pub fn splice_unified(
         .filter(|(slot, _)| !lambda_slots.contains(slot))
         .map(|&(slot, op)| local_load_store(op, slot))
         .collect();
+    crate::trace_compiler!(
+        "splice",
+        "inline prologue descriptor={descriptor} stores={stores:?} lambda_slots={lambda_slots:?} prologue={prologue:?}"
+    );
     let p = prologue.len();
     shift_targets(&mut merged, p);
     let mut final_insns = prologue;

@@ -35,6 +35,18 @@ fn is_native_unsigned(fq: TypeName) -> bool {
         || fq.matches("kotlin/ULong")
 }
 
+/// JVM reference form of a value-class classifier. Native unsigned classifiers are also semantic
+/// scalars, so their nullable form is the only `Ty` spelling that denotes their boxed reference slot;
+/// ordinary value classes are references already.
+fn boxed_value_ty(fq: TypeName) -> Ty {
+    let ty = Ty::obj_name(fq);
+    if ty.is_jvm_scalar() {
+        Ty::nullable(ty)
+    } else {
+        ty
+    }
+}
+
 /// Whether an underlying fq name is an IEEE floating-point type. A value class over `Float`/`Double`
 /// compares by IEEE TOTAL ORDER (`NaN == NaN`, `0.0 != -0.0`) via `{Float,Double}.compare`, NOT a raw
 /// `fcmp`/`dcmp` — matching kotlinc's `equals-impl0`.
@@ -298,6 +310,33 @@ pub fn lower_value_classes(
     // into the CHECKER's library view (which drives construction/member resolution).
     module_value_classes: &std::collections::HashMap<TypeName, Ty>,
 ) -> bool {
+    crate::trace_compiler!(
+        "value_classes",
+        "lower start classes={} functions={} expressions={}",
+        ir.classes.len(),
+        ir.functions.len(),
+        ir.exprs.len()
+    );
+    for (id, expression) in ir.exprs.iter().enumerate() {
+        match expression {
+            IrExpr::PropertyRead { owner, name, .. } => crate::trace_compiler!(
+                "value_classes",
+                "input property read {id}: {}.{}",
+                owner,
+                name
+            ),
+            IrExpr::Call {
+                callee: Callee::Virtual { owner, name, .. },
+                ..
+            } => crate::trace_compiler!(
+                "value_classes",
+                "input virtual call {id}: {}.{}",
+                owner,
+                name
+            ),
+            _ => {}
+        }
+    }
     // internal name → underlying (single-field) type, before erasure. NOTE: the `Object` underlying for a
     // generic value class is a deliberate approximation — the correct BOUND (`S<T: String>` → `String`)
     // BREAKS more `*Generic` files than it fixes (their lambda boxing / list iteration / equality assume the
@@ -334,12 +373,7 @@ pub fn lower_value_classes(
     // in the lowerer — the lowerer carries no value-class knowledge. Every referenced class name in the IR
     // is probed; a classpath value class contributes its `value_underlying`.
     let mut under = under;
-    // Value classes krusty does NOT compile: their members were realized by kotlinc, so a computed
-    // member property is the static `-impl` over the unboxed carrier rather than an instance accessor
-    // on the box. Recorded here because that is the only point where the two origins are still
-    // distinguishable — `under` merges them.
-    let mut classpath_value_classes: std::collections::HashSet<TypeName> =
-        std::collections::HashSet::new();
+    let mut external_underlying_properties = HashMap::new();
     for fq in referenced_class_names(ir) {
         if under.contains_key(&fq) || is_native_unsigned(fq) {
             continue;
@@ -348,11 +382,21 @@ pub fn lower_value_classes(
         if crate::types::prim_array_element(&rendered).is_some() {
             continue;
         }
-        if !module_value_classes.contains_key(&fq) && resolver.value_underlying_name(fq).is_some() {
-            classpath_value_classes.insert(fq);
+        let classifier = resolver.classifier(fq);
+        if let Some(property) = classifier
+            .as_ref()
+            .and_then(|classifier| classifier.value_underlying_property.clone())
+        {
+            crate::trace_compiler!(
+                "value_classes",
+                "external value class {} underlying property {}",
+                fq,
+                property
+            );
+            external_underlying_properties.insert(fq, property);
         }
-        if let Some(u) = resolver
-            .value_underlying_name(fq)
+        if let Some(u) = classifier
+            .and_then(|classifier| classifier.value_underlying)
             .or_else(|| module_value_classes.get(&fq).copied())
         {
             // The underlying carries its own declared nullability — trust it: a NON-NULL reference
@@ -363,7 +407,21 @@ pub fn lower_value_classes(
             under.insert(fq, ir_under);
         }
     }
-    if under.is_empty() {
+    // Native unsigned classes share ordinary primitive carriers in expressions, but cross boxed
+    // FunctionN/property-reference ABI slots like value classes. Keep them out of the global rewrite
+    // map and add them only to the callable-boundary map.
+    let mut callable_under = under.clone();
+    for semantic in [Ty::UByte, Ty::UShort, Ty::UInt, Ty::ULong] {
+        callable_under.insert(
+            semantic
+                .kotlin_class_internal()
+                .expect("native unsigned scalar must name its Kotlin classifier"),
+            semantic
+                .scalar_value_repr()
+                .expect("native unsigned scalar must have a carrier"),
+        );
+    }
+    if under.is_empty() && callable_under.is_empty() {
         return true;
     }
     // Publish only the distinction the existing unified value-class lookup cannot answer: which
@@ -390,11 +448,8 @@ pub fn lower_value_classes(
     // this table only as its declaration-less fallback; same-file declarations and classpath metadata
     // remain authoritative. Keeping this target fact in a JVM-pass side table prevents common lowering
     // from branching on whether the owner came from this file, another module file, or the classpath.
-    ir.property_accessor_jvm_realizations = ir
-        .exprs
-        .iter()
-        .enumerate()
-        .filter_map(|(id, expression)| {
+    ir.property_accessor_jvm_realizations
+        .extend(ir.exprs.iter().enumerate().filter_map(|(id, expression)| {
             let operation = match expression {
                 IrExpr::PropertyRead { operation, .. }
                 | IrExpr::PropertyWrite { operation, .. } => operation.unwrap_or(id as u32),
@@ -436,8 +491,7 @@ pub fn lower_value_classes(
                 _ => unreachable!("the accessor match above accepted only property operations"),
             };
             Some((operation, (accessor, physical)))
-        })
-        .collect();
+        }));
 
     let value_class_ids: Vec<u32> = (0..ir.classes.len() as u32)
         .filter(|&i| ir.classes[i as usize].is_value)
@@ -475,7 +529,24 @@ pub fn lower_value_classes(
             continue;
         }
         let has_init = ir.classes[cid as usize].init_body.is_some();
+        crate::trace_compiler!(
+            "value_classes",
+            "synthesize {} fields={:?} type-params={:?} secondary-ctors={}",
+            ir.classes[cid as usize].fq_name.render(),
+            ir.classes[cid as usize]
+                .fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.ty, field.type_param.as_deref()))
+                .collect::<Vec<_>>(),
+            ir.classes[cid as usize].type_params,
+            ir.classes[cid as usize].secondary_ctors.len()
+        );
         if !synth_value_members(ir, cid, &under, has_init) {
+            crate::trace_compiler!(
+                "value_classes",
+                "synthesis rejected {}",
+                ir.classes[cid as usize].fq_name.render()
+            );
             return false;
         }
     }
@@ -495,6 +566,13 @@ pub fn lower_value_classes(
         .iter()
         .map(|c| c.ctor_args.iter().map(|a| a.ty).collect())
         .collect();
+    for (class, params) in ir.classes.iter().zip(&orig_ctor_args) {
+        crate::trace_compiler!(
+            "value_classes",
+            "class {} constructor params={params:?}",
+            class.fq_name.render()
+        );
+    }
     // Pre-erasure secondary-constructor parameter types (class → ctor → params) — slot types for a
     // regular class's secondary-`<init>` body/delegation box/unbox (slot 0 = `this`, slots 1.. = params).
     let orig_secondary: Vec<Vec<Vec<Ty>>> = ir
@@ -592,9 +670,10 @@ pub fn lower_value_classes(
         }
     }
 
-    // Each value class's getter name keyed by its internal name (`A2` → `getValue`) — to recognize a
-    // sole-property access emitted as a resolved `invokevirtual X.getV()`.
-    let mut vc_getters: HashMap<TypeName, String> = ir
+    // Each source value class's getter name keyed by its internal name (`A2` → `getValue`) — to
+    // recognize the legacy call-shaped form. Semantic property nodes use the source property-name map
+    // below and never derive meaning from a JVM getter spelling.
+    let vc_getters: HashMap<TypeName, String> = ir
         .classes
         .iter()
         .filter(|c| c.is_value)
@@ -604,12 +683,18 @@ pub fn lower_value_classes(
                 .map(|f| (c.fq_name, property_getter_name(&f.name)))
         })
         .collect();
-    // A classpath value class's sole-property getter (`ids/RoleId` → `getV`), so `r.v` (an
-    // `invokevirtual X.getV()`) on an unboxed external value is rewritten to identity like a user one.
-    vc_getters.extend(
-        ir.external_value_class_getters()
-            .map(|(k, v)| (k, v.to_string())),
-    );
+    let mut vc_properties: HashMap<TypeName, String> = ir
+        .classes
+        .iter()
+        .filter(|class| class.is_value)
+        .filter_map(|class| {
+            class
+                .fields
+                .first()
+                .map(|field| (class.fq_name, field.name.clone()))
+        })
+        .collect();
+    vc_properties.extend(external_underlying_properties);
 
     // Interfaces that value classes implement — a function returning one of these (or `Any`) boxes a
     // value-class tail so virtual/interface dispatch works.
@@ -700,7 +785,7 @@ pub fn lower_value_classes(
                 let boxed_own = own_from.is_some_and(|s| i as u32 >= s)
                     && !p.is_nullable()
                     && p.non_null().obj_internal().is_some_and(|fq| {
-                        under.contains_key(&fq)
+                        callable_under.contains_key(&fq)
                             && lambda_slot_is_boxed(
                                 sam_params.and_then(|declared| {
                                     declared.get(i - own_from.unwrap_or(0) as usize)
@@ -822,23 +907,14 @@ pub fn lower_value_classes(
             .obj_internal()
             .is_some_and(|fq| under.contains_key(&fq))
     };
+    let is_callable_vc_ty = |t: &Ty| {
+        t.non_null()
+            .obj_internal()
+            .is_some_and(|fq| callable_under.contains_key(&fq))
+    };
     // `(owner-internal, plain name, arity)` → mangled name, for rewriting resolved-by-name calls
     // (`super.f(vc)`, an interface method) to the value-class-mangled method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::new();
-    let mut target_param_map: HashMap<(Option<TypeName>, String, usize), Vec<Ty>> = HashMap::new();
-    let mut target_nullable_map: HashMap<(Option<TypeName>, String, usize), Vec<bool>> =
-        HashMap::new();
-    for (fid, f) in ir.functions.iter().enumerate() {
-        let owner = f.dispatch_receiver;
-        let key = (owner, f.name.clone(), orig_params[fid].len());
-        let nullable = orig_params[fid]
-            .iter()
-            .enumerate()
-            .map(|(i, t)| t.is_nullable() || f.param_checks.get(i).is_none_or(Option::is_none))
-            .collect();
-        target_param_map.insert(key.clone(), orig_params[fid].clone());
-        target_nullable_map.insert(key, nullable);
-    }
     let super_member_names = same_file_super_member_names(ir);
     // A getter NAME whose override pair DIVERGES in type across the same-file hierarchy (a covariant
     // `val alt: Vid` overriding `val alt: Vid?`): the two sides would hash differently, and krusty
@@ -930,7 +1006,7 @@ pub fn lower_value_classes(
             if orig_params[fid]
                 .iter()
                 .chain(std::iter::once(&orig_rets[fid]))
-                .any(is_vc_ty)
+                .any(is_callable_vc_ty)
             {
                 declared_sigs.push((
                     fid as u32,
@@ -943,7 +1019,7 @@ pub fn lower_value_classes(
                 &f.name,
                 &orig_params[fid],
                 &orig_rets[fid],
-                &under,
+                &callable_under,
                 is_file_class,
                 suspend_fids.contains(&(fid as u32)),
             );
@@ -974,7 +1050,7 @@ pub fn lower_value_classes(
             if own_from.is_some_and(|s| idx as u32 >= s)
                 && !p.is_nullable()
                 && p.non_null().obj_internal().is_some_and(|fq| {
-                    under.contains_key(&fq)
+                    callable_under.contains_key(&fq)
                         && lambda_slot_is_boxed(
                             sam_params.and_then(|d| d.get(idx - own_from.unwrap_or(0) as usize)),
                             fq,
@@ -1179,8 +1255,29 @@ pub fn lower_value_classes(
             }
         }
     }
+    // A SAM declaration may live in a sibling source file, so it is absent from this file's
+    // `mangle_map`. The checker/lowerer handoff records the selected SAM's declared signature on the
+    // lambda implementation; realize the call-site method name from that exact declaration here,
+    // where value-class JVM naming belongs. This is deliberately not a classifier lookup: overload
+    // selection is already complete and the implementation id identifies the recorded signature.
+    if !callable_under.is_empty() {
+        for expression in &mut ir.exprs {
+            let IrExpr::Lambda {
+                impl_fn,
+                sam: Some((_, method, _)),
+                ..
+            } = expression
+            else {
+                continue;
+            };
+            let Some((params, ret)) = ir.lambda_sam_signature.get(impl_fn) else {
+                continue;
+            };
+            *method = vc_mangle_once(method, params, ret, &callable_under, false, false);
+        }
+    }
     // Rewrite cross-file calls with value-class signatures to their JVM names and types.
-    if !under.is_empty() {
+    if !callable_under.is_empty() {
         for e in &mut ir.exprs {
             if let IrExpr::Call {
                 callee:
@@ -1192,7 +1289,7 @@ pub fn lower_value_classes(
                 ..
             } = e
             {
-                let mangled = vc_mangle(name, params, ret, &under, false, false);
+                let mangled = vc_mangle(name, params, ret, &callable_under, false, false);
                 if &mangled != name {
                     *name = mangled;
                     for p in params.iter_mut() {
@@ -1212,7 +1309,7 @@ pub fn lower_value_classes(
                 } => (name, params, ret),
                 _ => continue,
             };
-            *name = vc_mangle(name, params, ret, &under, true, false);
+            *name = vc_mangle(name, params, ret, &callable_under, true, false);
             for parameter in params.iter_mut() {
                 *parameter = erase(parameter, &under);
             }
@@ -1230,16 +1327,16 @@ pub fn lower_value_classes(
             crate::ir::FrDispatch::VirtualUnbound => 1usize,
             _ => 0usize,
         };
-        let call_params = fr.param_tys[first_call_arg..].to_vec();
         let call_owner = fr.call_owner;
-        let target_decl_params = target_param_map
-            .get(&(call_owner, fr.call_name.clone(), call_params.len()))
-            .cloned()
-            .unwrap_or_else(|| call_params.clone());
-        let target_nullable = target_nullable_map
-            .get(&(call_owner, fr.call_name.clone(), call_params.len()))
-            .cloned()
-            .unwrap_or_else(|| target_decl_params.iter().map(|t| t.is_nullable()).collect());
+        // The lowerer records the already-selected callable's exact target signature. Do not rebuild it
+        // from `(owner, name, arity)`: overloads with equal arity are deliberately indistinguishable by
+        // that key, and whichever declaration was visited last would corrupt every other reference.
+        let target_decl_params = fr.target_param_tys[first_call_arg..].to_vec();
+        let target_decl_ret = fr.target_ret_ty;
+        let target_nullable: Vec<bool> = target_decl_params
+            .iter()
+            .map(|parameter| parameter.is_nullable())
+            .collect();
         // A BOUND extension reference on a VALUE-CLASS receiver (`Z(42)::test`, `FrDispatch::StaticBound`)
         // targets a facade static whose leading param is the receiver — that receiver lives in
         // `target_param_tys` (the `target_override`), NOT in the invoke `param_tys`. Mangle against that
@@ -1266,8 +1363,8 @@ pub fn lower_value_classes(
             vc_mangle_once(
                 base,
                 &mangle_params,
-                &fr.ret_ty,
-                &under,
+                &target_decl_ret,
+                &callable_under,
                 is_file_class,
                 fr_suspend,
             )
@@ -1287,10 +1384,13 @@ pub fn lower_value_classes(
             fr.staticbound_recv_unbox = erase_src
                 .first()
                 .and_then(|t| t.non_null().obj_internal())
-                .filter(|fq| under.contains_key(fq));
+                .filter(|fq| callable_under.contains_key(fq));
         }
-        fr.target_param_tys = erase_src.iter().map(|t| erase(t, &under)).collect();
-        fr.target_ret_ty = erase(&erase_ret, &under);
+        fr.target_param_tys = erase_src
+            .iter()
+            .map(|t| erase(t, &callable_under))
+            .collect();
+        fr.target_ret_ty = erase(&erase_ret, &callable_under);
         let target_offset = usize::from(staticbound);
         fr.unbox_params = fr
             .param_tys
@@ -1299,7 +1399,7 @@ pub fn lower_value_classes(
             .map(|(i, logical)| {
                 let target = fr.target_param_tys.get(i + target_offset)?;
                 let fq = logical.non_null().obj_internal()?;
-                (under.contains_key(&fq) && logical != target).then_some(fq)
+                (callable_under.contains_key(&fq) && logical != target).then_some(fq)
             })
             .collect();
         fr.unbox_param_nullable = fr
@@ -1329,7 +1429,10 @@ pub fn lower_value_classes(
             return false;
         }
         fr.box_ret = fr.ret_ty.non_null().obj_internal().and_then(|fq| {
-            (under.contains_key(&fq) && fr.ret_ty != fr.target_ret_ty).then_some(fq)
+            (callable_under.contains_key(&fq)
+                && target_decl_ret.non_null().obj_internal() == Some(fq)
+                && fr.ret_ty != fr.target_ret_ty)
+                .then_some(fq)
         });
         crate::trace_compiler!(
             "value_classes",
@@ -1658,16 +1761,28 @@ pub fn lower_value_classes(
                 .non_null()
                 .obj_internal()
                 .filter(|fq| under.contains_key(fq))?;
-            let IrExpr::MethodCall { class, index, .. } = &ir.exprs[*arg as usize] else {
-                return None;
+            let unboxed_carrier = match &ir.exprs[*arg as usize] {
+                IrExpr::MethodCall { class, index, .. } => {
+                    let &fid = ir
+                        .classes
+                        .get(*class as usize)
+                        .and_then(|c| c.methods.get(*index as usize))?;
+                    let declared_x = orig_rets[fid as usize].non_null().obj_internal() == Some(x);
+                    let realized_x =
+                        ir.functions[fid as usize].ret.non_null().obj_internal() == Some(x);
+                    declared_x && !realized_x
+                }
+                // A mutable captured local keeps its value in `Ref$XxxRef.element`. When the logical
+                // element is an UNBOXED value class, the cell physically stores its carrier; the
+                // lowerer's generic-erasure self-cast must disappear before property access decides
+                // whether to call `unbox-impl`. A nullable value class whose representation is BOXED
+                // deliberately does not match this arm.
+                IrExpr::RefGet { .. } => ir.logical_types.get(arg).is_some_and(
+                    |logical| matches!(repr_of_ty(logical, &under), Repr::Unboxed(value_class) if value_class == x),
+                ),
+                _ => false,
             };
-            let &fid = ir
-                .classes
-                .get(*class as usize)
-                .and_then(|c| c.methods.get(*index as usize))?;
-            let declared_x = orig_rets[fid as usize].non_null().obj_internal() == Some(x);
-            let realized_x = ir.functions[fid as usize].ret.non_null().obj_internal() == Some(x);
-            (declared_x && !realized_x).then_some((id as ExprId, *arg))
+            unboxed_carrier.then_some((id as ExprId, *arg))
         })
         .collect();
     for (id, arg) in self_casts_over_carriers {
@@ -1698,10 +1813,19 @@ pub fn lower_value_classes(
     //    Inside a value-class member body, an `is X`/`(X)other` whose type IS a value class must stay
     //    the BOXED class (the synthesized `equals` checks/casts the box) — keep it; everything else
     //    (including field-value operations over a nested value-class underlying) erases normally.
+    let mut erased_variable_defaults = Vec::new();
     for (i, e) in ir.exprs.iter_mut().enumerate() {
         let keep_box = vc_body_exprs.contains(&(i as u32));
         match e {
-            IrExpr::Variable { ty, .. } => *ty = erase(ty, &under),
+            IrExpr::Variable { ty, init, .. } => {
+                let erased = erase(ty, &under);
+                if is_ref(ty) && erased.is_jvm_scalar() {
+                    if let Some(init) = init {
+                        erased_variable_defaults.push((*init, erased));
+                    }
+                }
+                *ty = erased;
+            }
             // A property WRITE's carried type is the value it stores, which erases like any other. A
             // property READ's is the property's DECLARED type, which the pass's own analyses read
             // pre-erasure (exactly as they read a field's declared type) — erasing it would hide the
@@ -1765,6 +1889,15 @@ pub fn lower_value_classes(
             | IrExpr::RefSet { elem, .. } => *elem = erase(elem, &under),
             IrExpr::Try { result, .. } => *result = erase(result, &under),
             _ => {}
+        }
+    }
+    for (init, erased) in erased_variable_defaults {
+        if matches!(
+            ir.exprs[init as usize],
+            IrExpr::Const(crate::ir::IrConst::Null)
+        ) {
+            ir.exprs[init as usize] =
+                IrExpr::Const(crate::ir::IrConst::zero_for_value_type(erased));
         }
     }
 
@@ -1868,11 +2001,13 @@ pub fn lower_value_classes(
     for s in &ir.statics {
         s4_bodies.push((s.init, HashMap::new(), HashSet::new()));
     }
-    // Map each reachable target expr to its body's slot map (first body wins; bodies don't overlap).
+    // Map each reachable target expr to its body's slot map. A real lambda body belongs only to its
+    // lifted function; traversing it from the enclosing `Lambda` expression would interpret the same
+    // slot indices in the wrong function scope.
     let mut target_slots: HashMap<ExprId, usize> = HashMap::new();
     for (bi, (root, _, _)) in s4_bodies.iter().enumerate() {
         let mut reach = HashSet::new();
-        collect_reachable(&ir.exprs, *root, &mut reach);
+        collect_reachable_scoped(&ir.exprs, &ir.inline_only_fns, *root, &mut reach);
         for id in reach {
             target_slots.entry(id).or_insert(bi);
         }
@@ -1961,7 +2096,20 @@ pub fn lower_value_classes(
                 owner: TypeName,
                 underlying: Ty,
             },
-            Prop(ExprId, TypeName),
+            Prop {
+                receiver: ExprId,
+                owner: TypeName,
+                result: Ty,
+            },
+            /// A selected value-class member that became a static `-impl`. Its former dispatch receiver
+            /// becomes argument zero and must be unboxed when the user-member ABI supplied a box.
+            ImplCall {
+                receiver: ExprId,
+                owner: TypeName,
+                name: String,
+                descriptor: String,
+                args: Vec<ExprId>,
+            },
             /// Same-value-class `==`/`!=` → `equals-impl0(U, U)Z` compared against 0 (kotlinc's ABI).
             VcEq {
                 ne: bool,
@@ -2055,29 +2203,59 @@ pub fn lower_value_classes(
             }
             // `x.v` (sole-field read): identity on an unboxed value, `unbox-impl()` on a boxed one.
             IrExpr::GetField {
-                receiver, class, ..
-            } if is_vc[*class as usize] => Some(Rw::Prop(*receiver, fq[*class as usize])),
+                receiver,
+                class,
+                index,
+            } if is_vc[*class as usize] => Some(Rw::Prop {
+                receiver: *receiver,
+                owner: fq[*class as usize],
+                result: orig_fields[*class as usize][*index as usize],
+            }),
             // The same read as a PROPERTY: a value class's sole property IS its erased underlying, so
             // reading it never goes through an accessor whatever the owner's declaration says.
             IrExpr::PropertyRead {
                 receiver,
                 owner,
                 name,
+                ty,
                 ..
-            } if vc_getters
-                .get(owner)
-                .is_some_and(|getter| *getter == property_getter_name(name)) =>
+            } if {
+                crate::trace_compiler!(
+                    "value_classes",
+                    "property read candidate {}.{} underlying={:?}",
+                    owner,
+                    name,
+                    vc_properties.get(owner)
+                );
+                vc_properties
+                    .get(owner)
+                    .is_some_and(|property| property == name)
+            } =>
             {
-                Some(Rw::Prop(*receiver, *owner))
+                Some(Rw::Prop {
+                    receiver: *receiver,
+                    owner: *owner,
+                    result: *ty,
+                })
             }
             // A sole-property access resolved to `invokevirtual X.getV()` (e.g. inside another value
             // class's `init` block) — rewrite like the indexed getter.
             IrExpr::Call {
-                callee: Callee::Virtual { owner, name, .. },
+                callee:
+                    Callee::Virtual {
+                        owner,
+                        name,
+                        params,
+                        ..
+                    },
                 dispatch_receiver: Some(receiver),
                 ..
             } if vc_getters.get(owner).is_some_and(|g| g == name) => {
-                value_class_name(*owner, &under).map(|owner| Rw::Prop(*receiver, owner))
+                value_class_name(*owner, &under).map(|owner| Rw::Prop {
+                    receiver: *receiver,
+                    owner,
+                    result: params.as_ref().map_or(under[&owner], |(_, ret)| *ret),
+                })
             }
             // A zero-arg `Any`-override dispatched VIRTUALLY on the value class itself (`id.hashCode()`
             // / `id.toString()` — e.g. a data class hashing its value-class field on the field's own
@@ -2139,6 +2317,32 @@ pub fn lower_value_classes(
                     _ => None,
                 }
             }
+            // A source call resolved by class+method index before value-class realization may still
+            // point at a user-written Any override after `synth_value_members` turns that exact
+            // function into static `toString-impl`/`hashCode-impl`/`equals-impl`. Retain the selected
+            // declaration, but realize its new ABI: the former dispatch receiver is parameter zero.
+            IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args,
+            } if is_vc[*class as usize]
+                && ir.classes[*class as usize]
+                    .methods
+                    .get(*index as usize)
+                    .and_then(|fid| ir.functions.get(*fid as usize))
+                    .is_some_and(|function| function.is_static) =>
+            {
+                let fid = ir.classes[*class as usize].methods[*index as usize];
+                let function = &ir.functions[fid as usize];
+                Some(Rw::ImplCall {
+                    receiver: *receiver,
+                    owner: fq[*class as usize],
+                    name: function.name.clone(),
+                    descriptor: ir_method_desc(&function.params, &function.ret),
+                    args: args.iter().filter_map(|arg| *arg).collect(),
+                })
+            }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
             IrExpr::MethodCall {
                 class,
@@ -2153,7 +2357,12 @@ pub fn lower_value_classes(
                     .and_then(|fid| ir.functions.get(*fid as usize))
                     .map(|f| f.name.as_str());
                 if name.is_some() && name == getter[cls].as_deref() {
-                    Some(Rw::Prop(*receiver, fq[cls]))
+                    let fid = ir.classes[cls].methods[*index as usize] as usize;
+                    Some(Rw::Prop {
+                        receiver: *receiver,
+                        owner: fq[cls],
+                        result: orig_rets[fid],
+                    })
                 } else {
                     None
                 }
@@ -2191,17 +2400,87 @@ pub fn lower_value_classes(
                     args: vec![dummy, mask, null_marker],
                 })
             }
-            Some(Rw::Prop(receiver, x)) => Some(prop_access(
-                ir,
+            Some(Rw::Prop {
                 receiver,
-                x,
-                &under,
-                &orig_fields,
-                &orig_rets,
-                slots,
-                &field_getters,
-                boxed_slots,
-            )),
+                owner,
+                result,
+            }) => {
+                ir.logical_types.insert(id, result);
+                ir.physical_types.insert(
+                    id,
+                    under
+                        .get(&owner)
+                        .map(|underlying| erase(underlying, &under))
+                        .unwrap_or(Ty::Error),
+                );
+                Some(prop_access(
+                    ir,
+                    receiver,
+                    owner,
+                    result,
+                    &under,
+                    &orig_fields,
+                    &orig_rets,
+                    slots,
+                    &field_getters,
+                    boxed_slots,
+                ))
+            }
+            Some(Rw::ImplCall {
+                receiver,
+                owner,
+                name,
+                descriptor,
+                mut args,
+            }) => {
+                let explicitly_boxed = matches!(
+                    &ir.exprs[receiver as usize],
+                    IrExpr::GetValue(slot) if boxed_slots.contains(slot)
+                );
+                let inferred_boxed = is_boxed_vc(
+                    &ir.exprs,
+                    &ir.functions,
+                    &orig_fields,
+                    &orig_rets,
+                    slots,
+                    &under,
+                    CallTypes::of(ir),
+                    &ir.physical_types,
+                    &field_getters,
+                    receiver,
+                    owner,
+                );
+                let receiver = if explicitly_boxed || inferred_boxed {
+                    let underlying = under
+                        .get(&owner)
+                        .map(|ty| erase(ty, &under))
+                        .unwrap_or(Ty::Error);
+                    ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner,
+                            name: "unbox-impl".to_string(),
+                            descriptor: format!("(){}", desc(&underlying)),
+                            params: None,
+                            interface: false,
+                        },
+                        dispatch_receiver: Some(receiver),
+                        args: Vec::new(),
+                    })
+                } else {
+                    receiver
+                };
+                args.insert(0, receiver);
+                Some(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner,
+                        name,
+                        descriptor,
+                        inline: InlineKind::None,
+                    },
+                    dispatch_receiver: None,
+                    args,
+                })
+            }
             Some(Rw::VcEq {
                 ne,
                 lhs,
@@ -2239,6 +2518,20 @@ pub fn lower_value_classes(
         }
     }
 
+    // Property rewrites above can introduce a fresh `checkcast X` receiver for `X.unbox-impl()`.
+    // Preserve those casts just like the unbox receivers that existed before expression-type erasure.
+    let unbox_receiver_casts: HashSet<u32> = unbox_receiver_casts
+        .into_iter()
+        .chain(ir.exprs.iter().filter_map(|e| match e {
+            IrExpr::Call {
+                callee: Callee::Virtual { name, .. },
+                dispatch_receiver: Some(receiver),
+                ..
+            } if name == "unbox-impl" => Some(*receiver),
+            _ => None,
+        }))
+        .collect();
+
     // 5. Box/unbox at call boundaries, per function so each value's slot type is known: an UNBOXED
     //    value-class value into a reference target (`Object`/generic/nullable-`X`) is `box-impl`'d; a
     //    BOXED one into an unboxed (non-null `X`) target is `unbox-impl`'d. Collect then apply.
@@ -2259,6 +2552,13 @@ pub fn lower_value_classes(
     // `fid` indexes two parallel vecs (`ir.functions` and `slot_types`), so the range loop is wanted.
     #[allow(clippy::needless_range_loop)]
     for fid in 0..ir.functions.len() {
+        crate::trace_compiler!(
+            "value_classes",
+            "boundary body fid={fid} name={} value_member={} body={:?}",
+            ir.functions[fid].name,
+            vc_methods.contains(&(fid as u32)),
+            ir.functions[fid].body
+        );
         if vc_methods.contains(&(fid as u32)) {
             continue;
         }
@@ -2406,27 +2706,16 @@ pub fn lower_value_classes(
                     }
                 }
             }
-            // An `Object`-typed value coerced to a (non-null) value class `X` is a BOXED `X` (it sat in a
-            // generic/`Object` slot — a `FunctionN` SAM param/result, a suspension `Object` result) — unbox
-            // it to the underlying. This loop excludes value-class MEMBER bodies (where the raw underlying
-            // legitimately flows), so there's no boxed-vs-underlying ambiguity here. Applies to EVERY value
-            // class, classpath ones included (a `kotlin/Result` in a `FunctionN` slot is boxed like any
-            // other). `repr=NotVc` keeps an already-unboxed `X` (`Repr::Unboxed`) and a boxed `X`
-            // (`Repr::Boxed`, handled by the boundary unbox) untouched.
+            // A semantic `ImplicitCoercion(Object -> X)` already is the complete representation
+            // boundary; the backend realizes its selected target adapter. This pass only handles the
+            // distinct sole-field case below, where the coercion's TARGET is the underlying and the
+            // boxed value-class identity exists solely on its source expression.
             if let IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
             } = &ir.exprs[id as usize]
             {
-                if let Some(x) = type_operand.non_null().obj_internal() {
-                    if !type_operand.is_nullable()
-                        && under.contains_key(&x)
-                        && matches!(repr_ctx.repr(*arg), Repr::NotVc)
-                    {
-                        ops.push((id, BoxOp::Unbox(x)));
-                    }
-                }
                 // The sole-field coercion (`w.v` → `ImplicitCoercion(<w>, U)`) over a BOXED receiver
                 // (`w!!` of a boxed `W?` shared cell): unbox the receiver first — otherwise the
                 // emitter coerces the box reference straight to the underlying (`checkcast Integer`
@@ -2445,26 +2734,17 @@ pub fn lower_value_classes(
                     }
                 }
             }
-            // Reading a value class's OWN property that is not its sole stored one (a computed member)
-            // dispatches on the boxed object exactly like a member call — box the receiver. The sole
-            // property is not here: that read was rewritten to identity in step 4.
-            //
-            // NOT for a CLASSPATH value class: kotlinc realizes such a property as a static `-impl`
-            // whose sole parameter is the UNBOXED carrier (`isFreezing-impl(I)Z`), so boxing the
-            // receiver hands it an operand of the wrong type ("'lib/Celsius' is not assignable to
-            // integer"). There the unboxed representation is already what the accessor wants; a
-            // receiver that happens to be boxed is unboxed to reach it.
+            // A value-class property accessor is a static `-impl` over the unboxed carrier, regardless
+            // of whether this compilation or a dependency declared it. The sole stored property was
+            // already rewritten to identity; every remaining semantic property read keeps the carrier
+            // representation expected by its selected accessor.
             if let IrExpr::PropertyRead {
                 receiver, owner, ..
             } = &ir.exprs[id as usize]
             {
-                if classpath_value_classes.contains(owner) {
+                if under.contains_key(owner) {
                     if let Repr::Boxed(x) = repr_ctx.repr(*receiver) {
                         ops.push((*receiver, BoxOp::Unbox(x)));
-                    }
-                } else if under.contains_key(owner) {
-                    if let Repr::Unboxed(x) = repr_ctx.repr(*receiver) {
-                        ops.push((*receiver, BoxOp::Box(x)));
                     }
                 }
             }
@@ -2479,8 +2759,18 @@ pub fn lower_value_classes(
             } = &ir.exprs[id as usize]
             {
                 if is_vc[*class as usize] || !is_value_class_internal(fq[*class as usize], &under) {
-                    if let Repr::Unboxed(x) = repr_ctx.repr(*receiver) {
-                        ops.push((*receiver, BoxOp::Box(x)));
+                    match repr_ctx.repr(*receiver) {
+                        Repr::Unboxed(x) => ops.push((*receiver, BoxOp::Box(x))),
+                        Repr::Boxed(x)
+                            if is_vc[*class as usize]
+                                && ir
+                                    .physical_types
+                                    .get(receiver)
+                                    .is_some_and(|ty| ty.is_erased_top()) =>
+                        {
+                            ops.push((*receiver, BoxOp::Narrow(x)));
+                        }
+                        _ => {}
                     }
                 }
                 // A USER value-class member keeps its value-class PARAMS boxed (`fun foo(x: Z)` → `foo(LZ;)`,
@@ -2530,6 +2820,17 @@ pub fn lower_value_classes(
                     None
                 };
                 if let Some(vc) = vc_side {
+                    crate::trace_compiler!(
+                        "value_classes",
+                        "value/null comparison expr {id} value={vc} {:?} repr={} nonnull={}",
+                        &ir.exprs[vc as usize],
+                        match repr_ctx.repr(vc) {
+                            Repr::Unboxed(_) => "Unboxed",
+                            Repr::Boxed(_) => "Boxed",
+                            Repr::NotVc => "NotVc",
+                        },
+                        repr_ctx.operand_nonnull(vc),
+                    );
                     if matches!(repr_ctx.repr(vc), Repr::Unboxed(_)) && repr_ctx.operand_nonnull(vc)
                     {
                         vacuous.push((id, is_ne));
@@ -2567,10 +2868,14 @@ pub fn lower_value_classes(
                     }
                 }
             }
-            // The RECEIVER of an `Any`-method external call (`a.toString()`/`a.hashCode()`) on an unboxed
-            // value class boxes, so the call dispatches to the box's override.
+            // The nullable-Any toString declaration consumes a reference. Other intrinsics carry
+            // concrete scalar/array contracts and must not turn their receiver into an erased box.
             if let IrExpr::Call {
-                callee: Callee::External(_),
+                callee:
+                    Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::NullableAnyToString,
+                        ..
+                    },
                 dispatch_receiver: Some(recv),
                 ..
             } = &ir.exprs[id as usize]
@@ -2641,23 +2946,37 @@ pub fn lower_value_classes(
                     }
                 }
             }
-            // An unboxed value class flowing into a stdlib (`External`) call or a dynamic `invoke`
-            // (string-template `append`/`toString`, a generic `Object` param), or stored as a reference
-            // array element (`arrayOf(X(..))` → `X[]`), must be boxed.
+            // The String-plus argument is the declaration's `Any?` operand and therefore boxes an
+            // unboxed value class. Dynamic invokes, reference varargs, and string templates are the
+            // other erased reference boundaries handled here.
             if let IrExpr::Call {
-                callee: Callee::External(_),
+                callee:
+                    Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::StringPlus,
+                        ..
+                    },
                 args,
                 ..
             }
             | IrExpr::InvokeFunction { args, .. }
             | IrExpr::Vararg { elements: args, .. }
             // A value-class part of a string template flows into `StringBuilder.append(Object)` /
-            // `String.valueOf(Object)`, so it must box (→ the value class's `toString`), exactly like an
-            // `External` `String.plus` arg did before templates lowered to `StringConcat`.
+            // `String.valueOf(Object)`, so it must box (→ the value class's `toString`).
             | IrExpr::StringConcat(args) = &ir.exprs[id as usize]
             {
                 for a in args.clone() {
-                    if let Repr::Unboxed(x) = repr_ctx.repr(a) {
+                    let representation = repr_ctx.repr(a);
+                    crate::trace_compiler!(
+                        "value_classes",
+                        "reference aggregate expr {id} element {a} {:?} repr={}",
+                        &ir.exprs[a as usize],
+                        match representation {
+                            Repr::Unboxed(_) => "Unboxed",
+                            Repr::Boxed(_) => "Boxed",
+                            Repr::NotVc => "NotVc",
+                        }
+                    );
+                    if let Repr::Unboxed(x) = representation {
                         ops.push((a, repr_ctx.box_op(a, x)));
                     }
                 }
@@ -2718,7 +3037,9 @@ pub fn lower_value_classes(
                     if recv_is_ref_vc && k == 0 {
                         continue;
                     }
-                    let Repr::Unboxed(x) = repr_ctx.repr(a) else {
+                    let (representation_value, representation) =
+                        repr_ctx.through_erased_generic_coercion(a);
+                    let Repr::Unboxed(x) = representation else {
                         continue;
                     };
                     // A VC-owned call boxes an unboxed value-class arg at a parameter that is the boxed VC
@@ -2745,7 +3066,10 @@ pub fn lower_value_classes(
                         refs.get(k).copied().unwrap_or(false) && !own_underlying
                     };
                     if box_here {
-                        ops.push((a, repr_ctx.box_op(a, x)));
+                        ops.push((
+                            representation_value,
+                            repr_ctx.box_op(representation_value, x),
+                        ));
                     }
                 }
             }
@@ -2784,6 +3108,33 @@ pub fn lower_value_classes(
                     .zip(orig_params[*cfid as usize].iter())
                     .map(|(a, p)| (*a, p.clone()))
                     .collect(),
+                // `Array<T>.set(index, value)` stores into the receiver array's semantic element
+                // slot. Reference arrays of value classes keep boxed elements, so the value-class
+                // boundary belongs here alongside call parameters and fields. The receiver is often
+                // a generated local read; recover its pre-erasure type from the function slot map.
+                IrExpr::Call {
+                    callee:
+                        Callee::Intrinsic {
+                            operation: crate::ir::IrIntrinsic::ArraySet,
+                            ..
+                        },
+                    dispatch_receiver: Some(array),
+                    args,
+                } => {
+                    let element =
+                        array_element_type(&ir.exprs, repr_ctx.slots, &ir.logical_types, *array);
+                    crate::trace_compiler!(
+                        "value_classes",
+                        "array set expr {id} receiver={array} {:?} element={element:?} args={args:?}",
+                        &ir.exprs[*array as usize],
+                    );
+                    if let Some((value, element)) = args.get(1).copied().zip(element) {
+                        record_reference_array_element_boundary(
+                            &mut ops, &ir.exprs, &repr_ctx, value, element,
+                        );
+                    }
+                    continue;
+                }
                 // Captures target the lifted implementation's leading parameters.
                 IrExpr::Lambda {
                     impl_fn, captures, ..
@@ -2868,98 +3219,27 @@ pub fn lower_value_classes(
                 _ => continue,
             };
             for (a, p) in pairs {
-                let tgt = target(&p, &under);
-                #[cfg(feature = "trace")]
-                if crate::trace::enabled("value_classes") {
-                    let r = repr_ctx.repr(a);
-                    crate::trace_compiler!(
-                        "value_classes",
-                        "boundary expr {a} {:?} -> param {p:?} repr={} target={}",
-                        &ir.exprs[a as usize],
-                        match r {
-                            Repr::Unboxed(_) => "Unboxed",
-                            Repr::Boxed(_) => "Boxed",
-                            Repr::NotVc => "NotVc",
-                        },
-                        match tgt {
-                            Target::UnboxedX(_) => "UnboxedX",
-                            Target::Boxed => "Boxed",
-                            Target::Other => "Other",
-                        }
-                    );
-                }
-                // An unboxed value class flowing to a reference SUPERTYPE — `Any`, an interface the value
-                // class implements, a generic `T` — must be boxed (the box satisfies that type; the raw
-                // underlying does not). `Target::Boxed` covers `Any`/nullable-`X`; a plain interface/class
-                // target (`Target::Other` that is a reference and not the value class itself) also boxes.
-                // EXCEPT the value class's OWN erased underlying (`Aid(String)` → a `getFor-<hash>(String)`
-                // param): that is the value's native representation, so it passes UNBOXED (identity), not a
-                // spurious `box-impl` the callee's `String` signature would then reject (`VerifyError`).
-                let supertype_box = matches!(&tgt, Target::Boxed)
-                    || (matches!(tgt, Target::Other)
-                        && is_ref(&p)
-                        && match &repr_ctx.repr(a) {
-                            Repr::Unboxed(x) | Repr::Boxed(x) => {
-                                // Own-erased-underlying exclusion, but only for a DISTINCT non-`Object`
-                                // underlying — an `Object` underlying can't be told apart from a generic
-                                // supertype slot, where kotlinc boxes (see the call-arg site above).
-                                let u = under.get(x).map(|u| erase(u, &under).non_null());
-                                let own_underlying = u.as_ref() == Some(&p.non_null())
-                                    && u.as_ref()
-                                        .and_then(|t| t.obj_internal())
-                                        .is_none_or(|n| !n.matches("java/lang/Object"));
-                                !p.non_null().obj_internal().is_some_and(|n| n == *x)
-                                    && !own_underlying
-                            }
-                            Repr::NotVc => false,
-                        });
-                match repr_ctx.repr(a) {
-                    Repr::Unboxed(x) if supertype_box => {
-                        let mut tails = Vec::new();
-                        value_tails(&ir.exprs, a, &mut tails);
-                        for tail in tails {
-                            if matches!(repr_ctx.repr(tail), Repr::Unboxed(tx) if tx == x) {
-                                ops.push((tail, repr_ctx.box_op(tail, x)));
-                            }
-                        }
-                    }
-                    Repr::Boxed(x) if matches!(&tgt, Target::UnboxedX(tx) if *tx == x) => {
-                        let mut tails = Vec::new();
-                        value_tails(&ir.exprs, a, &mut tails);
-                        for tail in tails {
-                            if matches!(repr_ctx.repr(tail), Repr::Boxed(tx) if tx == x) {
-                                let op = if p.is_nullable() {
-                                    BoxOp::UnboxNull(x)
-                                } else {
-                                    BoxOp::Unbox(x)
-                                };
-                                ops.push((tail, op));
-                            }
-                        }
-                    }
-                    // A boxed element read from a stdlib reference array (`arr[i]` → `Object`/boxed `X`)
-                    // flowing into an unboxed value-class slot must `unbox-impl`.
-                    Repr::NotVc => {
-                        if let Target::UnboxedX(x) = &tgt {
-                            if matches!(
-                                &ir.exprs[a as usize],
-                                IrExpr::Call {
-                                    callee: Callee::External(_),
-                                    ..
-                                }
-                            ) {
-                                let op = if p.is_nullable() {
-                                    BoxOp::UnboxNull(*x)
-                                } else {
-                                    BoxOp::Unbox(*x)
-                                };
-                                ops.push((a, op));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                record_value_boundary(&mut ops, &ir.exprs, &repr_ctx, a, p, &under);
             }
+        }
+    }
+    // A superclass invocation is not an IR `Call` node: `super_args` are emitted directly by the class
+    // constructor. Apply the same semantic boundary operation using the checker-selected parameter types
+    // retained beside those arguments.
+    for (class_index, class) in ir.classes.iter().enumerate() {
+        for (&argument, &parameter) in class.super_args.iter().zip(&class.super_ctor_params) {
+            let slots = body_slot_map(&ir.exprs, argument, &orig_ctor_args[class_index]);
+            let repr_ctx = ReprCtx {
+                exprs: &ir.exprs,
+                rets: &orig_rets,
+                fields: &orig_fields,
+                slots: &slots,
+                under: &under,
+                types: CallTypes::of(ir),
+                physical: &ir.physical_types,
+                field_getters: &field_getters,
+            };
+            record_value_boundary(&mut ops, &ir.exprs, &repr_ctx, argument, parameter, &under);
         }
     }
     for (id, is_ne) in vacuous {
@@ -2993,6 +3273,18 @@ pub fn lower_value_classes(
         .unwrap_or(0)
         + 1;
     for (id, op) in ops {
+        crate::trace_compiler!(
+            "value_classes",
+            "apply representation op expr {id} {:?} op={}",
+            &ir.exprs[id as usize],
+            match op {
+                BoxOp::Box(_) => "Box",
+                BoxOp::BoxNull(_) => "BoxNull",
+                BoxOp::Unbox(_) => "Unbox",
+                BoxOp::UnboxNull(_) => "UnboxNull",
+                BoxOp::Narrow(_) => "Narrow",
+            }
+        );
         // Box/unbox a value class at a boundary uniformly — a classpath value class (`kotlin/Result`) has
         // `box-impl`/`unbox-impl` on the classpath and is boxed in reference slots and unboxed at its
         // members like any user value class. (kotlinc observes the boxed form's `toString`/`equals`/
@@ -3008,6 +3300,7 @@ pub fn lower_value_classes(
                 unbox_wrap_nullable(ir, id, x, &under, fresh);
                 fresh += 1;
             }
+            BoxOp::Narrow(x) => narrow_wrap(ir, id, x),
         }
     }
 
@@ -3028,10 +3321,25 @@ pub fn lower_value_classes(
         }
     }
 
+    let lambda_implementation_ids: HashSet<u32> = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Lambda { impl_fn, .. } => Some(*impl_fn),
+            _ => None,
+        })
+        .collect();
+
     // 6. A function returning a nullable value class `X?` boxes its non-null (unboxed) results; a
     //    function declared to return a reference SUPERTYPE (`Any`/`Any?`/an interface — NOT the value
     //    class itself) boxes a value-class tail too (`fun f(): Any? = vc`).
     for fid in 0..ir.functions.len() {
+        // FunctionN/SAM result representation is one boundary handled by step 7 below. Running this
+        // ordinary declaration-return rewrite first would unbox a boxed lambda tail and then make the
+        // lambda pass box it again.
+        if lambda_implementation_ids.contains(&(fid as u32)) {
+            continue;
+        }
         if vc_methods.contains(&(fid as u32)) {
             // A value-class MEMBER returns the BOXED value-class form (its signature keeps the value
             // class — see the `vc_member && is_vc_ty(ret)` guard above). If its declared return is a
@@ -3092,7 +3400,7 @@ pub fn lower_value_classes(
                 // leaves BOXED (kotlinc: `box-impl` before the CPS `areturn`). Box the tail exactly like a
                 // lambda's erased `Object` result and record the class, so the resume side can undo it.
                 if let Some(body) = ir.functions[fid].body {
-                    ir.functions[fid].ret = Ty::obj_name(x);
+                    ir.functions[fid].ret = boxed_value_ty(x);
                     box_ref_tail(
                         ir,
                         body,
@@ -3136,7 +3444,7 @@ pub fn lower_value_classes(
             // A lambda SAM-converted to a method that DECLARES this very value class as its return is
             // exempt from ALL of the tail boxing below — see the note on the loop. Its inline body
             // shares the same tail node, so it must be exempt from `box_vc_tail` too.
-            if sam_declares_vc_return(ir, &orig_rets, *impl_fn, &under) {
+            if sam_declares_vc_return(ir, &orig_rets, *impl_fn, &callable_under) {
                 continue;
             }
             if let Some(body) = ir.functions.get(*impl_fn as usize).and_then(|f| f.body) {
@@ -3160,14 +3468,14 @@ pub fn lower_value_classes(
         if let Some(x) = orig_rets[impl_fn as usize]
             .non_null()
             .obj_internal()
-            .filter(|fq| under.contains_key(fq))
+            .filter(|fq| callable_under.contains_key(fq))
         {
-            ir.functions[impl_fn as usize].ret = Ty::obj_name(x);
+            ir.functions[impl_fn as usize].ret = boxed_value_ty(x);
             box_ref_tail(
                 ir,
                 body,
                 x,
-                &under,
+                &callable_under,
                 &orig_rets,
                 &orig_fields,
                 &slot_types[impl_fn as usize],
@@ -3175,11 +3483,11 @@ pub fn lower_value_classes(
             );
         } else {
             // A lambda returning `Any`/an interface (not a value class itself) still boxes a value-class tail.
-            box_vc_tail(ir, body, &under, &orig_rets, false);
+            box_vc_tail(ir, body, &callable_under, &orig_rets, false);
         }
     }
     for body in inline_bodies {
-        box_vc_tail(ir, body, &under, &orig_rets, false);
+        box_vc_tail(ir, body, &callable_under, &orig_rets, false);
     }
 
     // A property whose declared type is a VALUE CLASS has a `@JvmName`-mangled accessor. The backend
@@ -3298,6 +3606,68 @@ pub fn lower_value_classes(
         }
     }
 
+    // Property references cross the erased `KProperty` Object boundary. A value-class property accessor
+    // itself uses the mangled name and carrier descriptor, but `get` must box that carrier and `set` must
+    // unbox the incoming value-class object. Record that JVM realization on the already-selected target;
+    // no declaration lookup or overload resolution happens here.
+    for class in &mut ir.classes {
+        let Some(reference) = class.prop_ref.as_mut() else {
+            continue;
+        };
+        let Some(value_class) = reference
+            .prop_ty
+            .non_null()
+            .obj_internal()
+            .filter(|name| callable_under.contains_key(name))
+        else {
+            continue;
+        };
+        // A specialized generic property (`Pair<UInt, _>::first`) has semantic type `UInt`, but its
+        // selected declaration still exposes `getFirst(): Object`. That object is already the boxed
+        // value and the declaration is not value-class-mangled. Only a descriptor returning this
+        // value class's actual carrier denotes a concrete value-class property accessor.
+        if reference
+            .getter_descriptor
+            .as_ref()
+            .is_some_and(|descriptor| {
+                let physical_ret = descriptor.rsplit_once(')').map(|(_, ret)| ret);
+                let carrier = callable_under
+                    .get(&value_class)
+                    .map(|underlying| desc(&erase(underlying, &callable_under)));
+                physical_ret
+                    .zip(carrier.as_deref())
+                    .is_some_and(|(ret, carrier)| ret != carrier)
+            })
+        {
+            continue;
+        }
+        reference.boxed_value_class = Some(value_class);
+        reference.getter_name = vc_mangle(
+            &property_getter_name(&reference.prop_name),
+            &[],
+            &reference.prop_ty,
+            &callable_under,
+            false,
+            false,
+        );
+        if let Some(descriptor) = reference.getter_descriptor.as_mut() {
+            *descriptor = erase_descriptor(descriptor, &callable_under);
+        }
+        if reference.setter_name.is_some() {
+            reference.setter_name = Some(vc_mangle(
+                &crate::names::property_setter_name(&reference.prop_name),
+                std::slice::from_ref(&reference.prop_ty),
+                &Ty::Unit,
+                &callable_under,
+                false,
+                false,
+            ));
+        }
+        if let Some(descriptor) = reference.setter_descriptor.as_mut() {
+            *descriptor = erase_descriptor(descriptor, &callable_under);
+        }
+    }
+
     true
 }
 
@@ -3390,6 +3760,7 @@ enum BoxOp {
     BoxNull(TypeName),
     Unbox(TypeName),
     UnboxNull(TypeName),
+    Narrow(TypeName),
 }
 
 fn value_tails(exprs: &[IrExpr], id: ExprId, out: &mut Vec<ExprId>) {
@@ -3412,6 +3783,7 @@ fn value_tails(exprs: &[IrExpr], id: ExprId, out: &mut Vec<ExprId>) {
 }
 
 /// The representation a value-class value currently has.
+#[derive(Clone, Copy)]
 enum Repr {
     NotVc,
     Unboxed(TypeName),
@@ -3419,6 +3791,7 @@ enum Repr {
 }
 
 /// What a target position wants of a value-class value.
+#[derive(Clone, Copy)]
 enum Target {
     UnboxedX(TypeName), // a non-null `X` position → wants the unboxed `U`
     Boxed,              // `Object`/generic/nullable-`X` → wants a boxed `X` object
@@ -3460,6 +3833,148 @@ impl ReprCtx<'_> {
             BoxOp::Box(value_class)
         } else {
             BoxOp::BoxNull(value_class)
+        }
+    }
+
+    /// A coercion to an erased type parameter changes the consumer's contract, not the value's current
+    /// representation. Descriptor boundaries must inspect the value beneath such coercions so an
+    /// unboxed value class is boxed at the reference slot, while its preceding specialized local keeps
+    /// the unboxed carrier. Return the expression that should receive the representation rewrite.
+    fn through_erased_generic_coercion(&self, mut id: ExprId) -> (ExprId, Repr) {
+        while let IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = &self.exprs[id as usize]
+        {
+            if !matches!(type_operand.non_null(), Ty::TyParam(..)) {
+                break;
+            }
+            id = *arg;
+        }
+        (id, self.repr(id))
+    }
+}
+
+fn record_value_boundary(
+    ops: &mut Vec<(ExprId, BoxOp)>,
+    exprs: &[IrExpr],
+    repr_ctx: &ReprCtx<'_>,
+    value: ExprId,
+    parameter: Ty,
+    under: &Under,
+) {
+    let target = target(&parameter, under);
+    let representation = repr_ctx.repr(value);
+    crate::trace_compiler!(
+        "value_classes",
+        "boundary expr {value} {:?} -> param {parameter:?} repr={} target={}",
+        &exprs[value as usize],
+        match representation {
+            Repr::Unboxed(_) => "Unboxed",
+            Repr::Boxed(_) => "Boxed",
+            Repr::NotVc => "NotVc",
+        },
+        match target {
+            Target::UnboxedX(_) => "UnboxedX",
+            Target::Boxed => "Boxed",
+            Target::Other => "Other",
+        }
+    );
+    let supertype_box = matches!(target, Target::Boxed)
+        || (matches!(target, Target::Other)
+            && is_ref(&parameter)
+            && match representation {
+                Repr::Unboxed(value_class) | Repr::Boxed(value_class) => {
+                    let underlying = under
+                        .get(&value_class)
+                        .map(|underlying| erase(underlying, under).non_null());
+                    let own_underlying = underlying.as_ref() == Some(&parameter.non_null())
+                        && underlying
+                            .as_ref()
+                            .and_then(|ty| ty.obj_internal())
+                            .is_none_or(|name| !name.matches("java/lang/Object"));
+                    parameter.non_null().obj_internal() != Some(value_class) && !own_underlying
+                }
+                Repr::NotVc => false,
+            });
+    match representation {
+        Repr::Unboxed(value_class) if supertype_box => {
+            let mut tails = Vec::new();
+            value_tails(exprs, value, &mut tails);
+            for tail in tails {
+                if matches!(repr_ctx.repr(tail), Repr::Unboxed(tail_class) if tail_class == value_class)
+                {
+                    ops.push((tail, repr_ctx.box_op(tail, value_class)));
+                }
+            }
+        }
+        Repr::Boxed(value_class) if matches!(target, Target::UnboxedX(target_class) if target_class == value_class) =>
+        {
+            let mut tails = Vec::new();
+            value_tails(exprs, value, &mut tails);
+            for tail in tails {
+                if matches!(repr_ctx.repr(tail), Repr::Boxed(tail_class) if tail_class == value_class)
+                {
+                    ops.push((
+                        tail,
+                        if parameter.is_nullable() {
+                            BoxOp::UnboxNull(value_class)
+                        } else {
+                            BoxOp::Unbox(value_class)
+                        },
+                    ));
+                }
+            }
+        }
+        Repr::NotVc => {
+            if let Target::UnboxedX(value_class) = target {
+                if matches!(
+                    &exprs[value as usize],
+                    IrExpr::Call {
+                        callee: Callee::Intrinsic { .. },
+                        ..
+                    }
+                ) {
+                    ops.push((
+                        value,
+                        if parameter.is_nullable() {
+                            BoxOp::UnboxNull(value_class)
+                        } else {
+                            BoxOp::Unbox(value_class)
+                        },
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A Kotlin `Array<T>` is a JVM reference array even when `T` is a non-null value class. Its semantic
+/// element type stays `T`; only this platform boundary requires the boxed `T` object for `aastore`.
+fn record_reference_array_element_boundary(
+    ops: &mut Vec<(ExprId, BoxOp)>,
+    exprs: &[IrExpr],
+    repr_ctx: &ReprCtx<'_>,
+    value: ExprId,
+    element: Ty,
+) {
+    let Some(value_class) = element
+        .non_null()
+        .obj_internal()
+        .filter(|name| repr_ctx.under.contains_key(name))
+    else {
+        return;
+    };
+    if !matches!(repr_ctx.repr(value), Repr::Unboxed(actual) if actual == value_class) {
+        return;
+    }
+    let mut tails = Vec::new();
+    value_tails(exprs, value, &mut tails);
+    for tail in tails {
+        if matches!(repr_ctx.repr(tail), Repr::Unboxed(actual) if actual == value_class) {
+            ops.push((tail, repr_ctx.box_op(tail, value_class)));
         }
     }
 }
@@ -3526,6 +4041,18 @@ fn operand_nonnull(
         // The same read as a property: its declared type is what says whether the value can be null.
         IrExpr::PropertyRead { ty, .. } => non_null_ty(ty),
         IrExpr::NotNullAssert { .. } => true,
+        // A successful cast to a non-null reference has a non-null result; `CastNonNull` states the
+        // same contract directly. This matters for a non-null generic value class whose unboxed
+        // carrier itself may contain null (`Ag<T>(null)` is still not a null `Ag<T>`).
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::Cast,
+            type_operand,
+            ..
+        } => non_null_ty(type_operand),
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::CastNonNull,
+            ..
+        } => true,
         IrExpr::Call {
             callee: Callee::Static { name, .. },
             ..
@@ -3573,6 +4100,31 @@ impl<'a> CallTypes<'a> {
             .non_null()
             .obj_internal()
             .filter(|fq| under.contains_key(fq))
+    }
+}
+
+/// Semantic element type of an array-valued expression before value-class erasure. Generated array
+/// fill loops normally pass the array through a local slot, while ordinary expressions may retain a
+/// logical type directly. Follow only representation-transparent wrappers; this never resolves a type.
+fn array_element_type(
+    exprs: &[IrExpr],
+    slots: &HashMap<u32, Ty>,
+    logical: &HashMap<u32, Ty>,
+    id: ExprId,
+) -> Option<Ty> {
+    if let Some(element) = logical.get(&id).and_then(|ty| ty.array_elem()) {
+        return Some(element);
+    }
+    match &exprs[id as usize] {
+        IrExpr::GetValue(slot) => slots.get(slot).and_then(|ty| ty.array_elem()),
+        IrExpr::TypeOp { arg, .. } => array_element_type(exprs, slots, logical, *arg),
+        IrExpr::Block {
+            value: Some(value), ..
+        } => array_element_type(exprs, slots, logical, *value),
+        IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => {
+            array_type.array_elem()
+        }
+        _ => None,
     }
 }
 
@@ -3631,7 +4183,16 @@ fn repr(
             .map_or(Repr::NotVc, |t| repr_of_ty(t, under)),
         // A property read carries its own declared type. Whatever accessor or field the target picks for
         // it yields the value class's ERASED underlying — the same representation a field read of one has.
-        IrExpr::PropertyRead { ty, .. } => repr_of_ty(ty, under),
+        IrExpr::PropertyRead { ty, .. } => {
+            if physical.get(&id).is_some_and(|ty| ty.is_erased_top()) {
+                ty.non_null()
+                    .obj_internal()
+                    .filter(|owner| under.contains_key(owner))
+                    .map_or(Repr::NotVc, Repr::Boxed)
+            } else {
+                repr_of_ty(ty, under)
+            }
+        }
         // A value-class-FIELD getter (`Test.getS()` for `val s: S<T>`) reprs as the field's representation
         // — the UNBOXED underlying. Keyed on the getter's IDENTITY (owning class + method slot, via
         // `field_getters`), so it is distinguished from a boxing OVERRIDE getter, which is not in the map and
@@ -3695,9 +4256,6 @@ fn repr(
                 }) =>
                 {
                     Repr::Boxed(fq_name)
-                }
-                _ if type_operand.is_nullable() && !nullable_is_boxed(fq_name, under) => {
-                    Repr::Unboxed(fq_name)
                 }
                 _ => Repr::Boxed(fq_name),
             }
@@ -3817,14 +4375,12 @@ fn repr(
 
 /// Replace the expr at `id` with `(X)<orig>.unbox-impl()` — checkcast then unbox a boxed `X`.
 fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
-    let orig = ir.exprs[id as usize].clone();
-    let new_id = ir.exprs.len() as ExprId;
-    ir.exprs.push(orig);
+    let new_id = clone_expr_with_type_facts(ir, id);
     let cast = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::Cast,
         arg: new_id,
-        type_operand: Ty::obj_name(x),
+        type_operand: boxed_value_ty(x),
     });
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let d = desc(&u);
@@ -3841,10 +4397,34 @@ fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
     };
 }
 
+/// Preserve the expression's physical/logical facts while moving it below a representation wrapper.
+fn clone_expr_with_type_facts(ir: &mut IrFile, id: ExprId) -> ExprId {
+    let new_id = ir.exprs.len() as ExprId;
+    ir.exprs.push(ir.exprs[id as usize].clone());
+    if let Some(ty) = ir.physical_types.get(&id).copied() {
+        ir.physical_types.insert(new_id, ty);
+    }
+    if let Some(ty) = ir.logical_types.get(&id).copied() {
+        ir.logical_types.insert(new_id, ty);
+    }
+    if let Some(ty) = ir.property_declaration_types.get(&id).copied() {
+        ir.property_declaration_types.insert(new_id, ty);
+    }
+    new_id
+}
+
+/// Replace an erased-reference expression with an explicit cast to its known boxed value class.
+fn narrow_wrap(ir: &mut IrFile, id: ExprId, x: TypeName) {
+    let arg = clone_expr_with_type_facts(ir, id);
+    ir.exprs[id as usize] = IrExpr::TypeOp {
+        op: crate::ir::IrTypeOp::Cast,
+        arg,
+        type_operand: boxed_value_ty(x),
+    };
+}
+
 fn unbox_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
-    let orig = ir.exprs[id as usize].clone();
-    let orig_id = ir.exprs.len() as ExprId;
-    ir.exprs.push(orig);
+    let orig_id = clone_expr_with_type_facts(ir, id);
     let boxed_ty = Ty::nullable(Ty::obj_name(x));
     let var = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Variable {
@@ -3899,6 +4479,7 @@ fn prop_access(
     ir: &mut IrFile,
     receiver: ExprId,
     x: TypeName,
+    result: Ty,
     under: &Under,
     fields: &[Vec<Ty>],
     rets: &[Ty],
@@ -3914,21 +4495,50 @@ fn prop_access(
     // coercion tells later analysis that the property itself has the underlying representation.
     let explicitly_boxed = matches!(&ir.exprs[receiver as usize],
         IrExpr::GetValue(index) if boxed_slots.contains(index));
-    let inner = if explicitly_boxed
-        || is_boxed_vc(
-            &ir.exprs,
-            &ir.functions,
-            fields,
-            rets,
-            slots,
-            under,
-            CallTypes::of(ir),
-            &ir.physical_types,
-            field_getters,
-            receiver,
-            x,
-        ) {
+    let inferred_boxed = is_boxed_vc(
+        &ir.exprs,
+        &ir.functions,
+        fields,
+        rets,
+        slots,
+        under,
+        CallTypes::of(ir),
+        &ir.physical_types,
+        field_getters,
+        receiver,
+        x,
+    );
+    crate::trace_compiler!(
+        "value_classes",
+        "prop access {} receiver={receiver} {:?} result={result:?} underlying={u:?} explicit_box={explicitly_boxed} inferred_box={inferred_boxed}",
+        x.render(),
+        &ir.exprs[receiver as usize],
+    );
+    if let IrExpr::TypeOp { arg, .. } = &ir.exprs[receiver as usize] {
+        crate::trace_compiler!(
+            "value_classes",
+            "prop access {} receiver arg={arg} {:?} logical={:?} physical={:?}",
+            x.render(),
+            &ir.exprs[*arg as usize],
+            ir.logical_types.get(arg),
+            ir.physical_types.get(arg),
+        );
+    }
+    let inner = if explicitly_boxed || inferred_boxed {
         let d = desc(&u);
+        let dispatch = if ir
+            .physical_types
+            .get(&receiver)
+            .is_some_and(|ty| ty.is_erased_top())
+        {
+            ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast,
+                arg: receiver,
+                type_operand: boxed_value_ty(x),
+            })
+        } else {
+            receiver
+        };
         ir.add_expr(IrExpr::Call {
             callee: Callee::Virtual {
                 owner: x,
@@ -3937,7 +4547,7 @@ fn prop_access(
                 params: None,
                 interface: false,
             },
-            dispatch_receiver: Some(receiver),
+            dispatch_receiver: Some(dispatch),
             args: vec![],
         })
     } else {
@@ -3946,7 +4556,29 @@ fn prop_access(
     IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::ImplicitCoercion,
         arg: inner,
-        type_operand: u,
+        // A generic value class keeps an erased `Object` carrier, but an applied property read
+        // (`X<Int>.x`) has a concrete Kotlin result. Preserve that selected result so this coercion
+        // performs the required `Integer` unbox / reference cast instead of degrading it back to Any.
+        type_operand: if result
+            .non_null()
+            .obj_internal()
+            .is_some_and(|result_class| under.contains_key(&result_class))
+            && u.is_erased_top()
+        {
+            // A value class recovered from a generic `Object` underlying is a BOX in that slot. Keep
+            // the box type here; coercing straight to its carrier would cast `ICStr` to `String` before
+            // the following property/member access gets a chance to call `unbox-impl`.
+            result
+        } else if result.is_ty_param() {
+            // The declaration's generic underlying is erased (`Wrapper<T>.value: Object`), but an
+            // applied read keeps the selected bound. A scalar-bounded `T` therefore needs the bound's
+            // carrier (`T : Int` -> `int`), while an ordinary reference-bounded `T` keeps the erased
+            // underlying. Treating every type parameter as `u` loses the only fact that can unbox the
+            // result before arithmetic.
+            result.scalar_value_repr().unwrap_or(u)
+        } else {
+            erase(&result, under)
+        },
     }
 }
 
@@ -3968,6 +4600,12 @@ fn is_boxed_vc(
 ) -> bool {
     let x_rendered = x.render();
     let is_x = |t: &Ty| t.non_null().obj_internal().is_some_and(|n| n == x);
+    if types.get(&id).is_some_and(is_x)
+        && physical.get(&id).is_some_and(|ty| ty.is_erased_top())
+        && types.declared_value_class(id, under) != Some(x)
+    {
+        return true;
+    }
     match &exprs[id as usize] {
         // A local/param slot whose declared type is a BOXED value class `x` (a nullable `X?`, e.g. the
         // `?.` receiver temp) holds a boxed `x` — so a `.field` on it `unbox-impl`s.
@@ -3979,7 +4617,8 @@ fn is_boxed_vc(
             .and_then(|fs| fs.get(*index as usize))
             .is_some_and(|t| matches!(repr_of_ty(t, under), Repr::Boxed(c) if c == x)),
         IrExpr::PropertyRead { ty, .. } => {
-            matches!(repr_of_ty(ty, under), Repr::Boxed(c) if c == x)
+            (is_x(ty) && physical.get(&id).is_some_and(|ty| ty.is_erased_top()))
+                || matches!(repr_of_ty(ty, under), Repr::Boxed(c) if c == x)
         }
         IrExpr::Call {
             callee: Callee::Static { owner, name, .. },
@@ -4012,11 +4651,15 @@ fn is_boxed_vc(
             callee: Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. },
             ..
         } => descriptor.ends_with(&format!("L{x_rendered};")),
-        // A stdlib reference-array element read (`arr[i]` → `kotlin/Array.get`) yields a boxed element.
+        // A stdlib reference-array element read yields a boxed element.
         IrExpr::Call {
-            callee: Callee::External(name),
+            callee:
+                Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::ArrayGet,
+                    ..
+                },
             ..
-        } => name == "kotlin/Array.get",
+        } => true,
         // `e as X` / `e as X?` yields a boxed `X` (e.g. casting an `Any` returned by a value-class method
         // seen through a supertype) — the property access then `unbox-impl`s it. EXCEPT when the operand is
         // ALREADY an unboxed `X` (a generic value-class receiver erased to its underlying, with a no-op
@@ -4031,7 +4674,19 @@ fn is_boxed_vc(
             type_operand,
         } => {
             is_x(type_operand)
-                && !matches!(repr(exprs, rets, fields, slots, under, types, physical, field_getters, *arg), Repr::Unboxed(c) if c == x)
+                && (is_boxed_vc(
+                    exprs,
+                    funcs,
+                    fields,
+                    rets,
+                    slots,
+                    under,
+                    types,
+                    physical,
+                    field_getters,
+                    *arg,
+                    x,
+                ) || !matches!(repr(exprs, rets, fields, slots, under, types, physical, field_getters, *arg), Repr::Unboxed(c) if c == x))
         }
         IrExpr::NotNullAssert { operand } => is_boxed_vc(
             exprs,
@@ -4639,6 +5294,124 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
     let str_ir = Ty::obj("kotlin/String");
     let any_ir = Ty::obj("kotlin/Any");
 
+    // A value class's declared accessors are static implementations over its carrier. The source IR
+    // initially represents a computed accessor like every ordinary member (implicit receiver in slot
+    // zero); replacing that receiver with an explicit carrier parameter preserves every body value id
+    // while giving emission and metadata the ABI kotlinc exposes.
+    let computed_accessors = ir.classes[class_id as usize]
+        .properties
+        .iter()
+        .enumerate()
+        .filter(|(_, property)| property.backing_field.is_none())
+        .map(|(index, property)| {
+            (
+                index,
+                property.getter,
+                property.setter,
+                property.name.clone(),
+                property.is_open,
+            )
+        })
+        .collect::<Vec<_>>();
+    for (property_index, getter, setter, property_name, overrides_supertype) in computed_accessors {
+        if let Some(getter) = getter {
+            let source_name = property_getter_name(&property_name);
+            let jvm_name = format!("{}-impl", property_getter_name(&property_name));
+            let ret = {
+                let function = &mut ir.functions[getter as usize];
+                function.name.clone_from(&jvm_name);
+                function.params.insert(0, u_ir);
+                function.is_static = true;
+                function.ret
+            };
+            ir.classes[class_id as usize].properties[property_index].getter_jvm_name =
+                Some(jvm_name.clone());
+            // The static `getX-impl(U)` is how an unboxed value calls its accessor. If the property
+            // overrides a supertype declaration, the BOX must additionally implement the ordinary
+            // virtual `getX()` entry point. Delegate from that instance method to the same implementation;
+            // bridge derivation has already established the override, so no hierarchy lookup occurs here.
+            if overrides_supertype {
+                let this = ir.add_expr(IrExpr::GetValue(0));
+                let carrier = ir.add_expr(IrExpr::GetField {
+                    receiver: this,
+                    class: class_id,
+                    index: 0,
+                });
+                let call = ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: internal_name,
+                        name: jvm_name,
+                        descriptor: format!("({}){}", desc(&u_ir), desc(&ret)),
+                        inline: crate::libraries::InlineKind::None,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![carrier],
+                });
+                let returned = ir.add_expr(IrExpr::Return(Some(call)));
+                let body = ir.add_expr(IrExpr::Block {
+                    stmts: vec![returned],
+                    value: None,
+                });
+                let fid = ir.add_fun(crate::ir::IrFunction {
+                    name: source_name,
+                    params: vec![],
+                    ret,
+                    body: Some(body),
+                    is_static: false,
+                    dispatch_receiver: Some(internal_name),
+                    param_checks: vec![],
+                });
+                ir.classes[class_id as usize].methods.push(fid);
+                ir.open_methods.insert(fid);
+            }
+        }
+        if let Some(setter) = setter {
+            let jvm_name = format!(
+                "{}-impl",
+                crate::names::property_setter_name(&property_name)
+            );
+            let function = &mut ir.functions[setter as usize];
+            function.name.clone_from(&jvm_name);
+            function.params.insert(0, u_ir);
+            function.is_static = true;
+            ir.classes[class_id as usize].properties[property_index].setter_jvm_name =
+                Some(jvm_name);
+        }
+    }
+
+    // User-written Any overrides become the static `-impl` body. Its former receiver slot 0 is exactly
+    // the first static parameter slot, so the body itself needs no slot rewrite; value-class property
+    // reads inside it are lowered to the carrier later in this pass. The ordinary instance override is
+    // synthesized below as the ABI delegator back to this implementation.
+    let mut custom_equals = false;
+    let mut custom_hash_code = false;
+    let mut custom_to_string = false;
+    for &fid in &ir.classes[class_id as usize].methods.clone() {
+        let Some(function) = ir.functions.get_mut(fid as usize) else {
+            continue;
+        };
+        let custom_impl = match (function.name.as_str(), function.params.as_slice()) {
+            ("equals", [_]) => {
+                custom_equals = true;
+                Some("equals-impl")
+            }
+            ("hashCode", []) => {
+                custom_hash_code = true;
+                Some("hashCode-impl")
+            }
+            ("toString", []) => {
+                custom_to_string = true;
+                Some("toString-impl")
+            }
+            _ => None,
+        };
+        if let Some(name) = custom_impl {
+            function.name = name.to_string();
+            function.params.insert(0, u_ir);
+            function.is_static = true;
+        }
+    }
+
     let add_static = |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| -> u32 {
         let fid = ir.add_fun(crate::ir::IrFunction {
             name: name.to_string(),
@@ -4791,7 +5564,30 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
     {
         let a = ir.add_expr(IrExpr::GetValue(0));
         let b = ir.add_expr(IrExpr::GetValue(1));
-        let cmp = vc_underlying_eq(ir, a, b, is_ref_under, &final_fq);
+        let cmp = if custom_equals {
+            let boxed = ir.add_expr(IrExpr::Call {
+                callee: Callee::Static {
+                    owner: internal_name,
+                    name: "box-impl".to_string(),
+                    descriptor: format!("({udesc})L{internal};"),
+                    inline: InlineKind::None,
+                },
+                dispatch_receiver: None,
+                args: vec![b],
+            });
+            ir.add_expr(IrExpr::Call {
+                callee: Callee::Static {
+                    owner: internal_name,
+                    name: "equals-impl".to_string(),
+                    descriptor: format!("({udesc}Ljava/lang/Object;)Z"),
+                    inline: InlineKind::None,
+                },
+                dispatch_receiver: None,
+                args: vec![a, boxed],
+            })
+        } else {
+            vc_underlying_eq(ir, a, b, is_ref_under, &final_fq)
+        };
         let body = ret_block(ir, cmp);
         add_static(ir, "equals-impl0", vec![u_ir, u_ir], bool_ir, body);
     }
@@ -4805,15 +5601,17 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
             .next()
             .unwrap_or(&internal)
             .replace('$', ".");
-        let v = ir.add_expr(IrExpr::GetValue(0));
-        // ONE `StringConcat` (not nested `+`): kotlinc builds a single `StringBuilder` and appends the
-        // 1-char closing paren via `append(C)` — a nested concat would emit a second builder.
-        let prefix = str_const(ir, format!("{simple}({fname}="));
-        let close = str_const(ir, ")".to_string());
-        let acc = ir.add_expr(IrExpr::StringConcat(vec![prefix, v, close]));
-        let sbody = ret_block(ir, acc);
-        let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
-        ir.open_methods.insert(impl_fid);
+        if !custom_to_string {
+            let v = ir.add_expr(IrExpr::GetValue(0));
+            // ONE `StringConcat` (not nested `+`): kotlinc builds a single `StringBuilder` and appends the
+            // 1-char closing paren via `append(C)` — a nested concat would emit a second builder.
+            let prefix = str_const(ir, format!("{simple}({fname}="));
+            let close = str_const(ir, ")".to_string());
+            let acc = ir.add_expr(IrExpr::StringConcat(vec![prefix, v, close]));
+            let sbody = ret_block(ir, acc);
+            let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
+            ir.open_methods.insert(impl_fid);
+        }
         let fv = this_field(ir);
         let call = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
@@ -4832,23 +5630,25 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
     }
     // hashCode-impl(U v): v.hashCode() ; hashCode(): return hashCode-impl(this.field)
     {
-        let v = ir.add_expr(IrExpr::GetValue(0));
-        // A NON-NULL reference underlying hashes through its OWN `hashCode()` (kotlinc's shape,
-        // `String.hashCode()`), not the null-safe `Objects.hashCode` — that is only for a nullable (or
-        // boxed-primitive) underlying, which can actually be null.
-        // Only a real non-null reference CLASS underlying: an ARRAY has no such class (`kotlin/IntArray`
-        // is not a JVM type — a virtual call on it is a `NoClassDefFoundError`), and a nullable or
-        // boxed-primitive underlying must keep the null-safe `Objects.hashCode`.
-        let nonnull_ref_owner: Option<String> = (is_ref_under
-            && !eu.is_nullable()
-            && !eu.non_null().is_array()
-            && matches!(eu.non_null(), Ty::String | Ty::Obj(..)))
-        .then(|| eu.non_null().kotlin_class_internal().map(|s| s.to_string()))
-        .flatten();
-        let h = field_hash_ir(ir, v, &final_fq, nonnull_ref_owner.as_deref());
-        let sbody = ret_block(ir, h);
-        let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
-        ir.open_methods.insert(impl_fid);
+        if !custom_hash_code {
+            let v = ir.add_expr(IrExpr::GetValue(0));
+            // A NON-NULL reference underlying hashes through its OWN `hashCode()` (kotlinc's shape,
+            // `String.hashCode()`), not the null-safe `Objects.hashCode` — that is only for a nullable (or
+            // boxed-primitive) underlying, which can actually be null.
+            // Only a real non-null reference CLASS underlying: an ARRAY has no such class (`kotlin/IntArray`
+            // is not a JVM type — a virtual call on it is a `NoClassDefFoundError`), and a nullable or
+            // boxed-primitive underlying must keep the null-safe `Objects.hashCode`.
+            let nonnull_ref_owner: Option<String> = (is_ref_under
+                && !eu.is_nullable()
+                && !eu.non_null().is_array()
+                && matches!(eu.non_null(), Ty::String | Ty::Obj(..)))
+            .then(|| eu.non_null().kotlin_class_internal().map(|s| s.to_string()))
+            .flatten();
+            let h = field_hash_ir(ir, v, &final_fq, nonnull_ref_owner.as_deref());
+            let sbody = ret_block(ir, h);
+            let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
+            ir.open_methods.insert(impl_fid);
+        }
         let fv = this_field(ir);
         let call = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
@@ -4868,48 +5668,50 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
     // equals-impl(U v, Object other): other is X && equals-impl0(v, other.unbox-impl())
     // equals(other): return equals-impl(this.field, other)
     {
-        // static: v = slot 0, other = slot 1.
-        let mut stmts = Vec::new();
-        let other = ir.add_expr(IrExpr::GetValue(1));
-        let not_inst = ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::NotInstanceOf,
-            arg: other,
-            type_operand: x_ir,
-        });
-        stmts.push(guard_false(ir, not_inst));
-        let other_v = ir.add_expr(IrExpr::GetValue(1));
-        let ocast = ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::Cast,
-            arg: other_v,
-            type_operand: x_ir,
-        });
-        let ounbox = ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: internal_name,
-                name: "unbox-impl".to_string(),
-                descriptor: format!("(){udesc}"),
-                params: None,
-                interface: false,
-            },
-            dispatch_receiver: Some(ocast),
-            args: vec![],
-        });
-        // kotlinc INLINES the underlying comparison here (it does not call `equals-impl0`), with the
-        // OTHER operand first, then guards: `if (!eq) return false; return true`.
-        let v = ir.add_expr(IrExpr::GetValue(0));
-        let eq = vc_underlying_eq(ir, ounbox, v, is_ref_under, &final_fq);
-        let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
-        let not_eq = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::Eq,
-            lhs: eq,
-            rhs: zero,
-        });
-        stmts.push(guard_false(ir, not_eq));
-        let t = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(true)));
-        stmts.push(ir.add_expr(IrExpr::Return(Some(t))));
-        let sbody = ir.add_expr(IrExpr::Block { stmts, value: None });
-        let impl_fid = add_static(ir, "equals-impl", vec![u_ir, any_ir], bool_ir, sbody);
-        ir.open_methods.insert(impl_fid);
+        if !custom_equals {
+            // static: v = slot 0, other = slot 1.
+            let mut stmts = Vec::new();
+            let other = ir.add_expr(IrExpr::GetValue(1));
+            let not_inst = ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::NotInstanceOf,
+                arg: other,
+                type_operand: x_ir,
+            });
+            stmts.push(guard_false(ir, not_inst));
+            let other_v = ir.add_expr(IrExpr::GetValue(1));
+            let ocast = ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast,
+                arg: other_v,
+                type_operand: x_ir,
+            });
+            let ounbox = ir.add_expr(IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: internal_name,
+                    name: "unbox-impl".to_string(),
+                    descriptor: format!("(){udesc}"),
+                    params: None,
+                    interface: false,
+                },
+                dispatch_receiver: Some(ocast),
+                args: vec![],
+            });
+            // kotlinc INLINES the underlying comparison here (it does not call `equals-impl0`), with the
+            // OTHER operand first, then guards: `if (!eq) return false; return true`.
+            let v = ir.add_expr(IrExpr::GetValue(0));
+            let eq = vc_underlying_eq(ir, ounbox, v, is_ref_under, &final_fq);
+            let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+            let not_eq = ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: crate::ir::IrBinOp::Eq,
+                lhs: eq,
+                rhs: zero,
+            });
+            stmts.push(guard_false(ir, not_eq));
+            let t = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(true)));
+            stmts.push(ir.add_expr(IrExpr::Return(Some(t))));
+            let sbody = ir.add_expr(IrExpr::Block { stmts, value: None });
+            let impl_fid = add_static(ir, "equals-impl", vec![u_ir, any_ir], bool_ir, sbody);
+            ir.open_methods.insert(impl_fid);
+        }
         // instance equals(other) → return equals-impl(this.field, other)
         let fv = this_field(ir);
         let other_i = ir.add_expr(IrExpr::GetValue(1));

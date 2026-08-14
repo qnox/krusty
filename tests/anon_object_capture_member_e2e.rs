@@ -103,8 +103,5 @@ fn companion_capture_preserves_prior_instance_return_inference() {
         \x20 }\n\
         }\n\
         fun box(): String = A.make().result()\n";
-    assert_eq!(
-        run(SRC).expect("companion capture uses inferred instance return"),
-        "OK"
-    );
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }

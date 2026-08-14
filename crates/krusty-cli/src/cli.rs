@@ -26,6 +26,10 @@ pub struct Options {
     pub print_help: bool,
     /// `-jdk-home <dir>`: the JDK whose `lib/modules` (java.base etc.) seeds the bootclasspath.
     pub jdk_home: Option<PathBuf>,
+    /// `-no-stdlib`: do not add the Kotlin standard library to the compile classpath.
+    pub no_stdlib: bool,
+    /// `-no-reflect`: do not add Kotlin reflection to the compile classpath.
+    pub no_reflect: bool,
     /// `-no-jdk`: do NOT add the platform JDK to the classpath (kotlinc semantics).
     pub no_jdk: bool,
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
@@ -45,6 +49,8 @@ impl Default for Options {
             print_version: false,
             print_help: false,
             jdk_home: None,
+            no_stdlib: false,
+            no_reflect: false,
             no_jdk: false,
             jvm_target_major: None,
         }
@@ -82,8 +88,6 @@ const IGNORED_WITH_VALUE: &[&str] = &[
 /// kotlinc valueless flags that krusty ignores (accept + drop).
 const IGNORED_FLAGS: &[&str] = &[
     "-include-runtime",
-    "-no-stdlib",
-    "-no-reflect",
     "-nowarn",
     "-verbose",
     "-Werror",
@@ -155,6 +159,8 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     opts.jdk_home = Some(PathBuf::from(v));
                 }
             }
+            "-no-stdlib" => opts.no_stdlib = true,
+            "-no-reflect" => opts.no_reflect = true,
             "-no-jdk" => opts.no_jdk = true,
             "-jvm-target" => {
                 // Honor the target: it sets the emitted class-file version. An unrecognized value is
@@ -188,21 +194,35 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
 }
 
 impl Options {
-    /// The classpath to drive resolution with: the user's `-cp` entries plus — like kotlinc, unless
-    /// `-no-jdk` — the platform JDK's `lib/modules` jimage (the `java.base` bootclasspath). Without it,
-    /// kotlin-stdlib symbols whose `@Metadata` references `java/lang/*` (`require`, `String.isNotBlank`,
-    /// collection ops, …) fail to resolve — a confusing "unresolved function" whose real cause is a
-    /// missing JDK. Resolved from `-jdk-home`, else `$JAVA_HOME`; appended only when the jimage actually
-    /// exists, so a misconfigured env never breaks an explicit classpath. Kept out of `parse` so that
-    /// stays a pure, env-independent function.
-    pub fn effective_classpath(&self) -> Vec<PathBuf> {
+    /// The classpath to drive resolution with: the user's `-cp` entries plus kotlinc's implicit
+    /// standard library and JDK modules, unless their corresponding `-no-*` option disables them.
+    /// Kept out of `parse` so parsing stays env-independent.
+    pub fn effective_classpath(&self) -> Result<Vec<PathBuf>, String> {
         let mut cp = self.classpath.clone();
+        if !self.no_stdlib {
+            let stdlib = krusty::jvm::kotlin_stdlib_jar().ok_or_else(|| {
+                "cannot locate kotlin-stdlib.jar; configure a Kotlin distribution or pass -no-stdlib"
+                    .to_string()
+            })?;
+            if !cp.contains(&stdlib) {
+                cp.push(stdlib);
+            }
+            if !self.no_reflect {
+                let reflect = krusty::jvm::kotlin_dist_jar("kotlin-reflect.jar").ok_or_else(|| {
+                    "cannot locate kotlin-reflect.jar in the selected Kotlin distribution; pass -no-reflect to disable it"
+                        .to_string()
+                })?;
+                if !cp.contains(&reflect) {
+                    cp.push(reflect);
+                }
+            }
+        }
         if !self.no_jdk {
             if let Some(modules) = platform_jdk_modules(self.jdk_home.as_deref()) {
                 cp.push(modules);
             }
         }
-        cp
+        Ok(cp)
     }
 }
 
@@ -333,15 +353,38 @@ mod tests {
         let o = parse_args(&["-no-jdk", "f.kt"]);
         assert!(o.no_jdk);
         // `-no-jdk` suppresses the JDK even with a `-jdk-home`; effective cp adds nothing.
-        let o = parse_args(&["-no-jdk", "-jdk-home", "/opt/jdk", "f.kt"]);
-        assert_eq!(o.effective_classpath(), o.classpath);
+        let o = parse_args(&["-no-stdlib", "-no-jdk", "-jdk-home", "/opt/jdk", "f.kt"]);
+        assert_eq!(o.effective_classpath().unwrap(), o.classpath);
     }
 
     #[test]
     fn effective_classpath_ignores_a_missing_jdk_home() {
         // A non-existent `-jdk-home` contributes nothing (a bad env must not break an explicit cp).
-        let o = parse_args(&["-jdk-home", "/definitely/not/a/jdk", "-cp", "a.jar", "f.kt"]);
-        assert_eq!(o.effective_classpath(), vec![PathBuf::from("a.jar")]);
+        let o = parse_args(&[
+            "-no-stdlib",
+            "-jdk-home",
+            "/definitely/not/a/jdk",
+            "-cp",
+            "a.jar",
+            "f.kt",
+        ]);
+        assert_eq!(
+            o.effective_classpath().unwrap(),
+            vec![PathBuf::from("a.jar")]
+        );
+    }
+
+    #[test]
+    fn effective_classpath_adds_stdlib_unless_disabled() {
+        let with_stdlib = parse_args(&["-no-reflect", "-no-jdk", "f.kt"])
+            .effective_classpath()
+            .expect("test toolchain must provide stdlib");
+        let stdlib = krusty::jvm::kotlin_stdlib_jar().expect("test toolchain must provide stdlib");
+        assert!(with_stdlib.contains(&stdlib));
+        assert!(parse_args(&["-no-stdlib", "-no-jdk", "f.kt"])
+            .effective_classpath()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

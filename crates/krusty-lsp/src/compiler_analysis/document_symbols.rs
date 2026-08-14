@@ -6,11 +6,11 @@ use krusty::ast::{ClassDecl, ClassKind, Decl, File, FunDecl, PropDecl};
 use krusty::diag::{DiagSink, Span};
 use krusty::frontend::lex_name_tokens;
 
-use super::navigation::definition_name_span;
 use super::source_scan::{
     bounded_utf8_advance, matching_delimiter, normalized_scan_end, skip_block_comment, skip_quoted,
     skip_trivia, utf8_char_len,
 };
+use super::{companion_class, navigation::definition_name_span};
 
 const SYMBOL_KIND_CLASS: u8 = 5;
 const SYMBOL_KIND_METHOD: u8 = 6;
@@ -243,7 +243,7 @@ fn class_node(
             }
         }
     }
-    if let Some(node) = companion_object_node(source, tokens, class, budget) {
+    if let Some(node) = companion_object_node(source, tokens, file, class, budget) {
         body_children.push(node);
     }
     let mut enum_boundary = outer_braces(source.as_bytes(), class.span)
@@ -283,12 +283,15 @@ fn class_node(
 
     Some(SymbolNode {
         name: name.to_string(),
-        kind: match class.kind {
-            ClassKind::Class if class.is_data => SYMBOL_KIND_STRUCT,
-            ClassKind::Class | ClassKind::Annotation => SYMBOL_KIND_CLASS,
-            ClassKind::Interface => SYMBOL_KIND_INTERFACE,
-            ClassKind::Object => SYMBOL_KIND_OBJECT,
-            ClassKind::Enum => SYMBOL_KIND_ENUM,
+        kind: if class.is_singleton() {
+            SYMBOL_KIND_OBJECT
+        } else {
+            match class.kind {
+                ClassKind::Class if class.is_data => SYMBOL_KIND_STRUCT,
+                ClassKind::Class | ClassKind::Annotation => SYMBOL_KIND_CLASS,
+                ClassKind::Interface => SYMBOL_KIND_INTERFACE,
+                ClassKind::Enum => SYMBOL_KIND_ENUM,
+            }
         },
         deprecated: source_prefix_is_deprecated(
             source,
@@ -447,23 +450,25 @@ fn type_alias_range(source: &str, keyword: Span) -> Span {
 fn companion_object_node(
     source: &str,
     tokens: &[krusty::frontend::FrontendNameToken],
+    file: &File,
     class: &ClassDecl,
     budget: &mut ExtractionBudget,
 ) -> Option<SymbolNode> {
+    let companion = companion_class(file, class)?;
     let (keyword, _object_keyword, selection, name, body) =
         companion_object_source(source, class.span)?;
     if !budget.take() {
         return None;
     }
     let mut children = Vec::with_capacity(
-        (class.companion_props.len() + class.companion_methods.len()).min(budget.remaining),
+        (companion.body_props.len() + companion.methods.len()).min(budget.remaining),
     );
-    for property in &class.companion_props {
+    for property in &companion.body_props {
         if let Some(node) = property_node(source, tokens, property, budget) {
             children.push(node);
         }
     }
-    for function in &class.companion_methods {
+    for function in &companion.methods {
         if let Some(node) = function_node(source, tokens, function, true, budget) {
             children.push(node);
         }
@@ -779,7 +784,7 @@ fn primary_constructor_spans(
     class: &ClassDecl,
     class_name: Span,
 ) -> Option<(Span, Span)> {
-    if matches!(class.kind, ClassKind::Interface | ClassKind::Object) {
+    if class.is_singleton() || class.kind == ClassKind::Interface {
         return None;
     }
     let bytes = source.as_bytes();

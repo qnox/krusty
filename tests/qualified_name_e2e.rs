@@ -74,6 +74,16 @@ fn both_ref(tag: &str, main: &str) {
     classpath_box_ref(tag, main);
 }
 
+#[test]
+fn implicit_receiver_value_root_wins_over_same_named_package() {
+    common::expect_box_ok_with_stdlib(
+        "class JavaValue { val io: String = \"OK\" }\n\
+         class Host { val java = JavaValue(); fun result(): String = java.io }\n\
+         fun box(): String = Host().result()\n",
+        "ImplicitValueRootBeforePackage",
+    );
+}
+
 // ---------------------------------------------------------------- construction
 
 #[test]

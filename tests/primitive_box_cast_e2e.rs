@@ -95,18 +95,11 @@ fun box(): String {\n\
 }
 
 #[test]
-fn impossible_primitive_cast_is_rejected_not_miscompiled() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
-    // `1 as String` can never succeed (kotlinc rejects it). krusty must NOT box an `Integer` into a
-    // `String` slot (a load-time VerifyError) — it rejects the file (compile returns `None`) instead.
-    let jh = common::java_home();
-    let sl = common::stdlib_jar();
-    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
-    let src = "// WITH_STDLIB\nfun box(): String { val s = 1 as String; return s }\n";
-    assert!(
-        common::compile_in_process(src, "P", &[sl], Some(&jdk)).is_none(),
-        "impossible primitive→String cast must be rejected, not compiled to broken bytecode"
-    );
+fn impossible_primitive_cast_throws_instead_of_miscompiling() {
+    const SRC: &str = "// WITH_STDLIB\n\
+fun box(): String {\n\
+    try { 1 as String; return \"fail\" } catch (_: ClassCastException) {}\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }

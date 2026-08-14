@@ -6,6 +6,7 @@ use krusty::ast::{ClassDecl, Decl, FunBody, FunDecl, Stmt};
 use krusty::diag::Span;
 
 use super::{
+    companion_class,
     source_scan::{
         matching_delimiter, skip_block_comment, skip_line_comment, skip_quoted, skip_trivia,
         utf8_char_len,
@@ -622,12 +623,18 @@ fn append_class_function_ranges(
     suppressed_parentheses: &mut HashSet<u32>,
     max_entries: usize,
 ) {
-    for function in class.methods.iter().chain(&class.companion_methods).chain(
-        class
-            .enum_entries
-            .iter()
-            .flat_map(|entry| entry.methods.iter()),
-    ) {
+    let companion = companion_class(&analysis.file, class);
+    for function in class
+        .methods
+        .iter()
+        .chain(companion.into_iter().flat_map(|class| &class.methods))
+        .chain(
+            class
+                .enum_entries
+                .iter()
+                .flat_map(|entry| entry.methods.iter()),
+        )
+    {
         append_function_range(
             source,
             analysis,

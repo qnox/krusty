@@ -87,6 +87,26 @@ fn continuation_ty() -> Ty {
     Ty::obj(CONTINUATION)
 }
 
+/// Trace a residual suspending expression as an id-labelled tree. This is intentionally kept next to
+/// the suspend pass rather than in the generic IR printer: it is only useful when normalization leaves
+/// a suspension below a statement shape the state-machine flattener does not model.
+fn trace_residual_suspension(ir: &IrFile, expression: ExprId, depth: usize) {
+    crate::trace_compiler!(
+        "suspend",
+        "flatten residual {}{expression}: {:?}",
+        "  ".repeat(depth),
+        ir.exprs[expression as usize]
+    );
+    if depth >= 12 {
+        return;
+    }
+    let mut children = Vec::new();
+    crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+    for child in children {
+        trace_residual_suspension(ir, child, depth + 1);
+    }
+}
+
 /// Rewrite every `suspend fun` in `ir` to the JVM CPS ABI. `facade` is the file's facade class internal
 /// name (e.g. `SKt`) — the continuation class for `bar` is `SKt$bar$1`. Returns `false` (skip the whole
 /// file, never miscompile) on any suspend shape this pass can't yet transform.
@@ -1124,6 +1144,10 @@ fn hoist_expr(
         });
         value_types.insert(tmp, ty);
         prelude.push(var);
+        crate::trace_compiler!(
+            "suspend",
+            "hoist suspension expression={e} into local={tmp} type={ty:?}"
+        );
         return ir.add_expr(IrExpr::GetValue(tmp));
     }
     match ir.exprs[e as usize].clone() {
@@ -1366,30 +1390,19 @@ fn hoist_expr(
             };
             e
         }
-        // A STATEMENT-LESS `Block` in VALUE position — an INLINE function's body spliced into a `return`/
-        // `val =`/argument position collapses to `{ <value> }` (`return myRun { await() }` →
-        // `return { await() }`). Hoist a suspension in its trailing value; the block is just grouping. An
-        // inline fn does not break the suspend context, so the spliced tail suspension is an ordinary
-        // bound-local suspension here. A block WITH statements is left for the flattener (lifting its
-        // statements out would reorder them — e.g. a suspend body spliced inside a loop).
+        // A value `Block` reached here is in an unconditional expression position. Normalize its
+        // statements at that exact operand position, then its value. The enclosing ordered-operand
+        // planner has already arranged snapshots for earlier operands, so lifting the block prelude
+        // cannot move it ahead of an earlier effect. This also handles nested lowering blocks such as
+        // `{ val a = susp(); a + susp() } + tail`, which otherwise leave the second call hidden after
+        // the flattener splices only the first declaration.
         IrExpr::Block {
             stmts,
             value: Some(v),
-        } if stmts.is_empty() => hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude),
-        // A non-suspending block prelude can move with its suspending value without reordering effects.
-        // The ordered-operand planner snapshots every earlier runtime read before reaching this arm,
-        // including an ordinary local: `f(x, run { x = 5; susp() })` therefore materializes `x` before
-        // these statements move into the prelude. This shared rule avoids trying to recognize writes
-        // hidden in one particular block/module/classpath representation.
-        IrExpr::Block {
-            stmts,
-            value: Some(v),
-        } if !stmts
-            .iter()
-            .any(|&s| expr_calls_suspend(ir, s, suspend_set))
-            && expr_calls_suspend(ir, v, suspend_set) =>
-        {
-            prelude.extend(stmts);
+        } => {
+            for statement in stmts {
+                hoist_stmt(ir, statement, suspend_set, orig_rets, value_types, prelude);
+            }
             hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude)
         }
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
@@ -1432,6 +1445,10 @@ fn hoist_call_operands_in_order(
             };
             let nr = no.remove(0);
             let na: Vec<ExprId> = no.into_iter().map(|a| a.unwrap()).collect();
+            crate::trace_compiler!(
+                "suspend",
+                "hoist call operands expression={e} receiver={dispatch_receiver:?}->{nr:?} args={args:?}->{na:?}"
+            );
             if let IrExpr::Call {
                 dispatch_receiver: r,
                 args,
@@ -1483,10 +1500,9 @@ fn hoist_call_operands_in_order(
 /// shape (skip, never miscompile). The snapshot plan is decided and typed on the ORIGINAL operands
 /// before any rewrite: bailing mid-hoist would strand already-bound prelude temps next to a
 /// returned original expression, double-evaluating their effects. Typing the original is valid for
-/// the residual because every head-kind-CHANGING rewrite is excluded from the plan: a direct
-/// suspension point (residual `GetValue`) is skipped outright, and a collapsing `Block` types as
-/// `None` so the plan bails before anything is rewritten. All remaining rewrites replace children
-/// in place with typed `GetValue` temps and keep the head node, preserving its recovered type.
+/// the residual: a direct suspension point (residual `GetValue`) is skipped outright, a value block
+/// has the type of its final value, and all other rewrites replace children in place while preserving
+/// the head node and its recovered type.
 fn hoist_operands_in_order(
     ir: &mut IrFile,
     operands: &[Option<ExprId>],
@@ -1611,24 +1627,7 @@ fn hoisted_value_ty(
             } => params.as_ref().map(|(_, ret)| *ret).or_else(|| {
                 crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
             }),
-            // An external callee carries no signature in the IR; the checker's recorded logical type
-            // stands in, but ONLY where logical = physical representation (scalars and String —
-            // `"a" + susp()` chains). An `Obj`/nullable/etc. logical type may hide a value-class or
-            // boxing representation owned by the value-class pass, so those still return `None`.
-            Callee::External(_) => ir.logical_types.get(&expression).copied().filter(|ty| {
-                matches!(
-                    ty,
-                    Ty::Int
-                        | Ty::Byte
-                        | Ty::Short
-                        | Ty::Long
-                        | Ty::Float
-                        | Ty::Double
-                        | Ty::Boolean
-                        | Ty::Char
-                        | Ty::String
-                )
-            }),
+            Callee::Intrinsic { ret, .. } => Some(*ret),
         },
         IrExpr::MethodCall { class, index, .. } => ir
             .classes
@@ -1659,6 +1658,12 @@ fn hoisted_value_ty(
         // `operand!!` yields its operand's value unchanged (the assert only throws), matching
         // `value_ty`'s treatment in the emitter.
         IrExpr::NotNullAssert { operand } => hoisted_value_ty(ir, *operand, orig_rets, value_types),
+        // A value block is an evaluation wrapper, not a distinct value representation. Hoisting its
+        // statements collapses the wrapper to the final expression, so a snapshot uses that final
+        // expression's exact type. An empty/statement-only block has no value to materialize.
+        IrExpr::Block {
+            value: Some(value), ..
+        } => hoisted_value_ty(ir, *value, orig_rets, value_types),
         // Declared storage types, read straight off the IR declaration the node indexes — the same
         // sources the emitter's `value_ty` consults. `PropertyRead` carries its type inline; a
         // `Unit`-typed property realizes through a `()V` accessor (nothing to bind) and a bare
@@ -1731,6 +1736,28 @@ fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty>
     }
     for (index, ty) in function.params.iter().copied().enumerate() {
         out.insert(receiver_offset + index as u32, ty);
+    }
+    // A generated `SuspendLambda.invokeSuspend` reloads captures and own lambda parameters from the
+    // lambda object's field prefix when entering each state. Before state-machine construction those
+    // values are represented by semantic locals starting at index 2 (`this`, `result`, then fields),
+    // without synthetic `Variable` nodes. Seed their exact types from the recorded lambda/class shape
+    // so operand-order hoisting can snapshot reads such as the receiver of `this.result = susp()`.
+    if let Some((_, class, field_base)) = ir
+        .suspend_lambda_sm
+        .iter()
+        .find(|(lambda_fid, _, _)| *lambda_fid == fid)
+    {
+        if let Some(class) = ir.classes.get(*class as usize) {
+            for (field, ty) in class
+                .fields
+                .iter()
+                .take(*field_base as usize)
+                .map(|field| field.ty)
+                .enumerate()
+            {
+                out.insert(2 + field as u32, ty);
+            }
+        }
     }
     collect(ir, body, &mut out);
     out
@@ -1926,6 +1953,24 @@ fn cps_descriptor(logical: &str) -> String {
     )
 }
 
+/// Locate the continuation slot in a suspend `$default` descriptor. Its ABI suffix is
+/// `Continuation, int mask..., Object marker`; scanning the typed signature keeps both continuation
+/// insertion and operand spilling independent of source arity and of the number of mask words.
+fn default_suspend_continuation_index(params: &[Ty]) -> Option<usize> {
+    let mut index = params.len().checked_sub(2)?;
+    let mut masks = 0;
+    while params.get(index).copied() == Some(Ty::Int) {
+        masks += 1;
+        index = index.checked_sub(1)?;
+    }
+    (masks > 0
+        && params
+            .get(index)
+            .and_then(|ty| ty.obj_internal())
+            .is_some_and(|name| name.matches("kotlin/coroutines/Continuation")))
+    .then_some(index)
+}
+
 /// Append the continuation `cont` as the trailing argument of suspend call `call_e` (a `Call` or
 /// `MethodCall`) — the CPS parameter the callee now expects. For a cross-unit `Callee::Static` (resolved
 /// by its logical signature), also rewrite the descriptor to the physical CPS form so the emitted
@@ -1940,11 +1985,17 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
             ..
         } => {
             // A `suspend` method's `$default` synthetic already spells the `Continuation` in its descriptor
-            // — BEFORE the trailing `int mask` and `Object marker`. Insert the continuation VALUE at that
-            // position (two before the end) and leave the descriptor unchanged, rather than appending it
-            // after the marker (which would pass the mask where the `Continuation` is expected).
-            if name.ends_with("$default") && args.len() >= 2 {
-                args.insert(args.len() - 2, cont);
+            // — BEFORE the trailing mask words and marker. Insert the value at the descriptor-owned
+            // slot and leave the descriptor unchanged.
+            if name.ends_with("$default") {
+                let Some((params, _)) = crate::jvm::ir_emit::parse_physical_method_desc(descriptor)
+                else {
+                    return call_e;
+                };
+                let Some(index) = default_suspend_continuation_index(&params) else {
+                    return call_e;
+                };
+                args.insert(index, cont);
             } else {
                 *descriptor = cps_descriptor(descriptor);
                 args.push(cont);
@@ -2004,6 +2055,7 @@ fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
         return;
     };
     let mut out: Vec<ExprId> = Vec::with_capacity(stmts.len());
+    let mut changed = false;
     for s in stmts {
         if let IrExpr::Variable {
             index,
@@ -2040,6 +2092,7 @@ fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
                         named,
                     });
                     out.push(nv);
+                    changed = true;
                     continue;
                 }
             }
@@ -2047,6 +2100,11 @@ fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
         out.push(s);
     }
     ir.exprs[b as usize] = IrExpr::Block { stmts: out, value };
+    // A lifted prelude may itself contain another block-valued initializer. Reach a fixed point so
+    // the suspension-hoist pass that follows sees every unconditional nested call.
+    if changed {
+        normalize_block_inits(ir, b);
+    }
 }
 
 /// Whether `e`'s subtree contains any call to a suspend function (used to reject shapes this pass can't
@@ -2082,6 +2140,11 @@ fn build_state_machine(
     suspension_lines: &std::collections::HashMap<ExprId, (u32, u32)>,
     continuation_metadata: &mut ContinuationMetadataMap,
 ) -> bool {
+    crate::trace_compiler!(
+        "suspend",
+        "build_state_machine fid={fid} input={:?}",
+        ir.exprs[b as usize]
+    );
     // Normalize a block-valued initializer (`val a = (x ?: foo())`, `a?.b ?: foo()` — elvis / safe-call
     // lower to `Variable{ init: Block{ prelude…, value: When } }`) into `prelude…; Variable{ init: When }`,
     // so the conditional suspension surfaces as a `Variable{init: When}` the flattener handles.
@@ -2116,6 +2179,7 @@ fn build_state_machine(
             "suspend",
             "build_state_machine fid={fid} BAIL: block has a trailing value (suspend body must use `return`)"
         );
+        trace_residual_suspension(ir, b, 0);
         return false; // a suspending trailing-value body isn't modeled (desugar to a `return` first)
     }
     // A SUSPENSION reached through `invokespecial` (`super.suspendHere(x)`): the machine would have to
@@ -2972,6 +3036,9 @@ fn build_lambda_state_machine(
             "lambda stmt[{n}] = {:?}",
             flat.ir.exprs[s as usize]
         );
+        if expr_calls_suspend(flat.ir, s, &suspend_set) {
+            trace_residual_suspension(flat.ir, s, 0);
+        }
     }
     flat.flatten(&stmts, 0, None);
     if flat.failed {
@@ -3404,7 +3471,7 @@ impl Flat<'_> {
     /// Emit the suspend-call sequence into `out`, transferring to state `resume` (the loop re-dispatches
     /// `resume` on synchronous completion; on `COROUTINE_SUSPENDED` the function returns and a later
     /// resume re-enters at `resume`).
-    fn emit_suspension(&mut self, out: &mut Vec<ExprId>, point: ExprId, resume: usize) {
+    fn emit_suspension(&mut self, out: &mut Vec<ExprId>, point: ExprId, resume: usize) -> bool {
         crate::trace_compiler!(
             "suspend",
             "emit_suspension {point}:{:?}",
@@ -3416,7 +3483,7 @@ impl Flat<'_> {
                 "emit_suspension BAIL: no scope snapshot for suspension point {point}"
             );
             self.failed = true;
-            return;
+            return false;
         };
         if !self.bind_operand_temps(out, point, &list) {
             crate::trace_compiler!(
@@ -3424,7 +3491,19 @@ impl Flat<'_> {
                 "emit_suspension BAIL: unre-bindable operands at suspension point {point}"
             );
             self.failed = true;
-            return;
+            return false;
+        }
+        // A suspend call whose source result is `Nothing` can still return
+        // `COROUTINE_SUSPENDED`. The ordinary emitter-level bottom guard must therefore not run on
+        // the physical call itself (it would throw before the marker comparison). Preserve the fact
+        // for the resume state, then clear it from this rewritten CPS call.
+        let bottom = self
+            .ir
+            .logical_types
+            .get(&point)
+            .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing);
+        if bottom {
+            self.ir.logical_types.remove(&point);
         }
         self.spill_scope(out, &list);
         self.resume_points.push(point);
@@ -3477,6 +3556,14 @@ impl Flat<'_> {
         out.push(when);
         let vg = self.gv(vv);
         self.setfield(out, 0, vg); // cont.result = v (so the resume reads the synchronous value)
+        bottom
+    }
+
+    fn terminate_bottom_resume(&mut self, out: &mut Vec<ExprId>) {
+        let exception =
+            self.ir
+                .new_external("kotlin/KotlinNothingValueException", "()V", Vec::new());
+        out.push(self.add(IrExpr::Throw { operand: exception }));
     }
     /// Bind a suspension result from `cont.result` (loaded into `r`) at a resume state's entry.
     /// A spilled local's slot is pre-declared in the machine PROLOGUE (zero-initialized), so assign
@@ -3700,10 +3787,14 @@ impl Flat<'_> {
                 self.goto(&mut bb, target);
             } else if is_suspension_point(self.ir, uvalue, self.suspend) {
                 let br_resume = self.new_state();
-                self.emit_suspension(&mut bb, uvalue, br_resume);
+                let bottom = self.emit_suspension(&mut bb, uvalue, br_resume);
                 let mut rs: Vec<ExprId> = Vec::new();
-                self.bind_from_r(&mut rs, local, ty, br_resume, uvalue);
-                self.goto(&mut rs, merge);
+                if bottom {
+                    self.terminate_bottom_resume(&mut rs);
+                } else {
+                    self.bind_from_r(&mut rs, local, ty, br_resume, uvalue);
+                    self.goto(&mut rs, merge);
+                }
                 self.states[br_resume] = rs;
             } else {
                 if self.is_spilled(local) {
@@ -3861,14 +3952,18 @@ impl Flat<'_> {
             }
             if let Some((bind, call)) = self.stmt_suspension(stmt) {
                 let resume = self.new_state();
-                self.emit_suspension(&mut out, call, resume);
+                let bottom = self.emit_suspension(&mut out, call, resume);
                 self.states[cur] = out;
                 let mut rs: Vec<ExprId> = Vec::new();
-                if let Some((local, ty)) = bind {
+                if bottom {
+                    self.terminate_bottom_resume(&mut rs);
+                } else if let Some((local, ty)) = bind {
                     self.bind_from_r(&mut rs, local, &ty, resume, call);
                 }
                 self.states[resume] = rs;
-                self.flatten(&stmts[i + 1..], resume, after);
+                if !bottom {
+                    self.flatten(&stmts[i + 1..], resume, after);
+                }
                 return;
             }
             if let Some((local, ty, when_branches)) = self.stmt_cond_suspension(stmt) {
@@ -4257,6 +4352,7 @@ impl Flat<'_> {
                 }
             }
             if expr_calls_suspend(self.ir, stmt, self.suspend) {
+                trace_residual_suspension(self.ir, stmt, 0);
                 if let IrExpr::Variable { init: Some(i), .. } = self.ir.exprs[stmt as usize] {
                     crate::trace_compiler!(
                         "suspend",
@@ -5488,6 +5584,7 @@ fn build_continuation_class(
         decl_line: 0,
         type_param_bounds: vec![],
         type_params: Vec::new(),
+        captured_type_params: Vec::new(),
         supertypes: vec![],
         properties: Vec::new(),
         fields,
@@ -5498,6 +5595,7 @@ fn build_continuation_class(
         explicit_param_stores: false,
         methods: vec![inv_fid],
         is_interface: false,
+        is_fun_interface: false,
         is_annotation: false,
         annotation_impl_of: None,
         is_sealed: false,
@@ -5506,6 +5604,7 @@ fn build_continuation_class(
         is_open: false,
         superclass: crate::types::type_name(CONTINUATION_IMPL),
         super_args: vec![super_arg],
+        super_ctor_params: vec![Ty::Int],
         enum_entries: vec![],
         enum_entry_of: None,
         prop_ref: None,
@@ -5688,7 +5787,7 @@ fn unbox_value_class(ir: &mut IrFile, value: ExprId, x: TypeName, target: &Ty) -
 /// there `ImplicitCoercion` UNBOXES to the primitive, whereas a `checkcast` would leave it boxed and a
 /// later primitive use (`istore`/`iadd`) would fail verification.
 fn reference_needs_checkcast(t: &Ty) -> bool {
-    match t {
+    match *t {
         // A NULLABLE PRIMITIVE (`Int?`) is a boxed reference (`Integer`): the resume value must be
         // checkcast to the wrapper — `ImplicitCoercion` would no-op (it can't unbox to a nullable),
         // leaving the slot `Object` while the spill restore's frame type is the wrapper (VerifyError
@@ -5836,7 +5935,7 @@ fn spill_kind(ty: &Ty) -> char {
     if ty.is_reference() {
         'L'
     } else {
-        match ty {
+        match *ty {
             Ty::Long => 'J',
             Ty::Float => 'F',
             Ty::Double => 'D',
@@ -5982,7 +6081,7 @@ fn spill_shape_unmodeled(spilled: &[(u32, Ty)]) -> bool {
     spilled.iter().any(|(_, t)| {
         // `Boolean` is excluded: it is the one narrow kind the restore does handle, and it occurs in
         // every `runBlocking { … }` that keeps a flag across a suspension.
-        matches!(t, Ty::Byte | Ty::Short | Ty::Char) || t.non_null().array_elem().is_some()
+        matches!(*t, Ty::Byte | Ty::Short | Ty::Char) || t.non_null().array_elem().is_some()
     })
 }
 
@@ -6138,18 +6237,15 @@ fn writes_local_in(ir: &IrFile, e: ExprId, list: &[(u32, Ty)]) -> bool {
 /// kind the call consumes. `None` for a shape whose operands can't be typed or safely re-bound: an
 /// intrinsic callee, a `Callee::Static` that is `inline` (SPLICED from its operand nodes rather than
 /// called with them) or carries a `dispatch_receiver` (which the non-splice emit path does not even
-/// push), ANY `$default` synthetic (see the indexing rule below), a `MethodCall` with omitted arguments
-/// (routed through that same stub), or a `Lambda`/`Vararg` operand (not a plain value at emit either).
+/// push), a `MethodCall` with omitted arguments, or a `Lambda`/`Vararg` operand.
 ///
 /// A `Callee::Virtual` may also be inline-spliced at emit (its descriptor form has an inline branch) and
 /// is deliberately NOT refused for it: splicing reads its operand nodes as values, and a `GetValue` of a
 /// temp is one.
 fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, Ty)>> {
-    // Parameters are indexed, never length-matched — sound ONLY while the surplus parameter is the
-    // TRAILING one. That holds for the accepted callees: the CPS `Continuation` is appended to the
-    // signature ahead of this pass but to the ARGUMENTS only after the spill (`append_continuation`), so
-    // `args` is legitimately one short here. It does NOT hold for a `$default` synthetic, whose
-    // continuation sits before the mask/marker — refused above rather than mis-zipped.
+    // Parameters are indexed before the continuation value is added. An ordinary suspend call's
+    // continuation is the trailing surplus parameter. A `$default` call removes its descriptor-owned
+    // continuation slot before this zip, leaving real arguments, masks, and marker aligned exactly.
     fn zip(args: &[ExprId], params: &[Ty], out: &mut Vec<(ExprId, Ty)>) -> Option<()> {
         for (i, &a) in args.iter().enumerate() {
             out.push((a, *params.get(i)?));
@@ -6179,14 +6275,12 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                     ..
                 } => {
                     (!inline.can_inline() && dispatch_receiver.is_none()).then_some(())?;
-                    // NOT a `$default` synthetic. Indexing arguments against parameters is only sound
-                    // while the surplus parameter is the TRAILING one; a suspend `$default` descriptor
-                    // spells its `Continuation` BEFORE the `int mask` + `Object marker` (see
-                    // `append_continuation`, which inserts the continuation VALUE two before the end for
-                    // exactly this reason), so zipping would pair the mask with the `Continuation` and the
-                    // marker with the mask — an `astore` of an int, i.e. a class that fails verification.
-                    (!name.ends_with("$default")).then_some(())?;
-                    crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0
+                    let mut params = crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0;
+                    if name.ends_with("$default") {
+                        let continuation = default_suspend_continuation_index(&params)?;
+                        params.remove(continuation);
+                    }
+                    params
                 }
                 Callee::Virtual {
                     owner,
@@ -6217,7 +6311,7 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                     ));
                     crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0
                 }
-                Callee::External(_) | Callee::LocalDefault(_) => return None,
+                Callee::Intrinsic { .. } | Callee::LocalDefault(_) => return None,
             };
             zip(args, &params, &mut out)?;
         }
@@ -6309,6 +6403,7 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::Const(_)
         | IrExpr::GetValue(_)
         | IrExpr::GetStatic(_)
+        | IrExpr::StaticInstance { .. }
         | IrExpr::ExternalStaticField { .. }
         | IrExpr::UnitInstance => true,
         IrExpr::TypeOp { arg, .. } | IrExpr::NotNullAssert { operand: arg } => box_returns(ir, arg),

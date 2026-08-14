@@ -5104,6 +5104,33 @@ mod tests {
         assert!(!member.member_name.is_empty());
     }
 
+    #[test]
+    fn selected_inherited_library_member_does_not_navigate_to_a_source_namesake() {
+        let classpath = krusty::toolchain::stdlib_classpath();
+        if classpath.scan_types().is_empty() {
+            return;
+        }
+        let source = concat!(
+            "class Namesake {\n",
+            "    fun toString(flag: Boolean): String = \"source\"\n",
+            "}\n",
+            "fun use(value: Namesake): String = value.toString()\n",
+        );
+        let analysis = document_analysis_for(source);
+        let call = source.rfind("toString").unwrap() as u32;
+
+        let source_targets = analysis.definitions.get(call).collect::<Vec<_>>();
+        assert!(
+            source_targets.is_empty(),
+            "source targets: {source_targets:?}"
+        );
+        let selected = analysis
+            .library_definitions
+            .get(call)
+            .expect("the selected inherited classpath member is terminal");
+        assert_eq!(selected.member_name, "toString");
+    }
+
     fn document_analysis_for(source: &str) -> DocumentAnalysis {
         let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_classpath());
         let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
@@ -6464,6 +6491,52 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn enum_entry_call_navigates_to_its_selected_override() {
+        let source = "enum class Mode {\n\
+                      A {\n\
+                        override fun text() = \"A\"\n\
+                        fun use() = text()\n\
+                      };\n\
+                      abstract fun text(): String\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let occurrences = source
+            .match_indices("text")
+            .map(|(offset, _)| offset as u32)
+            .collect::<Vec<_>>();
+        let target = DefinitionTarget {
+            file: 0,
+            span: Span::new(occurrences[0], occurrences[0] + 4),
+        };
+
+        assert_eq!(
+            analysis.definitions.get(occurrences[1]).collect::<Vec<_>>(),
+            vec![target]
+        );
+    }
+
+    #[test]
+    fn source_super_property_navigates_to_the_selected_declaration() {
+        let source = "open class Base { open val x: Int = 1 }\n\
+                      class Child : Base() {\n\
+                        override val x: Int = 2\n\
+                        fun read(): Int = super.x\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let declaration = source.find("x:").unwrap() as u32;
+        let access = source.rfind("x").unwrap() as u32;
+
+        assert_eq!(
+            analysis.definitions.get(access).collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(declaration, declaration + 1),
+            }]
+        );
+        assert!(analysis.library_definitions.get(access).is_none());
     }
 
     #[test]

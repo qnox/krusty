@@ -14,7 +14,10 @@ pub struct LangFeatures {
 impl Default for LangFeatures {
     fn default() -> Self {
         Self {
-            enabled: HashSet::from(["MultiDollarInterpolation".to_string()]),
+            enabled: HashSet::from([
+                "ContextParameters".to_string(),
+                "MultiDollarInterpolation".to_string(),
+            ]),
         }
     }
 }

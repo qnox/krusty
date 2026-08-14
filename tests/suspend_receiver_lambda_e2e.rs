@@ -135,14 +135,11 @@ fun box(): String {
 "#);
 }
 
-/// The complementary safety boundary: when the selected target itself is `suspend inline`, lowering
-/// must still decline before it emits a direct call from generated state-machine code. Assert the
-/// stable capability-based reason exactly; putting the source function's name in this diagnostic would
-/// leak application identifiers and couple tests to a real declaration spelling.
+/// A public `suspend inline` declaration has a callable CPS entry. Inside a generated suspend-lambda
+/// state machine lowering uses that entry instead of eagerly splicing the body. A `MustInline` target
+/// remains a separate unsupported boundary because it has no legal direct call.
 #[test]
-fn suspend_lambda_rejects_selected_suspend_inline_without_name_leakage() {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
+fn suspend_lambda_calls_public_suspend_inline_cps_entry() {
     let source = r#"
 import kotlin.coroutines.*
 
@@ -154,16 +151,10 @@ fun start(body: suspend () -> Unit) {
 
 fun box(): String {
     start { selectedOperation() }
-    return "unreachable"
+    return "OK"
 }
 "#;
-    let outcome =
-        common::backend_outcome_in_process(source, "SelectedSuspendInline", &[stdlib], Some(&jdk))
-            .expect("the front end must accept the regression source");
-    assert_eq!(
-        outcome,
-        common::BackendOutcome::LowerBail("gate:suspend-inline-call-in-suspend-lambda".to_string())
-    );
+    run(source);
 }
 
 /// A `Unit` tail that leaves NOTHING on the operand stack must materialize the `Unit` singleton — a

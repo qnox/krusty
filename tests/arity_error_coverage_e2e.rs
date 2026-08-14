@@ -1,6 +1,6 @@
 //! Reject paths for argument-count mismatches the corpus doesn't trigger: calling an extension
 //! function with the wrong number of arguments, and constructing a qualified nested type with the
-//! wrong number of arguments. Both emit a checker diagnostic (`… expects N args, got M`).
+//! wrong number of arguments. Both emit the callable-specific checker diagnostic used by kotlinc.
 
 use super::common;
 
@@ -19,8 +19,10 @@ fn assert_arity_error(src: &str) {
         return; // environment skip (no stdlib)
     }
     assert!(
-        d.iter()
-            .any(|m| m.contains("expects") && m.contains("args, got")),
+        d.iter().any(|message| {
+            (message.contains("expects") && message.contains("args, got"))
+                || message.starts_with("too many arguments for '")
+        }),
         "expected an arity error, got: {d:?}"
     );
 }

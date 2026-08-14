@@ -150,6 +150,14 @@ fn string_concat_and_tostring() {
 }
 
 #[test]
+fn nullable_string_plus_uses_kotlin_string_conversion() {
+    check(
+        "fun box(): String { val left: String? = null; val right: String? = null; return left + right }",
+        "nullnull",
+    );
+}
+
+#[test]
 fn boolean_short_circuit_and_when() {
     check(
         "fun grade(n: Int): String = when {\n\

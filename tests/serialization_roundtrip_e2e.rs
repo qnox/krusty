@@ -133,7 +133,7 @@ fn serializable_class_encode_round_trips() {
         host.register(Box::new(SerializationPlugin::default()));
         host.run(&mut ir, &ctx);
         let facade = file_class_name("Foo", files[0].package.as_deref());
-        let classes = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)
+        let classes = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None, &syms)
             .expect("krusty emits Foo + Foo$serializer");
 
         let out = std::env::temp_dir().join(format!("krusty_serrt_{}", std::process::id()));

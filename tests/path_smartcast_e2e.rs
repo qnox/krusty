@@ -266,10 +266,7 @@ fun box(): String {\n\
 }
 
 #[test]
-fn when_value_class_property_narrowing_stays_rejected() {
-    // A value class selected from an `Any` property needs representation-specific unboxing that the
-    // generic member-read coercion does not yet provide. `if` already rejects this narrowing through
-    // the shared support gate; `when` must do the same instead of accepting a verifier-risking path.
+fn when_value_class_property_narrowing_runs() {
     const SRC: &str = "@JvmInline value class Token(val raw: String)\n\
 class Holder(val value: Any)\n\
 fun box(): String {\n\
@@ -279,13 +276,7 @@ fun box(): String {\n\
         else -> \"FAIL\"\n\
     }\n\
 }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("unresolved reference 'raw'")),
-        "unsupported value-class property narrowing must stay a checked skip; got {diagnostics:?}"
-    );
+    assert_ok(SRC);
 }
 
 #[test]

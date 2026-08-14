@@ -17,7 +17,7 @@ const LIB: &str = "package lib\n\
 fn classpath_companion_invoke_factory() {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
-    let Some(lo) = common::compile_lib("companion_invoke", LIB) else {
+    let Some(lo) = common::compile_lib_ref("companion_invoke", LIB) else {
         return;
     };
     const MAIN: &str = "import lib.Id\n\

@@ -10,8 +10,6 @@ static DHAT_ALLOC: krusty::dhat::Alloc = krusty::dhat::Alloc;
 
 mod common;
 
-#[path = "box_corpus_regression_e2e.rs"]
-mod box_corpus_regression_e2e;
 #[path = "box_vendored_e2e.rs"]
 mod box_vendored_e2e;
 #[path = "ir_blockers.rs"]

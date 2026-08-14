@@ -28,8 +28,7 @@ fn run_no_jdk_box(src: &str, stem: &str) -> Option<String> {
     // A runtime JVM is still required to LOAD the emitted class; only the COMPILE is JDK-less.
     let _ = common::java_home();
     let jars = [stdlib];
-    let classes = common::compile_in_process(src, stem, &jars, None)
-        .unwrap_or_else(|| panic!("{stem} must compile with no JDK on the classpath"));
+    let classes = common::expect_compile_in_process(src, stem, &jars, None);
     let box_class = common::find_box_class(&classes)
         .unwrap_or_else(|| panic!("{stem} emitted no static box(): String"));
     Some(

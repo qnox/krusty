@@ -25,6 +25,70 @@ enum class Choice {
 }
 
 #[test]
+fn enum_entry_constructor_lambda_resolves_its_entry() {
+    const SOURCE: &str = r#"
+enum class Choice(val text: String, val callback: () -> String) {
+    RETAIN("OK", { RETAIN.text })
+}
+"#;
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[SOURCE],
+        "bare enum entry in its constructor lambda",
+    );
+}
+
+#[test]
+fn enum_entry_constructor_object_resolves_its_entry() {
+    const SOURCE: &str = r#"
+interface Callback { fun invoke(): String }
+
+enum class Choice(val text: String, val callback: Callback) {
+    RETAIN("OK", object : Callback {
+        override fun invoke(): String = RETAIN.text
+    })
+}
+"#;
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[SOURCE],
+        "bare enum entry in its constructor object",
+    );
+}
+
+#[test]
+fn constructor_header_this_is_the_selected_companion() {
+    const SOURCE: &str = r#"
+open class Base(val callback: () -> Any) {
+    companion object { val marker = "base" }
+}
+
+class Derived : Base({ this })
+
+class Secondary : Base {
+    constructor() : super({ this })
+}
+
+class ThisDelegating(val callback: () -> Any) {
+    constructor() : this({ this })
+    companion object { val marker = "this" }
+}
+
+enum class Choice(val callback: () -> Any) {
+    RETAIN({ this })
+}
+
+fun box(): String =
+    if (Derived().callback() === Base &&
+        Secondary().callback() === Base &&
+        ThisDelegating().callback() === ThisDelegating &&
+        Choice.RETAIN.callback() === Enum) "OK" else "wrong"
+"#;
+
+    common::expect_box_ok_with_stdlib(SOURCE, "ConstructorHeaderThis");
+}
+
+#[test]
 fn companion_property_shadows_enum_entry() {
     const SOURCE: &str = r#"
 enum class Result {

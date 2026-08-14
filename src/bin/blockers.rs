@@ -26,19 +26,6 @@ fn first_error(src: &str) -> Option<(String, u32)> {
     None
 }
 
-fn collect_kt(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.filter_map(|e| e.ok()) {
-            let p = e.path();
-            if p.is_dir() {
-                collect_kt(&p, out);
-            } else if p.extension().is_some_and(|e| e == "kt") {
-                out.push(p);
-            }
-        }
-    }
-}
-
 fn norm(line: &str) -> String {
     // Normalize a source line into a coarse pattern: drop identifiers/strings/numbers.
     let mut out = String::new();
@@ -71,8 +58,7 @@ fn main() {
         .next()
         .expect("usage: blockers <box_dir> [msg-substring]");
     let filter = args.next();
-    let mut files = Vec::new();
-    collect_kt(std::path::Path::new(&box_dir), &mut files);
+    let files = krusty::conformance::kotlin_files(std::path::Path::new(&box_dir));
     let mut buckets: HashMap<String, (u32, Vec<String>)> = HashMap::new();
     for f in &files {
         let src = std::fs::read_to_string(f).unwrap_or_default();

@@ -41,11 +41,9 @@ fn suspend_spill_slot_reuse_runs() {
                 mapOf(\"a\" to listOf(10, 20), \"b\" to listOf(1, 2, 3)))\n\
             if (r == 69) \"OK\" else \"F r=$r\"\n\
         }\n";
-    let out =
-        common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
+    let out = common::expect_box_run(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
-        out.as_deref(),
-        Some("OK"),
+        out, "OK",
         "spilled restore-only local across a `?: continue` + nested loop must share one slot"
     );
 }

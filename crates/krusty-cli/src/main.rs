@@ -41,7 +41,11 @@ fn main() {
         sources.push(src);
     }
 
-    let cp = std::rc::Rc::new(Classpath::new(opts.effective_classpath()));
+    let effective_classpath = opts.effective_classpath().unwrap_or_else(|error| {
+        eprintln!("krusty: {error}");
+        std::process::exit(1);
+    });
+    let cp = std::rc::Rc::new(Classpath::new(effective_classpath));
     let platform = Box::new(JvmLibraries::new(cp.clone()));
     let source_inputs = opts
         .sources

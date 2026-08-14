@@ -84,8 +84,12 @@ fn serialization_runtime_jars() -> Option<Vec<PathBuf>> {
 /// dependency is absent (test self-skips). Shared by the encode and the round-trip tests.
 fn run_box_in_krusty(src: &str, stem: &str) -> Option<(String, String)> {
     let cp_jars = serialization_runtime_jars()?;
-    let classes = common::compile_in_process(src, stem, &cp_jars, None)
-        .unwrap_or_else(|| panic!("krusty failed to compile the pure-krusty program ({stem})"));
+    let classes = common::compile_in_process(src, stem, &cp_jars, None).unwrap_or_else(|| {
+        let diagnostics = common::front_end_diagnostics(src, &cp_jars, None);
+        panic!(
+            "krusty failed to compile the pure-krusty program ({stem}); diagnostics: {diagnostics:?}"
+        )
+    });
     let box_class = common::find_box_class(&classes)?;
     common::run_box(&classes, &box_class, &cp_jars).map(|stdout| (stdout, String::new()))
 }

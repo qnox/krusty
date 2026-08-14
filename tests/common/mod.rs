@@ -320,6 +320,7 @@ pub fn compile_in_process(
         metadata.as_ref(),
         &opts,
         &krusty::jvm::ir_emit::EmitRun::default(),
+        &syms,
     )?;
     if outputs.is_empty() {
         None
@@ -442,10 +443,13 @@ pub fn compile_in_process_metadata_cp(
         &ir,
         &facade,
         &*cp,
-        metadata.as_ref(),
+        krusty::jvm::ir_emit::EmitMetadata {
+            facade: metadata.as_ref(),
+            continuations: &continuation_metadata,
+        },
         &opts,
         &run,
-        &continuation_metadata,
+        &syms,
     )?;
     (!outputs.is_empty()).then_some(outputs)
 }
@@ -556,7 +560,7 @@ pub fn backend_outcome_in_process(
         return Some(BackendOutcome::BackendPassBail(reason));
     }
     Some(
-        if krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None).is_none() {
+        if krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None, &syms).is_none() {
             BackendOutcome::EmitBail
         } else {
             BackendOutcome::Emitted
@@ -672,7 +676,6 @@ pub fn front_end_diagnostics(
 
 /// Multi-file form of [`front_end_diagnostics`]. All signatures are collected before every file is
 /// checked, matching the module pipeline and keeping cross-file tests on the shared harness.
-#[allow(dead_code)]
 pub fn front_end_diagnostics_files(
     sources: &[&str],
     cp_jars: &[PathBuf],
@@ -746,24 +749,63 @@ pub fn run_js(js: &str) -> Option<String> {
     static JS_COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = JS_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = dir.join(format!("m_{:x}_{n}.mjs", hash_str(js)));
+    let stdout_path = path.with_extension("stdout");
+    let stderr_path = path.with_extension("stderr");
     std::fs::write(&path, js).ok()?;
-    // Bound wall time via `timeout` so a miscompiled loop can't hang the suite forever (exit 124).
-    let out = Command::new("timeout")
-        .arg("15s")
-        .arg(&node)
+    // Enforce the deadline in-process. Depending on GNU `timeout` made every JS test silently skip on
+    // macOS even when Node was installed, so local runs never exercised the backend that CI executed.
+    // Redirect output to files rather than pipes: a child that fills a pipe would block before
+    // `try_wait` observes its exit and turn a successful, verbose program into a false timeout.
+    let stdout = std::fs::File::create(&stdout_path).ok()?;
+    let stderr = std::fs::File::create(&stderr_path).ok()?;
+    let mut child = Command::new(&node)
         .arg(&path)
-        .output()
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
         .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                timed_out = true;
+                break child.wait().ok()?;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(&stdout_path);
+                let _ = std::fs::remove_file(&stderr_path);
+                return None;
+            }
+        }
+    };
+    let stdout = std::fs::read(&stdout_path).unwrap_or_default();
+    let stderr = std::fs::read(&stderr_path).unwrap_or_default();
     let _ = std::fs::remove_file(&path);
-    if !out.status.success() {
-        let code = out.status.code().unwrap_or(-1);
-        let tag = if code == 124 { "TIMEOUT" } else { "ERROR" };
+    let _ = std::fs::remove_file(&stdout_path);
+    let _ = std::fs::remove_file(&stderr_path);
+    if timed_out {
         return Some(format!(
-            "{tag}:{}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "TIMEOUT:{}",
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        return Some(format!(
+            "ERROR({code}):{}",
+            String::from_utf8_lossy(&stderr).trim()
+        ));
+    }
+    Some(String::from_utf8_lossy(&stdout).trim().to_string())
 }
 
 fn which_node() -> Option<PathBuf> {
@@ -996,7 +1038,12 @@ public class BoxRunner {
                         return r == null ? "null" : r;
                     } catch (Throwable t) {
                         Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null) ? t.getCause() : t;
-                        return "ERROR:" + cause.getClass().getSimpleName() + ":" + cause.getMessage();
+                        StringBuilder detail = new StringBuilder();
+                        for (Throwable current = cause; current != null; current = current.getCause()) {
+                            if (detail.length() > 0) detail.append(" <- ");
+                            detail.append(current.getClass().getSimpleName()).append(":").append(current.getMessage());
+                        }
+                        return "ERROR:" + detail;
                     }
                 });
                 try {
@@ -1568,7 +1615,13 @@ pub fn expect_box_run(
 ) -> String {
     compile_and_run_box(src, stem, cp_jars, jdk_modules).unwrap_or_else(|| {
         let diagnostics = front_end_diagnostics(src, cp_jars, jdk_modules);
-        panic!("{stem}: compile/run returned None; {}", why(&diagnostics))
+        let backend = diagnostics
+            .is_empty()
+            .then(|| backend_outcome_in_process(src, stem, cp_jars, jdk_modules));
+        panic!(
+            "{stem}: compile/run returned None; {}; backend outcome: {backend:?}",
+            why(&diagnostics)
+        )
     })
 }
 
@@ -1981,9 +2034,7 @@ pub fn expect_box_run_against_with_reflect_ref(
 /// [`expect_box_ok_against`] with an EXPLICITLY reference-compiled dependency.
 #[allow(dead_code)]
 pub fn expect_box_ok_against_ref(tag: &str, lib_src: &str, main: &str) {
-    let Some(libout) = compile_lib_ref(tag, lib_src) else {
-        return;
-    };
+    let libout = compile_lib_ref(tag, lib_src).expect("reference compiler unavailable");
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
     let classpath = [libout, stdlib];
@@ -2015,7 +2066,7 @@ pub fn checker_diags_against_ref(tag: &str, lib_src: &str, main: &str) -> Option
     let stdlib = stdlib_jar();
     let mut classpath = vec![libout, stdlib];
     classpath.push(jdk_modules());
-    Some(checker_diags_with_classpath(main, classpath))
+    Some(inspect_checker_with_classpath(main, classpath, |_, _, _| ()).0)
 }
 
 /// Compile a dependency source set with the REFERENCE kotlinc (pooled server) into a scratch
@@ -2263,7 +2314,12 @@ pub fn expect_box_ok_against(tag: &str, lib_src: &str, main: &str) {
         .unwrap_or_else(|| {
             let cp = [build.krusty_out().to_path_buf(), stdlib.clone()];
             let diagnostics = front_end_diagnostics(main, &cp, Some(jdk.as_path()));
-            panic!("{tag}: compile/run returned None; diagnostics: {diagnostics:?}")
+            let backend = diagnostics
+                .is_empty()
+                .then(|| backend_outcome_in_process(main, "Main", &cp, Some(jdk.as_path())));
+            panic!(
+                "{tag}: compile/run returned None; diagnostics: {diagnostics:?}; backend: {backend:?}"
+            )
         });
     assert_eq!(output, "OK", "{tag}");
 }
@@ -2277,7 +2333,7 @@ pub fn checker_diags_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec
     let stdlib = stdlib_jar();
     let mut classpath = vec![libout, stdlib];
     classpath.push(jdk_modules());
-    Some(checker_diags_with_classpath(main, classpath))
+    Some(inspect_checker_with_classpath(main, classpath, |_, _, _| ()).0)
 }
 
 /// Check `main` against the Kotlin stdlib without lowering or emitting.
@@ -2286,10 +2342,18 @@ pub fn checker_diags_with_stdlib(main: &str) -> Option<Vec<String>> {
     let stdlib = stdlib_jar();
     let mut classpath = vec![stdlib];
     classpath.push(jdk_modules());
-    Some(checker_diags_with_classpath(main, classpath))
+    Some(inspect_checker_with_classpath(main, classpath, |_, _, _| ()).0)
 }
 
-fn checker_diags_with_classpath(main: &str, classpath: Vec<PathBuf>) -> Vec<String> {
+pub fn inspect_checker_with_classpath<T>(
+    main: &str,
+    classpath: Vec<PathBuf>,
+    inspect: impl FnOnce(
+        &krusty::ast::File,
+        &krusty::frontend::FrontendTypeInfo,
+        &krusty::frontend::FrontendSymbols,
+    ) -> T,
+) -> (Vec<String>, T) {
     use krusty::diag::DiagSink;
     use krusty::frontend::{check_file, collect_signatures_with_cp};
     let mut diags = DiagSink::new();
@@ -2301,8 +2365,12 @@ fn checker_diags_with_classpath(main: &str, classpath: Vec<PathBuf>) -> Vec<Stri
     let cp = std::rc::Rc::new(Classpath::new(classpath));
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    let _ = check_file(&files[0], &mut syms, &mut diags);
-    diags.diags.iter().map(|m| m.msg.clone()).collect()
+    let info = check_file(&files[0], &mut syms, &mut diags);
+    let inspected = inspect(&files[0], &info, &syms);
+    (
+        diags.diags.iter().map(|m| m.msg.clone()).collect(),
+        inspected,
+    )
 }
 
 /// Whether both the JVM toolchain AND the box corpus are provisioned (an e2e that runs a corpus case
@@ -2333,9 +2401,9 @@ pub fn corpus_ready() -> bool {
 /// treat `None` as a skip (matching the gate's skip accounting), NOT a failure.
 #[allow(dead_code)]
 pub fn run_box_corpus_case(rel: &str) -> Option<String> {
-    let src = std::fs::read_to_string(box_corpus_dir()?.join(rel))
-        .ok()?
-        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
+    let src = krusty::conformance::prepare_test_source(
+        &std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?,
+    );
     // Multi-file / multi-module cases need the gate's `// FILE:`/`// MODULE:` splitting — skip here
     // rather than miscompile all blocks as one source (enforce the contract, don't rely on luck).
     if src.contains("// FILE:") || src.contains("// MODULE:") {
@@ -2350,9 +2418,9 @@ pub fn run_box_corpus_case(rel: &str) -> Option<String> {
 
 #[allow(dead_code)]
 pub fn box_corpus_case_backend_outcome(rel: &str) -> Option<BackendOutcome> {
-    let src = std::fs::read_to_string(box_corpus_dir()?.join(rel))
-        .ok()?
-        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
+    let src = krusty::conformance::prepare_test_source(
+        &std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?,
+    );
     if src.contains("// FILE:") || src.contains("// MODULE:") {
         return None;
     }
@@ -2611,7 +2679,6 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
 /// and each JavaRunner at `-Xmx512m`, so the `ncpu/2` default clamped to [1, 6] bounds worst-case
 /// footprint at ~6 GB on big hosts and 2 servers on a 4-core CI runner. `KRUSTY_SERVER_POOL`
 /// overrides in either direction (e.g. 1 on a swapping shared box).
-#[allow(dead_code)]
 fn server_pool_cap() -> usize {
     std::env::var("KRUSTY_SERVER_POOL")
         .ok()

@@ -21,13 +21,21 @@ pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
 
-/// The target of an `IrExpr::Call`. `Local` references a function defined in this IR file;
-/// `External` references a symbol that is **not** — a stdlib `expect`/operator named by its Kotlin
-/// FqName (`kotlin/Array.size`, `kotlin/String.plus`, `kotlin/collections/listOf`). Each backend
-/// resolves an `External` the way kotlinc does: if it is one of the handful in the **intrinsic
-/// table** (array access, arithmetic, …) it emits target bytecode directly; otherwise it resolves
-/// the platform **`actual`** from the linked stdlib (`kotlin-stdlib-jvm`/`-js`) and emits a normal
-/// call. Either way it is *data* (a FqName), never a new IR node.
+/// A compiler-supplied operation selected from a real semantic declaration. This is an operation
+/// identity, not a library name: backends implement it without recovering signature facts from text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrIntrinsic {
+    ArrayGet,
+    ArraySet,
+    ArraySize,
+    StringGet,
+    StringLength,
+    StringPlus,
+    NullableAnyToString,
+    PrimitiveArrayNew { element: Ty },
+}
+
+/// The target of an `IrExpr::Call`. `Local` references a function defined in this IR file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Callee {
     Local(FunId),
@@ -37,7 +45,10 @@ pub enum Callee {
     /// `Object` marker to the real function's parameters. Used when a call omits a (possibly non-const)
     /// defaulted argument, mirroring kotlinc's default-argument ABI.
     LocalDefault(FunId),
-    External(String),
+    Intrinsic {
+        operation: IrIntrinsic,
+        ret: Ty,
+    },
     /// A top-level function defined in ANOTHER source file of the same multi-file compilation —
     /// `invokestatic <facade>.<name>(params)ret`. Carries the signature as backend-agnostic `Ty`s
     /// (the JVM backend builds the descriptor), so `ir_lower` needn't know JVM descriptors. Distinct
@@ -146,7 +157,7 @@ pub enum IrExpr {
     },
     /// A call to a function/constructor/operator/stdlib intrinsic (`IrCall`). The `callee` is a
     /// resolved [`Callee`]: a local function, or an intrinsic identified by Kotlin FqName that each
-    /// backend maps to its platform (`kotlin/String.plus`, `kotlin/io/println`, …). This single node
+    /// backend maps to its platform (`kotlin.plus`, `kotlin.io.println`, …). This single node
     /// expresses every call — there is no dedicated node per stdlib operation.
     Call {
         callee: Callee,
@@ -221,9 +232,7 @@ pub enum IrExpr {
     /// A built-in primitive binary operator (`+`/`-`/`<`/`==`/…) on numeric/boolean operands. One
     /// parameterized node (not one-per-intrinsic): Kotlin IR models these as `IrCall` to the
     /// operator function, but the built-in numeric/boolean ops are universal across backends, so a
-    /// single node lets each emit the native instruction (JVM `iadd`, JS `+`). Every *other*
-    /// operator/stdlib operation — `String.plus`, `toString`, `println`, collections — is an
-    /// ordinary `Call` to a `Callee::External` symbol the backend resolves; there is no per-op node.
+    /// single node lets each emit the native instruction (JVM `iadd`, JS `+`).
     PrimitiveBinOp {
         op: IrBinOp,
         lhs: ExprId,
@@ -721,7 +730,12 @@ pub struct IrCtorArg {
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
+    /// The property's language-level type. This is also the type exposed by its accessors.
     pub ty: Ty,
+    /// The declared type of an explicit backing field when it differs from the property's public type.
+    /// The JVM value-class pass may erase the physical [`IrField`] to its carrier, so retaining this
+    /// semantic storage boundary lets the backend box/unbox at the accessor without resolving anything.
+    pub storage_ty: Option<Ty>,
     /// Index into [`IrClass::fields`] for the backing field, `None` for a computed/delegated property
     /// (which stores nothing).
     pub backing_field: Option<u32>,
@@ -780,6 +794,10 @@ pub struct IrClass {
     /// those with only the implicit `Any` bound (unlike [`type_param_bounds`], which lists only non-`Any`
     /// bounds). Empty for a non-generic class.
     pub type_params: Vec<String>,
+    /// Semantic identities captured from enclosing generic declarations. These are available to
+    /// member metadata but are not declarations of this class. Kotlin metadata assigns them IDs
+    /// before this class's own parameters (an inner `U` is id 1 when outer `T` is id 0).
+    pub captured_type_params: Vec<String>,
     pub supertypes: Vec<Ty>,
     /// Instance fields. The first `ctor_param_count` are the primary-constructor parameters (stored
     /// directly from args, in order); any after them are class-body properties initialized by `init_body`.
@@ -814,6 +832,9 @@ pub struct IrClass {
     /// Instance methods — `FunId`s into `IrFile.functions` (each with `dispatch_receiver = Some`).
     pub methods: Vec<FunId>,
     pub is_interface: bool,
+    /// `true` for a source `fun interface`. This is a language-level classifier fact carried through
+    /// IR so emitted Kotlin metadata preserves SAM eligibility for dependent modules.
+    pub is_fun_interface: bool,
     /// `true` for a Kotlin `annotation class`. Emitted as a JVM annotation INTERFACE (`ACC_ANNOTATION|
     /// ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/annotation/Annotation`, one abstract accessor per
     /// member named after the property — from `fields`). NOT a plain class.
@@ -841,6 +862,9 @@ pub struct IrClass {
     /// `this`=value 0 and the primary-constructor params as values `1..=ctor_param_count`. Empty
     /// unless `superclass` is a user base class.
     pub super_args: Vec<ExprId>,
+    /// Checker-selected semantic parameter types parallel to `super_args`. A backend couples these to
+    /// its physical superclass-constructor ABI without resolving the constructor again.
+    pub super_ctor_params: Vec<Ty>,
     /// Enum entries in declaration order. Non-empty only for an `enum class`; the backend emits a static
     /// field per entry, a `$VALUES` array, a `<clinit>` that constructs them, and `values()`/
     /// `valueOf(String)`. Each [`IrEnumEntry`] carries its name, lowered constructor args, and optional
@@ -960,6 +984,9 @@ pub enum FrDispatch {
 pub struct FuncRef {
     pub bound: bool,
     pub arity: u8,
+    /// The referenced declaration is suspend. Its erased function arity includes the trailing
+    /// continuation and the generated reference carries Kotlin's suspend-function marker.
+    pub is_suspend: bool,
     /// Class passed to `super(...)` (the reference's declaring class); `None` = the file facade.
     pub owner_class: Option<TypeName>,
     pub fn_name: String,
@@ -1001,11 +1028,21 @@ pub struct FuncRef {
 pub struct PropRef {
     /// Referenced property's owner class; `None` = the file facade.
     pub owner_internal: Option<TypeName>,
+    /// Physical owner of a member accessor. This differs from `owner_internal` for an inherited
+    /// property reference (`Derived::p` reflects on `Derived` but may invoke `Base.getP`).
+    pub call_owner_internal: Option<TypeName>,
     pub prop_name: String,
     pub getter_name: String,
     pub getter_descriptor: Option<String>,
     pub setter_name: Option<String>,
     pub setter_descriptor: Option<String>,
+    /// JVM-only property-reference boundary: the accessor uses this value class's erased carrier,
+    /// while `KProperty.get`/`set` exchange the boxed value-class object through `Object`.
+    pub boxed_value_class: Option<TypeName>,
+    /// The selected member accessor is declared by an interface. Static extension/top-level
+    /// accessors ignore this bit; instance references use it to choose `invokeinterface` without
+    /// querying a class model again during emission.
+    pub owner_is_interface: bool,
     pub prop_ty: Ty,
     /// `false` = an unbound `Type::prop` (a `PropertyReference1Impl` singleton with `get(Object)`);
     /// `true` = a bound `obj::prop` (a `PropertyReference0Impl` constructed with the captured receiver,
@@ -1056,6 +1093,10 @@ impl PropRef {
 
     pub fn owner(&self) -> Option<String> {
         self.owner_internal.map(TypeName::render)
+    }
+
+    pub fn call_owner(&self) -> Option<String> {
+        self.call_owner_internal.map(TypeName::render)
     }
 
     pub fn ext_facade_or_facade(&self, facade: &str) -> Option<String> {
@@ -1433,7 +1474,6 @@ pub struct IrFile {
     /// Getter method name (`getV`) for each classpath `@JvmInline value class` in
     /// [`Self::external_value_classes`] — lets the value-class pass recognize a sole-property read emitted
     /// as `invokevirtual X.getV()` and rewrite it to identity (the receiver IS the unboxed underlying).
-    external_value_class_getters: std::collections::HashMap<TypeName, String>,
     /// Call `ExprId` → reified-type substitution for a `<reified T>` CLASSPATH inline extension whose
     /// compiled body the backend must splice: `[(type-parameter name, concrete JVM internal name)]`
     /// (`[("T", "lib/Prov")]`). The bytecode splicer feeds this to `substitute_reified` so a
@@ -1495,19 +1535,27 @@ pub struct IrFile {
 /// platform's equivalent needs). NO target descriptors here — each backend formats its own.
 #[derive(Clone, Debug)]
 pub struct IrGenericSig {
-    /// Each type parameter: its name and its upper bound as a Kotlin `Ty` (`kotlin/Any` when none).
-    pub type_params: Vec<(String, Ty)>,
-    /// Per value parameter: `Some(name)` when it is a bare type-parameter reference, else `None` (the
-    /// backend uses the parameter's own erased type). Empty for a class signature.
-    pub param_tparams: Vec<Option<String>>,
-    /// `Some(name)` when the return type is a bare type-parameter reference, else `None`.
-    pub ret_tparam: Option<String>,
+    /// Each declared type parameter with its complete semantic bound shape. Whether that bound is an
+    /// interface is declaration metadata, not something a backend may infer from a physical name.
+    pub type_params: Vec<IrTypeParameter>,
+    /// Complete semantic value-parameter types for a function signature. Empty for a class signature.
+    pub params: Vec<Ty>,
+    /// Complete semantic return type for a function signature. `None` for a class signature.
+    pub ret: Option<Ty>,
     /// For a CLASS signature with a PARAMETERIZED supertype: the superclass + superinterfaces as
     /// platform-agnostic `Ty`s carrying their type arguments (`[Any, Operation<Result<Int>>]`), so a
     /// cross-module reader recovers a member's concrete generic return. The backend formats these into the
     /// JVM `Signature` string. Empty ⇒ no parameterized supertype (backend emits the default `Object`
     /// superclass). Empty for a function signature.
     pub supers: Vec<Ty>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IrTypeParameter {
+    pub name: String,
+    pub semantic_name: String,
+    pub bounds: Vec<(Ty, bool)>,
+    pub variance: crate::types::TypeVariance,
 }
 
 impl IrFile {
@@ -1758,16 +1806,6 @@ impl IrFile {
             .iter()
             .any(|c| c.is_value && c.fq_name == internal)
             || self.has_external_value_class_name(internal)
-    }
-
-    pub fn insert_external_value_class_getter_name(&mut self, internal: TypeName, getter: String) {
-        self.external_value_class_getters.insert(internal, getter);
-    }
-
-    pub fn external_value_class_getters(&self) -> impl Iterator<Item = (TypeName, &str)> + '_ {
-        self.external_value_class_getters
-            .iter()
-            .map(|(&internal, getter)| (internal, getter.as_str()))
     }
 
     pub fn param_defaults(&self, fid: u32) -> Option<&Vec<Option<ExprId>>> {
@@ -2340,6 +2378,7 @@ mod tests {
             decl_line: 0,
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
+            captured_type_params: Vec::new(),
             supertypes: Vec::new(),
             properties: Vec::new(),
             fields: Vec::new(),
@@ -2351,6 +2390,7 @@ mod tests {
             explicit_param_stores: false,
             methods: Vec::new(),
             is_interface: false,
+            is_fun_interface: false,
             is_annotation: false,
             annotation_impl_of: None,
             is_sealed: false,
@@ -2359,6 +2399,7 @@ mod tests {
             is_open: false,
             superclass: "kotlin/Any".into(),
             super_args: Vec::new(),
+            super_ctor_params: Vec::new(),
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,

@@ -41,7 +41,7 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
     krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms)
         .expect("backend passes should accept this value class");
     let cp = Classpath::new(vec![]);
-    let classes = emit_all(&ir, &facade, &cp, None).expect("emit");
+    let classes = emit_all(&ir, &facade, &cp, None, &syms).expect("emit");
 
     let (_, bytes) = classes
         .iter()
@@ -106,7 +106,7 @@ fn value_class_is_property_uses_javabean_getter_name() {
     krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms)
         .expect("backend passes should accept this value class");
     let cp = Classpath::new(vec![]);
-    let classes = emit_all(&ir, &facade, &cp, None).expect("emit");
+    let classes = emit_all(&ir, &facade, &cp, None, &syms).expect("emit");
 
     let (_, bytes) = classes
         .iter()
