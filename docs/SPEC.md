@@ -5671,3 +5671,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   splicer patches it there; krusty's delegating stub left a live direct call in spliced output. The
   spurious `JvmMethodSignature` on plain inline facade records is gone (kotlinc emits none; suspend
   and type-parameter-mentioning signatures keep theirs).
+
+- **Return-only generic suspend overrides need no erasure bridge.** The CPS rewrite gives BOTH the
+  supertype declaration and the override the same physical shape — a trailing `Continuation`
+  parameter and an `Object` return — so a type parameter appearing only in RETURN position erases
+  identically on both sides and no bridge exists to build (probed: kotlinc emits a single
+  `byId(int, Continuation)` for `class RealRepo : Repo<Cfg> { override suspend fun byId(id: Int):
+  Cfg? }`). The suspend-erasure-bridge lowering gate and both bridge-derivation refusals
+  (superclass and interface-obligation paths) now require a VALUE-parameter erasure difference —
+  a reference-typed parameter — before skipping; all-primitive-parameter suspend overrides of
+  generic supertypes compile and run. Test: `tests/generic_suspend_member_return_e2e.rs`
+  (krusty-built by default).

@@ -723,10 +723,22 @@ fn lower_file_at_reporting_impl(
             }
             false
         };
+        // A suspend member's CPS RETURN is always `Ljava/lang/Object;`, so return-position generics
+        // erase identically in the override and the supertype — no bridge exists to build (probed:
+        // kotlinc emits a single `byId(int, Continuation)` for `Repo<T>.byId(Int): T?`). Only a
+        // VALUE PARAMETER can erase differently, and a JVM-primitive parameter never does; the gate
+        // therefore requires a reference-typed parameter on the suspend member.
+        let primitive_param = |name: &str| {
+            matches!(
+                name,
+                "Int" | "Long" | "Short" | "Byte" | "Char" | "Boolean" | "Float" | "Double"
+            )
+        };
         let suspend_member_needs_bridge = file.decls.iter().any(|&d| {
             matches!(file.decl(d), Decl::Class(c)
                 if (!c.supertypes.is_empty() || c.base_class.is_some())
-                    && c.methods.iter().any(|m| m.is_suspend())
+                    && c.methods.iter().any(|m| m.is_suspend()
+                        && m.params.iter().any(|p| !primitive_param(&p.ty.name) || p.ty.nullable()))
                     && (!c.type_params.is_empty()
                         || c.supertypes.iter().any(|s| {
                             !s.targs.is_empty()
