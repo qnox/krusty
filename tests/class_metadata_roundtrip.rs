@@ -244,6 +244,7 @@ fn package_value_param_defaults_round_trip() {
     // per-parameter default flags must survive `build_package` → `package_functions`, so a dependent
     // module can omit `b` (the reader's `metadata_param_defaults` drives classpath default-omission).
     let funcs = vec![PkgFnMeta {
+        annotations: Vec::new(),
         name: "host".to_string(),
         params: vec![("a".to_string(), Ty::String), ("b".to_string(), Ty::Int)],
         ret: Ty::String,
@@ -284,6 +285,7 @@ fn package_function_type_parameter_bound_round_trips() {
     use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
     let t = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
     let funcs = vec![PkgFnMeta {
+        annotations: Vec::new(),
         name: "identity".to_string(),
         params: vec![("value".to_string(), t)],
         ret: t,
@@ -326,6 +328,7 @@ fn package_extension_receiver_round_trips() {
     // `route`), not 2. Without this a dependent counts the receiver as an argument and can't resolve a
     // `builder.composable("x")` call.
     let funcs = vec![PkgFnMeta {
+        annotations: Vec::new(),
         name: "composable".to_string(),
         params: vec![("route".to_string(), Ty::String)],
         ret: Ty::Unit,
@@ -373,6 +376,7 @@ fn package_receiver_function_type_param_round_trips() {
     // metadata Type must carry @ExtensionFunctionType + the receiver as the first type argument, so a
     // dependent recognizes a lambda passed to `builder` binds `this` to NGB (drives classpath lambda_recv).
     let funcs = vec![PkgFnMeta {
+        annotations: Vec::new(),
         name: "NavHost".to_string(),
         params: vec![(
             "builder".to_string(),

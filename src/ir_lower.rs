@@ -1228,11 +1228,8 @@ fn lower_file_at_reporting_impl(
                     &lo.ir,
                 ),
                 field_annotations: class_field_annotations(file, lo.file_index, c, syms, &lo.ir),
-                // A Kotlin `annotation class` is RUNTIME-retained unless it opts out — emit the
-                // `@Retention(RUNTIME)` meta-annotation so its uses stay visible to reflection.
-                runtime_retained: c.kind == ast::ClassKind::Annotation
-                    && runtime_annotation_decl(file, lo.file_index, syms, type_name(&internal))
-                        .is_some(),
+                annotation_retention: (c.kind == ast::ClassKind::Annotation)
+                    .then(|| declared_annotation_retention(file, lo.file_index, syms, c)),
             });
             // Record a LOCAL class's captures against its IR id, so every construction supplies
             // them (`emit_new`). An anonymous object is not recorded: its single construction site
@@ -4168,7 +4165,7 @@ fn lower_file_at_reporting_impl(
                             has_primary_ctor: true,
                             applied_annotations: Vec::new(),
                             field_annotations: Vec::new(),
-                            runtime_retained: false,
+                            annotation_retention: None,
                         });
                         // Register the subclass so an override body resolves a prop as `this.<field>` and
                         // getter synthesis can attach. Methods are filled in below.
@@ -10646,7 +10643,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
             field_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         };
         let class_id = self.ir.add_class(class);
         // Patch the `<init>` field stores with the now-known class id.
@@ -12875,7 +12872,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
             field_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         });
         if let Some(recv_e) = capture {
             // `new <Synth>(receiver)` — the captured receiver is the constructor's `Object` argument.
@@ -13018,7 +13015,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
             field_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         });
         match capture {
             Some(cap) => self.emit_new(
@@ -13259,7 +13256,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
             field_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         });
         Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE"))
     }
@@ -13966,7 +13963,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
             field_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         });
         match capture {
             Some(cap) => self.emit_new(
@@ -26968,7 +26965,10 @@ fn file_class_decl<'a>(file: &'a ast::File, name: &str) -> Option<&'a ast::Class
     })
 }
 
-fn file_class_decl_by_internal(file: &ast::File, internal: TypeName) -> Option<&ast::ClassDecl> {
+pub(crate) fn file_class_decl_by_internal(
+    file: &ast::File,
+    internal: TypeName,
+) -> Option<&ast::ClassDecl> {
     file.decls
         .iter()
         .find_map(|&declaration| match file.decl(declaration) {
@@ -26977,6 +26977,34 @@ fn file_class_decl_by_internal(file: &ast::File, internal: TypeName) -> Option<&
             }
             _ => None,
         })
+}
+
+/// Declared Kotlin retention of an `annotation class` decl: the `@Retention(AnnotationRetention.<X>)`
+/// argument when explicit, `AnnoRetention::Default` (RUNTIME semantics) otherwise. The distinction
+/// matters to the emitter: kotlinc stamps `kotlin.annotation.Retention` on the compiled annotation
+/// interface only for an EXPLICIT `@Retention`.
+pub(crate) fn declared_annotation_retention(
+    file: &ast::File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+    cd: &ast::ClassDecl,
+) -> crate::ir::AnnoRetention {
+    use crate::ir::AnnoRetention;
+    cd.annotations
+        .iter()
+        .zip(cd.annotation_args.iter())
+        .find_map(|(annotation, arguments)| {
+            syms.resolved_annotation(file_index, annotation)
+                .filter(|name| name.matches("kotlin/annotation/Retention"))?;
+            let &arg = arguments.first()?;
+            match file.expr(arg) {
+                ast::Expr::Member { name, .. } if name == "RUNTIME" => Some(AnnoRetention::Runtime),
+                ast::Expr::Member { name, .. } if name == "BINARY" => Some(AnnoRetention::Binary),
+                ast::Expr::Member { name, .. } if name == "SOURCE" => Some(AnnoRetention::Source),
+                _ => None,
+            }
+        })
+        .unwrap_or(AnnoRetention::Default)
 }
 
 /// The `ClassDecl` of a RUNTIME-retained `annotation class` named `name` declared in this file — the only

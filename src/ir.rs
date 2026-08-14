@@ -914,10 +914,22 @@ pub struct IrClass {
     /// fields), by field name — emitted into each field's `Runtime[In]VisibleAnnotations`. Empty for a
     /// class whose fields carry none.
     pub field_annotations: Vec<FieldAnnotations>,
-    /// For an `annotation class`: `true` when its Kotlin retention is RUNTIME (the default) — the emitter
-    /// then writes a `@java.lang.annotation.Retention(RUNTIME)` meta-annotation on the annotation interface
-    /// so the JVM keeps the annotation's uses visible to reflection.
-    pub runtime_retained: bool,
+    /// For an `annotation class`: its declared Kotlin retention. `None` for every other class. Drives the
+    /// meta-annotations the emitter stamps on the annotation interface — kotlinc writes
+    /// `@kotlin.annotation.Retention(<declared>)` for an EXPLICIT `@Retention(…)` plus
+    /// `@java.lang.annotation.Retention(RUNTIME|CLASS|SOURCE)` always (RUNTIME when defaulted) — so
+    /// consumers can read the retention back from the compiled class.
+    pub annotation_retention: Option<AnnoRetention>,
+}
+
+/// Declared Kotlin retention of an `annotation class`. `Default` is RUNTIME semantics without an explicit
+/// `@Retention` — kotlinc then stamps only the java meta-annotation, not the kotlin one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnoRetention {
+    Default,
+    Runtime,
+    Binary,
+    Source,
 }
 
 /// A resolved JVM annotation value (`element_value`, JVMS §4.7.16.1) — an annotation argument folded to
@@ -2443,7 +2455,7 @@ mod tests {
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         }
     }
 

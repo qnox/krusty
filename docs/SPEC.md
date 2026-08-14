@@ -5534,3 +5534,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   substitution into each `splice_unified` attempt. This keeps default-slotting, intrinsic behavior,
   reification, and module/classpath origin orthogonal. Test:
   `tests/fq_targ_trailing_lambda_e2e.rs`.
+
+- **Annotation-class retention is stamped on the compiled annotation interface, kotlinc-style.** An
+  `annotation class` records its declared Kotlin retention as meta-annotations in its own
+  `RuntimeVisibleAnnotations`: an EXPLICIT `@Retention(X)` stamps `kotlin.annotation.Retention(X)`
+  first, and every annotation class carries `java.lang.annotation.Retention(RUNTIME|CLASS|SOURCE)`
+  (RUNTIME when defaulted, CLASS for Kotlin BINARY). The java stamp is the channel consumers — the
+  JVM, javac, and krusty's own classpath reader (`LibraryType::retention`) — read the retention back
+  from; without it a krusty-built annotation lib made every use-site annotation drop (retention
+  unreadable → treated as unusable). IR: `IrClass::annotation_retention: Option<AnnoRetention>`
+  (`Default` ≠ explicit `Runtime`: kotlinc omits the kotlin stamp when the retention is defaulted).
+  Test: `tests/classpath_annotation_emit_e2e.rs` (krusty-built lib by default).
+
+- **Top-level function annotations survive into `@Metadata` `Function.annotation` records.** An
+  argument-less BINARY/RUNTIME-retained annotation applied to a top-level function is recorded as
+  `Function.annotation` (field 12) `Annotation { id }` with the class in the string table's
+  DESC_TO_CLASS_ID form, plus `Function.flags` `HAS_ANNOTATIONS` (bit 0) — exactly kotlinc's shape
+  (probe: `choose` with `@kotlin.internal.LowPriorityInOverloadResolution` → `f12 { f1: <id> }`,
+  flags `7`). This is the channel a separate compilation reads resolution markers from
+  (`MfnFlags::low_priority` via `has_annotation`). SOURCE-retained annotations (`@Suppress`) are
+  dropped from metadata, matching kotlinc; annotations WITH arguments are not yet modeled and are
+  omitted rather than recorded argument-less (a wrong record is worse than none). Test:
+  `tests/classpath_annotation_emit_e2e.rs::classpath_low_priority_annotation_reaches_overload_selection`.

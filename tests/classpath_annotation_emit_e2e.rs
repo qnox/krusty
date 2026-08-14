@@ -16,7 +16,7 @@ const LIB: &str = "package lib\n\
 fn role_bytes() -> Vec<u8> {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
-    let lib = common::compile_lib_ref("annlib", LIB).expect("compile annotation lib");
+    let lib = common::compile_lib("annlib", LIB).expect("compile annotation lib");
     let classes = common::compile_in_process(
         "package demo\n\
          import lib.Vis\n\
@@ -63,7 +63,7 @@ fn classpath_annotation_retention_splits_visible_invisible_drops_source() {
 
 #[test]
 fn classpath_low_priority_annotation_reaches_overload_selection() {
-    let library = common::compile_lib_ref(
+    let library = common::compile_lib(
         "low_priority_metadata",
         r#"package lib
 @Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")

@@ -5560,20 +5560,47 @@ fn emit_annotation_class(
         cw.add_abstract_method(0x0401, &field.name, &format!("(){}", type_descriptor(ret)));
         // PUBLIC|ABSTRACT
     }
-    // A RUNTIME-retention Kotlin annotation emits `@java.lang.annotation.Retention(RUNTIME)` so the JVM
-    // keeps its USES (`@Anno` in `RuntimeVisibleAnnotations`) visible to reflection.
+    // Retention meta-annotations, matching kotlinc: an EXPLICIT `@Retention(X)` stamps
+    // `kotlin.annotation.Retention(X)` first, and every annotation class carries
+    // `java.lang.annotation.Retention(RUNTIME|CLASS|SOURCE)` (RUNTIME when defaulted) — the java one is
+    // what both the JVM and classpath consumers read the retention back from.
     let mut meta: Vec<crate::ir::AppliedAnnotation> = Vec::new();
-    if c.runtime_retained {
-        meta.push(crate::ir::AppliedAnnotation {
-            internal: crate::types::type_name("java/lang/annotation/Retention"),
-            values: vec![(
-                "value".to_string(),
-                crate::ir::AnnoValue::Enum(
-                    crate::types::type_name("java/lang/annotation/RetentionPolicy"),
-                    "RUNTIME".to_string(),
-                ),
-            )],
-        });
+    if let Some(retention) = c.annotation_retention {
+        use crate::ir::AnnoRetention;
+        let enum_stamp =
+            |internal: &str, enum_ty: &str, constant: &str| crate::ir::AppliedAnnotation {
+                internal: crate::types::type_name(internal),
+                values: vec![(
+                    "value".to_string(),
+                    crate::ir::AnnoValue::Enum(
+                        crate::types::type_name(enum_ty),
+                        constant.to_string(),
+                    ),
+                )],
+            };
+        let kotlin_name = match retention {
+            AnnoRetention::Default => None,
+            AnnoRetention::Runtime => Some("RUNTIME"),
+            AnnoRetention::Binary => Some("BINARY"),
+            AnnoRetention::Source => Some("SOURCE"),
+        };
+        if let Some(constant) = kotlin_name {
+            meta.push(enum_stamp(
+                "kotlin/annotation/Retention",
+                "kotlin/annotation/AnnotationRetention",
+                constant,
+            ));
+        }
+        let policy = match retention {
+            AnnoRetention::Default | AnnoRetention::Runtime => "RUNTIME",
+            AnnoRetention::Binary => "CLASS",
+            AnnoRetention::Source => "SOURCE",
+        };
+        meta.push(enum_stamp(
+            "java/lang/annotation/Retention",
+            "java/lang/annotation/RetentionPolicy",
+            policy,
+        ));
     }
     meta.extend(c.applied_annotations.iter().cloned());
     cw.set_runtime_annotations(&meta);

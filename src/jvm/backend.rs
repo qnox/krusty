@@ -536,6 +536,31 @@ impl Backend for JvmBackend {
     }
 }
 
+/// `true` when annotation `internal` applied in `file` belongs in `@Metadata` annotation records: its
+/// Kotlin retention is BINARY or RUNTIME. kotlinc drops SOURCE-retained annotations (`@Suppress`) from
+/// metadata and bytecode alike. A CLASSPATH annotation's retention comes from its compiled class's
+/// `java.lang.annotation.Retention` ("RUNTIME"/"CLASS"; SOURCE or unreadable → dropped); a SAME-FILE
+/// `annotation class` reports its declared retention.
+fn metadata_recorded_annotation(
+    file: &File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+    internal: crate::types::TypeName,
+) -> bool {
+    if let Some(declaration) = crate::ir_lower::file_class_decl_by_internal(file, internal) {
+        return declaration.kind == crate::ast::ClassKind::Annotation
+            && crate::ir_lower::declared_annotation_retention(file, file_index, syms, declaration)
+                != crate::ir::AnnoRetention::Source;
+    }
+    syms.libraries.classifier(internal).is_some_and(|library| {
+        library.is_annotation()
+            && matches!(
+                library.retention.as_deref(),
+                Some("RUNTIME") | Some("CLASS")
+            )
+    })
+}
+
 /// The facade's `@kotlin.Metadata` (`k = 2`, file facade), recording every top-level function —
 /// plain and EXTENSION, suspend and INLINE included — with its LOGICAL source signature. The physical
 /// descriptor alone cannot express an extension's receiver (it is just the first JVM parameter), a
@@ -637,9 +662,22 @@ pub fn facade_package_metadata(
             sig.context_count,
             sig.contract.is_some(),
         );
+        // Argument-less non-SOURCE annotations survive into `Function.annotation` records — the
+        // channel a separate compilation reads resolution markers (`@LowPriorityInOverloadResolution`)
+        // from. Annotations WITH arguments are not modeled yet: recording one without its arguments
+        // would corrupt the record, so they are omitted (as before).
+        let annotations: Vec<crate::types::TypeName> = f
+            .annotations
+            .iter()
+            .zip(f.annotation_args.iter())
+            .filter(|(_, args)| args.is_empty())
+            .filter_map(|(annotation, _)| syms.resolved_annotation(file_index, annotation))
+            .filter(|&internal| metadata_recorded_annotation(file, file_index, syms, internal))
+            .collect();
         metas.push(crate::metadata::builder::FnMeta {
             name: f.name.clone(),
             params,
+            annotations,
             ret: declared_ret,
             receiver,
             param_defaults: sig.param_defaults.clone(),

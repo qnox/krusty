@@ -14,6 +14,12 @@ pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
+    /// Argument-less BINARY/RUNTIME-retained annotations applied to the function, recorded as
+    /// `Function.annotation` (field 12) `Annotation { id }` entries — how a separate compilation reads
+    /// resolution-affecting markers like `@kotlin.internal.LowPriorityInOverloadResolution` back from
+    /// the classpath. Also sets `Function.flags` `HAS_ANNOTATIONS` (bit 0). SOURCE-retained annotations
+    /// never appear here (kotlinc drops them from metadata too).
+    pub annotations: Vec<crate::types::TypeName>,
     /// Extension-receiver type (`Function.receiver_type` = 5), `Some` for an extension function. Recorded
     /// SEPARATELY from `params` (the LOGICAL value params, receiver excluded), so a reader recovers the
     /// extension's true source arity — `fun T.f(a)` is one value param, not two. `None` for a plain fn.
@@ -223,7 +229,10 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         crate::types::Visibility::Protected => 2,
         crate::types::Visibility::Public => 3,
     };
-    let flags = (vis << 1) | (u64::from(f.suspend) << 13) | (u64::from(f.inline) << 10);
+    let flags = u64::from(!f.annotations.is_empty())
+        | (vis << 1)
+        | (u64::from(f.suspend) << 13)
+        | (u64::from(f.inline) << 10);
     if flags != 0x06 {
         p.field_varint(9, flags);
     }
@@ -295,6 +304,14 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         } else {
             p.repeated_message(6, &vp); // Function.value_parameter = 6
         }
+    }
+    // Applied annotations (Function.annotation = 12): `Annotation.id` (field 1) referencing the class
+    // through the string table's DESC_TO_CLASS_ID form, exactly as kotlinc records e.g.
+    // `@LowPriorityInOverloadResolution`.
+    for &annotation in &f.annotations {
+        let mut ab = Pb::new();
+        ab.field_varint(1, u64::from(st.class_id(annotation)));
+        p.repeated_message(12, &ab);
     }
     // The declared contract (Function.contract = 32) — `returns(…) implies …` / `callsInPlace`
     // effects a separate compilation applies at call sites.
@@ -453,6 +470,7 @@ mod tests {
     fn matches_kotlinc_reference_for_f_int_int() {
         let (d1, d2) = build_package(
             &[FnMeta {
+                annotations: Vec::new(),
                 name: "f".into(),
                 params: vec![("a".into(), Ty::Int)],
                 ret: Ty::Int,
@@ -573,6 +591,7 @@ mod tests {
         };
         let (d1, d2) = build_package(
             &[FnMeta {
+                annotations: Vec::new(),
                 name: "validate".into(),
                 params: vec![("value".into(), Ty::obj("kotlin/Any"))],
                 ret: Ty::Boolean,
@@ -611,6 +630,7 @@ mod tests {
         // return Int + param Int must share one string-table entry (index 1).
         let (_d1, d2) = build_package(
             &[FnMeta {
+                annotations: Vec::new(),
                 name: "g".into(),
                 params: vec![("x".into(), Ty::Int)],
                 ret: Ty::Int,
