@@ -17,41 +17,8 @@ export KRUSTY_TEST_TIMEOUT_SECONDS="${KRUSTY_TEST_TIMEOUT_SECONDS:-120}"
 
 cd "$(dirname "$0")"
 
-# Run one command in its own process group. On timeout terminate the whole group, including JVMs
-# spawned by the test binary. Killing only the Rust parent leaks those children on platforms without
-# Linux's PR_SET_PDEATHSIG and makes every later timing measurement compete with stale compiler work.
-run_with_deadline() {
-  local seconds="$1"
-  shift
-  command -v perl >/dev/null 2>&1 || {
-    echo "run-tests.sh: perl is required to enforce the test deadline" >&2
-    return 2
-  }
-  perl -MPOSIX -e '
-    my $seconds = shift @ARGV;
-    my $pid = fork();
-    die "fork failed: $!\n" unless defined $pid;
-    if ($pid == 0) {
-      POSIX::setpgid(0, 0) == 0 or die "setpgid failed: $!\n";
-      exec @ARGV;
-      die "exec failed: $!\n";
-    }
-    my $timed_out = 0;
-    $SIG{ALRM} = sub {
-      $timed_out = 1;
-      kill "TERM", -$pid;
-      select undef, undef, undef, 0.2;
-      kill "KILL", -$pid;
-    };
-    alarm $seconds;
-    waitpid($pid, 0);
-    alarm 0;
-    exit 124 if $timed_out;
-    exit(128 + ($? & 127)) if $? & 127;
-    exit($? >> 8);
-  ' "$seconds" "$@"
-}
-export -f run_with_deadline
+# Shared with instrumented coverage, which executes the already-built test binaries directly.
+source "$(dirname "$0")/scripts/test-deadline.sh"
 
 # Frontend/corpus diagnosis is part of the test workflow, not a separate release-build path. Keep it
 # behind this harness so it receives the same provisioned Kotlin version and global deadline as the
