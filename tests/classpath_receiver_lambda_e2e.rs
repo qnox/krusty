@@ -524,3 +524,23 @@ fn postponed_callable_reference_does_not_reject_receiver_lambda_candidate() {
         result.krusty_stdout, result.krusty_stderr
     );
 }
+
+#[test]
+fn stdlib_join_to_string_trailing_lambda_remains_applicable() {
+    let classpath = [common::stdlib_jar()];
+    let source = "fun probe(xs: List<String>): String {\n\
+        \x20 val implicitDefaults = xs.joinToString { it.length.toString() }\n\
+        \x20 return implicitDefaults + xs.joinToString(\"-\") { it.uppercase() }\n\
+        }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &classpath);
+    assert_eq!(
+        result.reference_code, 0,
+        "kotlinc rejected joinToString trailing lambdas: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        result.krusty_code, 0,
+        "krusty did not match kotlinc: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+}

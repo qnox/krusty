@@ -19085,7 +19085,7 @@ impl<'a> Checker<'a> {
                             return true;
                         }
                         expected.is_some_and(|expected| {
-                            expected.fun_arity().is_some()
+                            expected.non_null().fun_arity().is_some()
                                 || expected.is_erased_top()
                                 || self.semantic_sam_signature(expected).is_some()
                         })
