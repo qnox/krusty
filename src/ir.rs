@@ -1280,6 +1280,12 @@ pub struct IrStatic {
     /// = a specific class — a `companion object`'s `const val` lives on the OUTER class (kotlinc emits
     /// `public static final` + `ConstantValue` there), not the facade.
     pub owner: Option<TypeName>,
+    /// A COMPANION property hoisted onto the outer class as a static (kotlinc's layout): the field
+    /// is `private static [final]` on the OUTER class, the outer emits PUBLIC synthetic
+    /// `access$get<X>$cp()`/`access$set<X>$cp(v)` bridges, the companion's instance accessors
+    /// delegate through them, and the initializer runs in the outer's `<clinit>` AFTER the
+    /// `Companion` instance store.
+    pub companion_hoisted: bool,
     /// Declaration visibility (`public` by default). A PRIVATE top-level property gets NO public
     /// accessors; cross-class reads inside the file go through a synthesized `access$get<X>$p` bridge
     /// (kotlinc's shape).
