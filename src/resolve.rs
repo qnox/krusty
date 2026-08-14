@@ -1169,10 +1169,9 @@ pub struct ClassSig {
     /// `Box<Int>` substitutes the argument at that index (`Int`) for the erased `Object`.
     pub generic_props: HashMap<String, (usize, bool)>,
     /// Properties whose DECLARED type is a direct nullable type parameter (`val value: T?`), by
-    /// class-type-parameter index. Deliberately separate from `generic_props`/
-    /// `generic_property_shapes`: the fact substitutes ONLY in the member-READ result position —
-    /// call signatures, setters and storage stay erased (a scalar binding would otherwise create a
-    /// nullable-scalar boxing boundary the other paths do not model).
+    /// class-type-parameter index. This is separate from `generic_props`, which represents a bare
+    /// `T`, and from the recursive shapes in `generic_property_shapes`; all three are semantic
+    /// declaration templates consumed uniformly by property selection.
     pub nullable_tparam_props: HashMap<String, usize>,
     /// Function-property signatures that require class type-parameter substitution.
     /// Declared property types that mention class parameters anywhere in their shape (`Cell<T>`,
@@ -2762,19 +2761,6 @@ impl SymbolTable {
         name: &str,
         declared: Ty,
     ) -> Ty {
-        self.applied_declared_member_prop_ty_at(recv, owner, name, declared, true)
-    }
-
-    /// `read_position = false` for STORAGE/setter shapes: a direct `val value: T?` member keeps its
-    /// erased slot there (only the READ result substitutes — see `nullable_tparam_props`).
-    fn applied_declared_member_prop_ty_at(
-        &self,
-        recv: Ty,
-        owner: TypeName,
-        name: &str,
-        declared: Ty,
-        read_position: bool,
-    ) -> Ty {
         let recv = recv.non_null();
         let Some(internal) = recv.obj_internal() else {
             return declared;
@@ -2793,15 +2779,12 @@ impl SymbolTable {
                     .find_map(|(o, applied, _)| (o == owner).then_some(applied))
             }
         };
-        // A direct `val value: T?` member READ: nullable of the receiver's binding. REFERENCE
-        // bindings only — a scalar binding would turn the erased reference slot into a
-        // nullable-scalar boxing boundary the read path does not model, so it keeps `declared`.
-        if read_position {
-            if let Some(&i) = owner_class.nullable_tparam_props.get(name) {
-                if let Some(&arg) = applied().and_then(|applied| applied.type_args().get(i)) {
-                    if !arg.non_null().is_jvm_scalar() && arg != Ty::Error {
-                        return Ty::nullable(arg.non_null());
-                    }
+        // A direct `val value: T?` declaration is nullable of the receiver's semantic binding.
+        // Whether that binding needs a boxed physical slot is a backend representation decision.
+        if let Some(&i) = owner_class.nullable_tparam_props.get(name) {
+            if let Some(&arg) = applied().and_then(|applied| applied.type_args().get(i)) {
+                if arg != Ty::Error {
+                    return Ty::nullable(arg.non_null());
                 }
             }
         }

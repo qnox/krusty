@@ -233,6 +233,85 @@ fn generic_extension_property_keeps_nullability_and_kotlin_collection_type() {
 }
 
 #[test]
+fn direct_nullable_type_parameter_property_keeps_scalar_semantics() {
+    const SOURCE: &str = r#"
+        class Box<T>(var value: T?)
+        class ReadBox<T>(val value: T?)
+
+        fun read(box: Box<Int>) = box.value
+
+        fun demand(value: Int?) {}
+
+        fun write(box: Box<Int>) {
+            box.value = 7
+        }
+
+        fun use(box: Box<Int>) {
+            demand(read(box))
+        }
+
+        fun narrowed(box: ReadBox<Int>): Int {
+            if (box.value != null) return box.value + 1
+            return 0
+        }
+    "#;
+    let (code, diagnostics) = common::kotlinc_source_result("NullableTypeParamScalar", SOURCE);
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected the control source: {diagnostics}"
+    );
+    let same_file = common::front_end_diagnostics(SOURCE, &[], None);
+    assert!(
+        same_file.is_empty(),
+        "a same-file property read/write must substitute T? to Int?: {same_file:?}"
+    );
+    let krusty = common::front_end_diagnostics_files(
+        &[
+            "package fixtures\nclass Box<T>(var value: T?)",
+            "package consumer\nimport fixtures.Box\n\
+             fun read(box: Box<Int>) = box.value\n\
+             fun demand(value: Int?) {}\n\
+             fun write(box: Box<Int>) { box.value = 7 }\n\
+             fun use(box: Box<Int>) { demand(read(box)) }",
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        krusty.is_empty(),
+        "a source property read/write must substitute T? to Int?: {krusty:?}"
+    );
+}
+
+#[test]
+fn direct_nullable_type_parameter_setter_rejects_the_wrong_binding() {
+    const SOURCE: &str = r#"
+        class Box<T>(var value: T?)
+
+        fun invalid(box: Box<String>) {
+            box.value = 7
+        }
+    "#;
+    let (code, _) = common::kotlinc_source_result("NullableTypeParamSetter", SOURCE);
+    assert_ne!(code, 0, "kotlinc must reject Int assigned to String?");
+    let krusty = common::front_end_diagnostics_files(
+        &[
+            "package fixtures\nclass Box<T>(var value: T?)",
+            "package consumer\nimport fixtures.Box\n\
+             fun invalid(box: Box<String>) { box.value = 7 }",
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        krusty
+            .iter()
+            .any(|message| message.contains("type mismatch")),
+        "the semantic setter parameter must be String?, got {krusty:?}"
+    );
+}
+
+#[test]
 fn java_generic_member_binds_lambda_param_from_receiver_type_argument() {
     // A lambda passed to a classpath generic member
     // (`TransformSequence<T>.mapPresent(Function<? super T, ? extends R>)`) must type `it` from the
