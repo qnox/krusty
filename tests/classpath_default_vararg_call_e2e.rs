@@ -9,17 +9,6 @@ use super::common;
 const LIB: &str = "package lib\n\
     fun <T : Any> omittable(name: String? = null, vararg more: T): String = \"ok\"\n";
 
-fn assert_accepted(name: &str, main: &str) {
-    let Some(diagnostics) = common::checker_diags_against("default_vararg", LIB, main) else {
-        eprintln!("skipping: no kotlinc/stdlib toolchain");
-        return;
-    };
-    assert!(
-        diagnostics.is_empty(),
-        "{name}: unexpected diagnostics: {diagnostics:?}"
-    );
-}
-
 /// Reference-compiled dependency variant: these cases consume kotlinc-emitted metadata
 /// shapes krusty does not produce yet (see `common::compile_lib_ref`).
 fn assert_accepted_ref(name: &str, main: &str) {
@@ -64,7 +53,7 @@ fn default_and_vararg_omitted_plain() {
 fn vararg_used_default_given() {
     // Regression guard: supplies every parameter, so it passes through the base overload's vararg
     // machinery and never touches the changed guard — it passed pre-fix too.
-    assert_accepted(
+    assert_accepted_ref(
         "first arg + vararg elements",
         "import lib.omittable\nfun box() { omittable(\"n\", Any()) }\n",
     );

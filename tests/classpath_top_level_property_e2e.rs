@@ -64,7 +64,7 @@ fn a_classpath_internal_top_level_property_does_not_leak_through_its_public_gett
     const PRIVATE_LIB: &str = "package lib\ninternal val hiddenCounter: Int = 9\n";
     let main = "import lib.hiddenCounter\nfun use(): Int = hiddenCounter\n";
     let Some(diagnostics) =
-        common::diagnostics_against("cptoplevelpropinternal", PRIVATE_LIB, main)
+        common::diagnostics_against_ref("cptoplevelpropinternal", PRIVATE_LIB, main)
     else {
         return;
     };

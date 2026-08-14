@@ -405,7 +405,7 @@ fn classpath_extension_named_after_spread() {
         \x20 val got = B().segd(*xs, flag = true)\n\
         \x20 return if (got == \"OKtrue\") \"OK\" else \"F:\" + got\n\
         }\n";
-    if let Some(out) = common::expect_box_run_against("cp_vararg_spread_named", LIB, MAIN) {
+    if let Some(out) = common::expect_box_run_against_ref("cp_vararg_spread_named", LIB, MAIN) {
         assert_eq!(out, "OK", "classpath named after spread");
     }
 }
