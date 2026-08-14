@@ -4500,31 +4500,52 @@ impl JvmLibraries {
         ) {
             return plan.map(|boxed| *boxed);
         }
-        let plan = self.inline_body_plan_uncached(callable, &body_descriptor);
-        self.cp.memoize_inline_plan(
-            callable.owner,
-            &callable.name,
+        let mut body_unavailable = false;
+        let plan = self.inline_body_plan_uncached(
+            callable,
             &body_descriptor,
             &parameter_slots,
-            default_descriptor,
-            plan.clone().map(Box::new),
+            &mut body_unavailable,
         );
+        // "No plan" is only a memoizable FACT when it was decoded from bytes actually read. A
+        // failed body read (archive open/read error under load, a jar changing mid-run) must stay
+        // transient — publishing it into the per-entry global map would suppress the plan for
+        // every later compile sharing the jar (the body cache guards the same hazard one level
+        // down: "only a SUCCESSFUL read may populate the process-global cache").
+        if !body_unavailable {
+            self.cp.memoize_inline_plan(
+                callable.owner,
+                &callable.name,
+                &body_descriptor,
+                &parameter_slots,
+                default_descriptor,
+                plan.clone().map(Box::new),
+            );
+        }
         plan
     }
 
+    /// Decode one callable's inline-body plan from bytecode. `body_unavailable` is set (and `None`
+    /// returned) when a body READ failed — the caller must not memoize that answer; a `None` with
+    /// the flag clear is a decoded "no expandable shape", which is a stable fact of the bytes.
     fn inline_body_plan_uncached(
         &self,
         callable: &LibraryCallable,
         body_descriptor: &str,
+        parameter_slots: &[u16],
+        body_unavailable: &mut bool,
     ) -> Option<InlineBodyPlan> {
         let owner = callable.owner.render();
         let inline_name = format!("{}$$forInline", callable.name);
-        let body = self
+        let Some(body) = self
             .cp
             .method_code(&owner, &inline_name, body_descriptor)
-            .or_else(|| self.cp.method_code(&owner, &callable.name, body_descriptor))?;
+            .or_else(|| self.cp.method_code(&owner, &callable.name, body_descriptor))
+        else {
+            *body_unavailable = true;
+            return None;
+        };
         let instructions = crate::jvm::inline::disassemble(&body.code)?;
-        let parameter_slots = callable_parameter_slots(&callable.physical_params);
         let parameter_at = |slot: u16| {
             parameter_slots
                 .iter()
@@ -4604,8 +4625,13 @@ impl JvmLibraries {
             .filter_map(crate::jvm::inline::loaded_local)
             .nth(1)?;
         let state_parameter = parameter_at(state_slot)?;
-        if !self.inline_default_is_null(callable, state_parameter) {
-            return None;
+        match self.inline_default_is_null(callable, parameter_slots, state_parameter) {
+            None => {
+                *body_unavailable = true;
+                return None;
+            }
+            Some(false) => return None,
+            Some(true) => {}
         }
         let enter = inline_plan_member(enter.1, true)?;
         let cleanup = inline_plan_member(cleanup.1, false)?;
@@ -4618,31 +4644,35 @@ impl JvmLibraries {
         })
     }
 
-    fn inline_default_is_null(&self, callable: &LibraryCallable, parameter: usize) -> bool {
+    /// Whether the `$default` bridge stores `null` into `parameter`'s slot. `None` means the bridge
+    /// body could not be READ (a transient failure the caller must not memoize); `Some(false)`
+    /// covers every decoded negative, including "the callable has no `$default` bridge at all"
+    /// (stable — the bridge descriptor is part of the plan cache key).
+    fn inline_default_is_null(
+        &self,
+        callable: &LibraryCallable,
+        parameter_slots: &[u16],
+        parameter: usize,
+    ) -> Option<bool> {
         let Some(realization) = callable.default_realization.as_deref() else {
-            return false;
+            return Some(false);
         };
         let owner = callable.owner.render();
         let bridge_name = format!("{}$default", callable.name);
-        let Some(body) = self
+        // A failed bridge-body READ is the transient case the caller must not memoize.
+        let body = self
             .cp
-            .method_code(&owner, &bridge_name, &realization.descriptor)
-        else {
-            return false;
-        };
+            .method_code(&owner, &bridge_name, &realization.descriptor)?;
         let Some(instructions) = crate::jvm::inline::disassemble(&body.code) else {
-            return false;
+            return Some(false);
         };
-        let Some(slot) = callable_parameter_slots(&callable.physical_params)
-            .get(parameter)
-            .copied()
-        else {
-            return false;
+        let Some(slot) = parameter_slots.get(parameter).copied() else {
+            return Some(false);
         };
-        instructions.windows(2).any(|window| {
+        Some(instructions.windows(2).any(|window| {
             matches!(window[0], crate::jvm::inline::Insn::Plain { op: 0x01, .. })
                 && crate::jvm::inline::stored_local(&window[1]) == Some(slot)
-        })
+        }))
     }
 
     fn top_level_default_realization(

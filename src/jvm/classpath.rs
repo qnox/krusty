@@ -506,7 +506,7 @@ pub fn trace_cache_stats() {
         let s = cache_stats();
         crate::trace_compiler!(
             "cache",
-            "class L1 {} · L2 {} | ext L1 {} · L2 {} | meta_fns {} | types {} | symbols {} | bodies {} | builtin {}",
+            "class L1 {} · L2 {} | ext L1 {} · L2 {} | meta_fns {} | types {} | symbols {} | bodies {} | builtin {} | plans {}",
             s.l1_class.line("hits"),
             s.l2_class.line("hits"),
             s.ext_l1.line("hits"),
@@ -516,8 +516,8 @@ pub fn trace_cache_stats() {
             s.symbols_memo.line("hits"),
             s.bodies.line("hits"),
             s.builtin_members.line("hits"),
+            s.inline_plans.line("hits"),
         );
-        crate::trace_compiler!("cache", "inline plans {}", s.inline_plans.line("hits"),);
     }
 }
 
@@ -839,9 +839,13 @@ fn global_entry_body_cache(key: &EntryKey) -> BodyCache {
 }
 
 /// Process-global memoized inline-body plans, one [`EntryCache`] slot per jar/jimage entry, keyed by
-/// [`PlanKey`]. Under that full key a plan is decoded purely from the owning entry's bytecode, so —
-/// exactly like the body cache above — it is identical wherever the jar appears and survives the
-/// per-case `Classpath` instances the conformance/e2e harnesses build for scratch-dir classpaths.
+/// [`PlanKey`]. Like the body cache above, a slot survives the per-case `Classpath` instances the
+/// conformance/e2e harnesses build for scratch-dir classpaths. The decode is ALMOST a pure function
+/// of the owning entry's bytes under that key — the one assumption this global slot adds is that a
+/// multifile facade's part classes (and a callable's `$default` bridge owner) co-reside with the
+/// facade in the same artifact and are not shadowed or overlaid independently, which is how kotlinc
+/// emits them; the method-code fallback walk could otherwise read a part body from a different
+/// entry than the facade's.
 /// The full input set a plan decode reads: owner + source name + body descriptor locate the
 /// bytecode, but the SAME method surfaces through several provider channels (plain, suspend
 /// facade, extension) whose `physical_params` slot layouts and `$default` bridges differ — and the
@@ -7143,6 +7147,49 @@ mod fq_tests {
         let string = type_name("kotlin/String");
         assert!(cp.builtin_members.borrow().contains_key(&string));
         assert!(cp.builtin_members("kotlin/String").is_empty());
+    }
+
+    #[test]
+    fn inline_plan_memo_refuses_overlaid_owner() {
+        let owner = type_name("p/Widget");
+        let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
+            lambda_parameter: 0,
+            argument_parameters: Vec::new(),
+            return_parameter: None,
+        };
+        let cp = Classpath::new(vec![]);
+        cp.memoize_inline_plan(owner, "run", "()V", &[0], None, Some(Box::new(plan)));
+        assert!(
+            cp.cached_inline_plan(owner, "run", "()V", &[0], None)
+                .is_some(),
+            "memoized plan served while the owner is jar/absent"
+        );
+        // Overlaying the owner must make the remembered plan unreachable: the overlay is
+        // per-request bytecode, and a later request can overlay DIFFERENT bytes under this name.
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &[("W.java".into(), "package p; public class Widget {}".into())],
+            crate::jvm::java_stub::StubMode::Lenient,
+            &|c| c == "java/lang/Object",
+        )
+        .expect("stub");
+        cp.set_stub_overlay(stubs);
+        assert!(
+            cp.cached_inline_plan(owner, "run", "()V", &[0], None)
+                .is_none(),
+            "overlaid owner must not serve a remembered plan"
+        );
+        cp.memoize_inline_plan(owner, "let", "()V", &[0], None, None);
+        cp.clear_stub_overlay();
+        assert!(
+            cp.cached_inline_plan(owner, "let", "()V", &[0], None)
+                .is_none(),
+            "a memoize attempted while overlaid must not be stored"
+        );
+        assert!(
+            cp.cached_inline_plan(owner, "run", "()V", &[0], None)
+                .is_some(),
+            "the jar-derived plan is valid again once the overlay clears"
+        );
     }
 
     #[test]
