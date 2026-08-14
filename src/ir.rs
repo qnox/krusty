@@ -716,6 +716,9 @@ pub struct IrCtorArg {
     /// available as a local in `<init>` for property initializers / `init` blocks.
     pub is_field: bool,
     pub has_default: bool,
+    /// A `vararg` primary-ctor parameter — class `@Metadata` emits `ValueParameter.vararg_element_type`
+    /// (f4) so a consumer admits element-form/omitted arguments instead of demanding a literal array.
+    pub is_vararg: bool,
     pub type_param: Option<u32>,
     /// `Some(name)` when the backend should guard this parameter with a non-null assertion
     /// (`Intrinsics.checkNotNullParameter`) at `<init>` entry — a non-null reference param. `None` for a

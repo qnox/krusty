@@ -203,6 +203,9 @@ struct CtorShape<'a> {
     param_defaults: &'a [bool],
     param_tparams: &'a [Option<u32>],
     sig_name: Option<&'a str>,
+    /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type` (f4),
+    /// the only place ctor vararg-ness survives into metadata.
+    vararg_index: Option<usize>,
 }
 
 fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &TypeParameters) -> Pb {
@@ -225,6 +228,17 @@ fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &Type
             type_parameters,
         );
         vp.field_message(3, &ty); // ValueParameter.type = 3
+                                  // A vararg parameter records its ELEMENT type as `vararg_element_type` (f4) — the declared
+                                  // type stays the array, exactly as the package-function writer does.
+        if shape.vararg_index == Some(i) {
+            let elem = pty
+                .array_elem()
+                .or_else(|| pty.type_args().first().copied());
+            if let Some(elem) = elem {
+                let et = type_pb(st, elem, type_parameters);
+                vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
+            }
+        }
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
     let sig = jvm_method_sig(st, Some(shape.sig_name.unwrap_or("<init>")), shape.desc);
@@ -280,6 +294,9 @@ pub struct ClassTail<'a> {
     /// `Class` JvmProtoBuf extension field 104 (`jvmClassFlags`) — kotlinc emits `3` for an interface.
     /// `None` for every other kind (field omitted).
     pub jvm_class_flags: Option<u64>,
+    /// Index of a `vararg` PRIMARY-ctor parameter (into `ctor_params`), for its
+    /// `vararg_element_type` record. `None` ⇒ no vararg parameter.
+    pub ctor_vararg_index: Option<usize>,
     /// Whether the class HAS a primary constructor at all — an `interface` has none, so `Class` carries
     /// no `constructor` (f8) entry. Defaults to true (every other kind).
     pub emit_primary_ctor: bool,
@@ -317,6 +334,7 @@ impl Default for ClassTail<'_> {
             inline_underlying: None,
             ctor_sig_name: None,
             jvm_class_flags: None,
+            ctor_vararg_index: None,
             emit_primary_ctor: true,
             primary_ctor_flags: 0,
             type_params: &[],
@@ -429,6 +447,7 @@ pub fn build_class(
                 param_defaults: tail.ctor_param_defaults,
                 param_tparams: &ctor_param_tparams,
                 sig_name: tail.ctor_sig_name,
+                vararg_index: tail.ctor_vararg_index,
             },
             &class_type_parameters,
         )]
@@ -445,6 +464,7 @@ pub fn build_class(
                 param_defaults: &[],
                 param_tparams: &[],
                 sig_name: None,
+                vararg_index: None,
             },
             &class_type_parameters,
         ));

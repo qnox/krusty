@@ -891,6 +891,13 @@ fn build_class_metadata(
     } else {
         named_ctor_args
     };
+    // Position of a `vararg` primary-ctor parameter within the NAMED parameter list (the same
+    // filtered order `ctor_params` uses) — `None` when unnamed-args fallback is in effect.
+    let ctor_vararg_index = c
+        .ctor_args
+        .iter()
+        .filter(|arg| arg.name.is_some())
+        .position(|arg| arg.is_vararg);
     let ctor_params: Vec<(String, Ty)> = ctor_params_with_defaults
         .iter()
         .map(|(name, ty, _, _)| (name.clone(), *ty))
@@ -1043,8 +1050,18 @@ fn build_class_metadata(
                     params_have_defaults: false,
                     param_defaults,
                     vararg_index: ir.fn_vararg_index.get(&fid).copied(),
-                    jvm_sig: declared
-                        .map(|_| crate::jvm::names::method_descriptor(&f.params, f.ret)),
+                    // The physical descriptor rides along whenever a reader could not derive it from
+                    // the proto types: a VC/suspend-rewritten member (`declared`), a signature
+                    // mentioning a TYPE PARAMETER (`vararg parts: T` erases to `[Ljava/lang/Object;`
+                    // — nothing in the record names that), or a vararg (kotlinc records it there
+                    // too). Derivable signatures omit it, kotlinc's usual shape.
+                    jvm_sig: (declared.is_some()
+                        || ir.fn_vararg_index.contains_key(&fid)
+                        || matches!(metadata_ret, crate::types::Ty::TyParam(..))
+                        || metadata_params
+                            .iter()
+                            .any(|parameter| matches!(parameter, crate::types::Ty::TyParam(..))))
+                    .then(|| crate::jvm::names::method_descriptor(&f.params, f.ret)),
                     jvm_sig_name: (name != f.name).then(|| f.name.clone()),
                 })
             })
@@ -1304,6 +1321,7 @@ fn build_class_metadata(
                 && (c.has_primary_ctor || c.secondary_ctors.is_empty()),
             jvm_class_flags: c.is_interface.then_some(3),
             secondary_ctors: &secondary_ctor_metas,
+            ctor_vararg_index,
             nested: &nested_refs,
             sealed_subclasses: &sealed_refs,
             supertypes: &supertypes,

@@ -200,7 +200,7 @@ fn named_args_to_classpath_member_fn_reorder_and_run() {
 
 #[test]
 fn named_classpath_member_vararg_reorders_and_passes_array() {
-    common::expect_box_ok_against_ref(
+    common::expect_box_ok_against(
         "named_member_vararg",
         "package sample\n\
          class Formatter {\n\

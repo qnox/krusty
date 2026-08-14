@@ -1523,6 +1523,7 @@ impl IrPlugin for SerializationPlugin {
                     ty: kserializer_of(class_ty("kotlin/Any")),
                     is_field: false,
                     has_default: false,
+                    is_vararg: false,
                     type_param: None,
                     check: None,
                 };

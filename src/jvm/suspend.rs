@@ -5559,6 +5559,7 @@ fn build_continuation_class(
             ty: recv_ty,
             is_field: false,
             has_default: false,
+            is_vararg: false,
             type_param: None,
             check: None,
         });
@@ -5569,6 +5570,7 @@ fn build_continuation_class(
         ty: continuation_ty(),
         is_field: false,
         has_default: false,
+        is_vararg: false,
         type_param: None,
         check: None,
     });

@@ -1130,6 +1130,7 @@ fn lower_file_at_reporting_impl(
                         ty: ty_to_ir(Ty::obj(o)),
                         is_field: true,
                         has_default: false,
+                        is_vararg: false,
                         type_param: None,
                         check: None,
                     })
@@ -1139,6 +1140,7 @@ fn lower_file_at_reporting_impl(
                             ty: ty_to_ir(capture.ty),
                             is_field: true,
                             has_default: false,
+                            is_vararg: false,
                             type_param: None,
                             check: capture
                                 .ty
@@ -1171,6 +1173,7 @@ fn lower_file_at_reporting_impl(
                             ty: t,
                             is_field: p.is_property,
                             has_default: p.default.is_some(),
+                            is_vararg: p.is_vararg,
                             type_param: c
                                 .type_params
                                 .iter()
@@ -10588,6 +10591,7 @@ impl<'a> Lower<'a> {
                 ty: ty_to_ir(*ty),
                 is_field: false,
                 has_default: false,
+                is_vararg: false,
                 type_param: None,
                 check: None,
             })
@@ -10596,6 +10600,7 @@ impl<'a> Lower<'a> {
                 ty: cont_ir.clone(),
                 is_field: false,
                 has_default: false,
+                is_vararg: false,
                 type_param: None,
                 check: None,
             }))

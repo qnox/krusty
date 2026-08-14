@@ -5582,3 +5582,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   private `(String, I)` one (byte-identity test pins this). Value classes with secondary
   constructors keep declining (static `constructor-impl` overloads unmodeled). Test:
   `tests/classpath_ctor_receiver_lambda_e2e.rs` (krusty-built dependency by default).
+
+- **Primary-ctor varargs and non-derivable member descriptors survive into class `@Metadata`.** A
+  `vararg` primary-constructor parameter records `ValueParameter.vararg_element_type` (f4) — without
+  it a consumer demands a literal array argument and rejects `Words()` ("no value passed for
+  parameter"). `IrCtorArg::is_vararg` carries the fact from lowering. A member function record also
+  carries its physical `JvmMethodSignature` descriptor whenever a reader could not derive it from
+  the proto types: a signature mentioning a TYPE PARAMETER (`fun <T> genericJoin(vararg parts: T)`
+  erases to `[Ljava/lang/Object;`, which nothing in the record names) or a vararg member — kotlinc
+  records both. Derivable signatures keep omitting it. Tests:
+  `tests/interface_supertype_members_e2e.rs`, `tests/named_args_classpath_e2e.rs` (both krusty-built
+  by default).
