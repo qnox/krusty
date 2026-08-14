@@ -22769,6 +22769,26 @@ impl<'a> Lower<'a> {
         }
 
         let t = {
+            // A BARE classifier property read (`entries` inside an enum's companion) records the
+            // same `ClassifierPropertyRead` the qualified `Color.entries` member read does — the
+            // realization is identical: a static accessor call with no receiver.
+            if let Some(ExprLowering::ClassifierPropertyRead { owner, property }) =
+                self.info.expr_lowers.get(&e).cloned()
+            {
+                let Some(accessor) = property.getter else {
+                    self.set_bail("classifier property has no direct accessor");
+                    return None;
+                };
+                let target_owner = accessor.owner.unwrap_or(owner);
+                let target_name = accessor.physical_name.unwrap_or(accessor.name);
+                return Some(self.emit_static_call(
+                    target_owner,
+                    target_name,
+                    accessor.descriptor,
+                    accessor.inline,
+                    vec![],
+                ));
+            }
             if let Some(ExprLowering::ClassStorageRead { field }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
