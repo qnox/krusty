@@ -57,20 +57,40 @@ pub fn render_file_dump(input: &FileDumpInput<'_>) -> String {
 /// does not bound debug expansion: a long resolved type name may be repeated for many expressions.
 pub fn render_file_dump_with_limit(input: &FileDumpInput<'_>, max_bytes: usize) -> String {
     let bail = std::cell::RefCell::new(String::new());
-    let lowered = input.info.and_then(|info| {
-        crate::ir_lower::lower_file_at_reporting(
-            input.file,
-            input.file_index as u32,
-            info,
-            input.symbols,
-            input.runtime,
-            &bail,
-        )
-    });
+    // The compile pipeline only lowers files whose check produced no errors (`emit_checked`), so
+    // lowering's internal asserts assume an error-free handoff — an unresolved type, for example,
+    // records no resolved `Ty` for its reference. Uphold the same precondition here.
+    let has_errors = input
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == crate::diag::Severity::Error);
+    // Lowering asserts on handoff invariants by panicking; a dump exists to debug exactly the
+    // files that break invariants, so a panic becomes the IR section's reason instead of killing
+    // the process (the LSP analysis worker runs this on its main thread).
+    let mut panicked = String::new();
+    let lowered = match (input.info, has_errors) {
+        (Some(info), false) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::ir_lower::lower_file_at_reporting(
+                input.file,
+                input.file_index as u32,
+                info,
+                input.symbols,
+                input.runtime,
+                &bail,
+            )
+        }))
+        .unwrap_or_else(|payload| {
+            panicked = format!("lowering panicked: {}", panic_message(payload.as_ref()));
+            None
+        }),
+        _ => None,
+    };
     let bail_reason = bail.borrow();
     let ir = match lowered.as_ref() {
         Some(ir) => Ok(ir),
         None if input.info.is_none() => Err("file was not checked"),
+        None if has_errors => Err("file has frontend errors (see Checker section)"),
+        None if !panicked.is_empty() => Err(panicked.as_str()),
         None if bail_reason.is_empty() => Err("lowering produced no IR and no reason"),
         None => Err(bail_reason.as_str()),
     };
@@ -86,6 +106,15 @@ pub fn render_file_dump_with_limit(input: &FileDumpInput<'_>, max_bytes: usize) 
         },
         max_bytes,
     )
+}
+
+/// The human-readable text of a caught panic payload (`panic!` carries `&str` or `String`).
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 /// Render the dump document.
@@ -451,5 +480,71 @@ mod tests {
         assert_eq!(line_column("abc\ndef\n", 4), (2, 1));
         // Past the end clamps to the last position rather than panicking.
         assert_eq!(line_column("abc\n", 999), (2, 1));
+    }
+
+    #[test]
+    fn a_file_dump_with_frontend_errors_skips_lowering() {
+        // An unresolved classpath type (`RegularFileProperty` with no Gradle classpath) records no
+        // resolved `Ty` for its reference; lowering would panic on the missing handoff. The compile
+        // pipeline never lowers an errored file, and neither may the dump.
+        let source =
+            "abstract class GreetTask {\n    abstract val outputFile: RegularFileProperty\n}\n";
+        let mut diags = DiagSink::new();
+        let files = [parse_source_with_detected_features(source, &mut diags)];
+        let mut symbols = collect_signatures(&files, &mut diags);
+        let info = check_file(&files[0], &mut symbols, &mut diags);
+        assert!(diags.has_errors(), "the probe source must fail its check");
+
+        let text = render_file_dump(&FileDumpInput {
+            label: "src/GreetTask.kt",
+            source,
+            file: &files[0],
+            file_index: 0,
+            info: Some(&info),
+            symbols: &symbols,
+            runtime: &EmptySymbolSource,
+            diagnostics: &diags.diags,
+        });
+
+        assert!(
+            text.contains("not lowered: file has frontend errors (see Checker section)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("unresolved reference 'RegularFileProperty'"),
+            "{text}"
+        );
+        assert!(!text.contains("functions ("), "{text}");
+    }
+
+    #[test]
+    fn a_panic_during_lowering_becomes_the_ir_sections_reason() {
+        // Defense in depth: if a caller loses the diagnostics (or lowering breaks an invariant on
+        // an error-free file), the panic must render as the IR section's reason, not kill the
+        // process — the LSP analysis worker runs dumps on its main thread.
+        let source =
+            "abstract class GreetTask {\n    abstract val outputFile: RegularFileProperty\n}\n";
+        let mut diags = DiagSink::new();
+        let files = [parse_source_with_detected_features(source, &mut diags)];
+        let mut symbols = collect_signatures(&files, &mut diags);
+        let info = check_file(&files[0], &mut symbols, &mut diags);
+
+        let text = render_file_dump(&FileDumpInput {
+            label: "src/GreetTask.kt",
+            source,
+            file: &files[0],
+            file_index: 0,
+            info: Some(&info),
+            symbols: &symbols,
+            runtime: &EmptySymbolSource,
+            // Empty on purpose: the error gate must not fire, forcing lowering to panic.
+            diagnostics: &[],
+        });
+
+        assert!(
+            text.contains("not lowered: lowering panicked: checked type reference missing"),
+            "{text}"
+        );
+        assert!(!text.contains("functions ("), "{text}");
     }
 }

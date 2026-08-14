@@ -352,30 +352,76 @@ pub struct DocumentAnalyzer;
 /// parse. An unreadable or deleted file simply contributes nothing; the caller knows which URIs it
 /// attempted and drops their stale entries.
 pub fn index_workspace_symbols_from_disk(uris: &[&str]) -> WorkspaceSymbolIndex {
-    let mut skipped_oversized = false;
+    // This check intentionally precedes the read: the generic builder never sees the source, so
+    // an oversized file costs a `stat`. The skip is recorded with its URI after construction
+    // rather than letting an empty-looking input incorrectly restore the chunk's completeness —
+    // and so the client log can name the file instead of reporting an anonymous gap.
+    let skipped = std::cell::RefCell::new(Vec::new());
     let readable = uris.iter().filter_map(|uri| {
         let path = crate::uri::file_uri_to_path(uri)?;
-        let size = match usize::try_from(std::fs::metadata(&path).ok()?.len()) {
-            Ok(size) => size,
-            Err(_) => {
-                skipped_oversized = true;
-                return None;
-            }
-        };
-        if size > crate::analysis::MAX_INDEXED_FILE_BYTES {
-            // This check intentionally precedes the read. Because the generic builder never
-            // sees the source, propagate the omission after construction rather than letting
-            // an empty-looking input incorrectly restore the chunk's completeness.
-            skipped_oversized = true;
+        let bytes = std::fs::metadata(&path).ok()?.len();
+        let oversized = usize::try_from(bytes)
+            .map_or(true, |size| size > crate::analysis::MAX_INDEXED_FILE_BYTES);
+        if oversized {
+            skipped.borrow_mut().push(((*uri).to_string(), bytes));
             return None;
         }
         Some((*uri, std::fs::read_to_string(path).ok()?))
     });
     let mut index = WorkspaceSymbolIndex::from_uri_sources(readable);
-    if skipped_oversized {
-        index.mark_incomplete();
+    for (uri, bytes) in skipped.into_inner() {
+        index.note_oversized_file(&uri, bytes);
     }
     index
+}
+
+/// One log line saying what project-wide symbol search is missing and which limit took it.
+///
+/// Every clause carries the number a user can act on: the skipped file's URI and size against the
+/// per-file cap, or the dropped-declaration count against the retention ceiling.
+fn symbol_index_incomplete_message(project: &crate::analysis::ProjectSymbolIndex) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let omissions = project.omissions();
+    let mut clauses = Vec::new();
+    if omissions.oversized_files > 0 {
+        let mut examples = omissions
+            .oversized_examples
+            .iter()
+            .map(|(uri, bytes)| format!("{uri} ({:.1} MiB)", *bytes as f64 / MIB))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if omissions.oversized_files > omissions.oversized_examples.len() {
+            examples.push_str(", …");
+        }
+        clauses.push(format!(
+            "skipped {} file(s) over the {} MiB per-file cap: {}",
+            omissions.oversized_files,
+            crate::analysis::MAX_INDEXED_FILE_BYTES / (1024 * 1024),
+            examples,
+        ));
+    }
+    if omissions.dropped_entries > 0 {
+        clauses.push(format!(
+            "dropped {} declaration(s) at the {} MiB retention ceiling ({} retained)",
+            omissions.dropped_entries,
+            crate::analysis::MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES / (1024 * 1024),
+            project.entry_count(),
+        ));
+    }
+    if omissions.truncated_chunks > 0 {
+        clauses.push(format!(
+            "{} index chunk(s) stopped early on a spent per-chunk budget",
+            omissions.truncated_chunks,
+        ));
+    }
+    if clauses.is_empty() {
+        // Incomplete with no recorded provenance (e.g. a refused cross-phase merge).
+        clauses.push("an index chunk could not be retained".to_string());
+    }
+    format!(
+        "krusty: project-wide symbol search is incomplete: {}",
+        clauses.join("; ")
+    )
 }
 
 /// FNV-1a over the file text. Only ever compared against another hash this process produced, so a
@@ -1024,7 +1070,11 @@ pub struct LspService<B> {
     /// Project-model generation `project_symbols` describes. A batch from an older generation is
     /// about a model that no longer exists.
     project_symbols_generation: u64,
-    project_symbols_incomplete_reported: bool,
+    /// Which omission causes were already said out loud for this generation, as the
+    /// `(oversized, dropped, truncated)` presence triple. A sweep grows the counts chunk by chunk,
+    /// so re-reporting on every change would log per chunk; a report repeats only when a NEW kind
+    /// of omission appears.
+    reported_symbol_omissions: Option<(bool, bool, bool)>,
     /// Class names from the project's dependencies. Names only; a location costs a render.
     dependency_symbols: DependencySymbolIndex,
     /// Project-model generation shared by the dependency index and every asynchronous render.
@@ -1090,7 +1140,7 @@ where
             workspace_symbols: WorkspaceSymbolIndex::default(),
             project_symbols: ProjectSymbolIndex::default(),
             project_symbols_generation: 0,
-            project_symbols_incomplete_reported: false,
+            reported_symbol_omissions: None,
             dependency_symbols: DependencySymbolIndex::default(),
             dependency_symbols_generation: 0,
             located_dependencies: HashMap::new(),
@@ -1448,18 +1498,29 @@ where
         }
         self.project_symbols
             .replace_files(&batch.attempted, batch.symbols);
-        // Said once per generation. A file too large to parse or a layer at its retention ceiling
-        // means the picker is answering over less than the workspace, and nothing else would tell
-        // anyone: a missing symbol looks exactly like a symbol that does not exist.
-        if self.project_symbols.is_complete() || self.project_symbols_incomplete_reported {
+        // Said once per generation and cause. A file too large to parse or a layer at its
+        // retention ceiling means the picker is answering over less than the workspace, and
+        // nothing else would tell anyone: a missing symbol looks exactly like a symbol that does
+        // not exist. The message names what was omitted and by which limit, because it is the
+        // only place a user can learn which file to exclude or which ceiling is undersized.
+        if self.project_symbols.is_complete() {
             return Vec::new();
         }
-        self.project_symbols_incomplete_reported = true;
-        vec![log_message(
-            "krusty: the workspace symbol index reached its retention limit or skipped an \
-             oversized file; project-wide symbol search is incomplete"
-                .to_string(),
-        )]
+        let omissions = self.project_symbols.omissions();
+        let causes = (
+            omissions.oversized_files > 0,
+            omissions.dropped_entries > 0,
+            omissions.truncated_chunks > 0,
+        );
+        if self.reported_symbol_omissions.is_some_and(|reported| {
+            (!causes.0 || reported.0) && (!causes.1 || reported.1) && (!causes.2 || reported.2)
+        }) {
+            return Vec::new();
+        }
+        self.reported_symbol_omissions = Some(causes);
+        vec![log_message(symbol_index_incomplete_message(
+            &self.project_symbols,
+        ))]
     }
 
     pub(crate) fn set_dependency_index(&mut self, generation: u64, index: DependencySymbolIndex) {
@@ -1588,7 +1649,7 @@ where
     pub(crate) fn reset_workspace_index(&mut self, generation: u64) -> Vec<Value> {
         self.project_symbols = ProjectSymbolIndex::default();
         self.project_symbols_generation = generation;
-        self.project_symbols_incomplete_reported = false;
+        self.reported_symbol_omissions = None;
         // Dependency names and materialized sources describe the same project model as the source
         // index. Clear all three pieces together; retaining names while clearing only locations
         // let stale candidates queue renders between reset and the replacement index arriving.
@@ -4334,7 +4395,7 @@ where
             service.record_located_dependencies(generation, attempted, located);
         }
         EngineEvent::SymbolIndexProgress(batch) => {
-            for message in service.apply_symbol_index_batch(batch) {
+            for message in service.apply_symbol_index_batch(*batch) {
                 let encoded = serde_json::to_vec(&message).map_err(json_io)?;
                 write_framed(writer, &encoded)?;
             }
@@ -4611,6 +4672,15 @@ mod tests {
         assert!(
             !index.is_complete(),
             "pre-read size rejection must reach the retained index completeness flag"
+        );
+        // The skip keeps its provenance: the URI and size are what the client log reports.
+        assert_eq!(index.omissions().oversized_files, 1);
+        assert_eq!(
+            index.omissions().oversized_examples,
+            vec![(
+                uri.clone(),
+                crate::analysis::MAX_INDEXED_FILE_BYTES as u64 + 1
+            )]
         );
         drop(cleanup);
     }
@@ -6157,36 +6227,81 @@ mod tests {
             submitted,
         });
         service.force_initialized_for_test();
-        let oversized = format!(
-            "package demo\nclass Oversized\n// {}\n",
-            "x".repeat(crate::analysis::MAX_INDEXED_FILE_BYTES)
-        );
+        // Recorded the way the disk adapter records a stat-only skip; materializing a real
+        // past-the-cap source would allocate the whole cap per test run.
+        let oversized_skip = || {
+            let mut index = crate::analysis::WorkspaceSymbolIndex::default();
+            index.note_oversized_file(
+                "file:///Huge.kt",
+                crate::analysis::MAX_INDEXED_FILE_BYTES as u64 + 1,
+            );
+            index
+        };
 
         let reported = service.apply_symbol_index_batch(SymbolIndexBatch {
             generation: 0,
             attempted: vec!["file:///Huge.kt".to_string()],
-            symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
-                "file:///Huge.kt",
-                oversized.as_str(),
-            )]),
+            symbols: oversized_skip(),
         });
 
         // A symbol the picker never shows is indistinguishable from one that does not exist, so
-        // the shortfall has to be said out loud -- but once, not per chunk.
+        // the shortfall has to be said out loud -- but once per cause, not per chunk.
         assert_eq!(reported.len(), 1);
         assert_eq!(reported[0]["method"], "window/logMessage");
-        assert!(reported[0]["params"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("incomplete")));
+        let message = reported[0]["params"]["message"].as_str().unwrap();
+        assert!(message.contains("incomplete"), "{message}");
+        // The message names the skipped file, its size, and the cap it exceeded: it is the only
+        // place a user can learn which file to exclude or which limit is undersized.
+        assert!(message.contains("file:///Huge.kt"), "{message}");
+        assert!(message.contains("per-file cap"), "{message}");
         let repeated = service.apply_symbol_index_batch(SymbolIndexBatch {
             generation: 0,
-            attempted: vec!["file:///Other.kt".to_string()],
-            symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
-                "file:///Other.kt",
-                oversized.as_str(),
-            )]),
+            attempted: vec!["file:///Huge.kt".to_string()],
+            symbols: oversized_skip(),
         });
         assert!(repeated.is_empty());
+    }
+
+    #[test]
+    fn a_new_omission_cause_is_reported_even_after_the_first_report() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+
+        let mut oversized_index = crate::analysis::WorkspaceSymbolIndex::default();
+        oversized_index.note_oversized_file("file:///build/Gen.kt", 65 * 1024 * 1024);
+        let first = service.apply_symbol_index_batch(SymbolIndexBatch {
+            generation: 0,
+            attempted: vec!["file:///build/Gen.kt".to_string()],
+            symbols: oversized_index,
+        });
+        assert_eq!(first.len(), 1);
+        let message = first[0]["params"]["message"].as_str().unwrap();
+        assert!(message.contains("per-file cap"), "{message}");
+        assert!(
+            message.contains("file:///build/Gen.kt (65.0 MiB)"),
+            "{message}"
+        );
+
+        // A zero-budget merge drops every declaration: a different omission than the skip above,
+        // so it deserves its own report even though incompleteness was already said.
+        let populated = crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///A.kt",
+            "package demo\nclass Alpha\n",
+        )]);
+        let mut trimmed = crate::analysis::WorkspaceSymbolIndex::default();
+        trimmed.merge_within(populated, 0);
+        let second = service.apply_symbol_index_batch(SymbolIndexBatch {
+            generation: 0,
+            attempted: vec!["file:///A.kt".to_string()],
+            symbols: trimmed,
+        });
+        assert_eq!(second.len(), 1, "a new cause must be reported");
+        let message = second[0]["params"]["message"].as_str().unwrap();
+        assert!(message.contains("declaration(s)"), "{message}");
     }
 
     #[test]
