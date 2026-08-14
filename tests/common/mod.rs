@@ -756,24 +756,63 @@ pub fn run_js(js: &str) -> Option<String> {
     static JS_COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = JS_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = dir.join(format!("m_{:x}_{n}.mjs", hash_str(js)));
+    let stdout_path = path.with_extension("stdout");
+    let stderr_path = path.with_extension("stderr");
     std::fs::write(&path, js).ok()?;
-    // Bound wall time via `timeout` so a miscompiled loop can't hang the suite forever (exit 124).
-    let out = Command::new("timeout")
-        .arg("15s")
-        .arg(&node)
+    // Enforce the deadline in-process. Depending on GNU `timeout` made every JS test silently skip on
+    // macOS even when Node was installed, so local runs never exercised the backend that CI executed.
+    // Redirect output to files rather than pipes: a child that fills a pipe would block before
+    // `try_wait` observes its exit and turn a successful, verbose program into a false timeout.
+    let stdout = std::fs::File::create(&stdout_path).ok()?;
+    let stderr = std::fs::File::create(&stderr_path).ok()?;
+    let mut child = Command::new(&node)
         .arg(&path)
-        .output()
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
         .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                timed_out = true;
+                break child.wait().ok()?;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(&stdout_path);
+                let _ = std::fs::remove_file(&stderr_path);
+                return None;
+            }
+        }
+    };
+    let stdout = std::fs::read(&stdout_path).unwrap_or_default();
+    let stderr = std::fs::read(&stderr_path).unwrap_or_default();
     let _ = std::fs::remove_file(&path);
-    if !out.status.success() {
-        let code = out.status.code().unwrap_or(-1);
-        let tag = if code == 124 { "TIMEOUT" } else { "ERROR" };
+    let _ = std::fs::remove_file(&stdout_path);
+    let _ = std::fs::remove_file(&stderr_path);
+    if timed_out {
         return Some(format!(
-            "{tag}:{}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "TIMEOUT:{}",
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        return Some(format!(
+            "ERROR({code}):{}",
+            String::from_utf8_lossy(&stderr).trim()
+        ));
+    }
+    Some(String::from_utf8_lossy(&stdout).trim().to_string())
 }
 
 fn which_node() -> Option<PathBuf> {

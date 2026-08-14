@@ -5768,15 +5768,22 @@ impl<'a> Lower<'a> {
         // the representation analysis reads the fact off the `Call`, so keying the wrapper drops it
         // silently (the map just gains a dead id).
         let declared_ret = member.declared_ret;
-        let direct_receiver = match member.realization {
+        let realization = member.realization;
+        let direct_receiver = match realization {
             crate::libraries::MemberRealization::Dispatch => None,
             crate::libraries::MemberRealization::Direct { pass_receiver } => Some(pass_receiver),
+            crate::libraries::MemberRealization::Intrinsic(_) => None,
             crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
         };
         // The receiver is checked with the arguments: a member realized as a mangled `-impl` static
         // carries it in the descriptor's leading parameter. Ordinary virtual-receiver boxing belongs
         // to JVM emission, which has the selected owner and exact descriptor.
-        if !member.descriptor.is_empty() {
+        if !member.descriptor.is_empty()
+            && !matches!(
+                realization,
+                crate::libraries::MemberRealization::Intrinsic(_)
+            )
+        {
             self.check_unsigned_boxes_fit_descriptor(
                 self.runtime
                     .descriptor_method_layout(&member.descriptor)
@@ -5792,33 +5799,46 @@ impl<'a> Lower<'a> {
         // disagree about when an already-evaluated receiver needs a continuation spill.
         let (recv, recv_spill) =
             self.spill_value_before_suspending_operands(recv, Ty::obj_name(owner), &args);
-        let call = if let Some(pass_receiver) = direct_receiver {
-            let mut physical_args = Vec::with_capacity(args.len() + usize::from(pass_receiver));
-            if pass_receiver {
-                physical_args.push(recv);
-            }
-            physical_args.extend(args);
-            self.emit_static_call(
-                owner,
-                member.name,
-                member.descriptor,
-                member.inline,
-                physical_args,
-            )
-        } else if member.descriptor.is_empty() {
-            self.emit_call(
-                Callee::Virtual {
-                    owner,
-                    name: member.name,
-                    descriptor: String::new(),
-                    params: Some((member.params, logical_ret)),
-                    interface,
-                },
+        let call = match realization {
+            crate::libraries::MemberRealization::Intrinsic(
+                crate::libraries::CompilerIntrinsic::StringPlus,
+            ) if args.len() == 1 => self.emit_intrinsic_call(
+                crate::ir::IrIntrinsic::StringPlus,
+                logical_ret,
                 Some(recv),
                 args,
-            )
-        } else {
-            self.emit_virtual_call(owner, member.name, member.descriptor, interface, recv, args)
+            ),
+            crate::libraries::MemberRealization::Intrinsic(_) => return None,
+            crate::libraries::MemberRealization::Direct { pass_receiver } => {
+                let mut physical_args = Vec::with_capacity(args.len() + usize::from(pass_receiver));
+                if pass_receiver {
+                    physical_args.push(recv);
+                }
+                physical_args.extend(args);
+                self.emit_static_call(
+                    owner,
+                    member.name,
+                    member.descriptor,
+                    member.inline,
+                    physical_args,
+                )
+            }
+            crate::libraries::MemberRealization::Dispatch if member.descriptor.is_empty() => self
+                .emit_call(
+                    Callee::Virtual {
+                        owner,
+                        name: member.name,
+                        descriptor: String::new(),
+                        params: Some((member.params, logical_ret)),
+                        interface,
+                    },
+                    Some(recv),
+                    args,
+                ),
+            crate::libraries::MemberRealization::Dispatch => {
+                self.emit_virtual_call(owner, member.name, member.descriptor, interface, recv, args)
+            }
+            crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
         };
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
@@ -13170,6 +13190,13 @@ impl<'a> Lower<'a> {
         receiver: Ty,
         member: &crate::libraries::LibraryMember,
     ) -> Option<IntrinsicMemberReference> {
+        if member.realization
+            == crate::libraries::MemberRealization::Intrinsic(
+                crate::libraries::CompilerIntrinsic::StringPlus,
+            )
+        {
+            return Some(IntrinsicMemberReference::StringPlus);
+        }
         let receiver = receiver
             .non_null()
             .unboxed_primitive()
@@ -13182,7 +13209,6 @@ impl<'a> Lower<'a> {
                 member.ret,
             ) {
                 (Ty::Boolean, "not", [], Ty::Boolean) => IntrinsicMemberReference::BooleanNot,
-                (Ty::String, "plus", [_], Ty::String) => IntrinsicMemberReference::StringPlus,
                 (Ty::Int, "dec", [], Ty::Int) => IntrinsicMemberReference::IntDec,
                 _ => return None,
             },

@@ -226,6 +226,9 @@ pub enum MemberRealization {
     /// Direct provider call. Some realizations encode the semantic receiver as their first argument
     /// (value-class implementation methods); others address a singleton implementation directly.
     Direct { pass_receiver: bool },
+    /// Compiler-supplied implementation attached to this exact semantic declaration. The provider
+    /// identifies the declaration; common lowering only preserves the operation for each backend.
+    Intrinsic(CompilerIntrinsic),
     /// A builtin range operator whose declaration is semantic but whose platform implementation is
     /// not an instance method on the receiver. The selected provider supplies the construction plan;
     /// lowering never infers this from a callable name.

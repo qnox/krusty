@@ -10232,10 +10232,6 @@ impl<'a> Emitter<'a> {
                     if self.emit_unsigned_compare_to_virtual(&owner, &name, recv, &args, code) {
                         return;
                     }
-                    if is_string_plus_virtual(&owner, &name, &descriptor) && args.len() == 1 {
-                        self.emit_string_plus(recv, args[0], code);
-                        return;
-                    }
                     // A `@JvmStatic` member of an `object`/companion (`Dispatchers.IO`): an ordinary
                     // member call in the language — resolved and lowered with a receiver — that kotlinc
                     // emits as a static taking none. Drop the receiver and `invokestatic`. The receiver is
@@ -13392,12 +13388,6 @@ fn discard(t: Ty, code: &mut CodeBuilder) {
         1 => code.pop(),
         _ => {}
     }
-}
-
-fn is_string_plus_virtual(owner: &str, name: &str, descriptor: &str) -> bool {
-    matches!(owner, "java/lang/String" | "kotlin/String")
-        && name == "plus"
-        && descriptor == "(Ljava/lang/Object;)Ljava/lang/String;"
 }
 
 fn wrapper_owner_primitive(owner: &str) -> Option<Ty> {

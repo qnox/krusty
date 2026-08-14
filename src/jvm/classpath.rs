@@ -2496,13 +2496,25 @@ impl Classpath {
                     } else {
                         m.name.clone()
                     };
-                    let realization = match m.name.as_str() {
-                        "rangeTo" => crate::libraries::MemberRealization::RangeConstruction {
+                    let realization = match (internal_id, m.name.as_str()) {
+                        (owner, "plus")
+                            if owner.matches("kotlin/String")
+                                && m.generic_sig.params.as_slice()
+                                    == [Ty::nullable(Ty::obj("kotlin/Any"))]
+                                && m.generic_sig.ret == Ty::String =>
+                        {
+                            crate::libraries::MemberRealization::Intrinsic(
+                                crate::libraries::CompilerIntrinsic::StringPlus,
+                            )
+                        }
+                        (_, "rangeTo") => crate::libraries::MemberRealization::RangeConstruction {
                             open_end: false,
                         },
-                        "rangeUntil" => crate::libraries::MemberRealization::RangeConstruction {
-                            open_end: true,
-                        },
+                        (_, "rangeUntil") => {
+                            crate::libraries::MemberRealization::RangeConstruction {
+                                open_end: true,
+                            }
+                        }
                         _ => crate::libraries::MemberRealization::Dispatch,
                     };
                     crate::libraries::LibraryMember {
@@ -6360,6 +6372,13 @@ mod fq_tests {
             .into_iter()
             .find(|member| member.name == "plus")
             .expect("String.plus builtin declaration");
+        assert_eq!(
+            string_plus.realization,
+            crate::libraries::MemberRealization::Intrinsic(
+                crate::libraries::CompilerIntrinsic::StringPlus,
+            ),
+            "the selected declaration must carry its compiler realization into backend-neutral IR"
+        );
         assert_eq!(
             string_plus
                 .generic_sig
