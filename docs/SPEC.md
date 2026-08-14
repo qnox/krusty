@@ -5691,3 +5691,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   defaults to simple constants, which cannot suspend — so the previously-rejected shape is modeled
   by the ordinary facade stub emitter unchanged. Tests: `tests/metadata_kept_params.rs`,
   `tests/unsigned_classpath_call_e2e.rs` (both krusty-built by default).
+
+- **Safe-call `invoke` on a nullable fun-typed value resolves through the invoke convention.** For
+  `op?.invoke(a, b)` where `op: ((Int, Int) -> Int)?`, the ordinary member paths know no `invoke`
+  member on `Function{N}` and typed the call `Error` (the whole file then bailed at SafeCall
+  lowering). The checker's safe-call fallback now routes `invoke` on a `Ty::Fun` receiver through
+  `record_invoke` with the non-null receiver — the same convention the call-position spelling uses
+  — and `expr_inner_call_member` lowers a recorded `ExprLowering::Invoke` reached through the
+  member spelling (the safe-call assembly's non-null branch delegates there). Test:
+  `tests/classpath_fun_typed_property_lambda_e2e.rs` (krusty-built by default).

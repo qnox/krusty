@@ -32606,6 +32606,29 @@ impl<'a> Checker<'a> {
                     }
                 }
             };
+            // `<expr>?.invoke(args)` on a FUN-TYPED receiver: the ordinary member paths know no
+            // `invoke` member on `Function{N}` — route through the invoke-operator convention with
+            // the non-null receiver, exactly as the call-position spelling does.
+            let result =
+                if result == Ty::Error && name == "invoke" && matches!(rt.non_null(), Ty::Fun(_)) {
+                    self.diags.diags.truncate(checkpoint);
+                    match self.record_invoke(
+                        scope,
+                        CallArgs {
+                            call: e,
+                            args: args.as_deref().unwrap_or_default(),
+                            arg_tys: &checked_arg_tys,
+                        },
+                        receiver,
+                        rt.non_null(),
+                        self.span(e),
+                    ) {
+                        InvokeResolution::Selected(ty) => ty,
+                        _ => Ty::Error,
+                    }
+                } else {
+                    result
+                };
             let result = if result == Ty::Error {
                 self.receiver_function_value(scope, &name)
                     .and_then(|(signature, origin)| {

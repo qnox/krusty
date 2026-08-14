@@ -25101,6 +25101,19 @@ impl<'a> Lower<'a> {
         receiver: AstExprId,
         name: String,
     ) -> Option<u32> {
+        // A checker-selected invoke-operator call reached through the MEMBER spelling
+        // (`b.op?.invoke(a, b)` — the safe-call assembly delegates its non-null branch here):
+        // the same lowering as the call-position `Invoke` record.
+        if let Some(ExprLowering::Invoke {
+            receiver: recorded_receiver,
+            params,
+            kind,
+        }) = self.info.expr_lowers.get(&e).cloned()
+        {
+            if !(matches!(kind, InvokeKind::Function { .. }) && params.len() != args.len()) {
+                return self.lower_invoke(e, recorded_receiver, &params, kind, &args);
+            }
+        }
         {
             // Constant string normalization belongs to the selected compiler-supplied declaration.
             // A same-named source function carries no intrinsic tag and therefore keeps its own body.
