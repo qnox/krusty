@@ -2598,7 +2598,7 @@ mod tests {
     }
 
     #[test]
-    fn toplevel_default_stub_safe_accepts_mangled_and_rejects_missing_defaults() {
+    fn toplevel_default_stub_safe_accepts_mangled_suspend_and_rejects_missing_defaults() {
         // A value-class-MANGLED name (the post-pass view of a VC-param function) emits the mangled
         // `foo-<hash>$default` stub, kotlinc's shape — accepted since the erased params carry no
         // extra carve-out evidence.
@@ -2609,9 +2609,10 @@ mod tests {
             .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
         assert!(toplevel_default_stub_safe(&f, fid));
 
-        // A mangled SUSPEND function's CPS-appended Continuation param is not modeled — rejected.
+        // A mangled SUSPEND function's CPS-appended Continuation is an ordinary loaded stub
+        // parameter; the default mask still covers only the declared value parameters.
         f.suspend_funs.push(fid);
-        assert!(!toplevel_default_stub_safe(&f, fid));
+        assert!(toplevel_default_stub_safe(&f, fid));
 
         let mut g = IrFile::default();
         let gid = add_toplevel_fn(&mut g, "hello", Ty::Int);

@@ -32454,6 +32454,29 @@ impl<'a> Checker<'a> {
             let checkpoint = self.diags.diags.len();
             let mut checked_arg_tys = Vec::new();
             let result = match &args {
+                // A function value's explicit `invoke` spelling is the invoke-operator convention,
+                // not a failed ordinary member lookup. Select that semantic path up front so the
+                // checker never emits and then discards diagnostics from another scope-tower level.
+                Some(a) if name == "invoke" && matches!(rt.non_null(), Ty::Fun(_)) => {
+                    let recv = rt.non_null();
+                    checked_arg_tys = self.invoke_operator_arg_tys(scope, recv, a);
+                    match self.record_invoke(
+                        scope,
+                        CallArgs {
+                            call: e,
+                            args: a,
+                            arg_tys: &checked_arg_tys,
+                        },
+                        receiver,
+                        recv,
+                        self.span(e),
+                    ) {
+                        InvokeResolution::Selected(ty) => ty,
+                        InvokeResolution::Ambiguous(_)
+                        | InvokeResolution::Inapplicable(_)
+                        | InvokeResolution::Absent => Ty::Error,
+                    }
+                }
                 // After `?.` the receiver is non-null, so resolve the member against the NON-NULL
                 // receiver type — mirroring the args (extension) branch below. A genuinely nullable
                 // receiver that ISN'T smart-cast (a call result: `xs.firstOrNull()?.field`) reached
@@ -32606,29 +32629,6 @@ impl<'a> Checker<'a> {
                     }
                 }
             };
-            // `<expr>?.invoke(args)` on a FUN-TYPED receiver: the ordinary member paths know no
-            // `invoke` member on `Function{N}` — route through the invoke-operator convention with
-            // the non-null receiver, exactly as the call-position spelling does.
-            let result =
-                if result == Ty::Error && name == "invoke" && matches!(rt.non_null(), Ty::Fun(_)) {
-                    self.diags.diags.truncate(checkpoint);
-                    match self.record_invoke(
-                        scope,
-                        CallArgs {
-                            call: e,
-                            args: args.as_deref().unwrap_or_default(),
-                            arg_tys: &checked_arg_tys,
-                        },
-                        receiver,
-                        rt.non_null(),
-                        self.span(e),
-                    ) {
-                        InvokeResolution::Selected(ty) => ty,
-                        _ => Ty::Error,
-                    }
-                } else {
-                    result
-                };
             let result = if result == Ty::Error {
                 self.receiver_function_value(scope, &name)
                     .and_then(|(signature, origin)| {
