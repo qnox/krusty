@@ -84,7 +84,7 @@ impl DependencyPlatform {
         leaf_visibility.map_or(SourceTypeAccess::Absent, SourceTypeAccess::Declared)
     }
 
-    fn public_source_type_name(&self, internal: TypeName) -> Option<Rc<LibraryType>> {
+    fn public_source_type_name(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
         if self.source_type_access(internal) != SourceTypeAccess::Declared(Visibility::Public) {
             return None;
         }
@@ -311,7 +311,7 @@ impl SymbolSource for DependencyPlatform {
             SourceTypeAccess::Absent => None,
         };
         let mut classifier = match (&primary.classifier, source_classifier) {
-            (Some(primary), Some(source)) => Some(Rc::new(merge_type(
+            (Some(primary), Some(source)) => Some(std::sync::Arc::new(merge_type(
                 self.platform.as_ref(),
                 (**primary).clone(),
                 (**source).clone(),
@@ -325,7 +325,7 @@ impl SymbolSource for DependencyPlatform {
         if let (Some(shape), Some(visibility)) = (&classifier, source_access.source_visibility()) {
             let mut shape = (**shape).clone();
             shape.access = visibility.into();
-            classifier = Some(Rc::new(shape));
+            classifier = Some(std::sync::Arc::new(shape));
         }
         let (primary_functions, primary_properties) = primary.callables.clone().into_parts();
         let (source_functions, source_properties) = source.callables.clone().into_parts();
@@ -479,7 +479,7 @@ mod tests {
             let classifier_name = namespace.existing_classifier(name);
             let classifier = classifier_name
                 .and_then(|name| self.public.get(&name))
-                .map(|&is_public| Rc::new(type_shape(is_public)));
+                .map(|&is_public| std::sync::Arc::new(type_shape(is_public)));
             Rc::new(ResolvedSymbols {
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier,
