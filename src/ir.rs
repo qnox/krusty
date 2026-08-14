@@ -2609,8 +2609,9 @@ mod tests {
             .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
         assert!(toplevel_default_stub_safe(&f, fid));
 
-        // A mangled SUSPEND function's CPS-appended Continuation is an ordinary loaded stub
-        // parameter; the default mask still covers only the declared value parameters.
+        // A mangled SUSPEND function stays accepted: the CPS-appended Continuation is just another
+        // loaded stub parameter (kotlinc's pick-<hash>$default shape), and the constant-only
+        // default restriction already excludes anything that could suspend.
         f.suspend_funs.push(fid);
         assert!(toplevel_default_stub_safe(&f, fid));
 

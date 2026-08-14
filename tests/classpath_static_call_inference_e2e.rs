@@ -191,7 +191,7 @@ fn class_literal_binds_nested_java_generic_returns() {
 fn generic_extension_property_keeps_nullability_and_kotlin_collection_type() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(library) = common::compile_lib_ref(
+    let Some(library) = common::compile_lib(
         "generic_extension_property",
         r#"
             package fixtures

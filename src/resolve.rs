@@ -1168,6 +1168,12 @@ pub struct ClassSig {
     /// that parameter's index (`class Box<T>(val x: T)` → `{"x": 0}`). A read of such a property on
     /// `Box<Int>` substitutes the argument at that index (`Int`) for the erased `Object`.
     pub generic_props: HashMap<String, (usize, bool)>,
+    /// Properties whose DECLARED type is a direct nullable type parameter (`val value: T?`), by
+    /// class-type-parameter index. Deliberately separate from `generic_props`/
+    /// `generic_property_shapes`: the fact substitutes ONLY in the member-READ result position —
+    /// call signatures, setters and storage stay erased (a scalar binding would otherwise create a
+    /// nullable-scalar boxing boundary the other paths do not model).
+    pub nullable_tparam_props: HashMap<String, usize>,
     /// Function-property signatures that require class type-parameter substitution.
     /// Declared property types that mention class parameters anywhere in their shape (`Cell<T>`,
     /// `(T) -> R`, and similar). Read-site substitution consumes this uniformly; callable-specific
@@ -2756,6 +2762,19 @@ impl SymbolTable {
         name: &str,
         declared: Ty,
     ) -> Ty {
+        self.applied_declared_member_prop_ty_at(recv, owner, name, declared, true)
+    }
+
+    /// `read_position = false` for STORAGE/setter shapes: a direct `val value: T?` member keeps its
+    /// erased slot there (only the READ result substitutes — see `nullable_tparam_props`).
+    fn applied_declared_member_prop_ty_at(
+        &self,
+        recv: Ty,
+        owner: TypeName,
+        name: &str,
+        declared: Ty,
+        read_position: bool,
+    ) -> Ty {
         let recv = recv.non_null();
         let Some(internal) = recv.obj_internal() else {
             return declared;
@@ -2774,6 +2793,18 @@ impl SymbolTable {
                     .find_map(|(o, applied, _)| (o == owner).then_some(applied))
             }
         };
+        // A direct `val value: T?` member READ: nullable of the receiver's binding. REFERENCE
+        // bindings only — a scalar binding would turn the erased reference slot into a
+        // nullable-scalar boxing boundary the read path does not model, so it keeps `declared`.
+        if read_position {
+            if let Some(&i) = owner_class.nullable_tparam_props.get(name) {
+                if let Some(&arg) = applied().and_then(|applied| applied.type_args().get(i)) {
+                    if !arg.non_null().is_jvm_scalar() && arg != Ty::Error {
+                        return Ty::nullable(arg.non_null());
+                    }
+                }
+            }
+        }
         if let Some(&(i, definitely_non_null)) = owner_class.generic_props.get(name) {
             // A `val p: T`-shaped property: the type is the receiver's i-th type argument.
             if let Some(&arg) = applied().and_then(|applied| applied.type_args().get(i)) {
@@ -7175,15 +7206,26 @@ fn collect_signatures_with_cp_impl(
                             && c.type_params.iter().any(|parameter| parameter == &r.name)
                     };
                     let mut generic_props: HashMap<String, (usize, bool)> = HashMap::new();
+                    let mut nullable_tparam_props: HashMap<String, usize> = HashMap::new();
                     for p in c.props.iter().filter(|p| p.is_property && !p.is_vararg) {
                         if let Some(i) = tparam_index(&p.ty) {
                             generic_props.insert(p.name.clone(), i);
+                        }
+                        if is_direct_nullable_tparam(&p.ty) {
+                            if let Some(i) = c.type_params.iter().position(|t| *t == p.ty.name) {
+                                nullable_tparam_props.insert(p.name.clone(), i);
+                            }
                         }
                     }
                     for bp in &c.body_props {
                         if let Some(r) = &bp.ty {
                             if let Some(i) = tparam_index(r) {
                                 generic_props.insert(bp.name.clone(), i);
+                            }
+                            if is_direct_nullable_tparam(r) {
+                                if let Some(i) = c.type_params.iter().position(|t| *t == r.name) {
+                                    nullable_tparam_props.insert(bp.name.clone(), i);
+                                }
                             }
                         }
                     }
@@ -7314,6 +7356,7 @@ fn collect_signatures_with_cp_impl(
                             captured_type_parameters,
                             metadata_captured_type_parameters,
                             generic_props,
+                            nullable_tparam_props,
                             generic_property_shapes,
                             value_field,
                             generic_methods,
@@ -7367,6 +7410,7 @@ fn collect_signatures_with_cp_impl(
                                     ),
                                     metadata_captured_type_parameters: Vec::new(),
                                     generic_props: HashMap::new(),
+                                    nullable_tparam_props: HashMap::new(),
                                     generic_property_shapes: HashMap::new(),
                                     value_field: None,
                                     generic_methods: HashMap::new(),

@@ -5701,3 +5701,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ExprLowering::Invoke` reached through the
   member spelling (the safe-call assembly's non-null branch delegates there). Test:
   `tests/classpath_fun_typed_property_lambda_e2e.rs` (krusty-built by default).
+
+- **Direct `val value: T?` members substitute in the READ result position only.** The
+  per-class `nullable_tparam_props` table (name → type-parameter index) records direct
+  nullable-type-parameter properties, deliberately separate from `generic_props`/
+  `generic_property_shapes`: the read template (`Nullable(TyParam)`) rides ONLY the property's
+  `ty`/getter return in the module-symbols projection — call signatures, setter parameters and
+  storage stay erased, which is what a previous whole-template attempt broke (12 regressions).
+  With the template confined to reads, `val <T> Box<T>.maybe: T? get() = value` type-checks
+  (`T?`, not `Any?`) and the full suite stays green. The class-applied read path
+  (`applied_declared_member_prop_ty_at`) takes the same fact with a scalar-binding guard.
+  Tests: `tests/classpath_static_call_inference_e2e.rs` (krusty-built by default).

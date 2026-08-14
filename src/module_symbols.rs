@@ -826,6 +826,25 @@ impl<'a> ModuleSymbols<'a> {
                     .unwrap_or(property.ty);
                 declaration.ty = template;
                 declaration.getter.ret = template;
+                // A direct `val value: T?` member substitutes in the READ result only — the
+                // template rides `ty`/`getter.ret`, never the setter parameter or storage (a
+                // scalar binding there would create an unmodeled boxing boundary; the read side
+                // shares the nullable-primitive representation machinery).
+                if let Some(read_template) =
+                    class.nullable_tparam_props.get(name).and_then(|&index| {
+                        let parameter = class.type_params.get(index)?;
+                        let bound = class
+                            .type_param_bounds
+                            .get(index)
+                            .copied()
+                            .filter(|bound| *bound != Ty::Error)
+                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                        Some(Ty::nullable(Ty::ty_param(parameter, bound)))
+                    })
+                {
+                    declaration.ty = read_template;
+                    declaration.getter.ret = read_template;
+                }
                 if let Some(setter) = &mut declaration.setter {
                     if let Some(parameter) = setter.params.last_mut() {
                         *parameter = template;
@@ -1491,6 +1510,7 @@ mod tests {
             captured_type_parameters: crate::types::TypeParameters::default(),
             metadata_captured_type_parameters: Vec::new(),
             generic_props: HashMap::new(),
+            nullable_tparam_props: HashMap::new(),
             generic_property_shapes: HashMap::new(),
             value_field: None,
             generic_methods: HashMap::new(),
