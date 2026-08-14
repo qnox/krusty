@@ -1417,12 +1417,17 @@ fn build_class_metadata(
             emit_primary_ctor: !c.is_interface
                 && (c.has_primary_ctor || c.secondary_ctors.is_empty()),
             jvm_class_flags: c.is_interface.then_some(3),
+            // A class with a companion records its simple name (`Class.companionObjectName`, f4) —
+            // the consumer resolves `C.member` through it.
+            companion: c
+                .companion_class
+                .as_ref()
+                .map(|companion| companion.nested_segment_ref()),
             secondary_ctors: &secondary_ctor_metas,
             ctor_vararg_index,
             nested: &nested_refs,
             sealed_subclasses: &sealed_refs,
             supertypes: &supertypes,
-            ..Default::default()
         },
     );
     // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
@@ -1478,7 +1483,6 @@ fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) ->
         || c.enum_entry_of.is_some()
         || c.prop_ref.is_some()
         || c.func_ref.is_some()
-        || c.companion_class.is_some()
         // A DECLARED secondary constructor is described (`Class.constructor`, flags 22) from its
         // recorded source names + semantic types; one without that record (an unmodeled synthesis
         // path) would be published with wrong parameters, so the class declines instead. Synthetic

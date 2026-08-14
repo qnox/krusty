@@ -5732,3 +5732,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Once an argument falls outside the seed, ordinary joining takes over; there is no post-merge
   recovery pass. Test:
   `tests/build840_collection_property_element_e2e.rs` (krusty-built by default).
+
+- **Companion `val`/`var` properties are hoisted onto the OUTER class as statics.** kotlinc's
+  layout, now krusty's: the backing field is `private static [final]` on the outer class
+  (regardless of the property's declared visibility), initialized in the outer's `<clinit>`
+  AFTER the `Companion` instance store; the companion keeps the property declaration and its
+  instance accessors, which reach the field through `public static final synthetic`
+  `access$get<X>$cp`/`access$set<X>$cp` bridges on the outer; an outer INSTANCE property with
+  the same source name keeps the metadata/accessor name but its JVM field is suffixed
+  (`result` → `result$1`). Member order matches kotlinc: `Companion` field first, `<clinit>`
+  last, bridges between the instance methods and `<clinit>`. An initializer may read sibling
+  companion members (`this` = the just-stored Companion instance); one that doesn't reads as a
+  bare expression in `<clinit>`. Conservative subset: public, non-const, non-lateinit,
+  non-delegated, plain-accessor, initialized, non-value-class-typed properties on a PLAIN class
+  outer — interface/enum/value-class outers keep the previous instance layout (their emit paths
+  lack the bridge synthesis). Tests: `tests/companion_member_read_e2e.rs`
+  (`kotlinc_member_companion_property_field_shape` pins the kotlinc shape; krusty-built by
+  default).
