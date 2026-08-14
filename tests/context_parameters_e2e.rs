@@ -579,10 +579,7 @@ fn functional_interface_member_context_is_implicit() {
         \x20 context(c: C) fun accept(value: String): String\n\
         }\n\
         fun consume(action: Action): String = with(C()) { action.accept(\"OK\") }\n";
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(SRC),
-        Vec::<String>::new()
-    );
+    common::expect_true_e2e("functional_interface_member_context_is_implicit", SRC, &[]);
 }
 
 #[test]
@@ -709,9 +706,10 @@ fn context_local_function_maps_reordered_named_arguments() {
         \x20 context(c: C) fun combine(a: String, b: String): String = a + b\n\
         \x20 return with(C()) { combine(b = \"K\", a = \"O\") }\n\
         }\n";
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(SRC),
-        Vec::<String>::new()
+    common::expect_true_e2e(
+        "context_local_function_maps_reordered_named_arguments",
+        SRC,
+        &[],
     );
     assert_eq!(run(SRC).expect("local context named arguments"), "OK");
 }
@@ -721,9 +719,10 @@ fn context_top_level_function_maps_named_argument_past_default() {
     const SRC: &str = "class C\n\
         context(c: C) fun choose(a: Int = 7, b: String): String = b\n\
         fun box(): String = with(C()) { choose(b = \"OK\") }\n";
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(SRC),
-        Vec::<String>::new()
+    common::expect_true_e2e(
+        "context_top_level_function_maps_named_argument_past_default",
+        SRC,
+        &[],
     );
     assert_eq!(run(SRC).expect("context named argument past default"), "OK");
 }
@@ -735,9 +734,10 @@ fn context_local_function_maps_named_argument_past_default() {
         \x20 context(c: C) fun choose(a: Int = 7, b: String): String = b\n\
         \x20 return with(C()) { choose(b = \"OK\") }\n\
         }\n";
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(SRC),
-        Vec::<String>::new()
+    common::expect_true_e2e(
+        "context_local_function_maps_named_argument_past_default",
+        SRC,
+        &[],
     );
     assert_eq!(
         run(SRC).expect("local context named argument past default"),

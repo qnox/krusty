@@ -1603,6 +1603,32 @@ pub fn compile_and_run_box_files(
     run_box(&classes, &box_class, cp_jars)
 }
 
+/// A POSITIVE front-end coverage test upgraded to TRUE e2e: the source must be checker-clean, the
+/// BACKEND must emit it (a lowering/emit bail is a failure, not a skip), and when it declares
+/// `fun box()`, running it must return "OK". Use for tests whose old form only asserted empty
+/// diagnostics — the front end accepting a shape means nothing if the backend can't realize it.
+/// `extra_cp` joins kotlin-stdlib + the JDK on the classpath (empty for stdlib-only sources).
+#[allow(dead_code)]
+pub fn expect_true_e2e(tag: &str, src: &str, extra_cp: &[PathBuf]) {
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    let mut cp = extra_cp.to_vec();
+    cp.push(stdlib);
+    let diagnostics = front_end_diagnostics(src, &cp, Some(jdk.as_path()));
+    assert!(
+        diagnostics.is_empty(),
+        "{tag}: expected a checker-clean source, got: {diagnostics:?}"
+    );
+    let Some(classes) = compile_in_process(src, "Main", &cp, Some(jdk.as_path())) else {
+        panic!("{tag}: the front end accepted the source but the backend bailed on emitting it");
+    };
+    if let Some(box_class) = find_box_class(&classes) {
+        let out = run_box(&classes, &box_class, &cp)
+            .unwrap_or_else(|| panic!("{tag}: emitted classes but the box() run failed to start"));
+        assert_eq!(out.trim(), "OK", "{tag}: box() returned {out:?}");
+    }
+}
+
 /// Compile `src` with kotlin-stdlib plus the provisioned JDK modules, then run `box()`.
 #[allow(dead_code)]
 pub fn compile_and_run_with_stdlib(src: &str, stem: &str) -> Option<String> {

@@ -38,9 +38,10 @@ fn chained_generic_extension_call_types_an_inferred_property() {
 val values = listOf("a", "b").asSequence()
 fun use() = values.withIndex()
 "#;
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(src),
-        Vec::<String>::new()
+    common::expect_true_e2e(
+        "chained_generic_extension_call_types_an_inferred_property",
+        src,
+        &[],
     );
 }
 
@@ -49,9 +50,10 @@ fn extension_on_a_classpath_supertype_applies_to_its_implementation() {
     let src = r#"
 fun indexed(builder: StringBuilder) = builder.withIndex()
 "#;
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(src),
-        Vec::<String>::new()
+    common::expect_true_e2e(
+        "extension_on_a_classpath_supertype_applies_to_its_implementation",
+        src,
+        &[],
     );
 }
 
@@ -71,9 +73,10 @@ fun use() {
     holder.consumer.consume("OK")
 }
 "#;
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(src),
-        Vec::<String>::new()
+    common::expect_true_e2e(
+        "context_typed_lambda_selects_the_callable_for_property_inference",
+        src,
+        &[],
     );
 }
 
@@ -88,10 +91,13 @@ class Derived : Base() {
 }
 fun use(): String = Derived().read()
 "#;
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(src),
-        Vec::<String>::new()
-    );
+    // BACKEND STILL BAILS on this shape (a generic member-extension property over a fun-type
+    // receiver): checker-clean is asserted, emission is a known gap — upgrade to
+    // `expect_true_e2e` when the member-ext-property gate admits it.
+    // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
+    // gap - upgrade to `expect_true_e2e` when the backend admits it.
+    let bail_diags = common::front_end_diagnostics_with_stdlib(src);
+    assert!(bail_diags.is_empty(), "{bail_diags:?}");
 }
 
 #[test]
@@ -193,8 +199,11 @@ fun box(): String = println("OK")
 
 #[test]
 fn core_any_constructor_is_an_ordinary_candidate_without_a_classpath() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib("fun make(): Any = Any()");
-    assert_eq!(diagnostics, Vec::<String>::new());
+    common::expect_true_e2e(
+        "core_any_constructor_is_an_ordinary_candidate_without_a_classpath",
+        "fun make(): Any = Any()",
+        &[],
+    );
 }
 
 #[test]
@@ -272,19 +281,21 @@ fun sentinel(): Any = COROUTINE_SUSPENDED
 
 #[test]
 fn suspend_coroutine_intrinsic_uses_its_selected_stdlib_signature() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "suspend_coroutine_intrinsic_uses_its_selected_stdlib_signature",
         r#"
 import kotlin.coroutines.intrinsics.*
 suspend fun suspendForever(): Int =
     suspendCoroutineUninterceptedOrReturn { COROUTINE_SUSPENDED }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
 fn suspend_coroutine_intrinsic_preserves_its_continuation_type() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "suspend_coroutine_intrinsic_preserves_its_continuation_type",
         r#"
 import kotlin.coroutines.resume
 import kotlin.coroutines.intrinsics.*
@@ -294,8 +305,8 @@ suspend fun <T> await(value: T): T =
         COROUTINE_SUSPENDED
     }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
@@ -308,9 +319,10 @@ fun <U : Marker> outer(): List<U> = build { it.mark() }
 "#;
     let (code, diagnostics) = common::kotlinc_source_result("NestedContextResult", source);
     assert_eq!(code, 0, "kotlinc rejected the fixture: {diagnostics}");
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(source),
-        Vec::<String>::new()
+    common::expect_true_e2e(
+        "nested_contextual_result_preserves_the_lambda_input_type_parameter",
+        source,
+        &[],
     );
 }
 
@@ -389,7 +401,8 @@ fun box(): String = accept(Unit)
 
 #[test]
 fn implicit_member_beats_top_level_scope_function_for_callable_reference_arguments() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "implicit_member_beats_top_level_scope_function_for_callable_reference_arguments",
         r#"
 import kotlin.reflect.KFunction2
 
@@ -407,13 +420,14 @@ abstract class Checker {
     ): String
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
 fn implicit_receiver_generic_member_reference_uses_its_expected_shape() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "implicit_receiver_generic_member_reference_uses_its_expected_shape",
         r#"
 class Source(private val text: String) {
     inline fun <reified T> read(): T? = text as? T
@@ -423,13 +437,14 @@ fun use() {
     val read: () -> String? = with(Source("OK")) { ::read }
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
 fn function_values_inherit_any_members_without_a_function_n_name() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "function_values_inherit_any_members_without_a_function_n_name",
         r#"
 fun <T> renderIdentity(): String = { value: T -> value }.toString()
 
@@ -437,8 +452,8 @@ class Holder<T> {
     fun <R : T> render(value: R): String = (fun(_: List<T>): R = value).toString()
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
@@ -468,19 +483,22 @@ fun use() {
 
 #[test]
 fn suspend_function_value_invoke_reference_uses_the_function_signature() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
+    // gap - upgrade to `expect_true_e2e` when the backend admits it.
+    let bail_diags = common::front_end_diagnostics_with_stdlib(
         r#"
 fun capture(block: suspend () -> Unit) {
     val invoke: suspend () -> Unit = block::invoke
 }
 "#,
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
+    assert!(bail_diags.is_empty(), "{bail_diags:?}");
 }
 
 #[test]
 fn postponed_builder_receiver_selects_member_callable_reference_by_expected_arity() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "postponed_builder_receiver_selects_member_callable_reference_by_expected_arity",
         r#"
 fun use(value: String?) {
     buildList {
@@ -488,13 +506,14 @@ fun use(value: String?) {
     }
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
 fn nested_generic_builder_constrains_a_constructor_reference() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "nested_generic_builder_constrains_a_constructor_reference",
         r#"
 data class DataClass(val data: String)
 
@@ -517,13 +536,14 @@ fun use() {
     }
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
 fn bound_value_class_extension_property_reference_uses_its_semantic_receiver() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "bound_value_class_extension_property_reference_uses_its_semantic_receiver",
         r#"
 @JvmInline value class WrappedInt(val value: Int)
 @JvmInline value class Wrapped<T : String>(val value: T)
@@ -536,13 +556,15 @@ fun use() {
     Wrapped("OK")::unwrapped.get()
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
 fn generic_fun_interface_alias_has_an_ordinary_constructor_reference() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
+    // gap - upgrade to `expect_true_e2e` when the backend admits it.
+    let bail_diags = common::front_end_diagnostics_with_stdlib(
         r#"
 fun interface Transform<Input, Output> {
     fun invoke(value: Input): Output
@@ -559,12 +581,13 @@ fun use(function: (String) -> Int) {
 }
 "#,
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
+    assert!(bail_diags.is_empty(), "{bail_diags:?}");
 }
 
 #[test]
 fn nullable_continuation_resume_uses_the_stdlib_extension_signature() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "nullable_continuation_resume_uses_the_stdlib_extension_signature",
         r#"
 import kotlin.coroutines.*
 
@@ -575,13 +598,14 @@ fun resumeValues(continuation: Continuation<Any>?) {
     continuation?.resume(Token(42))
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
 fn member_result_constrains_a_stdlib_apply_builder() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "member_result_constrains_a_stdlib_apply_builder",
         r#"
 class Product
 class Builder<C> {
@@ -599,13 +623,15 @@ fun use() {
     exact<Builder<Product>>(built)
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
 fn constructor_parameter_constrains_a_nested_generic_suspend_result() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
+    // gap - upgrade to `expect_true_e2e` when the backend admits it.
+    let bail_diags = common::front_end_diagnostics_with_stdlib(
         r#"
 @JvmInline value class Raw(val value: Int)
 @JvmInline value class Wrapped(val raw: Raw)
@@ -620,12 +646,13 @@ class Consumer {
 }
 "#,
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
+    assert!(bail_diags.is_empty(), "{bail_diags:?}");
 }
 
 #[test]
 fn elvis_preserves_an_applied_common_collection_supertype() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "elvis_preserves_an_applied_common_collection_supertype",
         r#"
 fun maybeMutable(): MutableList<Int>? = null
 
@@ -635,8 +662,8 @@ fun consume() {
     target.addAll(source)
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
@@ -670,15 +697,17 @@ fun recursive(flag: Boolean): Recursive<*> =
 "#;
     let (code, diagnostics) = common::kotlinc_source_result("GenericCommonSupertype", source);
     assert_eq!(code, 0, "kotlinc rejected the fixture: {diagnostics}");
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(source),
-        Vec::<String>::new()
+    common::expect_true_e2e(
+        "generic_common_supertypes_reconstruct_kotlin_projections",
+        source,
+        &[],
     );
 }
 
 #[test]
 fn nullable_assignment_infers_a_non_null_bounded_generic_result() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "nullable_assignment_infers_a_non_null_bounded_generic_result",
         r#"
 fun <T : Any> create(): T = TODO()
 var chooseFirst = true
@@ -692,13 +721,14 @@ fun consume(): String {
     return select(value)
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
 fn function_receiver_extension_joins_a_diverging_lambda_result() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "function_receiver_extension_joins_a_diverging_lambda_result",
         r#"
 infix fun <R> (() -> R).recover(alternative: () -> R): R = try {
     this()
@@ -712,13 +742,14 @@ fun consume(): String = {
     "OK"
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
 fn overloaded_method_type_parameter_bounds_select_the_applicable_declaration() {
-    let diagnostics = common::front_end_diagnostics_with_stdlib(
+    common::expect_true_e2e(
+        "overloaded_method_type_parameter_bounds_select_the_applicable_declaration",
         r#"
 open class Marker
 
@@ -734,8 +765,8 @@ fun consume(): String {
     return unconstrained + constrained
 }
 "#,
+        &[],
     );
-    assert_eq!(diagnostics, Vec::<String>::new());
 }
 
 #[test]
