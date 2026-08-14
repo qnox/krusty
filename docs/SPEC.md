@@ -5556,3 +5556,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   dropped from metadata, matching kotlinc; annotations WITH arguments are not yet modeled and are
   omitted rather than recorded argument-less (a wrong record is worse than none). Test:
   `tests/classpath_annotation_emit_e2e.rs::classpath_low_priority_annotation_reaches_overload_selection`.
+
+- **Member extension properties are metadata `Property` records, not accessor `Function`s.** A member
+  extension property (`object Tools { val Int.doubled get() = … }`) lowers to accessor METHODS
+  (`getDoubled(I)I`), but its class `@Metadata` record must be a `Property` carrying
+  `Property.receiver_type` (f5) and the accessor `JvmPropertySignature` — kotlinc emits NO `Function`
+  record for the accessor. Krusty previously recorded the getter as a member extension FUNCTION
+  (`getDoubled` + `$receiver`), so `import Tools.doubled` from a krusty-built classpath was
+  `unresolved reference` while sibling extension FUNCTIONS resolved. The declaration facts ride
+  `IrFile::member_ext_props` (semantic receiver/type + accessor fids, per class) — the accessor fids
+  are excluded from the declared-function records and re-emitted as `Property` records with
+  `receiver` (`metadata::class_builder::PropMeta::receiver`). Test:
+  `tests/classpath_object_member_extension_import_e2e.rs` (krusty-built dependency by default).

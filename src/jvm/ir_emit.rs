@@ -532,6 +532,15 @@ fn build_class_metadata(
             [getter, setter]
         })
         .collect();
+    // Member-extension-PROPERTY accessors are described as `Property` records (below), never as
+    // functions — kotlinc emits no `Function` record for `getDoubled` of `val Int.doubled`.
+    let ext_prop_accessor_fids: std::collections::HashSet<u32> = ir
+        .member_ext_props
+        .get(&c.fq_name_id())
+        .into_iter()
+        .flatten()
+        .flat_map(|prop| std::iter::once(prop.getter).chain(prop.setter))
+        .collect();
     // Any member that is NOT an accessor and NOT part of a data/value class's synthesized set is a REAL
     // declared function — emit it (with derived flags) rather than declining the whole class.
     let declared_fids: Vec<u32> = c
@@ -540,6 +549,9 @@ fn build_class_metadata(
         .copied()
         .filter(|&fid| {
             if ir.lambda_own_params_from.contains_key(&fid) {
+                return false;
+            }
+            if ext_prop_accessor_fids.contains(&fid) {
                 return false;
             }
             let n = &ir.functions[fid as usize].name;
@@ -779,6 +791,7 @@ fn build_class_metadata(
                         })
                         .map(|index| index as u32)
                 }),
+                receiver: None,
                 getter,
                 setter,
                 field_desc: backing
@@ -787,6 +800,38 @@ fn build_class_metadata(
             }
         })
         .collect();
+    // Member EXTENSION properties: a `Property` record with `receiver_type` and the accessor
+    // signatures — the declaration the accessor methods (excluded from `declared_fids`) realize.
+    for ext in ir
+        .member_ext_props
+        .get(&c.fq_name_id())
+        .into_iter()
+        .flatten()
+    {
+        let accessor_sig = |fid: u32| {
+            ir.functions.get(fid as usize).map(|function| {
+                (
+                    function.name.clone(),
+                    method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
+                )
+            })
+        };
+        props.push(PropMeta {
+            name: ext.name.clone(),
+            ty: ext.ty,
+            is_var: ext.is_var,
+            visibility: ext.visibility,
+            has_constant: false,
+            is_const: false,
+            is_abstract: false,
+            has_backing_field: false,
+            tparam: None,
+            receiver: Some(ext.receiver),
+            getter: accessor_sig(ext.getter),
+            setter: ext.setter.and_then(accessor_sig),
+            field_desc: None,
+        });
+    }
     for &static_id in ir
         .declared_class_statics
         .get(&c.fq_name_id())
@@ -804,6 +849,7 @@ fn build_class_metadata(
             is_abstract: false,
             has_backing_field: true,
             tparam: None,
+            receiver: None,
             getter: None,
             setter: None,
             field_desc: None,

@@ -38,6 +38,11 @@ pub struct PropMeta {
     /// Index of the class type parameter this property is declared as (`class C<T>(val a: T)` → 0).
     /// `None` for an ordinary type.
     pub tparam: Option<u32>,
+    /// Extension-receiver type (`Property.receiver_type` = f5) for a MEMBER EXTENSION property
+    /// (`object Tools { val Int.doubled get() }`). Its presence marks the record an extension —
+    /// without it a consumer sees an ordinary member property that does not exist. `None` for an
+    /// ordinary member.
+    pub receiver: Option<Ty>,
     /// `(jvm name, jvm descriptor)` of the accessor, when one is emitted.
     pub getter: Option<(String, String)>,
     pub setter: Option<(String, String)>,
@@ -455,6 +460,12 @@ pub fn build_class(
                 &class_type_parameters,
             );
             prop.field_message(3, &ty); // Property.return_type = 3
+            if let Some(recv) = p.receiver {
+                // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
+                // its presence is what makes the record an extension.
+                let rt = type_pb(&mut st, recv, &class_type_parameters);
+                prop.field_message(5, &rt);
+            }
             let pflags = property_flags(p);
             if pflags != property_flags::DEFAULT {
                 prop.field_varint(11, pflags); // Property.flags = 11
@@ -741,6 +752,7 @@ mod tests {
                 is_abstract: false,
                 has_backing_field: true,
                 tparam: None,
+                receiver: None,
                 getter: None,
                 setter: None,
                 field_desc: None,
@@ -796,6 +808,7 @@ mod tests {
                 is_abstract: false,
                 has_backing_field: true,
                 tparam: None,
+                receiver: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
@@ -933,6 +946,7 @@ mod tests {
                 is_abstract: false,
                 has_backing_field: true,
                 tparam: None,
+                receiver: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
@@ -947,6 +961,7 @@ mod tests {
                 is_abstract: false,
                 has_backing_field: true,
                 tparam: None,
+                receiver: None,
                 getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                 field_desc: None,
@@ -1010,6 +1025,7 @@ mod tests {
                 is_abstract: false,
                 has_backing_field: true,
                 tparam: None,
+                receiver: None,
                 getter: Some(("getR".into(), "()Ljava/util/List;".into())),
                 setter: None,
                 field_desc: None,
@@ -1119,6 +1135,7 @@ mod tests {
                 is_abstract: false,
                 has_backing_field: true,
                 tparam: None,
+                receiver: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
@@ -1169,6 +1186,7 @@ mod tests {
                 is_abstract: false,
                 has_backing_field: true,
                 tparam: None,
+                receiver: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
@@ -1223,6 +1241,7 @@ mod tests {
                     is_abstract: false,
                     has_backing_field: true,
                     tparam: None,
+                    receiver: None,
                     getter: Some(("getX".into(), "()I".into())),
                     setter: None,
                     field_desc: None,
@@ -1237,6 +1256,7 @@ mod tests {
                     is_abstract: false,
                     has_backing_field: true,
                     tparam: None,
+                    receiver: None,
                     getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                     field_desc: None,

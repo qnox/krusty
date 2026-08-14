@@ -1643,6 +1643,7 @@ fn lower_file_at_reporting_impl(
                 lo.ir.fresh_method_decls.push(gfid);
                 methods.entry(gname).or_default().push((mi, gfid, ret));
                 method_fids.push(gfid);
+                let mut ext_setter = None;
                 if p.is_var {
                     let setter = p.setter.as_ref()?;
                     let sname = property_setter_name(&p.name);
@@ -1674,7 +1675,23 @@ fn lower_file_at_reporting_impl(
                     lo.ir.fresh_method_decls.push(sfid);
                     methods.entry(sname).or_default().push((mi, sfid, Ty::Unit));
                     method_fids.push(sfid);
+                    ext_setter = Some(sfid);
                 }
+                // The PROPERTY declaration these accessors realize, for class `@Metadata`: the record
+                // must be a `Property` with `receiver_type`, not `Function`s named after accessors.
+                lo.ir
+                    .member_ext_props
+                    .entry(type_name(&internal))
+                    .or_default()
+                    .push(crate::ir::MemberExtProp {
+                        name: p.name.clone(),
+                        receiver: sig.receiver,
+                        ty: ret,
+                        is_var: p.is_var,
+                        getter: gfid,
+                        setter: ext_setter,
+                        visibility: p.visibility,
+                    });
             }
             // Delegated body properties (`val/var x by Del()`) → a `getX()` (and `setX()` for a `var`)
             // instance method that calls the delegate's `getValue`/`setValue`. Bodies built in pass 2.

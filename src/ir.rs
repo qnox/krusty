@@ -727,6 +727,24 @@ pub struct IrCtorArg {
 /// thing, and the `getA()` a target may emit for it is a realization of it. The front end lowers only
 /// what is genuinely Kotlin — a source-written accessor's BODY — and leaves naming, descriptors and
 /// dispatch to the backend.
+/// One member EXTENSION property declaration ([`IrFile::member_ext_props`]): the SEMANTIC types
+/// (checker-resolved, pre-erasure) plus the accessor realization, everything a class `Property`
+/// metadata record needs.
+#[derive(Clone, Debug)]
+pub struct MemberExtProp {
+    pub name: String,
+    /// Declared extension receiver (`Int` in `val Int.doubled`).
+    pub receiver: crate::types::Ty,
+    /// Declared property type.
+    pub ty: crate::types::Ty,
+    pub is_var: bool,
+    /// Getter function id (always present — only `get()`-bodied shapes are lowered).
+    pub getter: u32,
+    /// Setter function id, for a `var`.
+    pub setter: Option<u32>,
+    pub visibility: crate::types::Visibility,
+}
+
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
@@ -1332,6 +1350,13 @@ pub struct IrFile {
     /// `Function.receiver_type` (f5) and EXCLUDE the receiver from its value parameters, or a
     /// consumer sees an ordinary member with one extra parameter.
     pub member_ext_receiver_fns: std::collections::HashSet<u32>,
+    /// Member EXTENSION properties per class (`object Tools { val Int.doubled get() = … }`), keyed by
+    /// the declaring class's fq name. Lowering realizes each as accessor METHODS (`getDoubled(I)I`),
+    /// which erases property-ness from the IR — class `@Metadata` needs the declaration back: a
+    /// `Property` record with `Property.receiver_type` (f5) and the accessor `JvmPropertySignature`,
+    /// NOT a `Function` record for the accessor (kotlinc emits none), or a consumer cannot resolve
+    /// `import Tools.doubled` / `5.doubled` from the classpath.
+    pub member_ext_props: std::collections::HashMap<TypeName, Vec<MemberExtProp>>,
     /// Function ids declared `operator` — `@Metadata` marks `Function.flags` bit 8 (`isOperator`)
     /// so a consumer admits the conventional call form (`recv(args)` for `invoke`, `a[i]` for
     /// `get`, …); the JVM method itself carries no such bit.
