@@ -3040,6 +3040,15 @@ fn inline_body_has_splice_only_shape(
             }
         }
         match file.expr(e) {
+            // A REIFIED fn is emitted as a real method (kotlinc always does), and a standalone
+            // `try` lowers there exactly as in any ordinary function — only the splice-time
+            // re-lowering concern applies, which the reified path never takes for the emitted
+            // body. Non-local returns inside its lambdas stay rejected by the arms below.
+            Expr::Try { .. } if !reified.is_empty() => file.any_child_expr(
+                e,
+                &mut |child| bad_expr(file, child, tparams, reified, is_erased_contract),
+                &mut |stmt| bad_stmt(file, stmt, tparams, reified, is_erased_contract),
+            ),
             Expr::Lambda { .. }
             | Expr::Try { .. }
             | Expr::Break { .. }

@@ -5712,3 +5712,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   storage are backend decisions. Thus `val <T> Box<T>.maybe: T? get() = value` type-checks as
   `T?`, and a stable `ReadBox<Int>.value` narrows to `Int` after a null check.
   Tests: `tests/classpath_static_call_inference_e2e.rs` (krusty-built by default).
+
+- **A `try` body keeps a reified fn emittable.** The splice-only body screen rejected any `try` in
+  an inline fn — but a REIFIED fn is emitted as a real method (kotlinc always emits one), where a
+  standalone `try` lowers exactly as in any ordinary function; only the splice-time re-lowering
+  concern applies, which the emitted-body path never takes. `try` now recurses into its children
+  for reified fns instead of rejecting outright (non-local returns inside its lambdas stay
+  rejected). This makes the assertFailsWith shape (`inline fun <reified T : Throwable>
+  failsWith(...) { try { ... } catch ... }`) a real facade method + `$default`, so the
+  fully-qualified no-import spelling resolves against krusty-built libs. Test:
+  `tests/fq_targ_trailing_lambda_e2e.rs` (krusty-built by default).
