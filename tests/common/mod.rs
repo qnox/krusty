@@ -2075,7 +2075,7 @@ pub fn checker_diags_against_ref(tag: &str, lib_src: &str, main: &str) -> Option
     let stdlib = stdlib_jar();
     let mut classpath = vec![libout, stdlib];
     classpath.push(jdk_modules());
-    Some(checker_diags_with_classpath(main, classpath))
+    Some(inspect_checker_with_classpath(main, classpath, |_, _, _| ()).0)
 }
 
 /// Compile a dependency source set with the REFERENCE kotlinc (pooled server) into a scratch
