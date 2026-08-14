@@ -604,6 +604,10 @@ mod tests {
         let sup = Ty::fun(vec![s("app/Dog")], s("app/Animal"));
         assert!(ok(sub, sup));
         assert!(!ok(sup, sub));
+        assert!(ok(
+            Ty::fun(Vec::new(), Ty::Nothing),
+            Ty::fun(Vec::new(), Ty::nullable(s("kotlin/Any")))
+        ));
         // arity mismatch
         assert!(!ok(
             Ty::fun(vec![], Ty::Int),

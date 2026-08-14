@@ -366,6 +366,7 @@ mod tests {
                 "names",
                 "parser",
                 "plugins",
+                "trace_compiler",
                 "types",
             ],
         );

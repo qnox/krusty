@@ -16,7 +16,7 @@ use super::common;
 use std::path::PathBuf;
 
 fn run_with_lib(tag: &str, lib: &str, main: &str) -> Option<String> {
-    common::run_box_against(tag, lib, main)
+    common::expect_box_run_against(tag, lib, main)
 }
 
 #[test]
@@ -104,8 +104,7 @@ fn suspend_interface_get_with_list_param_lowers() {
         suspend fun use(p: Port): Int = p.get(listOf(1, 2)).sumOf { it.n }\n\
         fun box(): String = \"OK\"\n";
     assert_eq!(
-        common::compile_and_run_box(MAIN, "Main", &cp, Some(jdk.as_path()))
-            .expect("suspend List-param lowers"),
+        common::expect_box_run(MAIN, "Main", &cp, Some(jdk.as_path())),
         "OK"
     );
 }

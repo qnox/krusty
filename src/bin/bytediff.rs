@@ -49,7 +49,7 @@ fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(Stri
     let mut ir = lower_file(&files[0], &info, &syms, &runtime)?;
     // Shared post-lowering pass pipeline (jvm/backend.rs).
     krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms).ok()?;
-    let out = emit_all(&ir, &facade, &**cp, None)?;
+    let out = emit_all(&ir, &facade, &**cp, None, &syms)?;
     if out.is_empty() {
         None
     } else {

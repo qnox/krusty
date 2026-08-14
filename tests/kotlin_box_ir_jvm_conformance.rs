@@ -295,6 +295,7 @@ fn compile_source(
         metadata.as_ref(),
         &opts,
         &run,
+        &syms,
     ) {
         Some(o) => o,
         None => {
@@ -586,7 +587,8 @@ fn compile_blocks(
             krusty::jvm::backend::shipping_emit_options(&blocks[i].0, "main", None, cp.clone());
         let run = ir_emit::EmitRun::default();
         report("module emit");
-        let out = ir_emit::emit_all_with_opts(&ir, &facade, &*cp, metadata.as_ref(), &opts, &run)?;
+        let out =
+            ir_emit::emit_all_with_opts(&ir, &facade, &*cp, metadata.as_ref(), &opts, &run, &syms)?;
         all.extend(out);
     }
     if all.is_empty() {

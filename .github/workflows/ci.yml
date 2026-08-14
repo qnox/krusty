@@ -1,7 +1,7 @@
 name: ci
 
 # Build the conformance test binary once, run it against every supported Kotlin version, and publish
-# only after every version passes the 50% scanned-corpus conformance gate.
+# only after every version passes the 55% scanned-corpus conformance gate.
 on:
   pull_request:
   push:
@@ -117,14 +117,14 @@ jobs:
           name: pct-${{ matrix.version }}
           path: pct.txt
           if-no-files-found: error
-      - name: enforce >= 50%
+      - name: enforce >= 55%
         run: |
           set -euo pipefail
           read -r pct passed scanned < pct.txt
           awk -v passed="$passed" -v scanned="$scanned" \
-            'BEGIN { exit !(scanned > 0 && passed * 100 >= scanned * 50) }' \
-            || { echo "conformance ${{ matrix.version }} = ${pct}% < 50% — blocking" >&2; exit 1; }
-          echo "conformance ${{ matrix.version }} = ${pct}% >= 50% OK"
+            'BEGIN { exit !(scanned > 0 && passed * 100 >= scanned * 55) }' \
+            || { echo "conformance ${{ matrix.version }} = ${pct}% < 55% — blocking" >&2; exit 1; }
+          echo "conformance ${{ matrix.version }} = ${pct}% >= 55% OK"
 
   # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
   # parallel; publishing is what waits on the gate.

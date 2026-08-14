@@ -214,6 +214,7 @@ mod tests {
                             },
                             PropertySet {
                                 overloads: vec![PropertyInfo {
+                                    name: name.clone(),
                                     kind: PropKind::Member,
                                     receiver: None,
                                     formals: Vec::new(),

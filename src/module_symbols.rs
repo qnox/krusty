@@ -775,7 +775,8 @@ impl<'a> ModuleSymbols<'a> {
             .declared_props
             .get(name)
             .map(|property| {
-                let mut declaration = source_property(internal, property, class.is_interface(), 0);
+                let mut declaration =
+                    source_property(internal, name, property, class.is_interface(), 0);
                 let template = class
                     .generic_props
                     .get(name)
@@ -848,6 +849,7 @@ pub(crate) fn member_from_signature(
     m.context_count = sig.context_count;
     m.default_values = sig.param_default_values.clone();
     m.plugin_expression = sig.plugin_expression;
+    m.source_member = sig.source_member;
     m
 }
 
@@ -925,6 +927,7 @@ fn fn_info(
             .source_file
             .zip(sig.source_decl)
             .map(|(file, decl)| (file, decl.0)),
+        source_member: sig.source_member,
         flags: FnFlags {
             inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
             // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver
@@ -1016,11 +1019,13 @@ fn source_accessor(
 
 fn source_property(
     owner: TypeName,
+    name: &str,
     property: &FrontendDeclaredPropertySig,
     owner_is_interface: bool,
     receiver_rank: u32,
 ) -> PropertyInfo {
     PropertyInfo {
+        name: name.to_string(),
         kind: PropKind::Member,
         receiver: Some(Ty::obj_name(owner)),
         formals: Vec::new(),
@@ -1237,6 +1242,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                             setter
                         });
                         properties.push(PropertyInfo {
+                            name: name.clone(),
                             kind: PropKind::Extension,
                             receiver: Some(declaration.receiver_ty()),
                             formals: declaration.type_params().to_vec(),
@@ -1289,6 +1295,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 )
             });
             properties.push(PropertyInfo {
+                name: name.clone(),
                 kind: PropKind::TopLevel,
                 receiver: None,
                 formals: Vec::new(),
@@ -1336,6 +1343,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     source_callable(owner, setter_name.clone(), params, Ty::Unit, false)
                 });
                 properties.push(PropertyInfo {
+                    name: property_name.clone(),
                     kind: PropKind::Extension,
                     receiver: Some(property.receiver),
                     formals: property.formals.clone(),
@@ -1414,6 +1422,7 @@ mod tests {
             context_count: 0,
             source_decl: None,
             source_file: None,
+            source_member: None,
             source_receiver: None,
             package: String::new(),
             contract: None,

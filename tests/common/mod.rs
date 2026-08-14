@@ -320,6 +320,7 @@ pub fn compile_in_process(
         metadata.as_ref(),
         &opts,
         &krusty::jvm::ir_emit::EmitRun::default(),
+        &syms,
     )?;
     if outputs.is_empty() {
         None
@@ -442,10 +443,13 @@ pub fn compile_in_process_metadata_cp(
         &ir,
         &facade,
         &*cp,
-        metadata.as_ref(),
+        krusty::jvm::ir_emit::EmitMetadata {
+            facade: metadata.as_ref(),
+            continuations: &continuation_metadata,
+        },
         &opts,
         &run,
-        &continuation_metadata,
+        &syms,
     )?;
     (!outputs.is_empty()).then_some(outputs)
 }
@@ -556,7 +560,7 @@ pub fn backend_outcome_in_process(
         return Some(BackendOutcome::BackendPassBail(reason));
     }
     Some(
-        if krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None).is_none() {
+        if krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None, &syms).is_none() {
             BackendOutcome::EmitBail
         } else {
             BackendOutcome::Emitted

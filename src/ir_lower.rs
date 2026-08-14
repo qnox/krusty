@@ -9,7 +9,9 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    self, BinOp, Decl, DeclId, Expr, ExprId as AstExprId, FunBody, FunDecl, Stmt, TemplatePart,
+    self, has_instance_backing_field as is_backing_field_prop,
+    is_computed_member_prop as is_computed_prop, BinOp, Decl, DeclId, Expr, ExprId as AstExprId,
+    FunBody, FunDecl, Stmt, TemplatePart,
 };
 use crate::frontend::{
     function_import_scope, AdaptedRefArgument, AnonymousObjectCapture,
@@ -215,6 +217,7 @@ fn lower_file_at_reporting_impl(
         expected_array_elem: std::cell::Cell::new(None),
         cur_class: None,
         cur_field: None,
+        class_storage_parameter_subst: Vec::new(),
         field_accessor_props: std::collections::HashSet::new(),
         field_accessor_var_props: std::collections::HashSet::new(),
         cur_fn_name: String::new(),
@@ -248,6 +251,7 @@ fn lower_file_at_reporting_impl(
         inline_return: Vec::new(),
         inline_lambda_ret: Vec::new(),
         closure_return_target: None,
+        captured_implicit_receivers: Vec::new(),
         foreach_splice: Vec::new(),
         fn_body_tail: None,
     };
@@ -800,19 +804,35 @@ fn lower_file_at_reporting_impl(
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
             let class_sig = syms.class_by_internal(&internal)?;
+            if c.props
+                .iter()
+                .filter(|property| property.is_property)
+                .map(|property| property.name.as_str())
+                .chain(
+                    c.body_props
+                        .iter()
+                        .filter(|property| is_backing_field_prop(property))
+                        .map(|property| property.name.as_str()),
+                )
+                .any(|name| !class_sig.declared_props.contains_key(name))
+            {
+                return lo.bail("checked class property metadata is incomplete");
+            }
             let resolved_prop_ty = |name: &str| {
-                class_sig
-                    .props
-                    .iter()
-                    .find_map(|(n, t, _)| (n == name).then_some(stored_value_ty(*t)))
-                    .unwrap_or(Ty::Error)
+                let property = class_sig
+                    .declared_props
+                    .get(name)
+                    .expect("property metadata validated above");
+                property
+                    .storage_ty
+                    .unwrap_or_else(|| stored_value_ty(property.ty))
             };
             let declared_prop_ty = |name: &str| {
                 class_sig
                     .declared_props
                     .get(name)
-                    .map(|property| property.ty)
-                    .unwrap_or_else(|| resolved_prop_ty(name))
+                    .expect("property metadata validated above")
+                    .ty
             };
             // Constructor-parameter fields, then class-body-property fields (initialized in `init_body`).
             // Field types come from the resolver's ClassSig so nested/imported/user classifier decisions
@@ -3424,8 +3444,9 @@ fn lower_file_at_reporting_impl(
                 }
                 // A REGULAR (non-value, non-inner) class with a DEFAULT on any primary-ctor parameter needs
                 // kotlinc's synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload. Lower
-                // each default in the INSTANCE `<init>` frame (`this` = value 0, params = 1..=n) and stash
-                // them by class internal; the backend emits the overload (one int mask per 32 params).
+                // each default in the INSTANCE `<init>` frame (`this` = value 0, then captured parameters,
+                // then source parameters) and stash one parallel entry per physical constructor parameter;
+                // the backend emits the overload (one int mask per 32 params).
                 if !c.is_value
                     && c.inner_of.is_none()
                     && !c.is_interface()
@@ -3444,14 +3465,21 @@ fn lower_file_at_reporting_impl(
                     let this_v = lo.fresh_value(); // value 0 = `this`
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    for capture in &anonymous_captures {
+                        let value = lo.fresh_value();
+                        lo.scope.push((capture.name.clone(), value, capture.ty));
+                    }
                     let mut ptys = Vec::new();
                     for (p, &pty) in c.props.iter().zip(&class_sig.ctor_params) {
                         let v = lo.fresh_value(); // params at 1..=n
                         lo.scope.push((p.name.clone(), v, pty));
                         ptys.push(pty);
                     }
-                    let mut defaults = Vec::with_capacity(c.props.len());
+                    let mut defaults = vec![None; anonymous_captures.len()];
+                    defaults.reserve(c.props.len());
                     let mut all_ok = true;
+                    lo.class_storage_parameter_subst =
+                        (1..=anonymous_captures.len() as u32).collect();
                     for (p, pty) in c.props.iter().zip(&ptys) {
                         match p.default {
                             Some(d) => match lo.lower_arg(d, &ty_to_ir(*pty)) {
@@ -3464,6 +3492,7 @@ fn lower_file_at_reporting_impl(
                             None => defaults.push(None),
                         }
                     }
+                    lo.class_storage_parameter_subst.clear();
                     // Only register when EVERY default lowered — a partial set would emit a stub that fills
                     // some slots with a zero placeholder (a miscompile); bail to the no-stub status quo.
                     if all_ok {
@@ -3501,7 +3530,11 @@ fn lower_file_at_reporting_impl(
                     || c.inner_of.is_some()
                     || !anonymous_captures.is_empty()
                     || c.props.iter().any(|p| p.is_property))
-                    && c.primary_ctor_annotations.is_some()
+                    // An enum always has a primary construction path, even when source writes no
+                    // constructor header (`enum class E { A; val x = 1 }`). Its body-property
+                    // initializers belong in that implicit constructor exactly like an explicitly
+                    // declared class primary constructor.
+                    && (c.primary_ctor_annotations.is_some() || c.is_enum())
                 {
                     let class_id = lo.class_info(&internal)?.id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count;
@@ -5101,18 +5134,6 @@ fn body_prop_ir_ty(
     }
 }
 
-fn is_computed_prop(p: &ast::PropDecl) -> bool {
-    p.receiver.is_none()
-        && !p.is_lateinit
-        && p.init.is_none()
-        && p.getter.is_some()
-        && (!p.is_var || p.setter.as_ref().is_some_and(|setter| setter.body.is_some()))
-        // A getter that reads `field` has a REAL backing field (assigned in a constructor), so it is
-        // NOT a computed (field-less) property.
-        && !p.getter_reads_field
-    // The type may be inferred from the getter body (`val xx get() = x`) — no explicit annotation needed.
-}
-
 /// A MEMBER EXTENSION PROPERTY (`class C { val Int.x: T get() = … }`): an extension receiver and a
 /// custom getter (plus a bodied custom setter for a `var`) — never an initializer, a `field` read,
 /// or a delegate (an extension property can't have a backing field). Its accessor lowers exactly
@@ -5233,23 +5254,6 @@ fn registered_method_signature(
     })
 }
 
-/// A body property with a real backing field — neither a computed property (custom getter, no field)
-/// nor an `abstract` one (emitted as an abstract `getX()`, the field lives on the subclass) nor a
-/// delegated one (`by Del()` — its field is the synthetic `x$delegate`, accessor calls `getValue`).
-fn is_backing_field_prop(p: &ast::PropDecl) -> bool {
-    // A `const val` is NEVER an instance backing field — Kotlin only allows `const` in an `object`,
-    // `companion object`, or at top level, where it compiles to a `public static final` + `ConstantValue`
-    // field (emitted on the static path) and every read is inlined. Excluding it here also suppresses the
-    // `getX()` accessor (kotlinc emits none for a const).
-    // An EXTENSION property can't have a backing field either (kotlinc rejects an initializer) —
-    // exclude it here so no shape ever synthesizes one for it.
-    !p.is_const
-        && !is_computed_prop(p)
-        && !p.is_abstract
-        && p.delegate.is_none()
-        && p.receiver.is_none()
-}
-
 /// A backing-field property whose accessor is CUSTOM and reads/writes `field` (`val x = init get() =
 /// field…`, `var x = init set(v) { field = … }`). The backing field is emitted as usual; the
 /// synthesized `getX`/`setX` run the custom body (with `field` bound to that field) instead of the
@@ -5279,6 +5283,7 @@ struct InlineMemberTarget {
     owner: TypeName,
     params: Vec<Ty>,
     ret: Ty,
+    source: crate::libraries::SourceMember,
 }
 
 #[derive(Clone, Copy)]
@@ -5423,6 +5428,11 @@ pub(crate) struct Lower<'a> {
     /// `(class_id, field_index, field_ir_type)` — so the `field` keyword reads/writes it. `None`
     /// outside an accessor body.
     cur_field: Option<(u32, u32, Ty)>,
+    /// While lowering a constructor default before `this` is initialized, a checker-selected current-
+    /// class storage field may already be available as the corresponding leading constructor parameter
+    /// (local-class captures). Field index → value index; consuming it preserves the checker identity and
+    /// avoids an illegal `getfield` on `uninitializedThis`.
+    class_storage_parameter_subst: Vec<u32>,
     /// `(class internal, property name)` for every property with a CUSTOM accessor over a backing
     /// field. Such a property is read/written ONLY through `getX`/`setX` (even in-class) — never as a
     /// direct field — so `resolve_field` declines it (the `field` keyword reaches the field via
@@ -5555,6 +5565,10 @@ pub(crate) struct Lower<'a> {
     /// Lambda expression whose real closure method is currently being lowered. Return ownership is
     /// checker-selected by this identity; source labels are never resolved in lowering.
     closure_return_target: Option<AstExprId>,
+    /// Checker receiver coordinates remapped to captured closure parameters while a lambda body is
+    /// lowered. Each frame contains `(semantic receiver depth, captured value slot, receiver type)`;
+    /// consuming a selection is a direct coordinate lookup, never a member/type/name search.
+    captured_implicit_receivers: Vec<Vec<(usize, u32, Ty)>>,
     /// Active `forEach` lambda splices, innermost last: `(source label, IR loop label)`. `forEach` is
     /// spliced into a for-each LOOP rather than through a result-slot frame, so a `return@<label>` in
     /// its body is the loop's `continue`, not a break to a result slot. The source label is the
@@ -5757,6 +5771,7 @@ impl<'a> Lower<'a> {
         let direct_receiver = match member.realization {
             crate::libraries::MemberRealization::Dispatch => None,
             crate::libraries::MemberRealization::Direct { pass_receiver } => Some(pass_receiver),
+            crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
         };
         // The receiver is checked with the arguments: a member realized as a mangled `-impl` static
         // carries it in the descriptor's leading parameter. Ordinary virtual-receiver boxing belongs
@@ -8768,6 +8783,7 @@ impl<'a> Lower<'a> {
         let model = self.syms.class_model(owner)?;
         let value_underlying = model.value_underlying;
         let slot_primitives = self.constructor_slot_primitives(call, &model);
+        let capture_count = self.local_class_captures.get(&class).map_or(0, Vec::len);
 
         let captures_outer = !self.local_class_captures.contains_key(&class)
             && self.ir.classes[class as usize]
@@ -8829,6 +8845,20 @@ impl<'a> Lower<'a> {
                     .bail("selected source constructor has no emitted default-argument ABI");
             }
         }
+        // Resolver argument slots and omissions are source-parameter coordinates. A local class's JVM
+        // constructor prepends its captures, so only the backend mask coordinate shifts; source overload
+        // selection remains untouched. Rebuild from the selected omitted slots so crossing a 32-parameter
+        // mask boundary is handled correctly.
+        let physical_default_masks = if default_masks.is_empty() || capture_count == 0 {
+            default_masks.clone()
+        } else {
+            let mut masks = vec![0; default_mask_count(capture_count + params.len())];
+            for &parameter in &omitted {
+                let physical = capture_count + parameter;
+                masks[physical / 32] |= default_mask_bit(physical);
+            }
+            masks
+        };
         let (lowered, prelude, invoke_params) = self.lower_resolved_source_constructor(
             args,
             ResolvedSourceConstructorPlan {
@@ -8837,13 +8867,13 @@ impl<'a> Lower<'a> {
                 argument_types: &argument_types,
                 omitted: &omitted,
                 vararg,
-                default_masks: &default_masks,
+                default_masks: &physical_default_masks,
                 value_class,
                 slot_prims: &slot_primitives,
             },
         )?;
-        let exact_params =
-            (!primary || !default_masks.is_empty() || value_class).then_some(invoke_params);
+        let exact_params = (!primary || !physical_default_masks.is_empty() || value_class)
+            .then_some(invoke_params);
         let new = self.emit_new(class, lowered, exact_params)?;
         Some(self.wrap_arg_prelude(new, prelude))
     }
@@ -9540,6 +9570,7 @@ impl<'a> Lower<'a> {
         let deep = true;
         let selected_context_values = self.lambda_selected_context_values(body, deep);
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
+        let mut captured_receivers: Vec<(usize, u32, Ty)> = Vec::new();
         let mut same_name_depths = std::collections::HashMap::<&str, usize>::new();
         let mut receiver_depth = 0usize;
         for (name, v, ty) in self.scope.iter().rev() {
@@ -9604,16 +9635,22 @@ impl<'a> Lower<'a> {
             && !has_implicit_receiver
             && self.lambda_uses_enclosing_this(body, &bound_names, deep);
         let captures_outer_this = !captures_this
-            && !has_implicit_receiver
             && self.cur_class.is_some()
             && self.lookup("this$0").is_some()
             && self.lambda_uses_outer_this_param(body, &bound_names, deep);
         if captures_this {
             let tty = Ty::obj_name(self.cur_class.unwrap());
             captures.insert(0, ("this".to_string(), 0, tty));
+            captured_receivers.push((0, 0, tty));
         } else if captures_outer_this {
             let (v, tty) = self.lookup("this$0")?;
             captures.insert(0, ("this".to_string(), v, tty));
+            let outer_depth = self.implicit_receivers().len();
+            for selection in self.lambda_selected_implicit_receivers(body, deep) {
+                if selection.receiver_depth == outer_depth {
+                    captured_receivers.push((selection.receiver_depth, 0, tty));
+                }
+            }
         }
         let recv_lambda_captures_outer = self.cur_class.is_some()
             && has_implicit_receiver
@@ -9702,6 +9739,7 @@ impl<'a> Lower<'a> {
             None
         };
         let saved_closure_return_target = self.closure_return_target.replace(e);
+        self.captured_implicit_receivers.push(captured_receivers);
         // A `var` declared INSIDE this lambda's body and mutated by a further (non-inline) closure
         // (`{ var v = …; call { v = … }; v }`) needs a `Ref` holder so the nested write is observed.
         // UNION the body-local shared cells with the inherited set (captured enclosing cells stay boxed)
@@ -9723,6 +9761,7 @@ impl<'a> Lower<'a> {
         let saved_backing_fields = (lambda_info.capture == LambdaCapture::Closure)
             .then(|| (self.cur_field.take(), self.cur_static_field.take()));
         let ve = self.expr(body);
+        self.captured_implicit_receivers.pop();
         if let Some((field, static_field)) = saved_backing_fields {
             self.cur_field = field;
             self.cur_static_field = static_field;
@@ -10088,6 +10127,20 @@ impl<'a> Lower<'a> {
         let mut out = Vec::new();
         scan(self, body, deep, &mut out);
         out
+    }
+
+    fn lambda_selected_implicit_receivers(
+        &self,
+        body: AstExprId,
+        deep: bool,
+    ) -> Vec<ImplicitReceiverSelection> {
+        self.lambda_selected_context_values(body, deep)
+            .into_iter()
+            .filter_map(|source| match source {
+                ResolvedContextArgument::ImplicitReceiver(selection) => Some(selection),
+                ResolvedContextArgument::Binding { .. } => None,
+            })
+            .collect()
     }
 
     /// In an inner-class constructor prelude (`super(...)` arguments), the captured outer instance is a
@@ -11617,30 +11670,34 @@ impl<'a> Lower<'a> {
             })
     }
 
-    fn source_member_decl(&self, target: &InlineMemberTarget, name: &str) -> Option<ast::FunDecl> {
-        if let Some(class) = self.class_decl_by_type_name(target.owner) {
-            let class_sig = self.syms.class_by_type_name(target.owner)?;
-            return class
-                .methods
-                .iter()
-                .enumerate()
-                .find_map(|(index, method)| {
-                    if method.name != name || method.receiver.is_some() {
-                        return None;
-                    }
-                    let overload = class.methods[..index]
-                        .iter()
-                        .filter(|candidate| candidate.name == name && candidate.receiver.is_none())
-                        .count();
-                    class_sig
-                        .methods_named(name)
-                        .get(overload)
-                        .filter(|signature| signature.params == target.params)
-                        .map(|_| method.clone())
-                });
-        }
+    fn selected_source_member_decl(&self, target: &InlineMemberTarget) -> Option<ast::FunDecl> {
+        use crate::libraries::SourceMember;
 
-        None
+        (target.source.file() == self.file_index).then_some(())?;
+        match target.source {
+            SourceMember::Class { owner, method, .. } => {
+                let Decl::Class(class) = self.afile.decl(ast::DeclId(owner)) else {
+                    return None;
+                };
+                class.methods.get(method as usize).cloned()
+            }
+            SourceMember::EnumEntry {
+                owner,
+                entry,
+                method,
+                ..
+            } => {
+                let Decl::Class(class) = self.afile.decl(ast::DeclId(owner)) else {
+                    return None;
+                };
+                class
+                    .enum_entries
+                    .get(entry as usize)?
+                    .methods
+                    .get(method as usize)
+                    .cloned()
+            }
+        }
     }
 
     fn serializable_uses_companion_accessor(&self, c: &ast::ClassDecl) -> bool {
@@ -12710,12 +12767,13 @@ impl<'a> Lower<'a> {
 
     fn lower_property_ref(
         &mut self,
-        name: &str,
+        _name: &str,
         property: crate::symbol_resolver::ResolvedPropertyRef,
         capture: Option<u32>,
     ) -> Option<u32> {
         let bound = capture.is_some();
         let p = property;
+        let name = p.name.clone();
         crate::trace_compiler!(
             "lower",
             "property ref target name={name} reflection_owner={:?} getter={}.{}{} interface={} getter_visibility={:?} setter_visibility={:?}",
@@ -12804,7 +12862,7 @@ impl<'a> Lower<'a> {
             prop_ref: Some(crate::ir::PropRef {
                 owner_internal: Some(owner),
                 call_owner_internal: Some(p.getter.owner),
-                prop_name: name.to_string(),
+                prop_name: name,
                 getter_name: p.getter.name,
                 getter_descriptor: Some(getter_descriptor),
                 setter_name: p.setter.as_ref().map(|setter| setter.name.clone()),
@@ -12992,33 +13050,15 @@ impl<'a> Lower<'a> {
     /// the file facade, so the synthesized `get`/`set` dispatch via `invokestatic`. `owner_internal` is
     /// the declaring facade (empty = this file's facade, resolved at emit); a cross-file property names
     /// its facade explicitly. The expression evaluates to the singleton's `INSTANCE`.
-    fn lower_toplevel_prop_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
-        // A DELEGATED top-level property (`val x by Delegate`) reserves a `x$delegate` static and has no
-        // plain `setX`; its reference needs reflection metadata (`getDelegate()`) krusty doesn't emit.
-        // Skip (the whole `::x` expression then fails to lower and the case is dropped, not miscompiled).
-        if self.statics.contains_key(&format!("{name}$delegate")) {
-            return None;
-        }
-        // Resolve the property's type, mutability, and declaring facade. A same-file property leaves the
-        // facade implicit; a cross-file one carries its facade id. `const val`s have no accessor, so they
-        // can't be referenced — skip.
-        let (owner, prop_ty, is_var): (Option<TypeName>, Ty, bool) =
-            if let Some((ty, is_var, is_const)) = self.syms.props.get(name).cloned() {
-                if is_const {
-                    return None;
-                }
-                (None, ty, is_var)
-            } else if let Some((facade, ty, is_var, is_const)) =
-                self.syms.prop_facades.get(name).cloned()
-            {
-                if is_const {
-                    return None;
-                }
-                (Some(facade), ty, is_var)
-            } else {
-                return None;
-            };
-        let prop_ty = ty_to_ir(prop_ty);
+    fn lower_toplevel_prop_ref(
+        &mut self,
+        _name: &str,
+        property: crate::libraries::PropertyInfo,
+    ) -> Option<u32> {
+        let name = property.name.clone();
+        let owner = (!property.getter.owner.matches("")).then_some(property.getter.owner);
+        let prop_ty = ty_to_ir(property.ty);
+        let is_var = property.setter.is_some();
         let superclass = self.property_reference_impl(0, is_var)?.internal;
         let seq = self.next_synthetic_seq();
         let synth_fq = class_internal(
@@ -13060,11 +13100,14 @@ impl<'a> Lower<'a> {
             prop_ref: Some(crate::ir::PropRef {
                 owner_internal: owner,
                 call_owner_internal: owner,
-                prop_name: name.to_string(),
-                getter_name: property_getter_name(name),
-                getter_descriptor: None,
-                setter_name: None,
-                setter_descriptor: None,
+                prop_name: name,
+                getter_name: property.getter.name,
+                getter_descriptor: (!property.getter.descriptor.is_empty())
+                    .then_some(property.getter.descriptor),
+                setter_name: property.setter.as_ref().map(|setter| setter.name.clone()),
+                setter_descriptor: property.setter.as_ref().and_then(|setter| {
+                    (!setter.descriptor.is_empty()).then(|| setter.descriptor.clone())
+                }),
                 boxed_value_class: None,
                 owner_is_interface: false,
                 prop_ty,
@@ -13085,7 +13128,6 @@ impl<'a> Lower<'a> {
             field_annotations: Vec::new(),
             runtime_retained: false,
         });
-        let _ = e;
         Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE"))
     }
 
@@ -13215,6 +13257,54 @@ impl<'a> Lower<'a> {
             ty_to_ir(member.ret),
             capture,
             Some((tys_to_ir(&target_params), ty_to_ir(member.ret))),
+        )
+    }
+
+    fn lower_bound_intrinsic_extension_reference(
+        &mut self,
+        e: AstExprId,
+        display_name: &str,
+        receiver: Ty,
+        callable: &crate::libraries::LibraryCallable,
+        capture: u32,
+    ) -> Option<u32> {
+        let operation = match callable.compiler_intrinsic {
+            Some(crate::libraries::CompilerIntrinsic::NullableAnyToString) => {
+                crate::ir::IrIntrinsic::NullableAnyToString
+            }
+            _ => return None,
+        };
+        let target_receiver = callable.physical_params.first().copied()?;
+        let recv = self.emit_get_value(0);
+        let value = self.emit_intrinsic_call(operation, callable.ret, Some(recv), vec![]);
+        let ret = self.emit_return(Some(value));
+        let body = self.emit_block(vec![ret], None);
+        let adapter_name = format!("{}$intrinsicRef${}", self.cur_fn_name, e.0);
+        self.ir.add_fun(IrFunction {
+            name: adapter_name.clone(),
+            params: vec![ty_to_ir(target_receiver)],
+            ret: ty_to_ir(callable.ret),
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        self.make_func_ref(
+            e.0,
+            true,
+            0,
+            false,
+            receiver.kotlin_class_internal(),
+            display_name.to_string(),
+            1,
+            crate::ir::FrDispatch::StaticBound,
+            None,
+            adapter_name,
+            false,
+            Vec::new(),
+            ty_to_ir(callable.ret),
+            Some(capture),
+            Some((vec![ty_to_ir(target_receiver)], ty_to_ir(callable.ret))),
         )
     }
 
@@ -14084,6 +14174,33 @@ impl<'a> Lower<'a> {
             ResolvedCall::Member(resolved)
                 if matches!(resolved.origin, crate::libraries::Origin::Library) =>
             {
+                if let crate::libraries::MemberRealization::RangeConstruction { open_end } =
+                    resolved.member.realization
+                {
+                    let [end] = args else { return None };
+                    let construction = self
+                        .runtime
+                        .range_construction(recv_ty, self.info.ty(*end))?;
+                    let elem = ty_to_ir(construction.elem);
+                    let start = self.coerce_argument_value(recv_v, recv_ty, elem)?;
+                    let end = self.lower_arg(*end, &elem)?;
+                    let call = if open_end {
+                        self.emit_library_static_call(construction.until?, vec![start, end], false)?
+                    } else if let Some(callable) = construction.through_static {
+                        self.emit_library_static_call(callable, vec![start, end], false)?
+                    } else {
+                        let mut arguments = vec![start, end];
+                        for _ in 0..construction.through.trailing_nulls {
+                            arguments.push(self.emit_const(IrConst::Null));
+                        }
+                        self.emit_new_external(
+                            construction.through.internal,
+                            construction.through.ctor_desc,
+                            arguments,
+                        )
+                    };
+                    return Some((call, resolved.ret));
+                }
                 let internal = recv_ty.kotlin_class_internal()?;
                 let physical_params = resolved.physical_params;
                 let member = resolved.member;
@@ -14191,7 +14308,7 @@ impl<'a> Lower<'a> {
             ResolvedCall::Extension(extension) => {
                 let ResolvedExtensionCall {
                     callable,
-                    receiver,
+                    receiver: _,
                     params: selected_params,
                     context_args,
                     source,
@@ -14207,9 +14324,6 @@ impl<'a> Lower<'a> {
                 let context_types = callable.params.get(1..1 + context_count)?.to_vec();
                 let module_owner = match callable.origin {
                     crate::libraries::Origin::Library => {
-                        if target != name {
-                            return None;
-                        }
                         let physical_ret = callable.physical_ret;
                         let receiver_param = callable.params[0];
                         // A library extension's receiver is its first JVM argument, so realize that
@@ -14253,24 +14367,12 @@ impl<'a> Lower<'a> {
                 // name a supertype (`fun A.test()` called on `B`), so comparing it with the call-site
                 // type here would both duplicate resolution and reject valid calls. Lowering only
                 // realizes that semantic handoff at the declaration's physical receiver boundary.
-                if target != name {
-                    return None;
-                }
                 let exact_local = source
                     .filter(|(file, _)| *file == self.file_index)
                     .and_then(|(_, declaration)| {
                         self.fun_ids_by_decl.get(&ast::DeclId(declaration)).copied()
                     });
-                let legacy_local = source.is_none().then(|| {
-                    self.ext_fun_id_by_sig
-                        .get(&(
-                            receiver.erased_recv(),
-                            target.to_string(),
-                            selected_params.clone(),
-                        ))
-                        .copied()
-                });
-                if let Some(fid) = exact_local.or_else(|| legacy_local.flatten()) {
+                if let Some(fid) = exact_local {
                     let params = self.ir.functions[fid as usize].params.clone();
                     let ret = self.ir.functions[fid as usize].ret;
                     crate::trace_compiler!(
@@ -14951,13 +15053,18 @@ impl<'a> Lower<'a> {
             && self.scalar_value_repr(target.non_null()).is_none()
             && self.value_class_underlying(actual.non_null()).is_none()
             && self.value_class_underlying(target.non_null()).is_none()
-            && actual.kotlin_class_internal() != target.kotlin_class_internal()
+            && actual
+                .kotlin_class_internal()
+                .zip(target.kotlin_class_internal())
+                .is_some_and(|(actual, target)| actual != target)
         {
-            // A smart-cast keeps the source expression's declared type in `semantic_ty` while the
-            // selected callable's receiver is the narrowed subtype. The verifier needs that proof as
-            // an explicit checkcast at the call boundary. Value classes only LOOK reference-typed in
-            // the semantic model; their call boundary is a carrier conversion owned by the value-class
-            // representation pass, never a reference cast to that carrier.
+            // A smart-cast keeps the source expression's declared CLASSIFIER in `semantic_ty` while
+            // the selected callable's receiver is a narrower classifier. The verifier needs that
+            // proof as an explicit checkcast at the call boundary. Both sides must therefore have
+            // semantic classifier identity: a function type intentionally has none, and its physical
+            // `FunctionN` ABI slot is not a semantic narrowing target. Value classes only LOOK
+            // reference-typed in the semantic model; their call boundary is a carrier conversion
+            // owned by the value-class representation pass, never a reference cast to that carrier.
             crate::trace_compiler!(
                 "lower",
                 "argument reference narrowing actual={actual:?} target={target:?}"
@@ -15386,7 +15493,8 @@ impl<'a> Lower<'a> {
         callable: &crate::libraries::LibraryCallable,
         args: &[AstExprId],
     ) -> Option<u32> {
-        if !self.runtime.is_reified_assert_fails_with_default(callable) {
+        if callable.compiler_intrinsic != Some(crate::libraries::CompilerIntrinsic::AssertFailsWith)
+        {
             return None;
         }
         let expected = self
@@ -16065,11 +16173,33 @@ impl<'a> Lower<'a> {
                 .map(|(_, slot, ty)| (*slot, *ty))?;
             return Some((self.emit_get_value(slot), ty));
         }
+        if let Some((_, slot, ty)) = self
+            .captured_implicit_receivers
+            .iter()
+            .rev()
+            .find_map(|receivers| {
+                receivers
+                    .iter()
+                    .find(|(depth, _, _)| *depth == selection.receiver_depth)
+            })
+            .copied()
+        {
+            return Some((self.emit_get_value(slot), ty));
+        }
         if selection.current {
             let (slot, ty) = self.lookup("this")?;
             return Some((self.emit_get_value(slot), ty));
         }
         let direct = self.implicit_receivers();
+        // Constructor-header selections keep their checker tower coordinate, which includes the
+        // unavailable class receiver. Lowering has the captured outer instance as the explicit
+        // `this$0` constructor parameter; consume that exact slot before attempting a field walk on
+        // the still-uninitialized current instance.
+        if let Some((slot, ty)) = self.lookup("this$0") {
+            if selection.receiver_depth == direct.len() {
+                return Some((self.emit_get_value(slot), ty));
+            }
+        }
         if let Some((slot, ty)) = direct.get(selection.receiver_depth).copied() {
             return Some((self.emit_get_value(slot), ty));
         }
@@ -18287,6 +18417,7 @@ impl<'a> Lower<'a> {
                                     context_count: 0,
                                     source_decl: None,
                                     source_file: None,
+                                    source_member: None,
                                     source_receiver: None,
                                     package: String::new(),
                                     contract: None,
@@ -18340,6 +18471,7 @@ impl<'a> Lower<'a> {
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
+                                source_member: None,
                                 source_receiver: None,
                                 package: String::new(),
                                 contract: None,
@@ -19896,14 +20028,14 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let member = match member_target {
             Some(ResolvedCall::Member(member))
-                if matches!(member.origin, crate::libraries::Origin::Module { .. })
-                    && member.member.name == fname =>
+                if matches!(member.origin, crate::libraries::Origin::Module { .. }) =>
             {
                 Some(InlineMemberTarget {
                     receiver: member.receiver,
                     owner: member.member.owner?,
                     params: member.member.params.clone(),
                     ret: member.ret,
+                    source: member.member.source_member?,
                 })
             }
             Some(ResolvedCall::Extension(_)) => None,
@@ -19921,24 +20053,21 @@ impl<'a> Lower<'a> {
                 .find_map(|(candidate, applied, _)| (candidate == member.owner).then_some(applied))
         });
         let f = if let Some(member) = member.as_ref() {
-            self.source_member_decl(member, fname)?
+            self.selected_source_member_decl(member)?
         } else if let Some(target) = module_target {
-            if recv.is_some()
-                || target.callable.name != fname
-                || target.source_file != Some(self.file_index)
-            {
+            if target.source_file != Some(self.file_index) {
                 return None;
             }
             let decl = target.source_decl?;
             match self.afile.decl(decl) {
-                Decl::Fun(f) if f.name == fname && f.receiver.is_none() => f.clone(),
+                Decl::Fun(f) => f.clone(),
                 _ => return None,
             }
         } else if let Some(extension) = extension {
             let (file, declaration) = extension.source?;
             (file == self.file_index).then_some(())?;
             match self.afile.decl(ast::DeclId(declaration)) {
-                Decl::Fun(f) if f.name == fname && f.receiver.is_some() => f.clone(),
+                Decl::Fun(f) => f.clone(),
                 _ => return None,
             }
         } else {
@@ -19976,6 +20105,13 @@ impl<'a> Lower<'a> {
         // A GENERIC receiver (`<T> T.foo()`) is specialized to the ACTUAL receiver's type at the call site.
         let recv_ty = if let Some(member) = member.as_ref() {
             Some(member_owner_ty.unwrap_or_else(|| Ty::obj_name(member.owner)))
+        } else if let Some(extension) = extension {
+            // The checker already selected and specialized the extension receiver. In particular,
+            // the non-null branch of `nullable?.extension()` records `T = Int`, while the receiver
+            // AST still has type `Int?`. Re-reading that AST type here makes an inline expansion
+            // declare a boxed temp and initialize it with the branch's unboxed value. Lowering must
+            // consume the semantic call handoff, not resolve the receiver a second time.
+            Some(extension.receiver)
         } else {
             match (&f.receiver, recv) {
                 (Some(r), Some(InlineReceiver::Expr(ra))) => {
@@ -21233,44 +21369,15 @@ impl<'a> Lower<'a> {
             Expr::RangeTo { lo, hi, kind } => {
                 use crate::ast::RangeKind;
                 let lt = self.info.ty(lo);
-                let rt = self.info.ty(hi);
                 let selected_name = match kind {
                     RangeKind::Through => "rangeTo",
                     RangeKind::OpenEnd => "rangeUntil",
                     RangeKind::Until => "until",
                     RangeKind::DownTo => "downTo",
                 };
-                if self.info.resolved_operator_call(e, selected_name).is_some() {
-                    let recv0 = self.expr(lo)?;
-                    let (range_v, _) = self.lower_op_call(recv0, lt, selected_name, &[hi], e)?;
-                    return Some(range_v);
-                }
-                let range = self.runtime.range_construction(lt, rt)?;
-                let lo_v = self.lower_arg(lo, &ty_to_ir(range.elem))?;
-                let hi_v = self.lower_arg(hi, &ty_to_ir(range.elem))?;
-                match kind {
-                    RangeKind::Through => {
-                        if let Some(c) = range.through_static {
-                            self.emit_library_static_call(c, vec![lo_v, hi_v], false)?
-                        } else {
-                            let mut args = vec![lo_v, hi_v];
-                            for _ in 0..range.through.trailing_nulls {
-                                args.push(self.emit_const(IrConst::Null));
-                            }
-                            self.emit_new_external(
-                                range.through.internal,
-                                range.through.ctor_desc,
-                                args,
-                            )
-                        }
-                    }
-                    RangeKind::OpenEnd | RangeKind::Until => {
-                        let c = range.until?;
-                        self.emit_library_static_call(c, vec![lo_v, hi_v], false)?
-                    }
-                    // `downTo` never reaches here (it parses as an infix function call, not `RangeTo`).
-                    RangeKind::DownTo => return None,
-                }
+                let recv0 = self.expr(lo)?;
+                let (range_v, _) = self.lower_op_call(recv0, lt, selected_name, &[hi], e)?;
+                range_v
             }
             Expr::IncDec {
                 target,
@@ -21632,6 +21739,10 @@ impl<'a> Lower<'a> {
         let t = {
             let rty = self.info.ty(receiver);
             let result_ty = self.info.ty(e);
+            crate::trace_compiler!(
+                "lower",
+                "safe call={e:?} receiver={receiver:?} receiver_ty={rty:?} result_ty={result_ty:?} name={name}"
+            );
             // A receiver that can only ever be `null`: the `null` literal (`null?.toString()`) and
             // `Nothing`/`Nothing?` (`val n: Nothing? = null; n?.toString()` — `Nothing` has no non-null
             // value, and a non-nullable `Nothing` receiver diverges before the member could run). The
@@ -21694,6 +21805,14 @@ impl<'a> Lower<'a> {
                     && result_ty != Ty::Unit
                     && !proven_nonnull_scalar_property)
             {
+                crate::trace_compiler!(
+                    "lower",
+                    "safe call={e:?} rejected by representation receiver_reference={} receiver_scalar={:?} result_reference={} result_nullable_primitive={:?}",
+                    rty.is_reference(),
+                    self.scalar_value_repr(rty),
+                    result_ty.is_reference(),
+                    result_ty.nullable_primitive(),
+                );
                 return None;
             }
             // The receiver internal comes from the NON-null form (`Int?` in a chained `?.let` unwraps
@@ -21703,9 +21822,13 @@ impl<'a> Lower<'a> {
             if nn != Ty::String
                 && nn.obj_internal().is_none()
                 && !self.has_scalar_value_repr(nn)
-                && !matches!(nn, Ty::Fun(_))
+                && !matches!(nn, Ty::Fun(_) | Ty::TyParam(..))
             {
                 // A non-object, non-primitive receiver (e.g. a literal `null?.…`): unsupported — bail.
+                crate::trace_compiler!(
+                    "lower",
+                    "safe call={e:?} rejected because non-null receiver has no runtime representation: {nn:?}"
+                );
                 return None;
             }
             // Flow analysis can prove the receiver non-null and a stable nullable-primitive property
@@ -21720,6 +21843,7 @@ impl<'a> Lower<'a> {
                 return self.lower_member_read_on(recv, rty, &name, e);
             }
             let rv = self.expr(receiver)?;
+            crate::trace_compiler!("lower", "safe call={e:?} lowered receiver to ir={rv}");
             // A NON-NULL primitive receiver: the temp slot is the boxed (`Int?`) form — box before
             // storing, so the slot type and value agree.
             let rv = if rty.is_reference() {
@@ -21741,10 +21865,10 @@ impl<'a> Lower<'a> {
             // receiver keeps its boxed form — which is exactly the representation the receiver
             // expr's type implies (`Int?` is boxed), so `index_subst` below can map the receiver
             // expr to `recv2` and let the ordinary coercion machinery do its job.
-            let recv2 = if rty.is_reference() {
-                recv2
-            } else {
+            let recv2 = if self.has_scalar_value_repr(nn) {
                 self.emit_type_op(IrTypeOp::ImplicitCoercion, recv2, ty_to_ir(nn))
+            } else {
+                recv2
             };
             // A receiver-function-typed value in scope reached by `?.` (`b?.f()`, checker-selected
             // [`ExprLowering::ReceiverFnInvoke`]): invoke the local function value with the
@@ -22035,6 +22159,9 @@ impl<'a> Lower<'a> {
                     (_, CallableReferenceTarget::ClassifierProperty { .. }) => {
                         return self.bail("classifier property reference is not lowered");
                     }
+                    (_, CallableReferenceTarget::TopLevelProperty(property)) => {
+                        return self.lower_toplevel_prop_ref(&name, *property);
+                    }
                     (
                         CallableReferenceBinding::Unbound,
                         CallableReferenceTarget::Property(property),
@@ -22196,6 +22323,15 @@ impl<'a> Lower<'a> {
                             receiver_ty,
                             Ty::obj("kotlin/Any"),
                         )?;
+                        if callable.compiler_intrinsic.is_some() {
+                            return self.lower_bound_intrinsic_extension_reference(
+                                e,
+                                &name,
+                                receiver_ty,
+                                &callable,
+                                capture,
+                            );
+                        }
                         return self.make_func_ref(
                             e.0,
                             true,
@@ -22291,13 +22427,6 @@ impl<'a> Lower<'a> {
             // property-reference runtime object on the JVM.
             if let Some(recv) = receiver {
                 if let Some(pr) = self.lower_prop_ref(e, recv, &name) {
-                    return Some(pr);
-                }
-            }
-            // Top-level property reference `::foo` lowers to a `(Mutable)PropertyReference0Impl`
-            // singleton whose `get`/`set` dispatch statically to the facade accessor.
-            if receiver.is_none() {
-                if let Some(pr) = self.lower_toplevel_prop_ref(e, &name) {
                     return Some(pr);
                 }
             }
@@ -22432,6 +22561,9 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::ClassStorageRead { field }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
+                if let Some(&parameter) = self.class_storage_parameter_subst.get(field as usize) {
+                    return Some(self.emit_get_value(parameter));
+                }
                 let owner = self.cur_class?;
                 let class = self.class_info_name(owner)?.id;
                 let (this, _) = self.lookup("this")?;
@@ -22605,54 +22737,6 @@ impl<'a> Lower<'a> {
                 } else {
                     read
                 }
-            } else if let Some((facade, ty, _, is_const)) = self.syms.prop_facades.get(&n).cloned()
-            {
-                if is_const {
-                    // A `const val` from another file has a PUBLIC field and NO accessor — read it as
-                    // `getstatic <facade>.X` (kotlinc inlines the constant; a field read is equivalent
-                    // and avoids a `NoSuchMethodError` on the non-existent `getX`).
-                    self.emit_external_static_field(
-                        facade.render(),
-                        n.clone(),
-                        self.runtime.type_descriptor(ty)?,
-                    )
-                } else {
-                    // A top-level property from ANOTHER file → call its facade's `getX()` (the field is
-                    // private), reusing the backend-agnostic cross-file callee.
-                    self.emit_cross_file_call(
-                        facade,
-                        property_getter_name(&n),
-                        vec![],
-                        ty_to_ir(ty),
-                        vec![],
-                    )
-                }
-            } else if let Some(class) = self
-                .class_info(&class_internal(self.afile, &n))
-                .filter(|ci| self.ir.classes[ci.id as usize].is_object)
-                .map(|ci| ci.id)
-            {
-                // A bare `object` name → its singleton instance.
-                self.emit_static_instance(class, class, "INSTANCE")
-            } else if let Some((owner, field, cty)) = {
-                // A bare CLASSPATH class with a companion object (`Json` → `Json.Default`): read the
-                // companion-instance static field. Resolve the simple name to its classpath internal
-                // via imports (`class_names`), exactly as the checker did. The checker already typed
-                // this as the companion's type, so member calls on it resolve normally.
-                self.syms
-                    .class_names
-                    .get(&n)
-                    .filter(|i| !i.starts_with("__ty/"))
-                    .map(|i| i.to_string())
-                    .and_then(|internal| {
-                        self.syms
-                            .libraries
-                            .classifier(type_name(&internal))
-                            .and_then(|lt| lt.companion_object.clone())
-                            .map(|(f, t)| (internal, f, t.render()))
-                    })
-            } {
-                self.ir.external_static_instance(&owner, &cty, field)
             } else {
                 let owner = self.info.narrowed_this_member.get(&e).copied()?;
                 // `narrowed_this_member` always describes Kotlin's semantic `this`. In a member
@@ -23180,12 +23264,18 @@ impl<'a> Lower<'a> {
                     });
                 }
                 if self.has_scalar_value_repr(lt) && self.has_scalar_value_repr(rt) && lt != rt {
-                    let p = Ty::promote(lt, rt)?;
+                    // Arithmetic is emitted over platform scalar carriers. A bounded type parameter
+                    // remains semantic in the checker (`T : Int`), but its operand occupies the same
+                    // carrier as the bound; asking `Ty::promote(T, Int)` mixes those layers and rejects
+                    // a valid operation. Compare and promote only the runtime-provided carriers here.
+                    let lrepr = self.scalar_value_repr(lt)?;
+                    let rrepr = self.scalar_value_repr(rt)?;
+                    let p = Ty::promote(lrepr, rrepr)?;
                     let pir = ty_to_ir(p);
-                    if lt != p {
+                    if lrepr != p {
                         l = self.emit_type_op(IrTypeOp::ImplicitCoercion, l, pir.clone());
                     }
-                    if rt != p {
+                    if rrepr != p {
                         r = self.emit_type_op(IrTypeOp::ImplicitCoercion, r, pir);
                     }
                 } else if matches!(op, BinOp::Eq | BinOp::Ne)
@@ -23292,21 +23382,15 @@ impl<'a> Lower<'a> {
             // yields false for null. Lower to `x == null || x is A` (and the De Morgan dual for
             // `x !is A?` → `x != null && x !is A`), binding the operand to a temp so it runs once.
             if ty.nullable() {
-                // `ty_ref` returns `None` for any nullable type; resolve the non-null base — a
-                // reference, OR a boxable primitive (`x is Int?` → `x == null || x instanceof Integer`).
-                let mut base_ref = ty.clone();
-                base_ref.set_nullable(false);
-                // A non-reference base resolves to a primitive whose wrapper the `instanceof` tests
-                // (`x is Int?` → `x == null || x instanceof Integer`). Float/Double are now allowed: a
-                // smart-cast of them reaches the IEEE-correct numeric `==` conform. Unsigned stays
-                // excluded (its conform / value-box unbox isn't modeled).
+                // Resolution is complete before lowering. Consume the checker's resolved nullable
+                // target and remove only its nullability for the runtime `instanceof`; never invent a
+                // second AST type reference or retry lookup by source spelling here.
                 let base = match self.info.expr_lowers.get(&source) {
-                    Some(ExprLowering::RuntimeTypeOperand(target)) => Some(*target),
-                    _ => self.ty_ref(&base_ref).or_else(|| {
-                        Ty::from_name(&base_ref.name)
-                            .filter(|t| self.has_scalar_value_repr(*t) && !t.is_unsigned())
-                    }),
-                };
+                    Some(ExprLowering::RuntimeTypeOperand(target)) => *target,
+                    _ => self.resolved_type_ref(&ty)?,
+                }
+                .non_null();
+                let base = (!base.is_unsigned()).then_some(base);
                 if let Some(target) = base {
                     let inst_operand = ty_to_ir(target);
                     // The operand is stored into an `Any` slot (below); a PRIMITIVE operand must be
@@ -23359,21 +23443,8 @@ impl<'a> Lower<'a> {
             // the backend resolves from the primitive type_operand).
             let target = match self.info.expr_lowers.get(&source) {
                 Some(ExprLowering::RuntimeTypeOperand(target)) => Some(*target),
-                _ => self
-                    .info
-                    .resolved_type(&ty)
-                    .map(|target| self.apply_reified_substitution(target))
-                    .or_else(|| self.ty_ref(&ty)),
-            }
-            .or_else(|| {
-                if ty.nullable() {
-                    None
-                } else {
-                    // `x is Int`/`x is Double` → `instanceof` the boxed wrapper. Float/Double are
-                    // allowed: a boxed-FP `==` reached after the test conforms with IEEE semantics.
-                    Ty::from_name(&ty.name).filter(|t| self.has_scalar_value_repr(*t))
-                }
-            })?;
+                _ => Some(self.resolved_type_ref(&ty)?),
+            }?;
             // An unsigned target tests against its inline-class object (`kotlin/UInt`), not the
             // representation's wrapper (`Integer`).
             let type_operand = if target.is_unsigned() {
@@ -24398,6 +24469,7 @@ impl<'a> Lower<'a> {
                     crate::libraries::CompilerIntrinsic::ForEach
                     | crate::libraries::CompilerIntrinsic::ForEachIndexed
                     | crate::libraries::CompilerIntrinsic::Assert
+                    | crate::libraries::CompilerIntrinsic::AssertFailsWith
                     | crate::libraries::CompilerIntrinsic::Print
                     | crate::libraries::CompilerIntrinsic::Println
                     | crate::libraries::CompilerIntrinsic::StartCoroutine
@@ -27012,36 +27084,40 @@ fn class_generic_sig(
     info: &FrontendTypeInfo,
     syms: &FrontendSymbols,
 ) -> Result<Option<crate::ir::IrGenericSig>, &'static str> {
-    // A CLASS with a PARAMETERIZED supertype (`object O : Operation<Result<Int>>`): carry the superclass
-    // + interfaces as `Ty`s (with their type arguments) so the backend can format a class `Signature` a
-    // cross-module reader uses to recover a member's concrete generic return. Independent of own type params.
-    if !c.base_type_args.is_empty() || c.supertypes.iter().any(|s| !s.targs.is_empty()) {
-        let class = syms
-            .class_by_internal(&class_internal(file, &c.name))
-            .ok_or("internal:missing-checked-class-signature")?;
-        let mut supers: Vec<Ty> = Vec::new();
-        // Superclass first (kotlin/Any → the backend's Object when no base).
-        supers.push(class.super_internal.map_or_else(
-            || Ty::obj("kotlin/Any"),
-            |superclass| Ty::obj_args_name(superclass, &class.super_type_args),
-        ));
-        supers.extend(
-            class
-                .interfaces
-                .iter_ids()
-                .enumerate()
-                .map(|(index, interface)| {
-                    Ty::obj_args_name(
-                        interface,
-                        class
-                            .interface_type_args
-                            .get(index)
-                            .map(Vec::as_slice)
-                            .unwrap_or_default(),
-                    )
-                }),
-        );
-        let type_params = if c.type_params.is_empty() {
+    let has_parameterized_supertype =
+        !c.base_type_args.is_empty() || c.supertypes.iter().any(|s| !s.targs.is_empty());
+    if c.type_params.is_empty() && !has_parameterized_supertype {
+        return Ok(None);
+    }
+    let class = syms
+        .class_by_internal(&class_internal(file, &c.name))
+        .ok_or("internal:missing-checked-class-signature")?;
+    // A class signature is one semantic declaration. Its own type parameters cannot be omitted merely
+    // because the class also has a superclass or interface: metadata, member signatures, and the JVM
+    // signature all need the same identities. Supertypes are recorded alongside them, with `Any` first
+    // when the declaration has no explicit superclass.
+    let mut supers = vec![class.super_internal.map_or_else(
+        || Ty::obj("kotlin/Any"),
+        |superclass| Ty::obj_args_name(superclass, &class.super_type_args),
+    )];
+    supers.extend(
+        class
+            .interfaces
+            .iter_ids()
+            .enumerate()
+            .map(|(index, interface)| {
+                Ty::obj_args_name(
+                    interface,
+                    class
+                        .interface_type_args
+                        .get(index)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                )
+            }),
+    );
+    Ok(Some(crate::ir::IrGenericSig {
+        type_params: if c.type_params.is_empty() {
             Vec::new()
         } else {
             type_param_bounds_ir(
@@ -27051,33 +27127,10 @@ fn class_generic_sig(
                 &c.type_param_bounds,
                 c.span.lo,
             )?
-        };
-        crate::trace_compiler!("value_classes", "class {} supers = {:?}", c.name, supers);
-        return Ok(Some(crate::ir::IrGenericSig {
-            type_params,
-            params: Vec::new(),
-            ret: None,
-            supers,
-        }));
-    }
-    // The original case: a generic class with only own type parameters and no supertypes.
-    if c.type_params.is_empty() || c.base_class.is_some() || !c.supertypes.is_empty() {
-        return Ok(None);
-    }
-    let class = syms
-        .class_by_internal(&class_internal(file, &c.name))
-        .ok_or("internal:missing-checked-class-signature")?;
-    Ok(Some(crate::ir::IrGenericSig {
-        type_params: type_param_bounds_ir(
-            info,
-            &c.type_params,
-            class.type_param_variances(),
-            &c.type_param_bounds,
-            c.span.lo,
-        )?,
+        },
         params: Vec::new(),
         ret: None,
-        supers: Vec::new(),
+        supers,
     }))
 }
 

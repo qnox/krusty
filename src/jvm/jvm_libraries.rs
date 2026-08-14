@@ -33,23 +33,6 @@ enum FunctionClassKind {
 #[derive(Clone, Copy)]
 struct FictitiousFunctionClass {
     kind: FunctionClassKind,
-    arity: usize,
-}
-
-fn decimal_arity(digits: &str) -> Option<usize> {
-    if digits.is_empty() {
-        return None;
-    }
-    let mut arity = 0usize;
-    for digit in digits.bytes() {
-        if !digit.is_ascii_digit() {
-            return None;
-        }
-        arity = arity
-            .checked_mul(10)?
-            .checked_add(usize::from(digit - b'0'))?;
-    }
-    Some(arity)
 }
 
 /// Kotlin's built-in function-class provider owns these declarations; they are absent from stdlib
@@ -70,10 +53,8 @@ fn fictitious_function_class(internal: TypeName) -> Option<FictitiousFunctionCla
     } else {
         return None;
     };
-    Some(FictitiousFunctionClass {
-        kind,
-        arity: decimal_arity(digits)?,
-    })
+    (!digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit()))
+        .then_some(FictitiousFunctionClass { kind })
 }
 
 fn fictitious_function_class_name(fqn: &str) -> Option<TypeName> {
@@ -83,7 +64,7 @@ fn fictitious_function_class_name(fqn: &str) -> Option<TypeName> {
         "kotlin/reflect" => name.strip_prefix("KFunction")?,
         _ => return None,
     };
-    decimal_arity(digits)?;
+    (!digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit())).then_some(())?;
     Some(type_name(fqn))
 }
 
@@ -369,6 +350,92 @@ fn java_type_argument_nullability(ty: Ty) -> Ty {
 }
 
 impl JvmLibraries {
+    /// Turn a JVM generic-signature node into a Kotlin function type only when the referenced
+    /// classifier declaration says that it is a function interface. The raw descriptor/name does
+    /// not carry the callable shape; `callable_signature` is decoded from the interface's `invoke`
+    /// declaration and its type-parameter metadata.
+    fn semanticize_jvm_type(&self, ty: Ty) -> Ty {
+        match ty {
+            Ty::Obj(internal, args) => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.semanticize_jvm_type(*arg))
+                    .collect::<Vec<_>>();
+                let nominal = Ty::obj_args_name(internal, &args);
+                let Some(class) = self.cp.find_name(internal) else {
+                    return nominal;
+                };
+                if !class.interfaces.contains_name(type_name("kotlin/Function")) {
+                    return nominal;
+                }
+                let Some(classifier) = self.classifier_record(internal) else {
+                    return nominal;
+                };
+                if classifier.type_params.len() != args.len() {
+                    return nominal;
+                }
+                let Some(signature) = classifier.callable_signature else {
+                    return nominal;
+                };
+                let Some(arguments) = args
+                    .iter()
+                    .zip(classifier.type_param_variances())
+                    .map(|(argument, variance)| match (argument, variance) {
+                        (Ty::InProjection(inner), crate::types::TypeVariance::In)
+                        | (Ty::OutProjection(inner), crate::types::TypeVariance::Out) => {
+                            Some(gsig_unbox_wrapper(**inner))
+                        }
+                        (Ty::InProjection(_) | Ty::OutProjection(_), _) => None,
+                        (argument, _) => Some(gsig_unbox_wrapper(*argument)),
+                    })
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return nominal;
+                };
+                let bindings = classifier
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .zip(arguments)
+                    .collect::<std::collections::HashMap<_, _>>();
+                ty_subst_keep_unbound(signature, &bindings)
+            }
+            Ty::Fun(signature) => Ty::fun_with_shape(
+                signature
+                    .params
+                    .iter()
+                    .map(|param| self.semanticize_jvm_type(*param))
+                    .collect(),
+                self.semanticize_jvm_type(signature.ret),
+                signature.context_count,
+                signature.has_receiver,
+                signature.suspend,
+            ),
+            Ty::Nullable(inner) => Ty::nullable(self.semanticize_jvm_type(*inner)),
+            Ty::PlatformNullable(inner) => Ty::platform_nullable(self.semanticize_jvm_type(*inner)),
+            Ty::InProjection(inner) => Ty::in_projection(self.semanticize_jvm_type(*inner)),
+            Ty::OutProjection(inner) => Ty::out_projection(self.semanticize_jvm_type(*inner)),
+            Ty::TyParam(name, bound) => Ty::ty_param(name, self.semanticize_jvm_type(*bound)),
+            _ => ty,
+        }
+    }
+
+    fn semanticize_jvm_generic_sig(&self, mut signature: GenericSig) -> GenericSig {
+        for bounds in &mut signature.formal_bounds {
+            for bound in bounds {
+                *bound = self.semanticize_jvm_type(*bound);
+            }
+        }
+        signature.receiver = signature
+            .receiver
+            .map(|receiver| self.semanticize_jvm_type(receiver));
+        for parameter in &mut signature.params {
+            *parameter = self.semanticize_jvm_type(*parameter);
+        }
+        signature.ret = self.semanticize_jvm_type(signature.ret);
+        signature
+    }
+
     fn member_scope_names(
         &self,
         internal: TypeName,
@@ -918,6 +985,7 @@ impl JvmLibraries {
                 })
             });
             props.push(PropertyInfo {
+                name: property.name.clone(),
                 kind: PropKind::Extension,
                 receiver: property_gsig
                     .as_ref()
@@ -1270,7 +1338,7 @@ impl JvmLibraries {
         // No `@Metadata` FUNCTION for the name — the JVM `Signature` is the only source. Its extension
         // receiver is the leading value parameter; move it to the `receiver` ATTRIBUTE so the signature has
         // the same shape as a metadata one (consumers bind the receiver separately, not as a value param).
-        let gsig = jvm_sig.and_then(parse_method_gsig)?;
+        let gsig = self.semanticize_jvm_generic_sig(jvm_sig.and_then(parse_method_gsig)?);
         Some(
             if is_extension && gsig.receiver.is_none() && !gsig.params.is_empty() {
                 let mut params = gsig.params;
@@ -1406,7 +1474,11 @@ impl JvmLibraries {
             };
             let mut member = LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
             member.signature = m.signature.clone();
-            member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+            member.generic_sig = m
+                .signature
+                .as_deref()
+                .and_then(parse_method_gsig)
+                .map(|signature| self.semanticize_jvm_generic_sig(signature));
             sam = Some(member);
         }
         sam
@@ -1472,28 +1544,40 @@ impl JvmLibraries {
     /// byte-consistent. Members/return types erase to the JVM forms (`get(int)Object`, etc.).
     fn build_library_type(&self, internal_name: TypeName) -> Option<LibraryType> {
         if let Some(function_class) = fictitious_function_class(internal_name) {
-            let arity = function_class.arity;
             if function_class.kind == FunctionClassKind::Function {
-                let runtime_name = format!("Function{arity}");
-                let runtime =
-                    crate::types::type_name_child(type_name("kotlin/jvm/functions"), &runtime_name);
+                let runtime = crate::types::type_name_child(
+                    type_name("kotlin/jvm/functions"),
+                    internal_name.segment_ref(),
+                );
                 return self
                     .classifier_record(runtime)
                     .map(|classifier| (*classifier).clone());
             }
-            let type_params = (0..arity)
-                .map(|index| format!("P{}", index + 1))
-                .chain(std::iter::once("R".to_string()))
-                .collect::<Vec<_>>();
+            let digits = internal_name.segment_ref().strip_prefix("KFunction")?;
+            let runtime_name = format!("Function{digits}");
+            let runtime =
+                crate::types::type_name_child(type_name("kotlin/jvm/functions"), &runtime_name);
+            let runtime_shape = self.classifier_record(runtime)?;
+            let type_params = runtime_shape.type_params.clone();
             let arguments = type_params
                 .iter()
-                .map(|formal| Ty::ty_param(formal, Ty::obj("kotlin/Any")))
+                .enumerate()
+                .map(|(index, formal)| {
+                    Ty::ty_param(
+                        formal,
+                        runtime_shape
+                            .type_param_bounds
+                            .get(index)
+                            .and_then(|bounds| bounds.first())
+                            .copied()
+                            .unwrap_or_else(|| Ty::obj("kotlin/Any")),
+                    )
+                })
                 .collect::<Vec<_>>();
             let mut shape =
                 (*self.classifier_record(type_name(crate::types::KFUNCTION_INTERNAL))?).clone();
-            let function_name = format!("Function{arity}");
             let function_classifier =
-                crate::types::type_name_child(type_name("kotlin"), &function_name);
+                crate::types::type_name_child(type_name("kotlin"), &runtime_name);
             shape.supertypes = vec![
                 type_name(crate::types::KFUNCTION_INTERNAL),
                 function_classifier,
@@ -1848,7 +1932,11 @@ impl JvmLibraries {
                     } else {
                         Visibility::Protected
                     };
-                    member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                    member.generic_sig = m
+                        .signature
+                        .as_deref()
+                        .and_then(parse_method_gsig)
+                        .map(|signature| self.semanticize_jvm_generic_sig(signature));
                     if let Some(signature) = &mut member.generic_sig {
                         for (index, parameter) in signature.params.iter_mut().enumerate() {
                             *parameter = java_type_nullability(
@@ -2393,7 +2481,7 @@ impl JvmLibraries {
                         .as_deref()
                         .and_then(|signature| {
                             parse_field_gsig(signature, &field.descriptor, ci.signature.as_deref())
-                                .map(|(ty, _)| ty)
+                                .map(|(ty, _)| self.semanticize_jvm_type(ty))
                         })
                         .unwrap_or(erased_ty);
                     let ty = if uses_java_type_semantics {
@@ -2634,19 +2722,7 @@ fn parse_gsig_inner(s: &str, for_field: bool) -> Option<ParsedGsig<'_>> {
             let after = rest.strip_prefix(';')?;
             let binary_name = binary_name.as_deref().unwrap_or(first_component);
             let internal = to_kotlin_internal(binary_name);
-            let node = if let Some(arity) = jvm_function_arity(internal) {
-                if arity.checked_add(1) == Some(args.len()) {
-                    let ret = gsig_unbox_wrapper(args.pop()?);
-                    let params = args.into_iter().map(gsig_unbox_wrapper).collect();
-                    Ty::fun(params, ret)
-                } else {
-                    field_inexact = true;
-                    Ty::obj_args(internal, &args)
-                }
-            } else if internal.starts_with(JVM_FUNCTION_PREFIX) {
-                field_inexact = true;
-                Ty::obj_args(internal, &args)
-            } else if args.is_empty() {
+            let node = if args.is_empty() {
                 kotlin_name_to_ty(internal)
             } else {
                 Ty::obj_args(internal, &args)
@@ -2730,15 +2806,6 @@ fn parse_gsig_type_args(s: &str, for_field: bool) -> Option<(Vec<Ty>, bool, bool
         rest = parsed.rest;
     }
     Some((args, has_free, field_inexact, rest.strip_prefix('>')?))
-}
-
-const JVM_FUNCTION_PREFIX: &str = "kotlin/jvm/functions/Function";
-
-fn jvm_function_arity(internal: &str) -> Option<usize> {
-    let suffix = internal.strip_prefix(JVM_FUNCTION_PREFIX)?;
-    (!suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
-        .then(|| suffix.parse::<usize>().ok())
-        .flatten()
 }
 
 fn gsig_unbox_wrapper(g: Ty) -> Ty {
@@ -3159,15 +3226,7 @@ pub fn desc_to_ty(d: &str) -> Ty {
         s if s.starts_with('[') => Ty::array(field_desc_to_ty(&s[1..])),
         s if s.starts_with('L') && s.ends_with(';') => {
             let raw_internal = &s[1..s.len() - 1];
-            if raw_internal == "java/lang/Void" {
-                return Ty::Unit;
-            }
-            let internal = to_kotlin_internal(raw_internal);
-            if let Some(n) = jvm_function_arity(internal) {
-                Ty::fun(vec![Ty::obj("kotlin/Any"); n], Ty::obj("kotlin/Any"))
-            } else {
-                Ty::obj(internal)
-            }
+            Ty::obj(to_kotlin_internal(raw_internal))
         }
         _ => Ty::Error,
     }
@@ -3603,6 +3662,7 @@ impl JvmLibraries {
                     Some(setter)
                 });
                 overloads.push(PropertyInfo {
+                    name: name.to_string(),
                     kind: PropKind::Member,
                     receiver: Some(Ty::obj_name(cn)),
                     formals: property_signature
@@ -3643,6 +3703,7 @@ impl JvmLibraries {
                     .unwrap_or_else(|| function.ret.apply(getter.ret));
                 getter.ret = ty;
                 overloads.push(PropertyInfo {
+                    name: name.to_string(),
                     kind: PropKind::Member,
                     receiver: Some(recv),
                     formals: Vec::new(),
@@ -3706,6 +3767,7 @@ impl JvmLibraries {
                         .map_or(visibility, |setter| setter.visibility);
                     let setter = setter.map(|setter| setter.callable);
                     overloads.push(PropertyInfo {
+                        name: name.to_string(),
                         kind: PropKind::Member,
                         receiver: Some(recv),
                         formals: Vec::new(),
@@ -4191,6 +4253,7 @@ impl JvmLibraries {
                     ))
                 });
                 props.push(PropertyInfo {
+                    name: name.to_string(),
                     kind: if mp.is_extension {
                         PropKind::Extension
                     } else {
@@ -4268,6 +4331,10 @@ impl JvmLibraries {
                 "enumValueOf" => Some(crate::libraries::CompilerIntrinsic::EnumValueOf),
                 _ => None,
             },
+            SymbolNamespace::Package(package) if package.matches("kotlin/test") => match name {
+                "assertFailsWith" => Some(crate::libraries::CompilerIntrinsic::AssertFailsWith),
+                _ => None,
+            },
             SymbolNamespace::Package(package)
                 if package.matches("kotlin/collections") || package.matches("kotlin/text") =>
             {
@@ -4306,6 +4373,7 @@ impl JvmLibraries {
                     crate::libraries::CompilerIntrinsic::Print
                     | crate::libraries::CompilerIntrinsic::Println
                     | crate::libraries::CompilerIntrinsic::Assert
+                    | crate::libraries::CompilerIntrinsic::AssertFailsWith
                     | crate::libraries::CompilerIntrinsic::CoroutineSuspended
                     | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                     | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
@@ -5007,6 +5075,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     .signature
                     .as_deref()
                     .and_then(|signature| parse_concrete_field_gsig(signature, &f.descriptor))
+                    .map(|ty| self.semanticize_jvm_type(ty))
                     .unwrap_or_else(|| field_desc_to_ty(&f.descriptor));
                 let constant = f.const_value.as_ref().map(|value| LibraryConst {
                     ty,
@@ -5836,11 +5905,6 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
             }),
         }
     }
-
-    fn is_reified_assert_fails_with_default(&self, callable: &LibraryCallable) -> bool {
-        callable.owner_matches("kotlin/test/AssertionsKt__AssertionsKt")
-            && callable.name == "assertFailsWith$default"
-    }
 }
 
 #[cfg(test)]
@@ -5856,12 +5920,8 @@ mod tests {
     use crate::types::Ty;
 
     #[test]
-    fn function_class_provider_extracts_arity_once_without_a_22_limit() {
-        assert_eq!(
-            fictitious_function_class(type_name("kotlin/reflect/KFunction23"))
-                .map(|kind| kind.arity),
-            Some(23)
-        );
+    fn function_class_provider_recognizes_only_the_builtin_classifier_namespace() {
+        assert!(fictitious_function_class(type_name("kotlin/reflect/KFunction23")).is_some());
         assert!(fictitious_function_class(type_name("kotlin/reflect/KFunction")).is_none());
         assert!(fictitious_function_class(type_name("other/KFunction1")).is_none());
         assert!(fictitious_function_class(type_name("kotlin/reflect/KFunctionX")).is_none());
@@ -5882,6 +5942,82 @@ mod tests {
             panic!("Function1 callable signature is not a function")
         };
         assert_eq!(signature.params.len(), 1);
+    }
+
+    #[test]
+    fn mapped_mutable_list_publishes_its_applied_read_only_supertype() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let actual = Ty::obj_args("kotlin/collections/MutableList", &[Ty::String]);
+        let supertypes = crate::symbol_resolver::direct_supertypes(&libraries, actual);
+        assert!(
+            supertypes.contains(&Ty::obj_args("kotlin/collections/List", &[Ty::String])),
+            "MutableList<String> direct supertypes: {supertypes:?}"
+        );
+        assert!(crate::symbol_resolver::resolution_subtype(
+            &libraries,
+            actual,
+            Ty::obj_args("kotlin/collections/List", &[Ty::String]),
+        ));
+    }
+
+    #[test]
+    fn java_generic_static_sam_retains_its_declared_nullable_bound() {
+        let Some(jdk) = crate::toolchain::jdk_modules() else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![jdk]),
+        ));
+        let classifier = libraries
+            .classifier_record(type_name("java/lang/ThreadLocal"))
+            .expect("ThreadLocal classifier");
+        let callable = classifier
+            .companion
+            .iter()
+            .find(|member| member.name == "withInitial")
+            .expect("ThreadLocal.withInitial");
+        let parameter = callable
+            .generic_sig
+            .as_ref()
+            .and_then(|signature| signature.params.first())
+            .copied()
+            .expect("generic Supplier parameter");
+        let sam = crate::symbol_resolver::semantic_sam_signature(&libraries, parameter)
+            .expect("Supplier SAM declaration");
+        assert!(
+            crate::symbol_resolver::sam_return_matches(&libraries, &libraries, sam.ret, Ty::Null,),
+            "withInitial parameter={parameter:?}, SAM return={:?}",
+            sam.ret,
+        );
+
+        let specialized_parameter = Ty::platform_nullable(Ty::obj_args(
+            "java/util/function/Supplier",
+            &[Ty::out_projection(Ty::nullable(Ty::String))],
+        ));
+        let supplier = libraries
+            .classifier_record(type_name("java/util/function/Supplier"))
+            .expect("Supplier classifier");
+        assert!(
+            supplier
+                .type_param_bounds()
+                .first()
+                .is_some_and(|bounds| bounds.iter().all(|bound| bound.upper_bound_admits_null())),
+            "Java Supplier bounds must retain platform nullability: {:?}",
+            supplier.type_param_bounds()
+        );
+        let specialized =
+            crate::symbol_resolver::semantic_sam_signature(&libraries, specialized_parameter)
+                .expect("specialized Supplier SAM declaration");
+        assert_eq!(
+            specialized.ret,
+            Ty::nullable(Ty::String),
+            "specialized Supplier return must retain the applied nullable type argument"
+        );
     }
 
     #[test]
@@ -6399,8 +6535,8 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_void_reference_normalizes_before_core() {
-        assert_eq!(desc_to_ty("Ljava/lang/Void;"), Ty::Unit);
+    fn descriptor_void_and_java_void_are_distinct() {
+        assert_eq!(desc_to_ty("Ljava/lang/Void;"), Ty::obj("java/lang/Void"));
         assert_eq!(desc_to_ty("V"), Ty::Unit);
     }
 
@@ -6663,7 +6799,7 @@ mod tests {
         assert_eq!(
             signature.formal_bounds[2],
             [Ty::platform_nullable(Ty::obj_args(
-                "java/util/Collection",
+                "kotlin/collections/Collection",
                 &[Ty::in_projection(Ty::ty_param(
                     "R",
                     Ty::platform_nullable(Ty::obj("kotlin/Any")),
@@ -6679,7 +6815,7 @@ mod tests {
         assert_eq!(
             bounds,
             [vec![Ty::platform_nullable(Ty::obj_args(
-                "java/util/List",
+                "kotlin/collections/List",
                 &[Ty::platform_nullable(Ty::String)],
             ))]],
         );
@@ -6721,14 +6857,14 @@ mod tests {
         assert_eq!(
             method.params,
             [Ty::obj_args(
-                "java/util/List",
+                "kotlin/collections/List",
                 &[Ty::out_projection(Ty::String)]
             )]
         );
         assert_eq!(
             method.ret,
             Ty::obj_args(
-                "java/util/List",
+                "kotlin/collections/List",
                 &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
             )
         );
@@ -6751,7 +6887,7 @@ mod tests {
                 .expect("class signature");
         assert_eq!(
             supertypes[1],
-            Ty::obj_args("java/lang/Iterable", &[Ty::UInt])
+            Ty::obj_args("kotlin/collections/Iterable", &[Ty::UInt])
         );
     }
 
@@ -6763,21 +6899,53 @@ mod tests {
         assert_eq!(formals, ["T"]);
         assert_eq!(
             bounds,
-            [vec![Ty::platform_nullable(Ty::obj(
-                "java/lang/CharSequence"
-            ))]]
+            [vec![Ty::platform_nullable(Ty::obj("kotlin/CharSequence"))]]
         );
     }
 
     #[test]
     fn function_generic_signature_canonicalizes_bottom_and_unit_returns() {
-        let unit = parse_method_gsig("(Lkotlin/jvm/functions/Function0<Lkotlin/Unit;>;)V")
-            .expect("Unit function signature");
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let unit = libraries.semanticize_jvm_generic_sig(
+            parse_method_gsig("(Lkotlin/jvm/functions/Function0<Lkotlin/Unit;>;)V")
+                .expect("Unit function signature"),
+        );
         assert_eq!(unit.params, [Ty::fun(Vec::new(), Ty::Unit)]);
 
-        let bottom = parse_method_gsig("(Lkotlin/jvm/functions/Function0<Lkotlin/Nothing;>;)V")
-            .expect("Nothing function signature");
+        let bottom = libraries.semanticize_jvm_generic_sig(
+            parse_method_gsig("(Lkotlin/jvm/functions/Function0<Lkotlin/Nothing;>;)V")
+                .expect("Nothing function signature"),
+        );
         assert_eq!(bottom.params, [Ty::fun(Vec::new(), Ty::Nothing)]);
+    }
+
+    #[test]
+    fn function_generic_signature_consumes_function_interface_variance() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let signature = libraries.semanticize_jvm_generic_sig(
+            parse_method_gsig(
+                "<T:Ljava/lang/Object;>(Lkotlin/jvm/functions/Function1<\
+                 -Ljava/lang/String;+TT;>;)TT;",
+            )
+            .expect("function-typed generic signature"),
+        );
+        assert_eq!(
+            signature.params,
+            [Ty::fun(
+                vec![Ty::String],
+                Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any"))),
+            )]
+        );
     }
 
     #[test]
@@ -6835,17 +7003,25 @@ mod tests {
 
     #[test]
     fn field_generic_signature_recurses_through_function_types() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let raw = parse_concrete_field_gsig(
+            "Lkotlin/jvm/functions/Function1<\
+             Ljava/util/List<Ljava/lang/Integer;>;\
+             Ljava/util/Set<Ljava/lang/Long;>;>;",
+            "Lkotlin/jvm/functions/Function1;",
+        )
+        .expect("concrete generic field signature");
         assert_eq!(
-            parse_concrete_field_gsig(
-                "Lkotlin/jvm/functions/Function1<\
-                 Ljava/util/List<Ljava/lang/Integer;>;\
-                 Ljava/util/Set<Ljava/lang/Long;>;>;",
-                "Lkotlin/jvm/functions/Function1;",
-            ),
-            Some(Ty::fun(
+            libraries.semanticize_jvm_type(raw),
+            Ty::fun(
                 vec![Ty::obj_args("kotlin/collections/List", &[Ty::Int])],
                 Ty::obj_args("kotlin/collections/Set", &[Ty::Long]),
-            ))
+            )
         );
         assert_eq!(
             parse_concrete_field_gsig(
@@ -6886,16 +7062,24 @@ mod tests {
     }
 
     #[test]
-    fn field_generic_signature_requires_exact_function_arity() {
-        assert_eq!(
-            parse_concrete_field_gsig(
-                "Lkotlin/jvm/functions/Function2<\
+    fn field_function_shape_comes_from_the_classifier_declaration() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let valid = parse_concrete_field_gsig(
+            "Lkotlin/jvm/functions/Function2<\
                  Ljava/lang/Integer;\
                  Ljava/lang/Long;\
                  Ljava/lang/String;>;",
-                "Lkotlin/jvm/functions/Function2;",
-            ),
-            Some(Ty::fun(vec![Ty::Int, Ty::Long], Ty::String))
+            "Lkotlin/jvm/functions/Function2;",
+        )
+        .expect("valid generic field signature");
+        assert_eq!(
+            libraries.semanticize_jvm_type(valid),
+            Ty::fun(vec![Ty::Int, Ty::Long], Ty::String)
         );
 
         for signature in [
@@ -6908,10 +7092,11 @@ mod tests {
             "Lkotlin/jvm/functions/Function<Ljava/lang/String;>;",
         ] {
             let descriptor = format!("L{};", &signature[1..signature.find('<').unwrap()]);
-            assert_eq!(
-                parse_concrete_field_gsig(signature, &descriptor),
-                None,
-                "accepted malformed function signature {signature}"
+            let raw = parse_concrete_field_gsig(signature, &descriptor)
+                .expect("well-formed nominal generic signature");
+            assert!(
+                !matches!(libraries.semanticize_jvm_type(raw), Ty::Fun(_)),
+                "invented a function shape for {signature}"
             );
         }
     }

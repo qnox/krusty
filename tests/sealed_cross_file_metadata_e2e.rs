@@ -37,8 +37,16 @@ fn sealed_metadata_includes_sibling_file_subclasses() {
         source_file: Some("Base.kt".to_string()),
         ..Default::default()
     };
-    let classes = emit_all_with_opts(&ir, "p/BaseKt", &*cp, None, &options, &EmitRun::default())
-        .expect("emit sealed base");
+    let classes = emit_all_with_opts(
+        &ir,
+        "p/BaseKt",
+        &*cp,
+        None,
+        &options,
+        &EmitRun::default(),
+        &symbols,
+    )
+    .expect("emit sealed base");
     let bytes = classes
         .iter()
         .find_map(|(name, bytes)| (name == "p/Root").then_some(bytes))
@@ -62,6 +70,7 @@ fn sealed_metadata_includes_sibling_file_subclasses() {
         None,
         &java17_options,
         &EmitRun::default(),
+        &symbols,
     )
     .expect("emit Java 17 sealed base");
     let java17_root = java17_classes

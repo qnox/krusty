@@ -520,6 +520,17 @@ impl<'p, B> Scope<'p, B> {
             .collect()
     }
 
+    /// Identity of the innermost class receiver rung, if this lexical chain has one.
+    ///
+    /// Receiver types are not identities: a context parameter, extension receiver, and class
+    /// receiver may all have the same applied type while denoting different runtime values.
+    pub(crate) fn innermost_class_receiver_identity(&self) -> Option<(usize, usize)> {
+        self.ancestors().find_map(|scope| {
+            matches!(scope.kind, ScopeKind::Class { .. })
+                .then_some((scope as *const Self as usize, 0))
+        })
+    }
+
     fn implicit_receiver_values(&self) -> Vec<ScopedReceiver> {
         let mut out = Vec::new();
         let mut same_name_depths = HashMap::<String, usize>::new();
@@ -785,6 +796,24 @@ mod tests {
             "the extension receiver is nearer than the enclosing class"
         );
         assert_eq!(ext.this_ty(), Some(obj("kotlin/String")));
+    }
+
+    #[test]
+    fn class_receiver_identity_is_not_a_same_typed_context_receiver() {
+        let root: Scope<'_, u32> = Scope::root();
+        let class_scope = root.child(class("A", false));
+        let function = class_scope.function_child(None, None, &[(obj("A"), "other".to_string())]);
+
+        let receivers = function.implicit_receivers_with_declarations();
+        let class_identity = function
+            .innermost_class_receiver_identity()
+            .expect("class receiver identity");
+
+        assert_eq!(receivers.len(), 2);
+        assert_eq!(receivers[0].0, obj("A"));
+        assert_eq!(receivers[1].0, obj("A"));
+        assert_ne!(receivers[0].2, class_identity);
+        assert_eq!(receivers[1].2, class_identity);
     }
 
     #[test]

@@ -691,6 +691,7 @@ mod tests {
                         "marker".to_string(),
                         Callables::Properties(PropertySet {
                             overloads: vec![PropertyInfo {
+                                name: "marker".to_string(),
                                 kind: PropKind::Member,
                                 receiver: Some(receiver),
                                 formals: Vec::new(),

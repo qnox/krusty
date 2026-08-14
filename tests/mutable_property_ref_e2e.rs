@@ -305,17 +305,15 @@ fn bound_object_method_ref() {
 }
 
 #[test]
-fn nullable_typeparam_tostring_ref_declines() {
-    // t::toString where t: T may be null needs kotlinc's null-safe intrinsic; krusty declines (skip)
-    // rather than NPE on the captured null.
+fn nullable_typeparam_tostring_ref_is_null_safe() {
     const MAIN: &str = "fun <T> get(t: T): () -> String = t::toString\n\
         fun box(): String {\n\
         \x20 if (get(null).invoke() != \"null\") return \"Fail null\"\n\
         \x20 return get(\"OK\").invoke()\n\
         }\n";
-    assert!(
-        run(MAIN).is_none(),
-        "nullable-typeparam toString ref must decline, not NPE"
+    assert_eq!(
+        run(MAIN).expect("nullable type-parameter toString ref"),
+        "OK"
     );
 }
 

@@ -219,19 +219,6 @@ pub fn is_throwable_internal(internal: &str) -> bool {
 
 use crate::types::Ty;
 
-/// Bidirectional Kotlin↔JVM internal-name mapping for built-in *type identities* — the subset of
-/// `JavaToKotlinClassMap` whose two sides have different internal names. The front-end core speaks
-/// the Kotlin name (`kotlin/Any`); the JVM name (`java/lang/Object`) is materialized only when a
-/// type crosses into the backend (descriptor emission, constant-pool class references). Listing the
-/// pairs once here is what keeps every `java/lang/…` literal out of the compiler core.
-const TYPE_MAP: &[(&str, &str)] = &[
-    ("kotlin/Any", "java/lang/Object"),
-    ("kotlin/String", "java/lang/String"),
-    // Further built-ins (CharSequence, Comparable, Number, Enum, the primitive wrappers) and the
-    // curated JVM-ABI method tables are migrated off `java/lang/…` in later phases; adding a pair
-    // here also requires normalizing that name everywhere the classpath surfaces it.
-];
-
 /// The JVM wrapper (box) class internal name for a Kotlin primitive's INTERNAL NAME
 /// (`kotlin/Int` → `java/lang/Integer`), or `None` if `internal` is not a Kotlin primitive name.
 /// The single source of truth for the boxed form, shared by the emit-only boxing in
@@ -286,7 +273,7 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     // Emit-only: a BOXED primitive used as a reference (the element of `Array<Int>` = `[Ljava/lang/
     // Integer;`). The front end carries it as the Kotlin primitive name (`kotlin/Int`); only here does
     // it erase to the JVM wrapper. ONE-WAY (boxed primitives are never read back from the classpath
-    // under these names), so it stays out of the bidirectional `TYPE_MAP`.
+    // under these names), so it stays out of the classifier erasure groups.
     if let Some(wrapper) = kotlin_prim_to_wrapper(internal) {
         return wrapper;
     }
@@ -294,8 +281,8 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     // kotlinc's `KotlinTypeMapper` performs: `kotlin/Number` → `java/lang/Number`,
     // `kotlin/collections/MutableList` → `java/util/List`, `kotlin/Throwable` → `java/lang/Throwable`, …
     // The FRONT END keeps the Kotlin identity (own hierarchy/members, read-only vs mutable); only here, at
-    // the JVM boundary, does it erase. ONE-WAY — the inverse `to_kotlin_internal` uses the bidirectional
-    // `TYPE_MAP` (`Any`/`String` only), so a raw `java/util/List` never maps ambiguously back.
+    // the JVM boundary, does it erase. The inverse chooses each erasure group's canonical Kotlin
+    // declaration; for collection groups that is the read-only declaration.
     // Covers the top-level Kotlin mapped built-ins too (`kotlin/CharSequence` → `java/lang/CharSequence`,
     // `kotlin/Number`, `kotlin/Enum`, …), since they are keyed by their full internal name here.
     if let Some(j) = kotlin_builtin_to_jvm(internal) {
@@ -306,11 +293,7 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     {
         return crate::types::KFUNCTION_INTERNAL;
     }
-    TYPE_MAP
-        .iter()
-        .find(|(k, _)| *k == internal)
-        .map(|(_, j)| *j)
-        .unwrap_or(internal)
+    internal
 }
 
 /// Which declaration supplies a mapped builtin's SOURCE member/supertype scope. This is part of the
@@ -323,61 +306,103 @@ enum BuiltinScopeProvenance {
     KotlinDeclaration,
 }
 
+/// One Kotlin-to-JVM erasure identity group.
+///
+/// Most JVM classifiers in this table are also imported as the corresponding Kotlin builtin
+/// (`java.util.List` has Kotlin's mapped `List!` view). `kotlin.Nothing` is intentionally different:
+/// it erases to `java.lang.Void`, but a Java declaration that explicitly writes `java.lang.Void` still
+/// denotes that ordinary Java class, not Kotlin's bottom type. Keeping that direction on the group
+/// prevents the classpath reader from inferring semantic identity from a shared descriptor.
+struct ErasureGroup {
+    kotlin_names: &'static [&'static str],
+    jvm_name: &'static str,
+    scope: BuiltinScopeProvenance,
+    maps_java_source_to_kotlin: bool,
+}
+
+impl ErasureGroup {
+    const fn mapped(
+        kotlin_names: &'static [&'static str],
+        jvm_name: &'static str,
+        scope: BuiltinScopeProvenance,
+    ) -> Self {
+        Self {
+            kotlin_names,
+            jvm_name,
+            scope,
+            maps_java_source_to_kotlin: true,
+        }
+    }
+
+    const fn erasure_only(
+        kotlin_names: &'static [&'static str],
+        jvm_name: &'static str,
+        scope: BuiltinScopeProvenance,
+    ) -> Self {
+        Self {
+            kotlin_names,
+            jvm_name,
+            scope,
+            maps_java_source_to_kotlin: false,
+        }
+    }
+}
+
 /// The JVM-erasure identity groups: each group's Kotlin internal names, the single JVM internal name
 /// they erase to, and the semantic source-scope policy. Keeping all three facts in the same table prevents
 /// the classpath loader from reconstructing a parallel collection/String name list that can drift.
-const ERASURE_GROUPS: &[(&[&str], &str, BuiltinScopeProvenance)] = &[
-    (
+const ERASURE_GROUPS: &[ErasureGroup] = &[
+    ErasureGroup::mapped(
         &["kotlin/Any"],
         "java/lang/Object",
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/String"],
         "java/lang/String",
         BuiltinScopeProvenance::KotlinDeclaration,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/CharSequence"],
         "java/lang/CharSequence",
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/Throwable"],
         "java/lang/Throwable",
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/Cloneable"],
         "java/lang/Cloneable",
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/Number"],
         "java/lang/Number",
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/Comparable"],
         "java/lang/Comparable",
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/Enum"],
         "java/lang/Enum",
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/Annotation"],
         "java/lang/annotation/Annotation",
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
-    (
+    ErasureGroup::erasure_only(
         &["kotlin/Nothing"],
         "java/lang/Void",
         BuiltinScopeProvenance::JoinedWithJvm,
     ),
-    (
+    ErasureGroup::mapped(
         &[
             "kotlin/collections/Iterable",
             "kotlin/collections/MutableIterable",
@@ -385,7 +410,7 @@ const ERASURE_GROUPS: &[(&[&str], &str, BuiltinScopeProvenance)] = &[
         "java/lang/Iterable",
         BuiltinScopeProvenance::KotlinDeclaration,
     ),
-    (
+    ErasureGroup::mapped(
         &[
             "kotlin/collections/Iterator",
             "kotlin/collections/MutableIterator",
@@ -393,7 +418,7 @@ const ERASURE_GROUPS: &[(&[&str], &str, BuiltinScopeProvenance)] = &[
         "java/util/Iterator",
         BuiltinScopeProvenance::KotlinDeclaration,
     ),
-    (
+    ErasureGroup::mapped(
         &[
             "kotlin/collections/ListIterator",
             "kotlin/collections/MutableListIterator",
@@ -401,7 +426,7 @@ const ERASURE_GROUPS: &[(&[&str], &str, BuiltinScopeProvenance)] = &[
         "java/util/ListIterator",
         BuiltinScopeProvenance::KotlinDeclaration,
     ),
-    (
+    ErasureGroup::mapped(
         &[
             "kotlin/collections/Collection",
             "kotlin/collections/MutableCollection",
@@ -409,22 +434,22 @@ const ERASURE_GROUPS: &[(&[&str], &str, BuiltinScopeProvenance)] = &[
         "java/util/Collection",
         BuiltinScopeProvenance::KotlinDeclaration,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/collections/List", "kotlin/collections/MutableList"],
         "java/util/List",
         BuiltinScopeProvenance::KotlinDeclaration,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/collections/Set", "kotlin/collections/MutableSet"],
         "java/util/Set",
         BuiltinScopeProvenance::KotlinDeclaration,
     ),
-    (
+    ErasureGroup::mapped(
         &["kotlin/collections/Map", "kotlin/collections/MutableMap"],
         "java/util/Map",
         BuiltinScopeProvenance::KotlinDeclaration,
     ),
-    (
+    ErasureGroup::mapped(
         &[
             "kotlin/collections/Map.Entry",
             "kotlin/collections/Map$Entry",
@@ -468,7 +493,13 @@ fn builtin_ids() -> &'static BuiltinIds {
         let mut coll_to_kotlin_mutable = FxHashMap::default();
         let mut with_members = FxHashMap::default();
         let mut metadata_owner = FxHashMap::default();
-        for (group, (kotlin_names, jvm_name, scope)) in ERASURE_GROUPS.iter().enumerate() {
+        for (group, mapping) in ERASURE_GROUPS.iter().enumerate() {
+            let ErasureGroup {
+                kotlin_names,
+                jvm_name,
+                scope,
+                ..
+            } = mapping;
             let g = u8::try_from(group).expect("erasure group count fits u8");
             let jvm_id = tn(jvm_name);
             // Every erasure group is declared by a Kotlin builtin. Keeping the inverse beside the
@@ -536,7 +567,7 @@ fn builtin_ids() -> &'static BuiltinIds {
 pub fn type_name_maps_to_jvm_internal(internal: TypeName, jvm_internal: &str) -> bool {
     match ERASURE_GROUPS
         .iter()
-        .position(|(_, j, _)| *j == jvm_internal)
+        .position(|mapping| mapping.jvm_name == jvm_internal)
     {
         Some(group) => {
             jvm_erasure_group(internal) == Some(u8::try_from(group).expect("group fits u8"))
@@ -603,14 +634,14 @@ pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
         .map_or(internal, |(_, id)| *id)
 }
 
-/// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from the classpath/descriptors
-/// to its Kotlin identity (`java/lang/Object` → `kotlin/Any`), mirroring how the reference compiler
-/// maps Java types into Kotlin ones at the front-end boundary. Passes other names through unchanged.
+/// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from a classpath signature to
+/// the canonical Kotlin declaration in its erasure group. Read-only collection declarations are the
+/// canonical source identity; mutable siblings remain ordinary Kotlin subtypes.
 pub fn to_kotlin_internal(internal: &str) -> &str {
-    TYPE_MAP
+    ERASURE_GROUPS
         .iter()
-        .find(|(_, j)| *j == internal)
-        .map(|(k, _)| *k)
+        .find(|mapping| mapping.jvm_name == internal && mapping.maps_java_source_to_kotlin)
+        .and_then(|mapping| mapping.kotlin_names.first().copied())
         .unwrap_or(internal)
 }
 
@@ -634,7 +665,7 @@ mod tests {
         is_kotlin_collection_type_name, jvm_collection_to_kotlin_type_name,
         jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
         mapped_builtin_has_authoritative_kotlin_scope, to_jvm_internal, to_jvm_type_name,
-        wrapper_internal, wrapper_to_kotlin_prim_name,
+        to_kotlin_internal, wrapper_internal, wrapper_to_kotlin_prim_name,
     };
     use crate::types::{type_name, Ty};
 
@@ -693,6 +724,20 @@ mod tests {
         // A user/JDK class passes through unchanged.
         assert_eq!(to_jvm_internal("demo/Foo"), "demo/Foo");
         assert_eq!(to_jvm_internal("java/util/List"), "java/util/List");
+        assert_eq!(
+            to_kotlin_internal("java/util/List"),
+            "kotlin/collections/List"
+        );
+        assert_eq!(
+            to_kotlin_internal("java/lang/Comparable"),
+            "kotlin/Comparable"
+        );
+        assert_eq!(
+            to_kotlin_internal("java/lang/Void"),
+            "java/lang/Void",
+            "a Java Void declaration is not Kotlin's bottom type"
+        );
+        assert_eq!(to_jvm_internal("kotlin/Nothing"), "java/lang/Void");
         assert_eq!(
             jvm_collection_to_kotlin_type_name(type_name("java/util/List")),
             Some(type_name("kotlin/collections/List"))

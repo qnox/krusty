@@ -251,14 +251,6 @@ pub trait TargetRuntime {
     fn runtime_ctor(&self, _ctor: RuntimeCtor) -> Option<PlatformCtor> {
         None
     }
-
-    /// Whether a selected library callable has the semantics of Kotlin's defaulted reified
-    /// `assertFailsWith<T> { ... }` helper. Such helpers cannot be called directly when their platform
-    /// realization is private inline-only bytecode; common lowering can still realize the semantic shape
-    /// as `try/catch` IR when the target identifies it.
-    fn is_reified_assert_fails_with_default(&self, _callable: &LibraryCallable) -> bool {
-        false
-    }
 }
 
 pub trait CompilerPlatform: SemanticPlatform + TargetRuntime {}

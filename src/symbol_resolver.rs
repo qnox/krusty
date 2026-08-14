@@ -270,6 +270,32 @@ fn classifier_bindings(
         .collect()
 }
 
+/// The declared upper bound carried by each classifier type-parameter occurrence.
+///
+/// JVM `Signature` parsing discovers a class's formal declarations separately from a member's type
+/// uses. Until those two records are joined, a `TT;` use carries only the parser's temporary `Any`
+/// placeholder. Substitution must consume the declaration bound instead: in particular, an unqualified
+/// Java `T extends Object` is platform-nullable, while Kotlin `T & Any` intentionally carries a
+/// non-null occurrence bound.
+fn classifier_type_parameter_bounds(
+    classifier: &crate::libraries::LibraryType,
+) -> std::collections::HashMap<String, Ty> {
+    classifier
+        .type_params
+        .iter()
+        .enumerate()
+        .map(|(index, formal)| {
+            let bound = classifier
+                .type_param_bounds()
+                .get(index)
+                .and_then(|bounds| bounds.first())
+                .copied()
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+            (formal.clone(), bound)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 enum TypePosition {
     In,
@@ -641,6 +667,15 @@ fn members_in_hierarchy(source: &dyn SymbolSource, receiver: Ty, name: &str) -> 
         };
         let (mut current_functions, mut current_properties) =
             declared_callables(source, &classifier, current, name).into_parts();
+        crate::trace_compiler!(
+            "resolve",
+            "member hierarchy name={name} root={receiver:?} rung={depth} current={current:?} functions={:?}",
+            current_functions
+                .overloads
+                .iter()
+                .map(|function| (function.callable.params.as_slice(), function.callable.ret))
+                .collect::<Vec<_>>(),
+        );
         for function in &mut current_functions.overloads {
             function.receiver_rank += depth;
         }
@@ -682,7 +717,48 @@ fn members_in_hierarchy(source: &dyn SymbolSource, receiver: Ty, name: &str) -> 
             function.flags.operator = true;
         }
     }
+    retain_covariant_inherited_overrides(source, &mut functions);
     Callables::from_parts(functions, properties)
+}
+
+/// Collapse one inherited function slot when a diamond contributes covariant return declarations at
+/// the same receiver rung. Kotlin treats `iterator(): MutableIterator<T>` as the override of
+/// `iterator(): Iterator<T>` even when the two declarations arrive through sibling supertypes. They
+/// are not overloads: equal value-parameter lists identify the same slot, and the strict return
+/// subtype is its most-specific declaration. Incomparable returns remain separate so ordinary
+/// overload/ambiguity diagnostics can reject an invalid hierarchy.
+fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &mut FunctionSet) {
+    let mut retained: Vec<FunctionInfo> = Vec::with_capacity(functions.overloads.len());
+    for candidate in functions.overloads.drain(..) {
+        let candidate_ret = candidate.ret.apply(candidate.callable.ret);
+        let mut candidate_is_shadowed = false;
+        let mut shadowed = Vec::new();
+        for (index, existing) in retained.iter().enumerate() {
+            if existing.receiver_rank != candidate.receiver_rank
+                || existing.context_count != candidate.context_count
+                || existing.semantic_params() != candidate.semantic_params()
+            {
+                continue;
+            }
+            let existing_ret = existing.ret.apply(existing.callable.ret);
+            let candidate_is_subtype = resolution_subtype(source, candidate_ret, existing_ret);
+            let existing_is_subtype = resolution_subtype(source, existing_ret, candidate_ret);
+            if candidate_is_subtype && !existing_is_subtype {
+                shadowed.push(index);
+            } else if existing_is_subtype && !candidate_is_subtype {
+                candidate_is_shadowed = true;
+                break;
+            }
+        }
+        if candidate_is_shadowed {
+            continue;
+        }
+        for index in shadowed.into_iter().rev() {
+            retained.remove(index);
+        }
+        retained.push(candidate);
+    }
+    functions.overloads = retained;
 }
 
 /// Result of inherited nested-classifier lookup.
@@ -767,6 +843,11 @@ pub struct LambdaCallShape {
     /// decomposed inputs above; callable-reference adaptation needs the complete function type,
     /// including its return type, receiver bit, and still-unbound generic variables.
     pub expected_types: Option<Vec<Option<Ty>>>,
+    /// Complete callable expectations whose result is fixed strongly enough to contextualize a
+    /// lambda literal. Callable references may use the symbolic [`Self::expected_types`] above to
+    /// select by input shape while contributing a result constraint; a lambda body must not be
+    /// coerced to a widenable receiver lower bound before overload inference finishes.
+    pub fixed_expected_types: Option<Vec<Option<Ty>>>,
     pub receivers: Option<Vec<Option<Ty>>>,
     pub context_counts: Option<Vec<usize>>,
     pub materialized: Option<Vec<bool>>,
@@ -857,70 +938,16 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     }
 }
 
-/// [`crate::assignable::TypeOracle`] over a [`SemanticPlatform`].
-pub(crate) struct PlatformOracle<'a>(pub &'a dyn SemanticPlatform);
-
-impl crate::assignable::TypeOracle for PlatformOracle<'_> {
-    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
-        direct_supertypes(self.0, ty)
-    }
-    fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
-        let a = self.0.library_value_form_name(a);
-        let b = self.0.library_value_form_name(b);
-        platform_type_names_match(a, b)
-    }
-    fn type_param_variance(&self, internal: TypeName, index: usize) -> crate::types::TypeVariance {
-        self.0
-            .classifier(internal)
-            .and_then(|classifier| classifier.type_param_variances.get(index).copied())
-            .unwrap_or_default()
-    }
-    fn type_param_upper_bounds(&self, internal: TypeName, index: usize) -> Vec<Ty> {
-        self.0
-            .classifier(internal)
-            .and_then(|classifier| classifier.type_param_bounds.get(index).cloned())
-            .filter(|bounds| !bounds.is_empty())
-            .unwrap_or_else(|| vec![Ty::nullable(Ty::obj("kotlin/Any"))])
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn platform_class_identity(internal: &str) -> &str {
-    crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(internal).unwrap_or(internal)
-}
-
-#[cfg(test)]
-pub(crate) fn platform_class_names_match(a: &str, b: &str) -> bool {
-    a == b || nested_separator_names_match(a, b)
-}
-
-pub(crate) fn platform_type_names_match(a: TypeName, b: TypeName) -> bool {
-    a == b || crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(a, b)
-}
-
-#[cfg(test)]
-fn nested_separator_names_match(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let a_nested_start = a.rfind('/').map_or(0, |i| i + 1);
-    let b_nested_start = b.rfind('/').map_or(0, |i| i + 1);
-    if a_nested_start != b_nested_start || a[..a_nested_start] != b[..b_nested_start] {
-        return false;
-    }
-    a.bytes().zip(b.bytes()).enumerate().all(|(i, (a, b))| {
-        a == b || (i >= a_nested_start && matches!((a, b), (b'.', b'$') | (b'$', b'.')))
-    })
-}
-
 /// The type arguments of a constructed generic type INFERRED from a construction's argument types
 /// (`Pair(1, 2)` → `[Int, Int]`, so `Pair(1, 2)` types as `Pair<Int, Int>`). Each of the type's formal
 /// parameters (`ty.type_params`) is bound by unifying the matching-arity constructor's parsed generic
 /// parameter signatures against `arg_tys`; an unbound formal defaults to `Any`. `None` when the type is
 /// non-generic or no constructor carries a generic signature to unify.
 pub(crate) fn infer_constructor_type_args(
+    owner: TypeName,
     ty: &crate::libraries::LibraryType,
     arg_tys: &[Ty],
+    expected: Option<Ty>,
 ) -> Option<Vec<Ty>> {
     if ty.type_params.is_empty() {
         return None;
@@ -938,6 +965,7 @@ pub(crate) fn infer_constructor_type_args(
         }
         break;
     }
+    constrain_constructor_result(owner, &ty.type_params, expected, &mut binds);
     if binds.is_empty() {
         return None;
     }
@@ -952,6 +980,29 @@ pub(crate) fn infer_constructor_type_args(
             })
             .collect(),
     )
+}
+
+/// Add the constructed value's expected type to the same inference bindings populated from
+/// constructor arguments. Materialization happens only after both constraint directions have run.
+pub(crate) fn constrain_constructor_result(
+    owner: TypeName,
+    type_params: &[String],
+    expected: Option<Ty>,
+    binds: &mut GSigBinds,
+) {
+    let Some(Ty::Obj(expected_owner, expected_args)) = expected.map(Ty::non_null) else {
+        return;
+    };
+    if expected_owner != owner || expected_args.len() != type_params.len() {
+        return;
+    }
+    for (formal, actual) in type_params.iter().zip(expected_args.iter().copied()) {
+        unify_inferred_ty(
+            Ty::ty_param(formal, Ty::nullable(Ty::obj("kotlin/Any"))),
+            actual.projection_inner().unwrap_or(actual),
+            binds,
+        );
+    }
 }
 
 /// Bind type variables by unifying a signature `Ty` (whose type variables are [`Ty::TyParam`]) against
@@ -1039,17 +1090,14 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             // declaration explicitly in `infer_generic_call_bindings`; ordinary unification never does.
             let actual = actual.non_null();
             let projected = match actual {
-                Ty::Obj(actual_name, _) if platform_type_names_match(name, actual_name) => {
-                    Some(actual)
-                }
+                Ty::Obj(actual_name, _) if name == actual_name => Some(actual),
                 Ty::Obj(_, _) => source.and_then(|source| {
                     receiver_hierarchy(source, actual)
                         .into_iter()
                         .map(|(ty, _)| ty)
                         .find(|ty| {
-                            ty.obj_internal().is_some_and(|actual_name| {
-                                platform_type_names_match(name, actual_name)
-                            })
+                            ty.obj_internal()
+                                .is_some_and(|actual_name| name == actual_name)
                         })
                 }),
                 _ => None,
@@ -1214,7 +1262,7 @@ pub(crate) fn merge_call_argument_bindings(
                 let variance = signature
                     .receiver
                     .and_then(|receiver_shape| {
-                        receiver_formal_variance(source, receiver_shape, &formal)
+                        formal_variance_in_type(source, receiver_shape, &formal)
                     })
                     .unwrap_or(crate::types::TypeVariance::Invariant);
                 let candidate = match variance {
@@ -1250,7 +1298,7 @@ pub(crate) fn merge_call_argument_bindings(
     }
 }
 
-fn receiver_formal_variance(
+pub(crate) fn formal_variance_in_type(
     source: &dyn SymbolSource,
     shape: Ty,
     formal: &str,
@@ -1284,29 +1332,28 @@ fn receiver_formal_variance(
                 .iter()
                 .enumerate()
                 .fold(None, |found, (index, argument)| {
-                    let nested =
-                        receiver_formal_variance(source, *argument, formal).map(|nested| {
-                            compose(
-                                classifier
-                                    .type_param_variances
-                                    .get(index)
-                                    .copied()
-                                    .unwrap_or(TypeVariance::Invariant),
-                                nested,
-                            )
-                        });
+                    let nested = formal_variance_in_type(source, *argument, formal).map(|nested| {
+                        compose(
+                            classifier
+                                .type_param_variances
+                                .get(index)
+                                .copied()
+                                .unwrap_or(TypeVariance::Invariant),
+                            nested,
+                        )
+                    });
                     merge(found, nested)
                 })
         }
         Ty::Fun(function) => {
             let parameters = function.params.iter().fold(None, |found, parameter| {
-                let nested = receiver_formal_variance(source, *parameter, formal)
+                let nested = formal_variance_in_type(source, *parameter, formal)
                     .map(|variance| compose(TypeVariance::In, variance));
                 merge(found, nested)
             });
             merge(
                 parameters,
-                receiver_formal_variance(source, function.ret, formal),
+                formal_variance_in_type(source, function.ret, formal),
             )
         }
         _ => None,
@@ -1360,17 +1407,14 @@ fn unify_inferred_ty_impl(
         Ty::Obj(name, arguments) => {
             let actual = actual.non_null();
             let projected = match actual {
-                Ty::Obj(actual_name, _) if platform_type_names_match(name, actual_name) => {
-                    Some(actual)
-                }
+                Ty::Obj(actual_name, _) if name == actual_name => Some(actual),
                 Ty::Obj(_, _) => source.and_then(|source| {
                     receiver_hierarchy(source, actual)
                         .into_iter()
                         .map(|(ty, _)| ty)
                         .find(|ty| {
-                            ty.obj_internal().is_some_and(|actual_name| {
-                                platform_type_names_match(name, actual_name)
-                            })
+                            ty.obj_internal()
+                                .is_some_and(|actual_name| name == actual_name)
                         })
                 }),
                 _ => None,
@@ -1434,7 +1478,7 @@ fn merge_inferred_ty_from_symbols(
             right.iter().filter_map(move |(right_ty, right_depth)| {
                 let left_name = left_ty.obj_internal()?;
                 let right_name = right_ty.obj_internal()?;
-                platform_type_names_match(left_name, right_name).then_some((
+                (left_name == right_name).then_some((
                     left_depth + right_depth,
                     if left_ty == right_ty {
                         *left_ty
@@ -1680,16 +1724,13 @@ fn collect_call_inference_constraints(
         Ty::Obj(owner, arguments) => {
             let actual = actual.non_null();
             let projected = match actual {
-                Ty::Obj(actual_owner, _) if platform_type_names_match(owner, actual_owner) => {
-                    Some(actual)
-                }
+                Ty::Obj(actual_owner, _) if owner == actual_owner => Some(actual),
                 Ty::Obj(_, _) => receiver_hierarchy(source, actual)
                     .into_iter()
                     .map(|(ty, _)| ty)
                     .find(|ty| {
-                        ty.obj_internal().is_some_and(|actual_owner| {
-                            platform_type_names_match(owner, actual_owner)
-                        })
+                        ty.obj_internal()
+                            .is_some_and(|actual_owner| owner == actual_owner)
                     }),
                 _ => None,
             };
@@ -2058,7 +2099,7 @@ fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
             Ty::nullable(merge_specialized_return(provider, *inferred))
         }
         (Ty::Obj(provider_name, provider_args), Ty::Obj(inferred_name, inferred_args))
-            if platform_type_names_match(provider_name, inferred_name) =>
+            if provider_name == inferred_name =>
         {
             if provider_args.is_empty() {
                 return Ty::obj_args_name(provider_name, inferred_args);
@@ -2125,6 +2166,10 @@ pub(crate) fn semantic_sam_signature(
         });
     };
 
+    let mut occurrence_bounds = classifier_type_parameter_bounds(&ty);
+    for method_formal in &gsig.formals {
+        occurrence_bounds.remove(method_formal);
+    }
     let mut binds = GSigBinds::new();
     for (formal, actual) in ty.type_params.iter().zip(target.type_args()) {
         binds.insert(formal.clone(), actual.projection_inner().unwrap_or(*actual));
@@ -2139,9 +2184,17 @@ pub(crate) fn semantic_sam_signature(
         params: gsig
             .params
             .iter()
-            .map(|parameter| ty_subst_keep_unbound(*parameter, &binds))
+            .map(|parameter| {
+                ty_subst_keep_unbound(
+                    crate::types::ty_with_param_bounds(*parameter, &occurrence_bounds),
+                    &binds,
+                )
+            })
             .collect(),
-        ret: ty_subst_keep_unbound(gsig.ret, &binds),
+        ret: ty_subst_keep_unbound(
+            crate::types::ty_with_param_bounds(gsig.ret, &occurrence_bounds),
+            &binds,
+        ),
         declared_params: sam.params.clone(),
         declared_ret: sam.ret,
         context_count: sam.context_count,
@@ -2488,7 +2541,7 @@ pub(crate) fn sam_arg_matches(
 }
 
 pub(crate) fn sam_return_matches(
-    lib: &dyn SemanticPlatform,
+    _lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     expected: Ty,
     actual: Ty,
@@ -2503,8 +2556,7 @@ pub(crate) fn sam_return_matches(
         Ty::TyParam(_, bound) => *bound,
         expected => expected,
     };
-    platform_arg_assignable(lib, &expected, &actual)
-        || source_arg_assignable(src, &expected, &actual)
+    semantic_arg_assignable(src, &expected, &actual)
 }
 
 fn arg_fits_platform(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
@@ -2522,27 +2574,21 @@ fn arg_fits_source(
     arg: &Ty,
 ) -> bool {
     arg_fits_platform(lib, param, arg)
-        || platform_arg_assignable(lib, param, arg)
-        || crate::assignable::is_assignable(
-            &crate::assignable::TyCtx::new(),
-            &SourceOracle(src),
-            *arg,
-            *param,
-        )
+        || semantic_arg_assignable(src, param, arg)
+        // An unresolved type parameter is an inference slot during candidate collection. Keep the
+        // candidate so `null` can either infer `Nothing?` from a callable-owned formal or reach the
+        // ordinary checker, which rejects a fixed enclosing bare `T` with the precise nullability
+        // diagnostic. This is not assignability: [`semantic_arg_assignable`] remains strict.
+        || (*arg == Ty::Null && matches!(param.non_null(), Ty::TyParam(..)))
 }
 
-fn resolution_subtype(
-    lib: &dyn SemanticPlatform,
-    src: &dyn SymbolSource,
-    sub: Ty,
-    sup: Ty,
-) -> bool {
+pub(crate) fn resolution_subtype(src: &dyn SymbolSource, sub: Ty, sup: Ty) -> bool {
     crate::assignable::is_subtype(
         &crate::assignable::TyCtx::new(),
         &SourceOracle(src),
         sub,
         sup,
-    ) || platform_subtype(lib, sub, sup)
+    )
 }
 
 pub(crate) enum CandidateSelection<T> {
@@ -2727,21 +2773,20 @@ fn integer_literal_call_applies(
 }
 
 fn parameter_at_least_as_specific(
-    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
     left: Ty,
     right: Ty,
     arg: CallArgKind,
 ) -> bool {
     left == right
         || (left == arg.ty() && arg.adapts_integer_literal_to(right))
-        || platform_arg_assignable(lib, &right, &left)
+        || semantic_arg_assignable(src, &right, &left)
 }
 
 /// Select the unique most-specific parameter shape from an already-applicable tied family. This is
 /// independent of declaration kind: functions and constructors use the same Kotlin relation, while
 /// retaining their own candidate records and call materialization.
 pub(crate) fn most_specific_parameter_shape_index(
-    lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     parameter_shapes: &[Vec<Ty>],
     args: &[CallArgKind],
@@ -2753,8 +2798,7 @@ pub(crate) fn most_specific_parameter_shape_index(
             .map(|(index, params)| (params.clone(), index)),
         |position, left, right| {
             args.get(position).is_some_and(|argument| {
-                parameter_at_least_as_specific(lib, left, right, argument.clone())
-                    || source_arg_assignable(src, &right, &left)
+                parameter_at_least_as_specific(src, left, right, argument.clone())
             })
         },
         |_, _| true,
@@ -2847,8 +2891,8 @@ fn best_callable_member_overload<'a>(
         args,
         |position, param, arg| fits(position, param, arg),
         |_position, left, right, arg| {
-            parameter_at_least_as_specific(lib, left, right, arg)
-                || resolution_subtype(lib, src, left, right)
+            parameter_at_least_as_specific(src, left, right, arg)
+                || resolution_subtype(src, left, right)
         },
         |_, _| false,
     ) {
@@ -2863,7 +2907,7 @@ fn best_callable_member_overload<'a>(
             })
             .map(|shape| (shape, member))
         }),
-        |_, left, right| resolution_subtype(lib, src, left, right),
+        |_, left, right| resolution_subtype(src, left, right),
     ) {
         CandidateSelection::Selected(member) => return Some(member),
         CandidateSelection::Ambiguous => return None,
@@ -2882,7 +2926,7 @@ fn best_callable_member_overload<'a>(
                 })
                 .flatten()
         }),
-        |_, left, right| resolution_subtype(lib, src, left, right),
+        |_, left, right| resolution_subtype(src, left, right),
     ) {
         CandidateSelection::Selected(member) => return Some(member),
         CandidateSelection::Ambiguous => return None,
@@ -2901,7 +2945,7 @@ fn best_callable_member_overload<'a>(
             )
             .map(|shape| (shape, member))
         }),
-        |_, left, right| resolution_subtype(lib, src, left, right),
+        |_, left, right| resolution_subtype(src, left, right),
     ) {
         CandidateSelection::Selected(member) => Some(member),
         CandidateSelection::None | CandidateSelection::Ambiguous => None,
@@ -4049,15 +4093,19 @@ impl<'a> SymbolResolver<'a> {
                     .map(|selected| {
                         self.materialize_member_function(ty, args, type_args, selected)
                     });
-                let member_property = member_property_from_callables(&callables);
+                let member_dispatch = receiver_allows_member_dispatch(ty);
+                let member_property = member_dispatch
+                    .then(|| member_property_from_callables(&callables))
+                    .flatten();
                 let read = member_property
                     .as_ref()
                     .and_then(|property| member_property_read_from_declaration(ty, property));
                 let write = member_property
                     .as_ref()
                     .and_then(member_property_write_from_declaration);
-                let method_ref =
-                    select_instance_reference_from_functions(ty, callables.functions());
+                let method_ref = member_dispatch
+                    .then(|| select_instance_reference_from_functions(ty, callables.functions()))
+                    .flatten();
                 let property_ref = member_property
                     .as_ref()
                     .filter(|_| ty.kotlin_class_internal() != Some(crate::types::wk::any()))
@@ -4107,7 +4155,7 @@ impl<'a> SymbolResolver<'a> {
                 let mut overloads = callables
                     .functions()
                     .iter()
-                    .filter(|overload| overload.kind == FnKind::Member)
+                    .filter(|overload| member_dispatch && overload.kind == FnKind::Member)
                     .cloned()
                     .collect::<Vec<_>>();
                 if callables.functions().iter().any(FunctionInfo::is_extension) {
@@ -4309,7 +4357,7 @@ impl<'a> SymbolResolver<'a> {
                 if let Some(expected) = expected {
                     if let Some(inferred_return) =
                         infer_generic_return_bindings(&semantic, expected, |actual, bound| {
-                            resolution_subtype(self.lib, &self.src, actual, bound)
+                            resolution_subtype(&self.src, actual, bound)
                         })
                     {
                         for (formal, actual) in inferred_return {
@@ -4318,7 +4366,7 @@ impl<'a> SymbolResolver<'a> {
                     }
                 }
                 if !generic_bindings_satisfy_bounds(&semantic, &bindings, |actual, bound| {
-                    resolution_subtype(self.lib, &self.src, actual, bound)
+                    resolution_subtype(&self.src, actual, bound)
                 }) {
                     crate::trace_compiler!(
                         "resolve",
@@ -4389,8 +4437,8 @@ impl<'a> SymbolResolver<'a> {
                 args,
                 |_, param, arg| fits(param, arg),
                 |_position, left, right, arg| {
-                    parameter_at_least_as_specific(self.lib, left, right, arg)
-                        || resolution_subtype(self.lib, &self.src, left, right)
+                    parameter_at_least_as_specific(&self.src, left, right, arg)
+                        || resolution_subtype(&self.src, left, right)
                 },
                 |_, _| false,
             ) {
@@ -4405,7 +4453,7 @@ impl<'a> SymbolResolver<'a> {
                         fixed_parameter_shape(params, args, |_, param, arg| fits(param, arg))
                             .map(|shape| (shape, entry))
                     }),
-                    |_, left, right| resolution_subtype(self.lib, &self.src, left, right),
+                    |_, left, right| resolution_subtype(&self.src, left, right),
                 ) {
                     CandidateSelection::Selected(entry) => Some(entry),
                     CandidateSelection::Ambiguous => return None,
@@ -4416,7 +4464,7 @@ impl<'a> SymbolResolver<'a> {
                             })
                             .map(|shape| (shape, entry))
                         }),
-                        |_, left, right| resolution_subtype(self.lib, &self.src, left, right),
+                        |_, left, right| resolution_subtype(&self.src, left, right),
                     ) {
                         CandidateSelection::Selected(entry) => Some(entry),
                         CandidateSelection::Ambiguous => return None,
@@ -4731,7 +4779,6 @@ impl<'a> SymbolResolver<'a> {
         slots: &[Option<Ty>],
     ) -> bool {
         generic_bounds_admit_slots(
-            self.lib,
             &self.src,
             overload.generic_sig.as_ref(),
             self.extension_binding_receiver(receiver, overload),
@@ -4874,7 +4921,7 @@ impl<'a> SymbolResolver<'a> {
                 unify_ty(semantic.ret, expected, &mut bindings);
             }
             if !generic_bindings_satisfy_bounds(&semantic, &bindings, |actual, bound| {
-                resolution_subtype(self.lib, &self.src, actual, bound)
+                resolution_subtype(&self.src, actual, bound)
             }) {
                 return None;
             }
@@ -4952,7 +4999,7 @@ impl<'a> SymbolResolver<'a> {
             // declaration the equivalent candidate retained by the common specificity selector.
             applicable.sort_by_key(|(_, callable)| callable.params.len());
             unique_most_specific(applicable, |_, left, right| {
-                resolution_subtype(self.lib, &self.src, left, right)
+                resolution_subtype(&self.src, left, right)
             })
         };
         let fsd = function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default")));
@@ -5007,28 +5054,6 @@ impl<'a> SymbolResolver<'a> {
 // --- Navigation helpers (member/constructor resolution expressed purely against the trait) --------
 // The inherited-member walk over a library type's hierarchy — arg-dependent binding, so it lives in
 // this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
-
-fn abi_form_args(lib: &dyn SemanticPlatform, args: &[Ty]) -> Option<Vec<Ty>> {
-    let out: Vec<Ty> = args.iter().map(|a| lib.library_value_form(*a)).collect();
-    (out.as_slice() != args).then_some(out)
-}
-
-fn params_match_abi_form(lib: &dyn SemanticPlatform, params: &[Ty], args: &[Ty]) -> bool {
-    params.len() == args.len()
-        && params
-            .iter()
-            .zip(args)
-            .all(|(p, a)| lib.library_value_form(*p) == *a)
-}
-
-fn platform_subtype(lib: &dyn SemanticPlatform, sub: Ty, sup: Ty) -> bool {
-    crate::assignable::is_subtype(
-        &crate::assignable::TyCtx::new(),
-        &PlatformOracle(lib),
-        sub,
-        sup,
-    )
-}
 
 pub(crate) fn apply_platform_call_parameter_nullability(
     mut params: Vec<Ty>,
@@ -5247,7 +5272,7 @@ pub(crate) fn select_constructor_declaration_from_slots(
     });
 
     match unique_most_specific(candidates, |_, left, right| {
-        resolution_subtype(lib, src, left, right)
+        resolution_subtype(src, left, right)
     }) {
         CandidateSelection::Selected(declaration) => Some(declaration),
         CandidateSelection::None | CandidateSelection::Ambiguous => None,
@@ -5323,6 +5348,16 @@ fn select_instance_member_ty(
 /// no call arguments to drive overload resolution. Returns the UNIQUE natural-shape overload of `name`
 /// on `internal`, or `None` when the member is absent or ambiguous. Defaults and varargs do not alter
 /// that natural shape: every declared parameter remains present and a vararg is its array parameter.
+fn receiver_allows_member_dispatch(receiver: Ty) -> bool {
+    match receiver {
+        Ty::Nullable(_) | Ty::Null => false,
+        Ty::TyParam(_, bound) => receiver_allows_member_dispatch(*bound),
+        // Kotlin permits direct member calls on Java platform types despite uncertain nullability.
+        Ty::PlatformNullable(_) => true,
+        _ => true,
+    }
+}
+
 fn select_instance_reference_from_functions(
     recv: Ty,
     functions: &[FunctionInfo],
@@ -5348,12 +5383,7 @@ fn select_instance_reference_from_functions(
     // (`A::equals`, `Int::toString`). Nullable and type-parameter receivers need kotlinc's null-guarded
     // realization (`null::toString`); decline only those semantic receiver shapes instead of deleting
     // the inherited declaration for every class and synthesizing its names in the checker.
-    if o.callable.owner_type() == crate::types::wk::java_object()
-        && matches!(
-            recv,
-            Ty::TyParam(..) | Ty::Nullable(..) | Ty::PlatformNullable(..)
-        )
-    {
+    if !receiver_allows_member_dispatch(recv) {
         return None;
     }
     let ret = o.ret.apply(o.callable.ret);
@@ -5362,6 +5392,7 @@ fn select_instance_reference_from_functions(
 
 #[derive(Clone, Debug)]
 pub struct ResolvedPropertyRef {
+    pub name: String,
     pub getter: LibraryCallable,
     pub setter: Option<LibraryCallable>,
     pub getter_visibility: crate::types::Visibility,
@@ -5377,6 +5408,7 @@ pub struct ResolvedPropertyRef {
 }
 
 fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPropertyRef> {
+    let name = property.name;
     let source_key = property.source_key;
     let getter_visibility = property.visibility;
     let setter_visibility = property.setter_visibility;
@@ -5401,6 +5433,7 @@ fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPrope
     let reflection_owner = *getter.params.first()?;
     let facade = (!getter.owner.matches("")).then_some(getter.owner);
     Some(ResolvedPropertyRef {
+        name,
         extension_facade: Some(facade),
         getter,
         setter,
@@ -5443,6 +5476,7 @@ fn build_property_reference_from_declaration(
         return None;
     }
     Some(ResolvedPropertyRef {
+        name: property.name.clone(),
         getter,
         setter,
         getter_visibility,
@@ -6127,19 +6161,12 @@ impl CallArgKind {
     }
 
     /// Whether this selected callable can infer its result from one candidate parameter type.
-    fn binds_result_to(
-        &self,
-        lib: &dyn SemanticPlatform,
-        src: &dyn SymbolSource,
-        parameter: Ty,
-    ) -> bool {
+    fn binds_result_to(&self, src: &dyn SymbolSource, parameter: Ty) -> bool {
         let CallArgKind::ExpectedTypeCallable { generic_sig, .. } = self else {
             return false;
         };
         infer_generic_return_bindings(generic_sig, parameter, |actual, bound| {
-            actual == bound
-                || source_arg_assignable(src, &bound, &actual)
-                || platform_arg_assignable(lib, &bound, &actual)
+            actual == bound || semantic_arg_assignable(src, &bound, &actual)
         })
         .is_some()
     }
@@ -6323,7 +6350,8 @@ fn select_overload_tracking_with_functions(
     if matches!(
         mode,
         SelectionMode::Kind(FnKind::Member) | SelectionMode::Receiver
-    ) {
+    ) && receiver_allows_member_dispatch(recv)
+    {
         ranked.extend(
             overloads
                 .iter()
@@ -6335,7 +6363,6 @@ fn select_overload_tracking_with_functions(
     ranked.sort_by_key(|(priority, rank, _, _)| (*priority, *rank));
     for (priority, rank, binding_receiver, o) in ranked {
         if !generic_bounds_admit(
-            lib,
             src,
             o.generic_sig.as_ref(),
             binding_receiver,
@@ -6372,27 +6399,6 @@ fn select_overload_tracking_with_functions(
             CandidateSelection::None => {}
         }
     }
-    // Platform assignability pass: subtype closure, erased `Any`, and value-class underlying matching.
-    // A module-declared argument class reaches its library supertype only through the SOURCE
-    // federation (`class V : Thread()` into `take(Thread)`), so admit that walk too.
-    // The ordered applicability pass above stays stricter so exact/defaulted calls still win first.
-    for cands in by_rank.values() {
-        let mut applicable = cands.iter().filter(|(_, lp)| {
-            lp.len() == arg_tys.len()
-                && lp.iter().zip(args).all(|(p, a)| {
-                    platform_arg_assignable(lib, p, &a.ty())
-                        || source_arg_assignable(assign_src, p, &a.ty())
-                        || a.binds_result_to(lib, assign_src, *p)
-                })
-        });
-        if let Some((o, _)) = applicable.next() {
-            if applicable.next().is_some() {
-                *ambiguous = true;
-                return None;
-            }
-            return Some((*o).clone());
-        }
-    }
     // Vararg ELEMENT-expansion pass: a call passing loose elements (or nothing) where a
     // candidate declares a vararg (`"a.b".trim('.')` against `trim(vararg chars: Char)` — the
     // logical param is the ARRAY; `split('.')` against `split(vararg delimiters: Char,
@@ -6418,10 +6424,9 @@ fn select_overload_tracking_with_functions(
         args.len() >= vararg_index
             && lp[..vararg_index].iter().zip(args).all(|(p, a)| {
                 let ty = a.ty();
-                fun_arg_matches(lib, p, &ty, a.is_lambda_literal())
-                    || platform_arg_assignable(lib, p, &ty)
-                    || source_arg_assignable(assign_src, p, &ty)
-                    || a.binds_result_to(lib, assign_src, *p)
+                fun_arg_matches(assign_src, p, &ty, a.is_lambda_literal())
+                    || semantic_arg_assignable(assign_src, p, &ty)
+                    || a.binds_result_to(assign_src, *p)
             })
             && args[vararg_index..].iter().all(|a| {
                 let ty = a.ty();
@@ -6429,9 +6434,8 @@ fn select_overload_tracking_with_functions(
                 let expected = if a.is_spread() { array } else { elem };
                 ty == expected
                     || (!exact
-                        && (platform_arg_assignable(lib, &expected, &ty)
-                            || source_arg_assignable(assign_src, &expected, &ty)
-                            || a.binds_result_to(lib, assign_src, expected)))
+                        && (semantic_arg_assignable(assign_src, &expected, &ty)
+                            || a.binds_result_to(assign_src, expected)))
             })
             && (vararg_index + 1..lp.len()).all(|index| o.call_sig.param_has_default(index))
     };
@@ -6449,32 +6453,10 @@ fn select_overload_tracking_with_functions(
             }
         }
     }
-    // ABI-form pass, shared with constructor resolution: bridge target collection identity and
-    // erase type arguments after exact, widened, and source-level subtype matching have failed.
-    if let Some(abi_args) = abi_form_args(lib, &arg_tys) {
-        for cands in by_rank.values() {
-            let mut applicable = cands
-                .iter()
-                .filter(|(_, lp)| params_match_abi_form(lib, lp, &abi_args));
-            if let Some((o, _)) = applicable.next() {
-                if applicable.next().is_some() {
-                    *ambiguous = true;
-                    return None;
-                }
-                crate::trace_compiler!(
-                    "resolve",
-                    "select_overload {} matched via abi-form args {arg_tys:?} -> {abi_args:?}",
-                    o.callable.name
-                );
-                return Some((*o).clone());
-            }
-        }
-    }
     None
 }
 
 fn generic_bounds_admit(
-    lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     generic_sig: Option<&GenericSig>,
     receiver: Ty,
@@ -6485,12 +6467,14 @@ fn generic_bounds_admit(
         return true;
     };
     let mut binds = seeded_gsig_binds(gsig, type_args);
+    let mut inferred = GSigBinds::new();
     if let Some(declared_receiver) = gsig.receiver {
-        unify_ty(declared_receiver, receiver, &mut binds);
+        unify_inferred_ty_impl(Some(src), declared_receiver, receiver, &mut inferred);
     }
     for (&parameter, &argument) in gsig.params.iter().zip(args) {
-        unify_ty(parameter, argument, &mut binds);
+        unify_inferred_ty_impl(Some(src), parameter, argument, &mut inferred);
     }
+    merge_generic_bindings(gsig, type_args.len(), &mut binds, inferred);
     generic_bindings_satisfy_bounds(gsig, &binds, |actual, bound| {
         actual == bound
             || crate::assignable::is_assignable(
@@ -6499,12 +6483,10 @@ fn generic_bounds_admit(
                 actual,
                 bound,
             )
-            || platform_arg_assignable(lib, &bound, &actual)
     })
 }
 
 fn generic_bounds_admit_slots(
-    lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     generic_sig: Option<&GenericSig>,
     receiver: Ty,
@@ -6515,14 +6497,16 @@ fn generic_bounds_admit_slots(
         return true;
     };
     let mut binds = seeded_gsig_binds(gsig, type_args);
+    let mut inferred = GSigBinds::new();
     if let Some(declared_receiver) = gsig.receiver {
-        unify_ty(declared_receiver, receiver, &mut binds);
+        unify_inferred_ty_impl(Some(src), declared_receiver, receiver, &mut inferred);
     }
     for (&parameter, argument) in gsig.params.iter().zip(slots) {
         if let Some(argument) = argument {
-            unify_ty(parameter, *argument, &mut binds);
+            unify_inferred_ty_impl(Some(src), parameter, *argument, &mut inferred);
         }
     }
+    merge_generic_bindings(gsig, type_args.len(), &mut binds, inferred);
     generic_bindings_satisfy_bounds(gsig, &binds, |actual, bound| {
         actual == bound
             || crate::assignable::is_assignable(
@@ -6531,7 +6515,6 @@ fn generic_bounds_admit_slots(
                 actual,
                 bound,
             )
-            || platform_arg_assignable(lib, &bound, &actual)
     })
 }
 
@@ -6612,10 +6595,10 @@ fn logical_call_params(
 /// Assignability through the SOURCE symbol federation (module classes first): a module-declared
 /// class passed where a library member expects its (library) supertype — `class V : Thread()` into
 /// `take(Thread)` — is invisible to the platform oracle, which only walks classpath supertypes.
-fn source_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool {
+fn semantic_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool {
     if let Ty::TyParam(_, bound) = param.non_null() {
-        if *arg == Ty::Null && (param.is_nullable() || bound.is_nullable()) {
-            return true;
+        if *arg == Ty::Null {
+            return param.admits_null();
         }
         let expected = if param.is_nullable() {
             Ty::nullable(*bound)
@@ -6635,32 +6618,6 @@ fn source_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool {
         *arg,
         *param,
     )
-}
-
-fn platform_arg_assignable(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
-    if let Ty::TyParam(_, bound) = param.non_null() {
-        if *arg == Ty::Null && (param.is_nullable() || bound.is_nullable()) {
-            return true;
-        }
-        let expected = if param.is_nullable() {
-            Ty::nullable(*bound)
-        } else {
-            *bound
-        };
-        return crate::assignable::is_assignable(
-            &crate::assignable::TyCtx::new(),
-            &PlatformOracle(lib),
-            *arg,
-            expected,
-        );
-    }
-    (*arg == Ty::Null && param.is_reference())
-        || crate::assignable::is_assignable(
-            &crate::assignable::TyCtx::new(),
-            &PlatformOracle(lib),
-            *arg,
-            *param,
-        )
 }
 
 fn distinct_source_declarations(left: &FunctionInfo, right: &FunctionInfo) -> bool {
@@ -6732,9 +6689,7 @@ fn best_by_args_at_priority<'a>(
         arg.function_type()
             .filter(|function| *function != arg.ty())
             .is_some_and(|function| {
-                arg_fits_platform(lib, p, &function)
-                    || platform_arg_assignable(lib, p, &function)
-                    || source_arg_assignable(src, p, &function)
+                arg_fits_platform(lib, p, &function) || semantic_arg_assignable(src, p, &function)
             })
     };
     // The DEFAULT-omitting passes accept a reference SUBTYPE / value-class-underlying argument (a
@@ -6742,30 +6697,14 @@ fn best_by_args_at_priority<'a>(
     // exact-arity subtype pass in `select_overload` applies — the exact/`Any`-widened passes above stay
     // stricter so an exact call still prefers its precise overload.
     let fits = |_position: usize, p: &Ty, arg: &CallArgKind| {
-        if p.non_null().fun_arity().is_none()
+        let sam = p.non_null().fun_arity().is_none()
             && (arg.is_lambda_literal() || arg.function_type().is_some())
-        {
-            sam_arg_matches(lib, src, *p, arg.function_type().unwrap_or(arg.ty()))
-        } else {
-            fun_arg_matches(lib, p, &arg.ty(), arg.is_lambda_literal())
-                || platform_arg_assignable(lib, p, &arg.ty())
-                || source_arg_assignable(src, p, &arg.ty())
-                || function_like_fits(p, arg)
-                || arg.binds_result_to(lib, src, *p)
-        }
-    };
-    let erased_fits = |_position: usize, p: &Ty, arg: &CallArgKind| {
-        if p.non_null().fun_arity().is_none()
-            && (arg.is_lambda_literal() || arg.function_type().is_some())
-        {
-            sam_arg_matches(lib, src, *p, arg.function_type().unwrap_or(arg.ty()))
-        } else {
-            *p == arg.ty()
-                || *p == Ty::obj("kotlin/Any")
-                || fun_arg_matches(lib, p, &arg.ty(), arg.is_lambda_literal())
-                || function_like_fits(p, arg)
-                || arg.binds_result_to(lib, src, *p)
-        }
+            && sam_arg_matches(lib, src, *p, arg.function_type().unwrap_or(arg.ty()));
+        sam || fun_arg_matches(src, p, &arg.ty(), arg.is_lambda_literal())
+            || semantic_arg_assignable(src, p, &arg.ty())
+            || (arg.ty() == Ty::Null && matches!(p.non_null(), Ty::TyParam(..)))
+            || function_like_fits(p, arg)
+            || arg.binds_result_to(src, *p)
     };
     match source_aware_most_specific(
         cands
@@ -6773,7 +6712,7 @@ fn best_by_args_at_priority<'a>(
             .filter(|(_, params)| params.as_slice() == arg_tys)
             .map(|(candidate, _)| (declaration_specificity_params(candidate), *candidate)),
         |_, left, right| {
-            parameter_at_least_as_specific(lib, left, right, CallArgKind::Typed(Ty::Error))
+            parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
         },
     ) {
         CandidateSelection::Selected(candidate) => {
@@ -6788,7 +6727,7 @@ fn best_by_args_at_priority<'a>(
             .map(|(candidate, params)| (params.clone(), *candidate)),
         args,
         |position, param, arg| fits(position, param, arg),
-        |_position, left, right, arg| parameter_at_least_as_specific(lib, left, right, arg),
+        |_position, left, right, arg| parameter_at_least_as_specific(src, left, right, arg),
         |left, right| distinct_source_declarations(left, right),
     ) {
         CandidateSelection::Selected(candidate) => {
@@ -6797,28 +6736,8 @@ fn best_by_args_at_priority<'a>(
         CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
         CandidateSelection::None => {}
     }
-    if args.iter().any(|arg| arg.is_lambda_literal()) {
-        match unique_most_specific_with_conflicts(
-            cands.iter().filter_map(|(candidate, params)| {
-                fixed_parameter_shape(params, args, |position, param, arg| {
-                    erased_fits(position, param, arg)
-                })
-                .map(|shape| (shape, *candidate))
-            }),
-            |_, left, right| {
-                parameter_at_least_as_specific(lib, left, right, CallArgKind::Typed(Ty::Error))
-            },
-            |left, right| distinct_source_declarations(left, right),
-        ) {
-            CandidateSelection::Selected(candidate) => {
-                return CandidateSelection::Selected(candidate);
-            }
-            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-            CandidateSelection::None => {}
-        }
-    }
     let specificity = |_: usize, left: Ty, right: Ty| {
-        parameter_at_least_as_specific(lib, left, right, CallArgKind::Typed(Ty::Error))
+        parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
     };
 
     // Expected-result inference may make several otherwise unrelated overloads applicable. Unlike
@@ -6844,32 +6763,12 @@ fn best_by_args_at_priority<'a>(
         }
     }
 
-    // Exact arity, judged by ASSIGNABILITY, before the erased pass below. `erased_fits` admits a
-    // `kotlin/Any` parameter for any argument but nothing else that is merely assignable, so with
-    // `pick(value: Any)` and `pick(value: CharSequence)` in scope it dropped the CharSequence overload
-    // and selected the widest one — the opposite of Kotlin's most-specific rule. Judging by
-    // assignability first lets both compete and specificity decide; when only the `Any` overload fits,
-    // this pass finds nothing and the erased pass answers exactly as before.
+    // Exact arity is judged by the one semantic assignability relation. Every applicable overload
+    // competes in the same most-specific selection; there is no later descriptor/erasure retry.
     match source_aware_most_specific(
         cands.iter().filter_map(|(candidate, params)| {
             fixed_parameter_shape(params, args, |position, param, arg| {
                 fits(position, param, arg)
-            })
-            .map(|shape| (shape, *candidate))
-        }),
-        specificity,
-    ) {
-        CandidateSelection::Selected(candidate) => {
-            return CandidateSelection::Selected(candidate);
-        }
-        CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-        CandidateSelection::None => {}
-    }
-
-    match source_aware_most_specific(
-        cands.iter().filter_map(|(candidate, params)| {
-            fixed_parameter_shape(params, args, |position, param, arg| {
-                erased_fits(position, param, arg)
             })
             .map(|shape| (shape, *candidate))
         }),
@@ -6951,12 +6850,11 @@ fn best_by_args_at_priority<'a>(
     )
 }
 
-/// A lambda argument (`Ty::Fun`) matches a function-typed parameter of the same arity. The parameter may
-/// be a decoded `Ty::Fun` (whose return/parameter types differ from the lambda's — the body adapts) or an
-/// erased `kotlin/jvm/functions/FunctionN` object; neither pairs with the argument under plain equality or
-/// `Any` widening, so arity alone drives the match.
+/// A lambda argument (`Ty::Fun`) matches a decoded function-typed parameter of the same arity.
+/// Providers must expose callable shape from metadata; source resolution never derives it from a
+/// runtime classifier's spelling.
 fn fun_arg_matches(
-    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
     param: &Ty,
     arg: &Ty,
     allow_unit_coercion: bool,
@@ -6968,12 +6866,8 @@ fn fun_arg_matches(
         Ty::Nullable(inner) => **inner,
         _ => *param,
     };
-    let arity_ok = param.fun_arity().is_some_and(|pn| pn == arg_arity)
-        || param
-            .obj_internal()
-            .and_then(|p| p.unsigned_suffix_after_prefix("kotlin/jvm/functions/Function"))
-            == Some(usize::from(arg_arity));
-    arity_ok && fun_return_compatible(lib, param, *arg, allow_unit_coercion)
+    param.fun_arity().is_some_and(|pn| pn == arg_arity)
+        && fun_return_compatible(src, param, *arg, allow_unit_coercion)
 }
 
 /// A function-typed argument fits a function-typed parameter's RETURN. A parameter `(T) -> R` with a
@@ -6983,7 +6877,7 @@ fn fun_arg_matches(
 /// type-variable / erased-`Any` parameter return (an ordinary generic HOF `(T) -> R`), or an unresolved
 /// lambda body, stays permissive so normal HOFs keep matching.
 fn fun_return_compatible(
-    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
     param: Ty,
     arg: Ty,
     allow_unit_coercion: bool,
@@ -7016,13 +6910,13 @@ fn fun_return_compatible(
         ar.non_null().kotlin_class_internal(),
     ) {
         if pr.is_reference() && ar.is_reference() {
-            let compatible = platform_subtype(lib, Ty::obj_name(a), Ty::obj_name(p));
+            let compatible = resolution_subtype(src, Ty::obj_name(a), Ty::obj_name(p));
             crate::trace_compiler!(
                 "resolve",
                 "function return covariance actual={} expected={} compatible={compatible} actual_supertypes={:?}",
                 a.render(),
                 p.render(),
-                lib.classifier(a)
+                src.classifier(a)
                     .map(|classifier| classifier.supertypes.iter_rendered().collect::<Vec<_>>())
                     .unwrap_or_default(),
             );
@@ -7235,8 +7129,17 @@ mod tests {
     #[test]
     fn null_is_assignable_to_a_nullable_type_parameter_with_a_non_null_bound() {
         let parameter = Ty::nullable(Ty::ty_param("T", Ty::obj("kotlin/Any")));
-        assert!(source_arg_assignable(&EMPTY_SOURCE, &parameter, &Ty::Null));
-        assert!(platform_arg_assignable(
+        assert!(semantic_arg_assignable(
+            &EMPTY_SOURCE,
+            &parameter,
+            &Ty::Null
+        ));
+    }
+
+    #[test]
+    fn nullable_upper_bound_does_not_make_a_bare_type_parameter_nullable() {
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        assert!(!semantic_arg_assignable(
             &EMPTY_SOURCE,
             &parameter,
             &Ty::Null
@@ -7715,6 +7618,29 @@ mod tests {
     }
 
     #[test]
+    fn mapped_mutable_list_inherits_the_mutable_iterator_declaration() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let source = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let receiver = Ty::obj_args("kotlin/collections/MutableList", &[Ty::Int]);
+        let functions = members_in_hierarchy(&source, receiver, "iterator")
+            .into_parts()
+            .0;
+        let nearest = functions
+            .overloads
+            .iter()
+            .min_by_key(|function| function.receiver_rank)
+            .expect("inherited iterator declaration");
+        assert_eq!(
+            nearest.callable.ret,
+            Ty::obj_args("kotlin/collections/MutableIterator", &[Ty::Int]),
+        );
+    }
+
+    #[test]
     fn a_receiver_call_collects_its_member_hierarchy_once() {
         let source = CountingSource {
             inner: FakeSource {
@@ -7805,6 +7731,42 @@ mod tests {
 
         assert_eq!(selected.params, vec![Ty::Int]);
         assert_eq!(selected.physical_params, vec![Ty::obj("kotlin/Any")]);
+    }
+
+    #[test]
+    fn constructor_result_inference_combines_arguments_and_expected_type() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let first = Ty::ty_param("A", any);
+        let mut constructor = LibraryMember::new(
+            "<init>".into(),
+            vec![Ty::obj("kotlin/Any")],
+            Ty::Unit,
+            "(Ljava/lang/Object;)V".into(),
+        );
+        constructor.generic_sig = Some(GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: None,
+            params: vec![first],
+            ret: Ty::Unit,
+            return_policy: Default::default(),
+        });
+        let mut classifier = fake_library_type(Vec::new(), vec![constructor]);
+        classifier.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["A".to_string(), "B".to_string()],
+            vec![vec![any], vec![any]],
+        );
+        let owner = type_name("demo/Pair");
+
+        assert_eq!(
+            infer_constructor_type_args(
+                owner,
+                &classifier,
+                &[Ty::String],
+                Some(Ty::obj_args_name(owner, &[Ty::String, Ty::Int])),
+            ),
+            Some(vec![Ty::String, Ty::Int])
+        );
     }
 
     #[test]
@@ -8262,9 +8224,8 @@ mod tests {
             [
                 (vec![Ty::obj("kotlin/Any")], "any"),
                 (vec![Ty::String], "string"),
-                (vec![Ty::obj("java/lang/String")], "java string"),
             ],
-            |_, left, right| resolution_subtype(&source, &source, left, right),
+            |_, left, right| resolution_subtype(&source, left, right),
         );
         assert!(matches!(aliases, CandidateSelection::Selected("string")));
     }
@@ -8334,68 +8295,14 @@ mod tests {
     }
 
     #[test]
-    fn platform_class_identity_uses_borrowed_table_entries() {
-        assert_eq!(
-            platform_class_identity("kotlin/collections/Map$Entry"),
-            "java/util/Map$Entry"
-        );
-        assert_eq!(
-            platform_class_identity("kotlin/collections/Map.Entry"),
-            "java/util/Map$Entry"
-        );
-        let unmapped = "demo/Outer.Inner";
-        assert!(std::ptr::eq(
-            platform_class_identity(unmapped).as_ptr(),
-            unmapped.as_ptr()
-        ));
-    }
-
-    #[test]
-    fn platform_class_names_match_nested_spellings_without_normalizing() {
-        assert!(platform_class_names_match("lib/Flex.FMap", "lib/Flex$FMap"));
-        assert!(platform_class_names_match(
-            "lib/Flex.Inner.Deep",
-            "lib/Flex$Inner$Deep"
-        ));
-        assert!(!platform_class_names_match(
-            "lib/Flex.FMap",
-            "other/Flex$FMap"
-        ));
-        assert!(!platform_class_names_match(
-            "lib/Flex.FMap",
-            "lib/Flex$Other"
-        ));
-    }
-
-    #[test]
-    fn platform_type_names_match_nested_spellings_without_rendering() {
+    fn type_name_identity_normalizes_nested_source_spellings() {
         let dotted = crate::types::type_name("lib/Flex.Inner.Deep");
         let dollar = crate::types::type_name("lib/Flex$Inner$Deep");
         let other_pkg = crate::types::type_name("other/Flex$Inner$Deep");
         let other_tail = crate::types::type_name("lib/Flex$Inner$Other");
-        assert!(platform_type_names_match(dotted, dollar));
-        assert!(!platform_type_names_match(dotted, other_pkg));
-        assert!(!platform_type_names_match(dotted, other_tail));
-    }
-
-    #[test]
-    fn platform_oracle_compares_map_entry_spellings_by_type_name() {
-        let src = FakeSource {
-            name: "unused",
-            receiver: None,
-            info: top_level_nullable_string_info(),
-        };
-        let oracle = PlatformOracle(&src);
-        assert!(crate::assignable::TypeOracle::same_class_name(
-            &oracle,
-            crate::types::type_name("kotlin/collections/Map.Entry"),
-            crate::types::type_name("kotlin/collections/Map$Entry"),
-        ));
-        assert!(crate::assignable::TypeOracle::same_class_name(
-            &oracle,
-            crate::types::type_name("lib/Flex.FMap"),
-            crate::types::type_name("lib/Flex$FMap"),
-        ));
+        assert_eq!(dotted, dollar);
+        assert_ne!(dotted, other_pkg);
+        assert_ne!(dotted, other_tail);
     }
 
     fn member_nullable_string_info() -> FunctionInfo {
@@ -8634,11 +8541,13 @@ mod tests {
                         alias(Ty::String, "(Ljava/lang/String;)V"),
                     ],
                 },
-                &[CallArgKind::Typed(Ty::obj("java/lang/String"))],
+                // Providers normalize platform aliases before publishing semantic declarations or
+                // argument types. Core selection therefore compares the one Kotlin identity.
+                &[CallArgKind::Typed(Ty::String)],
                 &[],
                 None,
             )
-            .expect("platform aliases should remain applicable");
+            .expect("the normalized semantic string type should remain applicable");
         assert_eq!(call.params, vec![Ty::String]);
 
         let vararg = |element, descriptor| {

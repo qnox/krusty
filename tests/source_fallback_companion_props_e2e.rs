@@ -224,10 +224,8 @@ class Limits {
     assert_eq!(d, ["unresolved reference 'MISSING'."]);
 }
 
-// An `internal` companion property is module-scoped: the dependent module's read must keep
-// reporting the same unresolved-reference diagnostic (kotlinc rejects cross-module internal
-// access), exactly like the `public_functions`/`public_properties` filters hide internal
-// callables.
+// An `internal` companion property remains a declaration across the dependency boundary, but it is
+// inaccessible there. Kotlinc reports accessibility rather than pretending the declaration is absent.
 #[test]
 fn internal_companion_val_is_hidden_cross_module() {
     let d = fallback_diagnostics(
@@ -248,7 +246,10 @@ class Limits {
 }
 "#,
     );
-    assert_eq!(d, ["unresolved reference 'HIDDEN'."]);
+    assert_eq!(
+        d,
+        ["cannot access 'HIDDEN': it is internal in 'dep/Limits$Companion'"]
+    );
 }
 
 // The same `internal` companion property read from its OWN module keeps working.

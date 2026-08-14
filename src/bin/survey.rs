@@ -164,6 +164,7 @@ fn emit_checked_ir(
         metadata.as_ref(),
         &opts,
         &run,
+        syms,
     ) {
         // `Some([])` is NOT a bail: an all-`expect` file (decls stripped) or a typealias-only file
         // legitimately emits zero classes (the gate's per-file acceptance, mirrored). Emptiness at
@@ -171,6 +172,7 @@ fn emit_checked_ir(
         Some(o) => Ok(o),
         None => Err(run
             .inline_bail()
+            .or_else(|| run.emit_error())
             .map(|r| format!("emit: {r}"))
             .unwrap_or_else(|| "emit: emit_all bailed (unsupported codegen)".into())),
     }

@@ -442,8 +442,12 @@ fn generic_java_static_accepts_zero_arg_sam_lambda() {
         }\n";
 
     assert_eq!(
-        common::compile_and_run_with_stdlib(SOURCE, "Main")
-            .expect("generic Java static SAM call compiles and runs"),
+        common::compile_and_run_with_stdlib(SOURCE, "Main").unwrap_or_else(|| {
+            panic!(
+                "generic Java static SAM call failed: {:?}",
+                common::front_end_diagnostics_with_stdlib(SOURCE)
+            )
+        }),
         "OK"
     );
 }

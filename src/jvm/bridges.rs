@@ -43,6 +43,18 @@ struct MethodShape {
     ret: Ty,
 }
 
+struct InterfaceObligation {
+    name: String,
+    /// Descriptor shape declared by the interface.
+    erased_params: Vec<Ty>,
+    erased_ret: Ty,
+    /// Semantic shape after applying the implementing class's interface arguments. This selects the
+    /// override among same-named overloads; it is never used as the bridge descriptor.
+    applied_params: Vec<Ty>,
+    applied_ret: Ty,
+    default: Option<bool>,
+}
+
 /// Symbol providers may expose the same physical declaration through several semantic aliases (most
 /// visibly Kotlin/Java builtin twins on `Any`). Those are one override candidate, not an overload
 /// ambiguity. Collapse only identical erased signatures; genuinely distinct overloads remain distinct
@@ -554,7 +566,7 @@ fn types_match(left: Ty, right: Ty) -> bool {
     ) else {
         return false;
     };
-    crate::symbol_resolver::platform_type_names_match(left_name, right_name)
+    crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(left_name, right_name)
 }
 
 fn param_narrows(syms: &FrontendSymbols, erased: Ty, concrete: Ty) -> bool {
@@ -589,11 +601,14 @@ fn resolve_bridge_target(
     ir: &IrFile,
     syms: &FrontendSymbols,
     internal: TypeName,
-    name: &str,
-    erased_params: &[Ty],
-    erased_ret: Ty,
-    allow_fake_override: bool,
+    obligation: &InterfaceObligation,
 ) -> Option<u32> {
+    let name = obligation.name.as_str();
+    let erased_params = obligation.erased_params.as_slice();
+    let erased_ret = obligation.erased_ret;
+    let applied_params = obligation.applied_params.as_slice();
+    let applied_ret = obligation.applied_ret;
+    let allow_fake_override = obligation.default == Some(false);
     let mut current = Some(internal);
     let mut seen = std::collections::HashSet::new();
     while let Some(owner) = current {
@@ -629,10 +644,11 @@ fn resolve_bridge_target(
             return Some(*fid);
         }
         candidates.retain(|(fid, params, ret)| {
-            let generic_override = params
-                .iter()
-                .zip(erased_params)
-                .all(|(&concrete, &erased)| param_narrows(syms, erased, concrete));
+            let generic_override = params.len() == applied_params.len()
+                && params
+                    .iter()
+                    .zip(applied_params)
+                    .all(|(&concrete, &applied)| param_narrows(syms, applied, concrete));
             let fake_override = allow_fake_override
                 && params
                     .iter()
@@ -641,7 +657,7 @@ fn resolve_bridge_target(
                         types_match(concrete, erased) || concrete.is_erased_top()
                     });
             let changes_signature = params != erased_params || *ret != erased_ret;
-            let return_admitted = return_admits(syms, erased_ret, *ret, allow_fake_override);
+            let return_admitted = return_admits(syms, applied_ret, *ret, allow_fake_override);
             (generic_override || fake_override)
                 && return_admitted
                 && changes_signature
@@ -779,26 +795,38 @@ fn interface_bridges(
             .into_iter()
             .find_map(|(owner, applied, _)| (owner == itf).then(|| applied.type_args().to_vec()))
             .unwrap_or_default();
-        // `default`: whether the interface method has a body, known only for an interface declared in this
-        // file. `logical_params`: the generic signature's declared parameters, for a classpath interface.
-        type Obligation = (String, Vec<Ty>, Ty, Option<bool>, Option<Vec<Ty>>);
-        let obligations: Vec<Obligation> = if class_of(ir, itf).is_some() {
+        let interface_formals = syms
+            .class_by_type_name(itf)
+            .map(|class| class.type_params().clone())
+            .or_else(|| {
+                syms.libraries
+                    .classifier(itf)
+                    .map(|class| class.type_params().clone())
+            })
+            .unwrap_or_default();
+        let interface_bindings = interface_formals
+            .into_iter()
+            .zip(applied_interface_args.iter().copied())
+            .collect::<std::collections::HashMap<_, _>>();
+        let apply = |ty| crate::symbol_resolver::ty_subst_keep_unbound(ty, &interface_bindings);
+        let obligations: Vec<InterfaceObligation> = if class_of(ir, itf).is_some() {
             iface_methods(ir, itf)
                 .into_iter()
                 .map(|(_, name, fid)| {
                     let function = &ir.functions[fid as usize];
-                    (
+                    InterfaceObligation {
                         name,
-                        function
+                        erased_params: function
                             .params
                             .iter()
                             .copied()
                             .map(bridge_erasure)
                             .collect(),
-                        bridge_erasure(function.ret),
-                        Some(function.body.is_some()),
-                        None,
-                    )
+                        erased_ret: bridge_erasure(function.ret),
+                        applied_params: function.params.iter().copied().map(apply).collect(),
+                        applied_ret: apply(function.ret),
+                        default: Some(function.body.is_some()),
+                    }
                 })
                 .collect()
         } else if let Some(interface) = syms.libraries.classifier(itf) {
@@ -806,16 +834,24 @@ fn interface_bridges(
                 .members
                 .iter()
                 .map(|member| {
-                    (
-                        member.name.clone(),
-                        member.params.iter().copied().map(bridge_erasure).collect(),
-                        bridge_erasure(member.ret),
-                        None,
-                        member
-                            .generic_sig
-                            .as_ref()
-                            .map(|signature| signature.params.clone()),
-                    )
+                    let declared_params = member
+                        .generic_sig
+                        .as_ref()
+                        .map_or(member.params.as_slice(), |signature| {
+                            signature.params.as_slice()
+                        });
+                    let declared_ret = member
+                        .generic_sig
+                        .as_ref()
+                        .map_or(member.ret, |signature| signature.ret);
+                    InterfaceObligation {
+                        name: member.name.clone(),
+                        erased_params: member.params.iter().copied().map(bridge_erasure).collect(),
+                        erased_ret: bridge_erasure(member.ret),
+                        applied_params: declared_params.iter().copied().map(apply).collect(),
+                        applied_ret: apply(declared_ret),
+                        default: None,
+                    }
                 })
                 .collect()
         } else if let Some(interface) = syms.class_by_type_name(itf) {
@@ -823,34 +859,37 @@ fn interface_bridges(
                 .methods
                 .iter()
                 .flat_map(|(name, signatures)| {
-                    signatures.iter().map(move |signature| {
-                        (
-                            name.clone(),
-                            signature
-                                .params
-                                .iter()
-                                .copied()
-                                .map(bridge_erasure)
-                                .collect(),
-                            bridge_erasure(signature.ret),
-                            None,
-                            None,
-                        )
+                    signatures.iter().map(move |signature| InterfaceObligation {
+                        name: name.clone(),
+                        erased_params: signature
+                            .params
+                            .iter()
+                            .copied()
+                            .map(bridge_erasure)
+                            .collect(),
+                        erased_ret: bridge_erasure(signature.ret),
+                        applied_params: signature.params.iter().copied().map(apply).collect(),
+                        applied_ret: apply(signature.ret),
+                        default: None,
                     })
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        for (name, erased_params, erased_ret, default, logical_params) in obligations {
-            let impl_fid = resolve_bridge_target(
-                ir,
-                syms,
-                internal_name,
-                &name,
-                &erased_params,
+        for obligation in obligations {
+            let impl_fid = resolve_bridge_target(ir, syms, internal_name, &obligation);
+            let InterfaceObligation {
+                name,
+                erased_params,
                 erased_ret,
-                default == Some(false),
+                applied_params,
+                applied_ret,
+                default: _,
+            } = obligation;
+            crate::trace_compiler!(
+                "bridges",
+                "interface obligation class={internal_name} interface={itf} name={name} erased_params={erased_params:?} erased_ret={erased_ret:?} applied_params={applied_params:?} applied_ret={applied_ret:?} applied_args={applied_interface_args:?}"
             );
             // A property accessor is not an IR method — this backend synthesizes it — so the DECLARATION
             // is the implementation the obligation is satisfied by.
@@ -870,8 +909,16 @@ fn interface_bridges(
                 ),
             };
             let Some((concrete_params, concrete_ret, impl_owner)) = impl_sig else {
+                crate::trace_compiler!(
+                    "bridges",
+                    "interface obligation class={internal_name} name={name} has no implementation target"
+                );
                 continue;
             };
+            crate::trace_compiler!(
+                "bridges",
+                "interface obligation class={internal_name} name={name} target={impl_fid:?} concrete_params={concrete_params:?} concrete_ret={concrete_ret:?} owner={impl_owner:?}"
+            );
             let concrete_erased_params = concrete_params
                 .iter()
                 .copied()
@@ -898,13 +945,11 @@ fn interface_bridges(
                 .copied()
                 .map(|ty| post_value_erasure(syms, ty))
                 .collect::<Vec<_>>();
-            let logical_match = logical_params.as_ref().is_some_and(|logical| {
-                logical.len() == concrete_params.len()
-                    && logical
-                        .iter()
-                        .zip(&concrete_params)
-                        .all(|(&declared, &concrete)| types_match(declared, concrete))
-            });
+            let logical_match = applied_params.len() == concrete_params.len()
+                && applied_params
+                    .iter()
+                    .zip(&concrete_params)
+                    .all(|(&declared, &concrete)| types_match(declared, concrete));
             let specializes_value_parameter = concrete_params.iter().copied().any(|concrete| {
                 syms.libraries.value_underlying(concrete).is_some()
                     && applied_interface_args

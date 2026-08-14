@@ -57,6 +57,32 @@ pub fn is_computed_companion_prop(p: &PropDecl) -> bool {
         }
 }
 
+/// A field-less member property whose value is entirely supplied by its accessor body.
+///
+/// This is a source declaration shape shared by semantic checking and IR construction. Keeping it
+/// beside [`PropDecl`] prevents those phases from independently deciding which declarations own
+/// instance storage.
+pub fn is_computed_member_prop(p: &PropDecl) -> bool {
+    p.receiver.is_none()
+        && !p.is_lateinit
+        && p.init.is_none()
+        && p.getter.is_some()
+        && (!p.is_var
+            || p.setter
+                .as_ref()
+                .is_some_and(|setter| setter.body.is_some()))
+        && !p.getter_reads_field
+}
+
+/// Whether this member-property declaration contributes one instance-storage slot.
+pub fn has_instance_backing_field(p: &PropDecl) -> bool {
+    !p.is_const
+        && !is_computed_member_prop(p)
+        && !p.is_abstract
+        && p.delegate.is_none()
+        && p.receiver.is_none()
+}
+
 pub fn setter_param_or_value(param: Option<&String>) -> String {
     param.cloned().unwrap_or_else(|| "value".to_string())
 }
@@ -583,8 +609,8 @@ pub struct Param {
     /// `true` for a `vararg` parameter — its runtime type is `Array<ty>` and callers pack the
     /// trailing arguments into a fresh array.
     pub is_vararg: bool,
-    /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted trailing
-    /// arguments. Defaults that reference another parameter are rejected (see resolve.rs).
+    /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted arguments. A
+    /// default may reference parameters declared before it, matching Kotlin's left-to-right scope.
     pub default: Option<ExprId>,
     /// Simple names of annotations applied to the parameter (`@IntroducedAt("1") b: String` →
     /// `["IntroducedAt"]`). Used by the compiler-extension surface.

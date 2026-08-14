@@ -2820,6 +2820,17 @@ pub fn lower_value_classes(
                     None
                 };
                 if let Some(vc) = vc_side {
+                    crate::trace_compiler!(
+                        "value_classes",
+                        "value/null comparison expr {id} value={vc} {:?} repr={} nonnull={}",
+                        &ir.exprs[vc as usize],
+                        match repr_ctx.repr(vc) {
+                            Repr::Unboxed(_) => "Unboxed",
+                            Repr::Boxed(_) => "Boxed",
+                            Repr::NotVc => "NotVc",
+                        },
+                        repr_ctx.operand_nonnull(vc),
+                    );
                     if matches!(repr_ctx.repr(vc), Repr::Unboxed(_)) && repr_ctx.operand_nonnull(vc)
                     {
                         vacuous.push((id, is_ne));
@@ -3026,7 +3037,9 @@ pub fn lower_value_classes(
                     if recv_is_ref_vc && k == 0 {
                         continue;
                     }
-                    let Repr::Unboxed(x) = repr_ctx.repr(a) else {
+                    let (representation_value, representation) =
+                        repr_ctx.through_erased_generic_coercion(a);
+                    let Repr::Unboxed(x) = representation else {
                         continue;
                     };
                     // A VC-owned call boxes an unboxed value-class arg at a parameter that is the boxed VC
@@ -3053,7 +3066,10 @@ pub fn lower_value_classes(
                         refs.get(k).copied().unwrap_or(false) && !own_underlying
                     };
                     if box_here {
-                        ops.push((a, repr_ctx.box_op(a, x)));
+                        ops.push((
+                            representation_value,
+                            repr_ctx.box_op(representation_value, x),
+                        ));
                     }
                 }
             }
@@ -3092,6 +3108,33 @@ pub fn lower_value_classes(
                     .zip(orig_params[*cfid as usize].iter())
                     .map(|(a, p)| (*a, p.clone()))
                     .collect(),
+                // `Array<T>.set(index, value)` stores into the receiver array's semantic element
+                // slot. Reference arrays of value classes keep boxed elements, so the value-class
+                // boundary belongs here alongside call parameters and fields. The receiver is often
+                // a generated local read; recover its pre-erasure type from the function slot map.
+                IrExpr::Call {
+                    callee:
+                        Callee::Intrinsic {
+                            operation: crate::ir::IrIntrinsic::ArraySet,
+                            ..
+                        },
+                    dispatch_receiver: Some(array),
+                    args,
+                } => {
+                    let element =
+                        array_element_type(&ir.exprs, repr_ctx.slots, &ir.logical_types, *array);
+                    crate::trace_compiler!(
+                        "value_classes",
+                        "array set expr {id} receiver={array} {:?} element={element:?} args={args:?}",
+                        &ir.exprs[*array as usize],
+                    );
+                    if let Some((value, element)) = args.get(1).copied().zip(element) {
+                        record_reference_array_element_boundary(
+                            &mut ops, &ir.exprs, &repr_ctx, value, element,
+                        );
+                    }
+                    continue;
+                }
                 // Captures target the lifted implementation's leading parameters.
                 IrExpr::Lambda {
                     impl_fn, captures, ..
@@ -3792,6 +3835,25 @@ impl ReprCtx<'_> {
             BoxOp::BoxNull(value_class)
         }
     }
+
+    /// A coercion to an erased type parameter changes the consumer's contract, not the value's current
+    /// representation. Descriptor boundaries must inspect the value beneath such coercions so an
+    /// unboxed value class is boxed at the reference slot, while its preceding specialized local keeps
+    /// the unboxed carrier. Return the expression that should receive the representation rewrite.
+    fn through_erased_generic_coercion(&self, mut id: ExprId) -> (ExprId, Repr) {
+        while let IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = &self.exprs[id as usize]
+        {
+            if !matches!(type_operand.non_null(), Ty::TyParam(..)) {
+                break;
+            }
+            id = *arg;
+        }
+        (id, self.repr(id))
+    }
 }
 
 fn record_value_boundary(
@@ -3889,6 +3951,34 @@ fn record_value_boundary(
     }
 }
 
+/// A Kotlin `Array<T>` is a JVM reference array even when `T` is a non-null value class. Its semantic
+/// element type stays `T`; only this platform boundary requires the boxed `T` object for `aastore`.
+fn record_reference_array_element_boundary(
+    ops: &mut Vec<(ExprId, BoxOp)>,
+    exprs: &[IrExpr],
+    repr_ctx: &ReprCtx<'_>,
+    value: ExprId,
+    element: Ty,
+) {
+    let Some(value_class) = element
+        .non_null()
+        .obj_internal()
+        .filter(|name| repr_ctx.under.contains_key(name))
+    else {
+        return;
+    };
+    if !matches!(repr_ctx.repr(value), Repr::Unboxed(actual) if actual == value_class) {
+        return;
+    }
+    let mut tails = Vec::new();
+    value_tails(exprs, value, &mut tails);
+    for tail in tails {
+        if matches!(repr_ctx.repr(tail), Repr::Unboxed(actual) if actual == value_class) {
+            ops.push((tail, repr_ctx.box_op(tail, value_class)));
+        }
+    }
+}
+
 /// Whether a NULLABLE value class `X?` is represented BOXED. Only true when its underlying erases to a
 /// primitive (a primitive can't carry null, so `X?` keeps the boxed `X`). Over a reference underlying,
 /// `X?` erases to that underlying reference — represented unboxed, exactly like a non-null `X`.
@@ -3951,6 +4041,18 @@ fn operand_nonnull(
         // The same read as a property: its declared type is what says whether the value can be null.
         IrExpr::PropertyRead { ty, .. } => non_null_ty(ty),
         IrExpr::NotNullAssert { .. } => true,
+        // A successful cast to a non-null reference has a non-null result; `CastNonNull` states the
+        // same contract directly. This matters for a non-null generic value class whose unboxed
+        // carrier itself may contain null (`Ag<T>(null)` is still not a null `Ag<T>`).
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::Cast,
+            type_operand,
+            ..
+        } => non_null_ty(type_operand),
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::CastNonNull,
+            ..
+        } => true,
         IrExpr::Call {
             callee: Callee::Static { name, .. },
             ..
@@ -3998,6 +4100,31 @@ impl<'a> CallTypes<'a> {
             .non_null()
             .obj_internal()
             .filter(|fq| under.contains_key(fq))
+    }
+}
+
+/// Semantic element type of an array-valued expression before value-class erasure. Generated array
+/// fill loops normally pass the array through a local slot, while ordinary expressions may retain a
+/// logical type directly. Follow only representation-transparent wrappers; this never resolves a type.
+fn array_element_type(
+    exprs: &[IrExpr],
+    slots: &HashMap<u32, Ty>,
+    logical: &HashMap<u32, Ty>,
+    id: ExprId,
+) -> Option<Ty> {
+    if let Some(element) = logical.get(&id).and_then(|ty| ty.array_elem()) {
+        return Some(element);
+    }
+    match &exprs[id as usize] {
+        IrExpr::GetValue(slot) => slots.get(slot).and_then(|ty| ty.array_elem()),
+        IrExpr::TypeOp { arg, .. } => array_element_type(exprs, slots, logical, *arg),
+        IrExpr::Block {
+            value: Some(value), ..
+        } => array_element_type(exprs, slots, logical, *value),
+        IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => {
+            array_type.array_elem()
+        }
+        _ => None,
     }
 }
 
@@ -5182,18 +5309,61 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
                 property.getter,
                 property.setter,
                 property.name.clone(),
+                property.is_open,
             )
         })
         .collect::<Vec<_>>();
-    for (property_index, getter, setter, property_name) in computed_accessors {
+    for (property_index, getter, setter, property_name, overrides_supertype) in computed_accessors {
         if let Some(getter) = getter {
+            let source_name = property_getter_name(&property_name);
             let jvm_name = format!("{}-impl", property_getter_name(&property_name));
-            let function = &mut ir.functions[getter as usize];
-            function.name.clone_from(&jvm_name);
-            function.params.insert(0, u_ir);
-            function.is_static = true;
+            let ret = {
+                let function = &mut ir.functions[getter as usize];
+                function.name.clone_from(&jvm_name);
+                function.params.insert(0, u_ir);
+                function.is_static = true;
+                function.ret
+            };
             ir.classes[class_id as usize].properties[property_index].getter_jvm_name =
-                Some(jvm_name);
+                Some(jvm_name.clone());
+            // The static `getX-impl(U)` is how an unboxed value calls its accessor. If the property
+            // overrides a supertype declaration, the BOX must additionally implement the ordinary
+            // virtual `getX()` entry point. Delegate from that instance method to the same implementation;
+            // bridge derivation has already established the override, so no hierarchy lookup occurs here.
+            if overrides_supertype {
+                let this = ir.add_expr(IrExpr::GetValue(0));
+                let carrier = ir.add_expr(IrExpr::GetField {
+                    receiver: this,
+                    class: class_id,
+                    index: 0,
+                });
+                let call = ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: internal_name,
+                        name: jvm_name,
+                        descriptor: format!("({}){}", desc(&u_ir), desc(&ret)),
+                        inline: crate::libraries::InlineKind::None,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![carrier],
+                });
+                let returned = ir.add_expr(IrExpr::Return(Some(call)));
+                let body = ir.add_expr(IrExpr::Block {
+                    stmts: vec![returned],
+                    value: None,
+                });
+                let fid = ir.add_fun(crate::ir::IrFunction {
+                    name: source_name,
+                    params: vec![],
+                    ret,
+                    body: Some(body),
+                    is_static: false,
+                    dispatch_receiver: Some(internal_name),
+                    param_checks: vec![],
+                });
+                ir.classes[class_id as usize].methods.push(fid);
+                ir.open_methods.insert(fid);
+            }
         }
         if let Some(setter) = setter {
             let jvm_name = format!(

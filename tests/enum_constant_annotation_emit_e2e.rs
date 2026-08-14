@@ -5,8 +5,14 @@
 use super::common;
 
 fn role_bytes(src: &str) -> Vec<u8> {
-    let classes = common::compile_in_process(src, "File", &[], None)
-        .unwrap_or_else(|| panic!("krusty failed to compile:\n{src}"));
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classes = common::expect_compile_in_process(
+        src,
+        "File",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    );
     classes
         .into_iter()
         .find(|(n, _)| n == "demo/Role")

@@ -239,6 +239,29 @@ fun box(): String {
     );
 }
 
+/// A computed `var` has no interface storage: its getter and setter are ordinary default methods.
+/// Both accessors must dispatch through the interface declaration, including a write followed by a
+/// read on an implementation that declares no override.
+#[test]
+fn interface_default_getter_and_setter_run() {
+    run_box(
+        r#"
+interface I {
+    var x: String
+        get() = "OK"
+        set(value) {}
+}
+class C : I
+fun box(): String {
+    val value: I = C()
+    value.x = "ignored"
+    return value.x
+}
+"#,
+        "IfaceVar",
+    );
+}
+
 /// REJECTION GUARDS: shapes that must never EMIT (they'd miscompile as public defaults). Asserts
 /// on the backend outcome, not a run result — a skip and an emitted-but-crashing class both make a
 /// run-based check pass, but only the former is acceptable.
@@ -246,19 +269,6 @@ fun box(): String {
 fn unsupported_interface_property_shapes_still_rejected() {
     let jdk = common::jdk_modules();
     let cases: &[(&str, &str)] = &[
-        // A `var` with custom get+set.
-        (
-            "IfaceVar",
-            r#"
-interface I {
-    var x: String
-        get() = "OK"
-        set(v) {}
-}
-class C : I
-fun box(): String = C().x
-"#,
-        ),
         // An extension property in an interface.
         (
             "IfaceExtProp",

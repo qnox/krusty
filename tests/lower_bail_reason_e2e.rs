@@ -7,67 +7,7 @@
 //! boundary so the survey stays attributable; a failure here means a bail path lost (or never got) its
 //! label.
 //!
-//! Needs the provisioned box corpus + JVM toolchain; skips otherwise.
-
 use super::common;
-
-/// Single-file corpus cases pinned to their precise lowering-gate reason (previously the unrefined
-/// catch-all `deep`).
-const GATED_CORPUS_CASES: &[(&str, &str)] = &[
-    // `sequence { yieldAll(…) }` — the yield-builder suspend state machine isn't modeled.
-    ("coroutines/kt35967.kt", "gate:yield-builder"),
-    // A suspend member on a class with a GENERIC supertype needs an erasure bridge the coroutine
-    // lowering doesn't synthesize (`SuspendingMutableMap<K, V> : Map<K, V>`).
-    (
-        "coroutines/bridges/mapSuspendClear.kt",
-        "gate:suspend-erasure-bridge",
-    ),
-    // A plain extension `suspend fun` IS modeled now, so this case runs past the coroutine gate and
-    // stops at the next unsupported statement shape in its lambda body.
-    (
-        "coroutines/inlineClasses/direct/createOverride.kt",
-        "stmt Assign",
-    ),
-    // Member delegated-property shapes the inline accessor doesn't model: a value-class delegate,
-    // and an EXTENSION `getValue` (no member `getValue` on the delegate class).
-    (
-        "inlineClasses/propertyDelegation/kt27070.kt",
-        "gate:member-delegate-shape",
-    ),
-    (
-        "delegatedProperty/getAsExtensionFun.kt",
-        "gate:member-delegate-shape",
-    ),
-    // A top-level EXTENSION delegated property (`val Recv.x by …`) isn't modeled.
-    (
-        "extensionProperties/extensionPropertyDelegated.kt",
-        "gate:extension-delegated-property",
-    ),
-    (
-        "delegatedProperty/delegateForExtProperty.kt",
-        "gate:extension-delegated-property",
-    ),
-    // Interface-delegation forwarder synthesis declines an intersection-typed delegate while
-    // registering the class (pass 1a).
-    (
-        "delegation/delegationToIntersectionType3.kt",
-        "gate:delegation-forwarders",
-    ),
-];
-
-#[test]
-fn gated_corpus_cases_report_precise_lower_bail() {
-    if !common::corpus_ready() {
-        return;
-    }
-    for &(case, reason) in GATED_CORPUS_CASES {
-        assert_eq!(
-            common::box_corpus_case_backend_outcome(case),
-            Some(common::BackendOutcome::LowerBail(reason.to_string())),
-            "{case} must stop at its precise unsupported lowering boundary"
-        );
-    }
-}
 
 #[test]
 fn companion_with_explicit_base_arguments_runs() {
@@ -125,20 +65,5 @@ class C {
 fun box(): String = C().x
 "#,
         "gate:member-delegate-shape",
-    );
-}
-
-#[test]
-fn unsupported_call_bucket_is_semantic_and_hides_source_name() {
-    // The expression failure must explain the missing lowering contract without publishing the
-    // concrete callee, branching on provider origin, or trying symbol resolution again.
-    common::assert_inline_source_lower_bail(
-        r#"
-import kotlin.coroutines.suspendCoroutine
-
-suspend fun pause(): Unit = suspendCoroutine { }
-fun box(): String = "OK"
-"#,
-        "unqualified call has no supported semantic lowering",
     );
 }

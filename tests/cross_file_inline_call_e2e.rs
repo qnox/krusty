@@ -627,11 +627,11 @@ const SUSPEND_EXT_MAIN: &str = "import kotlin.coroutines.*\n\
                                 \x20   return if (r == 2) \"OK\" else \"fail\"\n\
                                 }\n";
 
-/// A `::ref` to a sibling-file inline fn that is NOT emitted (reified — it specializes per call
-/// site) used to decline silently: the reference fell through to unrelated overloads or the file
-/// died with the generic backend error. The checker now names the real problem at the reference.
+/// A callable reference supplies no explicit type-argument syntax. When a declaration's reified type
+/// parameter occurs in neither its parameters nor its result, there is no inference evidence; kotlinc
+/// rejects the reference semantically before backend realization matters.
 #[test]
-fn cross_file_ref_to_unemitted_inline_fn_names_the_reason() {
+fn cross_file_ref_reports_uninferred_reified_type_argument() {
     const LIB: &str = "inline fun <reified T> tag(): String = \"t\"\n";
     const MAIN: &str = "fun box(): String {\n\
                         \x20   val f: () -> String = ::tag\n\
@@ -642,9 +642,10 @@ fn cross_file_ref_to_unemitted_inline_fn_names_the_reason() {
         return;
     };
     assert!(
-        diags.iter().any(|d| d
-            .contains("cannot reference 'tag': the inline function is not emitted as a callable")),
-        "expected the unemitted-inline diagnostic, got: {diags:?}"
+        diags
+            .iter()
+            .any(|d| d.contains("not enough information to infer type variable")),
+        "expected the type-inference diagnostic, got: {diags:?}"
     );
 }
 
@@ -720,11 +721,10 @@ fn checker_only_pipeline_cross_file_ref_to_plain_fn_stays_clean() {
 }
 
 /// The ADAPTED-reference form (default-parameter adaptation): `::tag` passed to a
-/// function-typed parameter of smaller arity resolves through `select_adapted_source_ref`,
-/// which must name the same reason for an unemitted sibling inline fn rather than decline
-/// silently.
+/// function-typed parameter of smaller arity still provides no evidence for the independent reified
+/// parameter. Default adaptation must not invent an erased binding for it.
 #[test]
-fn cross_file_adapted_ref_to_unemitted_inline_fn_names_the_reason() {
+fn cross_file_adapted_ref_reports_uninferred_reified_type_argument() {
     const LIB: &str = "inline fun <reified T> tag(x: String, y: Char = 'K'): String = x + y\n";
     const MAIN: &str = "fun <T, U> call(f: (T) -> U, x: T): U = f(x)\n\
                         fun box(): String = call(::tag, \"O\")\n";
@@ -733,8 +733,9 @@ fn cross_file_adapted_ref_to_unemitted_inline_fn_names_the_reason() {
         return;
     };
     assert!(
-        diags.iter().any(|d| d
-            .contains("cannot reference 'tag': the inline function is not emitted as a callable")),
-        "expected the unemitted-inline diagnostic, got: {diags:?}"
+        diags
+            .iter()
+            .any(|d| d.contains("not enough information to infer type variable")),
+        "expected the type-inference diagnostic, got: {diags:?}"
     );
 }

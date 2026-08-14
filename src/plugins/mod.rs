@@ -92,6 +92,7 @@ pub enum FrontendCallableOwner {
 /// The resolved source-class information available to frontend declaration generation.
 pub struct FrontendClassContext<'a> {
     pub classifier: TypeName,
+    pub kind: crate::libraries::TypeKind,
     pub type_parameters: &'a crate::types::TypeParameters<Vec<Ty>>,
     pub annotations: &'a [TypeName],
 }

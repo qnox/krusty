@@ -2299,6 +2299,7 @@ fn suspend_binary_hoist_preserves_left_to_right_evaluation() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let src = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
 \n\
 fun <T> runBlocking(block: suspend () -> T): T {\n\
     var res: Result<T>? = null\n\
@@ -2316,16 +2317,12 @@ fun box(): String = runBlocking {\n\
     val sum = left() + awaitRight()\n\
     if (trace == \"LR\" && sum == 3) \"OK\" else \"$trace/$sum\"\n\
 }\n";
-    let Some(out) = common::compile_and_run_box(
+    let out = common::expect_box_run(
         src,
         "SuspendBinaryEvaluationOrder",
         &[stdlib],
         Some(jdk.as_path()),
-    ) else {
-        panic!(
-            "SuspendBinaryEvaluationOrder: lowering or emission unexpectedly declined the source"
-        );
-    };
+    );
     assert_eq!(out.trim(), "OK");
 }
 
@@ -2481,26 +2478,23 @@ fun box(): String = builder {{\n\
 }}\n"
         )
     };
-    let out = common::compile_and_run_box(
+    let out = common::expect_box_run(
         &body("bars(libFoo(i++), libFoo(i++))"),
         "SuspendDefaultArgWrites",
         &jars,
         Some(jdk.as_path()),
-    )
-    .expect("SuspendDefaultArgWrites: suspend $default call must compile and run");
+    );
     assert_eq!(
         out.trim(),
         "1!;2!;",
         "suspend $default operands must observe both increments in source order"
     );
-    let Some(out) = common::compile_and_run_box(
+    let out = common::expect_box_run(
         &body("bars(libFoo(i), libFoo(i + 1))"),
         "SuspendDefaultNoWrites",
         &jars,
         Some(jdk.as_path()),
-    ) else {
-        panic!("SuspendDefaultNoWrites: an untriggered $default suspend call must still compile");
-    };
+    );
     assert_eq!(
         out.trim(),
         "1!;2!;",

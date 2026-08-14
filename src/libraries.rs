@@ -221,6 +221,10 @@ pub enum MemberRealization {
     /// Direct provider call. Some realizations encode the semantic receiver as their first argument
     /// (value-class implementation methods); others address a singleton implementation directly.
     Direct { pass_receiver: bool },
+    /// A builtin range operator whose declaration is semantic but whose platform implementation is
+    /// not an instance method on the receiver. The selected provider supplies the construction plan;
+    /// lowering never infers this from a callable name.
+    RangeConstruction { open_end: bool },
 }
 
 /// One member (constructor, member function/property accessor, or companion member) of a library
@@ -295,6 +299,33 @@ pub struct LibraryMember {
     /// Compiler-plugin expression implementation attached to this exact declaration. Ordinary
     /// declarations leave it unset; selection carries it unchanged to the plugin planning phase.
     pub plugin_expression: Option<PluginExpressionDeclaration>,
+    /// Exact AST-backed member declaration selected from the current compilation. This is a handoff
+    /// from selection to lowering, not an overload key. Dependency and synthesized members leave it
+    /// unset.
+    pub source_member: Option<SourceMember>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceMember {
+    Class {
+        file: u32,
+        owner: u32,
+        method: u32,
+    },
+    EnumEntry {
+        file: u32,
+        owner: u32,
+        entry: u32,
+        method: u32,
+    },
+}
+
+impl SourceMember {
+    pub fn file(self) -> u32 {
+        match self {
+            Self::Class { file, .. } | Self::EnumEntry { file, .. } => file,
+        }
+    }
 }
 
 /// Callable declarations contributed by the Kotlin language to a classifier rather than written in
@@ -326,6 +357,7 @@ pub enum CompilerIntrinsic {
     StringPlus,
     NullableAnyToString,
     Assert,
+    AssertFailsWith,
     Print,
     Println,
     StartCoroutine,
@@ -630,6 +662,7 @@ impl LibraryMember {
             declared_ret: None,
             implicit_classifier_callable: None,
             plugin_expression: None,
+            source_member: None,
         }
     }
 
@@ -1482,6 +1515,10 @@ pub struct FunctionInfo {
     /// Source declaration key for a callable from the current compilation module. Classpath callables
     /// leave this unset.
     pub source_key: Option<(u32, u32)>,
+    /// Exact AST-backed member declaration selected from the current compilation. This is distinct
+    /// from [`Self::source_key`], whose second component is a top-level declaration arena id; a member
+    /// is owned by its classifier and is identified by its stable signature start.
+    pub source_member: Option<SourceMember>,
     /// Language-defined callable contributed by the classifier itself rather than by its companion
     /// value. It travels on the same candidate structure so the checker can combine both facets and
     /// run overload selection once.
@@ -1562,6 +1599,7 @@ impl FunctionInfo {
             default_values: Vec::new(),
             context_count: 0,
             source_key: None,
+            source_member: None,
             implicit_classifier_callable: None,
         }
     }
@@ -1608,6 +1646,7 @@ impl FunctionInfo {
         candidate.flags.is_abstract = member.is_abstract();
         candidate.flags.low_priority = member.low_priority;
         candidate.default_values = member.default_values.clone();
+        candidate.source_member = member.source_member;
         candidate.implicit_classifier_callable = member.implicit_classifier_callable;
         candidate
     }
@@ -1660,6 +1699,7 @@ impl FunctionInfo {
         member.contract = self.callable.contract.clone();
         member.implicit_classifier_callable = self.implicit_classifier_callable;
         member.plugin_expression = self.callable.plugin_expression;
+        member.source_member = self.source_member;
         member
     }
 }
@@ -1784,6 +1824,9 @@ pub enum PropKind {
 /// accessor [`LibraryCallable`]s.
 #[derive(Clone, Debug)]
 pub struct PropertyInfo {
+    /// Declared Kotlin property name. Lookup spelling may be an import alias and accessor names are
+    /// physical call targets, so neither can recover this identity after selection.
+    pub name: String,
     pub kind: PropKind,
     /// The extension/member receiver type; `None` for a top-level property.
     pub receiver: Option<Ty>,
@@ -2265,6 +2308,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         let mut getter = LibraryCallable::library(owner, name, Vec::new(), ty, ty, "");
         getter.compiler_intrinsic = Some(intrinsic);
         let property = PropertyInfo {
+            name: name.to_string(),
             kind: PropKind::Member,
             receiver: Some(Ty::obj_name(owner)),
             formals: Vec::new(),
@@ -2386,6 +2430,7 @@ impl EmptySymbolSource {
         getter.compiler_intrinsic = Some(CompilerIntrinsic::CharCode);
         Callables::Properties(PropertySet {
             overloads: vec![PropertyInfo {
+                name: name.to_string(),
                 kind: PropKind::Extension,
                 receiver: Some(Ty::Char),
                 formals: Vec::new(),
@@ -2482,6 +2527,7 @@ impl EmptySymbolSource {
         getter.compiler_intrinsic = Some(CompilerIntrinsic::CoroutineSuspended);
         Callables::Properties(PropertySet {
             overloads: vec![PropertyInfo {
+                name: name.to_string(),
                 kind: PropKind::TopLevel,
                 receiver: None,
                 formals: Vec::new(),

@@ -74,7 +74,7 @@ fn serializer_object_emits_wellformed_bytecode() {
     host.run(&mut ir, &ctx);
 
     let facade = file_class_name("Foo", files[0].package.as_deref());
-    let classes = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None);
+    let classes = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None, &syms);
     let Some(classes) = classes else {
         panic!("EMIT GAP: emit_all returned None for the serializer object (gap #7 — emitter does not yet support this construct)");
     };

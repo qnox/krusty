@@ -15,7 +15,8 @@ use crate::jvm::names::{
     type_descriptor,
 };
 use crate::kt_string::{KtString, KtStringBuf};
-use crate::types::{stored_value_ty, Ty, TypeName, Visibility};
+use crate::symbol_source::{CompositeSource, SymbolSource};
+use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance, Visibility};
 
 struct InlineStaticTarget<'a> {
     owner: &'a str,
@@ -49,6 +50,7 @@ pub struct EmitRun {
     /// from an unsupported lowering). The emitter never panics: it sets this and the file is dropped —
     /// a compiler must never crash on its own IR.
     emit_bail: std::cell::Cell<bool>,
+    emit_error: std::cell::RefCell<Option<String>>,
     /// Lambda impl `FunId`s that got a REAL `invokedynamic` this pass. A lambda spliced by the inliner
     /// (a `require { … }` message, an inlined `flatMap { … }` body) never emits one, so its standalone
     /// `$lambda$N` method is dead — dropped on the re-emit (kotlinc emits neither it nor its facade).
@@ -66,6 +68,20 @@ impl EmitRun {
     fn set_inline_bail(&self, reason: &'static str) {
         *self.inline_bail.borrow_mut() = Some(reason.to_string());
     }
+
+    /// The malformed-IR / missing-emission-context reason recorded this run, if any.
+    pub fn emit_error(&self) -> Option<String> {
+        self.emit_error.borrow().clone()
+    }
+
+    fn set_emit_error(&self, reason: String) {
+        crate::trace_compiler!("splice", "JVM emit error: {reason}");
+        self.emit_bail.set(true);
+        let mut current = self.emit_error.borrow_mut();
+        if current.is_none() {
+            *current = Some(reason);
+        }
+    }
 }
 
 /// The emit environment threaded (by `&`) through the whole emit callgraph in place of the bare
@@ -76,6 +92,10 @@ pub struct EmitEnv<'a> {
     bodies: &'a dyn MethodBodies,
     run: &'a EmitRun,
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
+    /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
+    /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
+    /// use-site wildcards is owned entirely by this emitter.
+    signature_symbols: &'a dyn SymbolSource,
 }
 
 /// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
@@ -501,6 +521,9 @@ fn build_class_metadata(
         .iter()
         .copied()
         .filter(|&fid| {
+            if ir.lambda_own_params_from.contains_key(&fid) {
+                return false;
+            }
             let n = &ir.functions[fid as usize].name;
             !accessor_names.contains(n)
                 && !data_method_names.contains(n)
@@ -634,85 +657,103 @@ fn build_class_metadata(
     }
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let const_fields = init_body_constant_fields(ir, c);
+    // Metadata describes Kotlin PROPERTY declarations, never physical fields. Synthetic storage such
+    // as `x$delegate`, `this$0`, and interface-delegation fields has no source declaration and must not
+    // leak into the metadata name/type namespace. A property's optional backing field supplies only
+    // its JVM realization (descriptor, constant, and accessor descriptor).
     let mut props: Vec<PropMeta> = c
-        .fields
+        .properties
         .iter()
-        .enumerate()
-        .map(|(i, f)| {
-            let visibility = property_visibility(ir, &c.fq_name(), &f.name);
-            // The value-class pass erases the backing FIELD to the underlying carrier and stamps the
-            // accessor's mangled JVM spelling on the property DECLARATION, which keeps the Kotlin type.
-            // So the record's Kotlin half comes from the declaration (`k: K`) and its JVM half from the
-            // field + stamp (`getK-XLNMDGE()Ljava/lang/String;`) — the same two facts accessor emission
-            // consumes, which is what keeps the described accessor one the class file defines. The
-            // erased field descriptor is recorded explicitly: a reader cannot derive
-            // `Ljava/lang/String;` from `K`.
-            let declaration = c.properties.iter().find(|p| p.name == f.name);
-            let stamped = declaration
-                .is_some_and(|p| p.getter_jvm_name.is_some() || p.setter_jvm_name.is_some());
-            let (getter, setter) = accessor_jvm_names(c, &f.name);
-            let declared_ty = match declaration {
-                Some(p) if stamped => p.ty,
-                _ => f.ty,
-            };
+        .map(|property| {
+            let visibility = property_visibility(ir, &c.fq_name(), &property.name);
+            let backing = property
+                .backing_field
+                .and_then(|index| c.fields.get(index as usize).map(|field| (index, field)));
+            let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
+            let getter = property
+                .getter
+                .and_then(|fid| ir.functions.get(fid as usize))
+                .map(|function| {
+                    (
+                        function.name.clone(),
+                        method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
+                    )
+                })
+                .or_else(|| {
+                    c.methods
+                        .iter()
+                        .map(|fid| &ir.functions[*fid as usize])
+                        .find(|function| function.name == default_getter)
+                        .map(|function| {
+                            (
+                                function.name.clone(),
+                                method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
+                            )
+                        })
+                })
+                .or_else(|| {
+                    backing.and_then(|(_, field)| {
+                        (!visibility.is_private())
+                            .then(|| (default_getter, format!("(){}", desc(field.ty))))
+                    })
+                });
+            let setter = property
+                .setter
+                .and_then(|fid| ir.functions.get(fid as usize))
+                .map(|function| {
+                    (
+                        function.name.clone(),
+                        method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
+                    )
+                })
+                .or_else(|| {
+                    c.methods
+                        .iter()
+                        .map(|fid| &ir.functions[*fid as usize])
+                        .find(|function| function.name == default_setter)
+                        .map(|function| {
+                            (
+                                function.name.clone(),
+                                method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
+                            )
+                        })
+                })
+                .or_else(|| {
+                    backing.and_then(|(_, field)| {
+                        (!visibility.is_private() && property.is_var)
+                            .then(|| (default_setter, format!("({})V", desc(field.ty))))
+                    })
+                });
             PropMeta {
-                name: f.name.clone(),
-                ty: declared_ty,
-                is_var: !f.is_final(),
+                name: property.name.clone(),
+                ty: property.ty,
+                is_var: property.is_var,
                 visibility,
-                has_constant: f.is_final()
-                    && i >= c.ctor_param_count as usize
-                    && const_fields.contains(&(i as u32)),
-                is_const: false,
-                is_abstract: c.is_interface,
-                has_backing_field: !c.is_interface,
-                tparam: ir.field_signatures(&c.fq_name()).and_then(|fs| {
-                    fs.iter()
-                        .find(|(fname, _)| fname == &f.name)
-                        .and_then(|(_, tp)| c.type_params.iter().position(|t| t == tp))
-                        .map(|i| i as u32)
+                has_constant: backing.is_some_and(|(index, field)| {
+                    field.is_final() && index >= c.ctor_param_count && const_fields.contains(&index)
                 }),
-                getter: (!visibility.is_private()).then(|| (getter, format!("(){}", desc(f.ty)))),
-                setter: (!visibility.is_private() && !f.is_final())
-                    .then(|| (setter, format!("({})V", desc(f.ty)))),
-                field_desc: (declared_ty != f.ty).then(|| desc(f.ty)),
+                is_const: false,
+                is_abstract: c.is_interface && property.getter.is_none(),
+                has_backing_field: backing.is_some() && !c.is_interface,
+                tparam: ir.field_signatures(&c.fq_name()).and_then(|signatures| {
+                    signatures
+                        .iter()
+                        .find(|(field, _)| field == &property.name)
+                        .and_then(|(_, parameter)| {
+                            c.type_params
+                                .iter()
+                                .position(|candidate| candidate == parameter)
+                        })
+                        .map(|index| index as u32)
+                }),
+                getter,
+                setter,
+                field_desc: backing
+                    .filter(|(_, field)| property.ty != field.ty)
+                    .map(|(_, field)| desc(field.ty)),
             }
         })
         .collect();
-    props.extend(c.properties.iter().filter_map(|property| {
-        if c.fields.iter().any(|field| field.name == property.name) {
-            return None;
-        }
-        let visibility = property_visibility(ir, &c.fq_name(), &property.name);
-        let getter = property.getter.and_then(|fid| {
-            let function = ir.functions.get(fid as usize)?;
-            Some((
-                function.name.clone(),
-                method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
-            ))
-        });
-        let setter = property.setter.and_then(|fid| {
-            let function = ir.functions.get(fid as usize)?;
-            Some((
-                function.name.clone(),
-                method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
-            ))
-        });
-        Some(PropMeta {
-            name: property.name.clone(),
-            ty: property.ty,
-            is_var: property.is_var,
-            visibility,
-            has_constant: false,
-            is_const: false,
-            is_abstract: c.is_interface,
-            has_backing_field: false,
-            tparam: None,
-            getter,
-            setter,
-            field_desc: None,
-        })
-    }));
     for &static_id in ir
         .declared_class_statics
         .get(&c.fq_name_id())
@@ -1268,6 +1309,7 @@ fn instance_field_jvm_name(
 }
 
 fn seed_plain_class_pool(
+    formatter: &JvmSignatureFormatter<'_>,
     ir: &IrFile,
     c: &crate::ir::IrClass,
     fq_name: &str,
@@ -1337,7 +1379,7 @@ fn seed_plain_class_pool(
                     .find(|(name, _)| name == &f.name)
                     .map(|(_, tp)| format!("T{tp};"))
             })
-            .or_else(|| parameterized_sig(&f.ty))
+            .or_else(|| parameterized_sig(formatter, &f.ty))
     };
     let ctor_sig = ctor_signature;
     let field_sigs: Vec<Option<String>> = c.fields.iter().map(field_sig_of).collect();
@@ -2229,6 +2271,7 @@ pub fn emit_all(
     facade: &str,
     bodies: &dyn MethodBodies,
     metadata: Option<&KotlinMetadata>,
+    symbols: &crate::frontend::FrontendSymbols,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     // [`EmitOptions::default`]: per-class `@Metadata` ON, as on the shipping path — what this default
     // lacks is the `SourceFile`, the inner-class resolver and any `-jvm-target` class version, so it is
@@ -2241,10 +2284,13 @@ pub fn emit_all(
     // `emit_all_with_opts` with their own `EmitRun`).
     let run = EmitRun::default();
     let empty_continuation_metadata = crate::jvm::suspend::ContinuationMetadataMap::default();
+    let module = crate::module_symbols::ModuleSymbols::new(symbols);
+    let signature_symbols = CompositeSource::new(vec![&module, &*symbols.libraries]);
     let env = EmitEnv {
         bodies,
         run: &run,
         continuation_metadata: &empty_continuation_metadata,
+        signature_symbols: &signature_symbols,
     };
     emit_all_with_class_meta(ir, facade, &env, metadata, &EmitOptions::default(), &|_| {
         None
@@ -2263,8 +2309,27 @@ pub fn emit_all_with_opts(
     metadata: Option<&KotlinMetadata>,
     opts: &EmitOptions,
     run: &EmitRun,
+    symbols: &crate::frontend::FrontendSymbols,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    emit_all_with_opts_and_metadata(ir, facade, bodies, metadata, opts, run, &Default::default())
+    let continuation_metadata = Default::default();
+    emit_all_with_opts_and_metadata(
+        ir,
+        facade,
+        bodies,
+        EmitMetadata {
+            facade: metadata,
+            continuations: &continuation_metadata,
+        },
+        opts,
+        run,
+        symbols,
+    )
+}
+
+/// Semantic metadata emitted beside one file's JVM classes.
+pub struct EmitMetadata<'a> {
+    pub facade: Option<&'a KotlinMetadata>,
+    pub continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
 }
 
 /// Emit classes with continuation metadata produced by the JVM suspend pass.
@@ -2272,17 +2337,20 @@ pub fn emit_all_with_opts_and_metadata(
     ir: &IrFile,
     facade: &str,
     bodies: &dyn MethodBodies,
-    metadata: Option<&KotlinMetadata>,
+    metadata: EmitMetadata<'_>,
     opts: &EmitOptions,
     run: &EmitRun,
-    continuation_metadata: &crate::jvm::suspend::ContinuationMetadataMap,
+    symbols: &crate::frontend::FrontendSymbols,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    let module = crate::module_symbols::ModuleSymbols::new(symbols);
+    let signature_symbols = CompositeSource::new(vec![&module, &*symbols.libraries]);
     let env = EmitEnv {
         bodies,
         run,
-        continuation_metadata,
+        continuation_metadata: metadata.continuations,
+        signature_symbols: &signature_symbols,
     };
-    emit_all_with_class_meta(ir, facade, &env, metadata, opts, &|_| None)
+    emit_all_with_class_meta(ir, facade, &env, metadata.facade, opts, &|_| None)
 }
 
 /// Like [`emit_all`], but `class_meta` may supply a per-class `@kotlin.Metadata` (keyed by the class's
@@ -3004,7 +3072,9 @@ fn emit_backing_field_read_adaptation(
     if field_jvm == accessor_jvm {
         return;
     }
-    if accessor_jvm.is_reference() {
+    if field_jvm.is_reference() && accessor_jvm.is_jvm_scalar() {
+        unbox_prim(cw, code, accessor_jvm);
+    } else if accessor_jvm.is_reference() {
         if let Some(storage) = property
             .storage_ty
             .and_then(|ty| ty.non_null().obj_internal())
@@ -3016,6 +3086,12 @@ fn emit_backing_field_read_adaptation(
         }
         if field_jvm.is_jvm_scalar() {
             box_prim_free(cw, code, field_jvm);
+        } else {
+            let internal = ref_internal(accessor_jvm);
+            if internal != "java/lang/Object" {
+                let class = cw.class_ref(&internal);
+                code.checkcast(class);
+            }
         }
     }
 }
@@ -3045,6 +3121,8 @@ fn emit_backing_field_write_adaptation(
             }
         }
         unbox_prim(cw, code, field_jvm);
+    } else if accessor_jvm.is_jvm_scalar() && field_jvm.is_reference() {
+        box_prim_free(cw, code, accessor_jvm);
     } else if accessor_jvm.is_reference() && field_jvm.is_reference() {
         let internal = ref_internal(field_jvm);
         if internal != "java/lang/Object" {
@@ -3065,6 +3143,7 @@ fn emit_declared_property_accessors(
     c: &crate::ir::IrClass,
     fq_name: &str,
     cw: &mut ClassWriter,
+    formatter: &JvmSignatureFormatter<'_>,
 ) {
     for property in &c.properties {
         // A private property reached from outside (an `inline` body spliced into its caller) needs the
@@ -3226,7 +3305,7 @@ fn emit_declared_property_accessors(
                 .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
                 .map(|(_, tp)| format!("()T{tp};"))
                 .or_else(|| field.type_param.as_ref().map(|tp| format!("()T{tp};")))
-                .or_else(|| method_parameterized_sig(&[], &field.ty));
+                .or_else(|| method_parameterized_sig(formatter, &[], &field.ty));
             cw.add_method_sig(
                 access,
                 &getter,
@@ -3289,7 +3368,11 @@ fn emit_declared_property_accessors(
                     .map(|(_, tp)| format!("(T{tp};)V"))
                     .or_else(|| field.type_param.as_ref().map(|tp| format!("(T{tp};)V")))
                     .or_else(|| {
-                        method_parameterized_sig(std::slice::from_ref(&field.ty), &Ty::Unit)
+                        method_parameterized_sig(
+                            formatter,
+                            std::slice::from_ref(&field.ty),
+                            &Ty::Unit,
+                        )
                     });
                 cw.add_method_sig(
                     access,
@@ -3335,10 +3418,12 @@ fn emit_class(
     }
     let fq_name = c.fq_name();
     let superclass = c.superclass();
+    let signature_formatter = JvmSignatureFormatter::new(env);
     // kotlinc (ASM) visits `(name, signature, superName)`, so a generic class's `Signature` VALUE
     // interns between the two class names — compute it before the writer exists.
     let raw_class_sig = ir.class_signature(&fq_name);
-    let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
+    let jvm_sig =
+        raw_class_sig.and_then(|signature| jvm_class_signature(&signature_formatter, signature));
     let mut cw = new_writer_generic(&fq_name, jvm_sig.as_deref(), &superclass, opts);
     // A LOCAL class needs an `EnclosingMethod` attribute: without it reflection reads the class as
     // top-level and `simpleName` reports the whole `owner$Local` name instead of `Local`. The
@@ -3404,12 +3489,13 @@ fn emit_class(
                 format!("(Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
             }
         })
-        .or_else(|| class_ctor_generic_sig(ir, c, &fq_name));
+        .or_else(|| class_ctor_generic_sig(&signature_formatter, ir, c, &fq_name));
     if !is_coroutine_state_machine(c)
         && opts.emit_class_metadata
         && build_class_metadata(ir, c, opts).is_some()
     {
         seed_plain_class_pool(
+            &signature_formatter,
             ir,
             c,
             &fq_name,
@@ -3499,7 +3585,7 @@ fn emit_class(
             .field_signatures(&fq_name)
             .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
             .map(|(_, tp)| format!("T{tp};"))
-            .or_else(|| parameterized_sig(ty));
+            .or_else(|| parameterized_sig(&signature_formatter, ty));
         let physical_name = instance_field_jvm_name(ir, c, field);
         cw.add_field_sig(acc, &physical_name, &ir_type_desc(ty), field_sig.as_deref());
     }
@@ -4024,7 +4110,7 @@ fn emit_class(
             .filter(|&fid| !accessor_order.contains(&ir.functions[fid as usize].name)),
     );
     // Accessors the IR does not carry — a plain property's are pure realization, synthesized here.
-    emit_declared_property_accessors(ir, c, &fq_name, &mut cw);
+    emit_declared_property_accessors(ir, c, &fq_name, &mut cw, &signature_formatter);
     for &fid in &ordered {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
@@ -4036,7 +4122,7 @@ fn emit_class(
                 0x0001 | 0x0400,
                 &f.name,
                 &ir_method_desc(&f.params, &f.ret),
-                method_signature(ir, fid, f).as_deref(),
+                method_signature(&signature_formatter, ir, fid, f).as_deref(),
             );
         }
         // A method with default-valued parameters gets a `<name>$default(…, mask, marker)` synthetic stub
@@ -4140,6 +4226,7 @@ fn emit_enum_entry_subclass(
 ) -> Vec<u8> {
     let superclass = c.superclass();
     let fq_name = c.fq_name();
+    let signature_formatter = JvmSignatureFormatter::new(env);
     let mut cw = new_writer(&fq_name, &superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
 
@@ -4190,7 +4277,7 @@ fn emit_enum_entry_subclass(
     );
 
     // The overriding methods + synthesized property getters.
-    emit_declared_property_accessors(ir, c, &fq_name, &mut cw);
+    emit_declared_property_accessors(ir, c, &fq_name, &mut cw, &signature_formatter);
     for &fid in &c.methods {
         emit_method(ir, fid, &fq_name, facade, &mut cw, true, env);
     }
@@ -5797,6 +5884,7 @@ fn emit_interface_class(
     extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
     let fq_name = c.fq_name();
+    let signature_formatter = JvmSignatureFormatter::new(env);
     let mut cw = new_writer(&fq_name, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
     for itf in c.interfaces.iter_rendered() {
@@ -5821,7 +5909,7 @@ fn emit_interface_class(
                 0x0001 | 0x0400,
                 &f.name,
                 &desc,
-                method_signature(ir, fid, f).as_deref(),
+                method_signature(&signature_formatter, ir, fid, f).as_deref(),
             );
             // An abstract method still carries kotlinc's nullability annotations: `@NotNull` /
             // `@Nullable` on each reference parameter and on a reference return. Having no body is
@@ -5950,6 +6038,7 @@ fn emit_enum_class(
     const ACC_ENUM: u16 = 0x4000;
     const ACC_SYNTHETIC: u16 = 0x1000;
     let fq = c.fq_name();
+    let signature_formatter = JvmSignatureFormatter::new(env);
     let self_desc = format!("L{fq};");
     let arr_desc = format!("[{self_desc}");
     // An enum extends the PARAMETERIZED `java.lang.Enum<E>`, so it carries a class `Signature` —
@@ -6303,7 +6392,7 @@ fn emit_enum_class(
         Some(&format!("()Lkotlin/enums/EnumEntries<L{fq};>;")),
     );
 
-    emit_declared_property_accessors(ir, c, &fq, &mut cw);
+    emit_declared_property_accessors(ir, c, &fq, &mut cw, &signature_formatter);
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
@@ -6318,7 +6407,7 @@ fn emit_enum_class(
                 0x0001 | 0x0400,
                 &f.name,
                 &ir_method_desc(&f.params, &f.ret),
-                method_signature(ir, fid, f).as_deref(),
+                method_signature(&signature_formatter, ir, fid, f).as_deref(),
             );
         }
     }
@@ -6455,7 +6544,8 @@ fn emit_method_inner(
     // `Signature` and annotation types precede every constant the body introduces. krusty builds the
     // body first, so reserve those entries here to land them in the same order.
     let reserved_desc = method_descriptor(&param_tys, ret);
-    let reserved_sig = method_signature(ir, fid, f);
+    let signature_formatter = JvmSignatureFormatter::new(env);
+    let reserved_sig = method_signature(&signature_formatter, ir, fid, f);
     let ann_of = |t: Ty| -> Option<&'static str> {
         let d = crate::jvm::names::type_descriptor(t);
         if !(d.starts_with('L') || d.starts_with('[')) {
@@ -6631,24 +6721,243 @@ fn emit_method_inner(
     }
 }
 
-/// Format a function's backend-agnostic [`crate::ir::IrGenericSig`] into a JVM generic `Signature`
-/// (`<T:Ljava/lang/Object;>(TT;)TT;`). `None` if a bound can't be represented yet. Concrete parameter/
-/// return descriptors come from the (erased) `IrFunction`; bare type-parameter positions are `T<name>;`.
-fn jvm_method_signature(g: &crate::ir::IrGenericSig, f: &crate::ir::IrFunction) -> Option<String> {
-    let mut s = jvm_type_params(g)?;
+/// Format backend-agnostic semantic types into JVM generic-signature elements. The ordinary JVM
+/// descriptor and the optional generic `Signature` attribute are separate classfile declarations: the
+/// former supplies runtime calling types, while this formatter preserves type parameters, type
+/// arguments, and declaration-site variance for classpath readers.
+struct JvmSignatureFormatter<'a> {
+    symbols: &'a dyn SymbolSource,
+    run: &'a EmitRun,
+}
+
+impl<'a> JvmSignatureFormatter<'a> {
+    fn new(env: &'a EmitEnv<'_>) -> Self {
+        Self {
+            symbols: env.signature_symbols,
+            run: env.run,
+        }
+    }
+
+    fn declaration_variance(&self, owner: TypeName, index: usize) -> Option<TypeVariance> {
+        let Some(classifier) = self.symbols.classifier(owner) else {
+            self.run.set_emit_error(format!(
+                "internal: JVM signature references classifier '{}' absent from checked symbols",
+                owner.render()
+            ));
+            return None;
+        };
+        let Some(variance) = classifier.type_param_variances.get(index).copied() else {
+            self.run.set_emit_error(format!(
+                "internal: JVM signature supplies type argument {} to classifier '{}' with {} type parameters",
+                index + 1,
+                owner.render(),
+                classifier.type_param_variances.len()
+            ));
+            return None;
+        };
+        Some(variance)
+    }
+
+    fn can_have_subtypes_ignoring_nullability(&self, ty: Ty) -> Option<bool> {
+        let ty = match ty {
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => *inner,
+            ty => ty,
+        };
+        if ty == Ty::Nothing {
+            return Some(false);
+        }
+        if matches!(ty, Ty::TyParam(..)) {
+            return Some(true);
+        }
+        // Core has compact variants for common Kotlin classifiers, but that storage choice does not
+        // change the JVM wildcard rule. Ask for their semantic classifier identity exactly as for an
+        // `Obj`; otherwise final `String`/numeric arguments would incorrectly gain `? extends`.
+        let Some(owner) = ty.kotlin_class_internal() else {
+            return Some(true);
+        };
+        let arguments = ty.type_args();
+        let Some(classifier) = self.symbols.classifier(owner) else {
+            self.run.set_emit_error(format!(
+                "internal: JVM wildcard optimization references classifier '{}' absent from checked symbols",
+                owner.render()
+            ));
+            return None;
+        };
+        let is_closed = match classifier.kind {
+            crate::libraries::TypeKind::Object | crate::libraries::TypeKind::Annotation => true,
+            crate::libraries::TypeKind::Class => {
+                !classifier.inheritance.is_abstract && !classifier.inheritance.is_extensible
+            }
+            crate::libraries::TypeKind::Enum => !classifier.inheritance.is_extensible,
+            crate::libraries::TypeKind::Interface => false,
+        };
+        if !is_closed {
+            return Some(true);
+        }
+        for (index, argument) in arguments.iter().copied().enumerate() {
+            let declaration = self.declaration_variance(owner, index)?;
+            let (use_site, argument) = match argument {
+                Ty::InProjection(inner) => (TypeVariance::In, *inner),
+                Ty::OutProjection(inner) => (TypeVariance::Out, *inner),
+                argument => (TypeVariance::Invariant, argument),
+            };
+            let effective = if use_site == TypeVariance::Invariant {
+                declaration
+            } else {
+                use_site
+            };
+            if effective == TypeVariance::Out
+                && self.can_have_subtypes_ignoring_nullability(argument)?
+            {
+                return Some(true);
+            }
+            if effective == TypeVariance::In && argument.non_null() != Ty::obj("kotlin/Any") {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
+
+    fn wildcard_is_redundant(&self, variance: TypeVariance, argument: Ty) -> Option<bool> {
+        match variance {
+            TypeVariance::Invariant => Some(true),
+            TypeVariance::Out => self
+                .can_have_subtypes_ignoring_nullability(argument)
+                .map(|can_have_subtypes| !can_have_subtypes),
+            TypeVariance::In => Some(argument.non_null() == Ty::obj("kotlin/Any")),
+        }
+    }
+
+    fn type_argument(&self, declaration: TypeVariance, argument: Ty) -> Option<String> {
+        match argument {
+            Ty::InProjection(inner) => Some(format!("-{}", self.ty(inner)?)),
+            Ty::OutProjection(inner) => Some(format!("+{}", self.ty(inner)?)),
+            argument => {
+                let mut signature = String::new();
+                if !self.wildcard_is_redundant(declaration, argument)? {
+                    match declaration {
+                        TypeVariance::In => signature.push('-'),
+                        TypeVariance::Out => signature.push('+'),
+                        TypeVariance::Invariant => {}
+                    }
+                }
+                signature.push_str(&self.ty(&argument)?);
+                Some(signature)
+            }
+        }
+    }
+
+    fn function_ty(&self, signature: &crate::types::FnSig) -> Option<String> {
+        let arity = signature.params.len() + usize::from(signature.suspend);
+        if arity > 22 {
+            self.run.set_emit_error(format!(
+                "internal: JVM generic signature cannot represent function arity {arity}"
+            ));
+            return None;
+        }
+        let mut rendered = format!("Lkotlin/jvm/functions/Function{arity}<");
+        for parameter in &signature.params {
+            rendered.push_str(&self.type_argument(TypeVariance::In, *parameter)?);
+        }
+        if signature.suspend {
+            rendered.push_str("-Lkotlin/coroutines/Continuation<-");
+            rendered.push_str(&self.ty(&signature.ret)?);
+            rendered.push_str(">;");
+            rendered.push_str("+Ljava/lang/Object;");
+        } else {
+            rendered.push_str(&self.type_argument(TypeVariance::Out, signature.ret)?);
+        }
+        rendered.push_str(">;");
+        Some(rendered)
+    }
+
+    /// One parameter or return position in a method `Signature`. Positions without generic structure
+    /// use their exact JVM descriptor spelling; structured positions are rendered from the semantic
+    /// type. This is a structural choice, not a recovery path after semantic formatting failed.
+    fn method_ty(&self, ty: &Ty) -> Option<String> {
+        let semantic = match ty {
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner,
+            ty => ty,
+        };
+        match semantic {
+            Ty::TyParam(..) | Ty::Fun(_) => self.ty(ty),
+            Ty::Obj(_, arguments) if !arguments.is_empty() => self.ty(ty),
+            Ty::InProjection(_) | Ty::OutProjection(_) | Ty::Null | Ty::Error => {
+                self.run.set_emit_error(format!(
+                    "internal: invalid semantic method-signature type {ty:?}"
+                ));
+                None
+            }
+            _ => Some(ir_type_desc(ty)),
+        }
+    }
+
+    /// Translate one semantic Kotlin type into a JVM generic-signature element. Kotlin declaration-
+    /// site variance has no classfile equivalent, so the JVM backend realizes it as a wildcard on
+    /// each otherwise-unprojected use-site argument. Explicit Kotlin `in`/`out` projections already
+    /// carry their own direction and take precedence.
+    fn ty(&self, ty: &Ty) -> Option<String> {
+        if let Ty::Nullable(inner) | Ty::PlatformNullable(inner) = ty {
+            return self.ty(inner);
+        }
+        if let Ty::TyParam(name, _) = ty {
+            return Some(format!(
+                "T{};",
+                crate::types::type_parameter_source_name(name)
+            ));
+        }
+        if ty.non_null().is_jvm_scalar() {
+            return Some(boxed_descriptor(ty.non_null()));
+        }
+        match *ty {
+            Ty::String => Some("Ljava/lang/String;".to_string()),
+            Ty::Unit => Some("Lkotlin/Unit;".to_string()),
+            Ty::Nothing => Some("Lkotlin/Nothing;".to_string()),
+            Ty::InProjection(inner) => Some(format!("-{}", self.ty(inner)?)),
+            Ty::OutProjection(inner) => Some(format!("+{}", self.ty(inner)?)),
+            Ty::Fun(signature) => self.function_ty(signature),
+            Ty::Obj(owner, arguments) => {
+                let internal = owner.render();
+                let jvm = crate::jvm::names::classfile_internal_name(&internal);
+                let mut signature = format!("L{jvm}");
+                if !arguments.is_empty() {
+                    signature.push('<');
+                    for (index, argument) in arguments.iter().enumerate() {
+                        let variance = self.declaration_variance(owner, index)?;
+                        signature.push_str(&self.type_argument(variance, *argument)?);
+                    }
+                    signature.push('>');
+                }
+                signature.push(';');
+                Some(signature)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn jvm_method_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    g: &crate::ir::IrGenericSig,
+    f: &crate::ir::IrFunction,
+) -> Option<String> {
+    let mut s = jvm_type_params(formatter, g)?;
     s.push('(');
     for parameter in &g.params {
-        s.push_str(&ty_generic_sig(parameter).unwrap_or_else(|| ir_type_desc(parameter)));
+        s.push_str(&formatter.method_ty(parameter)?);
     }
     s.push(')');
     let ret = g.ret.as_ref().unwrap_or(&f.ret);
-    s.push_str(&ty_generic_sig(ret).unwrap_or_else(|| ir_type_desc(ret)));
+    s.push_str(&formatter.method_ty(ret)?);
     Some(s)
 }
 
 /// Format a class's generic shape into a JVM class `Signature` (`<T:Ljava/lang/Object;>Ljava/lang/Object;`).
-fn jvm_class_signature(g: &crate::ir::IrGenericSig) -> Option<String> {
-    let mut s = jvm_type_params(g)?;
+fn jvm_class_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    g: &crate::ir::IrGenericSig,
+) -> Option<String> {
+    let mut s = jvm_type_params(formatter, g)?;
     if g.supers.is_empty() {
         // A plain generic class with no (parameterized) supertypes: just extends `Object`.
         s.push_str("Ljava/lang/Object;");
@@ -6656,7 +6965,7 @@ fn jvm_class_signature(g: &crate::ir::IrGenericSig) -> Option<String> {
         // The parameterized superclass + interfaces (`Ljava/lang/Object;LOperation<Lkotlin/Result<..>;>;`),
         // formatted from the platform-agnostic `Ty`s so a reader recovers a member's concrete generic return.
         for sup in &g.supers {
-            s.push_str(&ty_generic_sig(sup)?);
+            s.push_str(&formatter.ty(sup)?);
         }
     }
     Some(s)
@@ -6665,57 +6974,20 @@ fn jvm_class_signature(g: &crate::ir::IrGenericSig) -> Option<String> {
 /// A `Ty` as a JVM generic-signature type element: a primitive in a generic position is its BOXED wrapper
 /// (`Int` → `Ljava/lang/Integer;`), a reference maps its internal (`kotlin/Any` → `java/lang/Object`) and
 /// carries its (recursively formatted) type arguments. `None` for a shape not representable here.
-fn ty_generic_sig(t: &Ty) -> Option<String> {
-    if let Ty::Nullable(inner) | Ty::PlatformNullable(inner) = t {
-        return ty_generic_sig(inner);
-    }
-    if let Ty::TyParam(name, _) = t {
-        return Some(format!(
-            "T{};",
-            crate::types::type_parameter_source_name(name)
-        ));
-    }
-    if t.non_null().is_jvm_scalar() {
-        // A scalar in a generic position is a reference. In particular, an unsigned classifier uses
-        // its own inline-class box (`UInt`), never its signed carrier (`Integer`) and never bare `I`.
-        return Some(boxed_descriptor(t.non_null()));
-    }
-    match *t {
-        Ty::String => Some("Ljava/lang/String;".to_string()),
-        Ty::Unit => Some("Lkotlin/Unit;".to_string()),
-        Ty::InProjection(inner) => Some(format!("-{}", ty_generic_sig(inner)?)),
-        Ty::OutProjection(inner) => Some(format!("+{}", ty_generic_sig(inner)?)),
-        Ty::Obj(internal, args) => {
-            let internal = internal.render();
-            let jvm = crate::jvm::names::classfile_internal_name(&internal);
-            let mut s = format!("L{jvm}");
-            if !args.is_empty() {
-                s.push('<');
-                for a in args.iter() {
-                    s.push_str(&ty_generic_sig(a)?);
-                }
-                s.push('>');
-            }
-            s.push(';');
-            Some(s)
-        }
-        _ => None,
-    }
-}
-
 /// The generic `Signature` element for a parameterized concrete type (`List<String>` →
 /// `Ljava/util/List<Ljava/lang/String;>;`); `None` when erasure loses nothing. `T?` unwraps (generics
 /// survive nullability). Bare type parameters are handled separately via `field_signatures`.
-fn parameterized_sig(ty: &Ty) -> Option<String> {
+fn parameterized_sig(formatter: &JvmSignatureFormatter<'_>, ty: &Ty) -> Option<String> {
     let inner = match ty {
-        Ty::Nullable(t) => t,
+        Ty::Nullable(t) | Ty::PlatformNullable(t) => t,
         t => t,
     };
     match inner {
         Ty::Obj(_, args) if !args.is_empty() => {
-            let sig = ty_generic_sig(inner)?;
+            let sig = formatter.ty(inner)?;
             (sig != ir_type_desc(inner)).then_some(sig)
         }
+        Ty::Fun(_) => formatter.ty(inner),
         _ => None,
     }
 }
@@ -6724,25 +6996,32 @@ fn parameterized_sig(ty: &Ty) -> Option<String> {
 /// `suspend` CPS shape, or a parameterized concrete parameter/return type. `None` when erasure loses
 /// nothing. Shared by concrete and abstract emission — an abstract method has no body, which is not a
 /// reason to drop its signature.
-fn method_signature(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> Option<String> {
-    ir.signatures
-        .get(&fid)
-        .and_then(|g| jvm_method_signature(g, f))
-        .or_else(|| {
-            ir.suspend_declared_sigs.get(&fid).and_then(|(p, r)| {
-                // A value-class RETURN survives in the continuation's type argument as the value class
-                // itself (`Continuation<? super OrganizationId>`), not its erasure. The VC pass ran
-                // before the suspend pass and already erased `r` to the underlying, so recover the
-                // declared return from `vc_declared_sigs` when this function had one.
-                let ret = ir
-                    .vc_declared_sigs
-                    .get(&fid)
-                    .map(|(_, _, vr)| vr)
-                    .unwrap_or(r);
-                suspend_method_sig(p, ret)
-            })
-        })
-        .or_else(|| method_parameterized_sig(&f.params, &f.ret))
+fn method_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    fid: u32,
+    f: &crate::ir::IrFunction,
+) -> Option<String> {
+    // Pick the semantic signature category first. Formatting returns `None` both when no optional
+    // Signature attribute is needed and when the selected shape is invalid, so chaining formatters
+    // with `or_else` would incorrectly treat an encoding error as permission to try a less complete
+    // shape. `JvmSignatureFormatter` records a precise emit error for the latter case.
+    if let Some(generic) = ir.signatures.get(&fid) {
+        return jvm_method_signature(formatter, generic, f);
+    }
+    if let Some((params, declared_ret)) = ir.suspend_declared_sigs.get(&fid) {
+        // A value-class RETURN survives in the continuation's type argument as the value class
+        // itself (`Continuation<? super OrganizationId>`), not its erasure. The VC pass ran
+        // before the suspend pass and already erased `declared_ret` to the underlying, so recover the
+        // declared return from `vc_declared_sigs` when this function had one.
+        let ret = ir
+            .vc_declared_sigs
+            .get(&fid)
+            .map(|(_, _, value_class_ret)| value_class_ret)
+            .unwrap_or(declared_ret);
+        return suspend_method_sig(formatter, params, ret);
+    }
+    method_parameterized_sig(formatter, &f.params, &f.ret)
 }
 
 /// The generic `Signature` of a `suspend fun`'s CPS method. The declared return type survives only in
@@ -6750,17 +7029,21 @@ fn method_signature(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> Option<
 /// `f(String, Continuation): Object` but signs as
 /// `(Ljava/lang/String;Lkotlin/coroutines/Continuation<-Lkotlin/Unit;>;)Ljava/lang/Object;`, the `-`
 /// being `? super`. Takes the DECLARED parameters and return, not the rewritten ones.
-fn suspend_method_sig(params: &[Ty], ret: &Ty) -> Option<String> {
+fn suspend_method_sig(
+    formatter: &JvmSignatureFormatter<'_>,
+    params: &[Ty],
+    ret: &Ty,
+) -> Option<String> {
     // A type argument drops nullability (`OrganizationId?` and `String?` both sign as the bare type),
     // so unwrap before formatting.
     let ret = match ret {
         Ty::Nullable(inner) => inner,
         t => t,
     };
-    let ret_arg = ty_generic_sig(ret)?;
+    let ret_arg = formatter.ty(ret)?;
     let mut s = String::from("(");
     for p in params {
-        s.push_str(&parameterized_sig(p).unwrap_or_else(|| ir_type_desc(p)));
+        s.push_str(&formatter.method_ty(p)?);
     }
     s.push_str("Lkotlin/coroutines/Continuation<-");
     s.push_str(&ret_arg);
@@ -6771,14 +7054,19 @@ fn suspend_method_sig(params: &[Ty], ret: &Ty) -> Option<String> {
 /// A method's generic `Signature` when a concrete param/return type is parameterized (`getXs()` →
 /// `()Ljava/util/List<Ljava/lang/String;>;`); non-generic positions keep their erased descriptor,
 /// `None` when none are parameterized.
-fn method_parameterized_sig(params: &[Ty], ret: &Ty) -> Option<String> {
+fn method_parameterized_sig(
+    formatter: &JvmSignatureFormatter<'_>,
+    params: &[Ty],
+    ret: &Ty,
+) -> Option<String> {
     // Runs for every emitted method — bail before building any string when no position can carry one.
     let is_parameterized = |t: &Ty| {
         let inner = match t {
-            Ty::Nullable(t) => t,
+            Ty::Nullable(t) | Ty::PlatformNullable(t) => t,
             t => t,
         };
-        matches!(inner, Ty::Obj(_, args) if !args.is_empty())
+        matches!(inner, Ty::Fun(_))
+            || matches!(inner, Ty::Obj(_, arguments) if !arguments.is_empty())
     };
     if !params
         .iter()
@@ -6787,32 +7075,24 @@ fn method_parameterized_sig(params: &[Ty], ret: &Ty) -> Option<String> {
     {
         return None;
     }
-    let mut any = false;
     let mut s = String::from("(");
     for p in params {
-        match parameterized_sig(p) {
-            Some(ps) => {
-                s.push_str(&ps);
-                any = true;
-            }
-            None => s.push_str(&ir_type_desc(p)),
-        }
+        s.push_str(&formatter.method_ty(p)?);
     }
     s.push(')');
-    match parameterized_sig(ret) {
-        Some(ps) => {
-            s.push_str(&ps);
-            any = true;
-        }
-        None => s.push_str(&ir_type_desc(ret)),
-    }
-    any.then_some(s)
+    s.push_str(&formatter.method_ty(ret)?);
+    Some(s)
 }
 
 /// The primary constructor's generic `Signature` — bare type-parameter params (`(TT;)V`) and
 /// parameterized concrete params (`(Ljava/util/List<Ljava/lang/String;>;)V`), others erased; `None` when
 /// none need generics. Shared by the pool seeder and the attribute emitter so both produce one string.
-fn class_ctor_generic_sig(ir: &IrFile, c: &crate::ir::IrClass, fq_name: &str) -> Option<String> {
+fn class_ctor_generic_sig(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    fq_name: &str,
+) -> Option<String> {
     let param_tys = class_ctor_jvm_tys(c);
     let ftp = ir.field_signatures(fq_name);
     let is_field: Vec<bool> = if c.ctor_args.is_empty() {
@@ -6830,7 +7110,7 @@ fn class_ctor_generic_sig(ir: &IrFile, c: &crate::ir::IrClass, fq_name: &str) ->
             if let Some((_, tp)) = ftp.and_then(|ftp| ftp.iter().find(|(fp, _)| fp == fname)) {
                 sig.push_str(&format!("T{tp};"));
                 any = true;
-            } else if let Some(ps) = f.and_then(|f| parameterized_sig(&f.ty)) {
+            } else if let Some(ps) = f.and_then(|f| parameterized_sig(formatter, &f.ty)) {
                 sig.push_str(&ps);
                 any = true;
             } else {
@@ -6848,7 +7128,10 @@ fn class_ctor_generic_sig(ir: &IrFile, c: &crate::ir::IrClass, fq_name: &str) ->
 /// The shared `<T:bound…>` type-parameter DECLARATION section, or `""` when there are no own type
 /// parameters (e.g. a generic class's getter `getA()` → `()TA;` USES the class's `A` but declares none).
 /// `None` if any bound can't be represented.
-fn jvm_type_params(g: &crate::ir::IrGenericSig) -> Option<String> {
+fn jvm_type_params(
+    formatter: &JvmSignatureFormatter<'_>,
+    g: &crate::ir::IrGenericSig,
+) -> Option<String> {
     if g.type_params.is_empty() {
         return Some(String::new());
     }
@@ -6865,7 +7148,7 @@ fn jvm_type_params(g: &crate::ir::IrGenericSig) -> Option<String> {
         }
         for (bound, _) in bounds {
             s.push(':');
-            s.push_str(&jvm_bound_descriptor(bound)?);
+            s.push_str(&jvm_bound_descriptor(formatter, bound)?);
         }
     }
     s.push('>');
@@ -6874,14 +7157,14 @@ fn jvm_type_params(g: &crate::ir::IrGenericSig) -> Option<String> {
 
 /// A type-parameter upper bound as a JVM signature element: `kotlin/Any` → `Ljava/lang/Object;`, a
 /// primitive → its boxed wrapper (`kotlin/Int` → `Ljava/lang/Integer;`). `None` for anything else.
-fn jvm_bound_descriptor(bound: &Ty) -> Option<String> {
+fn jvm_bound_descriptor(formatter: &JvmSignatureFormatter<'_>, bound: &Ty) -> Option<String> {
     if *bound == Ty::obj("kotlin/Any") {
         return Some("Ljava/lang/Object;".to_string());
     }
     if bound.is_jvm_scalar() {
         return bound.nullable_boxed().map(type_descriptor);
     }
-    ty_generic_sig(bound)
+    formatter.ty(bound)
 }
 
 /// Emit the JVM `<name>$default(self, params…, mask: int, marker: Object)` synthetic stub for an
@@ -8162,7 +8445,9 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
-                    self.run.emit_bail.set(true);
+                    self.run.set_emit_error(
+                        "assignment references a value slot that was never declared".to_string(),
+                    );
                     return;
                 };
                 // `i = i + k` / `i = k + i` / `i = i - k` on an `Int` local with a small constant `k`
@@ -9233,7 +9518,9 @@ impl<'a> Emitter<'a> {
                         self.owner,
                         self.slots.keys().collect::<Vec<_>>()
                     );
-                    self.run.emit_bail.set(true);
+                    self.run.set_emit_error(
+                        "value read references a slot that was never declared".to_string(),
+                    );
                     return;
                 };
                 load(jt, slot, code);
@@ -9949,20 +10236,6 @@ impl<'a> Emitter<'a> {
                         self.emit_string_plus(recv, args[0], code);
                         return;
                     }
-                    if let Some((range_internal, ctor_desc, aw, elem)) =
-                        range_to_virtual_ctor(&owner, &name, &descriptor)
-                            .filter(|_| args.len() == 1)
-                    {
-                        self.emit_external_new_coerced(
-                            range_internal,
-                            ctor_desc,
-                            &[recv, args[0]],
-                            aw,
-                            elem,
-                            code,
-                        );
-                        return;
-                    }
                     // A `@JvmStatic` member of an `object`/companion (`Dispatchers.IO`): an ordinary
                     // member call in the language — resolved and lowered with a receiver — that kotlinc
                     // emits as a static taking none. Drop the receiver and `invokestatic`. The receiver is
@@ -10375,7 +10648,10 @@ impl<'a> Emitter<'a> {
                 // parameter, which belongs to the SAM side of the boundary rather than the captures.
                 let n_cap = captures.len();
                 if impl_params.len() < n_cap {
-                    self.run.emit_bail.set(true);
+                    self.run.set_emit_error(
+                        "lambda implementation has fewer parameters than captured values"
+                            .to_string(),
+                    );
                     return;
                 }
                 let (cap_tys, lam_tys) = impl_params.split_at(n_cap);
@@ -10558,14 +10834,18 @@ impl<'a> Emitter<'a> {
                 let elements = elements.clone();
                 let spreads = spreads.clone();
                 if spreads.len() != elements.len() {
-                    self.run.emit_bail.set(true);
+                    self.run.set_emit_error(
+                        "vararg spread flags do not match the element list".to_string(),
+                    );
                     return;
                 }
                 if spreads.iter().any(|&spread| spread) {
                     if et.is_jvm_scalar() {
                         let Some((builder, add_desc, array_desc)) = primitive_spread_builder(et)
                         else {
-                            self.run.emit_bail.set(true);
+                            self.run.set_emit_error(
+                                "primitive vararg spread has no platform builder".to_string(),
+                            );
                             return;
                         };
                         let class = self.cw.class_ref(builder);
@@ -11346,46 +11626,6 @@ impl<'a> Emitter<'a> {
             for &arg in args {
                 self.emit_value(arg, code);
             }
-        }
-    }
-
-    fn emit_external_new_coerced(
-        &mut self,
-        owner: &str,
-        desc: &str,
-        args: &[u32],
-        aw: i32,
-        target: Ty,
-        code: &mut CodeBuilder,
-    ) {
-        let emit_arg = |this: &mut Self, arg: u32, code: &mut CodeBuilder| {
-            let from = this.value_ty(arg);
-            this.emit_value(arg, code);
-            emit_num_conv(from, target, code);
-        };
-        if args.iter().any(|&a| self.records_frame(a)) {
-            let temps = self.spill_to_temps(args, code);
-            let ci = self.cw.class_ref(owner);
-            code.new_obj(ci);
-            code.dup();
-            for &(slot, t, _) in &temps {
-                load(t, slot, code);
-                emit_num_conv(t, target, code);
-            }
-            for &(_, _, key) in &temps {
-                self.slots.remove(&key);
-            }
-            let m = self.cw.methodref(owner, "<init>", desc);
-            code.invokespecial(m, aw, 0);
-        } else {
-            let ci = self.cw.class_ref(owner);
-            code.new_obj(ci);
-            code.dup();
-            for &arg in args {
-                emit_arg(self, arg, code);
-            }
-            let m = self.cw.methodref(owner, "<init>", desc);
-            code.invokespecial(m, aw, 0);
         }
     }
 
@@ -13160,37 +13400,6 @@ fn is_string_plus_virtual(owner: &str, name: &str, descriptor: &str) -> bool {
         && descriptor == "(Ljava/lang/Object;)Ljava/lang/String;"
 }
 
-fn range_to_virtual_ctor(
-    owner: &str,
-    name: &str,
-    descriptor: &str,
-) -> Option<(&'static str, &'static str, i32, Ty)> {
-    if name != "rangeTo" {
-        return None;
-    }
-    Some(match (owner, descriptor) {
-        (
-            "java/lang/Byte" | "kotlin/Byte" | "java/lang/Short" | "kotlin/Short"
-            | "java/lang/Integer" | "kotlin/Int",
-            "(B)Lkotlin/ranges/IntRange;"
-            | "(S)Lkotlin/ranges/IntRange;"
-            | "(I)Lkotlin/ranges/IntRange;",
-        ) => ("kotlin/ranges/IntRange", "(II)V", 2, Ty::Int),
-        (
-            "java/lang/Byte" | "kotlin/Byte" | "java/lang/Short" | "kotlin/Short"
-            | "java/lang/Integer" | "kotlin/Int" | "java/lang/Long" | "kotlin/Long",
-            "(B)Lkotlin/ranges/LongRange;"
-            | "(S)Lkotlin/ranges/LongRange;"
-            | "(I)Lkotlin/ranges/LongRange;"
-            | "(J)Lkotlin/ranges/LongRange;",
-        ) => ("kotlin/ranges/LongRange", "(JJ)V", 4, Ty::Long),
-        ("java/lang/Character" | "kotlin/Char", "(C)Lkotlin/ranges/CharRange;") => {
-            ("kotlin/ranges/CharRange", "(CC)V", 2, Ty::Char)
-        }
-        _ => return None,
-    })
-}
-
 fn wrapper_owner_primitive(owner: &str) -> Option<Ty> {
     Some(match owner {
         "java/lang/Integer" | "kotlin/Int" => Ty::Int,
@@ -13308,6 +13517,7 @@ mod fail_soft_tests {
     // (`emit_all` -> `None`), never panic — a compiler must not crash on its own IR.
     #[test]
     fn getvalue_of_unallocated_slot_skips_not_panics() {
+        let symbols = crate::frontend::FrontendSymbols::default();
         let mut ir = IrFile::default();
         let body = ir.add_expr(IrExpr::GetValue(99));
         ir.add_fun(IrFunction {
@@ -13319,11 +13529,12 @@ mod fail_soft_tests {
             dispatch_receiver: None,
             param_checks: vec![],
         });
-        assert!(emit_all(&ir, "TestKt", &NoBodies, None).is_none());
+        assert!(emit_all(&ir, "TestKt", &NoBodies, None, &symbols).is_none());
     }
 
     #[test]
     fn arity_failure_exposes_category_without_owner_or_callable_name() {
+        let symbols = crate::frontend::FrontendSymbols::default();
         let mut ir = IrFile::default();
         let unit = ir.add_expr(IrExpr::Block {
             stmts: vec![],
@@ -13363,6 +13574,7 @@ mod fail_soft_tests {
             None,
             &EmitOptions::default(),
             &run,
+            &symbols,
         )
         .is_none());
         assert_eq!(run.inline_bail().as_deref(), Some("call arity mismatch"));

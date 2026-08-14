@@ -1500,10 +1500,9 @@ fn hoist_call_operands_in_order(
 /// shape (skip, never miscompile). The snapshot plan is decided and typed on the ORIGINAL operands
 /// before any rewrite: bailing mid-hoist would strand already-bound prelude temps next to a
 /// returned original expression, double-evaluating their effects. Typing the original is valid for
-/// the residual because every head-kind-CHANGING rewrite is excluded from the plan: a direct
-/// suspension point (residual `GetValue`) is skipped outright, and a collapsing `Block` types as
-/// `None` so the plan bails before anything is rewritten. All remaining rewrites replace children
-/// in place with typed `GetValue` temps and keep the head node, preserving its recovered type.
+/// the residual: a direct suspension point (residual `GetValue`) is skipped outright, a value block
+/// has the type of its final value, and all other rewrites replace children in place while preserving
+/// the head node and its recovered type.
 fn hoist_operands_in_order(
     ir: &mut IrFile,
     operands: &[Option<ExprId>],
@@ -1659,6 +1658,12 @@ fn hoisted_value_ty(
         // `operand!!` yields its operand's value unchanged (the assert only throws), matching
         // `value_ty`'s treatment in the emitter.
         IrExpr::NotNullAssert { operand } => hoisted_value_ty(ir, *operand, orig_rets, value_types),
+        // A value block is an evaluation wrapper, not a distinct value representation. Hoisting its
+        // statements collapses the wrapper to the final expression, so a snapshot uses that final
+        // expression's exact type. An empty/statement-only block has no value to materialize.
+        IrExpr::Block {
+            value: Some(value), ..
+        } => hoisted_value_ty(ir, *value, orig_rets, value_types),
         // Declared storage types, read straight off the IR declaration the node indexes — the same
         // sources the emitter's `value_ty` consults. `PropertyRead` carries its type inline; a
         // `Unit`-typed property realizes through a `()V` accessor (nothing to bind) and a bare
@@ -2135,6 +2140,11 @@ fn build_state_machine(
     suspension_lines: &std::collections::HashMap<ExprId, (u32, u32)>,
     continuation_metadata: &mut ContinuationMetadataMap,
 ) -> bool {
+    crate::trace_compiler!(
+        "suspend",
+        "build_state_machine fid={fid} input={:?}",
+        ir.exprs[b as usize]
+    );
     // Normalize a block-valued initializer (`val a = (x ?: foo())`, `a?.b ?: foo()` — elvis / safe-call
     // lower to `Variable{ init: Block{ prelude…, value: When } }`) into `prelude…; Variable{ init: When }`,
     // so the conditional suspension surfaces as a `Variable{init: When}` the flattener handles.
@@ -2169,6 +2179,7 @@ fn build_state_machine(
             "suspend",
             "build_state_machine fid={fid} BAIL: block has a trailing value (suspend body must use `return`)"
         );
+        trace_residual_suspension(ir, b, 0);
         return false; // a suspending trailing-value body isn't modeled (desugar to a `return` first)
     }
     // A SUSPENSION reached through `invokespecial` (`super.suspendHere(x)`): the machine would have to

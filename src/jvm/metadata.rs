@@ -201,12 +201,17 @@ fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
 /// its receiver as the FIRST type argument, which [`Ty::Fun`] models as the first parameter binding
 /// `this` (`has_receiver`).
 pub(super) fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>, receiver_fun: bool) -> Ty {
-    if let Some(arity) = internal.strip_prefix("kotlin/Function") {
-        if arity.parse::<u8>().is_ok() {
-            let ret = args.pop().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            let has_receiver = receiver_fun && !args.is_empty();
-            return Ty::fun_with_shape(args, ret, 0, has_receiver, false);
-        }
+    let function_classifier = internal
+        .strip_prefix("kotlin/Function")
+        .is_some_and(|segment| {
+            !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    if function_classifier && !args.is_empty() {
+        // The metadata arguments are the declaration shape: `[P1, …, R]`. The numeric classifier
+        // suffix identifies the built-in family but is never parsed to recover or validate arity.
+        let ret = args.pop().expect("checked non-empty function arguments");
+        let has_receiver = receiver_fun && !args.is_empty();
+        return Ty::fun_with_shape(args, ret, 0, has_receiver, false);
     }
     // Arrays are `Obj` types. A boxed `Array<T>` carries its element as a type argument — built directly
     // so a primitive element stays the LOGICAL `Array<Int>` (`Obj("kotlin/Array", [Int])`), NOT the

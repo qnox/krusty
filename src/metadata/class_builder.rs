@@ -547,7 +547,12 @@ pub fn build_class(
                 .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"));
                 func.repeated_message(4, &parameter);
             }
-            let ret = type_pb(&mut st, m.ret, &function_type_parameters);
+            let ret = encode_type(&mut st, m.ret, &function_type_parameters).unwrap_or_else(|error| {
+                panic!(
+                    "invalid emitted metadata return type for '{class_internal}.{}': {error}",
+                    m.name
+                )
+            });
             func.field_message(3, &ret);
             for (pname, pty) in &m.params {
                 let mut vp = Pb::new();
@@ -555,7 +560,14 @@ pub fn build_class(
                     vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
                 }
                 vp.field_varint(2, st.local(pname) as u64);
-                let ty = type_pb(&mut st, *pty, &function_type_parameters);
+                let ty = encode_type(&mut st, *pty, &function_type_parameters).unwrap_or_else(
+                    |error| {
+                        panic!(
+                            "invalid emitted metadata parameter '{pname}' for '{class_internal}.{}': {error}",
+                            m.name
+                        )
+                    },
+                );
                 vp.field_message(3, &ty);
                 func.repeated_message(6, &vp); // Function.value_parameter = 6
             }

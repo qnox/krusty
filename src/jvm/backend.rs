@@ -471,16 +471,23 @@ impl Backend for JvmBackend {
             &ir,
             &facade_name,
             &*self.cp,
-            metadata.as_ref(),
+            crate::jvm::ir_emit::EmitMetadata {
+                facade: metadata.as_ref(),
+                continuations: &continuation_metadata,
+            },
             &emit_opts,
             &run,
-            &continuation_metadata,
+            syms,
         ) else {
             if let Some(reason) = run.inline_bail() {
                 diags.error(
                     crate::diag::Span::new(0, 0),
                     format!("krusty: JVM backend inline error: {reason}"),
                 );
+                return outputs;
+            }
+            if let Some(reason) = run.emit_error() {
+                diags.error(crate::diag::Span::new(0, 0), reason);
                 return outputs;
             }
             diags.error(

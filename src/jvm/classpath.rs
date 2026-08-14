@@ -99,7 +99,6 @@ pub(super) fn kotlin_type_name_to_ty(name: TypeName) -> Ty {
 struct MetaNameIds {
     prim: crate::name_tree::FxHashMap<crate::types::TypeName, Ty>,
     prim_array: crate::name_tree::FxHashMap<crate::types::TypeName, &'static str>,
-    fn_arity: crate::name_tree::FxHashMap<crate::types::TypeName, usize>,
     array: crate::types::TypeName,
     any: crate::types::TypeName,
     object: crate::types::TypeName,
@@ -145,13 +144,9 @@ fn meta_ids() -> &'static MetaNameIds {
         .into_iter()
         .map(|(name, desc)| (tn(name), desc))
         .collect();
-        let fn_arity = (0..=42)
-            .map(|arity| (tn(&format!("kotlin/Function{arity}")), arity))
-            .collect();
         MetaNameIds {
             prim,
             prim_array,
-            fn_arity,
             array: tn("kotlin/Array"),
             any: tn("kotlin/Any"),
             object: tn("java/lang/Object"),
@@ -161,13 +156,6 @@ fn meta_ids() -> &'static MetaNameIds {
             nothing: tn("kotlin/Nothing"),
         }
     })
-}
-
-fn meta_function_arity_name(name: TypeName) -> Option<usize> {
-    if let Some(&arity) = meta_ids().fn_arity.get(&name) {
-        return Some(arity);
-    }
-    name.unsigned_suffix_after_prefix("kotlin/Function")
 }
 
 fn primitive_array_descriptor_name(internal: TypeName) -> Option<&'static str> {
@@ -303,9 +291,6 @@ fn meta_param_compat(
         return desc.is_reference();
     };
     let ids = meta_ids();
-    if let Some(arity) = meta_function_arity_name(name) {
-        return matches!(desc, Ty::Fun(sig) if sig.params.len() == arity);
-    }
     if name == ids.array {
         return desc.is_reference_array();
     }
@@ -367,9 +352,6 @@ fn meta_param_exact(
         return ty_erases_to_object(*desc);
     };
     let ids = meta_ids();
-    if let Some(arity) = meta_function_arity_name(name) {
-        return matches!(desc, Ty::Fun(sig) if sig.params.len() == arity);
-    }
     if name == ids.array {
         return matches!(desc, Ty::Obj(n, args)
             if *n == ids.array && args.first().copied().is_some_and(ty_erases_to_object));
@@ -1376,18 +1358,22 @@ impl BuiltinsFile {
 /// and `exact` counts the value params matching by EQUAL erased descriptor (not through the loose
 /// type-variable rule), so the caller prefers the most-specific overload (`plusAssign(element: T)` binds
 /// the `Object` descriptor, `plusAssign(elements: Iterable)` the `Iterable` one).
-fn function_parameter_erasure_matches(signature: &crate::types::FnSig, descriptor: Ty) -> bool {
+fn function_parameter_erasure_matches(
+    signature: &crate::types::FnSig,
+    descriptor: Ty,
+    classifier_arity: &dyn Fn(Ty) -> Option<usize>,
+) -> bool {
     // A suspend function value implements Function(N+1): the additional JVM argument is its
     // Continuation. A receiver is already the first semantic parameter, so it needs no separate
     // adjustment (`suspend R.() -> T` has one semantic parameter and erases to Function2).
-    descriptor.non_null().fun_arity()
-        == u8::try_from(signature.params.len() + usize::from(signature.suspend)).ok()
+    classifier_arity(descriptor) == Some(signature.params.len() + usize::from(signature.suspend))
 }
 
 fn meta_callable_aligns(
     f: &super::metadata::MetaFn,
     desc_params: &[Ty],
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+    classifier_arity: &dyn Fn(Ty) -> Option<usize>,
 ) -> Option<(usize, usize)> {
     let off = f.is_extension() as usize;
     // Context parameters sit between the (extension) receiver and the value parameters in the
@@ -1414,7 +1400,7 @@ fn meta_callable_aligns(
                     .and_then(|signature| signature.params.get(index))
                     .copied();
                 if let Some(Ty::Fun(signature)) = signature_parameter.map(Ty::non_null) {
-                    return function_parameter_erasure_matches(signature, *d);
+                    return function_parameter_erasure_matches(signature, *d, classifier_arity);
                 }
                 let class = signature_parameter
                     .and_then(|parameter| parameter.non_null().obj_internal())
@@ -1435,7 +1421,7 @@ fn meta_callable_aligns(
                 .and_then(|signature| signature.params.get(*index))
                 .copied();
             if let Some(Ty::Fun(signature)) = signature_parameter.map(Ty::non_null) {
-                return function_parameter_erasure_matches(signature, **d);
+                return function_parameter_erasure_matches(signature, **d, classifier_arity);
             }
             let class = signature_parameter
                 .and_then(|parameter| parameter.non_null().obj_internal())
@@ -1456,11 +1442,13 @@ fn aligned_meta_index(
     desc_params: &[Ty],
     desc_ret: &Ty,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+    classifier_arity: &dyn Fn(Ty) -> Option<usize>,
 ) -> Option<(usize, usize)> {
     meta.fns_named(fn_name)
         .filter_map(|i| {
             let f = meta.fn_at(i as usize);
-            let alignment = meta_callable_aligns(f, desc_params, value_underlying);
+            let alignment =
+                meta_callable_aligns(f, desc_params, value_underlying, classifier_arity);
             crate::trace_compiler!(
                 "resolve",
                 "metadata alignment {fn_name} desc={desc_params:?} candidate_value_classes={:?} candidate_signature={:?} alignment={alignment:?}",
@@ -1483,9 +1471,17 @@ fn aligned_meta_callable<'a>(
     desc_params: &[Ty],
     desc_ret: &Ty,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+    classifier_arity: &dyn Fn(Ty) -> Option<usize>,
 ) -> Option<(usize, &'a super::metadata::MetaFn)> {
-    aligned_meta_index(meta, fn_name, desc_params, desc_ret, value_underlying)
-        .map(|(end, i)| (end, meta.fn_at(i)))
+    aligned_meta_index(
+        meta,
+        fn_name,
+        desc_params,
+        desc_ret,
+        value_underlying,
+        classifier_arity,
+    )
+    .map(|(end, i)| (end, meta.fn_at(i)))
 }
 
 pub(super) fn metadata_return_info(class: Option<TypeName>, nullable: bool) -> ReturnInfo {
@@ -1960,6 +1956,27 @@ impl Classpath {
         MetaProps(self.class_meta_name(internal))
     }
 
+    /// Arity of a physical JVM function interface, read from its declaration rather than its name.
+    /// The marker superinterface establishes the classifier family and the unique `invoke` descriptor
+    /// establishes its parameter count.
+    fn function_classifier_arity(&self, ty: Ty) -> Option<usize> {
+        let internal = ty.non_null().obj_internal()?;
+        let class = self.find_name(internal)?;
+        if !class.interfaces.contains_name(type_name("kotlin/Function")) {
+            return None;
+        }
+        let mut invokes = class
+            .methods
+            .iter()
+            .filter(|method| method.name == "invoke" && !method.is_static());
+        let invoke = invokes.next()?;
+        if invokes.next().is_some() {
+            return None;
+        }
+        crate::jvm::names::parse_method_descriptor(&invoke.descriptor)
+            .map(|(parameters, _)| parameters.len())
+    }
+
     /// The metadata-primary [`GenericSig`] for the `internal.jvm_name` overload corresponding to the JVM
     /// method with `desc_params`. kotlinc omits the `method_signature` extension when it equals the
     /// computed default, so the correct overload is picked by aligning the metadata signature to the
@@ -1976,9 +1993,16 @@ impl Classpath {
     ) -> Option<Option<crate::libraries::GenericSig>> {
         let meta = self.class_meta_name(internal);
         meta.has_jvm_name(jvm_name).then(|| {
-            aligned_meta_index(&meta, jvm_name, desc_params, desc_ret, value_underlying)
-                .map(|(_, idx)| meta.fn_at(idx))
-                .and_then(|f| f.generic_sig.clone())
+            aligned_meta_index(
+                &meta,
+                jvm_name,
+                desc_params,
+                desc_ret,
+                value_underlying,
+                &|ty| self.function_classifier_arity(ty),
+            )
+            .map(|(_, idx)| meta.fn_at(idx))
+            .and_then(|f| f.generic_sig.clone())
         })
     }
 
@@ -2023,9 +2047,14 @@ impl Classpath {
         value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
     ) -> MetadataCallFacts {
         let meta = self.class_meta_name(internal);
-        let Some((end, c)) =
-            aligned_meta_callable(&meta, fn_name, desc_params, desc_ret, value_underlying)
-        else {
+        let Some((end, c)) = aligned_meta_callable(
+            &meta,
+            fn_name,
+            desc_params,
+            desc_ret,
+            value_underlying,
+            &|ty| self.function_classifier_arity(ty),
+        ) else {
             return MetadataCallFacts::fallback(if extension {
                 CallSig::default()
             } else {
@@ -2457,6 +2486,15 @@ impl Classpath {
                     } else {
                         m.name.clone()
                     };
+                    let realization = match m.name.as_str() {
+                        "rangeTo" => crate::libraries::MemberRealization::RangeConstruction {
+                            open_end: false,
+                        },
+                        "rangeUntil" => crate::libraries::MemberRealization::RangeConstruction {
+                            open_end: true,
+                        },
+                        _ => crate::libraries::MemberRealization::Dispatch,
+                    };
                     crate::libraries::LibraryMember {
                         name: member_name,
                         owner: Some(owner),
@@ -2466,7 +2504,7 @@ impl Classpath {
                         ret,
                         physical_ret,
                         descriptor,
-                        realization: crate::libraries::MemberRealization::Dispatch,
+                        realization,
                         signature: None,
                         // A builtin member carries no JVM `Signature` string, so its DECODED signature
                         // is the only record of a type-parameter return/parameter — without it a
@@ -2495,6 +2533,7 @@ impl Classpath {
                         declared_ret: None,
                         implicit_classifier_callable: None,
                         plugin_expression: None,
+                        source_member: None,
                     }
                 })
             })
@@ -5140,7 +5179,11 @@ mod fq_tests {
             Ty::obj("kotlin/Any"),
         );
 
-        assert!(function_parameter_erasure_matches(metadata, erased));
+        assert!(function_parameter_erasure_matches(
+            metadata,
+            erased,
+            &|ty| ty.fun_arity().map(usize::from),
+        ));
     }
 
     #[test]

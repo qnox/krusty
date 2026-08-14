@@ -14,26 +14,13 @@
 //! Every test skips cleanly (returns) when the JDK / kotlin-stdlib toolchain is unavailable. Only
 //! the kotlin-stdlib is required — no user classpath deps.
 
-use std::path::PathBuf;
-
 use super::common;
-
-/// (stdlib jar, jdk `lib/modules` jimage) for the `box()` harness, or `None` → skip.
-fn env() -> Option<(PathBuf, PathBuf)> {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    Some((stdlib, jdk))
-}
 
 /// Compile `src` (a `fun box(): String`) and assert it round-trips to "OK" on the JVM.
 fn run_box(src: &str, stem: &str) {
-    let Some((stdlib, jdk)) = env() else {
-        eprintln!("skipping {stem}: no JDK/stdlib toolchain");
-        return;
-    };
     assert_eq!(
-        common::compile_and_run_box(src, stem, &[stdlib], Some(jdk.as_path())).as_deref(),
-        Some("OK"),
+        common::expect_box_run_with_stdlib(src, stem),
+        "OK",
         "{stem}"
     );
 }

@@ -65,6 +65,23 @@ fn generic_function_emits_signature() {
 }
 
 #[test]
+fn function_parameter_keeps_its_complete_signature() {
+    let src = "fun <T> transform(block: (String) -> T): T = block(\"x\")\n\
+               fun consume(block: (String) -> Long): Long = block(\"x\")\n";
+    let Some(cs) = classes(src) else { return };
+    assert_eq!(
+        method_signature(&cs, "GKt", "transform").as_deref(),
+        Some(
+            "<T:Ljava/lang/Object;>(Lkotlin/jvm/functions/Function1<-Ljava/lang/String;+TT;>;)TT;"
+        )
+    );
+    assert_eq!(
+        method_signature(&cs, "GKt", "consume").as_deref(),
+        Some("(Lkotlin/jvm/functions/Function1<-Ljava/lang/String;Ljava/lang/Long;>;)J")
+    );
+}
+
+#[test]
 fn generic_member_method_compiles_runs_and_signs() {
     // A member method with its OWN type parameter (`fun <U> wrap(u: U): U`) — previously rejected with
     // "unresolved reference 'U'" because the method's type params weren't in scope for its return type.

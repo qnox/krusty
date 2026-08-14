@@ -715,44 +715,18 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
                 field: "INSTANCE",
             }));
         }
-        // Per-type-parameter upper bound (internal name) of the BASE class — used to build a
-        // `PolymorphicSerializer` for a star-projection / erased `Any` argument (`Box<*>` with
-        // `Box<T : E>` → `PolymorphicSerializer(E::class)`). `kotlin/Any` for an unbounded parameter.
-        let bounds: Vec<String> = {
-            let base = ir.classes.iter().find(|c| c.fq_name_matches(&fq_name));
-            (0..n_tp)
-                .map(|i| {
-                    base.and_then(|c| {
-                        let name = c.type_params.get(i)?;
-                        c.type_param_bounds
-                            .iter()
-                            .find(|(n, _)| n == name)
-                            .and_then(|(_, bt)| bt.non_null().obj_internal().map(|s| s.to_string()))
-                    })
-                    .unwrap_or_else(|| "kotlin/Any".to_string())
-                })
-                .collect()
-        };
         // Generic: `Foo.serializer(<arg serializer>…)`, each type argument's serializer derived
-        // recursively; a star-projection / erased `Any` argument becomes a `PolymorphicSerializer` over
-        // the parameter's bound; if any other argument can't be derived, the whole element can't be.
+        // recursively. A star projection already carries its checked readable upper bound as an
+        // out-projection (`Box<*>`, `T : E` => `Box<out E>`), so consume that semantic type directly.
+        // An in-projection has no readable element type from which a serializer can be derived.
         let mut arg_sers = Vec::with_capacity(n_tp);
-        for (i, a) in type_args.iter().take(n_tp).enumerate() {
-            if let Some(e) = element_serializer_expr(ir, a) {
-                arg_sers.push(e);
-            } else if a
-                .non_null()
-                .obj_internal()
-                .is_some_and(|n| n.matches("kotlin/Any"))
-                && bounds[i] != "kotlin/Any"
-            {
-                // A star projection on a BOUNDED type parameter (`Box<*>` with `Box<T : E>`, the arg
-                // erased to `Any`) → `PolymorphicSerializer(E::class)`. Gated on a non-`Any` bound so an
-                // explicit unbounded `Box<Any>` (indistinguishable from `*` after erasure) isn't captured.
-                arg_sers.push(build_polymorphic_serializer(ir, &bounds[i]));
-            } else {
-                return None;
-            }
+        for argument in type_args.iter().take(n_tp) {
+            let readable = match argument {
+                Ty::OutProjection(inner) => **inner,
+                Ty::InProjection(_) => return None,
+                _ => *argument,
+            };
+            arg_sers.push(element_serializer_expr(ir, &readable)?);
         }
         if arg_sers.len() != n_tp {
             return None;
@@ -891,28 +865,14 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
         if n_tp == 0 {
             return true;
         }
-        let base = ir.classes.iter().find(|c| c.fq_name_matches(&fq_name));
         return type_args.len() >= n_tp
-            && type_args.iter().take(n_tp).enumerate().all(|(i, a)| {
-                if can_derive_element_serializer(ir, a) {
-                    return true;
-                }
-                // An erased `Any` argument (star projection) on a BOUNDED type parameter becomes a
-                // `PolymorphicSerializer` (mirrors `element_serializer_expr`).
-                a.non_null()
-                    .obj_internal()
-                    .is_some_and(|n| n.matches("kotlin/Any"))
-                    && base.is_some_and(|c| {
-                        c.type_params.get(i).is_some_and(|name| {
-                            c.type_param_bounds.iter().any(|(n, bt)| {
-                                n == name
-                                    && !bt
-                                        .non_null()
-                                        .obj_internal()
-                                        .is_some_and(|n| n.matches("kotlin/Any"))
-                            })
-                        })
-                    })
+            && type_args.iter().take(n_tp).all(|argument| {
+                let readable = match argument {
+                    Ty::OutProjection(inner) => **inner,
+                    Ty::InProjection(_) => return false,
+                    _ => *argument,
+                };
+                can_derive_element_serializer(ir, &readable)
             });
     }
     builtin_element_serializer(ty).is_some()
@@ -1341,7 +1301,13 @@ impl IrPlugin for SerializationPlugin {
             return_policy: crate::libraries::GenericReturnPolicy::Exact,
         });
         members.push(FrontendCallable {
-            owner: FrontendCallableOwner::Companion,
+            // A named object is already the singleton value through which its generated accessor is
+            // called. Ordinary classes expose the accessor through their companion value.
+            owner: if ctx.kind == crate::libraries::TypeKind::Object {
+                FrontendCallableOwner::Classifier
+            } else {
+                FrontendCallableOwner::Companion
+            },
             name: "serializer".to_string(),
             params,
             ret,
@@ -2011,14 +1977,31 @@ impl IrPlugin for SerializationPlugin {
             let fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields
                 .iter()
-                .map(|f| {
+                .map(|field| {
                     (
-                        f.name.clone(),
-                        value_class_underlying(ir, &f.ty).unwrap_or(f.ty.clone()),
+                        field.name.clone(),
+                        value_class_underlying(ir, &field.ty).unwrap_or(field.ty),
                     )
                 })
                 .collect();
-            let field_types: Vec<Ty> = fields.iter().map(|(_, ty)| ty.clone()).collect();
+            let serializer_field_types: Vec<Ty> = ir.classes[class_id as usize]
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| {
+                    let declared = ir.classes[class_id as usize]
+                        .properties
+                        .iter()
+                        .find(|property| property.backing_field == Some(index as u32))
+                        .map(|property| property.ty)
+                        .unwrap_or(field.ty);
+                    value_class_underlying(ir, &declared).unwrap_or(declared)
+                })
+                .collect();
+            crate::trace_compiler!(
+                "lower",
+                "serialization fields class_id={class_id} types={serializer_field_types:?}"
+            );
             // Per-property constant default (`Some` ⇒ OPTIONAL — serialize omits it when it still equals
             // the default, via `shouldEncodeElementDefault(desc,i) || value.x != default`).
             let field_defaults: Vec<Option<IrConst>> = ir.classes[class_id as usize]
@@ -2779,9 +2762,9 @@ impl IrPlugin for SerializationPlugin {
                             // fallback: default-construct stub (no decode emitted for unsupported shapes).
                             // Nullable fields default to null, matching the real decode path (and so a
                             // future non-null default in `default_const` can't leak into a nullable slot).
-                            let args: Vec<ExprId> = field_types
+                            let args: Vec<ExprId> = fields
                                 .iter()
-                                .map(|ty| {
+                                .map(|(_, ty)| {
                                     let dc = if is_nullable(ty) {
                                         IrConst::Null
                                     } else {
@@ -2811,14 +2794,14 @@ impl IrPlugin for SerializationPlugin {
                         // krusty-generated `<T>$serializer.INSTANCE`; a directly-supported field uses the
                         // builtin `…Serializer.INSTANCE`. An unsupported field type contributes `null`
                         // (placeholder) so the array arity still matches the descriptor's element count.
-                        let elements: Vec<ExprId> = field_types
+                        let elements: Vec<ExprId> = serializer_field_types
                             .iter()
                             .enumerate()
                             .map(|(i, _ty)| {
                                 if let Some(inst) = contextual_serializer_for(
                                     ir,
                                     property_is_contextual(ctx, ir, class_id, &fields[i].0),
-                                    &field_types[i],
+                                    &serializer_field_types[i],
                                 ) {
                                     // `@Contextual` / file-level `@UseContextualSerialization` property.
                                     inst
@@ -2836,12 +2819,13 @@ impl IrPlugin for SerializationPlugin {
                                     // Explicit per-property serializer: `new X()` (or `X.INSTANCE`),
                                     // wrapped `.nullable` for a nullable property.
                                     let base = build_field_serializer_instance(ir, &internal);
-                                    if is_nullable(&field_types[i]) {
+                                    if is_nullable(&serializer_field_types[i]) {
                                         wrap_nullable_serializer(ir, base)
                                     } else {
                                         base
                                     }
-                                } else if let Some(e) = element_serializer_expr(ir, &field_types[i])
+                                } else if let Some(e) =
+                                    element_serializer_expr(ir, &serializer_field_types[i])
                                 {
                                     // Nested @Serializable (generic `Foo<A>` → `Foo.serializer(A_ser)`,
                                     // or non-generic `Foo$serializer.INSTANCE`) | builtin `…Serializer`.
@@ -2914,6 +2898,7 @@ mod tests {
         SerializationPlugin::default().generate_frontend_declarations(
             &FrontendClassContext {
                 classifier,
+                kind: crate::libraries::TypeKind::Class,
                 type_parameters: &crate::types::TypeParameters::new(
                     vec!["T".to_string()],
                     vec![Ty::nullable(Ty::obj("kotlin/Any"))],
@@ -2963,6 +2948,24 @@ mod tests {
                 }),
             }]
         );
+    }
+
+    #[test]
+    fn contributes_object_serializer_as_an_object_member() {
+        let annotation = [type_name(SERIALIZABLE_FQ)];
+        let mut members = Vec::new();
+        SerializationPlugin::default().generate_frontend_declarations(
+            &FrontendClassContext {
+                classifier: type_name("demo/Singleton"),
+                kind: crate::libraries::TypeKind::Object,
+                type_parameters: &crate::types::TypeParameters::default(),
+                annotations: &annotation,
+            },
+            &mut members,
+        );
+
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].owner, FrontendCallableOwner::Classifier);
     }
 
     /// Build `@Serializable class <name>(<one val per field type>)` as IR + an annotation table.

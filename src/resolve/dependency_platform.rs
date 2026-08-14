@@ -554,6 +554,7 @@ mod tests {
             setter
         });
         PropertyInfo {
+            name: "value".to_string(),
             kind: PropKind::Member,
             receiver: Some(Ty::obj_name(owner)),
             formals: Vec::new(),
