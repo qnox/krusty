@@ -26943,8 +26943,8 @@ impl<'a> Checker<'a> {
         let carries_outer =
             cl.inner_of.is_some() || self.file.is_local_declaration(d) || is_anonymous_object;
         {
-            let class_tparams = scope
-                .visible_tparams()
+            let visible_type_parameters = scope.visible_tparams();
+            let mut class_tparams = visible_type_parameters
                 .symbolic_extended_with(
                     &cl.type_params,
                     &cl.type_param_bounds,
@@ -26956,6 +26956,23 @@ impl<'a> Checker<'a> {
                     self.file_index,
                     cl.span.lo,
                 );
+            if is_anonymous_object {
+                // The parser materializes the surrounding lexical parameters on an anonymous
+                // object's synthetic class so they can be emitted as captured class parameters.
+                // They are not declarations at the object-expression span: keep the enclosing
+                // function/class variables' exact identities instead of alpha-renaming fresh ones.
+                // A same-spelled concrete binding (for example `Any` inside a companion object) is
+                // an application of the synthetic parameter, not a declaration identity to retain;
+                // a nearer non-parameter classifier shadows it in the shared classifier namespace.
+                for name in &cl.type_params {
+                    match scope.tparam_binding(name) {
+                        Some((binding, extra_bounds, _)) if binding.ty_param_name().is_some() => {
+                            class_tparams.insert_binding(name, binding, extra_bounds);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             self.resolved_declaration_type_parameters.insert(
                 cl.span.lo,
                 cl.type_params
@@ -48113,6 +48130,45 @@ val result = object { fun value(): String = captured }
             .values()
             .any(|id| *id == anonymous));
         assert!(matches!(file.decl(owner), Decl::Class(class) if class.name == "Outer"));
+    }
+
+    #[test]
+    fn anonymous_object_does_not_retain_a_type_parameter_shadowed_by_a_local_classifier() {
+        let source = "fun <T> build(): Any {\n\
+                      \u{20} class T\n\
+                      \u{20} return object {}\n\
+                      }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let function_start = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Fun(function) if function.name == "build" => Some(function.signature_span.lo),
+                _ => None,
+            })
+            .expect("generic function");
+        let anonymous_start = file
+            .anonymous_object_classes
+            .values()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) => Some(class.span.lo),
+                _ => None,
+            })
+            .expect("anonymous object");
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        let function_parameters = info.resolved_declaration_type_parameters(function_start);
+        let anonymous_parameters = info.resolved_declaration_type_parameters(anonymous_start);
+        assert_eq!(function_parameters.len(), 1);
+        assert_eq!(anonymous_parameters.len(), 1);
+        assert_ne!(
+            anonymous_parameters, function_parameters,
+            "a nearer classifier named T shadows the function's semantic T"
+        );
     }
 
     #[test]
