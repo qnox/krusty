@@ -273,6 +273,8 @@ pub struct LibraryMember {
     /// treat the Object-erased result as `ret`.
     pub flags: LmFlags,
     pub inline: InlineKind,
+    /// At least one member type parameter carries Kotlin's `reified` modifier.
+    pub reified: bool,
     /// Structural expansion decoded from this exact member's inline body.
     pub inline_body_plan: Option<Box<InlineBodyPlan>>,
     /// The member's Kotlin visibility, from its bytecode access flags/`@Metadata`. A `Protected` member
@@ -672,6 +674,7 @@ impl LibraryMember {
             generic_sig: None,
             flags: LmFlags::default(),
             inline: InlineKind::None,
+            reified: false,
             inline_body_plan: None,
             visibility: Visibility::Public,
             call_sig: CallSig::default(),
@@ -1669,6 +1672,7 @@ impl FunctionInfo {
         candidate.call_sig = member.call_sig.clone();
         candidate.context_count = member.context_count;
         candidate.flags.inline = member.inline;
+        candidate.flags.reified = member.reified;
         candidate.flags.suspend = member.suspend();
         candidate.flags.operator = member.is_operator();
         candidate.flags.infix = member.is_infix();
@@ -1711,6 +1715,7 @@ impl FunctionInfo {
         member.default_realization = self.callable.default_realization.clone();
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
+        member.reified = self.flags.reified;
         member.visibility = self.visibility;
         member.set_suspend(self.flags.suspend);
         member.set_is_operator(self.flags.operator);
@@ -1783,6 +1788,9 @@ impl InlineKind {
 pub struct FnFlags {
     /// `inline` / non-public `@InlineOnly` inline-ness, in one field (was `inline` + `inline_only`).
     pub inline: InlineKind,
+    /// At least one callable type parameter carries Kotlin's `reified` modifier. This is distinct
+    /// from [`InlineKind::MustInline`], which also covers non-reified `@InlineOnly` declarations.
+    pub reified: bool,
     /// `suspend` — decoded from `@Metadata` (the `IS_SUSPEND` function flag). A call to a suspend
     /// function is a coroutine suspension point (the JVM lowering threads a `Continuation`).
     pub suspend: bool,
