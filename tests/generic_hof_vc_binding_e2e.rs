@@ -59,6 +59,124 @@ fn vc_string_underlying_lambda_reads_value() {
 }
 
 #[test]
+fn generic_extension_result_uses_the_enclosing_lambda_expectation() {
+    const MAIN: &str = "@JvmInline value class IC(val value: String)\n\
+        fun <T, R> bar(v: T, f: (T) -> R): R = f(v)\n\
+        @Suppress(\"UNCHECKED_CAST\")\n\
+        fun <T> IC.extensionValue(): T = value as T\n\
+        fun <T> extension(a: IC): T = bar(a) { it.extensionValue() }\n\
+        fun box(): String = extension<String>(IC(\"OK\"))\n";
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("GenericHofExtensionResultReference", MAIN);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected expected-result inference through the lambda: {reference_stderr}"
+    );
+    assert_eq!(
+        run("vc_extension_result", MAIN).expect("generic extension result through lambda"),
+        "OK"
+    );
+}
+
+#[test]
+fn generic_extension_result_uses_a_library_lambda_expectation() {
+    const MAIN: &str = "@JvmInline value class IC(val value: String)\n\
+        @Suppress(\"UNCHECKED_CAST\")\n\
+        fun <T> IC.extensionValue(): T = value as T\n\
+        fun <T> extension(values: List<IC>): List<T> =\n\
+            values.map { it.extensionValue() }\n\
+        fun box(): String = extension<String>(listOf(IC(\"OK\"))).single()\n";
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("LibraryLambdaExtensionResultReference", MAIN);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected the library-lambda expected-result fixture: {reference_stderr}"
+    );
+    assert_eq!(
+        run("library_lambda_extension_result", MAIN)
+            .expect("generic extension result through library lambda"),
+        "OK"
+    );
+}
+
+#[test]
+fn postponed_callee_formal_does_not_capture_enclosing_result_parameter() {
+    const MAIN: &str = "fun <A, R> select(f: (A) -> R): R = TODO()\n\
+        fun <T> bad(): T = select { _: String -> \"bad\" }\n";
+    let (reference_code, _) =
+        common::kotlinc_source_result("PostponedCalleeFormalOwnershipReference", MAIN);
+    assert_ne!(
+        reference_code, 0,
+        "kotlinc unexpectedly accepted a concrete String as universally quantified T"
+    );
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics =
+        common::front_end_diagnostics(MAIN, &[stdlib, jdk.clone()], Some(jdk.as_path()));
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("type mismatch")
+                && diagnostic.contains("String")
+                && diagnostic.contains("T")
+        }),
+        "callee inference must not solve the enclosing T: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn nested_postponed_hof_frames_keep_their_formal_owners() {
+    const MAIN: &str = "interface Provider<A, R> { fun value(): A }\n\
+        interface Scope<S> { fun <B> get(provider: Provider<S, B>): B }\n\
+        @Suppress(\"UNCHECKED_CAST\", \"UNUSED_PARAMETER\")\n\
+        fun <A, R> build(block: Scope<A>.() -> R): Provider<A, R> =\n\
+            object : Provider<A, R> { override fun value(): A = \"OK\" as A }\n\
+        @Suppress(\"UNCHECKED_CAST\", \"UNUSED_PARAMETER\")\n\
+        fun <A, R> build2(block: Scope<A>.() -> R): Provider<A, R> =\n\
+            object : Provider<A, R> { override fun value(): A = \"OK\" as A }\n\
+        val anyProvider: Provider<Any, Any> =\n\
+            object : Provider<Any, Any> { override fun value(): Any = \"unused\" }\n\
+        val nested = build { get(build2 { get(anyProvider) }) }\n\
+        fun box(): String = nested.value().toString()\n";
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("NestedPostponedHofOwnershipReference", MAIN);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected nested postponed HOF inference: {reference_stderr}"
+    );
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::expect_box_run(
+            MAIN,
+            "nested_postponed_hof_ownership",
+            &[stdlib, jdk.clone()],
+            Some(jdk.as_path()),
+        ),
+        "OK"
+    );
+}
+
+#[test]
+fn overloaded_library_lambda_result_is_selected_from_its_body() {
+    const MAIN: &str = "fun box(): String {\n\
+        val result = listOf(1, 2).sumOf { value -> run { value } }\n\
+        return if (result == 3) \"OK\" else \"FAIL: $result\"\n\
+    }\n";
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("OverloadedLambdaBodySelectionReference", MAIN);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected lambda-return overload selection: {reference_stderr}"
+    );
+    assert_eq!(
+        run("overloaded_lambda_body_selection", MAIN)
+            .expect("lambda body selects the sumOf overload"),
+        "OK"
+    );
+}
+
+#[test]
 fn nullable_generic_return_keeps_null() {
     // A declared-nullable generic return (`fun <T> ...: T?`) with a primitive binding stays BOXED
     // (`Int?`): the erased result may be `null`, so the call result must NOT be eagerly unboxed
