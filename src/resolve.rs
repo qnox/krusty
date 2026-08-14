@@ -18881,16 +18881,17 @@ impl<'a> Checker<'a> {
         &self,
         lexical_scope: &CheckerScope<'_>,
         name: &str,
-        arg_tys: &[Option<Ty>],
+        args_and_partial: (&[ExprId], &[Option<Ty>]),
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
         type_args: &[Ty],
         expected_result: Option<Ty>,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let (args, arg_tys) = args_and_partial;
         self.top_level_lambda_shape_in_scope(
             lexical_scope,
             name,
-            arg_tys,
+            (args, arg_tys),
             arg_names,
             trailing_lambda,
             None,
@@ -18899,16 +18900,97 @@ impl<'a> Checker<'a> {
         )
     }
 
+    fn merge_mapped_generic_argument_bindings(
+        &self,
+        overload: &crate::libraries::FunctionInfo,
+        args_and_partial: (&[ExprId], &[Option<Ty>]),
+        argument_map: &[usize],
+        named_whole_array_varargs: &[bool],
+        explicit_type_argument_count: usize,
+        bindings: &mut crate::symbol_resolver::GSigBinds,
+    ) {
+        let (args, arg_tys) = args_and_partial;
+        let semantic = overload.semantic_signature();
+        let source = self.fed_source();
+        let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
+            &source,
+            &semantic,
+            argument_map
+                .iter()
+                .copied()
+                .zip(arg_tys)
+                .enumerate()
+                .filter_map(|(argument, (parameter, actual))| {
+                    if self
+                        .unbound_call_result_signature(*args.get(argument)?)
+                        .is_some()
+                    {
+                        return None;
+                    }
+                    let actual = (*actual)?;
+                    let whole_array = named_whole_array_varargs
+                        .get(argument)
+                        .copied()
+                        .unwrap_or(false)
+                        || self.file.is_spread_arg(args[argument]);
+                    Some((parameter, actual, whole_array))
+                }),
+            overload.call_sig.vararg_index,
+        );
+        crate::symbol_resolver::merge_generic_bindings(
+            &semantic,
+            explicit_type_argument_count,
+            bindings,
+            inferred,
+        );
+    }
+
+    fn mapped_generic_call_bindings(
+        &self,
+        overload: &crate::libraries::FunctionInfo,
+        receiver: Option<Ty>,
+        args_and_partial: (&[ExprId], &[Option<Ty>]),
+        argument_map: &[usize],
+        named_whole_array_varargs: &[bool],
+        type_args: &[Ty],
+    ) -> crate::symbol_resolver::GSigBinds {
+        let (args, arg_tys) = args_and_partial;
+        let semantic = overload.semantic_signature();
+        let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
+        let source = self.fed_source();
+        if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
+            crate::symbol_resolver::unify_ty_from_symbols(
+                &source,
+                receiver_shape,
+                receiver,
+                &mut bindings,
+            );
+        }
+        self.merge_mapped_generic_argument_bindings(
+            overload,
+            (args, arg_tys),
+            argument_map,
+            named_whole_array_varargs,
+            type_args.len(),
+            &mut bindings,
+        );
+        bindings
+    }
+
     fn lambda_overload_partially_applicable(
         &self,
         overload: &crate::libraries::FunctionInfo,
         receiver: Option<Ty>,
-        arg_tys: &[Option<Ty>],
+        args_and_partial: (&[ExprId], &[Option<Ty>]),
         argument_map: &[usize],
         whole_array_varargs: &[bool],
         type_args: &[Ty],
     ) -> bool {
+        let (args, arg_tys) = args_and_partial;
         let semantic = overload.semantic_signature();
+        if !type_args.is_empty() && semantic.formals.len() != type_args.len() {
+            return false;
+        }
         // A spread may already be typed as its element (`*xs: String`) or may still carry the
         // array (`*xs: Array<String>`), depending on when contextual typing ran. Whole-array
         // vararg syntax always contributes its element constraints to overload applicability.
@@ -18953,74 +19035,93 @@ impl<'a> Checker<'a> {
                 Some(declared)
             })
             .collect::<Option<Vec<_>>>();
-        let generic_params = argument_shapes.as_ref().map(|argument_shapes| {
-            let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
-            if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
-                crate::symbol_resolver::unify_ty_from_symbols(
-                    &self.fed_source(),
-                    receiver_shape,
-                    receiver,
-                    &mut bindings,
-                );
-            }
-            for (&parameter_shape, actual) in argument_shapes.iter().zip(&normalized_arg_tys) {
-                if let Some(actual) = actual {
-                    crate::symbol_resolver::unify_ty(parameter_shape, *actual, &mut bindings);
-                }
-            }
-            argument_shapes
+        let generic = argument_shapes.as_ref().map(|argument_shapes| {
+            let bindings = self.mapped_generic_call_bindings(
+                overload,
+                receiver,
+                (args, arg_tys),
+                argument_map,
+                whole_array_varargs,
+                type_args,
+            );
+            let params = argument_shapes
                 .iter()
                 .map(|&parameter_shape| {
                     crate::symbol_resolver::ty_subst(parameter_shape, &bindings)
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (params, bindings)
         });
+        if generic.as_ref().is_some_and(|(_, bindings)| {
+            !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+                &semantic,
+                bindings,
+                |actual, bound| self.receiver_is_assignable(actual, bound),
+            )
+        }) {
+            return false;
+        }
+        let generic_params = generic.as_ref().map(|(params, _)| params);
         let callable_params = overload.semantic_params();
         argument_map
             .iter()
             .enumerate()
             .zip(&normalized_arg_tys)
             .all(|((argument, &parameter), actual)| {
-                actual.is_none_or(|actual| {
-                    let declared = argument_shapes
-                        .as_ref()
-                        .and_then(|params| params.get(argument))
-                        .copied()
-                        .or_else(|| callable_params.get(parameter).copied());
-                    // This predicate only keeps candidates alive while postponed lambdas are
-                    // shaped. Real overload inference owns type-variable constraint merging;
-                    // rejecting a generic shape here would duplicate that selector and cannot
-                    // model variance/LUB constraints (`Sink<Int>`, `Sink<String>`, `Sink<Long>`).
-                    if declared
-                        .is_some_and(|declared| ty_mentions_param(declared, &semantic.formals))
-                    {
-                        // Postpone constraints on type variables, not the fixed type constructor
-                        // surrounding them. `() -> T?` can infer `T` later, but it can never accept
-                        // a known `Int`. Keeping that overload alive here lets its lambda expectation
-                        // win before real overload selection (`generateSequence(1) { ... }` then
-                        // shapes `1` as the seed function overload).
-                        if declared.is_some_and(|declared| {
-                            matches!(declared.non_null(), Ty::Fun(_))
-                                && actual.non_null().fun_arity().is_none()
+                let declared = argument_shapes
+                    .as_ref()
+                    .and_then(|params| params.get(argument))
+                    .copied()
+                    .or_else(|| callable_params.get(parameter).copied());
+                let expected = generic_params
+                    .and_then(|params| params.get(argument))
+                    .copied()
+                    .or(declared);
+                match *actual {
+                    None => {
+                        if !args.get(argument).is_some_and(|&argument| {
+                            matches!(self.file.expr(argument), Expr::Lambda { .. })
                         }) {
-                            return false;
+                            return true;
                         }
-                        return true;
+                        expected.is_some_and(|expected| {
+                            expected.non_null().fun_arity().is_some()
+                                || expected.is_erased_top()
+                                || self.semantic_sam_signature(expected).is_some()
+                        })
                     }
-                    let expected = generic_params
-                        .as_ref()
-                        .and_then(|params| params.get(argument))
-                        .copied()
-                        .or(declared);
-                    expected.is_some_and(|expected| {
-                        crate::assignable::is_assignable(
-                            &crate::assignable::TyCtx::new(),
-                            self,
-                            actual,
-                            expected,
-                        ) || (!expected.is_reference() && arg_assignable_simple(expected, actual))
-                    })
-                })
+                    Some(actual) => {
+                        // This predicate only keeps candidates alive while postponed lambdas are
+                        // shaped. Real overload inference owns type-variable constraint merging;
+                        // rejecting a generic shape here would duplicate that selector and cannot
+                        // model variance/LUB constraints (`Sink<Int>`, `Sink<String>`, `Sink<Long>`).
+                        if declared
+                            .is_some_and(|declared| ty_mentions_param(declared, &semantic.formals))
+                        {
+                            // Postpone constraints on type variables, not the fixed type constructor
+                            // surrounding them. `() -> T?` can infer `T` later, but it can never accept
+                            // a known `Int`. Keeping that overload alive here lets its lambda expectation
+                            // win before real overload selection (`generateSequence(1) { ... }` then
+                            // shapes `1` as the seed function overload).
+                            if declared.is_some_and(|declared| {
+                                matches!(declared.non_null(), Ty::Fun(_))
+                                    && actual.non_null().fun_arity().is_none()
+                            }) {
+                                return false;
+                            }
+                            return true;
+                        }
+                        expected.is_some_and(|expected| {
+                            crate::assignable::is_assignable(
+                                &crate::assignable::TyCtx::new(),
+                                self,
+                                actual,
+                                expected,
+                            ) || (!expected.is_reference()
+                                && arg_assignable_simple(expected, actual))
+                        })
+                    }
+                }
             })
     }
 
@@ -19028,11 +19129,13 @@ impl<'a> Checker<'a> {
         &self,
         overload: &crate::libraries::FunctionInfo,
         receiver: Option<Ty>,
-        arg_tys: &[Option<Ty>],
-        argument_map: &[usize],
+        args_and_partial: (&[ExprId], &[Option<Ty>]),
+        mapped_arguments: (&[usize], &[bool]),
         type_args: &[Ty],
         expected_result: Option<Ty>,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let (args, arg_tys) = args_and_partial;
+        let (argument_map, whole_array_varargs) = mapped_arguments;
         let mut shape = crate::symbol_resolver::LambdaCallShape::default();
         let semantic = overload.semantic_signature();
         let mut binds = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
@@ -19100,9 +19203,19 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        self.merge_mapped_generic_argument_bindings(
+            overload,
+            (args, arg_tys),
+            argument_map,
+            whole_array_varargs,
+            type_args.len(),
+            &mut binds,
+        );
         for (&parameter, actual) in argument_map.iter().zip(arg_tys) {
-            if let (Some(actual), Some(parameter)) = (actual, semantic.params.get(parameter)) {
-                crate::symbol_resolver::unify_ty(*parameter, *actual, &mut binds);
+            if actual.is_some() {
+                let Some(parameter) = semantic.params.get(parameter) else {
+                    continue;
+                };
                 for formal in &semantic.formals {
                     if binds.contains_key(formal)
                         && crate::symbol_resolver::formal_variance_in_type(
@@ -19398,13 +19511,14 @@ impl<'a> Checker<'a> {
         &self,
         lexical_scope: &CheckerScope<'_>,
         name: &str,
-        arg_tys: &[Option<Ty>],
+        args_and_partial: (&[ExprId], &[Option<Ty>]),
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
         scope: Option<&[TypeName]>,
         type_args: &[Ty],
         expected_result: Option<Ty>,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let (args, arg_tys) = args_and_partial;
         let resolver = match scope {
             Some(scope) => self.resolver_in_scope(scope),
             None => self.resolver(),
@@ -19446,7 +19560,7 @@ impl<'a> Checker<'a> {
             let partially_applicable = self.lambda_overload_partially_applicable(
                 o,
                 None,
-                arg_tys,
+                (args, arg_tys),
                 &argument_map,
                 &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
                 type_args,
@@ -19463,8 +19577,11 @@ impl<'a> Checker<'a> {
             let Some(shape) = self.lambda_shape_for_overload(
                 o,
                 None,
-                arg_tys,
-                &argument_map,
+                (args, arg_tys),
+                (
+                    &argument_map,
+                    &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
+                ),
                 type_args,
                 expected_result,
             ) else {
@@ -19482,11 +19599,12 @@ impl<'a> Checker<'a> {
         &self,
         scope: &CheckerScope<'_>,
         name: &str,
-        arg_tys: &[Option<Ty>],
+        args_and_partial: (&[ExprId], &[Option<Ty>]),
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
         type_args: &[Ty],
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let (args, arg_tys) = args_and_partial;
         let overloads = self.companion_invoke_overloads(scope, name);
         for overload in &overloads {
             if overload.is_extension() {
@@ -19509,7 +19627,7 @@ impl<'a> Checker<'a> {
             if !self.lambda_overload_partially_applicable(
                 overload,
                 None,
-                arg_tys,
+                (args, arg_tys),
                 &argument_map,
                 &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
                 type_args,
@@ -19519,8 +19637,11 @@ impl<'a> Checker<'a> {
             if let Some(shape) = self.lambda_shape_for_overload(
                 overload,
                 None,
-                arg_tys,
-                &argument_map,
+                (args, arg_tys),
+                (
+                    &argument_map,
+                    &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
+                ),
                 type_args,
                 None,
             ) {
@@ -19535,12 +19656,13 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         receiver: Ty,
         name: &str,
-        arg_tys: &[Option<Ty>],
+        args_and_partial: (&[ExprId], &[Option<Ty>]),
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
         type_args: &[Ty],
         expected_result: Option<Ty>,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let (args, arg_tys) = args_and_partial;
         let src = self.fed_source();
         let fs = crate::libraries::FunctionSet {
             overloads: self
@@ -19593,7 +19715,7 @@ impl<'a> Checker<'a> {
             let partial = self.lambda_overload_partially_applicable(
                 o,
                 Some(binding_receiver),
-                arg_tys,
+                (args, arg_tys),
                 &argument_map,
                 &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
                 type_args,
@@ -19608,8 +19730,11 @@ impl<'a> Checker<'a> {
             if let Some(shape) = self.lambda_shape_for_overload(
                 o,
                 Some(binding_receiver),
-                arg_tys,
-                &argument_map,
+                (args, arg_tys),
+                (
+                    &argument_map,
+                    &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
+                ),
                 type_args,
                 expected_result,
             ) {
@@ -29903,7 +30028,7 @@ impl<'a> Checker<'a> {
                     self.lambda_overload_partially_applicable(
                         &candidate,
                         None,
-                        partial,
+                        (args, partial),
                         &argument_parameters,
                         &named_whole_array_varargs(
                             &argument_parameters,
@@ -29937,14 +30062,14 @@ impl<'a> Checker<'a> {
                     candidate.call_sig.lambda_receiver_params,
                 );
                 let semantic = candidate.semantic_signature();
-                let mut binds = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
-                for (&parameter, actual) in argument_parameters.iter().zip(partial) {
-                    if let (Some(&declared), Some(actual)) =
-                        (semantic.params.get(parameter), actual)
-                    {
-                        crate::symbol_resolver::unify_ty(declared, *actual, &mut binds);
-                    }
-                }
+                let binds = self.mapped_generic_call_bindings(
+                    candidate,
+                    None,
+                    (args, partial),
+                    argument_parameters,
+                    &named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig),
+                    type_args,
+                );
                 let expectations = argument_parameters
                     .iter()
                     .copied()
@@ -30329,7 +30454,7 @@ impl<'a> Checker<'a> {
                 scope,
                 receiver,
                 name,
-                &partial,
+                (args, &partial),
                 arg_names.as_deref(),
                 trailing_lambda,
                 explicit_type_args,
@@ -41568,7 +41693,7 @@ impl<'a> Checker<'a> {
                             let shape = self.top_level_lambda_shape_in_scope(
                                 scope,
                                 &name,
-                                &partial,
+                                (args, &partial),
                                 arg_names.as_deref(),
                                 true,
                                 Some(&pkg_scope),
@@ -42158,7 +42283,7 @@ impl<'a> Checker<'a> {
                             scope,
                             rt,
                             &name,
-                            partial,
+                            (args, partial),
                             arg_names.as_deref(),
                             self.file.call_has_trailing_lambda.contains(&call.0),
                             &member_extension_type_args,
@@ -43676,7 +43801,7 @@ impl<'a> Checker<'a> {
                         self.top_level_lambda_shape(
                             scope,
                             &fname,
-                            partial,
+                            (args, partial),
                             arg_names.as_deref(),
                             self.file.call_has_trailing_lambda.contains(&call.0),
                             &explicit_type_args,
@@ -43691,7 +43816,7 @@ impl<'a> Checker<'a> {
                             self.companion_invoke_lambda_shape(
                                 scope,
                                 &fname,
-                                partial,
+                                (args, partial),
                                 arg_names.as_deref(),
                                 self.file.call_has_trailing_lambda.contains(&call.0),
                                 &explicit_type_args,
@@ -43943,7 +44068,7 @@ impl<'a> Checker<'a> {
                                 scope,
                                 receiver,
                                 &fname,
-                                this_member_partial.as_deref().unwrap_or_default(),
+                                (args, this_member_partial.as_deref().unwrap_or_default()),
                                 arg_names.as_deref(),
                                 self.file.call_has_trailing_lambda.contains(&call.0),
                                 &explicit_type_args,

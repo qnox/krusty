@@ -681,83 +681,6 @@ fn parse_type_class_name(body: &[u8]) -> Option<u64> {
     class_name
 }
 
-/// For a function-type `Type` (`kotlin/FunctionN`), recover whether it is a RECEIVER function type
-/// (`Recv.(…) -> R`) and the receiver's class id: returns `(annotation_ids, first_argument_class_id)`,
-/// where `annotation_ids` contains EVERY repeated `Type.annotation` (field 100) `Annotation.id` (a caller
-/// checks whether any resolves to `kotlin/ExtensionFunctionType`) and the first `Type.argument` (field 1)
-/// carries the receiver type. The receiver id is `None` when absent.
-fn parse_type_recv_fun(body: &[u8]) -> (Vec<u64>, Option<u64>) {
-    let mut pb = Pb { b: body, i: 0 };
-    let mut annotation_ids = Vec::new();
-    let mut arg0_class = None;
-    let mut seen_arg = false;
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (2, 2) => {
-                // Type.argument (repeated, field 2) — the FIRST argument is the receiver. `Argument.type` = 2.
-                let Some(n) = pb.varint() else { break };
-                let Some(abody) = pb.bytes(n as usize) else {
-                    break;
-                };
-                if !seen_arg {
-                    seen_arg = true;
-                    let mut ap = Pb { b: abody, i: 0 };
-                    while !ap.at_end() {
-                        let Some(at) = ap.varint() else { break };
-                        match (at >> 3, at & 7) {
-                            (2, 2) => {
-                                if let Some(tn) = ap.varint() {
-                                    if let Some(tb) = ap.bytes(tn as usize) {
-                                        arg0_class = parse_type_class_name(tb);
-                                    }
-                                }
-                            }
-                            (_, w) => {
-                                if ap.skip(w).is_none() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            (100, 2) => {
-                // Type.annotation (extension) — `Annotation.id` = 1 (the annotation class id).
-                let Some(n) = pb.varint() else { break };
-                let Some(abody) = pb.bytes(n as usize) else {
-                    break;
-                };
-                let mut ap = Pb { b: abody, i: 0 };
-                while !ap.at_end() {
-                    let Some(at) = ap.varint() else { break };
-                    match (at >> 3, at & 7) {
-                        (1, 0) => {
-                            if let Some(id) = ap.varint() {
-                                // `Type.annotation` is repeated. Preserve the whole semantic set so a
-                                // later, unrelated type-use annotation cannot overwrite an earlier
-                                // receiver-function marker in this lightweight parameter decoder.
-                                annotation_ids.push(id);
-                            }
-                        }
-                        (_, w) => {
-                            if ap.skip(w).is_none() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    (annotation_ids, arg0_class)
-}
-
 /// `Function.flags` bit for `suspend` (kotlin metadata `Flags.IS_SUSPEND`, function flag bit 13).
 const IS_SUSPEND_BIT: u64 = 1 << 13;
 
@@ -1432,6 +1355,27 @@ fn vararg_element_type<'a>(
     )
 }
 
+/// Project receiver-function facts from the fully decoded Kotlin type. This keeps annotation,
+/// type-table, and nested generic decoding in [`decode_metadata_type`] instead of maintaining a
+/// second protobuf walk that can lose a table-backed or parameterized receiver.
+fn receiver_function_shape(ty: Option<Ty>) -> (bool, Option<TypeName>) {
+    let Some(Ty::Fun(signature)) = ty.map(Ty::non_null) else {
+        return (false, None);
+    };
+    if !signature.has_receiver {
+        return (false, None);
+    }
+    let receiver =
+        signature
+            .params
+            .get(signature.context_count)
+            .and_then(|receiver| match receiver.non_null() {
+                Ty::Obj(name, _) => Some(name),
+                _ => None,
+            });
+    (true, receiver)
+}
+
 fn metadata_type_ref<'a>(
     body: Option<&'a [u8]>,
     id: Option<u64>,
@@ -1449,6 +1393,56 @@ struct TypeParameterContext {
     formals: Vec<String>,
     formal_bounds: Vec<Vec<Ty>>,
     erasure_bounds: HashMap<String, Ty>,
+}
+
+fn decode_metadata_type_ref(
+    resolved: Option<(&[u8], bool)>,
+    type_table: Option<&[u8]>,
+    records: &[Rec],
+    d2: &[String],
+    context: Option<&TypeParameterContext>,
+) -> Option<Ty> {
+    let (body, table_nullable) = resolved?;
+    let context = context?;
+    decode_metadata_type(
+        body,
+        type_table,
+        records,
+        d2,
+        &context.names,
+        &context.erasure_bounds,
+        table_nullable,
+        0,
+    )
+}
+
+fn decode_value_parameter_types(
+    parameter: &ParsedValueParam,
+    type_table: Option<&[u8]>,
+    records: &[Rec],
+    d2: &[String],
+    context: Option<&TypeParameterContext>,
+) -> (Option<Ty>, Option<Ty>) {
+    let declared = decode_metadata_type_ref(
+        value_parameter_type(parameter, type_table),
+        type_table,
+        records,
+        d2,
+        context,
+    );
+    let receiver_shape =
+        if parameter.vararg_elem_body.is_some() || parameter.vararg_elem_id.is_some() {
+            decode_metadata_type_ref(
+                vararg_element_type(parameter, type_table),
+                type_table,
+                records,
+                d2,
+                context,
+            )
+        } else {
+            declared
+        };
+    (declared, receiver_shape)
 }
 
 fn type_parameter_context(
@@ -2561,18 +2555,12 @@ fn decode_functions(
                         function_type_table,
                     );
                     let decode_type = |body, id| {
-                        let context = type_context.as_ref()?;
-                        let (body, table_nullable) =
-                            metadata_type_ref(body, id, function_type_table)?;
-                        decode_metadata_type(
-                            body,
+                        decode_metadata_type_ref(
+                            metadata_type_ref(body, id, function_type_table),
                             function_type_table,
                             records,
                             d2,
-                            &context.names,
-                            &context.erasure_bounds,
-                            table_nullable,
-                            0,
+                            type_context.as_ref(),
                         )
                     };
                     let receiver_ty = decode_type(pf.receiver_body.as_deref(), pf.receiver_type_id);
@@ -2581,26 +2569,14 @@ fn decode_functions(
                     let ret_class = ret_ty.and_then(declared_classifier);
                     let decode_parameter = |p: &ParsedValueParam| {
                         let resolved_type = value_parameter_type(p, function_type_table);
-                        let decoded_type = resolved_type.and_then(|(body, table_nullable)| {
-                            let context = type_context.as_ref()?;
-                            decode_metadata_type(
-                                body,
-                                function_type_table,
-                                records,
-                                d2,
-                                &context.names,
-                                &context.erasure_bounds,
-                                table_nullable,
-                                0,
-                            )
-                        });
-                        let (recv_annotations, recv_class) = resolved_type
-                            .map(|(body, _)| parse_type_recv_fun(body))
-                            .unwrap_or_default();
-                        let recv_fun = recv_annotations.iter().copied().any(|id| {
-                            resolve_class_name(records, d2, id as usize)
-                                .is_some_and(|name| name == "kotlin/ExtensionFunctionType")
-                        });
+                        let (decoded_type, receiver_type) = decode_value_parameter_types(
+                            p,
+                            function_type_table,
+                            records,
+                            d2,
+                            type_context.as_ref(),
+                        );
+                        let (recv_fun, recv_fun_receiver) = receiver_function_shape(receiver_type);
                         let type_facts = resolved_type
                             .map(|(body, table_nullable)| {
                                 let mut facts = parse_type_facts(body);
@@ -2623,13 +2599,7 @@ fn decode_functions(
                                 .with_nullable(type_facts.nullable)
                                 .with_suspend_fun(type_facts.suspend_fun)
                                 .with_has_type_facts(resolved_type.is_some()),
-                            recv_fun_receiver: if recv_fun {
-                                recv_class
-                                    .and_then(|id| resolve_class_name(records, d2, id as usize))
-                                    .map(|name| type_name(&name))
-                            } else {
-                                None
-                            },
+                            recv_fun_receiver,
                         }
                     };
                     let value_params: Vec<MetaValueParam> =
@@ -3003,34 +2973,20 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
                             let Some(parameter) = parse_value_parameter(vbody) else {
                                 continue;
                             };
-                            let resolved_type =
-                                value_parameter_type(&parameter, type_table.as_deref());
-                            let is_recv_fun = resolved_type.is_some_and(|(body, _)| {
-                                parse_type_recv_fun(body).0.iter().copied().any(|id| {
-                                    resolve_class_name(records, d2, id as usize)
-                                        .is_some_and(|name| name == "kotlin/ExtensionFunctionType")
-                                })
-                            });
                             names.push(
                                 resolve_string(records, d2, parameter.name_id as usize)
                                     .unwrap_or_default(),
                             );
                             defaults.push(parameter.has_default);
-                            let decoded = resolved_type.and_then(|(body, table_nullable)| {
-                                let context = type_context.as_ref()?;
-                                decode_metadata_type(
-                                    body,
-                                    type_table.as_deref(),
-                                    records,
-                                    d2,
-                                    &context.names,
-                                    &context.erasure_bounds,
-                                    table_nullable,
-                                    0,
-                                )
-                            });
+                            let (decoded, receiver_type) = decode_value_parameter_types(
+                                &parameter,
+                                type_table.as_deref(),
+                                records,
+                                d2,
+                                type_context.as_ref(),
+                            );
                             types.push(decoded.unwrap_or(Ty::Error));
-                            recv_fun.push(is_recv_fun);
+                            recv_fun.push(receiver_function_shape(receiver_type).0);
                             if parameter.vararg_elem_body.is_some()
                                 || parameter.vararg_elem_id.is_some()
                             {
@@ -4895,8 +4851,8 @@ mod builtin_class_access_tests {
 mod module_reader_tests {
     use super::{
         decode_metadata_type, decode_properties, parse_function, parse_type_alias,
-        parse_type_facts, parse_type_recv_fun, primary_erasure_bounds, read_kotlin_module,
-        value_parameter_type, MetaCtx, ParsedValueParam,
+        parse_type_facts, primary_erasure_bounds, read_kotlin_module, value_parameter_type,
+        MetaCtx, ParsedValueParam,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
@@ -5157,19 +5113,14 @@ mod module_reader_tests {
             "sample/TypeUseMarker".to_string(),
         ];
         let expected = Ty::fun_with_shape(vec![Ty::String], Ty::Unit, 0, true, false);
-        for (annotations, expected_ids) in [
-            ([extension_annotation, unrelated_annotation], vec![3, 4]),
-            ([unrelated_annotation, extension_annotation], vec![4, 3]),
+        for annotations in [
+            [extension_annotation, unrelated_annotation],
+            [unrelated_annotation, extension_annotation],
         ] {
             let body = prefix
                 .into_iter()
                 .chain(annotations.into_iter().flatten())
                 .collect::<Vec<_>>();
-            assert_eq!(
-                parse_type_recv_fun(&body),
-                (expected_ids, Some(1)),
-                "the lightweight value-parameter decoder must preserve every annotation too"
-            );
             assert_eq!(
                 decode_metadata_type(
                     &body,
