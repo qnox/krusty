@@ -71,6 +71,11 @@ pub(crate) fn existing_type_name_in(names: &NameTree, internal: TypeName) -> Opt
     names.existing_from(type_names(), internal.name_id())
 }
 
+/// Copy a global type-name identity into another name tree without rendering it to text.
+pub(crate) fn insert_type_name_in(names: &NameTree, internal: TypeName) -> NameId {
+    names.insert_from(type_names(), internal.name_id())
+}
+
 fn split_nested_name(internal: &str) -> Option<(&str, &str)> {
     let classifier_start = internal.rfind('/').map_or(0, |slash| slash + 1);
     let classifier = &internal[classifier_start..];
@@ -1968,6 +1973,8 @@ mod tests {
             type_name_from(&names, names.insert("kotlin/collections/Map.Entry")),
             dollar
         );
+        let copied = insert_type_name_in(&names, dollar);
+        assert_eq!(type_name_from(&names, copied), dollar);
 
         let nested = type_name_child(type_name("demo"), "Outer/Inner");
         assert!(nested.matches("demo/Outer/Inner"));
