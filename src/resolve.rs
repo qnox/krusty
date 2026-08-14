@@ -12988,10 +12988,11 @@ impl CheckerScope<'_> {
             .unwrap_or(Ty::obj("java/lang/Object"))
     }
 
-    /// Whether `name` is a `reified` type parameter in scope.
-    fn is_reified(&self, name: &str) -> bool {
+    /// Declaration-owned semantic type of the reified parameter spelled `name`, if this scope
+    /// binds one. Source spelling is lookup input only; consumers receive the bound identity.
+    fn reified_tparam(&self, name: &str) -> Option<Ty> {
         self.tparam_binding(name)
-            .is_some_and(|(_, _, reified)| reified)
+            .and_then(|(parameter, _, reified)| reified.then_some(parameter))
     }
 
     /// Bounds beyond the first for whichever in-scope parameter has `bound` as its first. A type
@@ -34464,11 +34465,11 @@ impl<'a> Checker<'a> {
                 // skipped, not mis-read.
                 let unbound = if let Expr::Name(n) = self.file.expr(recv).clone() {
                     // `T::class` on a REIFIED type parameter is an unbound literal: the lowerer
-                    // substitutes `T` to the call-site type (`reified_subst`) when it expands the inline
-                    // body. Recorded as `Obj(T)`, a marker the lowerer resolves by name. Only a REIFIED
-                    // `T` is accepted — kotlinc rejects a class literal on a non-reified type parameter.
+                    // substitutes its declaration-owned identity to the call-site type
+                    // (`reified_subst`) when it expands the inline body. Only a REIFIED `T` is
+                    // accepted — kotlinc rejects a class literal on a non-reified type parameter.
                     self.class_literal_unbound_ty(scope, &n)
-                        .or_else(|| scope.is_reified(&n).then(|| Ty::obj(&n)))
+                        .or_else(|| scope.reified_tparam(&n))
                 } else {
                     // A QUALIFIED type name (`pkg.Cls::class`, `java.util.ArrayList::class`,
                     // `Outer.Nested::class`) is an unbound literal exactly like the simple name an
@@ -48709,6 +48710,61 @@ val result = object { fun value(): String = captured }
         assert_ne!(
             anonymous_parameters, function_parameters,
             "a nearer classifier named T shadows the function's semantic T"
+        );
+    }
+
+    #[test]
+    fn reified_class_literal_handoff_keeps_the_declaration_parameter_identity() {
+        // A same-named classifier makes source spelling especially unsafe here: `T::class` in the
+        // function body denotes the function's declaration-owned type parameter, not class `T`.
+        // Lowering must receive that semantic identity directly instead of an `Obj("T")` marker it
+        // would have to reinterpret by spelling.
+        let source = "class T\ninline fun <reified T : Any> literal() = T::class";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let literal = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::CallableRef { name, .. } if name == "class")
+                    .then_some(ExprId(index as u32))
+            })
+            .expect("class-literal expression");
+        let declaration_start = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Fun(function) if function.name == "literal" => {
+                    Some(function.signature_span.lo)
+                }
+                _ => None,
+            })
+            .expect("generic function declaration");
+        let files = vec![file];
+        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(Vec::new()),
+        ));
+        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
+            panic!("one declaration-owned type-parameter identity expected");
+        };
+        let Some(ExprLowering::ClassLiteral {
+            unbound: Some(Ty::TyParam(actual, _)),
+        }) = info.expr_lowers.get(&literal)
+        else {
+            panic!(
+                "class literal must carry a semantic TyParam, got {:?}",
+                info.expr_lowers.get(&literal)
+            );
+        };
+        assert_eq!(*actual, semantic.as_str());
+        assert_ne!(
+            *actual, "T",
+            "semantic identity must not be source spelling"
         );
     }
 

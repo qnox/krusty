@@ -222,7 +222,6 @@ fn lower_file_at_reporting_impl(
         field_accessor_var_props: std::collections::HashSet::new(),
         cur_fn: crate::ir::IrFunctionScope::default(),
         cur_fn_suspend: false,
-        cur_tparams: Vec::new(),
         synthetic_seq_by_owner: HashMap::new(),
         local_class_captures: HashMap::new(),
         shared_cell_vars: std::collections::HashSet::new(),
@@ -248,7 +247,6 @@ fn lower_file_at_reporting_impl(
         inline_active: Vec::new(),
         inline_member_callsites: Vec::new(),
         reified_subst: Vec::new(),
-        cur_emitted_reified: std::collections::HashSet::new(),
         inline_return: Vec::new(),
         inline_lambda_ret: Vec::new(),
         closure_return_target: None,
@@ -2629,7 +2627,6 @@ fn lower_file_at_reporting_impl(
 
     // Pass 2: lower bodies.
     for &d in &file.decls {
-        lo.cur_emitted_reified.clear();
         match file.decl(d) {
             Decl::Fun(f) if !has_callable_body(f, d) => {}
             Decl::Fun(f) => {
@@ -2639,7 +2636,6 @@ fn lower_file_at_reporting_impl(
                 lo.next_value = 0;
                 lo.cur_class = None;
                 lo.cur_fn_suspend = f.is_suspend();
-                lo.cur_emitted_reified = f.reified_type_params.clone();
                 let (fid, sig) = if f.receiver.is_some() {
                     // Extension bodies bind `this` to parameter zero.
                     let (recv_ty, sig) = syms.source_extension_function(file_index, d)?;
@@ -2659,9 +2655,9 @@ fn lower_file_at_reporting_impl(
                     let fid = *lo.fun_ids_by_decl.get(&d)?;
                     (fid, sig)
                 };
-                lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, f.name.clone());
-                lo.cur_tparams =
-                    callable_tparams(sig.generic_sig.as_ref(), &f.non_null_type_params);
+                let emitted_reified = emitted_reified_parameters(info, f)?;
+                lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, f.name.clone())
+                    .with_emitted_reified_parameters(emitted_reified);
                 let mut param_vals = Vec::new();
                 for (p, t) in f.params.iter().zip(&sig.params) {
                     let v = lo.fresh_value();
@@ -2883,19 +2879,6 @@ fn lower_file_at_reporting_impl(
                                 .get(signature_index)
                                 .cloned()
                         })?;
-                    // Method parameters shadow same-named class parameters. Both shapes come from
-                    // checker-owned signatures; lowering does not decode their AST declarations.
-                    lo.cur_tparams =
-                        callable_tparams(sig.generic_sig.as_ref(), &m.non_null_type_params);
-                    for ct in class_tparams(
-                        class_sig.type_params(),
-                        class_sig.type_param_bounds(),
-                        c.is_value,
-                    ) {
-                        if !lo.cur_tparams.iter().any(|(n, _, _)| *n == ct.0) {
-                            lo.cur_tparams.push(ct);
-                        }
-                    }
                     if let Some(extension) = extension_signature.as_ref() {
                         lo.scope
                             .push(("$dispatch".to_string(), dispatch_v, Ty::obj(&internal)));
@@ -2970,11 +2953,6 @@ fn lower_file_at_reporting_impl(
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
                     lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, gname);
-                    lo.cur_tparams = class_tparams(
-                        class_sig.type_params(),
-                        class_sig.type_param_bounds(),
-                        c.is_value,
-                    );
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -2998,11 +2976,6 @@ fn lower_file_at_reporting_impl(
                         lo.next_value = 0;
                         lo.cur_class = Some(type_name(&internal));
                         lo.cur_fn = crate::ir::IrFunctionScope::declared(sfid, sname);
-                        lo.cur_tparams = class_tparams(
-                            class_sig.type_params(),
-                            class_sig.type_param_bounds(),
-                            c.is_value,
-                        );
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3045,11 +3018,6 @@ fn lower_file_at_reporting_impl(
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
                     lo.cur_fn = crate::ir::IrFunctionScope::declared(gfid, gname);
-                    lo.cur_tparams = class_tparams(
-                        class_sig.type_params(),
-                        class_sig.type_param_bounds(),
-                        c.is_value,
-                    );
                     lo.ir.fn_params.entry(gfid).or_insert_with(|| {
                         let mut names = vec!["$receiver".to_string()];
                         names.extend(
@@ -3083,11 +3051,6 @@ fn lower_file_at_reporting_impl(
                         lo.next_value = 0;
                         lo.cur_class = Some(type_name(&internal));
                         lo.cur_fn = crate::ir::IrFunctionScope::declared(sfid, sname);
-                        lo.cur_tparams = class_tparams(
-                            class_sig.type_params(),
-                            class_sig.type_param_bounds(),
-                            c.is_value,
-                        );
                         let setter_param = ast::setter_param_or_value(setter.param.as_ref());
                         lo.ir.fn_params.entry(sfid).or_insert_with(|| {
                             let mut names = vec!["$receiver".to_string()];
@@ -3143,11 +3106,6 @@ fn lower_file_at_reporting_impl(
                         lo.cur_class = Some(type_name(&internal));
                         lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
                         lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, gname);
-                        lo.cur_tparams = class_tparams(
-                            class_sig.type_params(),
-                            class_sig.type_param_bounds(),
-                            c.is_value,
-                        );
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3175,11 +3133,6 @@ fn lower_file_at_reporting_impl(
                             lo.cur_class = Some(type_name(&internal));
                             lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
                             lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, sname);
-                            lo.cur_tparams = class_tparams(
-                                class_sig.type_params(),
-                                class_sig.type_param_bounds(),
-                                c.is_value,
-                            );
                             let this_v = lo.fresh_value();
                             lo.scope
                                 .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3520,11 +3473,6 @@ fn lower_file_at_reporting_impl(
                             lo.boxed_elem.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(type_name(&internal));
-                            lo.cur_tparams = class_tparams(
-                                class_sig.type_params(),
-                                class_sig.type_param_bounds(),
-                                c.is_value,
-                            );
                             let pty = class_sig.ctor_params[parameter];
                             let v = lo.fresh_value(); // value-index 0 = the underlying param
                             lo.scope.push((p.name.clone(), v, pty));
@@ -3549,11 +3497,6 @@ fn lower_file_at_reporting_impl(
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
-                    lo.cur_tparams = class_tparams(
-                        class_sig.type_params(),
-                        class_sig.type_param_bounds(),
-                        c.is_value,
-                    );
                     let this_v = lo.fresh_value(); // value 0 = `this`
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3635,13 +3578,6 @@ fn lower_file_at_reporting_impl(
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
-                    // Property initializers run here (`var s: T = x as T`), so class type params are
-                    // in scope as `as T` cast targets.
-                    lo.cur_tparams = class_tparams(
-                        class_sig.type_params(),
-                        class_sig.type_param_bounds(),
-                        c.is_value,
-                    );
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3867,11 +3803,6 @@ fn lower_file_at_reporting_impl(
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(type_name(&internal));
-                        lo.cur_tparams = class_tparams(
-                            class_sig.type_params(),
-                            class_sig.type_param_bounds(),
-                            c.is_value,
-                        );
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -4694,61 +4625,33 @@ fn checked_type(info: &FrontendTypeInfo, reference: &ast::TypeRef) -> Ty {
     })
 }
 
-/// A class is in the IR subset if: a primary constructor of only `val`/`var` properties, no base
-/// class/interfaces, no body properties, no companion/secondary/init, and methods (expr- or
-/// The type parameters of a generic function as `(name, bound, non_null)`, for lowering `as T`. `bound`
-/// is the declared upper bound kept VERBATIM as an `IrType` — `<T : CharSequence>` → `CharSequence`,
-/// an unbounded `<T>` → `kotlin/Any` (NOT erased here; the JVM emitter collapses it to a concrete
-/// class). `non_null` marks a non-nullable bound (`<T : Any>`, `<T : Foo>`) — such a cast null-checks
-/// (kotlinc emits `Intrinsics.checkNotNull`); an unbounded `<T>` (= `<T : Any?>`) does not.
-fn callable_tparams(
-    signature: Option<&crate::libraries::GenericSig>,
-    non_null: &std::collections::HashSet<String>,
-) -> Vec<(String, Ty, bool)> {
-    let Some(signature) = signature else {
-        return Vec::new();
-    };
-    signature
-        .formals
-        .iter()
-        .zip(&signature.formal_bounds)
-        .map(|(name, bounds)| {
-            // An empty bound list is the semantic representation of Kotlin's implicit `Any?` bound.
-            let bound = bounds
-                .first()
-                .copied()
-                .unwrap_or(Ty::nullable(Ty::obj("kotlin/Any")));
-            (
-                name.clone(),
-                ty_to_ir(bound),
-                non_null.contains(name) || !bound.is_nullable(),
-            )
-        })
-        .collect()
-}
-
-/// Class-level type parameters (`class C<T : B>`) as cast targets, so an `x as T` in a member body or
-/// property initializer erases to its bound (`Object` for an unbounded `T`) exactly like kotlinc —
-/// rather than falling through to `ty_ref` (which rejects a bare `T`) and bailing the whole file.
-fn class_tparams(names: &[String], bounds: &[Ty], is_value: bool) -> Vec<(String, Ty, bool)> {
-    // A value/inline class's generic underlying (`value class Foo<T : String>(val x: T)`) has a
-    // box/unbox erasure krusty doesn't model — an `as T` there must keep bailing (skip the file),
-    // not lower to a checkcast against the bound (which would store the wrong runtime type).
-    if is_value {
-        return Vec::new();
+/// Declaration-owned identities of the parameters marked `reified` on `function`.
+///
+/// The parser's ordered declarations identify which modifier belongs to which formal; the checker
+/// supplies the parallel semantic identities. Once paired at this boundary, lowering never compares
+/// a use against the source spelling again.
+fn emitted_reified_parameters(
+    info: &FrontendTypeInfo,
+    function: &ast::FunDecl,
+) -> Option<std::collections::HashSet<String>> {
+    if function.reified_type_params.is_empty() {
+        return Some(Default::default());
     }
-    names
-        .iter()
-        .cloned()
-        .zip(bounds.iter().copied())
-        .map(|(name, bound)| (name, ty_to_ir(bound), !bound.is_nullable()))
-        .collect()
+    let semantic = info.resolved_declaration_type_parameters(function.signature_span.lo);
+    if semantic.len() != function.type_params.len() {
+        return None;
+    }
+    Some(
+        function
+            .type_params
+            .iter()
+            .zip(semantic)
+            .filter(|(source, _)| function.reified_type_params.contains(*source))
+            .map(|(_, identity)| identity.clone())
+            .collect(),
+    )
 }
 
-/// block-bodied) without an extension receiver.
-/// A `const val`'s compile-time literal initializer as an `IrConst`, narrowed to its declared type
-/// (`const val b: Byte = 1` → `Byte(1)`). `None` for any non-literal initializer (then the read stays a
-/// `getstatic`). Lets a same-file const read inline the value (`ldc`), byte-identical to kotlinc.
 /// Whether every `break`/`continue` EXPRESSION in `e` sits in a TAIL position — one where the operand
 /// stack is empty at the jump (an elvis RHS, an `if`/`when`-branch value, a block's trailing value). A
 /// `break`/`continue` used mid-expression (`x + break`, `inc() downTo continue`, `while (break)`) would
@@ -4887,6 +4790,9 @@ fn library_const_ir(lc: &crate::libraries::LibraryConst) -> crate::ir::IrConst {
     }
 }
 
+/// A `const val`'s compile-time literal initializer as an `IrConst`, narrowed to its declared type
+/// (`const val b: Byte = 1` → `Byte(1)`). `None` for any non-literal initializer (then the read stays a
+/// `getstatic`). Lets a same-file const read inline the value (`ldc`), byte-identical to kotlinc.
 fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir::IrConst> {
     use crate::ir::IrConst;
     use ast::Expr;
@@ -5561,10 +5467,6 @@ pub(crate) struct Lower<'a> {
     /// suspension that the CPS flattener models only at unconditional positions, so `&&`/`||` keep the
     /// eager (operands-unconditional) form there until the flattener models conditional suspension.
     cur_fn_suspend: bool,
-    /// Type parameters in scope for the function body being lowered: `(name, bound, non_null)`. `bound`
-    /// is the declared upper bound as an un-erased `IrType` (`kotlin/Any` when unbounded); `non_null`
-    /// is set for a non-nullable bound (`<T : Any>`, `<T : Foo>`) — drives the `as T` null assertion.
-    cur_tparams: Vec<(String, Ty, bool)>,
     /// Synthetic-method sequence shared by declarations with the same JVM owner and name.
     synthetic_seq_by_owner: HashMap<(Option<TypeName>, String), u32>,
     /// A local class's captures, by IR class id. The class carries each one as a leading constructor
@@ -5658,10 +5560,6 @@ pub(crate) struct Lower<'a> {
     inline_member_callsites: Vec<Option<TypeName>>,
     /// Active reified type bindings. A stack allows nested inline expansions.
     reified_subst: Vec<std::collections::HashMap<String, Ty>>,
-    /// Reified type parameters of the fn body currently being lowered AS AN EMITTED METHOD (a
-    /// `<reified T>` inline fn admitted for facade emission): `T::class` lowers to the
-    /// `reifiedOperationMarker` placeholder instead of a resolved class constant.
-    cur_emitted_reified: std::collections::HashSet<String>,
     /// Active inline-fn return targets while expanding an `inline fun` whose body has `return`: each is
     /// `(result slot, end label, return type)`. A `return x` in the inlined body lowers to `result = x;
     /// break@end` (the body is wrapped in a `do { … } while(false)` labeled `end`), turning the function
@@ -7624,30 +7522,20 @@ impl<'a> Lower<'a> {
     /// A `ReifiedClassMarker` node when `ty` is a type parameter of the fn body currently lowered
     /// as an EMITTED reified method; `None` otherwise (the caller resolves the class normally).
     fn emitted_reified_marker(&mut self, ty: Ty) -> Option<u32> {
-        // The checker records the literal's receiver either as a genuine `TyParam` or as an
-        // unresolved bare `Obj("T")` classifier spelling — both name the reified parameter.
-        let (source, bound) = match ty {
-            Ty::TyParam(name, bound) => (
-                crate::types::type_parameter_source_name(name).to_string(),
-                Some(*bound),
-            ),
-            Ty::Obj(name, []) => (name.render(), None),
-            _ => return None,
+        let Ty::TyParam(identity, bound) = ty else {
+            return None;
         };
-        if !self.cur_emitted_reified.contains(&source) {
+        if !self.cur_fn.emitted_reified_parameters.contains(identity) {
             return None;
         }
         let erased = bound
-            .or_else(|| {
-                self.cur_tparams
-                    .iter()
-                    .find(|(name, _, _)| *name == source)
-                    .map(|(_, bound, _)| *bound)
-            })
-            .and_then(|bound| bound.non_null().obj_internal())
+            .non_null()
+            .obj_internal()
             .unwrap_or_else(crate::types::wk::any);
         Some(self.ir.add_expr(IrExpr::ReifiedClassMarker {
-            name: source,
+            // The JVM marker ABI genuinely requires the source parameter name as text; semantic
+            // membership above is already complete before this boundary conversion.
+            name: crate::types::type_parameter_source_name(identity).to_string(),
             erased,
         }))
     }

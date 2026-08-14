@@ -1635,6 +1635,11 @@ pub struct IrFile {
 pub struct IrFunctionScope {
     pub function: Option<u32>,
     pub source_name: String,
+    /// Declaration-owned type-parameter identities whose class-literal operations may remain as
+    /// reified placeholders in this emitted method. Kept on the lexical function scope so nested
+    /// inline expansion saves/restores the fact with its owner instead of a parallel current-state
+    /// field recovering parameters from source spelling.
+    pub emitted_reified_parameters: std::collections::HashSet<String>,
 }
 
 impl IrFunctionScope {
@@ -1642,6 +1647,7 @@ impl IrFunctionScope {
         Self {
             function: Some(function),
             source_name,
+            emitted_reified_parameters: Default::default(),
         }
     }
 
@@ -1649,7 +1655,16 @@ impl IrFunctionScope {
         Self {
             function: None,
             source_name,
+            emitted_reified_parameters: Default::default(),
         }
+    }
+
+    pub fn with_emitted_reified_parameters(
+        mut self,
+        parameters: std::collections::HashSet<String>,
+    ) -> Self {
+        self.emitted_reified_parameters = parameters;
+        self
     }
 }
 

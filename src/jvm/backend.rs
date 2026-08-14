@@ -920,7 +920,7 @@ mod tests {
             parse_source_with_detected_features(
                 "package p\nfun helper(): String = \"OK\"\n\
                  inline operator fun String.unaryMinus(): String = this\n\
-                 inline fun <reified T> spliceOnly(): String = \"x\"\n\
+                 inline fun <reified T> spliceOnly(value: Any): Boolean = value is T\n\
                  val answer: Int = 42",
                 &mut diags,
             ),
