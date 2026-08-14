@@ -3849,6 +3849,9 @@ fn emit_class(
     for itf in c.interfaces.iter_rendered() {
         cw.add_interface(&itf);
     }
+    // A class with a `companion object`: its `public static final Companion` field LEADS the field
+    // table (kotlinc's order), before the instance fields and any hoisted statics.
+    add_companion_field(&mut cw, c);
     // Public fields (the IR slice reads them cross-class directly; kotlinc uses private + getters —
     // an ABI refinement, not a runtime difference).
     // Backing fields are private; access goes through the synthesized `getX()`/`setX()` accessors
@@ -4347,84 +4350,6 @@ fn emit_class(
             emit_ctor_marker_accessor(&fq_name, &sc_param_tys, &mut cw);
         }
     }
-    // A class with a `companion object`: a `public static final Companion` field of the companion
-    // type, constructed in this class's `<clinit>`.
-    // A class with a `companion object` gets a `public static final Companion` field constructed in
-    // `<clinit>`; a non-const companion `val` (a static field on this class whose initializer is not a
-    // compile-time literal) is initialized in the SAME `<clinit>` (the `ConstantValue` path covers only
-    // folded `const val`s). Both share one `<clinit>` so it is never emitted twice.
-    {
-        let clinit_statics: Vec<&crate::ir::IrStatic> = ir
-            .statics
-            .iter()
-            .filter(|s| {
-                s.owner_matches(&fq_name) && !(s.is_const && const_value_idx_peek(ir, s.init))
-            })
-            .collect();
-        add_companion_field(&mut cw, c);
-        if c.companion_class.is_some() || !clinit_statics.is_empty() {
-            let mut e = Emitter::new(
-                ir,
-                &mut cw,
-                env,
-                &fq_name,
-                facade,
-                Ty::Unit,
-                clinit_statics.iter().map(|property| property.init),
-            );
-            let mut clinit = CodeBuilder::new(0);
-            emit_companion_init(e.cw, &mut clinit, &fq_name, c);
-            for s in &clinit_statics {
-                e.emit_value(s.init, &mut clinit);
-                let jt = ir_ty_to_jvm(&s.ty);
-                let fref = e.cw.fieldref(&fq_name, &s.name, &type_descriptor(jt));
-                clinit.putstatic(fref, slot_words(jt) as i32);
-            }
-            clinit.ret_void();
-            clinit.ensure_locals(e.next_slot);
-            clinit.link();
-            e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
-        }
-    }
-    // HOISTED companion properties: the private static field lives on THIS class, so the companion's
-    // delegating accessors reach it through PUBLIC synthetic `access$get<X>$cp`/`access$set<X>$cp`
-    // bridges here — kotlinc's hoisted-companion access shape.
-    for s in ir
-        .statics
-        .iter()
-        .filter(|s| s.companion_hoisted && s.owner_matches(&fq_name))
-    {
-        let jt = ir_ty_to_jvm(&s.ty);
-        let desc = type_descriptor(jt);
-        let mut g = CodeBuilder::new(0);
-        let fref = cw.fieldref(&fq_name, &s.name, &desc);
-        g.getstatic(fref, slot_words(jt) as i32);
-        emit_return(jt, &mut g);
-        g.ensure_locals(0);
-        g.link();
-        cw.add_method(
-            0x1009, /* PUBLIC | STATIC | SYNTHETIC */
-            &format!("access${}$cp", property_getter_name(&s.name)),
-            &format!("(){desc}"),
-            &g,
-        );
-        if s.is_var {
-            let words = slot_words(jt);
-            let mut st = CodeBuilder::new(words);
-            load(jt, 0, &mut st);
-            let fref = cw.fieldref(&fq_name, &s.name, &desc);
-            st.putstatic(fref, slot_words(jt) as i32);
-            st.ret_void();
-            st.ensure_locals(words);
-            st.link();
-            cw.add_method(
-                0x1009,
-                &format!("access${}$cp", property_setter_name(&s.name)),
-                &format!("({desc})V"),
-                &st,
-            );
-        }
-    }
     // Instance methods (concrete emitted; abstract declared with `ACC_ABSTRACT`, no Code).
     // kotlinc emits a property's ACCESSORS before the class's declared functions (source order: ctor
     // properties precede the body). The IR appends synthesized accessors after the declared methods, so
@@ -4491,6 +4416,81 @@ fn emit_class(
         }
     }
     emit_bridges(c, &mut cw);
+    // HOISTED companion properties: the private static field lives on THIS class, so the companion's
+    // delegating accessors reach it through PUBLIC synthetic `access$get<X>$cp`/`access$set<X>$cp`
+    // bridges — emitted AFTER the instance methods, right before `<clinit>` (kotlinc's order).
+    for s in ir
+        .statics
+        .iter()
+        .filter(|s| s.companion_hoisted && s.owner_matches(&fq_name))
+    {
+        let jt = ir_ty_to_jvm(&s.ty);
+        let desc = type_descriptor(jt);
+        let mut g = CodeBuilder::new(0);
+        let fref = cw.fieldref(&fq_name, &s.name, &desc);
+        g.getstatic(fref, slot_words(jt) as i32);
+        emit_return(jt, &mut g);
+        g.ensure_locals(0);
+        g.link();
+        cw.add_method(
+            0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
+            &format!("access${}$cp", property_getter_name(&s.name)),
+            &format!("(){desc}"),
+            &g,
+        );
+        if s.is_var {
+            let words = slot_words(jt);
+            let mut st = CodeBuilder::new(words);
+            load(jt, 0, &mut st);
+            let fref = cw.fieldref(&fq_name, &s.name, &desc);
+            st.putstatic(fref, slot_words(jt) as i32);
+            st.ret_void();
+            st.ensure_locals(words);
+            st.link();
+            cw.add_method(
+                0x1019,
+                &format!("access${}$cp", property_setter_name(&s.name)),
+                &format!("({desc})V"),
+                &st,
+            );
+        }
+    }
+    // A class with a `companion object` gets its `<clinit>` LAST among the methods (kotlinc's
+    // order): the `Companion` instance store, then each non-const owner static's initializer (a
+    // hoisted companion property, or a companion `const val` whose initializer isn't a compile-time
+    // literal — the `ConstantValue` path covers only folded consts). One shared `<clinit>`.
+    {
+        let clinit_statics: Vec<&crate::ir::IrStatic> = ir
+            .statics
+            .iter()
+            .filter(|s| {
+                s.owner_matches(&fq_name) && !(s.is_const && const_value_idx_peek(ir, s.init))
+            })
+            .collect();
+        if c.companion_class.is_some() || !clinit_statics.is_empty() {
+            let mut e = Emitter::new(
+                ir,
+                &mut cw,
+                env,
+                &fq_name,
+                facade,
+                Ty::Unit,
+                clinit_statics.iter().map(|property| property.init),
+            );
+            let mut clinit = CodeBuilder::new(0);
+            emit_companion_init(e.cw, &mut clinit, &fq_name, c);
+            for s in &clinit_statics {
+                e.emit_value(s.init, &mut clinit);
+                let jt = ir_ty_to_jvm(&s.ty);
+                let fref = e.cw.fieldref(&fq_name, &s.name, &type_descriptor(jt));
+                clinit.putstatic(fref, slot_words(jt) as i32);
+            }
+            clinit.ret_void();
+            clinit.ensure_locals(e.next_slot);
+            clinit.link();
+            e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+        }
+    }
     // A singleton `object` (emitted AFTER the instance methods — kotlinc's method order, which
     // also matches its constant-pool interning sequence): a `public static final INSTANCE` built in `<clinit>`.
     if c.is_object {

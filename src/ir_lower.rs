@@ -3667,7 +3667,27 @@ fn lower_file_at_reporting_impl(
                     let value = lo.with_init_shared_cells(p.init.unwrap(), |lo| {
                         lo.lower_arg(p.init.unwrap(), &sty)
                     })?;
-                    lo.ir.statics[sidx as usize].init = lo.emit_block(vec![bind], Some(value));
+                    // Bind `this` only when the lowered initializer actually reads it — kotlinc's
+                    // `<clinit>` has no companion-instance local for a self-contained initializer.
+                    let mut reads_this = false;
+                    let mut stack = vec![value];
+                    while let Some(cur) = stack.pop() {
+                        if matches!(
+                            lo.ir.exprs[cur as usize],
+                            crate::ir::IrExpr::GetValue(v) if v == this_v
+                        ) {
+                            reads_this = true;
+                            break;
+                        }
+                        crate::ir::for_each_child(&lo.ir.exprs, cur, &mut |child| {
+                            stack.push(child)
+                        });
+                    }
+                    lo.ir.statics[sidx as usize].init = if reads_this {
+                        lo.emit_block(vec![bind], Some(value))
+                    } else {
+                        value
+                    };
                     lo.set_bail("deep:class"); // survived; restore the phase marker
                 }
                 let has_delegated = c.body_props.iter().any(|p| p.delegate.is_some());
