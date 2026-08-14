@@ -951,15 +951,8 @@ pub struct IrClass {
     pub annotation_retention: Option<AnnoRetention>,
 }
 
-/// Declared Kotlin retention of an `annotation class`. `Default` is RUNTIME semantics without an explicit
-/// `@Retention` — kotlinc then stamps only the java meta-annotation, not the kotlin one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnnoRetention {
-    Default,
-    Runtime,
-    Binary,
-    Source,
-}
+/// Backend-agnostic retention fact resolved by the frontend.
+pub type AnnoRetention = crate::types::AnnotationRetention;
 
 /// A resolved JVM annotation value (`element_value`, JVMS §4.7.16.1) — an annotation argument folded to
 /// the constant the class file encodes.
@@ -1363,12 +1356,10 @@ pub struct IrFile {
     /// the `@NotNull`/`@Nullable` parameter annotations, which DO need the declared nullability, consult
     /// this side-table instead. Empty ⇒ treat every parameter as non-null (the prior behavior).
     pub fn_param_declared_nullable: std::collections::HashMap<u32, Vec<bool>>,
-    /// Function ids of MEMBER EXTENSION functions (`class C { operator fun String.invoke(…) }`):
-    /// lowering realizes the extension receiver as `params[0]`, which erases receiver-ness from
-    /// [`IrFunction`]. Class `@Metadata` needs it back — the member's record must carry
-    /// `Function.receiver_type` (f5) and EXCLUDE the receiver from its value parameters, or a
-    /// consumer sees an ordinary member with one extra parameter.
-    pub member_ext_receiver_fns: std::collections::HashSet<u32>,
+    /// Function ids whose physical `params[0]` realizes an extension receiver. Metadata and JVM
+    /// default-argument masks consume this semantic fact directly; neither may infer receiver-ness
+    /// from the synthetic `$receiver` parameter spelling.
+    pub extension_receiver_fns: std::collections::HashSet<u32>,
     /// Member EXTENSION properties per class (`object Tools { val Int.doubled get() = … }`), keyed by
     /// the declaring class's fq name. Lowering realizes each as accessor METHODS (`getDoubled(I)I`),
     /// which erases property-ness from the IR — class `@Metadata` needs the declaration back: a
@@ -1469,6 +1460,14 @@ pub struct IrFile {
     /// before the CPS rewrite, so a function that is both `suspend` and value-class-typed reports the
     /// fully declared signature here rather than the half-lowered one.
     pub vc_declared_sigs: std::collections::HashMap<u32, (String, Vec<Ty>, Ty)>,
+    /// Top-level source declaration id → its exact IR function id. Metadata emission uses this
+    /// checked declaration handoff to find a value-class-rewritten physical realization; it must
+    /// never reconstruct an overload by matching source names and arity.
+    pub top_level_function_fids: std::collections::HashMap<u32, u32>,
+    /// Exact IR function ids of public inline declarations. A synthesized class referenced from one
+    /// of these bodies must be public because the body can be spliced into another package/module.
+    /// Lowering carries the current [`IrFunctionScope`] rather than recovering this fact from a name.
+    pub public_inline_functions: std::collections::HashSet<u32>,
     /// Each `suspend fun` whose LOGICAL return is a NON-NULL `@JvmInline value class` → that class's
     /// internal name, recorded by the value-class pass as it boxes the function's tail. A CPS return
     /// is `Object`, so the value crosses the resume boundary in its BOXED form (`X.box-impl`) — the
@@ -1538,7 +1537,7 @@ pub struct IrFile {
     pub declared_class_statics: std::collections::HashMap<TypeName, Vec<u32>>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
     /// kotlinc attributes both the property's getter and its constructor-side initializer to this line.
-    pub prop_decl_lines: std::collections::HashMap<(String, String), u32>,
+    pub prop_decl_lines: std::collections::HashMap<(TypeName, String), u32>,
     /// FunId → 1-based source line of its `fun` declaration, for the method's `LineNumberTable`.
     /// A side map (not a field on `IrFunction`) so the 40-odd construction sites stay untouched.
     pub fn_decl_lines: std::collections::HashMap<u32, u32>,
@@ -1627,6 +1626,31 @@ pub struct IrFile {
     /// underlying — so the lambda's impl method must match whichever the interface actually declares.
     /// The lowerer records the declaration; deciding what erases is the backend pass's job.
     pub lambda_sam_signature: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
+}
+
+/// Exact function body currently owned by lowering. `source_name` is only the naming stem for
+/// generated methods/classes; semantic properties are keyed by `function`, never reconstructed from
+/// that spelling. `None` represents a constructor, property initializer, or class initializer.
+#[derive(Clone, Debug, Default)]
+pub struct IrFunctionScope {
+    pub function: Option<u32>,
+    pub source_name: String,
+}
+
+impl IrFunctionScope {
+    pub fn declared(function: u32, source_name: String) -> Self {
+        Self {
+            function: Some(function),
+            source_name,
+        }
+    }
+
+    pub fn synthetic(source_name: String) -> Self {
+        Self {
+            function: None,
+            source_name,
+        }
+    }
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
@@ -1798,9 +1822,9 @@ impl IrFile {
         self.vc_ctor_declared_params.insert(internal, declared);
     }
 
-    pub fn vc_ctor_declared_params(&self, internal: &str) -> Option<&[Ty]> {
+    pub fn vc_ctor_declared_params(&self, internal: TypeName) -> Option<&[Ty]> {
         self.vc_ctor_declared_params
-            .get(&crate::types::type_name(internal))
+            .get(&internal)
             .map(Vec::as_slice)
     }
 

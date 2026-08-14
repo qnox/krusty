@@ -2271,6 +2271,9 @@ pub struct SymbolTable {
     /// Qualified classifier selected for each annotation occurrence during frontend name resolution.
     /// Consumers use this identity directly; source spelling is never retried after this point.
     resolved_annotations: HashMap<(u32, u32, u32), TypeName>,
+    /// Retention normalized at the declaration/provider boundary by resolved annotation identity.
+    /// Lowering and backends consume this fact without reopening a source declaration or classpath.
+    annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
     /// Top-level function name → the facade class it lives on (`helper` → `pkg/AKt`), for the WHOLE
     /// multi-file compilation. Populated only by the multi-file driver (which knows each file's
     /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
@@ -2339,6 +2342,7 @@ impl Default for SymbolTable {
             ext_props: HashMap::new(),
             class_names: ClassNames::default(),
             resolved_annotations: HashMap::new(),
+            annotation_retentions: HashMap::new(),
             fn_facades: HashMap::new(),
             fn_facades_by_decl: HashMap::new(),
             unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
@@ -2497,6 +2501,13 @@ impl SymbolTable {
         self.resolved_annotations
             .get(&(file, annotation.span.lo, annotation.span.hi))
             .copied()
+    }
+
+    pub fn annotation_retention(
+        &self,
+        annotation: TypeName,
+    ) -> Option<crate::types::AnnotationRetention> {
+        self.annotation_retentions.get(&annotation).copied()
     }
 
     /// Insert under the class's own internal name (the map's key scheme).
@@ -5149,6 +5160,68 @@ fn collect_signatures_with_cp_impl(
                 );
             }
         }
+    }
+    // Normalize source annotation retention once identities are bound. The explicit retention
+    // argument is interpreted only under the resolved `kotlin.annotation.Retention` declaration;
+    // later phases receive the enum fact and never inspect its source spelling.
+    for (file_index, file) in files.iter().enumerate() {
+        for &declaration in &file.decls {
+            let Decl::Class(class) = file.decl(declaration) else {
+                continue;
+            };
+            if class.kind != crate::ast::ClassKind::Annotation {
+                continue;
+            }
+            let retention = class
+                .annotations
+                .iter()
+                .zip(&class.annotation_args)
+                .find_map(|(annotation, arguments)| {
+                    table
+                        .resolved_annotation(file_index as u32, annotation)
+                        .filter(|name| name.matches("kotlin/annotation/Retention"))?;
+                    let &argument = arguments.first()?;
+                    let Expr::Member { name, .. } = file.expr(argument) else {
+                        return None;
+                    };
+                    match name.as_str() {
+                        "RUNTIME" => Some(crate::types::AnnotationRetention::Runtime),
+                        "BINARY" => Some(crate::types::AnnotationRetention::Binary),
+                        "SOURCE" => Some(crate::types::AnnotationRetention::Source),
+                        _ => None,
+                    }
+                })
+                .unwrap_or(crate::types::AnnotationRetention::Default);
+            let Some(annotation_identity) = file_class_names[file_index].get_class(&class.name)
+            else {
+                continue;
+            };
+            table
+                .annotation_retentions
+                .insert(annotation_identity, retention);
+        }
+    }
+    // Providers normalize compiled declarations into `LibraryType`; retain only the semantic policy
+    // for annotation identities actually referenced by this source set.
+    let referenced_annotations: std::collections::HashSet<TypeName> =
+        table.resolved_annotations.values().copied().collect();
+    for annotation in referenced_annotations {
+        if table.annotation_retentions.contains_key(&annotation) {
+            continue;
+        }
+        let Some(library) = libraries.classifier(annotation) else {
+            continue;
+        };
+        if !library.is_annotation() {
+            continue;
+        }
+        let retention = match library.retention.as_deref() {
+            Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,
+            Some("CLASS") => crate::types::AnnotationRetention::Binary,
+            Some("SOURCE") => crate::types::AnnotationRetention::Source,
+            _ => continue,
+        };
+        table.annotation_retentions.insert(annotation, retention);
     }
     for file in files {
         let Some(package) = file.package.as_deref() else {

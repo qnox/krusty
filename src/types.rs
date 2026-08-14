@@ -1663,6 +1663,17 @@ pub enum Visibility {
     Private,
 }
 
+/// Kotlin annotation retention after frontend resolution. `Default` is runtime retention without
+/// an explicit `@Retention` declaration; keeping it distinct lets metadata emission omit the Kotlin
+/// meta-annotation while still stamping the JVM runtime policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnotationRetention {
+    Default,
+    Runtime,
+    Binary,
+    Source,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TypeVariance {
     #[default]

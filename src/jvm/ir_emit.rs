@@ -279,8 +279,7 @@ fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     // Visibility bits: INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3 — an `internal class` must
     // record explicit 0 so a consumer enforces the module boundary; synthesized classes without a
     // recorded visibility stay public.
-    #[allow(non_snake_case)]
-    let VIS_PUBLIC: u64 = match ir.class_visibilities.get(&c.fq_name_id()) {
+    let visibility: u64 = match ir.class_visibilities.get(&c.fq_name_id()) {
         Some(crate::types::Visibility::Internal) => 0,
         Some(crate::types::Visibility::Private) => 1,
         Some(crate::types::Visibility::Protected) => 2,
@@ -313,7 +312,7 @@ fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     // A value class carries `@JvmInline`, which sets `hasAnnotations`.
     let has_annotations = u64::from(c.is_value);
     has_annotations
-        | (VIS_PUBLIC << 1)
+        | (visibility << 1)
         | (modality << 4)
         | (kind << 6)
         // `IS_INNER` (bit 9): an `inner class` — the record is how a consumer knows construction
@@ -979,7 +978,7 @@ fn build_class_metadata(
     // the erase pass rewrote `ctor_args` to the underlying), and its physical handle is the PUBLIC
     // synthetic marker ctor (`(…;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`) — the private
     // erased `<init>` is not callable cross-class. Both exactly as kotlinc records them.
-    let (ctor_params, ctor_desc) = match ir.vc_ctor_declared_params(&c.fq_name()) {
+    let (ctor_params, ctor_desc) = match ir.vc_ctor_declared_params(c.fq_name_id()) {
         Some(declared) if c.enum_entries.is_empty() => {
             let named_declared: Vec<Ty> = c
                 .ctor_args
@@ -1051,7 +1050,7 @@ fn build_class_metadata(
                 let member_semantic = ir
                     .member_semantic_sigs
                     .get(&fid)
-                    .filter(|_| !ir.member_ext_receiver_fns.contains(&fid));
+                    .filter(|_| !ir.extension_receiver_fns.contains(&fid));
                 let metadata_params = semantic_signature
                     .map(|signature| signature.params.as_slice())
                     .or(member_semantic.map(|(params, _)| params.as_slice()))
@@ -1100,7 +1099,7 @@ fn build_class_metadata(
                 // parameters only in registration, while `fn_param_declared_nullable` leads with
                 // the receiver when one exists — align both by the receiver offset.
                 let is_ext =
-                    ir.member_ext_receiver_fns.contains(&fid) && !metadata_params.is_empty();
+                    ir.extension_receiver_fns.contains(&fid) && !metadata_params.is_empty();
                 let recv_offset = usize::from(is_ext);
                 let apply_nullable = |i_full: usize, t: crate::types::Ty| {
                     if declared_nullable
@@ -1910,7 +1909,7 @@ fn attach_synth_debug_tables(
         // sit on its own `val`/`var` line.
         let pline = ir
             .prop_decl_lines
-            .get(&(c.fq_name(), f.name.clone()))
+            .get(&(c.fq_name_id(), f.name.clone()))
             .copied()
             .filter(|&l| l != 0)
             .unwrap_or(line);
@@ -4059,7 +4058,8 @@ fn emit_class(
                             // kotlinc maps this field store to the parameter's own source line —
                             // capture the pc where it starts.
                             let pc = ctor.bytes.len() as u16;
-                            if let Some(&pl) = ir.prop_decl_lines.get(&(c.fq_name(), name.clone()))
+                            if let Some(&pl) =
+                                ir.prop_decl_lines.get(&(c.fq_name_id(), name.clone()))
                             {
                                 if pl != 0 {
                                     ctor_lines.push((pc, pl));
@@ -4096,7 +4096,7 @@ fn emit_class(
                             if let crate::ir::IrExpr::SetField { index, .. } = ir.expr(st) {
                                 let name = &c.fields[*index as usize].name;
                                 if let Some(&pl) =
-                                    ir.prop_decl_lines.get(&(c.fq_name(), name.clone()))
+                                    ir.prop_decl_lines.get(&(c.fq_name_id(), name.clone()))
                                 {
                                     if pl != 0 {
                                         ctor_lines.push((pc, pl));
@@ -4529,7 +4529,8 @@ fn emit_class(
                         let pc = clinit.bytes.len() as u16;
                         if let crate::ir::IrExpr::SetField { index, .. } = ir.expr(st) {
                             let name = &c.fields[*index as usize].name;
-                            if let Some(&pl) = ir.prop_decl_lines.get(&(c.fq_name(), name.clone()))
+                            if let Some(&pl) =
+                                ir.prop_decl_lines.get(&(c.fq_name_id(), name.clone()))
                             {
                                 if pl != 0 {
                                     clinit_lines.push((pc, pl));
@@ -7687,6 +7688,11 @@ fn emit_default_stub(
         .enumerate()
         .map(|(i, t)| boxed.get(&i).copied().unwrap_or(*t))
         .collect();
+    let recv_offset = usize::from(ir.extension_receiver_fns.contains(&fid));
+    let logical_param_count = real_params
+        .len()
+        .checked_sub(recv_offset)
+        .expect("an extension receiver is a leading physical parameter");
     let ret = ir_ty_to_jvm(&f.ret);
     let owner_ty = Ty::obj(owner);
 
@@ -7708,7 +7714,7 @@ fn emit_default_stub(
         param_slots.push((slot, *t));
         slot += slot_words(*t);
     }
-    let mask_slots: Vec<u16> = (0..default_mask_count(real_params.len()))
+    let mask_slots: Vec<u16> = (0..default_mask_count(logical_param_count))
         .map(|mi| {
             let s = slot;
             e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int)); // register so frames type these slots
@@ -7727,11 +7733,10 @@ fn emit_default_stub(
     // A MEMBER EXTENSION's physical params — and its registered defaults — lead with the extension
     // receiver: slice that prefix off (the receiver never defaults) and offset the slots, so the
     // mask bits stay LOGICAL (kotlinc's convention).
-    let recv_offset = usize::from(ir.member_ext_receiver_fns.contains(&fid));
     emit_default_param_overwrites(
         &mut e,
         &mut code,
-        &defaults[recv_offset.min(defaults.len())..],
+        &defaults[recv_offset..],
         recv_offset,
         &param_slots,
         &mask_slots,
@@ -7770,7 +7775,7 @@ fn emit_default_stub(
     stub_params.extend(stub_param_tys.iter().copied());
     stub_params.extend(std::iter::repeat_n(
         Ty::Int,
-        default_mask_count(real_params.len()),
+        default_mask_count(logical_param_count),
     ));
     stub_params.push(Ty::obj("java/lang/Object"));
     let desc = method_descriptor(&stub_params, ret);
@@ -7810,11 +7815,11 @@ fn emit_default_param_overwrites(
     mask_slots: &[u16],
     boxed: &HashMap<usize, Ty>,
 ) {
-    for (i, def) in defaults
-        .iter()
-        .enumerate()
-        .take(param_slots.len().saturating_sub(recv_offset))
-    {
+    let logical_param_count = param_slots
+        .len()
+        .checked_sub(recv_offset)
+        .expect("an extension receiver is a leading physical parameter");
+    for (i, def) in defaults.iter().enumerate().take(logical_param_count) {
         if let Some(def_expr) = def {
             let (pslot, pty) = param_slots[i + recv_offset];
             code.iload(mask_slots[i / 32]);
@@ -7905,6 +7910,11 @@ fn emit_facade_default_stub(
     let method_name = f.name.clone();
     let real_params = jvm_tys(&f.params);
     let ret = ir_ty_to_jvm(&f.ret);
+    let recv_offset = usize::from(ir.extension_receiver_fns.contains(&fid));
+    let logical_param_count = real_params
+        .len()
+        .checked_sub(recv_offset)
+        .expect("an extension receiver is a leading physical parameter");
 
     let mut e = Emitter::new(
         ir,
@@ -7924,7 +7934,7 @@ fn emit_facade_default_stub(
         param_slots.push((slot, *t));
         slot += slot_words(*t);
     }
-    let mask_slots: Vec<u16> = (0..default_mask_count(real_params.len()))
+    let mask_slots: Vec<u16> = (0..default_mask_count(logical_param_count))
         .map(|mi| {
             let s = slot;
             e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int)); // register so frames type these slots
@@ -7940,14 +7950,10 @@ fn emit_facade_default_stub(
     let mut code = CodeBuilder::new(slot);
     // A top-level EXTENSION's registered defaults/names carry a leading `$receiver` slot; the mask
     // bits stay LOGICAL (kotlinc's convention), so slice the receiver prefix off and offset slots.
-    let recv_offset = ir
-        .param_names(fid)
-        .map(|ns| ns.iter().take_while(|n| n.as_str() == "$receiver").count())
-        .unwrap_or(0);
     emit_default_param_overwrites(
         &mut e,
         &mut code,
-        &defaults[recv_offset.min(defaults.len())..],
+        &defaults[recv_offset..],
         recv_offset,
         &param_slots,
         &mask_slots,
@@ -7967,7 +7973,7 @@ fn emit_facade_default_stub(
     let mut stub_params = real_params.clone();
     stub_params.extend(std::iter::repeat_n(
         Ty::Int,
-        default_mask_count(real_params.len()),
+        default_mask_count(logical_param_count),
     ));
     stub_params.push(marker);
     let desc = method_descriptor(&stub_params, ret);
@@ -10329,8 +10335,12 @@ impl<'a> Emitter<'a> {
                     // Mask bits are LOGICAL (kotlinc numbers them over the declared value
                     // parameters) — a member EXTENSION's physical receiver at params[0] does not
                     // shift them, and is never omitted.
-                    let recv_offset = usize::from(self.ir.member_ext_receiver_fns.contains(&fid));
-                    let mut masks = vec![0i32; default_mask_count(param_tys.len())];
+                    let recv_offset = usize::from(self.ir.extension_receiver_fns.contains(&fid));
+                    let logical_param_count = param_tys
+                        .len()
+                        .checked_sub(recv_offset)
+                        .expect("an extension receiver is a leading physical parameter");
+                    let mut masks = vec![0i32; default_mask_count(logical_param_count)];
                     for (i, arg) in args.iter().enumerate() {
                         match arg {
                             Some(a) => {
@@ -10341,7 +10351,9 @@ impl<'a> Emitter<'a> {
                             }
                             None => {
                                 push_zero(stub_param_tys[i], code, self.cw);
-                                let li = i.saturating_sub(recv_offset);
+                                let li = i
+                                    .checked_sub(recv_offset)
+                                    .expect("an extension receiver cannot be omitted");
                                 masks[li / 32] |= default_mask_bit(li);
                             }
                         }
@@ -10354,7 +10366,7 @@ impl<'a> Emitter<'a> {
                     stub_params.extend(stub_param_tys.iter().copied());
                     stub_params.extend(std::iter::repeat_n(
                         Ty::Int,
-                        default_mask_count(param_tys.len()),
+                        default_mask_count(logical_param_count),
                     ));
                     stub_params.push(Ty::obj("java/lang/Object"));
                     let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
@@ -10469,9 +10481,15 @@ impl<'a> Emitter<'a> {
                     // (emitted by `emit_facade_default_stub`). Args already include mask words + marker.
                     let f = &self.ir.functions[*fid as usize];
                     let mut param_tys = jvm_tys(&f.params);
+                    let recv_offset = usize::from(self.ir.extension_receiver_fns.contains(fid));
+                    let logical_param_count = f
+                        .params
+                        .len()
+                        .checked_sub(recv_offset)
+                        .expect("an extension receiver is a leading physical parameter");
                     param_tys.extend(std::iter::repeat_n(
                         Ty::Int,
-                        default_mask_count(f.params.len()),
+                        default_mask_count(logical_param_count),
                     ));
                     param_tys.push(Ty::obj("java/lang/Object"));
                     let ret = ir_ty_to_jvm(&f.ret);

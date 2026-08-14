@@ -76,3 +76,31 @@ fn top_level_value_class_parameters_resolve_and_run() {
     };
     assert_eq!(out, "OK");
 }
+
+/// Facade metadata must attach each mangled JVM handle to its exact source declaration. Matching a
+/// realization by `(name, arity)` loses both handles when value-class overloads share that pair.
+#[test]
+fn same_name_same_arity_value_class_overloads_keep_distinct_jvm_handles() {
+    const OVERLOADS: &str = r#"
+        package overloads
+
+        @JvmInline
+        value class Text(val value: String)
+
+        @JvmInline
+        value class Number(val value: Int)
+
+        fun describe(value: Text): String = value.value
+        fun describe(value: Number): String = if (value.value == 1) "K" else "FAIL"
+    "#;
+    const CALLER: &str = r#"
+        import overloads.Number
+        import overloads.Text
+        import overloads.describe
+
+        fun box(): String = describe(Text("O")) + describe(Number(1))
+    "#;
+
+    common::expect_box_ok_against_ref("value_class_same_arity_overloads_ref", OVERLOADS, CALLER);
+    common::expect_box_ok_against("value_class_same_arity_overloads", OVERLOADS, CALLER);
+}

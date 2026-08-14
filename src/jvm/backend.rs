@@ -538,29 +538,17 @@ impl Backend for JvmBackend {
     }
 }
 
-/// `true` when annotation `internal` applied in `file` belongs in `@Metadata` annotation records: its
-/// Kotlin retention is BINARY or RUNTIME. kotlinc drops SOURCE-retained annotations (`@Suppress`) from
-/// metadata and bytecode alike. A CLASSPATH annotation's retention comes from its compiled class's
-/// `java.lang.annotation.Retention` ("RUNTIME"/"CLASS"; SOURCE or unreadable → dropped); a SAME-FILE
-/// `annotation class` reports its declared retention.
-fn metadata_recorded_annotation(
-    file: &File,
-    file_index: u32,
-    syms: &FrontendSymbols,
-    internal: crate::types::TypeName,
-) -> bool {
-    if let Some(declaration) = crate::ir_lower::file_class_decl_by_internal(file, internal) {
-        return declaration.kind == crate::ast::ClassKind::Annotation
-            && crate::ir_lower::declared_annotation_retention(file, file_index, syms, declaration)
-                != crate::ir::AnnoRetention::Source;
-    }
-    syms.libraries.classifier(internal).is_some_and(|library| {
-        library.is_annotation()
-            && matches!(
-                library.retention.as_deref(),
-                Some("RUNTIME") | Some("CLASS")
-            )
-    })
+/// Whether a resolved annotation belongs in Kotlin metadata. Retention is normalized by the
+/// frontend; the backend never reopens a source declaration or queries the classpath.
+fn metadata_recorded_annotation(syms: &FrontendSymbols, internal: crate::types::TypeName) -> bool {
+    matches!(
+        syms.annotation_retention(internal),
+        Some(
+            crate::types::AnnotationRetention::Default
+                | crate::types::AnnotationRetention::Runtime
+                | crate::types::AnnotationRetention::Binary
+        )
+    )
 }
 
 /// The facade's `@kotlin.Metadata` (`k = 2`, file facade), recording every top-level function —
@@ -591,41 +579,14 @@ pub fn facade_package_metadata_with_ir(
     syms: &FrontendSymbols,
     ir: Option<&crate::ir::IrFile>,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
-    // Declared name + arity → the physical (JVM name, descriptor) of a value-class-rewritten
-    // top-level function. Overloads differ in arity or vanish on collision (never a wrong record).
-    let mut vc_realizations: std::collections::HashMap<(String, usize), Option<(String, String)>> =
-        std::collections::HashMap::new();
-    if let Some(ir) = ir {
-        for (fid, (declared_name, declared_params, _)) in &ir.vc_declared_sigs {
-            let Some(function) = ir.functions.get(*fid as usize) else {
-                continue;
-            };
-            if !function.is_static {
-                continue;
-            }
-            let physical = (
-                function.name.clone(),
-                crate::jvm::names::method_descriptor(&function.params, function.ret),
-            );
-            vc_realizations
-                .entry((declared_name.clone(), declared_params.len()))
-                .and_modify(|existing| {
-                    if existing.as_ref() != Some(&physical) {
-                        *existing = None;
-                    }
-                })
-                .or_insert(Some(physical));
-        }
-    }
-    facade_package_metadata_inner(file, file_index, syms, &vc_realizations)
+    facade_package_metadata_inner(file, file_index, syms, ir)
 }
 
-#[allow(clippy::type_complexity)]
 fn facade_package_metadata_inner(
     file: &File,
     file_index: u32,
     syms: &FrontendSymbols,
-    vc_realizations: &std::collections::HashMap<(String, usize), Option<(String, String)>>,
+    ir: Option<&crate::ir::IrFile>,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let mut metas: Vec<crate::metadata::builder::FnMeta> = Vec::new();
     for &d in &file.decls {
@@ -724,13 +685,20 @@ fn facade_package_metadata_inner(
             .zip(f.annotation_args.iter())
             .filter(|(_, args)| args.is_empty())
             .filter_map(|(annotation, _)| syms.resolved_annotation(file_index, annotation))
-            .filter(|&internal| metadata_recorded_annotation(file, file_index, syms, internal))
+            .filter(|&internal| metadata_recorded_annotation(syms, internal))
             .collect();
         // A value-class-rewritten realization (mangled name + erased descriptor) overrides the
         // derived handle — nothing in the declared record spells either.
-        let vc_realization = vc_realizations
-            .get(&(f.name.clone(), sig.params.len()))
-            .and_then(|entry| entry.clone());
+        let vc_realization = ir
+            .and_then(|ir| ir.top_level_function_fids.get(&d.0).map(|&fid| (ir, fid)))
+            .and_then(|(ir, fid)| {
+                ir.vc_declared_sigs.get(&fid)?;
+                let function = ir.functions.get(fid as usize)?;
+                Some((
+                    function.name.clone(),
+                    crate::jvm::names::method_descriptor(&function.params, function.ret),
+                ))
+            });
         let (jvm_desc, jvm_name) = match vc_realization {
             Some((physical_name, physical_desc)) => (
                 Some(physical_desc),
