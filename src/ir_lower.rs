@@ -231,6 +231,7 @@ fn lower_file_at_reporting_impl(
         cur_method_returns_unit_ref: false,
         try_finally_stack: Vec::new(),
         companions: HashMap::new(),
+        companion_hoisted_statics: HashMap::new(),
         computed_props: HashMap::new(),
         computed_setters: HashMap::new(),
         source_property_accessors: HashMap::new(),
@@ -786,6 +787,53 @@ fn lower_file_at_reporting_impl(
                     .prop_visibilities
                     .insert((internal.clone(), p.name.clone()), p.visibility);
             }
+            // A `companion object`'s plain backing-field properties are HOISTED onto the OUTER class
+            // as `private static [final]` fields (kotlinc's layout): the companion keeps the property
+            // DECLARATION and instance accessors, which read/write the static through PUBLIC synthetic
+            // `access$get<X>$cp`/`access$set<X>$cp` bridges on the outer; the initializers run in the
+            // outer's `<clinit>` AFTER the `Companion` instance store. Detected by scanning for the
+            // declaring outer (`is_companion` is only linked after registration). Conservative subset:
+            // public, non-const, non-lateinit, non-delegated, plain-accessor, initialized properties
+            // of a non-value-class type — everything else keeps the instance layout for now.
+            // Only a PLAIN class outer hoists: an INTERFACE outer has a different kotlinc layout
+            // (interface fields are `public static final`), and enum/value-class outers are emitted
+            // by dedicated paths that don't synthesize the `access$…$cp` bridges yet.
+            let companion_outer: Option<TypeName> =
+                file.decls.iter().find_map(|&od| match file.decl(od) {
+                    Decl::Class(oc)
+                        if oc.companion == Some(d)
+                            && !oc.is_interface()
+                            && !oc.is_enum()
+                            && !oc.is_value =>
+                    {
+                        Some(type_name(&class_internal(file, &oc.name)))
+                    }
+                    _ => None,
+                });
+            let hoisted_props: std::collections::HashSet<String> = if companion_outer.is_some() {
+                c.body_props
+                    .iter()
+                    .filter(|p| is_backing_field_prop(p) && !is_field_accessor_prop(p))
+                    .filter(|p| {
+                        !p.is_const && !p.is_lateinit && p.delegate.is_none() && p.init.is_some()
+                    })
+                    .filter(|p| !p.visibility.is_private())
+                    .filter(|p| {
+                        // A value-class-typed property's accessors get `@JvmName` mangling in the
+                        // value-class pass, which expects instance storage — not hoisted yet.
+                        !resolved_prop_ty(&p.name)
+                            .non_null()
+                            .obj_internal()
+                            .is_some_and(|value_internal| {
+                                syms.class_by_type_name(value_internal)
+                                    .is_some_and(|cs| cs.value_field.is_some())
+                            })
+                    })
+                    .map(|p| p.name.clone())
+                    .collect()
+            } else {
+                Default::default()
+            };
             let mut ctor_fields: Vec<(String, Ty)> = anonymous_captures
                 .iter()
                 .map(|capture| (capture.name.clone(), capture.ty))
@@ -805,7 +853,7 @@ fn lower_file_at_reporting_impl(
             let body_fields: Vec<(String, Ty)> = c
                 .body_props
                 .iter()
-                .filter(|p| is_backing_field_prop(p))
+                .filter(|p| is_backing_field_prop(p) && !hoisted_props.contains(&p.name))
                 .map(|p| {
                     let ty =
                         p.ty.as_ref()
@@ -959,7 +1007,7 @@ fn lower_file_at_reporting_impl(
             field_type_params.extend(
                 c.body_props
                     .iter()
-                    .filter(|p| is_backing_field_prop(p))
+                    .filter(|p| is_backing_field_prop(p) && !hoisted_props.contains(&p.name))
                     .map(|_| None),
             );
             // Parallel `None` for each synthetic `x$delegate` field (concrete delegate type, no type-param).
@@ -983,7 +1031,7 @@ fn lower_file_at_reporting_impl(
                 .chain(
                     c.body_props
                         .iter()
-                        .filter(|p| is_backing_field_prop(p))
+                        .filter(|p| is_backing_field_prop(p) && !hoisted_props.contains(&p.name))
                         .map(|p| !p.is_var),
                 )
                 .chain(delegate_fields.iter().map(|_| true))
@@ -1856,7 +1904,9 @@ fn lower_file_at_reporting_impl(
                     .chain(
                         c.body_props
                             .iter()
-                            .filter(|p| is_backing_field_prop(p))
+                            .filter(|p| {
+                                is_backing_field_prop(p) && !hoisted_props.contains(&p.name)
+                            })
                             .map(|p| {
                                 (
                                     p.name.clone(),
@@ -2057,6 +2107,95 @@ fn lower_file_at_reporting_impl(
                             method_fids.push(fid);
                         }
                     }
+                }
+            }
+            // HOISTED companion properties: register the outer-class backing static (placeholder
+            // initializer — pass 2 lowers the real one into the slot), the companion's delegating
+            // instance accessors, and the property DECLARATION with no companion backing field. The
+            // accessor bodies are plain `GetStatic`/`SetStatic`; the emit arm routes a cross-class
+            // owner-static access through the outer's `access$…$cp` bridge (the field is private).
+            if let Some(outer) = companion_outer {
+                for p in c
+                    .body_props
+                    .iter()
+                    .filter(|p| hoisted_props.contains(&p.name))
+                {
+                    let pty = declared_prop_ty(&p.name);
+                    let ir_ty = ty_to_ir(pty);
+                    let sidx = lo.ir.statics.len() as u32;
+                    let placeholder = lo
+                        .ir
+                        .add_expr(crate::ir::IrExpr::Const(crate::ir::IrConst::Null));
+                    lo.ir.statics.push(crate::ir::IrStatic {
+                        visibility: p.visibility,
+                        name: p.name.clone(),
+                        ty: ir_ty,
+                        init: placeholder,
+                        is_var: p.is_var,
+                        companion_hoisted: true,
+                        is_const: false,
+                        owner: Some(outer),
+                        custom_accessor: false,
+                    });
+                    lo.companion_hoisted_statics
+                        .insert((type_name(&internal), p.name.clone()), sidx);
+                    let gname = property_getter_name(&p.name);
+                    let read = lo.emit_get_static(sidx);
+                    let ret = lo.emit_return(Some(read));
+                    let gbody = lo.emit_block(vec![ret], None);
+                    let gmi = method_fids.len() as u32;
+                    let gfid = lo.ir.add_fun(IrFunction {
+                        name: gname.clone(),
+                        params: vec![],
+                        ret: ir_ty,
+                        body: Some(gbody),
+                        is_static: false,
+                        dispatch_receiver: Some(type_name(&internal)),
+                        param_checks: vec![],
+                    });
+                    methods.entry(gname).or_default().push((gmi, gfid, pty));
+                    method_fids.push(gfid);
+                    let sfid = p.is_var.then(|| {
+                        let sname = property_setter_name(&p.name);
+                        // Instance method value space: 0 = `this`, 1 = the value parameter.
+                        let value = lo.emit_get_value(1);
+                        let write = lo.emit_set_static(sidx, value);
+                        let sret = lo.emit_return(None);
+                        let sbody = lo.emit_block(vec![write, sret], None);
+                        let smi = method_fids.len() as u32;
+                        let fid = lo.ir.add_fun(IrFunction {
+                            name: sname.clone(),
+                            params: vec![ir_ty],
+                            ret: Ty::Unit,
+                            body: Some(sbody),
+                            is_static: false,
+                            dispatch_receiver: Some(type_name(&internal)),
+                            param_checks: vec![],
+                        });
+                        methods.entry(sname).or_default().push((smi, fid, Ty::Unit));
+                        method_fids.push(fid);
+                        fid
+                    });
+                    lo.ir.classes[id as usize]
+                        .properties
+                        .push(crate::ir::IrProperty {
+                            name: p.name.clone(),
+                            ty: pty,
+                            storage_ty: None,
+                            backing_field: None,
+                            is_var: p.is_var,
+                            is_open: false,
+                            is_private: false,
+                            setter_is_private: p
+                                .setter
+                                .as_ref()
+                                .is_some_and(|setter| setter.is_private),
+                            getter: Some(gfid),
+                            setter: sfid,
+                            getter_jvm_name: None,
+                            setter_jvm_name: None,
+                            needs_access_bridge: false,
+                        });
                 }
             }
             lo.ir.classes[id as usize].methods = method_fids;
@@ -3488,6 +3627,49 @@ fn lower_file_at_reporting_impl(
                 // order, with `this` = value 0 and the constructor params as values 1..=N. For a class
                 // with NO primary constructor the init steps run inside each `super(…)`-reaching secondary
                 // constructor instead (lowered there, in that ctor's own value space) — skip here.
+                // HOISTED companion properties: lower each initializer into its outer-class static
+                // slot (registered in pass 1a with a placeholder). The expression runs in the OUTER
+                // `<clinit>` after the `Companion` instance store, so `this` (the companion instance,
+                // read back from that field) is bound first — an initializer reading a sibling
+                // member lowers like any companion body would.
+                let hoist_inits: Vec<(usize, u32)> = c
+                    .body_props
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, p)| {
+                        lo.companion_hoisted_statics
+                            .get(&(type_name(&internal), p.name.clone()))
+                            .map(|&sidx| (i, sidx))
+                    })
+                    .collect();
+                for (i, sidx) in hoist_inits {
+                    let p = &c.body_props[i];
+                    lo.set_bail("gate:companion-hoisted-init");
+                    lo.scope.clear();
+                    lo.boxed_elem.clear();
+                    lo.next_value = 0;
+                    lo.cur_class = Some(type_name(&internal));
+                    lo.cur_fn_name = p.name.clone();
+                    lo.cur_tparams = Default::default();
+                    let outer = lo.ir.statics[sidx as usize].owner?;
+                    let companion_tn = type_name(&internal);
+                    let simple = internal.rsplit('$').next().unwrap_or(&internal).to_string();
+                    let instance = lo.lower_singleton_value(&SingletonValue {
+                        owner: outer,
+                        field: simple,
+                        classifier: companion_tn,
+                    })?;
+                    let this_v = lo.fresh_value();
+                    let bind = lo.emit_variable(this_v, Ty::obj(&internal), Some(instance));
+                    lo.scope
+                        .push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    let sty = lo.ir.statics[sidx as usize].ty;
+                    let value = lo.with_init_shared_cells(p.init.unwrap(), |lo| {
+                        lo.lower_arg(p.init.unwrap(), &sty)
+                    })?;
+                    lo.ir.statics[sidx as usize].init = lo.emit_block(vec![bind], Some(value));
+                    lo.set_bail("deep:class"); // survived; restore the phase marker
+                }
                 let has_delegated = c.body_props.iter().any(|p| p.delegate.is_some());
                 // Interface delegation `: I by d` whose `d` is a NON-`val` param needs a `$$delegate_<i>`
                 // field store in the ctor.
@@ -3620,14 +3802,27 @@ fn lower_file_at_reporting_impl(
                                 // here too (it has no init expression).
                                 if !is_backing_field_prop(&c.body_props[*i])
                                     || c.body_props[*i].init.is_none()
+                                    // A HOISTED companion property has no companion field; its
+                                    // initializer runs in the OUTER `<clinit>` (lowered above).
+                                    || lo.companion_hoisted_statics.contains_key(&(
+                                        type_name(&internal),
+                                        c.body_props[*i].name.clone(),
+                                    ))
                                 {
                                     continue;
                                 }
                                 // Computed body properties are not fields, so the field index counts
-                                // only the non-computed body properties before this one.
+                                // only the non-computed body properties before this one. Hoisted
+                                // companion properties are not companion fields either.
                                 let body_offset = c.body_props[..*i as usize]
                                     .iter()
-                                    .filter(|p| is_backing_field_prop(p))
+                                    .filter(|p| {
+                                        is_backing_field_prop(p)
+                                            && !lo.companion_hoisted_statics.contains_key(&(
+                                                type_name(&internal),
+                                                p.name.clone(),
+                                            ))
+                                    })
                                     .count();
                                 let field_idx = ctor_count + body_offset as u32;
                                 let field_ty = lo.ir.classes[class_id as usize].fields
@@ -5440,6 +5635,11 @@ pub(crate) struct Lower<'a> {
     try_finally_stack: Vec<AstExprId>,
     /// Outer-class internal name → its `C$Companion` internal name, for routing `C.foo()` calls.
     companions: HashMap<TypeName, TypeName>,
+    /// (companion internal, property name) → `ir.statics` index of the property's HOISTED backing
+    /// static on the OUTER class (kotlinc's companion layout). Registered in pass 1a with a
+    /// placeholder initializer; pass 2 lowers the real initializer into the slot (the outer's
+    /// `<clinit>` runs it after the `Companion` instance store).
+    companion_hoisted_statics: HashMap<(TypeName, String), u32>,
     /// Top-level computed property name → (its synthesized `getX()` `FunId`, property type). A read of
     /// the property compiles to a call to the getter. For a *computed* property there is no backing
     /// field; for a top-level backing-field property with a custom getter (`val x = init get() = field`)

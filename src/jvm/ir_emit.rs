@@ -3909,7 +3909,9 @@ fn emit_class(
         // A `var` is reassignable, so it must NOT carry ACC_FINAL — a `putstatic` on a final field
         // outside `<clinit>` is an IllegalAccessError.
         let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
-        let acc = if s.visibility.is_private() {
+        // A HOISTED companion property's field is PRIVATE regardless of the property's declared
+        // visibility (kotlinc: every access goes through the accessors/bridges, never the field).
+        let acc = if s.visibility.is_private() || s.companion_hoisted {
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
@@ -4382,6 +4384,45 @@ fn emit_class(
             clinit.ensure_locals(e.next_slot);
             clinit.link();
             e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+        }
+    }
+    // HOISTED companion properties: the private static field lives on THIS class, so the companion's
+    // delegating accessors reach it through PUBLIC synthetic `access$get<X>$cp`/`access$set<X>$cp`
+    // bridges here — kotlinc's hoisted-companion access shape.
+    for s in ir
+        .statics
+        .iter()
+        .filter(|s| s.companion_hoisted && s.owner_matches(&fq_name))
+    {
+        let jt = ir_ty_to_jvm(&s.ty);
+        let desc = type_descriptor(jt);
+        let mut g = CodeBuilder::new(0);
+        let fref = cw.fieldref(&fq_name, &s.name, &desc);
+        g.getstatic(fref, slot_words(jt) as i32);
+        emit_return(jt, &mut g);
+        g.ensure_locals(0);
+        g.link();
+        cw.add_method(
+            0x1009, /* PUBLIC | STATIC | SYNTHETIC */
+            &format!("access${}$cp", property_getter_name(&s.name)),
+            &format!("(){desc}"),
+            &g,
+        );
+        if s.is_var {
+            let words = slot_words(jt);
+            let mut st = CodeBuilder::new(words);
+            load(jt, 0, &mut st);
+            let fref = cw.fieldref(&fq_name, &s.name, &desc);
+            st.putstatic(fref, slot_words(jt) as i32);
+            st.ret_void();
+            st.ensure_locals(words);
+            st.link();
+            cw.add_method(
+                0x1009,
+                &format!("access${}$cp", property_setter_name(&s.name)),
+                &format!("({desc})V"),
+                &st,
+            );
         }
     }
     // Instance methods (concrete emitted; abstract declared with `ACC_ABSTRACT`, no Code).
@@ -9081,13 +9122,24 @@ impl<'a> Emitter<'a> {
                 // or, for a PRIVATE top-level property (no public setter), the `access$set<X>$p` bridge.
                 let private = self.ir.statics[index as usize].visibility.is_private();
                 // A static declaring an OWNER lives on that class (a companion property is a static
-                // field on the outer class), so it is written directly there — the facade's
-                // accessor-or-bridge dance below is for the facade's own top-level properties.
+                // field on the outer class). Within the owner write the (private) field directly;
+                // from another class — the companion's delegating setter — go through the owner's
+                // PUBLIC synthetic `access$set<X>$cp` bridge (kotlinc's hoisted-companion shape).
                 if let Some(owner) = self.ir.statics[index as usize].owner {
-                    let fref = self
-                        .cw
-                        .fieldref(&owner.render(), &name, &type_descriptor(jt));
-                    code.putstatic(fref, slot_words(jt) as i32);
+                    let owner_name = owner.render();
+                    if self.owner == owner_name
+                        || !self.ir.statics[index as usize].companion_hoisted
+                    {
+                        let fref = self.cw.fieldref(&owner_name, &name, &type_descriptor(jt));
+                        code.putstatic(fref, slot_words(jt) as i32);
+                    } else {
+                        let m = self.cw.methodref(
+                            &owner_name,
+                            &format!("access${}$cp", property_setter_name(&name)),
+                            &format!("({})V", type_descriptor(jt)),
+                        );
+                        code.invokestatic(m, slot_words(jt) as i32, 0);
+                    }
                 } else if self.owner == facade || is_const {
                     let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
                     code.putstatic(fref, slot_words(jt) as i32);
@@ -10221,17 +10273,34 @@ impl<'a> Emitter<'a> {
                 let name = s.name.clone();
                 let is_const = s.is_const;
                 let facade = self.facade.clone();
+                // A static declaring an OWNER lives on that class, not the facade. Within the owner
+                // read the (private) field directly; from any other class — the companion's
+                // delegating accessors — go through the owner's PUBLIC synthetic `access$get<X>$cp`
+                // bridge, kotlinc's hoisted-companion-property access shape.
+                if let Some(owner) = self.ir.statics[*i as usize].owner {
+                    let owner_name = owner.render();
+                    if self.owner == owner_name || !self.ir.statics[*i as usize].companion_hoisted {
+                        let fref = self.cw.fieldref(&owner_name, &name, &type_descriptor(jt));
+                        code.getstatic(fref, slot_words(jt) as i32);
+                    } else {
+                        let m = self.cw.methodref(
+                            &owner_name,
+                            &format!("access${}$cp", property_getter_name(&name)),
+                            &format!("(){}", type_descriptor(jt)),
+                        );
+                        code.invokestatic(m, 0, slot_words(jt) as i32);
+                    }
+                }
                 // Within the facade (or a `const val`, which is public) read the field directly; from
                 // another class a plain top-level property is private, so go through `getX()` — kotlinc's
                 // cross-file property-access compilation.
-                let private = self.ir.statics[*i as usize].visibility.is_private();
-                if self.owner == facade || is_const {
+                else if self.owner == facade || is_const {
                     let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
                     code.getstatic(fref, slot_words(jt) as i32);
                 } else {
                     // A PRIVATE top-level property has no public getter; cross-class reads inside the
                     // file go through kotlinc's `access$get<X>$p` bridge.
-                    let gname = if private {
+                    let gname = if self.ir.statics[*i as usize].visibility.is_private() {
                         format!("access${}$p", property_getter_name(&name))
                     } else {
                         property_getter_name(&name)
