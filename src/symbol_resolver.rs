@@ -838,6 +838,10 @@ pub(crate) fn inherited_nested_classifier_name(
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LambdaCallShape {
+    /// Exact identities of the selected overload's generic formals. A postponed lambda frame may
+    /// collect and suppress constraints only for these variables; symbolic types owned by an
+    /// enclosing declaration remain fixed expectations.
+    pub generic_formals: Vec<String>,
     pub param_types: Option<Vec<Vec<Ty>>>,
     /// The selected callable parameter in source-argument order. Lambda checking consumes the
     /// decomposed inputs above; callable-reference adaptation needs the complete function type,
