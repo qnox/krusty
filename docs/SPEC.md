@@ -5661,3 +5661,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a reified name in a nested call's explicit type arguments keeps the function splice-only, as
   before. Nested splices inside an emitted body that resolve back to the enclosing `T` also emit
   the marker rather than a resolved class.
+
+- **Reified `is`/`as` markers and body-inlined `$default` stubs.** A non-safe `is T`/`as T` on the
+  emitted fn's own reified parameter lowers to `IrExpr::ReifiedTypeOp` — `reifiedOperationMarker(3)`
+  + `instanceof` / `marker(1)` + `checkcast` against the erasure, kotlinc's exact placeholder pair
+  (`as? T` and nullable `is T?` targets stay splice-only). The `$default` synthetic of a reified fn
+  INLINES the whole body after the default fills instead of delegating — the real method throws at
+  runtime by design (the marker intrinsic), so kotlinc's `$default` carries the body and every
+  splicer patches it there; krusty's delegating stub left a live direct call in spliced output. The
+  spurious `JvmMethodSignature` on plain inline facade records is gone (kotlinc emits none; suspend
+  and type-parameter-mentioning signatures keep theirs).

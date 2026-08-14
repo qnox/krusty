@@ -393,6 +393,16 @@ pub enum IrExpr {
         name: String,
         erased: TypeName,
     },
+    /// A reified `is`/`as` inside an EMITTED `inline fun <reified T>` body:
+    /// `reifiedOperationMarker(3|1, name)` then `instanceof`/`checkcast` against the erasure —
+    /// kotlinc's placeholder pair, patched at inline time. `negated` inverts the instanceof result.
+    ReifiedTypeOp {
+        cast: bool,
+        negated: bool,
+        arg: ExprId,
+        name: String,
+        erased: TypeName,
+    },
     /// A lambda literal — emitted as `invokedynamic` + `LambdaMetafactory`. `impl_fn` is the
     /// synthesized static method holding the body; `captures` are the free-variable values bound into
     /// the call site (empty = non-capturing). `sam` is `None` for a plain Kotlin lambda (target
@@ -2012,6 +2022,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
+        | IrExpr::ReifiedTypeOp { arg, .. }
         | IrExpr::RefNew { init: arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
         | IrExpr::NewArray { size: arg, .. }

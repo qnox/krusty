@@ -647,7 +647,11 @@ fn facade_package_metadata_inner(
             || declared_params
                 .iter()
                 .any(|parameter| matches!(parameter, Ty::TyParam(..)));
-        let jvm_desc = (f.is_suspend() || f.is_inline() || mentions_type_parameter).then(|| {
+        // kotlinc records NO JvmMethodSignature for a plain inline fn (reified included) — its
+        // splicers work from the metadata-derived descriptor, and the spurious handle steered
+        // krusty's own consumer away from the `$default` splice route. Suspend fns (the CPS form
+        // is not derivable) and type-parameter-mentioning signatures keep the handle.
+        let jvm_desc = (f.is_suspend() || mentions_type_parameter).then(|| {
             let mut p = String::new();
             if let Some(r) = receiver {
                 p.push_str(&crate::jvm::names::type_descriptor(r));

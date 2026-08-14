@@ -7897,6 +7897,27 @@ fn emit_unbox_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBu
 /// `self`: the real parameters occupy value-indices `0..n` (the STATIC layout the defaults were lowered
 /// with), and the stub dispatches to the real facade method via `invokestatic`. For each `mask & (1<<i)`
 /// bit set, the argument slot is overwritten with `default_i` before the dispatch.
+/// Whether an emitted body contains reification-marker nodes (a `<reified T>` fn realized as a
+/// standalone method) — its `$default` must inline the body, never delegate.
+fn body_has_reified_markers(ir: &IrFile, body: crate::ir::ExprId) -> bool {
+    fn walk(ir: &IrFile, e: crate::ir::ExprId) -> bool {
+        if matches!(
+            ir.expr(e),
+            IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. }
+        ) {
+            return true;
+        }
+        let mut found = false;
+        crate::ir::for_each_child(&ir.exprs, e, &mut |child| {
+            if walk(ir, child) {
+                found = true;
+            }
+        });
+        found
+    }
+    walk(ir, body)
+}
+
 fn emit_facade_default_stub(
     ir: &IrFile,
     fid: u32,
@@ -7959,14 +7980,25 @@ fn emit_facade_default_stub(
         &mask_slots,
         &HashMap::new(),
     );
-    for &(pslot, pty) in &param_slots {
-        load(pty, pslot, &mut code);
+    // A REIFIED base (its body carries reification markers) cannot be DELEGATED to: the real
+    // method throws at runtime and exists only to be inlined. kotlinc's `$default` therefore
+    // inlines the whole body after the default fills — emit the same: the body was lowered with
+    // value ids 0..n bound to the parameters, exactly this frame's layout.
+    if let Some(body) = f.body.filter(|&body| body_has_reified_markers(ir, body)) {
+        e.emit(body, &mut code);
+        if ret == Ty::Unit && !e.diverges(body) {
+            code.ret_void();
+        }
+    } else {
+        for &(pslot, pty) in &param_slots {
+            load(pty, pslot, &mut code);
+        }
+        let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
+        let desc = method_descriptor(&real_params, ret);
+        let m = e.cw.methodref(facade, &method_name, &desc);
+        code.invokestatic(m, aw, slot_words(ret) as i32);
+        emit_return(ret, &mut code);
     }
-    let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
-    let desc = method_descriptor(&real_params, ret);
-    let m = e.cw.methodref(facade, &method_name, &desc);
-    code.invokestatic(m, aw, slot_words(ret) as i32);
-    emit_return(ret, &mut code);
     code.ensure_locals(e.next_slot);
     code.link();
 
@@ -11163,6 +11195,34 @@ impl<'a> Emitter<'a> {
                 code.invokestatic(m, 2, 0);
                 code.ldc_class(&erased.render(), self.cw);
             }
+            IrExpr::ReifiedTypeOp {
+                cast,
+                negated,
+                arg,
+                name,
+                erased,
+            } => {
+                self.emit_value(*arg, code);
+                // kotlinc's reified is/as placeholder: marker(3) + instanceof, marker(1) + checkcast.
+                code.push_int(if *cast { 1 } else { 3 }, self.cw);
+                code.push_string(name, self.cw);
+                let m = self.cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "reifiedOperationMarker",
+                    "(ILjava/lang/String;)V",
+                );
+                code.invokestatic(m, 2, 0);
+                let ci = self.cw.class_ref(&erased.render());
+                if *cast {
+                    code.checkcast(ci);
+                } else {
+                    code.instance_of(ci);
+                    if *negated {
+                        code.push_int(1, self.cw);
+                        code.ixor();
+                    }
+                }
+            }
             IrExpr::EnumValueOf { class, arg } => {
                 let fq = self.ir.classes[*class as usize].fq_name();
                 self.emit_value(*arg, code);
@@ -13329,6 +13389,13 @@ impl<'a> Emitter<'a> {
                 Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name()))
             }
             IrExpr::ReifiedClassMarker { .. } => Ty::obj("java/lang/Class"),
+            IrExpr::ReifiedTypeOp { cast, erased, .. } => {
+                if *cast {
+                    Ty::obj(&erased.render())
+                } else {
+                    Ty::Boolean
+                }
+            }
             IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
             IrExpr::TypeOp {
                 op, type_operand, ..

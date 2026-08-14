@@ -2959,7 +2959,18 @@ fn reified_uses_are_class_literals(file: &File, f: &FunDecl) -> bool {
                 scan(file, *receiver, reified)
             }
             Expr::Name(n) if reified.contains(n) => false,
-            Expr::Is { ty, .. } | Expr::As { ty, .. } if reified.contains(&ty.name) => false,
+            // Non-safe `is T`/`as T` emit INSTANCEOF/CHECKCAST markers; `as? T` and a nullable
+            // `is T?` target stay splice-only (their branchy realization is not marker-modeled).
+            Expr::Is { ty, operand, .. } if reified.contains(&ty.name) => {
+                !ty.nullable() && scan(file, *operand, reified)
+            }
+            Expr::As {
+                ty,
+                operand,
+                nullable,
+            } if reified.contains(&ty.name) => {
+                !*nullable && !ty.nullable() && scan(file, *operand, reified)
+            }
             _ => {
                 // `any_child_*` short-circuits on `true`, so "any child is BAD" composes directly.
                 !file.any_child_expr(e, &mut |child| !scan(file, child, reified), &mut |stmt| {
@@ -2980,10 +2991,12 @@ fn inline_body_has_splice_only_shape(
     f: &FunDecl,
     is_erased_contract: &impl Fn(ExprId) -> bool,
 ) -> bool {
+    let reified = &f.reified_type_params;
     fn bad_expr(
         file: &File,
         e: ExprId,
         tparams: &[String],
+        reified: &std::collections::HashSet<String>,
         is_erased_contract: &impl Fn(ExprId) -> bool,
     ) -> bool {
         if file.anonymous_object_classes.contains_key(&e) {
@@ -3005,6 +3018,7 @@ fn inline_body_has_splice_only_shape(
                         file,
                         lambda_body.unwrap_or(arg),
                         tparams,
+                        reified,
                         is_erased_contract,
                     );
                 }
@@ -3017,25 +3031,31 @@ fn inline_body_has_splice_only_shape(
             | Expr::Break { .. }
             | Expr::Continue { .. }
             | Expr::Return { .. } => true,
-            Expr::Is { ty, .. } | Expr::As { ty, .. } if tparams.contains(&ty.name) => true,
+            // A REIFIED parameter's is/as emits reification markers (screened separately by
+            // `reified_uses_are_class_literals`); a plain erased parameter's cannot stand alone.
+            Expr::Is { ty, .. } | Expr::As { ty, .. }
+                if tparams.contains(&ty.name) && !reified.contains(&ty.name) =>
+            {
+                true
+            }
             // A lambda in DIRECT call-argument position is safe standalone: it splices with an
             // inline callee or closes over like any fn body. Its BODY is screened (a stored or
             // returned lambda stays rejected above), and a `return` inside it — a non-local
             // return through the inline frame — keeps the fn splice-only.
             Expr::Call { callee, args } => {
-                bad_expr(file, *callee, tparams, is_erased_contract)
+                bad_expr(file, *callee, tparams, reified, is_erased_contract)
                     || args.iter().any(|&arg| match file.expr(arg) {
                         Expr::Lambda { body, .. } => {
                             lambda_body_has_return(file, *body)
-                                || bad_expr(file, *body, tparams, is_erased_contract)
+                                || bad_expr(file, *body, tparams, reified, is_erased_contract)
                         }
-                        _ => bad_expr(file, arg, tparams, is_erased_contract),
+                        _ => bad_expr(file, arg, tparams, reified, is_erased_contract),
                     })
             }
             _ => file.any_child_expr(
                 e,
-                &mut |child| bad_expr(file, child, tparams, is_erased_contract),
-                &mut |stmt| bad_stmt(file, stmt, tparams, is_erased_contract),
+                &mut |child| bad_expr(file, child, tparams, reified, is_erased_contract),
+                &mut |stmt| bad_stmt(file, stmt, tparams, reified, is_erased_contract),
             ),
         }
     }
@@ -3043,6 +3063,7 @@ fn inline_body_has_splice_only_shape(
         file: &File,
         s: StmtId,
         tparams: &[String],
+        reified: &std::collections::HashSet<String>,
         is_erased_contract: &impl Fn(ExprId) -> bool,
     ) -> bool {
         if matches!(
@@ -3052,7 +3073,7 @@ fn inline_body_has_splice_only_shape(
             return true;
         }
         file.any_child_stmt(s, &mut |child| {
-            bad_expr(file, child, tparams, is_erased_contract)
+            bad_expr(file, child, tparams, reified, is_erased_contract)
         })
     }
     /// Any `return` inside a lambda argument's body (non-local through the inline frame — its
@@ -3068,7 +3089,7 @@ fn inline_body_has_splice_only_shape(
     }
     match &f.body {
         FunBody::Expr(body) | FunBody::Block(body) => {
-            bad_expr(file, *body, &f.type_params, is_erased_contract)
+            bad_expr(file, *body, &f.type_params, reified, is_erased_contract)
         }
         FunBody::None => true,
     }

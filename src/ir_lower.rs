@@ -7540,6 +7540,30 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// A `ReifiedTypeOp` marker node for `is`/`as` on the emitted fn's own reified parameter.
+    fn emitted_reified_type_op(
+        &mut self,
+        source: &str,
+        cast: bool,
+        negated: bool,
+        arg: u32,
+    ) -> Option<u32> {
+        let erased = self
+            .cur_tparams
+            .iter()
+            .find(|(name, _, _)| name == source)
+            .map(|(_, bound, _)| *bound)
+            .and_then(|bound| bound.non_null().obj_internal())
+            .unwrap_or_else(crate::types::wk::any);
+        Some(self.ir.add_expr(IrExpr::ReifiedTypeOp {
+            cast,
+            negated,
+            arg,
+            name: source.to_string(),
+            erased,
+        }))
+    }
+
     /// Emit the RAW `java.lang.Class` for a class literal `X::class` (`ce` is the `CallableRef`).
     /// UNBOUND `T::class` → a `Class` constant (reified `T` resolved to the call-site type first);
     /// BOUND `expr::class` → `expr.getClass()` (evaluated once). A bare `X::class` wraps this in
@@ -23642,6 +23666,13 @@ impl<'a> Lower<'a> {
             }
             let raw = self.expr(operand)?;
             let arg = self.box_operand_for_instanceof(operand, raw);
+            // `x is T` on the CURRENT fn's own reified parameter, lowered as an EMITTED method:
+            // the marker + instanceof placeholder kotlinc emits.
+            if !ty.nullable() && self.cur_emitted_reified.contains(&ty.name) {
+                if let Some(marker) = self.emitted_reified_type_op(&ty.name, false, negated, arg) {
+                    return Some(marker);
+                }
+            }
             let op = if negated {
                 IrTypeOp::NotInstanceOf
             } else {
@@ -24034,6 +24065,15 @@ impl<'a> Lower<'a> {
         nullable: bool,
     ) -> Option<u32> {
         let t = {
+            // `x as T` on the CURRENT fn's own reified parameter, lowered as an EMITTED method:
+            // the marker + checkcast placeholder kotlinc emits (`as?` stays splice-only).
+            if !nullable && !ty.nullable() && self.cur_emitted_reified.contains(&ty.name) {
+                let raw = self.expr(operand)?;
+                let boxed = self.box_operand_for_instanceof(operand, raw);
+                if let Some(marker) = self.emitted_reified_type_op(&ty.name, true, false, boxed) {
+                    return Some(marker);
+                }
+            }
             let declared_target = self.info.resolved_type(&ty)?;
             let specialized_target = self.apply_reified_substitution(declared_target);
             let reified_target =
