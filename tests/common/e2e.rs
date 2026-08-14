@@ -4,33 +4,109 @@
 //! unrelated resolver/reference-toolchain helpers and then suppress their dead-code warnings.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use super::common_core as common;
 
+pub struct CompilerDiagnosticResult {
+    pub krusty_code: i32,
+    pub krusty_stdout: String,
+    pub krusty_stderr: String,
+    pub reference_code: i32,
+    pub reference_stderr: String,
+}
+
+fn write_fixture_sources(work: &std::path::Path, sources: &[(&str, &str)]) -> Vec<PathBuf> {
+    sources
+        .iter()
+        .map(|(name, source)| {
+            let path = work.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create fixture source directory");
+            }
+            std::fs::write(&path, source).expect("write compiler fixture");
+            path
+        })
+        .collect()
+}
+
+fn kotlinc_paths_result(
+    sources: &[PathBuf],
+    output: &std::path::Path,
+    extra_args: &[String],
+) -> (i32, String) {
+    let mut args = sources
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    args.extend(["-d".to_string(), output.to_string_lossy().into_owned()]);
+    args.extend_from_slice(extra_args);
+    common::kotlinc_compile(&args).expect("reference compiler unavailable")
+}
+
+/// Compile named sources with both compiler CLIs and retain their diagnostic streams.
+pub fn compiler_diagnostics(
+    sources: &[(&str, &str)],
+    classpath: &[PathBuf],
+) -> CompilerDiagnosticResult {
+    let work = common::scratch_dir().expect("cannot allocate compiler-diagnostic fixture");
+    let source_paths = write_fixture_sources(&work, sources);
+    let joined_classpath = (!classpath.is_empty())
+        .then(|| std::env::join_paths(classpath).expect("build compiler-diagnostic classpath"));
+
+    let mut krusty = Command::new(common::krusty_binary());
+    krusty.args([
+        "-d",
+        work.join("krusty-out").to_str().expect("UTF-8 output path"),
+    ]);
+    if let Some(classpath) = &joined_classpath {
+        krusty.arg("-cp").arg(classpath);
+    }
+    krusty.args(&source_paths);
+    let krusty = krusty.output().expect("run krusty diagnostic fixture");
+
+    let reference_args = joined_classpath
+        .map(|classpath| vec!["-cp".to_string(), classpath.to_string_lossy().into_owned()])
+        .unwrap_or_default();
+    let (reference_code, reference_stderr) =
+        kotlinc_paths_result(&source_paths, &work.join("reference-out"), &reference_args);
+    let result = CompilerDiagnosticResult {
+        krusty_code: krusty
+            .status
+            .code()
+            .expect("krusty diagnostic fixture terminated by signal"),
+        krusty_stdout: String::from_utf8_lossy(&krusty.stdout).into_owned(),
+        krusty_stderr: String::from_utf8_lossy(&krusty.stderr).into_owned(),
+        reference_code,
+        reference_stderr,
+    };
+    let _ = std::fs::remove_dir_all(work);
+    result
+}
+
+/// Run the shared frontend against the provisioned Kotlin stdlib and JDK.
+pub fn front_end_diagnostics_with_stdlib(source: &str) -> Vec<String> {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(jdk.as_path()))
+}
+
 /// Assert one Kotlin language feature's gate against the reference compiler.
 pub fn assert_language_feature_gate(source: &str, feature: &str) {
-    let Some(work) = common::scratch_dir() else {
-        panic!("cannot allocate language-feature fixture");
-    };
-    let source_path = work.join("Feature.kt");
-    std::fs::write(&source_path, source).expect("write language-feature fixture");
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
 
     for (enabled, expectation) in [(false, "reject"), (true, "accept")] {
         let sign = if enabled { '+' } else { '-' };
-        let args = vec![
-            source_path.to_string_lossy().into_owned(),
-            "-d".to_string(),
-            work.join(if enabled { "enabled" } else { "disabled" })
-                .to_string_lossy()
-                .into_owned(),
-            format!("-XXLanguage:{sign}{feature}"),
-        ];
-        let Some((reference_code, reference_stderr)) = common::kotlinc_compile(&args) else {
-            eprintln!("skip: kotlinc unavailable");
-            return;
-        };
+        let (reference_code, reference_stderr) = kotlinc_source_result_with_args(
+            if enabled {
+                "FeatureEnabled"
+            } else {
+                "FeatureDisabled"
+            },
+            source,
+            &[format!("-XXLanguage:{sign}{feature}")],
+        );
         let source = format!("// LANGUAGE: {sign}{feature}\n{source}");
         let diagnostics = common::front_end_diagnostics(
             &source,
@@ -56,16 +132,14 @@ pub fn expect_suspend_result(tag: &str, main: &str, call: &str, expected: &str) 
 }
 
 /// The dependency variant of [`expect_suspend_result`].
-pub fn expect_suspend_result_against(
+pub fn expect_suspend_result_against_ref(
     tag: &str,
     lib_src: &str,
     main: &str,
     call: &str,
     expected: &str,
 ) {
-    let Some(library) = common::compile_lib(tag, lib_src) else {
-        return;
-    };
+    let library = common::compile_lib_ref(tag, lib_src).expect("reference compiler unavailable");
     expect_suspend_result_with_classpath(tag, main, call, expected, vec![library]);
 }
 
@@ -131,26 +205,29 @@ pub fn inspect_checker_with_stdlib<T>(
         &krusty::frontend::FrontendTypeInfo,
         &krusty::frontend::FrontendSymbols,
     ) -> T,
-) -> Option<(Vec<String>, T)> {
+) -> (Vec<String>, T) {
     let stdlib = common::stdlib_jar();
     let mut classpath = vec![stdlib];
     classpath.push(common::jdk_modules());
-    Some(common::inspect_checker_with_classpath(
-        main, classpath, inspect,
-    ))
+    common::inspect_checker_with_classpath(main, classpath, inspect)
 }
 
 /// Compile one in-memory fixture with the persistent reference compiler harness.
-pub fn kotlinc_source_result(tag: &str, source: &str) -> Option<(i32, String)> {
-    let work = common::scratch_dir()?;
-    let source_path = work.join(format!("{tag}.kt"));
+pub fn kotlinc_source_result(tag: &str, source: &str) -> (i32, String) {
+    kotlinc_source_result_with_args(tag, source, &[])
+}
+
+/// Compile one in-memory fixture with extra reference-compiler arguments.
+pub fn kotlinc_source_result_with_args(
+    tag: &str,
+    source: &str,
+    extra_args: &[String],
+) -> (i32, String) {
+    let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
+    let source_name = format!("{tag}.kt");
+    let source_paths = write_fixture_sources(&work, &[(source_name.as_str(), source)]);
     let output = work.join("out");
-    std::fs::write(&source_path, source).ok()?;
-    let result = common::kotlinc_compile(&[
-        source_path.to_string_lossy().into_owned(),
-        "-d".to_string(),
-        output.to_string_lossy().into_owned(),
-    ]);
+    let result = kotlinc_paths_result(&source_paths, &output, extra_args);
     let _ = std::fs::remove_dir_all(work);
     result
 }

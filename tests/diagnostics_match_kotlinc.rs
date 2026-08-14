@@ -1,9 +1,7 @@
 //! krusty's diagnostics should match kotlinc's message and source location. For a set of erroneous
 //! snippets, compile with both and assert the first error's file, line, column, and text match exactly.
 
-use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use super::common;
 
@@ -42,24 +40,9 @@ fn first_error(output: &str) -> Option<ObservedError> {
 #[test]
 fn generic_cast_is_accepted_by_both_frontends() {
     let source = "fun <T> materialize(): T = 42 as T";
-    let root =
-        std::env::temp_dir().join(format!("krusty_generic_cast_parity_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-    let kt = root.join("GenericCast.kt");
-    fs::write(&kt, source).unwrap();
-    let args = vec![
-        kt.to_string_lossy().into_owned(),
-        "-d".to_string(),
-        root.join("kotlinc-out").to_string_lossy().into_owned(),
-    ];
-    let Some((code, stderr)) = common::kotlinc_compile(&args) else {
-        eprintln!("skipping generic cast parity: kotlinc server unavailable");
-        return;
-    };
+    let (code, stderr) = common::kotlinc_source_result("GenericCast", source);
     assert_eq!(code, 0, "kotlinc rejected generic cast: {stderr}");
     common::expect_front_end_ok_files_with_stdlib(&[source], "generic cast parity");
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -89,8 +72,7 @@ fn generic_method_result_binds_outer_type_parameter() {
 fn dependent_function_bound_keeps_the_enclosing_formal_identity() {
     let source = "fun <T : CharSequence, U : T> keep(value: U): T = value\n\
                   fun box(): String = keep<String, String>(\"OK\")";
-    let (code, stderr) =
-        common::kotlinc_source_result("DependentFunctionBound", source).expect("kotlinc harness");
+    let (code, stderr) = common::kotlinc_source_result("DependentFunctionBound", source);
     assert_eq!(code, 0, "kotlinc rejected dependent bound: {stderr}");
     common::expect_front_end_ok_files_with_stdlib(&[source], "dependent function bound");
 }
@@ -101,8 +83,7 @@ fn member_type_parameter_bound_keeps_the_class_formal_identity() {
                       fun <U : T> keep(value: U): T = value\n\
                   }\n\
                   fun box(): String = Outer<String>().keep(\"OK\")";
-    let (code, stderr) =
-        common::kotlinc_source_result("MemberDependentBound", source).expect("kotlinc harness");
+    let (code, stderr) = common::kotlinc_source_result("MemberDependentBound", source);
     assert_eq!(code, 0, "kotlinc rejected dependent member bound: {stderr}");
     common::expect_front_end_ok_files_with_stdlib(&[source], "dependent member bound");
 }
@@ -110,8 +91,7 @@ fn member_type_parameter_bound_keeps_the_class_formal_identity() {
 #[test]
 fn where_constraint_subject_diagnostic_matches_kotlinc() {
     let source = "class C<T> where U : Any";
-    let (code, stderr) =
-        common::kotlinc_source_result("InvalidWhereSubject", source).expect("kotlinc harness");
+    let (code, stderr) = common::kotlinc_source_result("InvalidWhereSubject", source);
     assert_ne!(code, 0, "kotlinc unexpectedly accepted invalid constraint");
     assert!(
         stderr.contains("'U' does not refer to a type parameter of 'C'."),
@@ -152,30 +132,12 @@ open class Base(val callback: () -> Base.Companion) {
 
 class Derived : Base({ this })
 "#;
-    let root = std::env::temp_dir().join(format!(
-        "krusty_enum_entry_this_parity_{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-    let kt = root.join("EnumEntryThis.kt");
-    fs::write(&kt, source).unwrap();
-    let args = vec![
-        kt.to_string_lossy().into_owned(),
-        "-d".to_string(),
-        root.join("kotlinc-out").to_string_lossy().into_owned(),
-    ];
-    let Some((kotlinc_code, kotlinc_stderr)) = common::kotlinc_compile(&args) else {
-        eprintln!("skipping enum-entry this parity: kotlinc server unavailable");
-        return;
-    };
+    let (kotlinc_code, kotlinc_stderr) = common::kotlinc_source_result("EnumEntryThis", source);
     let diagnostics = common::front_end_diagnostics(
         source,
         std::slice::from_ref(&common::stdlib_jar()),
         Some(common::jdk_modules().as_path()),
     );
-    let _ = fs::remove_dir_all(&root);
-
     assert_eq!(
         kotlinc_code, 0,
         "kotlinc rejected enum this: {kotlinc_stderr}"
@@ -185,7 +147,6 @@ class Derived : Base({ this })
 
 #[test]
 fn errors_match_kotlinc_in_text_and_location() {
-    let krusty = common::krusty_binary();
     let stdlib = common::stdlib_jar();
 
     // Snippets within krusty's subset that produce a diagnostic kotlinc also produces identically.
@@ -313,74 +274,52 @@ fn errors_match_kotlinc_in_text_and_location() {
         "fun f(p: Any) = p as (DefinitelyAbsentClassifier) -> String",
     ];
 
-    let root = std::env::temp_dir().join(format!("krusty_diag_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-
     let workers = std::thread::available_parallelism()
         .map_or(1, usize::from)
         .min(10)
         .min(cases.len());
     let chunk_size = cases.len().div_ceil(workers);
-    let mut mismatches = std::thread::scope(|scope| {
+    let mismatches = std::thread::scope(|scope| {
         cases
             .chunks(chunk_size)
             .enumerate()
             .map(|(chunk, sources)| {
-                let root = &root;
-                let krusty = &krusty;
                 let stdlib = &stdlib;
                 scope.spawn(move || {
                     let mut mismatches = Vec::new();
                     for (offset, src) in sources.iter().enumerate() {
                         let i = chunk * chunk_size + offset;
-                        let kt = root.join(format!("t{i}.kt"));
-                        fs::write(&kt, src).unwrap();
-
-                        let kr = Command::new(krusty)
-                            .args(["-d", root.join(format!("o{i}")).to_str().unwrap(), "-cp"])
-                            .arg(stdlib)
-                            .arg(&kt)
-                            .output()
-                            .unwrap();
-                        let kr_error = first_error(String::from_utf8_lossy(&kr.stderr).as_ref())
-                            .or_else(|| first_error(&String::from_utf8_lossy(&kr.stdout)));
-
-                        let args = vec![
-                            kt.to_string_lossy().into_owned(),
-                            "-d".to_string(),
-                            root.join(format!("ko{i}")).to_string_lossy().into_owned(),
-                            "-cp".to_string(),
-                            stdlib.to_string_lossy().into_owned(),
-                        ];
-                        let (_, kc_err) = common::kotlinc_compile(&args)?;
-                        let kc_error = first_error(&kc_err);
-                        if kr_error != kc_error {
+                        let file = format!("t{i}.kt");
+                        let result = common::compiler_diagnostics(
+                            &[(file.as_str(), src)],
+                            std::slice::from_ref(stdlib),
+                        );
+                        let kr_error = first_error(&result.krusty_stderr)
+                            .or_else(|| first_error(&result.krusty_stdout));
+                        let kc_error = first_error(&result.reference_stderr);
+                        if (result.krusty_code == 0) != (result.reference_code == 0)
+                            || kr_error != kc_error
+                        {
                             mismatches.push((
                                 i,
                                 format!(
-                                    "diagnostic mismatch for {src:?}\n krusty: {kr_error:?}\n kotlinc: {kc_error:?}"
+                                    "diagnostic mismatch for {src:?}\n krusty ({code}): {kr_error:?}\n kotlinc ({reference_code}): {kc_error:?}",
+                                    code = result.krusty_code,
+                                    reference_code = result.reference_code,
                                 ),
                             ));
                         }
                     }
-                    Some(mismatches)
+                    mismatches
                 })
             })
             .collect::<Vec<_>>()
             .into_iter()
             .map(|worker| worker.join().unwrap())
-            .collect::<Option<Vec<_>>>()
+            .collect::<Vec<_>>()
     });
-    let Some(mut mismatches) = mismatches
-        .take()
-        .map(|chunks| chunks.into_iter().flatten().collect::<Vec<_>>())
-    else {
-        eprintln!("skipping diagnostics_match_kotlinc: kotlinc server unavailable");
-        return;
-    };
+    let mut mismatches = mismatches.into_iter().flatten().collect::<Vec<_>>();
     mismatches.sort_by_key(|(index, _)| *index);
-    let _ = fs::remove_dir_all(&root);
     assert!(
         mismatches.is_empty(),
         "{}",
@@ -394,134 +333,59 @@ fn errors_match_kotlinc_in_text_and_location() {
 
 #[test]
 fn jvm_builtin_errors_match_kotlinc() {
-    let krusty = common::krusty_binary();
-    let root = std::env::temp_dir().join(format!("krusty_jvm_builtin_diag_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
     let source = "fun f(a: Array<String>): Array<String> = a.clone(1)";
-    let kt = root.join("CloneError.kt");
-    fs::write(&kt, source).unwrap();
     let stdlib = common::stdlib_jar();
-
-    let kr = Command::new(&krusty)
-        .args(["-d", root.join("o").to_str().unwrap(), "-cp"])
-        .arg(&stdlib)
-        .arg(&kt)
-        .output()
-        .unwrap();
-    let kr_error = first_error(String::from_utf8_lossy(&kr.stderr).as_ref())
-        .or_else(|| first_error(&String::from_utf8_lossy(&kr.stdout)));
-
-    let args = vec![
-        kt.to_string_lossy().into_owned(),
-        "-d".to_string(),
-        root.join("ko").to_string_lossy().into_owned(),
-        "-cp".to_string(),
-        stdlib.to_string_lossy().into_owned(),
-    ];
-    let Some((_, kc_err)) = common::kotlinc_compile(&args) else {
-        eprintln!("skipping jvm_builtin_errors_match_kotlinc: kotlinc server unavailable");
-        return;
-    };
-    let kc_error = first_error(&kc_err);
-    let _ = fs::remove_dir_all(&root);
+    let result =
+        common::compiler_diagnostics(&[("CloneError.kt", source)], std::slice::from_ref(&stdlib));
+    let kr_error =
+        first_error(&result.krusty_stderr).or_else(|| first_error(&result.krusty_stdout));
+    let kc_error = first_error(&result.reference_stderr);
+    assert_ne!(result.krusty_code, 0, "krusty unexpectedly accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
     assert_eq!(kr_error, kc_error, "diagnostic mismatch for {source:?}");
 }
 
 #[test]
 fn kotlin_internal_exact_requires_an_exact_argument_type() {
-    let root = std::env::temp_dir().join(format!(
-        "krusty_kotlin_internal_exact_{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-
-    let ordinary = root.join("Ordinary.kt");
-    fs::write(
-        &ordinary,
-        "fun <T> ordinary(value: T) {}\nfun use() = ordinary<CharSequence>(\"x\")",
-    )
-    .unwrap();
-    let ordinary_args = vec![
-        ordinary.to_string_lossy().into_owned(),
-        "-d".to_string(),
-        root.join("ordinary-out").to_string_lossy().into_owned(),
-    ];
-    let Some((ordinary_code, ordinary_stderr)) = common::kotlinc_compile(&ordinary_args) else {
-        eprintln!("skipping kotlin_internal_exact contract: kotlinc server unavailable");
-        return;
-    };
+    let ordinary_source =
+        "fun <T> ordinary(value: T) {}\nfun use() = ordinary<CharSequence>(\"x\")";
+    let (ordinary_code, ordinary_stderr) =
+        common::kotlinc_source_result("Ordinary", ordinary_source);
     assert_eq!(ordinary_code, 0, "{ordinary_stderr}");
 
-    let exact = root.join("Exact.kt");
-    fs::write(
-        &exact,
-        concat!(
-            "@Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n",
-            "fun <T> exact(value: @kotlin.internal.Exact T) {}\n",
-            "fun use() = exact<CharSequence>(\"x\")",
-        ),
-    )
-    .unwrap();
-    let exact_args = vec![
-        exact.to_string_lossy().into_owned(),
-        "-d".to_string(),
-        root.join("exact-out").to_string_lossy().into_owned(),
-    ];
-    let Some((exact_code, exact_stderr)) = common::kotlinc_compile(&exact_args) else {
-        eprintln!("skipping kotlin_internal_exact contract: kotlinc server unavailable");
-        return;
-    };
+    let exact_source = concat!(
+        "@Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n",
+        "fun <T> exact(value: @kotlin.internal.Exact T) {}\n",
+        "fun use() = exact<CharSequence>(\"x\")",
+    );
+    let result = common::compiler_diagnostics(&[("Exact.kt", exact_source)], &[]);
     assert_ne!(
-        exact_code, 0,
+        result.reference_code, 0,
         "@Exact unexpectedly accepted the widened type"
     );
     assert!(
-        exact_stderr.contains("argument type mismatch"),
-        "unexpected kotlinc diagnostic: {exact_stderr}"
+        result.reference_stderr.contains("argument type mismatch"),
+        "unexpected kotlinc diagnostic: {}",
+        result.reference_stderr
     );
 
-    let krusty = common::krusty_binary();
-    let krusty_output = Command::new(krusty)
-        .args(["-d", root.join("krusty-out").to_str().unwrap()])
-        .arg(&exact)
-        .output()
-        .unwrap();
-    let krusty_error = first_error(String::from_utf8_lossy(&krusty_output.stderr).as_ref())
-        .or_else(|| first_error(&String::from_utf8_lossy(&krusty_output.stdout)));
-    let _ = fs::remove_dir_all(&root);
-    assert_eq!(krusty_error, first_error(&exact_stderr));
+    let krusty_error =
+        first_error(&result.krusty_stderr).or_else(|| first_error(&result.krusty_stdout));
+    assert_ne!(result.krusty_code, 0, "krusty unexpectedly accepted @Exact");
+    assert_eq!(krusty_error, first_error(&result.reference_stderr));
 }
 
 #[test]
 fn kotlin_internal_exact_can_require_two_arguments_to_have_the_same_type() {
-    let root = std::env::temp_dir().join(format!(
-        "krusty_kotlin_internal_exact_pair_{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-    let source = root.join("ExactPair.kt");
-    fs::write(
-        &source,
-        concat!(
-            "@Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n",
-            "fun <T> same(first: @kotlin.internal.Exact T, second: @kotlin.internal.Exact T) {}\n",
-            "fun use(first: String, second: CharSequence) = same(first, second)",
-        ),
-    )
-    .unwrap();
-    let args = vec![
-        source.to_string_lossy().into_owned(),
-        "-d".to_string(),
-        root.join("out").to_string_lossy().into_owned(),
-    ];
-    let Some((code, stderr)) = common::kotlinc_compile(&args) else {
-        eprintln!("skipping kotlin_internal_exact pair contract: kotlinc server unavailable");
-        return;
-    };
-    let _ = fs::remove_dir_all(&root);
+    let source = concat!(
+        "@Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n",
+        "fun <T> same(first: @kotlin.internal.Exact T, second: @kotlin.internal.Exact T) {}\n",
+        "fun use(first: String, second: CharSequence) = same(first, second)",
+    );
+    let (code, stderr) = common::kotlinc_source_result("ExactPair", source);
     assert_ne!(code, 0, "two @Exact parameters accepted different types");
     assert!(
         stderr.contains("argument type mismatch"),
@@ -531,36 +395,21 @@ fn kotlin_internal_exact_can_require_two_arguments_to_have_the_same_type() {
 
 #[test]
 fn cross_file_generic_diagnostic_matches_kotlinc() {
-    let krusty = common::krusty_binary();
-    let root = std::env::temp_dir().join(format!("krusty_cross_diag_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-    let declaration = root.join("declaration.kt");
-    let use_site = root.join("use.kt");
-    fs::write(&declaration, "fun <T> id(x: T): T = x").unwrap();
-    fs::write(&use_site, "fun use(): Int = id(1, 2)").unwrap();
+    let result = common::compiler_diagnostics(
+        &[
+            ("declaration.kt", "fun <T> id(x: T): T = x"),
+            ("use.kt", "fun use(): Int = id(1, 2)"),
+        ],
+        &[],
+    );
+    let krusty_error =
+        first_error(&result.krusty_stderr).or_else(|| first_error(&result.krusty_stdout));
+    let kotlinc_error = first_error(&result.reference_stderr);
 
-    let krusty_output = Command::new(&krusty)
-        .args(["-d", root.join("out").to_str().unwrap()])
-        .arg(&declaration)
-        .arg(&use_site)
-        .output()
-        .unwrap();
-    let krusty_error = first_error(String::from_utf8_lossy(&krusty_output.stderr).as_ref())
-        .or_else(|| first_error(&String::from_utf8_lossy(&krusty_output.stdout)));
-
-    let kotlinc_args = vec![
-        declaration.to_string_lossy().into_owned(),
-        use_site.to_string_lossy().into_owned(),
-        "-d".to_string(),
-        root.join("kotlinc-out").to_string_lossy().into_owned(),
-    ];
-    let Some((_, kotlinc_stderr)) = common::kotlinc_compile(&kotlinc_args) else {
-        eprintln!("skipping cross-file diagnostics parity: kotlinc server unavailable");
-        return;
-    };
-    let kotlinc_error = first_error(&kotlinc_stderr);
-    let _ = fs::remove_dir_all(&root);
-
+    assert_ne!(result.krusty_code, 0, "krusty unexpectedly accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
     assert_eq!(krusty_error, kotlinc_error);
 }

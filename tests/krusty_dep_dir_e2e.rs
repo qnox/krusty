@@ -5,26 +5,23 @@
 //! as they do from a jar.
 
 use super::common::{
-    compile_and_run_box, compile_to_dir, front_end_diagnostics, jdk_modules, stdlib_jar,
+    compile_and_run_box, compile_to_dir, front_end_diagnostics, jdk_modules, scratch_dir,
+    stdlib_jar,
 };
 
-/// Compile `lib` (krusty, in-process) into a fresh temp dir and return it. `None` ⇒ toolchain
-/// absent ⇒ caller skips.
-fn dep_dir(tag: &str, lib: &str) -> Option<std::path::PathBuf> {
+/// Compile `lib` (krusty, in-process) into a fresh harness-owned directory.
+fn dep_dir(tag: &str, lib: &str) -> std::path::PathBuf {
     let stdlib = stdlib_jar();
-    let dir = std::env::temp_dir().join(format!("krusty_depdir_{}_{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).ok()?;
+    let dir =
+        scratch_dir().unwrap_or_else(|| panic!("{tag}: allocate dependency scratch directory"));
     compile_to_dir(lib, "lib1", &[stdlib], Some(jdk_modules().as_path()), &dir)
         .expect("dep lib must compile");
-    Some(dir)
+    dir
 }
 
 #[test]
 fn top_level_fn_from_dep_dir() {
-    let Some(dir) = dep_dir("toplevel", "package dep\n\nfun greet(): String = \"OK\"\n") else {
-        return;
-    };
+    let dir = dep_dir("toplevel", "package dep\n\nfun greet(): String = \"OK\"\n");
     let stdlib = stdlib_jar();
     let main = "import dep.greet\n\nfun box(): String = greet()\n";
     let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
@@ -34,12 +31,10 @@ fn top_level_fn_from_dep_dir() {
 
 #[test]
 fn extension_fn_from_dep_dir() {
-    let Some(dir) = dep_dir(
+    let dir = dep_dir(
         "ext",
         "package dep\n\nfun String.shout(): String = this + \"!\"\n",
-    ) else {
-        return;
-    };
+    );
     let stdlib = stdlib_jar();
     let main = "import dep.shout\n\nfun box(): String {\n    return if (\"OK\".shout() == \"OK!\") \"OK\" else \"fail\"\n}\n";
     let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
@@ -49,12 +44,10 @@ fn extension_fn_from_dep_dir() {
 
 #[test]
 fn typealias_from_dep_dir_is_a_classifier_declaration() {
-    let Some(dir) = dep_dir(
+    let dir = dep_dir(
         "typealias",
         "package dep\n\nclass Real(val value: String)\ntypealias Alias = Real\n",
-    ) else {
-        return;
-    };
+    );
     let stdlib = stdlib_jar();
     let main = "import dep.Alias\n\nfun box(): String = Alias(\"OK\").value\n";
     let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
@@ -64,14 +57,12 @@ fn typealias_from_dep_dir_is_a_classifier_declaration() {
 
 #[test]
 fn fun_interface_metadata_survives_a_dependency_boundary() {
-    let Some(dir) = dep_dir(
+    let dir = dep_dir(
         "fun_interface",
         "package dep\n\n\
          interface Marker { val marker: Boolean get() = false }\n\
          fun interface Action : Marker { fun run() }\n",
-    ) else {
-        return;
-    };
+    );
     let stdlib = stdlib_jar();
     let main = "import dep.Action\n\n\
                 class Consumer { fun accept(action: Action) { action.run() } }\n\
@@ -86,12 +77,10 @@ fn fun_interface_metadata_survives_a_dependency_boundary() {
 // its own receiver (a name-only match would stamp one receiver on both).
 #[test]
 fn same_name_extension_properties_from_dep_dir() {
-    let Some(dir) = dep_dir(
+    let dir = dep_dir(
         "extprop2",
         "package dep\n\nval String.tagged: String\n    get() = \"s:\" + this\nval Int.tagged: String\n    get() = \"i:\" + this\n",
-    ) else {
-        return;
-    };
+    );
     let stdlib = stdlib_jar();
     let main = "import dep.tagged\n\nfun box(): String {\n    if (\"x\".tagged != \"s:x\") return \"fail string\"\n    if (7.tagged != \"i:7\") return \"fail int\"\n    return \"OK\"\n}\n";
     let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
@@ -101,12 +90,10 @@ fn same_name_extension_properties_from_dep_dir() {
 
 #[test]
 fn extension_property_from_dep_dir() {
-    let Some(dir) = dep_dir(
+    let dir = dep_dir(
         "extprop",
         "package dep\n\nval String.doubled: String\n    get() = this + this\n",
-    ) else {
-        return;
-    };
+    );
     let stdlib = stdlib_jar();
     let main = "import dep.doubled\n\nfun box(): String {\n    return if (\"ab\".doubled == \"abab\") \"OK\" else \"fail\"\n}\n";
     let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
@@ -116,15 +103,13 @@ fn extension_property_from_dep_dir() {
 
 #[test]
 fn generic_mutable_extension_property_reference_from_dep_dir() {
-    let Some(dir) = dep_dir(
+    let dir = dep_dir(
         "generic_extprop_ref",
         "class C<T>(var value: T)\n\
          var <T> C<T>.live: T\n\
          \x20 get() = value\n\
          \x20 set(next) { value = next }\n",
-    ) else {
-        return;
-    };
+    );
     let stdlib = stdlib_jar();
     let main = "import kotlin.reflect.KMutableProperty0\n\
         fun update(property: KMutableProperty0<String>): String {\n\
@@ -145,12 +130,10 @@ fn generic_mutable_extension_property_reference_from_dep_dir() {
 /// from another module. The `$default` body must not be spliced and the slot mapping must hold.
 #[test]
 fn inline_fn_with_defaults_named_calls_from_dep_dir() {
-    let Some(dir) = dep_dir(
+    let dir = dep_dir(
         "inline_named",
         "package dep\n\ninline fun foo(x: String = \"x\", y: String = \"y\") = x + y\n",
-    ) else {
-        return;
-    };
+    );
     let stdlib = stdlib_jar();
     let main = "import dep.foo\n\nfun box(): String {\n    val r = foo() + \";\" + foo(x = \"X\") + \";\" + foo(y = \"Y\") + \";\" + foo(x = \"X\", y = \"Y\")\n    return if (r == \"xy;Xy;xY;XY\") \"OK\" else \"fail: $r\"\n}\n";
     let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
@@ -160,7 +143,7 @@ fn inline_fn_with_defaults_named_calls_from_dep_dir() {
 
 #[test]
 fn legacy_inline_class_member_from_dep_dir_shapes_implicit_it() {
-    let Some(dir) = dep_dir(
+    let dir = dep_dir(
         "member_lambda",
         "// LANGUAGE: +InlineClasses\npackage dep\n\n\
          interface Text { fun text(): String }\n\
@@ -171,9 +154,7 @@ fn legacy_inline_class_member_from_dep_dir_shapes_implicit_it() {
            inline fun <T> run(transform: (String) -> T): T = transform(text)\n\
            companion object { fun make(number: Int) = Wrapper(number) }\n\
          }\n",
-    ) else {
-        return;
-    };
+    );
     let stdlib = stdlib_jar();
     let main = "// LANGUAGE: +InlineClasses\nimport dep.Wrapper\n\n\
                 fun read(wrapper: Wrapper): String = wrapper.run { it }\n\

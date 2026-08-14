@@ -1,21 +1,16 @@
 use super::common;
 
-fn kotlinc_error_against(
-    source: &str,
-    classpath: &std::path::Path,
-    root: &std::path::Path,
-) -> Option<String> {
-    let source_path = root.join("Reference.kt");
-    std::fs::write(&source_path, source).ok()?;
-    let args = vec![
-        source_path.to_string_lossy().into_owned(),
-        "-d".to_string(),
-        root.join("reference-out").to_string_lossy().into_owned(),
-        "-classpath".to_string(),
-        classpath.to_string_lossy().into_owned(),
-    ];
-    let (code, stderr) = common::kotlinc_compile(&args)?;
-    (code != 0).then_some(stderr)
+fn kotlinc_error_against(source: &str, classpath: &std::path::Path) -> String {
+    let (code, stderr) = common::kotlinc_source_result_with_args(
+        "Reference",
+        source,
+        &[
+            "-classpath".to_string(),
+            classpath.to_string_lossy().into_owned(),
+        ],
+    );
+    assert_ne!(code, 0, "reference compiler unexpectedly accepted fixture");
+    stderr
 }
 
 fn numeric_api() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
@@ -215,9 +210,8 @@ fn java_vararg_does_not_omit_fixed_parameters() {
         std::slice::from_ref(&java_classes),
         Some(jdk.as_path()),
     );
-    let reference = kotlinc_error_against(source, &java_classes, &temp_root);
+    let reference = kotlinc_error_against(source, &java_classes);
     let _ = std::fs::remove_dir_all(temp_root);
-    let reference = reference.expect("kotlinc rejected-call diagnostic");
     assert!(
         reference.contains("no value passed for parameter 'p0'."),
         "{reference}"
@@ -322,9 +316,8 @@ fn unrelated_instance_sam_overloads_are_ambiguous() {
         std::slice::from_ref(&java_classes),
         Some(jdk.as_path()),
     );
-    let reference = kotlinc_error_against(source, &java_classes, &temp_root);
+    let reference = kotlinc_error_against(source, &java_classes);
     let _ = std::fs::remove_dir_all(temp_root);
-    let reference = reference.expect("kotlinc SAM ambiguity diagnostic");
     assert!(
         reference.contains("overload resolution ambiguity between candidates:"),
         "{reference}"

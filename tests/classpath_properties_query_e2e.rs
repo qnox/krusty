@@ -172,8 +172,7 @@ fn classpath_var_extension_property_uses_the_selected_metadata_accessors() {
                @JvmName(\"writeScore\") set(v) { raw = v }";
     let main = "import lib.Box\nimport lib.score\nfun box(): String {\n  val b = Box(1)\n  \
                 b.score = 7\n  return if (b.score == 7) \"OK\" else \"f:${b.score}\"\n}";
-    let Some(out) = common::expect_box_run_against("varextsetterjvmname", lib, main) else {
-        return; // toolchain not provisioned
-    };
+    let out = common::expect_box_run_against_ref("varextsetterjvmname", lib, main)
+        .expect("reference compiler unavailable");
     assert_eq!(out, "OK");
 }

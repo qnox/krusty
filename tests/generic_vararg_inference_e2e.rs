@@ -53,8 +53,7 @@ fun box(): String {\n\
     val values = arrayOf(Entry(\"OK\"))\n\
     return last(*values).text\n\
 }\n";
-    let (reference_code, stderr) =
-        common::kotlinc_source_result("GenericVarargSpread", SRC).expect("pinned kotlinc");
+    let (reference_code, stderr) = common::kotlinc_source_result("GenericVarargSpread", SRC);
     assert_eq!(reference_code, 0, "kotlinc rejected fixture: {stderr}");
     assert_eq!(run(SRC).as_deref(), Some("OK"));
 }

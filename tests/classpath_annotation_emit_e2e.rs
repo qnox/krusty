@@ -63,7 +63,7 @@ fn classpath_annotation_retention_splits_visible_invisible_drops_source() {
 
 #[test]
 fn classpath_low_priority_annotation_reaches_overload_selection() {
-    let library = common::compile_lib(
+    let library = common::compile_lib_ref(
         "low_priority_metadata",
         r#"package lib
 @Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
@@ -82,8 +82,7 @@ fun choose(value: Any) = "normal"
         Some(jdk.as_path()),
     )
     .expect("compile consumer");
-    match common::run_box(&classes, "LowPriorityConsumerKt", &[library, stdlib]) {
-        Some(output) => assert_eq!(output.trim(), "normal"),
-        None => eprintln!("skipping: box runner unavailable"),
-    }
+    let output = common::run_box(&classes, "LowPriorityConsumerKt", &[library, stdlib])
+        .expect("pooled box runner unavailable");
+    assert_eq!(output.trim(), "normal");
 }

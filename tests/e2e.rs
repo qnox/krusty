@@ -4,6 +4,7 @@
 
 #[path = "common/mod.rs"]
 mod common_core;
+#[path = "common/e2e.rs"]
 mod e2e_support;
 
 mod common {

@@ -281,11 +281,8 @@ fn two_sam_overload_member_lambda_is_ambiguous() {
          \x20 fun perform(r: Runnable): String = \"runnable\"\n\
          }\n\
          fun box(): String = M().perform { }\n";
-    let Some((reference_code, reference_stderr)) =
-        common::kotlinc_source_result("member_sam_ambiguity_reference", SOURCE)
-    else {
-        return;
-    };
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("member_sam_ambiguity_reference", SOURCE);
     assert_ne!(
         reference_code, 0,
         "kotlinc accepted fixture: {reference_stderr}"

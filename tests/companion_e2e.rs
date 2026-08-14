@@ -149,9 +149,8 @@ fun box(): String =
 
     // Pin the language decision, not the old conservative rejection: kotlinc accepts all three
     // declaration pairs, and the nearer instance receiver wins only for the unqualified call.
-    if common::compile_lib("CompanionInstanceOverlapKotlinc", src).is_none() {
-        return;
-    }
+    common::compile_lib_ref("CompanionInstanceOverlapKotlinc", src)
+        .expect("reference compiler unavailable");
     common::expect_box_ok_with_stdlib(src, "CompanionInstanceOverlap");
 }
 

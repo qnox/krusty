@@ -283,8 +283,7 @@ fn source_generic_named_whole_array_preserves_selected_array_form() {
         \x20 return if (direct == \"2\" && spread == \"2\" && mixed == \"3\") \"OK\" else \"FAIL:$direct/$spread/$mixed\"\n\
         }\n";
     let (reference_code, reference_diagnostics) =
-        common::kotlinc_source_result("generic_named_array_reference", SRC)
-            .expect("reference kotlinc");
+        common::kotlinc_source_result("generic_named_array_reference", SRC);
     assert_eq!(
         reference_code, 0,
         "kotlinc rejected generic vararg shape: {reference_diagnostics}"
@@ -301,8 +300,7 @@ fn source_generic_contravariant_vararg_infers_nothing() {
         fun <T> choose(vararg values: Sink<T>): T = null as T\n\
         fun probe(): Nothing = choose(Sink<Int>(), Sink<String>(), Sink<Long>())\n";
     let (nothing_code, nothing_diagnostics) =
-        common::kotlinc_source_result("generic_contravariant_vararg_nothing_reference", SRC)
-            .expect("reference kotlinc");
+        common::kotlinc_source_result("generic_contravariant_vararg_nothing_reference", SRC);
     assert_eq!(
         nothing_code, 0,
         "kotlinc does not infer Nothing: {nothing_diagnostics}"

@@ -19,13 +19,12 @@ fun forward(consumer: Consumer, callback: () -> Unit) {
     consumer.accept(callback)
 }
 "#;
-    let Some(diagnostics) = common::checker_diags_against(
+    let diagnostics = common::checker_diags_against_ref(
         "classpath_fun_interface_with_inherited_concrete_property_is_a_sam",
         library,
         main,
-    ) else {
-        return;
-    };
+    )
+    .expect("reference compiler unavailable");
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 

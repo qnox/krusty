@@ -70,15 +70,14 @@ fun box(): String {\n\
     executeExactlyOnce { return \"OK\" }\n\
 }\n";
 
-    if let Some((code, diagnostics)) = common::kotlinc_source_result(
+    let (code, diagnostics) = common::kotlinc_source_result(
         "selected_exactly_once_contract_allows_non_local_return",
         SRC,
-    ) {
-        assert_eq!(
-            code, 0,
-            "kotlinc rejected contract-driven return: {diagnostics}"
-        );
-    }
+    );
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected contract-driven return: {diagnostics}"
+    );
     assert_eq!(
         run(SRC).expect("selected exactly-once contract permits non-local return"),
         "OK"

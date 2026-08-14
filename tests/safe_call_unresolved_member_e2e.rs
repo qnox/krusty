@@ -9,21 +9,15 @@
 //! kotlinc: `error: unresolved reference 'thisDoesNotExistAnywhere'`.
 use super::common;
 
-/// Run the front end with stdlib + JDK on the classpath; skip cleanly when unprovisioned.
-fn diags(src: &str) -> Option<Vec<String>> {
+/// Run the front end with stdlib + JDK on the classpath.
+fn diags(src: &str) -> Vec<String> {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    Some(common::front_end_diagnostics(
-        src,
-        &[stdlib],
-        Some(jdk.as_path()),
-    ))
+    common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
 }
 
 fn assert_unresolved(src: &str, name: &str) {
-    let Some(d) = diags(src) else {
-        return;
-    };
+    let d = diags(src);
     assert!(
         d.iter()
             .any(|m| m.contains(&format!("unresolved reference '{name}'."))),
@@ -32,9 +26,7 @@ fn assert_unresolved(src: &str, name: &str) {
 }
 
 fn assert_accepted(src: &str) {
-    let Some(d) = diags(src) else {
-        return;
-    };
+    let d = diags(src);
     assert!(
         d.is_empty(),
         "expected no diagnostics for {src:?}, got {d:?}"
@@ -42,9 +34,7 @@ fn assert_accepted(src: &str) {
 }
 
 fn assert_argument_mismatch(src: &str) {
-    let Some(d) = diags(src) else {
-        return;
-    };
+    let d = diags(src);
     assert!(
         d.iter()
             .any(|message| message.contains("argument type mismatch")),
@@ -53,9 +43,7 @@ fn assert_argument_mismatch(src: &str) {
 }
 
 fn assert_inapplicable(src: &str) {
-    let Some(d) = diags(src) else {
-        return;
-    };
+    let d = diags(src);
     assert!(
         d.iter().any(|message| {
             message.contains("argument type mismatch")

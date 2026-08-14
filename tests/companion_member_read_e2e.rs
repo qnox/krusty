@@ -232,9 +232,8 @@ class Outer {
     }
 }
 "#;
-    let Some(out) = common::compile_lib("CompCollisionReference", src) else {
-        return;
-    };
+    let out = common::compile_lib_ref("CompCollisionReference", src)
+        .expect("reference compiler unavailable");
     let bytes = std::fs::read(out.join("Outer.class")).expect("read kotlinc Outer.class");
     let class = krusty::jvm::classreader::parse_class(&bytes).expect("parse kotlinc Outer.class");
     let instance = class

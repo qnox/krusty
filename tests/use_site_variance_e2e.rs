@@ -54,8 +54,7 @@ fun take(value: Box<out Any?>) {}\n\
 fun <T> read(value: Box<out T>): T = null as T\n\
 fun accepted(value: Box<in String>) { take(value) }\n\
 fun rejected(value: Box<in String>): String = read(value)\n";
-    let (code, diagnostics) =
-        common::kotlinc_source_result("InProjectionReadBound", SRC).expect("reference kotlinc");
+    let (code, diagnostics) = common::kotlinc_source_result("InProjectionReadBound", SRC);
     assert_ne!(
         code, 0,
         "kotlinc unexpectedly inferred String: {diagnostics}"
@@ -71,8 +70,7 @@ fn contravariant_only_call_infers_nothing_before_lowering() {
 fun <T> select(value: Context<in T>): T = null as T\n\
 fun unused() { select(Context<Any>()) }\n\
 fun box(): String = \"OK\"\n";
-    let (code, diagnostics) =
-        common::kotlinc_source_result("ContravariantOnlyNothing", SRC).expect("reference kotlinc");
+    let (code, diagnostics) = common::kotlinc_source_result("ContravariantOnlyNothing", SRC);
     assert_eq!(code, 0, "kotlinc rejected the call: {diagnostics}");
     assert_eq!(
         common::expect_box_run_with_stdlib(SRC, "ContravariantOnlyNothing"),
@@ -85,8 +83,7 @@ fn expected_result_completes_a_contravariant_only_constraint() {
     const SRC: &str = "class Context<T>\n\
 fun <T> select(value: Context<in T>): T = \"OK\" as T\n\
 fun box(): String = select(Context<Any>())\n";
-    let (code, diagnostics) =
-        common::kotlinc_source_result("ExpectedProjectedResult", SRC).expect("reference kotlinc");
+    let (code, diagnostics) = common::kotlinc_source_result("ExpectedProjectedResult", SRC);
     assert_eq!(code, 0, "kotlinc rejected the call: {diagnostics}");
     assert_eq!(
         common::expect_box_run_with_stdlib(SRC, "ExpectedProjectedResult"),
@@ -99,8 +96,7 @@ fn invariant_argument_binding_is_not_overwritten_by_expected_result() {
     const SRC: &str = "class Context<T>\n\
 fun <T> select(value: Context<T>): T = \"OK\" as T\n\
 fun box(): String = select(Context<Any>())\n";
-    let (code, _) =
-        common::kotlinc_source_result("InvariantExpectedResult", SRC).expect("reference kotlinc");
+    let (code, _) = common::kotlinc_source_result("InvariantExpectedResult", SRC);
     assert_ne!(code, 0, "kotlinc unexpectedly overwrote invariant T = Any");
     assert!(!common::front_end_diagnostics(SRC, &[], None).is_empty());
 }

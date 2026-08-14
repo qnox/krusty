@@ -684,13 +684,6 @@ pub fn front_end_diagnostics_files(
     front_end_diagnostics_files_with_prepare(sources, cp_jars, jdk_modules, |_, _| {})
 }
 
-#[allow(dead_code)]
-pub fn front_end_diagnostics_with_stdlib(source: &str) -> Vec<String> {
-    let stdlib = stdlib_jar();
-    let jdk = jdk_modules();
-    front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(jdk.as_path()))
-}
-
 /// Shared production-shaped diagnostic path. The preparation callback is the only difference
 /// between a frontend-only consumer and a backend-aware batch compile; parsing, feature handling,
 /// expect/actual stripping, signature inference, checking, and diagnostic deduplication stay in
@@ -2041,9 +2034,7 @@ pub fn expect_box_run_against_with_reflect_ref(
 /// [`expect_box_ok_against`] with an EXPLICITLY reference-compiled dependency.
 #[allow(dead_code)]
 pub fn expect_box_ok_against_ref(tag: &str, lib_src: &str, main: &str) {
-    let Some(libout) = compile_lib_ref(tag, lib_src) else {
-        return;
-    };
+    let libout = compile_lib_ref(tag, lib_src).expect("reference compiler unavailable");
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
     let classpath = [libout, stdlib];

@@ -124,10 +124,10 @@ fn kotlin_test_assert_fails_with_default_is_inline_only_callable() {
     let mut cp_paths =
         common::classpath_jars_for("// WITH_STDLIB\nimport kotlin.test.assertFailsWith\n");
     let jdk = common::jdk_modules();
-    if cp_paths.is_empty() {
-        eprintln!("skip assertFailsWith provider shape: no stdlib/test jars");
-        return;
-    }
+    assert!(
+        !cp_paths.is_empty(),
+        "kotlin-test classpath unavailable for assertFailsWith metadata test"
+    );
     cp_paths.push(jdk);
     let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
     let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(cp);
@@ -163,10 +163,7 @@ fn kotlin_test_assert_fails_with_default_is_inline_only_callable() {
 #[test]
 fn enum_reflection_functions_are_published_from_stdlib_metadata() {
     let mut cp_paths = common::classpath_jars_for("// WITH_STDLIB\n");
-    if cp_paths.is_empty() {
-        eprintln!("skip enum metadata shape: no stdlib jar");
-        return;
-    }
+    assert!(!cp_paths.is_empty(), "stdlib classpath unavailable");
     cp_paths.push(common::jdk_modules());
     let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
     let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(cp);
@@ -196,7 +193,7 @@ fn enum_reflection_functions_are_published_from_stdlib_metadata() {
 #[test]
 fn enum_values_is_selected_as_the_stdlib_top_level_callable() {
     let src = "// WITH_STDLIB\nenum class E { A }\nfun use() = enumValues<E>()\n";
-    let Some((errors, selected)) =
+    let (errors, selected) =
         common::inspect_checker_with_stdlib(src, |file, info, _| {
             file.expr_arena.iter().enumerate().any(|(index, expression)| {
             let krusty::ast::Expr::Call { callee, .. } = expression else {
@@ -211,10 +208,7 @@ fn enum_values_is_selected_as_the_stdlib_top_level_callable() {
                                 == Some(krusty::libraries::CompilerIntrinsic::EnumValues)
                     })
         })
-        })
-    else {
-        return;
-    };
+        });
     assert!(errors.is_empty(), "{errors:?}");
     assert!(
         selected,

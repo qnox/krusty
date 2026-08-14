@@ -42,8 +42,7 @@ return component + copied\n\
 fn data_class_body_properties_do_not_declare_components() {
     const SOURCE: &str = "data class Box(val primary: String) { val body: String = \"body\" }\n\
         fun read(box: Box): String = box.component2()\n";
-    let (code, diagnostics) =
-        common::kotlinc_source_result("DataBodyComponent", SOURCE).expect("kotlinc harness");
+    let (code, diagnostics) = common::kotlinc_source_result("DataBodyComponent", SOURCE);
     assert_ne!(
         code, 0,
         "kotlinc unexpectedly accepted component2: {diagnostics}"
@@ -179,7 +178,7 @@ enum class Color { RED, GREEN;
 fun box(): String =
     if (Color.first == Color.RED && Color.green == Color.GREEN) "OK" else "FAIL"
 "#;
-    let Some((errors, selected)) = common::inspect_checker_with_stdlib(src, |file, info, _| {
+    let (errors, selected) = common::inspect_checker_with_stdlib(src, |file, info, _| {
         file.expr_arena
             .iter()
             .enumerate()
@@ -195,9 +194,7 @@ fun box(): String =
                     .is_some_and(|member| member.implicit_classifier_callable.is_some())
             })
             .count()
-    }) else {
-        return;
-    };
+    });
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(selected, 2);
 }
@@ -214,7 +211,7 @@ fun box(): String =
     if (Color.first == Color.RED && Color.valueOf("GREEN") == Color.GREEN) "OK" else "FAIL"
 "#;
 
-    let Some((errors, selected)) = common::inspect_checker_with_stdlib(src, |file, info, _| {
+    let (errors, selected) = common::inspect_checker_with_stdlib(src, |file, info, _| {
         file.expr_arena
             .iter()
             .enumerate()
@@ -227,9 +224,7 @@ fun box(): String =
                     .is_some_and(|member| member.implicit_classifier_callable.is_some())
             })
             .count()
-    }) else {
-        return;
-    };
+    });
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(selected, 2);
 }
@@ -245,7 +240,7 @@ enum class Color { RED, GREEN;
 fun box(): String = Color.first.name
 "#;
 
-    let Some((errors, selected)) = common::inspect_checker_with_stdlib(src, |file, info, _| {
+    let (errors, selected) = common::inspect_checker_with_stdlib(src, |file, info, _| {
         file.expr_arena
             .iter()
             .enumerate()
@@ -256,9 +251,7 @@ fun box(): String = Color.first.name
                 info.ty(krusty::ast::ExprId(*index as u32)) != krusty::types::Ty::Error
             })
             .count()
-    }) else {
-        return;
-    };
+    });
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(selected, 1);
 }
@@ -273,7 +266,7 @@ fun use(): String {
 }
 "#;
 
-    let Some((errors, (references, value_reads))) = common::inspect_checker_with_stdlib(
+    let (errors, (references, value_reads)) = common::inspect_checker_with_stdlib(
         src,
         |file, info, _| {
             let references = file
@@ -298,9 +291,7 @@ fun use(): String {
                 .count();
             (references, value_reads)
         },
-    ) else {
-        return;
-    };
+    );
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!((references, value_reads), (1, 1));
 }
@@ -328,7 +319,7 @@ fun use(): String {
 }
 "#;
 
-    let Some((errors, field_reads)) = common::inspect_checker_with_stdlib(src, |file, info, _| {
+    let (errors, field_reads) = common::inspect_checker_with_stdlib(src, |file, info, _| {
         file.expr_arena
             .iter()
             .enumerate()
@@ -338,9 +329,7 @@ fun use(): String {
             })
             .filter(|&read| info.ty(read) != krusty::types::Ty::Error)
             .count()
-    }) else {
-        return;
-    };
+    });
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(field_reads, 2);
 }

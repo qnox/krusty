@@ -228,11 +228,8 @@ fn explicit_context_arguments_map_dependency_metadata() {
         import dependency.combine
         fun box() = combine(first = "O", second = "K")
     "#;
-    let Some(diagnostics) =
-        common::diagnostics_against("explicitcontextdependency", LIBRARY, CALLER)
-    else {
-        return;
-    };
+    let diagnostics = common::diagnostics_against_ref("explicitcontextdependency", LIBRARY, CALLER)
+        .expect("reference compiler unavailable");
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
@@ -248,11 +245,8 @@ fn package_qualified_context_call_maps_dependency_defaults() {
         // LANGUAGE: +ContextParameters
         fun box() = with("O") { dependency.choose(false) + dependency.choose(true) }
     "#;
-    let Some(diagnostics) =
-        common::diagnostics_against("contextdependencydefaults", LIBRARY, CALLER)
-    else {
-        return;
-    };
+    let diagnostics = common::diagnostics_against_ref("contextdependencydefaults", LIBRARY, CALLER)
+        .expect("reference compiler unavailable");
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
@@ -268,7 +262,7 @@ fn package_qualified_context_call_runs_with_dependency_defaults() {
         // LANGUAGE: +ContextParameters
         fun box() = with("O") { dependency.choose(false) + dependency.choose(true) }
     "#;
-    common::expect_box_ok_against("context_dependency_defaults_run", LIBRARY, CALLER);
+    common::expect_box_ok_against_ref("context_dependency_defaults_run", LIBRARY, CALLER);
 }
 
 #[test]
@@ -283,7 +277,7 @@ fn package_qualified_suspend_context_call_runs() {
         // LANGUAGE: +ContextParameters
         suspend fun probe() = with("OK") { dependency.read() }
     "#;
-    common::expect_suspend_result_against(
+    common::expect_suspend_result_against_ref(
         "suspend_context_dependency_run",
         LIBRARY,
         CALLER,

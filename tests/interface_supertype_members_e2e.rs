@@ -4,53 +4,12 @@
 //! type argument. Each dependency is built by the real kotlinc, so its metadata/bytecode is authoritative.
 
 use std::fs;
-use std::path::PathBuf;
 
 use super::common;
 
-/// Build `src` with the real kotlinc into a fresh dir under `work`, returning it for the `-classpath`.
-/// `None` (→ skip) when the kotlinc toolchain isn't provisioned.
-fn build_lib(work: &std::path::Path, src: &str) -> Option<PathBuf> {
-    let out = work.join("libout");
-    fs::create_dir_all(&out).ok()?;
-    let stdlib = common::stdlib_jar();
-    let lib_kt = work.join("Lib.kt");
-    fs::write(&lib_kt, src).ok()?;
-    let args = vec![
-        "-d".into(),
-        out.to_string_lossy().into_owned(),
-        "-cp".into(),
-        format!("{}:{}", stdlib.display(), out.display()),
-        lib_kt.to_string_lossy().into_owned(),
-    ];
-    matches!(common::kotlinc_compile(&args), Some((0, _))).then_some(out)
-}
-
-fn work_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("krusty_{tag}_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&d);
-    fs::create_dir_all(&d).unwrap();
-    d
-}
-
 /// Compile `main` against the kotlinc-built `lib` and run its `box()` on the JVM.
-/// `None` means ONLY that the kotlinc/JVM toolchain isn't provisioned; a `main` krusty rejects panics
-/// with its front-end diagnostics instead of reporting as a passing skip.
-fn run_box_against(lib: &str, main: &str, tag: &str) -> Option<String> {
-    let work = work_dir(tag);
-    let libout = build_lib(&work, lib)?;
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    // The work dir must be reclaimed even when the compile step PANICS (`work_dir` only sweeps
-    // same-pid leftovers), so the cleanup runs on unwind rather than after the call.
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        common::expect_box_run(main, "Main", &[libout, stdlib], Some(jdk.as_path()))
-    }));
-    let _ = fs::remove_dir_all(&work);
-    match out {
-        Ok(s) => Some(s),
-        Err(payload) => std::panic::resume_unwind(payload),
-    }
+fn run_box_against(lib: &str, main: &str, tag: &str) -> String {
+    common::expect_box_run_against_ref(tag, lib, main).expect("reference compiler unavailable")
 }
 
 #[test]
@@ -74,9 +33,7 @@ fn inherited_interface_members_and_lambda_param() {
         \x20 return s.name + (f?.name ?: \"?\") + r.id\n\
         }\n\
         fun box() = if (use(MemRepo(\"R\"), object : Logger { override fun info(msg: () -> Any?) {} }) == \"kkR\") \"OK\" else \"fail\"\n";
-    let Some(out) = run_box_against(lib, main, "iface_mem") else {
-        return;
-    };
+    let out = run_box_against(lib, main, "iface_mem");
     assert_eq!(out, "OK");
 }
 
@@ -91,9 +48,7 @@ fn concrete_generic_return_keeps_type_argument() {
         \x20 r.all().forEach { s += it.id }\n\
         \x20 return if (s == \"1\" && r.all().first().id == \"1\" && r.all()[0].id == \"1\") \"OK\" else \"fail\"\n\
         }\n";
-    let Some(out) = run_box_against(lib, main, "gen_ret") else {
-        return;
-    };
+    let out = run_box_against(lib, main, "gen_ret");
     assert_eq!(out, "OK");
 }
 
@@ -110,9 +65,7 @@ fn named_args_to_classpath_constructor() {
         \x20 val c = Cfg(port = 80, host = \"h\")\n\
         \x20 return if (p.x == 1 && p.y == 2 && p.label == \"a\" && c.host == \"h\" && c.port == 80) \"OK\" else \"fail\"\n\
         }\n";
-    let Some(out) = run_box_against(lib, main, "named_ctor") else {
-        return;
-    };
+    let out = run_box_against(lib, main, "named_ctor");
     assert_eq!(out, "OK");
 }
 
@@ -125,9 +78,7 @@ fn named_array_argument_to_classpath_vararg_constructor() {
         \x20 val words = Words(parts = arrayOf(\"O\", \"K\"))\n\
         \x20 return words.parts.joinToString(\"\")\n\
         }\n";
-    let Some(out) = run_box_against(lib, main, "named_vararg_ctor") else {
-        return;
-    };
+    let out = run_box_against(lib, main, "named_vararg_ctor");
     assert_eq!(out, "OK");
 }
 
@@ -144,9 +95,7 @@ fn classpath_default_constructor_keeps_vararg_and_lambda_semantics() {
         \x20 val mapped = Words(transform = { it + \"!\" })\n\
         \x20 return if (empty.parts.isEmpty() && mapped.parts.isEmpty() && mapped.transform(\"OK\") == \"OK!\") \"OK\" else \"fail\"\n\
         }\n";
-    let Some(out) = run_box_against(lib, main, "default_vararg_ctor") else {
-        return;
-    };
+    let out = run_box_against(lib, main, "default_vararg_ctor");
     assert_eq!(out, "OK");
 }
 
@@ -156,9 +105,7 @@ fn jvmstatic_object_member() {
         object Ids { @JvmStatic fun of(s: String): String = s }\n";
     let main = "package app\n\
         fun box() = if (Ids.of(\"x\") == \"x\") \"OK\" else \"fail\"\n";
-    let Some(out) = run_box_against(lib, main, "jvmstatic") else {
-        return;
-    };
+    let out = run_box_against(lib, main, "jvmstatic");
     assert_eq!(out, "OK");
 }
 
@@ -166,10 +113,6 @@ fn jvmstatic_object_member() {
 fn suspend_interface_member() {
     // A `suspend` member is driven from Java with a completion `Continuation` (a suspend fn can't be
     // `box()`), the same shape `suspend_e2e.rs` uses.
-    let jh = common::java_home();
-    if !std::path::Path::new(&format!("{jh}/bin/javac")).exists() {
-        return;
-    }
     // The inherited `suspend` members cover the return shapes real repository ports use: a reference
     // (`getConfig: Config`) and `Unit` (`updateStatus`). A nullable member (`findById: Config?`) is also
     // DECLARED — proving the nullable `suspend` member is decoded/resolved without error — but not driven,
@@ -188,10 +131,9 @@ fn suspend_interface_member() {
         \x20 override suspend fun updateStatus(id: String, status: String) {}\n\
         \x20 override suspend fun findById(id: String): Config? = Config(id)\n\
         }\n";
-    let work = work_dir("susp_iface");
-    let Some(libout) = build_lib(&work, lib) else {
-        return;
-    };
+    let work = common::scratch_dir().expect("allocate suspend-interface scratch directory");
+    let libout =
+        common::compile_lib_ref("susp_iface", lib).expect("reference compiler unavailable");
     let stdlib = common::stdlib_jar();
 
     let main_src = "package app\n\
@@ -242,9 +184,8 @@ fn suspend_interface_member() {
         &cp,
         work.to_str().unwrap(),
         "M",
-    );
+    )
+    .expect("compile and run suspend-interface Java driver");
     let _ = fs::remove_dir_all(&work);
-    if let Some(out) = out {
-        assert_eq!(out.trim(), "OK");
-    }
+    assert_eq!(out.trim(), "OK");
 }

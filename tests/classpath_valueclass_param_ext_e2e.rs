@@ -22,9 +22,8 @@ fn valueclass_param_reified_extension_resolves() {
     // Explicit type argument — resolves to the reified extension.
     let main = "import lib.Reg\nimport lib.Id\nimport lib.Prov\nimport lib.getFor\n\
          fun f(r: Reg, id: Id): Prov = r.getFor<Prov>(id)\nfun box(): String = \"OK\"\n";
-    let Some(diags) = common::checker_diags_against("ee1_expl", LIB, main) else {
-        return;
-    };
+    let diags = common::checker_diags_against_ref("ee1_expl", LIB, main)
+        .expect("reference compiler unavailable");
     assert_eq!(
         diags,
         Vec::<String>::new(),

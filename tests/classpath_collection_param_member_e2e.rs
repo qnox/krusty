@@ -16,7 +16,7 @@ use super::common;
 use std::path::PathBuf;
 
 fn run_with_lib(tag: &str, lib: &str, main: &str) -> Option<String> {
-    common::expect_box_run_against(tag, lib, main)
+    common::expect_box_run_against_ref(tag, lib, main)
 }
 
 #[test]

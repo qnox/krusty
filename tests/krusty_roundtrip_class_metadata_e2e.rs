@@ -16,8 +16,8 @@ use std::path::PathBuf;
 type CompiledLib = (PathBuf, Vec<(String, Vec<u8>)>);
 
 /// Compile `lib_src` with krusty's default backend options and write the classes into a fresh
-/// directory. `None` only when the external toolchain (stdlib jar / JDK jimage) is unavailable.
-fn krusty_lib_dir(tag: &str, lib_src: &str) -> Option<CompiledLib> {
+/// harness-owned directory.
+fn krusty_lib_dir(tag: &str, lib_src: &str) -> CompiledLib {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let classpath = [stdlib];
@@ -26,23 +26,24 @@ fn krusty_lib_dir(tag: &str, lib_src: &str) -> Option<CompiledLib> {
             let diagnostics = common::front_end_diagnostics(lib_src, &classpath, Some(&jdk));
             panic!("{tag}: krusty rejected the library source; diagnostics: {diagnostics:?}")
         });
-    let dir = std::env::temp_dir().join(format!("krusty_clsmeta_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{tag}: allocate class-metadata scratch directory"));
     for (name, bytes) in &classes {
         let path = dir.join(format!("{name}.class"));
-        std::fs::create_dir_all(path.parent()?).ok()?;
-        std::fs::write(&path, bytes).ok()?;
+        let parent = path
+            .parent()
+            .unwrap_or_else(|| panic!("{tag}: emitted class path has no parent"));
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|error| panic!("{tag}: create class directory: {error}"));
+        std::fs::write(&path, bytes)
+            .unwrap_or_else(|error| panic!("{tag}: write {}: {error}", path.display()));
     }
-    Some((dir, classes))
+    (dir, classes)
 }
 
-/// Compile+run `main` against a krusty-built `lib_src`, asserting `"OK"`. Skips only when the
-/// toolchain is missing; a compiler rejection is a FAILURE with the diagnostics attached.
+/// Compile+run `main` against a krusty-built `lib_src`, asserting `"OK"`.
 fn expect_roundtrip_ok(tag: &str, lib_src: &str, main: &str) {
-    let Some((dir, _)) = krusty_lib_dir(tag, lib_src) else {
-        eprintln!("skip ({tag}: kotlin stdlib / JDK unavailable)");
-        return;
-    };
+    let (dir, _) = krusty_lib_dir(tag, lib_src);
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let classpath = [dir, stdlib];
@@ -59,11 +60,7 @@ fn expect_roundtrip_ok(tag: &str, lib_src: &str, main: &str) {
 /// nothing to read, whatever the reader does.
 #[test]
 fn a_class_carries_its_own_metadata_by_default() {
-    let Some((_, classes)) = krusty_lib_dir("write", "data class Point(val x: Int, val y: Int)\n")
-    else {
-        eprintln!("skip (kotlin stdlib / JDK unavailable)");
-        return;
-    };
+    let (_, classes) = krusty_lib_dir("write", "data class Point(val x: Int, val y: Int)\n");
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "Point")
@@ -105,10 +102,7 @@ fn a_class_carries_its_own_metadata_by_default() {
 fn value_class_body_property_round_trips() {
     let source = "@JvmInline value class K(val v: String)\n\
                   class Holder { val k: K = K(\"OK\") }\n";
-    let Some((_, classes)) = krusty_lib_dir("vc_body_property", source) else {
-        eprintln!("skip (kotlin stdlib / JDK unavailable)");
-        return;
-    };
+    let (_, classes) = krusty_lib_dir("vc_body_property", source);
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "Holder")
@@ -144,10 +138,7 @@ fn value_class_computed_property_round_trips_as_a_static_carrier_accessor() {
     let source = "@JvmInline value class Numbers(val values: IntArray) {\n\
                   \x20   val size: Int get() = values.size\n\
                   }\n";
-    let Some((_, classes)) = krusty_lib_dir("vc_computed_property", source) else {
-        eprintln!("skip (kotlin stdlib / JDK unavailable)");
-        return;
-    };
+    let (_, classes) = krusty_lib_dir("vc_computed_property", source);
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "Numbers")
@@ -223,10 +214,7 @@ class Holder {\n\
 }\n";
     // The record must be PRESENT — the fix is the read half, so a regression that silently reinstates
     // the decline would otherwise pass this test by rejecting nothing and running nothing.
-    let Some((_, classes)) = krusty_lib_dir("valueclass", LIB) else {
-        eprintln!("skip (kotlin stdlib / JDK unavailable)");
-        return;
-    };
+    let (_, classes) = krusty_lib_dir("valueclass", LIB);
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "Holder")
@@ -256,10 +244,20 @@ fn a_sibling_files_undescribed_value_class_withholds_the_record() {
         ),
         ("B.kt", "class Holder { fun make(): A = A(\"O\") }\n"),
     ];
-    let Some(classes) = common::compile_in_process_files(&sources, &[stdlib], Some(&jdk)) else {
-        eprintln!("skip (kotlin stdlib / JDK unavailable)");
-        return;
-    };
+    let source_texts = sources
+        .iter()
+        .map(|(_, source)| *source)
+        .collect::<Vec<_>>();
+    let classes =
+        common::compile_in_process_files(&sources, std::slice::from_ref(&stdlib), Some(&jdk))
+            .unwrap_or_else(|| {
+                let diagnostics = common::front_end_diagnostics_files(
+                    &source_texts,
+                    std::slice::from_ref(&stdlib),
+                    Some(&jdk),
+                );
+                panic!("krusty rejected the sibling-file metadata fixture: {diagnostics:?}")
+            });
     let (_, holder) = classes
         .iter()
         .find(|(name, _)| name == "Holder")
@@ -326,10 +324,7 @@ fn a_concrete_suspend_value_class_return_withholds_the_record() {
 class C {\n\
     suspend fun gk(): K = K(\"OK\")\n\
 }\n";
-    let Some((_, classes)) = krusty_lib_dir("suspendvcret", LIB) else {
-        eprintln!("skip (kotlin stdlib / JDK unavailable)");
-        return;
-    };
+    let (_, classes) = krusty_lib_dir("suspendvcret", LIB);
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "C")
@@ -355,10 +350,7 @@ fn a_value_class_with_a_declared_member_withholds_the_record() {
     const LIB: &str = "@JvmInline\nvalue class S(val v: String) {\n\
     fun k(): String = v + \"K\"\n\
 }\n";
-    let Some((_, classes)) = krusty_lib_dir("vcdeclared", LIB) else {
-        eprintln!("skip (kotlin stdlib / JDK unavailable)");
-        return;
-    };
+    let (_, classes) = krusty_lib_dir("vcdeclared", LIB);
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "S")
@@ -396,12 +388,7 @@ class C : A()\n";
 /// binds a method that is not there. Pins the record against kotlinc's own for the same source.
 #[test]
 fn a_body_property_adds_no_component_or_copy_parameter() {
-    let Some((_, classes)) =
-        krusty_lib_dir("bodyprop", "data class P(val x: Int) { val y: Int = 1 }\n")
-    else {
-        eprintln!("skip (kotlin stdlib / JDK unavailable)");
-        return;
-    };
+    let (_, classes) = krusty_lib_dir("bodyprop", "data class P(val x: Int) { val y: Int = 1 }\n");
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "P")
@@ -431,13 +418,10 @@ fn a_body_property_adds_no_component_or_copy_parameter() {
 /// getter's mangled name. `ir.has_value_param_ctor` is the signal (recorded before erasure).
 #[test]
 fn a_value_class_constructor_parameter_withholds_the_record() {
-    let Some((_, classes)) = krusty_lib_dir(
+    let (_, classes) = krusty_lib_dir(
         "vcctor",
         "@JvmInline\nvalue class ItemId(val v: String)\nclass Holder(val id: ItemId)\n",
-    ) else {
-        eprintln!("skip (kotlin stdlib / JDK unavailable)");
-        return;
-    };
+    );
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "Holder")

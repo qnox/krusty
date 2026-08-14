@@ -79,7 +79,7 @@ fn diverging_call_in_argument_position() {
 fn println_overloads_are_ambiguous_for_a_diverging_argument() {
     const SRC: &str = "fun boom(): Nothing = error(\"boom\")\n\
         fun test() = println(boom())\n";
-    let (code, _) = common::kotlinc_source_result("NothingPrintln", SRC).expect("kotlinc harness");
+    let (code, _) = common::kotlinc_source_result("NothingPrintln", SRC);
     assert_ne!(code, 0, "kotlinc unexpectedly selected a println overload");
     let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
     assert!(

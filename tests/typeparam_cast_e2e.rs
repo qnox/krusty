@@ -90,8 +90,7 @@ fun box(): String {\n\
     val receiver: String? = null\n\
     return receiver.plus(other = null)\n\
 }\n";
-    let (code, diagnostics) =
-        common::kotlinc_source_result("NullableStringPlusNamedNull", SRC).expect("kotlinc harness");
+    let (code, diagnostics) = common::kotlinc_source_result("NullableStringPlusNamedNull", SRC);
     assert_eq!(
         code, 0,
         "kotlinc rejected nullable String.plus: {diagnostics}"

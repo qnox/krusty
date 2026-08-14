@@ -306,10 +306,7 @@ interface Marker { fun mark(): String }
 fun <T> build(transform: (T) -> String): List<T> = TODO()
 fun <U : Marker> outer(): List<U> = build { it.mark() }
 "#;
-    let Some((code, diagnostics)) = common::kotlinc_source_result("NestedContextResult", source)
-    else {
-        return;
-    };
+    let (code, diagnostics) = common::kotlinc_source_result("NestedContextResult", source);
     assert_eq!(code, 0, "kotlinc rejected the fixture: {diagnostics}");
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
@@ -326,10 +323,7 @@ class Duo<A, B>
 fun <T> build(transform: (T) -> String): Duo<T, T> = TODO()
 fun <U : Marker> outer(): Duo<U, U?> = build { it.mark() }
 "#;
-    let Some((code, diagnostics)) = common::kotlinc_source_result("RepeatedContextResult", source)
-    else {
-        return;
-    };
+    let (code, diagnostics) = common::kotlinc_source_result("RepeatedContextResult", source);
     assert_ne!(code, 0, "kotlinc accepted the conflicting fixture");
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
@@ -351,10 +345,7 @@ class Duo<A, B>
 fun <T> build(transform: (T) -> String): Duo<T, T> = TODO()
 fun <U : Marker> outer(): Duo<U, String> = build { it.mark() }
 "#;
-    let Some((code, diagnostics)) = common::kotlinc_source_result("MixedContextResult", source)
-    else {
-        return;
-    };
+    let (code, diagnostics) = common::kotlinc_source_result("MixedContextResult", source);
     assert_ne!(code, 0, "kotlinc accepted the conflicting fixture");
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
@@ -375,10 +366,7 @@ interface Marker { fun mark(): String }
 fun <T> build(transform: (T) -> String): List<T> = TODO()
 fun <T : Marker> outer(): List<T?> = build { it.mark() }
 "#;
-    let Some((code, diagnostics)) = common::kotlinc_source_result("NullableNestedContext", source)
-    else {
-        return;
-    };
+    let (code, diagnostics) = common::kotlinc_source_result("NullableNestedContext", source);
     assert_ne!(code, 0, "kotlinc accepted the invalid fixture");
     assert!(
         diagnostics.contains("only safe (?.) or non-null asserted (!!.) calls are allowed"),
@@ -472,11 +460,9 @@ fun use() {
     extension.get("abc")
 }
 "#;
-    let Some(diagnostics) =
-        common::checker_diags_against("dependency_top_level_property_reference", LIBRARY, MAIN)
-    else {
-        return;
-    };
+    let diagnostics =
+        common::checker_diags_against_ref("dependency_top_level_property_reference", LIBRARY, MAIN)
+            .expect("reference compiler unavailable");
     assert_eq!(diagnostics, Vec::<String>::new());
 }
 
@@ -682,10 +668,7 @@ fun dependent(flag: Boolean): Dependent<out Any, *> =
 fun recursive(flag: Boolean): Recursive<*> =
     if (flag) RecursiveA() else RecursiveB()
 "#;
-    let Some((code, diagnostics)) = common::kotlinc_source_result("GenericCommonSupertype", source)
-    else {
-        return;
-    };
+    let (code, diagnostics) = common::kotlinc_source_result("GenericCommonSupertype", source);
     assert_eq!(code, 0, "kotlinc rejected the fixture: {diagnostics}");
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
