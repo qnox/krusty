@@ -30,7 +30,7 @@ const LIB: &str = "package lib\n\
 /// than assuming source argument index equals parameter index.
 #[test]
 fn classpath_companion_ext_lambda_call() {
-    common::expect_box_ok_against_ref(
+    common::expect_box_ok_against(
         "companion_ext_lambda",
         LIB,
         "import lib.FactoryApi\n\
@@ -52,7 +52,7 @@ fn classpath_companion_plain_lambda_call() {
                 fun build(action: () -> Unit): P2 { action(); return object : P2 {} }\n\
             }\n\
         }\n";
-    common::expect_box_ok_against_ref(
+    common::expect_box_ok_against(
         "companion_plain_lambda",
         LIB3,
         "import lib.P2\n\
@@ -78,7 +78,7 @@ fn classpath_instance_ext_lambda_call() {
             fun buildPlain(action: () -> Unit): String = \"p\"\n\
         }\n\
         fun runOn(h: Holder, block: Builder.() -> Unit): String = \"t\"\n";
-    let Some(diags) = common::diagnostics_against_ref(
+    let Some(diags) = common::diagnostics_against(
         "instance_ext_lambda",
         LIB2,
         "import lib.Holder\n\
@@ -108,7 +108,7 @@ fn classpath_instance_ext_lambda_runs() {
                 return b.v\n\
             }\n\
         }\n";
-    common::expect_box_ok_against_ref(
+    common::expect_box_ok_against(
         "instance_ext_lambda_run",
         LIB2,
         "import lib.Holder\n\
@@ -129,7 +129,7 @@ fn classpath_member_generic_ext_lambda_call() {
             fun mutate(block: T.() -> String) { out = block(v) }\n\
             fun two(a: () -> String, b: T.() -> String): String = a() + b(v)\n\
         }\n";
-    common::expect_box_ok_against_ref(
+    common::expect_box_ok_against(
         "member_generic_ext_lambda",
         LIB4,
         "import lib.Box\n\
@@ -151,7 +151,7 @@ fn classpath_member_parameterized_ext_lambda_receiver() {
         class GenericReceiver {\n\
             fun inspect(block: List<String>.() -> String): String = block(listOf(\"OK\"))\n\
         }\n";
-    common::expect_box_ok_against_ref(
+    common::expect_box_ok_against(
         "member_parameterized_ext_lambda",
         LIB5,
         "import lib.GenericReceiver\n\

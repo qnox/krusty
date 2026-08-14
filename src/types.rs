@@ -1625,6 +1625,30 @@ pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
     }
 }
 
+/// Whether `ty` mentions ANY type parameter, whatever its identity. Semantic type-parameter names
+/// are checker-generated (`\0tp:…`), so a source-name list cannot match them — use this where the
+/// only question is "does a type variable appear at all".
+pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
+    match ty {
+        Ty::TyParam(..) => true,
+        Ty::Obj(_, arguments) => arguments
+            .iter()
+            .any(|argument| ty_mentions_any_param(*argument)),
+        Ty::Fun(signature) => {
+            signature
+                .params
+                .iter()
+                .any(|parameter| ty_mentions_any_param(*parameter))
+                || ty_mentions_any_param(signature.ret)
+        }
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner) => ty_mentions_any_param(*inner),
+        _ => false,
+    }
+}
+
 /// Kotlin declaration visibility — the modifier on a `fun`/`val`/`class` (from source) or the
 /// `@Metadata`/bytecode flags of a library declaration. `PRIVATE_TO_THIS` folds into `Private`;
 /// `LOCAL` is not represented (locals are never surfaced as declarations). This records what a

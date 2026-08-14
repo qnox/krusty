@@ -5593,3 +5593,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   records both. Derivable signatures keep omitting it. Tests:
   `tests/interface_supertype_members_e2e.rs`, `tests/named_args_classpath_e2e.rs` (both krusty-built
   by default).
+
+- **Members mentioning enclosing-class type parameters publish their semantic shape.** A non-generic
+  member whose declared types mention a CLASS type parameter (`open class Base<T> { open fun
+  choose(value: T): T }`) lowers to an erased `IrFunction` (`Any`), and `IrFile::signatures` only
+  describes function-OWNED type parameters — so the class `@Metadata` published `choose(Any): Any`
+  and a consumer rejected a `Base<String>` override with "return type mismatch: expected 'String',
+  actual 'Any'". Lowering now records the checker-resolved shape in
+  `IrFile::member_semantic_sigs` (fid → semantic params + ret) and the class metadata prefers it,
+  encoding `Type.type_parameter` references against the class table. Semantic type-parameter
+  identities are checker-generated (`\0tp:…`), so the mention test is "any type variable at all"
+  (`ty_mentions_any_param`) — with no function-owned parameters and no receiver, any type variable
+  is an enclosing-class one. Extension members are excluded (their `params[0]` receiver alignment
+  is a separate channel). Also fixed the same way: generic member-extension lambdas and one
+  generic-suspend shape. Test: `tests/superclass_bridge_e2e.rs` (krusty-built by default).

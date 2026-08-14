@@ -1487,6 +1487,12 @@ pub struct IrFile {
     /// `FunId` → the backend-agnostic generic-signature SHAPE of a type-parameterized function. The JVM
     /// backend formats this into a `Signature` attribute; the IR itself holds no target descriptors.
     pub signatures: std::collections::HashMap<u32, IrGenericSig>,
+    /// Class MEMBERS whose semantic parameter/return types mention an ENCLOSING-CLASS type parameter
+    /// (`open class Base<T> { open fun choose(value: T): T }`): fid → (semantic params, semantic ret).
+    /// The erased [`IrFunction`] carries `Any`, and `signatures` only describes function-OWNED type
+    /// parameters — without this record the class `@Metadata` publishes `choose(Any): Any` and a
+    /// consumer rejects a `Base<String>` override with "return type mismatch".
+    pub member_semantic_sigs: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
     /// Kotlin declaration visibility by `(class internal name, property name)`. This is distinct from
     /// the backing field's JVM visibility.
     pub prop_visibilities: std::collections::HashMap<(String, String), crate::types::Visibility>,

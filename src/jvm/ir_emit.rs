@@ -961,11 +961,19 @@ fn build_class_metadata(
                 let (name, params, ret) =
                     declared.unwrap_or((f.name.as_str(), f.params.as_slice(), f.ret));
                 let semantic_signature = ir.signatures.get(&fid);
+                // A member mentioning an ENCLOSING-CLASS type parameter records its semantic shape
+                // separately (`member_semantic_sigs`) — the erased params would publish `Any`.
+                let member_semantic = ir
+                    .member_semantic_sigs
+                    .get(&fid)
+                    .filter(|_| !ir.member_ext_receiver_fns.contains(&fid));
                 let metadata_params = semantic_signature
                     .map(|signature| signature.params.as_slice())
+                    .or(member_semantic.map(|(params, _)| params.as_slice()))
                     .unwrap_or(params);
                 let metadata_ret = semantic_signature
                     .and_then(|signature| signature.ret)
+                    .or(member_semantic.map(|(_, ret)| *ret))
                     .unwrap_or(ret);
                 // A parameter's declared `?` lives in a side-table, not in `params` (which stays
                 // non-null so the value-class mangle is undisturbed) — re-apply it for `@Metadata`.

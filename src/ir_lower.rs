@@ -1492,6 +1492,38 @@ fn lower_file_at_reporting_impl(
                 if m.is_suspend() {
                     lo.ir.suspend_funs.push(fid);
                 }
+                // A non-generic member whose DECLARED types mention an enclosing-class type parameter
+                // (`class Base<T> { open fun choose(value: T): T }`): the erased IrFunction says `Any`,
+                // so record the semantic shape for `@Metadata` (`Type.type_parameter` refs) — or a
+                // consumer rejects a `Base<String>` override with "return type mismatch". Extension
+                // members are excluded: their `params[0]` receiver alignment has its own channel.
+                if m.type_params.is_empty() && m.receiver.is_none() {
+                    let semantic_params: Option<Vec<Ty>> = m
+                        .params
+                        .iter()
+                        .map(|parameter| info.resolved_declaration_type(&parameter.ty))
+                        .collect();
+                    let semantic_ret = match m.ret.as_ref() {
+                        Some(reference) => info.resolved_declaration_type(reference),
+                        None => Some(Ty::Unit),
+                    };
+                    if let (Some(semantic_params), Some(semantic_ret)) =
+                        (semantic_params, semantic_ret)
+                    {
+                        // Semantic type-parameter identities are checker-generated, so a
+                        // source-name comparison cannot see them; with no function-owned params
+                        // and no receiver, ANY type variable here is an enclosing-class one.
+                        let mentions_class_param = semantic_params
+                            .iter()
+                            .chain(std::iter::once(&semantic_ret))
+                            .any(|t| crate::types::ty_mentions_any_param(*t));
+                        if mentions_class_param {
+                            lo.ir
+                                .member_semantic_sigs
+                                .insert(fid, (semantic_params, semantic_ret));
+                        }
+                    }
+                }
                 // A generic member method gets the same JVM `Signature` as a generic top-level function.
                 match fn_generic_sig(info, m) {
                     Ok(Some(signature)) => {
