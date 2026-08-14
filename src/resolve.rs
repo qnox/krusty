@@ -4502,7 +4502,26 @@ fn collect_typeref_names(r: &TypeRef, out: &mut std::collections::HashSet<String
     }
 }
 
-fn collect_fun_type_names(f: &FunDecl, out: &mut std::collections::HashSet<String>) {
+fn collect_declaration_type_parameter_annotation_names(
+    file: &File,
+    declaration_start: u32,
+    out: &mut std::collections::HashSet<String>,
+) {
+    if let Some(parameters) = file
+        .declaration_type_parameter_annotations
+        .get(&declaration_start)
+    {
+        out.extend(
+            parameters
+                .iter()
+                .flat_map(|parameter| &parameter.annotations)
+                .map(|annotation| annotation.name.clone()),
+        );
+    }
+}
+
+fn collect_fun_type_names(file: &File, f: &FunDecl, out: &mut std::collections::HashSet<String>) {
+    collect_declaration_type_parameter_annotation_names(file, f.signature_span.lo, out);
     if let Some(receiver) = &f.receiver {
         collect_typeref_names(receiver, out);
     }
@@ -4517,7 +4536,12 @@ fn collect_fun_type_names(f: &FunDecl, out: &mut std::collections::HashSet<Strin
     }
 }
 
-fn collect_property_type_names(p: &PropDecl, out: &mut std::collections::HashSet<String>) {
+fn collect_property_type_names(
+    file: &File,
+    p: &PropDecl,
+    out: &mut std::collections::HashSet<String>,
+) {
+    collect_declaration_type_parameter_annotation_names(file, p.span.lo, out);
     for parameter in &p.context_params {
         collect_typeref_names(&parameter.ty, out);
     }
@@ -4596,7 +4620,7 @@ fn collect_expression_type_names(
                 Stmt::LocalLateinit { ty, .. }
                 | Stmt::Local { ty: Some(ty), .. }
                 | Stmt::LocalDelegate { ty: Some(ty), .. } => collect_typeref_names(ty, out),
-                Stmt::LocalFun(function) => collect_fun_type_names(function, out),
+                Stmt::LocalFun(function) => collect_fun_type_names(file, function, out),
                 Stmt::LocalClass(class) => collect_class_type_names(file, class, out),
                 _ => {}
             }
@@ -4659,6 +4683,7 @@ fn collect_class_type_names(
     class: &ClassDecl,
     out: &mut std::collections::HashSet<String>,
 ) {
+    collect_declaration_type_parameter_annotation_names(file, class.span.lo, out);
     for supertype in &class.supertypes {
         collect_typeref_names(supertype, out);
     }
@@ -4682,17 +4707,17 @@ fn collect_class_type_names(
         collect_typeref_names(&parameter.ty, out);
     }
     for property in &class.body_props {
-        collect_property_type_names(property, out);
+        collect_property_type_names(file, property, out);
     }
     for method in &class.methods {
-        collect_fun_type_names(method, out);
+        collect_fun_type_names(file, method, out);
     }
     for entry in &class.enum_entries {
         for method in &entry.methods {
-            collect_fun_type_names(method, out);
+            collect_fun_type_names(file, method, out);
         }
         for property in &entry.props {
-            collect_property_type_names(property, out);
+            collect_property_type_names(file, property, out);
         }
     }
     for constructor in &class.secondary_ctors {
@@ -4797,7 +4822,7 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
             Stmt::Local { ty: Some(ty), .. } | Stmt::LocalDelegate { ty: Some(ty), .. } => {
                 collect_typeref_names(ty, out)
             }
-            Stmt::LocalFun(f) => collect_fun_type_names(f, out),
+            Stmt::LocalFun(f) => collect_fun_type_names(file, f, out),
             _ => {}
         }
     }
@@ -4815,8 +4840,8 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
     }
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) => collect_fun_type_names(f, out),
-            Decl::Property(p) => collect_property_type_names(p, out),
+            Decl::Fun(f) => collect_fun_type_names(file, f, out),
+            Decl::Property(p) => collect_property_type_names(file, p, out),
             Decl::Class(c) => {
                 collect_class_type_names(file, c, out);
             }
@@ -5046,6 +5071,279 @@ fn has_projected_generic_return_hazard(_file: &File, function: &FunDecl) -> bool
         occurrences.1 |= here.1;
     }
     occurrences.0 && !occurrences.1
+}
+
+/// Bind declaration type-parameter annotations in the exact classifier scope already built for their
+/// owning signature. Source spelling is lookup input once; consumers read the committed `TypeName` by
+/// annotation occurrence span from `SymbolTable::resolved_annotations`.
+struct DeclarationAnnotationResolution<'a> {
+    file_index: u32,
+    attempted: &'a mut std::collections::HashSet<(u32, u32, u32)>,
+}
+
+fn resolve_declaration_type_parameter_annotations(
+    file: &File,
+    declaration_start: u32,
+    class_names: &ClassNames,
+    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
+    resolution: &mut DeclarationAnnotationResolution<'_>,
+    diags: &mut DiagSink,
+) {
+    let Some(parameters) = file
+        .declaration_type_parameter_annotations
+        .get(&declaration_start)
+    else {
+        return;
+    };
+    for annotation in parameters
+        .iter()
+        .flat_map(|parameter| &parameter.annotations)
+    {
+        let key = (
+            resolution.file_index,
+            annotation.span.lo,
+            annotation.span.hi,
+        );
+        if !resolution.attempted.insert(key) {
+            continue;
+        }
+        let Some(identity) = class_names.get_class(&annotation.name) else {
+            diags.error(
+                annotation.span,
+                format!("unresolved reference '{}'.", annotation.name),
+            );
+            continue;
+        };
+        let previous = resolved.insert(key, identity);
+        debug_assert!(
+            previous.is_none_or(|previous| previous == identity),
+            "annotation occurrence was rebound to a different classifier identity"
+        );
+    }
+}
+
+/// Add direct nested classifiers from the supplied lexical owners. Owners carry lexical-precedence
+/// ranks (nearest is lowest); one arena scan therefore handles ordinary nested classes, inherited
+/// lexical owners, and enum-entry anonymous subclass scopes without origin-specific name probing.
+fn extend_lexical_nested_classifier_names(
+    file: &File,
+    lexical_owner_ranks: &HashMap<TypeName, usize>,
+    class_names: &mut ClassNames,
+) {
+    let mut lexical_nested = HashMap::<String, (usize, TypeName)>::new();
+    for &declaration in &file.decls {
+        let Decl::Class(nested) = file.decl(declaration) else {
+            continue;
+        };
+        let Some((owner, simple)) = nested.name.rsplit_once('.') else {
+            continue;
+        };
+        let owner = type_name(&class_internal(file, owner));
+        let Some(&rank) = lexical_owner_ranks.get(&owner) else {
+            continue;
+        };
+        let internal = class_names
+            .get(&nested.name)
+            .unwrap_or_else(|| type_name(&class_internal(file, &nested.name)));
+        match lexical_nested.entry(simple.to_string()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((rank, internal));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) if rank < entry.get().0 => {
+                entry.insert((rank, internal));
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {}
+        }
+    }
+    for (simple, (_, internal)) in lexical_nested {
+        class_names.insert_name(simple, internal);
+    }
+}
+
+fn enum_entry_expression_roots(
+    entry: &crate::ast::AstEnumEntry,
+) -> impl Iterator<Item = ExprId> + '_ {
+    entry
+        .annotation_args
+        .iter()
+        .flatten()
+        .copied()
+        .chain(entry.args.iter().copied())
+        .chain(entry.methods.iter().flat_map(fun_expression_roots))
+        .chain(entry.props.iter().flat_map(property_expression_roots))
+        .chain(entry.init_order.iter().filter_map(|step| match step {
+            ClassInit::Block(body) => Some(*body),
+            ClassInit::PropInit(_) => None,
+        }))
+}
+
+/// Resolve every local function reachable below the supplied expression roots. Local classes are
+/// deliberately skipped here: parser normalization hoists them into `File::decls`, where the class
+/// inventory runs with that declaration's own lexical classifier scope. The iterative walk keeps this
+/// ownership pass bounded by arena size rather than expression nesting depth.
+fn resolve_local_type_parameter_annotation_inventory(
+    file: &File,
+    roots: impl IntoIterator<Item = ExprId>,
+    class_names: &ClassNames,
+    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
+    resolution: &mut DeclarationAnnotationResolution<'_>,
+    diags: &mut DiagSink,
+) {
+    let mut expressions = roots.into_iter().collect::<Vec<_>>();
+    let mut seen_expressions = std::collections::HashSet::new();
+    let mut seen_statements = std::collections::HashSet::new();
+    while let Some(expression) = expressions.pop() {
+        if !seen_expressions.insert(expression) {
+            continue;
+        }
+        let mut children = Vec::new();
+        let mut statements = Vec::new();
+        file.any_child_expr(
+            expression,
+            &mut |child| {
+                children.push(child);
+                false
+            },
+            &mut |statement| {
+                statements.push(statement);
+                false
+            },
+        );
+        expressions.extend(children);
+        for statement in statements {
+            if !seen_statements.insert(statement) {
+                continue;
+            }
+            match file.stmt(statement) {
+                Stmt::LocalFun(function) => {
+                    resolve_declaration_type_parameter_annotations(
+                        file,
+                        function.signature_span.lo,
+                        class_names,
+                        resolved,
+                        resolution,
+                        diags,
+                    );
+                    file.any_fun_expr(function, &mut |root| {
+                        expressions.push(root);
+                        false
+                    });
+                }
+                // Hoisted declarations receive their own exact class inventory.
+                Stmt::LocalClass(_) => {}
+                _ => {
+                    file.any_child_stmt(statement, &mut |child| {
+                        expressions.push(child);
+                        false
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// One declaration-owned inventory for annotation-bearing type parameters. Direct members inherit
+/// their containing class's already-built classifier scope; local functions are discovered once from
+/// the AST's shared expression inventory instead of adding origin-specific resolver call sites.
+fn resolve_declaration_type_parameter_annotation_inventory(
+    file: &File,
+    declaration: DeclId,
+    class_names: &ClassNames,
+    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
+    resolution: &mut DeclarationAnnotationResolution<'_>,
+    diags: &mut DiagSink,
+) {
+    let mut direct_owners = Vec::new();
+    match file.decl(declaration) {
+        Decl::Fun(function) => direct_owners.push(function.signature_span.lo),
+        Decl::Property(property) => direct_owners.push(property.span.lo),
+        Decl::Class(class) => {
+            direct_owners.push(class.span.lo);
+            direct_owners.extend(
+                class
+                    .methods
+                    .iter()
+                    .map(|function| function.signature_span.lo),
+            );
+            direct_owners.extend(class.body_props.iter().map(|property| property.span.lo));
+        }
+    }
+    for declaration_start in direct_owners {
+        resolve_declaration_type_parameter_annotations(
+            file,
+            declaration_start,
+            class_names,
+            resolved,
+            resolution,
+            diags,
+        );
+    }
+
+    let mut roots = Vec::new();
+    file.any_decl_expr(declaration, &mut |root| {
+        roots.push(root);
+        false
+    });
+    if let Decl::Class(class) = file.decl(declaration) {
+        let entry_roots = class
+            .enum_entries
+            .iter()
+            .flat_map(enum_entry_expression_roots)
+            .collect::<std::collections::HashSet<_>>();
+        roots.retain(|root| !entry_roots.contains(root));
+    }
+    resolve_local_type_parameter_annotation_inventory(
+        file,
+        roots,
+        class_names,
+        resolved,
+        resolution,
+        diags,
+    );
+}
+
+fn resolve_enum_entry_type_parameter_annotation_inventory(
+    file: &File,
+    class: &ClassDecl,
+    entry: &crate::ast::AstEnumEntry,
+    class_names: &ClassNames,
+    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
+    resolution: &mut DeclarationAnnotationResolution<'_>,
+    diags: &mut DiagSink,
+) {
+    let mut entry_class_names = class_names.clone();
+    let entry_owner = type_name(&class_internal(
+        file,
+        &format!("{}.{}", class.name, entry.name),
+    ));
+    extend_lexical_nested_classifier_names(
+        file,
+        &HashMap::from([(entry_owner, 0)]),
+        &mut entry_class_names,
+    );
+    for declaration_start in entry
+        .methods
+        .iter()
+        .map(|function| function.signature_span.lo)
+        .chain(entry.props.iter().map(|property| property.span.lo))
+    {
+        resolve_declaration_type_parameter_annotations(
+            file,
+            declaration_start,
+            &entry_class_names,
+            resolved,
+            resolution,
+            diags,
+        );
+    }
+    resolve_local_type_parameter_annotation_inventory(
+        file,
+        enum_entry_expression_roots(entry),
+        &entry_class_names,
+        resolved,
+        resolution,
+        diags,
+    );
 }
 
 fn generic_value_operand_slots(function: &FunDecl, owner_type_params: &[String]) -> Vec<u32> {
@@ -5398,15 +5696,55 @@ fn collect_signatures_with_cp_impl(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
+    let mut declaration_annotation_resolution_attempts = std::collections::HashSet::new();
     for (file_index, file) in files.iter().enumerate() {
+        diags.set_file(file_index as u32);
         let names = &file_class_names[file_index];
+        let mut annotation_resolution = DeclarationAnnotationResolution {
+            file_index: file_index as u32,
+            attempted: &mut declaration_annotation_resolution_attempts,
+        };
+        let declaration_annotation_spans = file
+            .declaration_type_parameter_annotations
+            .values()
+            .flatten()
+            .flat_map(|parameter| {
+                parameter
+                    .annotations
+                    .iter()
+                    .map(|annotation| annotation.span)
+            })
+            .collect::<std::collections::HashSet<_>>();
         for reference in &file.detached_type_refs {
+            if declaration_annotation_spans.contains(&reference.span) {
+                continue;
+            }
             if let Some(internal) = names.get_class(&reference.name) {
                 table.resolved_annotations.insert(
                     (file_index as u32, reference.span.lo, reference.span.hi),
                     internal,
                 );
             }
+        }
+        for &declaration_start in &file.type_alias_declaration_starts {
+            resolve_declaration_type_parameter_annotations(
+                file,
+                declaration_start,
+                names,
+                &mut table.resolved_annotations,
+                &mut annotation_resolution,
+                diags,
+            );
+        }
+        if let Some(script_body) = file.script_body {
+            resolve_local_type_parameter_annotation_inventory(
+                file,
+                [script_body],
+                names,
+                &mut table.resolved_annotations,
+                &mut annotation_resolution,
+                diags,
+            );
         }
     }
     // Normalize source annotation retention once identities are bound. The explicit retention
@@ -5528,9 +5866,21 @@ fn collect_signatures_with_cp_impl(
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
         let anonymous_lexical_scope = &anonymous_lexical_scopes[i];
+        let mut annotation_resolution = DeclarationAnnotationResolution {
+            file_index: i as u32,
+            attempted: &mut declaration_annotation_resolution_attempts,
+        };
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
+                    resolve_declaration_type_parameter_annotation_inventory(
+                        file,
+                        d,
+                        &class_names,
+                        &mut table.resolved_annotations,
+                        &mut annotation_resolution,
+                        diags,
+                    );
                     let source_key = (i as u32, d.0);
                     let value_operand_slots = generic_value_operand_slots(f, &[]);
                     if !value_operand_slots.is_empty() {
@@ -6023,12 +6373,30 @@ fn collect_signatures_with_cp_impl(
                     // type is a hoisted top-level `Decl::Class` named `Outer.Inner`; map its last segment.
                     let class_names = {
                         let mut ext = class_names.clone();
-                        let lexical_inheritors = declaration_lexical_class_names(
+                        let mut lexical_inheritors = declaration_lexical_class_names(
                             file,
                             d,
                             anonymous_lexical_scope,
                             |candidate| source_direct_supertypes.contains_key(&candidate),
                         );
+                        if let Some(owner) = file.local_class_lexical_classifier_owners.get(&d) {
+                            let owner = type_name(&class_internal(file, owner));
+                            if !lexical_inheritors.contains(&owner) {
+                                // An enum entry has no `Decl`, so splice its parser-recorded scope
+                                // immediately before its real containing enum. Keeping all actual
+                                // local/nested owners nearer preserves ordinary lexical shadowing:
+                                // `[Nested, Local, E.A, E]`, never `[Nested, E.A, Local, E]`.
+                                let rank = owner
+                                    .nested_owner()
+                                    .and_then(|containing| {
+                                        lexical_inheritors
+                                            .iter()
+                                            .position(|&candidate| candidate == containing)
+                                    })
+                                    .unwrap_or(lexical_inheritors.len());
+                                lexical_inheritors.insert(rank, owner);
+                            }
+                        }
                         let mut referenced_types = std::collections::HashSet::new();
                         collect_class_type_names(file, c, &mut referenced_types);
                         for name in &referenced_types {
@@ -6101,36 +6469,11 @@ fn collect_signatures_with_cp_impl(
                             .enumerate()
                             .map(|(rank, owner)| (owner, rank))
                             .collect::<HashMap<_, _>>();
-                        let mut lexical_nested = HashMap::<String, (usize, TypeName)>::new();
-                        for &nd in &file.decls {
-                            if let Decl::Class(nc) = file.decl(nd) {
-                                let Some((owner, simple)) = nc.name.rsplit_once('.') else {
-                                    continue;
-                                };
-                                let owner = type_name(&class_internal(file, owner));
-                                let Some(&rank) = lexical_owner_ranks.get(&owner) else {
-                                    continue;
-                                };
-                                let internal = class_names
-                                    .get(&nc.name)
-                                    .unwrap_or_else(|| type_name(&class_internal(file, &nc.name)));
-                                match lexical_nested.entry(simple.to_string()) {
-                                    std::collections::hash_map::Entry::Vacant(entry) => {
-                                        entry.insert((rank, internal));
-                                    }
-                                    std::collections::hash_map::Entry::Occupied(mut entry)
-                                        if rank < entry.get().0 =>
-                                    {
-                                        entry.insert((rank, internal));
-                                    }
-                                    std::collections::hash_map::Entry::Occupied(_) => {}
-                                }
-                            }
-                        }
-                        for (simple, (_, internal)) in lexical_nested {
-                            // A lexical nested classifier shadows top-level/imported classifiers.
-                            ext.insert_name(simple, internal);
-                        }
+                        extend_lexical_nested_classifier_names(
+                            file,
+                            &lexical_owner_ranks,
+                            &mut ext,
+                        );
                         // A LOCAL class's siblings — the other classes declared in the same body —
                         // are visible to it by their SOURCE name (`class Derived : Base()`), which
                         // is not the name their hoisted declaration was registered under. The
@@ -6143,6 +6486,25 @@ fn collect_signatures_with_cp_impl(
                         }
                         ext
                     };
+                    resolve_declaration_type_parameter_annotation_inventory(
+                        file,
+                        d,
+                        &class_names,
+                        &mut table.resolved_annotations,
+                        &mut annotation_resolution,
+                        diags,
+                    );
+                    for entry in &c.enum_entries {
+                        resolve_enum_entry_type_parameter_annotation_inventory(
+                            file,
+                            c,
+                            entry,
+                            &class_names,
+                            &mut table.resolved_annotations,
+                            &mut annotation_resolution,
+                            diags,
+                        );
+                    }
                     let mut enclosing_semantic_parameters = Vec::new();
                     let symbolic_enclosing_tparams = enclosing_tparam_declarations.iter().fold(
                         TParams::default(),
@@ -7617,6 +7979,14 @@ fn collect_signatures_with_cp_impl(
                     }
                 }
                 Decl::Property(p) => {
+                    resolve_declaration_type_parameter_annotation_inventory(
+                        file,
+                        d,
+                        &class_names,
+                        &mut table.resolved_annotations,
+                        &mut annotation_resolution,
+                        diags,
+                    );
                     validate_context_property(p, false, diags);
                     // Extension property `val Recv.name: T get() = …`: register by (erased receiver,
                     // name); emitted as a static `getName(Recv)`/`setName(Recv, T)`.
@@ -15346,6 +15716,15 @@ fn check_file_at_impl_mode(
     // plus the intrinsic-identity check), so a call site sees a source function's contract
     // regardless of the order function bodies are checked in.
     c.collect_source_contracts(scope);
+
+    // Typealiases have no `Decl` node, so their declaration type-parameter annotations enter the
+    // same checker path explicitly at file scope. Capture discovery is a scratch expression pass;
+    // the authoritative check below owns annotation validation and folded values.
+    if !capture_discovery {
+        for &declaration_start in &file.type_alias_declaration_starts {
+            c.check_declaration_type_parameter_annotations(scope, declaration_start);
+        }
+    }
 
     // Each top-level declaration is checked in its OWN scope, so a prior declaration's bindings
     // cannot leak into the next one.
@@ -27528,6 +27907,37 @@ impl<'a> Checker<'a> {
             .insert((annotation.span.lo, annotation.span.hi), applied);
     }
 
+    /// Check annotation arguments for one declaration's type parameters after signature collection
+    /// has committed every annotation occurrence to its qualified classifier identity. An absent
+    /// identity is already an unresolved-reference diagnostic from that authoritative binding pass.
+    fn check_declaration_type_parameter_annotations(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        declaration_start: u32,
+    ) {
+        let Some(parameters) = self
+            .file
+            .declaration_type_parameter_annotations
+            .get(&declaration_start)
+        else {
+            return;
+        };
+        let applications = parameters
+            .iter()
+            .flat_map(|parameter| parameter.annotations.iter().zip(&parameter.annotation_args))
+            .map(|(annotation, arguments)| (annotation.clone(), arguments.clone()))
+            .collect::<Vec<_>>();
+        for (annotation, arguments) in applications {
+            if self
+                .syms
+                .resolved_annotation(self.file_index, &annotation)
+                .is_some()
+            {
+                self.check_annotation_application(scope, &annotation, &arguments);
+            }
+        }
+    }
+
     fn check_annotation_arguments(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -27596,6 +28006,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, source_decl: Option<DeclId>) {
+        self.check_declaration_type_parameter_annotations(scope, f.signature_span.lo);
         for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
             self.check_annotation_application(scope, annotation, arguments);
         }
@@ -27882,6 +28293,7 @@ impl<'a> Checker<'a> {
             &TParams::symbolic_from_decl_with(&p.type_params, &p.type_param_bounds, &resolve),
             |_| false,
         );
+        self.check_declaration_type_parameter_annotations(scope, p.span.lo);
         for (_, bound) in &p.type_param_bounds {
             self.check_type_parameter_bound(scope, bound);
         }
@@ -28660,6 +29072,7 @@ impl<'a> Checker<'a> {
                 scope.declare_tparams(&captured_source_names, &captured, |_| false);
             }
             scope.declare_tparams(&cl.type_params, &class_tparams, |_| false);
+            self.check_declaration_type_parameter_annotations(scope, cl.span.lo);
             // Publish every explicit primary-constructor declaration type after the class formals
             // enter scope. The checked map is committed to the module signature after this immutable
             // checker finishes, so later files and lowering consume this exact shape.
@@ -29294,6 +29707,7 @@ impl<'a> Checker<'a> {
                             .collect(),
                     );
                     scope.declare_tparams(&bp.type_params, &property_tparams, |_| false);
+                    self.check_declaration_type_parameter_annotations(scope, bp.span.lo);
                     self.check_duplicate_param_names(
                         &bp.context_params,
                         bp.context_params.len(),
@@ -29575,6 +29989,7 @@ impl<'a> Checker<'a> {
         scope.declare_tparams(&f.type_params, &method_tparams, |name| {
             f.reified_type_params.contains(name)
         });
+        self.check_declaration_type_parameter_annotations(scope, f.signature_span.lo);
         for (_, bound) in &f.type_param_bounds {
             self.check_type_parameter_bound(scope, bound);
         }
@@ -49115,6 +49530,11 @@ impl<'a> Checker<'a> {
                 self.file_index,
                 f.signature_span.lo,
             );
+        let annotation_scope = scope.child(ScopeKind::Function { receiver: None });
+        annotation_scope.declare_tparams(&f.type_params, &semantic_tparams, |name| {
+            f.reified_type_params.contains(name)
+        });
+        self.check_declaration_type_parameter_annotations(&annotation_scope, f.signature_span.lo);
         self.resolved_declaration_type_parameters.insert(
             f.signature_span.lo,
             f.type_params
@@ -50782,6 +51202,318 @@ fun use() {
         let symbols = collect_signatures(&[declaration, use_site], &mut diagnostics);
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         assert_eq!(symbols.funs["same"][0].exact_params, [true, false]);
+    }
+
+    #[test]
+    fn nested_type_parameter_annotation_uses_lexical_classifier_identity() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            r#"
+package sample
+
+annotation class Mark
+
+class Host {
+    annotation class Mark
+    fun <@Mark T> keep(value: T): T = value
+}
+"#,
+            &mut diagnostics,
+        );
+        let host = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) if class.name == "Host" => Some(class),
+                _ => None,
+            })
+            .expect("Host class");
+        assert!(file.decls.iter().any(|&declaration| {
+            matches!(
+                file.decl(declaration),
+                Decl::Class(class)
+                    if class.name == "Host.Mark" && class.kind == ClassKind::Annotation
+            )
+        }));
+        let method = host
+            .methods
+            .iter()
+            .find(|method| method.name == "keep")
+            .expect("keep method");
+        let annotation = file.declaration_type_parameter_annotations[&method.signature_span.lo][0]
+            .annotations[0]
+            .clone();
+        let symbols = collect_signatures(&[file], &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        assert!(
+            symbols
+                .resolved_annotation(0, &annotation)
+                .is_some_and(|identity| identity.matches("sample/Host$Mark")),
+            "nested annotation should bind to Host.Mark, got {:?}",
+            symbols.resolved_annotation(0, &annotation)
+        );
+    }
+
+    #[test]
+    fn unresolved_declaration_type_parameter_annotation_is_an_error() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file("class Box<@DefinitelyAbsentAnnotation T>", &mut diagnostics);
+
+        let symbols = collect_signatures(&[file], &mut diagnostics);
+
+        assert!(symbols.resolved_annotations.is_empty());
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            ["unresolved reference 'DefinitelyAbsentAnnotation'."]
+        );
+    }
+
+    #[test]
+    fn declaration_type_parameter_annotation_arguments_are_checked() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            r#"
+annotation class Marker(val value: String)
+class Box<@Marker(1) T>
+class Target<T>
+typealias Alias<@Marker(2) T> = Target<T>
+"#,
+            &mut diagnostics,
+        );
+        let files = [file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.msg
+                        == "argument type mismatch: actual type is 'Int', but 'String' was expected."
+                })
+                .count(),
+            2,
+            "class and typealias annotations must use the normal argument checker: {:?}",
+            diagnostics.diags
+        );
+    }
+
+    #[test]
+    fn every_nested_declaration_type_parameter_annotation_gets_its_lexical_identity() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            r#"
+package sample
+
+annotation class Mark
+
+class Host {
+    annotation class Mark
+
+    fun outer() {
+        fun <@Mark T> local(value: T): T = value
+    }
+}
+
+enum class Choice {
+    ENTRY {
+        fun <@Mark T> entry(value: T): T = value
+    };
+
+    annotation class Mark
+}
+
+interface Contract {
+    annotation class Mark
+    fun <@Mark T> member(value: T): T
+}
+
+open class Base {
+    annotation class Mark
+}
+
+class Derived : Base() {
+    fun <@Mark T> inherited(value: T): T = value
+}
+
+enum class EntryChoice {
+    ENTRY {
+        annotation class Mark
+        annotation class EntryOnly
+        fun <@Mark T> entryLocal(value: T): T = value
+        fun localOwner() {
+            class Local<@EntryOnly T> {
+                annotation class Mark
+                class Nested<@Mark U, @EntryOnly V>
+            }
+        }
+    };
+
+    annotation class Mark
+}
+"#,
+            &mut diagnostics,
+        );
+        let class = |name: &str| {
+            file.decls
+                .iter()
+                .find_map(|&declaration| match file.decl(declaration) {
+                    Decl::Class(class) if class.name == name => Some(class),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing class {name}"))
+        };
+        let host = class("Host");
+        let outer = host
+            .methods
+            .iter()
+            .find(|method| method.name == "outer")
+            .expect("outer method");
+        let FunBody::Block(outer_body) = outer.body else {
+            panic!("outer block body");
+        };
+        let Expr::Block { stmts, .. } = file.expr(outer_body) else {
+            panic!("outer block expression");
+        };
+        let local = stmts
+            .iter()
+            .find_map(|&statement| match file.stmt(statement) {
+                Stmt::LocalFun(function) if function.name == "local" => Some(function),
+                _ => None,
+            })
+            .expect("local function");
+        let choice = class("Choice");
+        let entry = choice.enum_entries[0]
+            .methods
+            .iter()
+            .find(|method| method.name == "entry")
+            .expect("enum-entry function");
+        let contract = class("Contract");
+        let member = contract
+            .methods
+            .iter()
+            .find(|method| method.name == "member")
+            .expect("interface member");
+        let derived = class("Derived");
+        let inherited = derived
+            .methods
+            .iter()
+            .find(|method| method.name == "inherited")
+            .expect("inherited nested annotation method");
+        let entry_choice = class("EntryChoice");
+        assert!(file.decls.iter().any(|&declaration| {
+            matches!(
+                file.decl(declaration),
+                Decl::Class(class) if class.name == "EntryChoice.ENTRY.EntryOnly"
+            )
+        }));
+        assert!(file.decls.iter().any(|&declaration| {
+            matches!(
+                file.decl(declaration),
+                Decl::Class(class)
+                    if class.name.ends_with("EntryChoice.ENTRY.localOwner.Local.Mark")
+            )
+        }));
+        let entry_local = entry_choice.enum_entries[0]
+            .methods
+            .iter()
+            .find(|method| method.name == "entryLocal")
+            .expect("entry-local nested annotation method");
+        let entry_local_class = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class)
+                    if class.name.starts_with("EntryChoice.ENTRY.localOwner.")
+                        && class.name.ends_with("Local") =>
+                {
+                    Some(class)
+                }
+                _ => None,
+            })
+            .expect("enum-entry local class");
+        let entry_local_nested_class = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class)
+                    if class.name.starts_with("EntryChoice.ENTRY.localOwner.")
+                        && class.name.ends_with("Local.Nested") =>
+                {
+                    Some(class)
+                }
+                _ => None,
+            })
+            .expect("class nested inside an enum-entry local class");
+        let annotations = [
+            (
+                file.declaration_type_parameter_annotations[&local.signature_span.lo][0]
+                    .annotations[0]
+                    .clone(),
+                "sample/Host$Mark",
+            ),
+            (
+                file.declaration_type_parameter_annotations[&entry.signature_span.lo][0]
+                    .annotations[0]
+                    .clone(),
+                "sample/Choice$Mark",
+            ),
+            (
+                file.declaration_type_parameter_annotations[&member.signature_span.lo][0]
+                    .annotations[0]
+                    .clone(),
+                "sample/Contract$Mark",
+            ),
+            (
+                file.declaration_type_parameter_annotations[&inherited.signature_span.lo][0]
+                    .annotations[0]
+                    .clone(),
+                "sample/Base$Mark",
+            ),
+            (
+                file.declaration_type_parameter_annotations[&entry_local.signature_span.lo][0]
+                    .annotations[0]
+                    .clone(),
+                "sample/EntryChoice$ENTRY$Mark",
+            ),
+            (
+                file.declaration_type_parameter_annotations[&entry_local_class.span.lo][0]
+                    .annotations[0]
+                    .clone(),
+                "sample/EntryChoice$ENTRY$EntryOnly",
+            ),
+            (
+                file.declaration_type_parameter_annotations[&entry_local_nested_class.span.lo][0]
+                    .annotations[0]
+                    .clone(),
+                "sample/EntryChoice$ENTRY$localOwner$Local$Mark",
+            ),
+            (
+                file.declaration_type_parameter_annotations[&entry_local_nested_class.span.lo][1]
+                    .annotations[0]
+                    .clone(),
+                "sample/EntryChoice$ENTRY$EntryOnly",
+            ),
+        ];
+        let symbols = collect_signatures(&[file], &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        for (annotation, expected) in annotations {
+            assert!(
+                symbols
+                    .resolved_annotation(0, &annotation)
+                    .is_some_and(|identity| identity.matches(expected)),
+                "annotation should bind to {expected}, got {:?}",
+                symbols.resolved_annotation(0, &annotation)
+            );
+        }
     }
 
     #[test]

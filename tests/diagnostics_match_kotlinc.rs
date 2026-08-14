@@ -46,6 +46,76 @@ fn generic_cast_is_accepted_by_both_frontends() {
 }
 
 #[test]
+fn declaration_type_parameter_annotations_are_accepted_by_both_frontends() {
+    let source = r#"
+@Target(AnnotationTarget.TYPE_PARAMETER)
+annotation class Marker(val value: String)
+
+class Box<@Marker("class") T>(val value: T)
+
+class Lines<
+    @Marker("line") T
+>
+
+class Bound<@Marker("bound") T:
+Any>
+
+typealias Boxed<@Marker("alias") T> = List<T>
+
+class Host {
+    @Target(AnnotationTarget.TYPE_PARAMETER)
+    annotation class Marker
+
+    fun <@Marker T> keep(value: T): T = value
+
+    fun outer(): String {
+        fun <@Marker T> local(value: T): T = value
+        return local("OK")
+    }
+}
+
+interface Contract {
+    @Target(AnnotationTarget.TYPE_PARAMETER)
+    annotation class Marker
+
+    fun <@Marker T> member(value: T): T
+}
+
+inline fun <
+    reified @Marker("function") T
+> choose(value: T): T = value
+
+fun box(): Boxed<String> = listOf(
+    Box(choose("OK")).value,
+    Host().keep("OK"),
+    Host().outer(),
+)
+"#;
+    let (code, stderr) = common::kotlinc_source_result("AnnotatedTypeParameters", source);
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected annotated type parameters: {stderr}"
+    );
+    common::expect_front_end_ok_files_with_stdlib(&[source], "annotated type parameters");
+}
+
+#[test]
+fn unresolved_declaration_type_parameter_annotation_matches_kotlinc() {
+    let source = "class Box<@DefinitelyAbsentAnnotation T>";
+    let result = common::compiler_diagnostics(&[("MissingAnnotation.kt", source)], &[]);
+    let krusty_error =
+        first_error(&result.krusty_stderr).or_else(|| first_error(&result.krusty_stdout));
+    let kotlinc_error = first_error(&result.reference_stderr);
+
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    assert_eq!(krusty_error, kotlinc_error);
+}
+
+#[test]
 fn constructor_infers_nested_function_type() {
     let diagnostics = common::front_end_diagnostics(
         "class C<T>(val consume: ((T) -> Unit)?)\n\

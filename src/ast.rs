@@ -602,6 +602,17 @@ pub struct AnnotationRef {
     pub span: Span,
 }
 
+/// Source annotations on one declaration type parameter (`<@Ann("x") T>`). The parameter and every
+/// annotation retain exact spans; semantic resolution keys annotation identities by those spans.
+#[derive(Clone, Debug)]
+pub struct AnnotatedTypeParameter {
+    pub name: String,
+    pub span: Span,
+    pub annotations: Vec<AnnotationRef>,
+    /// Argument expressions parallel to [`Self::annotations`].
+    pub annotation_args: Vec<Vec<ExprId>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Param {
     pub name: String,
@@ -1342,6 +1353,10 @@ pub struct File {
     /// the checker enters it, so that it is checked in the lexical scope it was written in rather
     /// than at file level.
     pub local_class_decls: std::collections::HashMap<StmtId, DeclId>,
+    /// Hoisted local class declaration -> exact non-declaration classifier scope that owns it.
+    /// Enum entries have anonymous subclass scope (`Enum.ENTRY`) but no standalone `Decl`; retaining
+    /// that parser-known owner lets signature resolution include entry-local nested classifiers.
+    pub local_class_lexical_classifier_owners: std::collections::HashMap<DeclId, String>,
     /// Nested types hoisted out of a local class during its parse, named by the path from that
     /// class (`Local.Inner`). They are requalified with it when it is given its final name.
     pub local_class_nested: std::collections::HashMap<StmtId, Vec<DeclId>>,
@@ -1410,6 +1425,15 @@ pub struct File {
     /// reference retains its complete source spelling and own span until name resolution commits it
     /// to a canonical classifier identity.
     pub type_annotations: std::collections::HashMap<u32, Vec<AnnotationRef>>,
+    /// Declaration type parameters carrying annotations, keyed by the exact start of their owning
+    /// declaration's signature and then kept in source order. This is distinct from
+    /// [`Self::type_annotations`]: `class C<@Ann T>` annotates the declaration of `T`, not a type use.
+    pub declaration_type_parameter_annotations:
+        std::collections::HashMap<u32, Vec<AnnotatedTypeParameter>>,
+    /// Signature starts for typealiases with declaration type parameters. Typealiases currently live
+    /// in the structural alias tables rather than `Decl`; this exact owner set lets semantic annotation
+    /// resolution use file scope without guessing from names or source text.
+    pub type_alias_declaration_starts: std::collections::HashSet<u32>,
     /// `// ASSERTIONS_MODE: always-enable` — `assert(...)` is emitted UNGUARDED (always checks + throws),
     /// not behind the per-class `desiredAssertionStatus()` guard. From the test directive / `-Xassertions`.
     pub assert_always_enabled: bool,
@@ -1506,6 +1530,7 @@ impl File {
         self.anonymous_object_classes = Default::default();
         self.anonymous_object_enclosing_functions = Default::default();
         self.local_class_decls = Default::default();
+        self.local_class_lexical_classifier_owners = Default::default();
         self.local_class_nested = Default::default();
         self.lambda_param_types = Default::default();
         self.anon_fun_lambdas = Default::default();
