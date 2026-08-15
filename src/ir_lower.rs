@@ -9618,7 +9618,7 @@ impl<'a> Lower<'a> {
                     ResolvedCall::Extension(extension) => extension.callable.name.clone(),
                     _ => return None,
                 };
-                self.lower_selected_op_call(recv, recv_ty, &name, &[], *target, None, &[])
+                self.lower_selected_op_call(recv, recv_ty, &name, &[], *target, None, &[], None)
             }
             DestructureComponentTarget::IndexedGet(m) => {
                 let m = *m;
@@ -14152,6 +14152,7 @@ impl<'a> Lower<'a> {
             selected,
             Some(source_expr),
             &[],
+            None,
         )
     }
 
@@ -14164,7 +14165,11 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
     ) -> Option<(u32, Ty)> {
         let selected = self.info.resolved_stmt_operator_call(stmt, name).cloned()?;
-        self.lower_selected_op_call(recv_v, recv_ty, name, args, selected, None, &[])
+        let slots = self
+            .info
+            .resolved_stmt_operator_arg_slots(stmt, name)
+            .map(<[_]>::to_vec);
+        self.lower_selected_op_call(recv_v, recv_ty, name, args, selected, None, &[], slots)
     }
 
     fn lower_context_argument_values(
@@ -14430,6 +14435,7 @@ impl<'a> Lower<'a> {
         self.emit_module_or_library_static_call(setter.clone(), arguments, false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_selected_op_call(
         &mut self,
         recv_v: u32,
@@ -14439,6 +14445,7 @@ impl<'a> Lower<'a> {
         selected: ResolvedCall,
         source_expr: Option<AstExprId>,
         param_default_values: &[Option<CtorDefaultValue>],
+        selected_slots: Option<Vec<Option<AstExprId>>>,
     ) -> Option<(u32, Ty)> {
         match selected {
             selected @ ResolvedCall::MemberExtension { .. } => {
@@ -14504,13 +14511,25 @@ impl<'a> Lower<'a> {
                 let physical_params = resolved.physical_params;
                 let member = resolved.member;
                 let physical_ret = member.physical_ret;
-                let (a, prelude) = if member.call_sig.vararg {
-                    self.lower_library_member_vararg_args(
-                        source_expr?,
-                        args,
-                        &member,
-                        &physical_params,
-                    )?
+                let (a, mut prelude) = if member.call_sig.vararg {
+                    if let Some(call) = source_expr {
+                        self.lower_library_member_vararg_args(
+                            call,
+                            args,
+                            &member,
+                            &physical_params,
+                        )?
+                    } else {
+                        self.lower_call_slot_args_source_order_with_element(
+                            args,
+                            selected_slots.as_deref()?,
+                            &physical_params,
+                            Some(&member.params),
+                            None,
+                            member.call_sig.vararg_index,
+                            OmittedSlotPolicy::Reject,
+                        )?
+                    }
                 } else {
                     if member.params.len() != args.len() {
                         return None;
@@ -14529,6 +14548,7 @@ impl<'a> Lower<'a> {
                 // concrete consumer chooses its lower bound.
                 let ret = resolved.ret;
                 let suspend = resolved.suspend;
+                let recv_v = self.spill_receiver_before_args(recv_v, recv_ty, &mut prelude);
                 let call =
                     self.emit_library_member_call(recv_v, internal, member, ret, suspend, a)?;
                 let call = self.coerce_to_static(call, ret, physical_ret);
@@ -14538,15 +14558,20 @@ impl<'a> Lower<'a> {
                 let owner = resolved.member.owner?;
                 let interface = resolved.member.is_interface();
                 let target = resolved.member.name;
+                let vararg_index = resolved.member.call_sig.vararg_index;
                 let selected_params = resolved.member.params;
+                let physical_params = resolved.physical_params;
                 let physical_ret = resolved.member.physical_ret;
                 let selected_ret = resolved.ret;
                 let suspend = resolved.suspend;
                 if target != name {
                     return None;
                 }
+                let owner_name = owner.render();
+                let linked = self.link_local_method(&owner_name, name, &selected_params);
+                let argument_physical_params = physical_params.as_slice();
                 let params = tys_to_ir(&selected_params);
-                let (lowered, prelude) = match source_expr {
+                let (lowered, mut prelude) = match source_expr {
                     Some(call) => match self.info.resolved_call_arg_slots.get(&call).cloned() {
                         Some(slots) if slots.iter().any(Option::is_none) => self
                             .lower_source_slot_args(
@@ -14563,15 +14588,23 @@ impl<'a> Lower<'a> {
                         }
                         None => return None,
                     },
+                    None if vararg_index.is_some() => self
+                        .lower_call_slot_args_source_order_with_element(
+                            args,
+                            selected_slots.as_deref()?,
+                            argument_physical_params,
+                            Some(&selected_params),
+                            None,
+                            vararg_index,
+                            OmittedSlotPolicy::Reject,
+                        )?,
                     None if selected_params.len() == args.len() => {
                         (self.lower_args(args, &params)?, Vec::new())
                     }
                     None => return None,
                 };
-                let owner_name = owner.render();
-                let (call, emitted_ret) = if let Some((class, index, _fid, linked_ret)) =
-                    self.link_local_method(&owner_name, name, &selected_params)
-                {
+                let recv_v = self.spill_receiver_before_args(recv_v, recv_ty, &mut prelude);
+                let (call, emitted_ret) = if let Some((class, index, _fid, linked_ret)) = linked {
                     (
                         self.emit_method_call(
                             class,
@@ -14588,7 +14621,7 @@ impl<'a> Lower<'a> {
                                 owner: type_name(&owner_name),
                                 name: target,
                                 descriptor: String::new(),
-                                params: Some((tys_to_ir(&selected_params), ty_to_ir(physical_ret))),
+                                params: Some((tys_to_ir(&physical_params), ty_to_ir(physical_ret))),
                                 interface,
                             },
                             Some(recv_v),
@@ -14624,7 +14657,11 @@ impl<'a> Lower<'a> {
                 let module_owner = match callable.origin {
                     crate::libraries::Origin::Library => {
                         let physical_ret = callable.physical_ret;
-                        let receiver_param = callable.params[0];
+                        let physical_params = &callable.physical_params;
+                        if physical_params.len() != 1 + context_count + selected_params.len() {
+                            return None;
+                        }
+                        let receiver_param = physical_params[0];
                         // A library extension's receiver is its first JVM argument, so realize that
                         // boundary with the same operation as every written argument.
                         let receiver = self.coerce_callable_argument_value(
@@ -14634,19 +14671,67 @@ impl<'a> Lower<'a> {
                             &callable,
                             0,
                         )?;
-                        let params = tys_to_ir(&callable.params[1..]);
+                        let physical_context = &physical_params[1..1 + context_count];
+                        let physical_explicit = &physical_params[1 + context_count..];
                         let (arguments, mut prelude) = match source_expr {
                             Some(call) => {
-                                self.lower_call_args_in_slot_order(call, args, &params)?
+                                match self.info.resolved_call_arg_slots.get(&call).cloned() {
+                                    Some(slots) if vararg => self.lower_source_slot_args(
+                                        args,
+                                        &slots,
+                                        physical_explicit,
+                                        &selected_params,
+                                        vararg_index,
+                                        &param_default_values,
+                                    )?,
+                                    Some(_) => {
+                                        let params = tys_to_ir(physical_explicit);
+                                        self.lower_call_args_in_slot_order(call, args, &params)?
+                                    }
+                                    None => return None,
+                                }
                             }
-                            None if args.len() == params.len() => {
-                                (self.lower_args(args, &params)?, Vec::new())
+                            None if vararg_index.is_some() => self
+                                .lower_call_slot_args_source_order_with_element(
+                                    args,
+                                    selected_slots.as_deref()?,
+                                    physical_explicit,
+                                    Some(&selected_params),
+                                    None,
+                                    vararg_index,
+                                    OmittedSlotPolicy::Reject,
+                                )?,
+                            None if args.len() == selected_params.len() => {
+                                let mut lowered = Vec::with_capacity(args.len());
+                                for ((&argument, &semantic), &physical) in
+                                    args.iter().zip(&selected_params).zip(physical_explicit)
+                                {
+                                    let value = self.lower_arg(argument, &ty_to_ir(semantic))?;
+                                    lowered.push(self.coerce_argument_value(
+                                        value,
+                                        semantic,
+                                        ty_to_ir(physical),
+                                    )?);
+                                }
+                                (lowered, Vec::new())
                             }
                             None => return None,
                         };
                         let receiver =
                             self.spill_receiver_before_args(receiver, recv_ty, &mut prelude);
                         let mut lowered = vec![receiver];
+                        for ((source, &semantic), &physical) in context_args
+                            .iter()
+                            .zip(&context_types)
+                            .zip(physical_context)
+                        {
+                            let value = self.lower_context_argument_value(source, semantic)?;
+                            lowered.push(self.coerce_argument_value(
+                                value,
+                                semantic,
+                                ty_to_ir(physical),
+                            )?);
+                        }
                         lowered.extend(arguments);
                         let call = self.emit_library_static_call(callable, lowered, suspend)?;
                         let call = self.wrap_arg_prelude(call, prelude);
@@ -14708,6 +14793,16 @@ impl<'a> Lower<'a> {
                             None if vararg => return None,
                             None => (self.lower_args(args, explicit_params)?, Vec::new()),
                         },
+                        None if vararg_index.is_some() => self
+                            .lower_call_slot_args_source_order_with_element(
+                                args,
+                                selected_slots.as_deref()?,
+                                explicit_params,
+                                Some(&selected_params),
+                                None,
+                                vararg_index,
+                                OmittedSlotPolicy::Reject,
+                            )?,
                         None if args.len() == explicit_params.len() => {
                             (self.lower_args(args, explicit_params)?, Vec::new())
                         }
@@ -14770,6 +14865,16 @@ impl<'a> Lower<'a> {
                         }
                         None => return None,
                     },
+                    None if vararg_index.is_some() => self
+                        .lower_call_slot_args_source_order_with_element(
+                            args,
+                            selected_slots.as_deref()?,
+                            physical_explicit,
+                            Some(&selected_params),
+                            None,
+                            vararg_index,
+                            OmittedSlotPolicy::Reject,
+                        )?,
                     None if args.len() == selected_params.len() => {
                         let mut lowered = Vec::with_capacity(args.len());
                         for ((&argument, &semantic), &physical) in
@@ -18330,7 +18435,7 @@ impl<'a> Lower<'a> {
         };
         let recv_ty = self.info.ty(lhs);
         let recv = self.expr(lhs)?;
-        self.lower_selected_op_call(recv, recv_ty, aname, &[rhs], *target.call, None, &[])
+        self.lower_selected_op_call(recv, recv_ty, aname, &[rhs], *target.call, None, &[], None)
             .map(|(call, _)| call)
     }
 
@@ -21250,6 +21355,7 @@ impl<'a> Lower<'a> {
                     *target,
                     Some(e),
                     &param_default_values,
+                    None,
                 )
                 .map(|(call, _)| call)
             }
@@ -21700,7 +21806,16 @@ impl<'a> Lower<'a> {
                 let recv_v = self.expr(array)?;
                 let selected = self.info.resolved_calls.get(&e).cloned()?;
                 if let Some((v, ret)) =
-                    self.lower_selected_op_call(recv_v, at, "get", &indices, selected, Some(e), &[])
+                    self.lower_selected_op_call(
+                        recv_v,
+                        at,
+                        "get",
+                        &indices,
+                        selected,
+                        Some(e),
+                        &[],
+                        None,
+                    )
                 {
                     return Some(self.coerce_generic_read(v, e, ret));
                 }
@@ -23450,6 +23565,7 @@ impl<'a> Lower<'a> {
                         selected,
                         Some(e),
                         &[],
+                        None,
                     )?;
                     if ret != Ty::Int {
                         return None;
@@ -25629,6 +25745,7 @@ impl<'a> Lower<'a> {
                         target,
                         Some(e),
                         &[],
+                        None,
                     )
                     .map(|(value, _)| value);
             }

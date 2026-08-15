@@ -1810,6 +1810,52 @@ fn positional_candidate_score(
     ))
 }
 
+/// Map the written operands of an indexed operator to its declared value-parameter slots.
+///
+/// Indexed syntax is the one Kotlin call form where positional operands may surround a vararg:
+/// `a[i, j] = value` calls `set(vararg indices, value)`. Ordinary call mapping deliberately cannot
+/// admit that shape, because positional arguments after a vararg are otherwise forbidden. Keeping
+/// this mapping explicit lets selection, checking, and lowering agree without weakening normal calls.
+fn indexed_operator_argument_parameters(
+    params: &[Ty],
+    vararg_index: Option<usize>,
+    argument_count: usize,
+    set: bool,
+) -> Option<Vec<usize>> {
+    let Some(vararg) = vararg_index else {
+        return (params.len() == argument_count).then(|| (0..argument_count).collect());
+    };
+    let trailing = usize::from(set);
+    if params.len() != vararg + 1 + trailing {
+        return None;
+    }
+    let packed = argument_count.checked_sub(vararg + trailing)?;
+    let mut parameters = Vec::with_capacity(argument_count);
+    parameters.extend(0..vararg);
+    parameters.extend(std::iter::repeat_n(vararg, packed));
+    if set {
+        parameters.push(params.len() - 1);
+    }
+    Some(parameters)
+}
+
+fn indexed_operator_argument_slots(
+    params: &[Ty],
+    vararg_index: Option<usize>,
+    arguments: &[ExprId],
+    set: bool,
+) -> Option<Vec<Option<ExprId>>> {
+    let parameters =
+        indexed_operator_argument_parameters(params, vararg_index, arguments.len(), set)?;
+    let mut slots = vec![None; params.len()];
+    for (&argument, parameter) in arguments.iter().zip(parameters) {
+        if slots[parameter].is_none() {
+            slots[parameter] = Some(argument);
+        }
+    }
+    Some(slots)
+}
+
 /// Soundness guard shared by `pick_overload` and `pick_member_overloads`: krusty erases generics, so a
 /// generic value reads as `kotlin/Any`. An erased-`Any` ARGUMENT at a position where the candidates'
 /// parameter types DIFFER defeats selection — kotlinc selects on the precise type krusty no longer has —
@@ -10640,6 +10686,10 @@ pub struct TypeInfo {
     /// Statement-level synthetic operator calls selected while checking, e.g. `a[i] = v` resolving to
     /// `a.set(i, v)` or `a.put(i, v)`. Lowering reads this table instead of selecting the setter again.
     pub resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
+    /// Checker-selected source-argument slots for statement-level synthetic operators. Unmapped
+    /// source arguments contribute to the recorded target's vararg slot.
+    pub resolved_stmt_operator_arg_slots:
+        HashMap<(StmtId, SyntheticOperatorCall), Vec<Option<ExprId>>>,
     /// Checked read/storage/result types for every increment/decrement convention. The selected
     /// callable, when non-builtin, remains in the corresponding operator-call table.
     pub(crate) resolved_inc_dec: HashMap<IncDecSite, ResolvedIncDec>,
@@ -11613,6 +11663,15 @@ impl TypeInfo {
     pub fn resolved_stmt_operator_call(&self, s: StmtId, name: &str) -> Option<&ResolvedCall> {
         self.resolved_stmt_operator_calls
             .get(&(s, SyntheticOperatorCall::from_name(name)?))
+    }
+    pub fn resolved_stmt_operator_arg_slots(
+        &self,
+        s: StmtId,
+        name: &str,
+    ) -> Option<&[Option<ExprId>]> {
+        self.resolved_stmt_operator_arg_slots
+            .get(&(s, SyntheticOperatorCall::from_name(name)?))
+            .map(Vec::as_slice)
     }
     pub fn resolved_operator_call_is_extension(&self, e: ExprId, name: &str) -> bool {
         self.resolved_operator_call(e, name)
@@ -13364,6 +13423,8 @@ fn make_checker<'a>(
         extension_receiver_stmt_uses: vec![Vec::new(); file.stmt_arena.len()],
         resolved_operator_calls: HashMap::new(),
         resolved_stmt_operator_calls: HashMap::new(),
+        resolved_stmt_operator_arg_slots: HashMap::new(),
+        indexed_operator_ambiguous: false,
         resolved_inc_dec: HashMap::new(),
         resolved_index_store_get_returns: HashMap::new(),
         resolved_destructure_components: HashMap::new(),
@@ -14997,6 +15058,7 @@ fn check_file_at_impl_mode(
         extension_receiver_stmt_uses,
         resolved_operator_calls,
         resolved_stmt_operator_calls,
+        resolved_stmt_operator_arg_slots,
         resolved_inc_dec,
         resolved_index_store_get_returns,
         resolved_destructure_components,
@@ -15176,6 +15238,7 @@ fn check_file_at_impl_mode(
         used_extension_receivers,
         resolved_operator_calls,
         resolved_stmt_operator_calls,
+        resolved_stmt_operator_arg_slots,
         resolved_inc_dec,
         resolved_index_store_get_returns,
         resolved_destructure_components,
@@ -15760,6 +15823,9 @@ struct Checker<'a> {
     extension_receiver_stmt_uses: Vec<Vec<Span>>,
     resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
     resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
+    resolved_stmt_operator_arg_slots: HashMap<(StmtId, SyntheticOperatorCall), Vec<Option<ExprId>>>,
+    /// Set by indexed operator selection so assignment never retries `put` after an ambiguous `set`.
+    indexed_operator_ambiguous: bool,
     resolved_inc_dec: HashMap<IncDecSite, ResolvedIncDec>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
@@ -21314,11 +21380,117 @@ impl<'a> Checker<'a> {
         arg_exprs: &[ExprId],
         span: Span,
     ) -> Option<(Ty, ResolvedCall)> {
-        if let Some(internal) = receiver.obj_internal() {
-            if let Some((owner, sig)) = self
-                .syms
-                .operator_method_matching_with_owner_name(internal, name, arg_tys)
+        if name == "set" {
+            self.indexed_operator_ambiguous = false;
+            let arg_kinds = self.call_arg_kinds(scope, arg_exprs);
+            let resolver = self.resolver();
+            let (mut functions, properties) =
+                resolver.receiver_callables(receiver, name).into_parts();
+            functions.overloads.retain(|candidate| {
+                candidate.flags.operator
+                    && self.source_callable_visible(candidate)
+                    && (candidate.kind != crate::libraries::FnKind::Member
+                        || candidate.context_count == 0)
+            });
+            let callables = crate::libraries::Callables::from_parts(functions, properties);
+            let (selected, params, ret) = match resolver
+                .select_receiver_indexed_set_function_with_params(
+                    receiver,
+                    name,
+                    &arg_kinds,
+                    &[],
+                    &callables,
+                ) {
+                crate::symbol_resolver::CandidateSelection::Selected(selected) => selected,
+                crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                    self.indexed_operator_ambiguous = true;
+                    self.diags.error(
+                        span,
+                        "overload resolution ambiguity for operator 'set'".to_string(),
+                    );
+                    return None;
+                }
+                crate::symbol_resolver::CandidateSelection::None => return None,
+            };
+            let vararg = selected
+                .call_sig
+                .vararg_index
+                .and_then(|index| index.checked_sub(selected.context_count));
+            if !self
+                .expect_indexed_operator_params(scope, &params, vararg, true, arg_exprs, arg_tys)
             {
+                return None;
+            }
+            let semantic = selected.semantic_signature();
+            let context_count = selected.context_count.min(semantic.params.len());
+            let context_args = if context_count == 0 {
+                Vec::new()
+            } else if let Some(context) =
+                self.select_context_arguments(scope, &semantic.params[..context_count])
+            {
+                context
+            } else {
+                self.diags.error(
+                    span,
+                    "no implicit value is available for the context parameters".to_string(),
+                );
+                return None;
+            };
+            if !self.member_accessible(selected.visibility, selected.callable.owner) {
+                self.reject_if_inaccessible(
+                    selected.visibility,
+                    name,
+                    selected.callable.owner,
+                    span,
+                );
+                return None;
+            }
+            let target = if selected.kind == crate::libraries::FnKind::Member {
+                let mut member = selected.member_with_return(ret);
+                member.params = params;
+                ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
+                    receiver,
+                    physical_params: selected.callable.physical_params.clone(),
+                    context_args: context_args.into_iter().map(Some).collect(),
+                    ret,
+                    member,
+                    projected_return_hazard: selected.projected_return_hazard,
+                    suspend: selected.flags.suspend,
+                    origin: selected.callable.origin.clone(),
+                })
+            } else {
+                let mut callable = selected.callable.clone();
+                if let Some(facade) = selected
+                    .source_key
+                    .and_then(|key| self.syms.fn_facades_by_decl.get(&key).copied())
+                {
+                    callable.owner = facade;
+                    callable.origin = Origin::Module { facade };
+                }
+                callable.ret = ret;
+                ResolvedCall::source_extension(
+                    callable,
+                    receiver,
+                    params,
+                    context_args,
+                    ret,
+                    selected.source_key,
+                    vararg.is_some(),
+                    vararg,
+                    selected
+                        .default_values
+                        .get(selected.context_count..)
+                        .unwrap_or_default()
+                        .to_vec(),
+                )
+            };
+            return Some((ret, target));
+        }
+        if let Some(internal) = receiver.obj_internal() {
+            let selected = self
+                .syms
+                .operator_method_matching_with_owner_name(internal, name, arg_tys);
+            if let Some((owner, sig)) = selected {
                 let inherits_operator = self
                     .resolver()
                     .resolve_symbol(
@@ -21375,9 +21547,9 @@ impl<'a> Checker<'a> {
                 ))
                 .collect::<Vec<_>>()
         );
-        if let Some((selected, sig)) = self
-            .selected_source_extension(receiver, name, &arg_kinds)
-            .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
+        let source_extension = self.selected_source_extension(receiver, name, &arg_kinds);
+        if let Some((selected, sig)) =
+            source_extension.filter(|(_, signature)| signature.is_operator())
         {
             let context_count = sig.context_count.min(sig.params.len());
             let context_args = if context_count == 0 {
@@ -21436,13 +21608,38 @@ impl<'a> Checker<'a> {
         let argument_kinds = self.call_arg_kinds(scope, args);
         let resolver = self.resolver();
         let (mut functions, _) = resolver.receiver_callables(receiver, name).into_parts();
-        functions
-            .overloads
-            .retain(|candidate| candidate.flags.operator);
+        functions.overloads.retain(|candidate| {
+            candidate.flags.operator
+                && self.source_callable_visible(candidate)
+                && (candidate.kind != crate::libraries::FnKind::Member
+                    || candidate.context_count == 0)
+        });
         let callables = crate::libraries::Callables::Functions(functions);
-        resolver
-            .select_receiver_function_with_params(receiver, name, &argument_kinds, &[], &callables)
-            .map(|(_, params)| params)
+        if name == "set" {
+            match resolver.select_receiver_indexed_set_function_with_params(
+                receiver,
+                name,
+                &argument_kinds,
+                &[],
+                &callables,
+            ) {
+                crate::symbol_resolver::CandidateSelection::Selected((_, params, _)) => {
+                    Some(params)
+                }
+                crate::symbol_resolver::CandidateSelection::None
+                | crate::symbol_resolver::CandidateSelection::Ambiguous => None,
+            }
+        } else {
+            resolver
+                .select_receiver_function_with_params(
+                    receiver,
+                    name,
+                    &argument_kinds,
+                    &[],
+                    &callables,
+                )
+                .map(|(_, params)| params)
+        }
     }
     /// Resolve each context-parameter type to one semantic scope value. The implicit-receiver tower is
     /// searched nearest-first, followed by lexical bindings. The returned identities are the complete
@@ -29123,6 +29320,32 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn expect_indexed_operator_params(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        params: &[Ty],
+        vararg_index: Option<usize>,
+        set: bool,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+    ) -> bool {
+        let Some(parameters) =
+            indexed_operator_argument_parameters(params, vararg_index, arg_tys.len(), set)
+        else {
+            return false;
+        };
+        for (source, parameter) in parameters.into_iter().enumerate() {
+            let declared = params[parameter];
+            let expected = if vararg_index == Some(parameter) {
+                declared.array_elem().unwrap_or(declared)
+            } else {
+                declared
+            };
+            self.expect_call_arg(scope, expected, args[source], arg_tys[source]);
+        }
+        true
+    }
+
     /// Validate the source arguments of one already-selected callable and commit their semantic
     /// parameter slots. Selection owns WHICH callable won; this origin-neutral seam owns Kotlin's
     /// named/default/vararg/trailing-lambda mapping for every selected callable.
@@ -31720,96 +31943,104 @@ impl<'a> Checker<'a> {
             if at == Ty::Error {
                 return Ty::Error;
             }
-            // A user-class member `operator fun get(i, j, …)`.
-            if let Some(internal) = at.obj_internal() {
-                if let Some((owner, sig)) = self.syms.method_of_with_owner_name(internal, "get") {
-                    if sig.params.len() == its.len() {
-                        for (i, &pt) in sig.params.iter().enumerate() {
-                            self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
-                        }
-                        let interface = self
-                            .syms
-                            .class_by_type_name(owner)
-                            .is_some_and(|c| c.is_interface());
-                        self.resolved_calls.insert(
-                            e,
-                            ResolvedCall::Member(
-                                crate::symbol_resolver::ResolvedMember::from_member(
-                                    at,
-                                    crate::module_symbols::member_from_signature(
-                                        "get", &sig, owner, interface,
-                                    ),
-                                    sig.ret,
-                                    sig.projected_return_hazard,
-                                    Origin::Module { facade: owner },
-                                ),
-                            ),
-                        );
-                        return self.set(e, sig.ret);
-                    }
-                }
-            }
             let index_kinds = self.checked_call_arg_kinds(scope, &indices);
-            if let Some((selected, sig)) = self
-                .selected_source_extension(at, "get", &index_kinds)
-                .filter(|(_, signature)| signature.is_operator())
-            {
-                let context_count = sig.context_count.min(sig.params.len());
-                let context_args = if context_count > 0 {
-                    let Some(context) =
-                        self.select_context_arguments(scope, &sig.params[..context_count])
-                    else {
-                        self.diags.error(
-                            self.span(e),
-                            "no implicit value is available for the context parameters".to_string(),
-                        );
-                        return self.set(e, Ty::Error);
-                    };
-                    context
-                } else {
-                    Vec::new()
-                };
-                let value_params = selected.value_params().to_vec();
-                let value_call_sig = selected.call_sig.suffix(selected.context_count);
-                if !self.expect_selected_call_args(
-                    scope,
-                    CallArgs {
-                        call: e,
-                        args: &indices,
-                        arg_tys: &its,
-                    },
-                    &value_params,
-                    &value_call_sig,
-                    None,
-                ) {
-                    return self.set(e, Ty::Error);
-                }
-                self.mark_source_call(e, selected.source_key);
-                self.resolved_calls.insert(
-                    e,
-                    self.resolved_source_extension_call(
-                        &selected,
-                        at,
-                        sig.ret,
-                        context_args,
-                        sig.param_default_values.clone(),
-                    ),
-                );
-                return self.set(e, sig.ret);
-            }
-            // A library `get(i, j, …)` member (`List.get(Int)`, `Map.get(K)`).
-            if let Some(m) = self.select_instance_member(at, "get", &its) {
-                let ret = m.ret;
-                self.resolved_calls.insert(e, ResolvedCall::Member(m));
-                return self.set(e, ret);
-            }
-            if let Some(ret) = self.record_library_extension_call_with_arg_kinds(
-                Some(e),
-                "get",
+            let resolver = self.resolver();
+            let (mut functions, properties) = resolver.receiver_callables(at, "get").into_parts();
+            functions.overloads.retain(|candidate| {
+                candidate.flags.operator
+                    && self.source_callable_visible(candidate)
+                    && (candidate.kind != crate::libraries::FnKind::Member
+                        || candidate.context_count == 0)
+            });
+            let callables = crate::libraries::Callables::from_parts(functions, properties);
+            let selected_get = match resolver.select_receiver_indexed_get_function_with_params(
                 at,
+                "get",
                 &index_kinds,
                 &[],
+                &callables,
             ) {
+                crate::symbol_resolver::CandidateSelection::Selected(selected) => Some(selected),
+                crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                    self.diags.error(
+                        self.span(e),
+                        "overload resolution ambiguity for operator 'get'".to_string(),
+                    );
+                    return self.set(e, Ty::Error);
+                }
+                crate::symbol_resolver::CandidateSelection::None => None,
+            };
+            if let Some((selected, params, ret)) = selected_get {
+                let vararg = selected
+                    .call_sig
+                    .vararg_index
+                    .and_then(|index| index.checked_sub(selected.context_count));
+                if !self
+                    .expect_indexed_operator_params(scope, &params, vararg, false, &indices, &its)
+                {
+                    return self.set(e, Ty::Error);
+                }
+                if let Some(slots) =
+                    indexed_operator_argument_slots(&params, vararg, &indices, false)
+                {
+                    self.resolved_call_arg_slots.insert(e, slots);
+                }
+                let semantic = selected.semantic_signature();
+                let context_count = selected.context_count.min(semantic.params.len());
+                let context_args = if context_count == 0 {
+                    Vec::new()
+                } else if let Some(context) =
+                    self.select_context_arguments(scope, &semantic.params[..context_count])
+                {
+                    context
+                } else {
+                    self.diags.error(
+                        self.span(e),
+                        "no implicit value is available for the context parameters".to_string(),
+                    );
+                    return self.set(e, Ty::Error);
+                };
+                let target = if selected.kind == crate::libraries::FnKind::Member {
+                    let mut member = selected.member_with_return(ret);
+                    member.params = params;
+                    ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
+                        receiver: at,
+                        physical_params: selected.callable.physical_params.clone(),
+                        context_args: Vec::new(),
+                        ret,
+                        member,
+                        projected_return_hazard: selected.projected_return_hazard,
+                        suspend: selected.flags.suspend,
+                        origin: selected.callable.origin.clone(),
+                    })
+                } else {
+                    let mut callable = selected.callable.clone();
+                    if let Some(facade) = selected
+                        .source_key
+                        .and_then(|key| self.syms.fn_facades_by_decl.get(&key).copied())
+                    {
+                        callable.owner = facade;
+                        callable.origin = Origin::Module { facade };
+                    }
+                    callable.ret = ret;
+                    ResolvedCall::source_extension(
+                        callable,
+                        at,
+                        params,
+                        context_args,
+                        ret,
+                        selected.source_key,
+                        vararg.is_some(),
+                        vararg,
+                        selected
+                            .default_values
+                            .get(selected.context_count..)
+                            .unwrap_or_default()
+                            .to_vec(),
+                    )
+                };
+                self.mark_source_call(e, selected.source_key);
+                self.resolved_calls.insert(e, target);
                 return self.set(e, ret);
             }
             self.diags.error(
@@ -47731,19 +47962,42 @@ impl<'a> Checker<'a> {
         set_exprs.push(value);
         // Resolve `set` as a member, same-module extension, or library member. A single-index Map
         // store may resolve to `put`. Record the selected target so lowering does not choose again.
-        let selected = self
+        let set_selected = self
             .operator_call_ret(scope, at, "set", &set_args, &set_exprs, span)
-            .map(|(_, call)| (SyntheticOperatorCall::Set, call))
-            .or_else(|| {
-                single_index
-                    .then(|| self.operator_call_ret(scope, at, "put", &set_args, &set_exprs, span))
-                    .flatten()
-                    .map(|(_, call)| (SyntheticOperatorCall::Put, call))
-            });
+            .map(|(_, call)| (SyntheticOperatorCall::Set, call));
+        if self.indexed_operator_ambiguous {
+            return;
+        }
+        let selected = set_selected.or_else(|| {
+            single_index
+                .then(|| self.operator_call_ret(scope, at, "put", &set_args, &set_exprs, span))
+                .flatten()
+                .map(|(_, call)| (SyntheticOperatorCall::Put, call))
+        });
         let ok = if let Some((op, call)) = selected {
             if single_index && matches!(&call, ResolvedCall::Member(_)) {
                 if let Some(get) = self.select_instance_member(at, "get", &[its[0]]) {
                     self.resolved_index_store_get_returns.insert(s, get.ret);
+                }
+            }
+            let selected_shape = match &call {
+                ResolvedCall::Member(member) => Some((
+                    member.member.params.as_slice(),
+                    member.member.call_sig.vararg_index,
+                )),
+                ResolvedCall::Extension(extension) => {
+                    Some((extension.params.as_slice(), extension.vararg_index))
+                }
+                _ => None,
+            };
+            if let Some((params, vararg)) = selected_shape {
+                if let Some(slots) = indexed_operator_argument_slots(
+                    params,
+                    vararg,
+                    &set_exprs,
+                    op == SyntheticOperatorCall::Set,
+                ) {
+                    self.resolved_stmt_operator_arg_slots.insert((s, op), slots);
                 }
             }
             self.resolved_stmt_operator_calls.insert((s, op), call);
@@ -51066,12 +51320,14 @@ fun box(): String {
                         Ty::String,
                         "(I)Ljava/lang/String;",
                     );
+                    let mut info = crate::libraries::FunctionInfo::plain(
+                        crate::libraries::FnKind::Member,
+                        Some(Ty::obj("BoxedIndex")),
+                        callable,
+                    );
+                    info.flags.operator = true;
                     return crate::libraries::FunctionSet {
-                        overloads: vec![crate::libraries::FunctionInfo::plain(
-                            crate::libraries::FnKind::Member,
-                            Some(Ty::obj("BoxedIndex")),
-                            callable,
-                        )],
+                        overloads: vec![info],
                     };
                 }
                 if recv == Ty::obj("BoxedIndex") && name == "set" {
@@ -51083,12 +51339,14 @@ fun box(): String {
                         Ty::Unit,
                         "(ILjava/lang/String;)V",
                     );
+                    let mut info = crate::libraries::FunctionInfo::plain(
+                        crate::libraries::FnKind::Member,
+                        Some(Ty::obj("BoxedIndex")),
+                        callable,
+                    );
+                    info.flags.operator = true;
                     return crate::libraries::FunctionSet {
-                        overloads: vec![crate::libraries::FunctionInfo::plain(
-                            crate::libraries::FnKind::Member,
-                            Some(Ty::obj("BoxedIndex")),
-                            callable,
-                        )],
+                        overloads: vec![info],
                     };
                 }
                 if recv == Ty::obj("BoxedIterable") && name == "iterator" {
