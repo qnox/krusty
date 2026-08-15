@@ -1094,6 +1094,8 @@ mod suspend_withlock_nonlocal_return_e2e;
 mod synthetic_accessor_e2e;
 #[path = "tailrec_e2e.rs"]
 mod tailrec_e2e;
+#[path = "test_harness_sharding_e2e.rs"]
+mod test_harness_sharding_e2e;
 #[path = "this_callable_ref_e2e.rs"]
 mod this_callable_ref_e2e;
 #[path = "this_smartcast_e2e.rs"]
