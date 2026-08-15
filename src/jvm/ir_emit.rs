@@ -1358,7 +1358,14 @@ fn build_class_metadata(
             nested_names.push(segment);
         }
     }
-    let sealed_sorted = sorted_sealed_subclasses(c);
+    // `Class.sealedSubclassFqName` (f16) belongs only to a SEALED classifier — the IR records
+    // subtype relationships for every class, but kotlinc writes the field for sealed ones alone
+    // (a plain interface with implementors carries none).
+    let sealed_sorted = if c.is_sealed {
+        sorted_sealed_subclasses(c)
+    } else {
+        Vec::new()
+    };
     let sealed_descs: Vec<String> = sealed_sorted.iter().map(|s| format!("L{s};")).collect();
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
     let sealed_refs: Vec<&str> = sealed_descs.iter().map(String::as_str).collect();
