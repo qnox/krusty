@@ -4021,6 +4021,7 @@ fn lower_file_at_reporting_impl(
                             Some(lo.emit_block(out, None))
                         };
                         secs.push(crate::ir::IrSecondaryCtor {
+                            annotations: ctor_annotations(file, file_index, syms, sc, &lo.ir),
                             params: param_irs,
                             named_params: sc
                                 .params
@@ -27703,6 +27704,29 @@ fn library_field_annotation(
         },
         retention,
     ))
+}
+
+/// The user annotations applied to a secondary CONSTRUCTOR declaration, split by JVM retention.
+/// Same fold as a function's: a constructor's `@Anno(...)` is the same applied-annotation shape.
+fn ctor_annotations(
+    file: &ast::File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+    sc: &ast::SecondaryCtor,
+    ir: &crate::ir::IrFile,
+) -> crate::ir::FnAnnotations {
+    let mut out = crate::ir::FnAnnotations::default();
+    for (annotation, arguments) in sc.annotations.iter().zip(sc.annotation_args.iter()) {
+        let Some(internal) = syms.resolved_annotation(file_index, annotation) else {
+            continue;
+        };
+        match library_field_annotation(file, file_index, syms, internal, arguments, ir) {
+            Some((anno, Retention::Runtime)) => out.visible.push(anno),
+            Some((anno, Retention::Binary)) => out.invisible.push(anno),
+            None => {}
+        }
+    }
+    out
 }
 
 /// The user annotations applied to a FUNCTION declaration, split by JVM retention. Reuses the same

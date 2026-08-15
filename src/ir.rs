@@ -1261,6 +1261,10 @@ impl IrClass {
 /// delegate target, then runs `body`. `this` is value 0 and parameters are values `1..=params.len()`.
 #[derive(Clone, Debug)]
 pub struct IrSecondaryCtor {
+    /// User annotations declared on this constructor, split by JVM retention — the constructor
+    /// analogue of [`IrFile::function_annotations`] (a secondary constructor is not an
+    /// [`IrFunction`], so it carries them directly).
+    pub annotations: FnAnnotations,
     pub params: Vec<Ty>,
     /// SOURCE parameter names paired with SEMANTIC (checker-resolved) types — what the class
     /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
