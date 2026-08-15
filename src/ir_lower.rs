@@ -3711,11 +3711,11 @@ fn lower_file_at_reporting_impl(
                                     .position(|property| property.backing_field == Some(field_idx))
                                     .expect("backing-field property registered in pass 1");
                                 let init_e = c.body_props[*i].init.unwrap();
-                                // `val s: String? = null` — the JVM already zero-initializes the field,
-                                // so kotlinc emits no store at all. Skipping it also keeps the field's
-                                // name/descriptor out of the pool until the getter's `getfield`.
-                                if matches!(lo.afile.expr(init_e), Expr::NullLit) {
-                                    let value = lo.emit_const(IrConst::Null);
+                                // Preserve the declaration initializer even when the JVM can elide
+                                // its physical default-value store; backend storage lowering consumes
+                                // this semantic value without re-reading the AST.
+                                if ast_init_is_jvm_default(lo.afile, init_e) {
+                                    let value = lo.lower_arg(init_e, &field_ty)?;
                                     lo.ir.classes[class_id as usize].properties[property_index]
                                         .initializer = Some(value);
                                     continue;

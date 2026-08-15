@@ -1848,13 +1848,49 @@ fn seed_plain_class_pool(
             fields: if c.is_data { &[] } else { &field_sigs },
         },
         ctor_default_seed.as_ref(),
-        &c.super_args
-            .iter()
-            .filter_map(|&arg| match ir.expr(init_operand(ir, arg)) {
-                IrExpr::Const(crate::ir::IrConst::String(s)) => Some(s.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
+        &{
+            use crate::jvm::classfile::SeedSuperArg;
+            fn collect(ir: &IrFile, expr: crate::ir::ExprId, entries: &mut Vec<SeedSuperArg>) {
+                match ir.expr(init_operand(ir, expr)) {
+                    IrExpr::Const(crate::ir::IrConst::String(s)) => {
+                        entries.push(SeedSuperArg::Str(s.clone()));
+                    }
+                    IrExpr::New {
+                        internal,
+                        args,
+                        ctor_params,
+                        ctor_desc,
+                    } => {
+                        let owner = internal.render();
+                        entries.push(SeedSuperArg::Class(owner.clone()));
+                        for &arg in args {
+                            collect(ir, arg, entries);
+                        }
+                        let desc = if let Some(desc) = ctor_desc {
+                            desc.clone()
+                        } else if let Some(params) = ctor_params {
+                            method_descriptor(&jvm_tys(params), Ty::Unit)
+                        } else {
+                            let class = ir.class_id_by_name(*internal).expect(
+                                "checked construction without explicit parameters must name an IR class",
+                            );
+                            method_descriptor(
+                                &class_ctor_jvm_tys(&ir.classes[class as usize]),
+                                Ty::Unit,
+                            )
+                        };
+                        entries.push(SeedSuperArg::Ctor { owner, desc });
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut entries: Vec<SeedSuperArg> = Vec::new();
+            for &arg in &c.super_args {
+                collect(ir, arg, &mut entries);
+            }
+            entries
+        },
     );
     // A companion OUTER continues with its hoisted-property entries: the `access$…$cp` bridges,
     // `<clinit>`'s Companion construction, and the hoisted initializers' string constants — all in
@@ -1881,17 +1917,18 @@ fn seed_plain_class_pool(
                 )
             })
             .collect();
-        if !hoisted.is_empty() {
-            cw.seed_companion_outer_pool(
-                fq_name,
-                &hoisted,
-                &companion.render(),
-                (
-                    companion.nested_segment_ref(),
-                    &format!("L{};", companion.render()),
-                ),
-            );
-        }
+        // Runs for EVERY companion outer, hoisted statics or not — the `<clinit>` window (its name,
+        // the companion construction, the `Companion`/named field entries) precedes the field-table
+        // interning either way (a NAMED companion with no properties still needs it).
+        cw.seed_companion_outer_pool(
+            fq_name,
+            &hoisted,
+            &companion.render(),
+            (
+                companion.nested_segment_ref(),
+                &format!("L{};", companion.render()),
+            ),
+        );
     }
     if synthesizes_data_class_members(c) {
         let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);

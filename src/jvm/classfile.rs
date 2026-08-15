@@ -77,6 +77,15 @@ fn verif_eq(a: &VerifType, b: &VerifType, cp: &ConstPool) -> bool {
         _ => a == b,
     }
 }
+/// One pool entry a `super(…)` argument's evaluation interns before the super `<init>` Methodref,
+/// in code order: a construction's Class ref, a string constant's CONSTANT_String, or a
+/// constructor Methodref (`class Basic : Engine(Cfg(false), "basic")`).
+pub enum SeedSuperArg {
+    Class(String),
+    Str(KtString),
+    Ctor { owner: String, desc: String },
+}
+
 /// A primary constructor with defaulted parameters: kotlinc emits the `$default` `<init>` overload
 /// right after the primary one, interning its marker descriptor, the default STRING constants and
 /// the delegating own-`<init>` Methodref BEFORE the accessors — the seeder mirrors that window.
@@ -1023,10 +1032,9 @@ impl ClassWriter {
         // The primary ctor's `$default` overload entries (marker desc, default string constants,
         // delegating `<init>` ref) — interned between the ctor and the accessors, kotlinc's order.
         ctor_defaults: Option<&SeedCtorDefaults>,
-        // String constants the `super(…)` call's arguments push — code order puts their `ldc`
-        // BEFORE the `invokespecial`, so they intern before the super `<init>` Methodref
-        // (`class Basic : Engine("basic")`).
-        super_arg_strings: &[KtString],
+        // Entries the `super(…)` call's arguments intern in code order, BEFORE the super `<init>`
+        // Methodref (`class Basic : Engine(Cfg(false), "basic")`).
+        super_arg_entries: &[SeedSuperArg],
     ) {
         let (ctor_desc, super_ctor_desc) = ctor_descs;
         // Primary constructor: name + descriptor are interned at method entry, before its body.
@@ -1069,8 +1077,18 @@ impl ClassWriter {
                 }
             }
         }
-        for s in super_arg_strings {
-            self.cp.string_kt(s);
+        for entry in super_arg_entries {
+            match entry {
+                SeedSuperArg::Class(internal) => {
+                    self.cp.class(internal);
+                }
+                SeedSuperArg::Str(s) => {
+                    self.cp.string_kt(s);
+                }
+                SeedSuperArg::Ctor { owner, desc } => {
+                    self.cp.methodref(owner, "<init>", desc);
+                }
+            }
         }
         self.cp.methodref(super_internal, "<init>", super_ctor_desc);
         // One `putfield` per property-backed parameter: field name, descriptor, NameAndType, Fieldref.
