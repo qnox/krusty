@@ -1335,18 +1335,28 @@ fn build_class_metadata(
     let enum_entry_names: Vec<String> = c.enum_entries.iter().map(|e| e.name.clone()).collect();
     // Metadata keeps nested declarations ordered and sealed subclasses sorted.
     let self_fq = c.fq_name();
+    // Every DECLARED direct nested classifier joins `Class.nestedClassName` (f7) — kotlinc records
+    // them all, not only sealed subtypes. Synthesized classes (anonymous objects, lambdas,
+    // continuations — their segments carry digits or are locals/refs) stay out.
     let mut nested_names: Vec<String> = ir
         .classes
         .iter()
         .filter(|candidate| {
-            c.sealed_subclasses
-                .iter_ids()
-                .any(|subtype| subtype == candidate.fq_name_id())
+            !candidate.is_local_class
+                && candidate.prop_ref.is_none()
+                && candidate.func_ref.is_none()
+                && candidate.enum_entry_of.is_none()
+                && !is_coroutine_state_machine(candidate)
         })
         .filter_map(|candidate| {
             candidate
                 .fq_name()
                 .strip_prefix(&format!("{self_fq}$"))
+                .filter(|segment| {
+                    !segment.contains('$')
+                        && !segment.chars().any(|ch| ch.is_ascii_digit())
+                        && *segment != "WhenMappings"
+                })
                 .map(str::to_string)
         })
         .collect();
@@ -5026,9 +5036,11 @@ fn emit_class(
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
-    // Seed the nested simple name at kotlinc's post-metadata pool position.
+    // Seed the nested OUTER class ref + simple name at kotlinc's post-metadata pool position
+    // (its `InnerClasses` visit interns the outer's Class entry, then the simple name).
     if !is_coroutine_state_machine(c) {
         if let Some(pos) = fq_name.rfind('$') {
+            cw.seed_class(&fq_name[..pos]);
             cw.seed_utf8(&fq_name[pos + 1..]);
         }
     }

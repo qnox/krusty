@@ -1970,6 +1970,38 @@ impl ClassWriter {
 
     pub fn finish(mut self) -> Vec<u8> {
         self.resolve_inner_classes();
+        // Every EMITTED `InnerClasses` entry's refs (outer Class, simple name) intern here — before
+        // the `SourceFile` value and the attribute names (kotlinc visits the InnerClasses table
+        // ahead of both; a nested class's own entry otherwise interned its outer at serialization,
+        // after everything else). Only candidates whose inner class is ALREADY a pool constant
+        // qualify — an unreferenced candidate emits no entry, and interning it here would falsely
+        // mark it referenced.
+        let referenced: std::collections::HashSet<String> =
+            self.cp.class_names().into_iter().collect();
+        let inner_specs: Vec<(String, Option<String>, Option<String>)> = self
+            .inner_class_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.outer.as_deref() == Some(self.internal_name.as_str())
+                    || referenced.contains(&candidate.inner)
+            })
+            .map(|candidate| {
+                (
+                    candidate.inner.clone(),
+                    candidate.outer.clone(),
+                    candidate.name.clone(),
+                )
+            })
+            .collect();
+        for (inner, outer, name) in inner_specs {
+            self.cp.class(&inner);
+            if let Some(outer) = outer {
+                self.cp.class(&outer);
+            }
+            if let Some(name) = name {
+                self.cp.utf8(&name);
+            }
+        }
         // kotlinc interns the `SourceFile` VALUE (the `.kt` name) right after the class annotations and
         // before the Code-attribute names, then the `SourceFile` attribute NAME later, and
         // `RuntimeVisibleAnnotations` last. Intern the value up front to match.
