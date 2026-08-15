@@ -1106,15 +1106,16 @@ impl ClassWriter {
             // descriptor at the `getfield`.
             if *setter_kind == 0 {
                 if let Some(f) = fields.iter().find(|f| {
-                    !f.stores_in_ctor && {
-                        let mut ch = f.name.chars();
-                        let cap = ch
-                            .next()
-                            .map(|c| c.to_uppercase().collect::<String>() + ch.as_str())
-                            .unwrap_or_default();
-                        *name == format!("get{cap}")
-                    }
+                    let mut ch = f.name.chars();
+                    let cap = ch
+                        .next()
+                        .map(|c| c.to_uppercase().collect::<String>() + ch.as_str())
+                        .unwrap_or_default();
+                    *name == format!("get{cap}")
                 }) {
+                    // The getter's return annotation interns at its method-attribute write —
+                    // usually a dedup no-op (ctor parameter annotations came first), but a class
+                    // whose only reference property is a BODY property first interns it here.
                     match f.ann_kind {
                         1 => {
                             self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
@@ -1124,9 +1125,13 @@ impl ClassWriter {
                         }
                         _ => {}
                     }
-                    self.cp.utf8(&f.name);
-                    self.cp.utf8(&f.desc);
-                    self.cp.fieldref(this_internal, &f.name, &f.desc);
+                    // A field the constructor never stores (a body property initialized to `null`)
+                    // first appears at its GETTER: its name/descriptor intern at the `getfield`.
+                    if !f.stores_in_ctor {
+                        self.cp.utf8(&f.name);
+                        self.cp.utf8(&f.desc);
+                        self.cp.fieldref(this_internal, &f.name, &f.desc);
+                    }
                 }
             }
             if *setter_kind >= 1 {
@@ -1146,6 +1151,61 @@ impl ClassWriter {
         // after the methods but its Utf8 lands here).
         for s in sigs.fields.iter().flatten() {
             self.cp.utf8(s);
+        }
+    }
+
+    /// Seed a companion OUTER's hoisted-property entries in kotlinc's first-use order, AFTER
+    /// [`Self::seed_plain_class_pool`]: the `access$…$cp` bridges (each interning its static's
+    /// field entries at the body's `getstatic`), then `<clinit>` with the `Companion` construction
+    /// and the hoisted initializers' string constants. Pre-interning here makes the field-table and
+    /// method-emission interning downstream a dedup no-op, so the pool ORDER matches kotlinc even
+    /// though krusty writes the field table first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seed_companion_outer_pool(
+        &mut self,
+        this_internal: &str,
+        // (name, descriptor, is_var, ann_kind, string_const) per hoisted static, declaration order.
+        statics: &[(String, String, bool, u8, Option<KtString>)],
+        companion_internal: &str,
+        companion_field: (&str, &str),
+    ) {
+        for (name, desc, is_var, ann_kind, _) in statics {
+            match ann_kind {
+                1 => {
+                    self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+                }
+                2 => {
+                    self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
+                }
+                _ => {}
+            }
+            let mut ch = name.chars();
+            let cap = ch
+                .next()
+                .map(|c| c.to_uppercase().collect::<String>() + ch.as_str())
+                .unwrap_or_default();
+            self.cp.utf8(&format!("access$get{cap}$cp"));
+            self.cp.utf8(&format!("(){desc}"));
+            self.cp.fieldref(this_internal, name, desc);
+            if *is_var {
+                self.cp.utf8(&format!("access$set{cap}$cp"));
+                self.cp.utf8(&format!("({desc})V"));
+                self.cp.utf8("<set-?>");
+            }
+        }
+        self.cp.utf8("<clinit>");
+        self.cp.class(companion_internal);
+        self.cp.methodref(
+            companion_internal,
+            "<init>",
+            "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+        );
+        self.cp
+            .fieldref(this_internal, companion_field.0, companion_field.1);
+        for (_, _, _, _, string_const) in statics {
+            if let Some(sc) = string_const {
+                self.cp.string_kt(sc);
+            }
         }
     }
 

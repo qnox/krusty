@@ -1797,6 +1797,40 @@ fn seed_plain_class_pool(
             fields: if c.is_data { &[] } else { &field_sigs },
         },
     );
+    // A companion OUTER continues with its hoisted-property entries: the `access$…$cp` bridges,
+    // `<clinit>`'s Companion construction, and the hoisted initializers' string constants — all in
+    // kotlinc's first-use order (the field table's own interning then dedups against these).
+    if let Some(companion) = &c.companion_class {
+        let hoisted: Vec<(String, String, bool, u8, Option<crate::kt_string::KtString>)> = ir
+            .statics
+            .iter()
+            .filter(|s| s.companion_hoisted && s.owner_matches(fq_name))
+            .map(|s| {
+                let string_const = match ir.expr(init_operand(ir, s.init)) {
+                    IrExpr::Const(crate::ir::IrConst::String(t)) => Some(t.clone()),
+                    _ => None,
+                };
+                (
+                    s.name.clone(),
+                    desc(ir_ty_to_jvm(&s.ty)),
+                    s.is_var,
+                    ann_kind(&s.name, ir_ty_to_jvm(&s.ty)),
+                    string_const,
+                )
+            })
+            .collect();
+        if !hoisted.is_empty() {
+            cw.seed_companion_outer_pool(
+                fq_name,
+                &hoisted,
+                &companion.render(),
+                (
+                    companion.nested_segment_ref(),
+                    &format!("L{};", companion.render()),
+                ),
+            );
+        }
+    }
     if synthesizes_data_class_members(c) {
         let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
         // The synthesized members cover the PRIMARY-CONSTRUCTOR properties only; a body property has a
@@ -2084,6 +2118,28 @@ fn attach_synth_debug_tables(
             );
         }
     }
+    // A companion OUTER's `access$…$cp` bridges: kotlinc maps each to the CLASS declaration line
+    // (getter bridges carry only the LineNumberTable; the setter bridge also names its `<set-?>`
+    // value parameter).
+    for s in ir
+        .statics
+        .iter()
+        .filter(|s| s.companion_hoisted && s.owner_matches(&c.fq_name()))
+    {
+        let pd = crate::jvm::names::type_descriptor(ir_ty_to_jvm(&s.ty));
+        let getter_bridge = format!("access${}$cp", crate::names::property_getter_name(&s.name));
+        cw.set_method_debug(&getter_bridge, &format!("(){pd}"), Some((0, line)), &[]);
+        if s.is_var {
+            let setter_bridge =
+                format!("access${}$cp", crate::names::property_setter_name(&s.name));
+            cw.set_method_debug(
+                &setter_bridge,
+                &format!("({pd})V"),
+                Some((0, line)),
+                &[("<set-?>".to_string(), pd.clone(), 0)],
+            );
+        }
+    }
     // A `@JvmInline value class`'s synthesized members: the static `-impl` family (taking the erased
     // underlying) and their instance delegators. kotlinc gives each a LocalVariableTable but no
     // LineNumberTable; the static impls name their parameter positionally (`arg0`/`v`/`p1`/`p2`) except
@@ -2230,11 +2286,29 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
             "Lorg/jetbrains/annotations/NotNull;"
         })
     };
-    // Interfaces have accessors but no backing fields.
+    // Interfaces have accessors but no backing fields. The annotation targets the PHYSICAL field
+    // (`result$1` when mangled away from a same-named hoisted companion static).
     if !c.is_interface {
         for f in &c.fields {
             if let Some(a) = ann(&f.name, f.ty) {
-                cw.set_field_nullability(&f.name, a);
+                cw.set_field_nullability(&instance_field_jvm_name(ir, c, f), a);
+            }
+        }
+    }
+    // The `Companion` instance field is a never-null reference (`@NotNull`), and each REFERENCE
+    // hoisted companion static is annotated like any other backing field.
+    if let Some(companion) = &c.companion_class {
+        cw.set_field_nullability(
+            companion.nested_segment_ref(),
+            "Lorg/jetbrains/annotations/NotNull;",
+        );
+        for s in ir
+            .statics
+            .iter()
+            .filter(|s| s.companion_hoisted && s.owner_matches(&c.fq_name()))
+        {
+            if let Some(a) = ann(&s.name, ir_ty_to_jvm(&s.ty)) {
+                cw.set_field_nullability(&s.name, a);
             }
         }
     }
@@ -3956,10 +4030,10 @@ fn emit_class(
             }
         })
         .or_else(|| class_ctor_generic_sig(&signature_formatter, ir, c, &fq_name));
-    if !is_coroutine_state_machine(c)
+    let byte_parity = !is_coroutine_state_machine(c)
         && opts.emit_class_metadata
-        && build_class_metadata(ir, c, opts).is_some()
-    {
+        && build_class_metadata(ir, c, opts).is_some();
+    if byte_parity {
         seed_plain_class_pool(
             &signature_formatter,
             ir,
@@ -4083,8 +4157,12 @@ fn emit_class(
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
         };
         // `ConstantValue` is only meaningful on a FINAL field (JVMS 4.7.2 ignores it otherwise), and a
-        // `var` is initialized by the `<clinit>` store anyway.
-        match const_value_idx(ir, s.init, &mut cw).filter(|_| !s.is_var) {
+        // `var` is initialized by the `<clinit>` store anyway. A HOISTED companion property never
+        // folds either — kotlinc initializes it in `<clinit>` (only `const val` gets the attribute).
+        // The eligibility check runs FIRST: `const_value_idx` interns the constant as a side effect,
+        // and a pool entry for a value the class never `ldc`s diverges from kotlinc's pool.
+        let fold = !s.is_var && !s.companion_hoisted;
+        match fold.then(|| const_value_idx(ir, s.init, &mut cw)).flatten() {
             Some(cv) => cw.add_field_const(acc, &s.name, &desc, cv),
             None => cw.add_field(acc, &s.name, &desc),
         }
@@ -4649,7 +4727,22 @@ fn emit_class(
             );
             let mut clinit = CodeBuilder::new(0);
             emit_companion_init(e.cw, &mut clinit, &fq_name, c);
+            // kotlinc's `<clinit>` LineNumberTable: one entry per hoisted-property store, at the
+            // store's pc, mapping to the property's declaration line in the COMPANION source. The
+            // `Companion` construction itself has no entry.
+            let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
             for s in &clinit_statics {
+                let pc = clinit.bytes.len() as u16;
+                if s.companion_hoisted {
+                    if let Some(&line) = c.companion_class.as_ref().and_then(|companion| {
+                        ir.prop_decl_lines
+                            .get(&(companion.render(), s.name.clone()))
+                    }) {
+                        if line != 0 {
+                            clinit_lines.push((pc, line));
+                        }
+                    }
+                }
                 e.emit_value(s.init, &mut clinit);
                 let jt = ir_ty_to_jvm(&s.ty);
                 let fref = e.cw.fieldref(&fq_name, &s.name, &type_descriptor(jt));
@@ -4659,6 +4752,9 @@ fn emit_class(
             clinit.ensure_locals(e.next_slot);
             clinit.link();
             e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+            if byte_parity && !clinit_lines.is_empty() {
+                e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
+            }
         }
     }
     // A singleton `object` (emitted AFTER the instance methods — kotlinc's method order, which
