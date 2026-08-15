@@ -1291,6 +1291,12 @@ pub struct File {
     pub expr_end_lines: Vec<u32>,
     /// 1-based source line of each statement's start (parallel to `stmt_spans`; 0 = unknown).
     pub stmt_lines: Vec<u32>,
+    /// Name of each NAMED annotation argument, keyed by that argument's own `ExprId`
+    /// (`@Deprecated("gone", level = HIDDEN)` → the `HIDDEN` expression maps to `"level"`).
+    /// Sparse: a positional argument has no entry. Annotation elements have defaults and may be
+    /// written in any order, so folding an applied annotation must bind by NAME where one is
+    /// given — a positional zip would attach the value to the wrong element.
+    pub annotation_arg_names: std::collections::HashMap<u32, String>,
     /// Per-`Expr::Call` argument names: keyed by the call's `ExprId`, parallel to its `args`
     /// (`None` = positional, `Some(name)` = `name = expr`). Absent ⇒ all positional.
     pub call_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,

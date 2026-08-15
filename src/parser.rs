@@ -1761,12 +1761,19 @@ impl<'a> Parser<'a> {
         }
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-            // optional named argument `name = value`
+            // optional named argument `name = value` — the label binds the value to an element by
+            // NAME, so it is recorded rather than skipped (annotation elements have defaults and
+            // may appear in any order).
+            let mut argument_name = None;
             if self.at_named_arg() {
+                argument_name = Some(self.text().to_string());
                 self.bump(); // name
                 self.bump(); // '='
             }
             if let Some(e) = self.parse_annotation_value() {
+                if let Some(name) = argument_name {
+                    self.file.annotation_arg_names.insert(e.0, name);
+                }
                 out.push(e);
             }
             self.skip_newlines();
