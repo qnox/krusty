@@ -1206,6 +1206,10 @@ pub(crate) fn merge_generic_bindings(
         let merged = merge_inferred_ty(bindings.get(&formal).copied(), actual);
         bindings.insert(formal, merged);
     }
+    // Join bottom bindings against `where`-clause subtype constraints (`ifBlank { null }` binds
+    // `R := Nothing?` under `C : R`; the solution is `R = C?`). Here, at the common merge funnel,
+    // so every selection, realization, and lambda-expectation path sees the same completed map.
+    complete_bottom_constraint_bindings(signature, bindings, explicit_type_argument_count);
 }
 
 /// Merge constraints contributed by an expected call result. These are upper bounds: they can fill
@@ -1787,6 +1791,65 @@ fn collect_call_inference_constraints(
             }
         }
         _ => {}
+    }
+}
+
+/// Complete a call's INFERRED bindings against `where`-clause subtype constraints, in place. When
+/// a formal's bound names another formal (`C : R`) whose inferred binding is a BOTTOM
+/// (`ifBlank { null }` binds `R := Nothing?`, `{ error(..) }` binds `R := Nothing`) while the
+/// constraining side is not, the binding becomes their JOIN — the constraining binding, made
+/// nullable when the bottom admitted null (`R = String?` / `R = String`), which is kotlinc's
+/// inference. Runs on the caller's REAL bindings — the return type substitutes from them, so a
+/// check-local completion would admit the candidate while leaving the bottom to poison the
+/// signature. The leading `explicit` formals were WRITTEN at the call site and are never rewritten
+/// (kotlinc rejects an explicit `<String, Nothing?>` against `C : R`, and so does the unchanged
+/// bounds check).
+pub(crate) fn complete_bottom_constraint_bindings(
+    generic_sig: &GenericSig,
+    bindings: &mut GSigBinds,
+    explicit: usize,
+) {
+    loop {
+        let mut changed = false;
+        for (formal, bounds) in generic_sig.formals.iter().zip(&generic_sig.formal_bounds) {
+            let Some(actual) = bindings.get(formal).copied() else {
+                continue;
+            };
+            for bound in bounds {
+                let Ty::TyParam(bound_formal, _) = bound.non_null() else {
+                    continue;
+                };
+                let Some(position) = generic_sig
+                    .formals
+                    .iter()
+                    .position(|candidate| candidate == bound_formal)
+                else {
+                    continue;
+                };
+                if position < explicit {
+                    continue;
+                }
+                let is_bottom = |ty: Ty| ty == Ty::Null || ty.non_null() == Ty::Nothing;
+                match bindings.get(bound_formal).copied() {
+                    Some(bottom) if is_bottom(bottom) && !is_bottom(actual) => {
+                        // `Null` (the raw literal type) and `Nothing?` both admitted null.
+                        let joined = if bottom == Ty::Null || bottom.is_nullable() {
+                            Ty::nullable(actual)
+                        } else {
+                            actual
+                        };
+                        if joined != bottom {
+                            bindings.insert(bound_formal.to_string(), joined);
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
     }
 }
 
@@ -2433,6 +2496,7 @@ fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> T
     for (ps, a) in gsig.params.iter().zip(args.iter().copied()) {
         unify_ty(*ps, a, &mut binds);
     }
+    complete_bottom_constraint_bindings(gsig, &mut binds, targs.len());
     ty_subst(gsig.ret, &binds)
 }
 
@@ -7371,6 +7435,51 @@ mod tests {
         let mut explicit = GSigBinds::from([("T".to_string(), Ty::Int)]);
         unify_ty(parameter, Ty::Null, &mut explicit);
         assert_eq!(explicit.get("T"), Some(&Ty::Int));
+    }
+
+    fn subtype_chain_signature() -> GenericSig {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let c = Ty::ty_param("C", any);
+        let r = Ty::ty_param("R", any);
+        let q = Ty::ty_param("Q", any);
+        GenericSig {
+            formals: vec!["C".to_string(), "R".to_string(), "Q".to_string()],
+            formal_bounds: vec![vec![r], vec![q], vec![any]],
+            receiver: Some(c),
+            params: Vec::new(),
+            ret: q,
+            return_policy: GenericReturnPolicy::Exact,
+        }
+    }
+
+    #[test]
+    fn bottom_bindings_complete_transitively_in_the_real_binding_map() {
+        let signature = subtype_chain_signature();
+        let mut bindings = GSigBinds::from([
+            ("C".to_string(), Ty::String),
+            ("R".to_string(), Ty::Nothing),
+            ("Q".to_string(), Ty::Null),
+        ]);
+
+        complete_bottom_constraint_bindings(&signature, &mut bindings, 0);
+
+        assert_eq!(bindings.get("R"), Some(&Ty::String));
+        assert_eq!(bindings.get("Q"), Some(&Ty::nullable(Ty::String)));
+    }
+
+    #[test]
+    fn explicitly_written_bottom_binding_is_not_completed() {
+        let signature = subtype_chain_signature();
+        let mut bindings = GSigBinds::from([
+            ("C".to_string(), Ty::String),
+            ("R".to_string(), Ty::Nothing),
+            ("Q".to_string(), Ty::Null),
+        ]);
+
+        complete_bottom_constraint_bindings(&signature, &mut bindings, 3);
+
+        assert_eq!(bindings.get("R"), Some(&Ty::Nothing));
+        assert_eq!(bindings.get("Q"), Some(&Ty::Null));
     }
 
     #[test]
