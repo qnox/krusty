@@ -301,6 +301,7 @@ fn kotlin_canonical_ty(internal: &str) -> Option<crate::types::Ty> {
 struct ParsedTypeParam {
     id: u64,
     name_id: u64,
+    reified: bool,
     upper_bound_bodies: Vec<Vec<u8>>,
     /// `TypeParameter.upper_bound_id` (field 6) — the type-table form a `.kotlin_builtins` fragment
     /// uses instead of the inline `upper_bound`. Empty for the `@Metadata` carrier, which inlines.
@@ -314,12 +315,14 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
     let mut name = None;
     let mut upper_bound_bodies = Vec::new();
     let mut upper_bound_ids = Vec::new();
+    let mut reified = false;
     let mut variance = crate::types::TypeVariance::Invariant;
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
             (1, 0) => id = Some(pb.varint()?),
             (2, 0) => name = Some(pb.varint()?),
+            (3, 0) => reified = pb.varint()? != 0,
             (4, 0) => {
                 variance = match pb.varint()? {
                     0 => crate::types::TypeVariance::In,
@@ -342,6 +345,7 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
     Some(ParsedTypeParam {
         id: id?,
         name_id: name?,
+        reified,
         upper_bound_bodies,
         upper_bound_ids,
         variance,
@@ -1830,6 +1834,7 @@ impl MfnFlags {
     const IS_OPERATOR: u8 = 1 << 4;
     const LOW_PRIORITY: u8 = 1 << 5;
     const IS_INFIX: u8 = 1 << 6;
+    const HAS_REIFIED_TYPE_PARAMS: u8 = 1 << 7;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -1872,6 +1877,10 @@ impl MfnFlags {
     #[inline]
     pub const fn with_is_infix(self, on: bool) -> Self {
         self.with(Self::IS_INFIX, on)
+    }
+    #[inline]
+    pub const fn with_has_reified_type_params(self, on: bool) -> Self {
+        self.with(Self::HAS_REIFIED_TYPE_PARAMS, on)
     }
 }
 
@@ -1942,6 +1951,10 @@ impl MetaFn {
     #[inline]
     pub fn is_infix(&self) -> bool {
         self.flags.has(MfnFlags::IS_INFIX)
+    }
+    #[inline]
+    pub fn has_reified_type_params(&self) -> bool {
+        self.flags.has(MfnFlags::HAS_REIFIED_TYPE_PARAMS)
     }
     #[inline]
     pub fn ret_nullable(&self) -> bool {
@@ -2749,6 +2762,9 @@ fn decode_functions(
                             .with_ret_nullable(ret_ty.is_some_and(Ty::is_nullable))
                             .with_is_operator(pf.is_operator)
                             .with_is_infix(pf.is_infix)
+                            .with_has_reified_type_params(
+                                pf.type_params.iter().any(|parameter| parameter.reified),
+                            )
                             .with_low_priority(has_annotation(
                                 &pf.annotation_bodies,
                                 records,
@@ -3787,6 +3803,7 @@ pub struct BuiltinFunction {
     pub vararg: Option<usize>,
     pub visibility: crate::types::Visibility,
     pub is_inline: bool,
+    pub has_reified_type_params: bool,
     pub is_suspend: bool,
     pub is_operator: bool,
     pub is_infix: bool,
@@ -4210,6 +4227,10 @@ fn parse_builtin_package_functions(
                 vararg,
                 visibility: function.visibility,
                 is_inline: function.is_inline,
+                has_reified_type_params: function
+                    .type_params
+                    .iter()
+                    .any(|parameter| parameter.reified),
                 is_suspend: function.is_suspend,
                 is_operator: function.is_operator,
                 is_infix: function.is_infix,

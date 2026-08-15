@@ -5383,6 +5383,10 @@ struct InlineMemberTarget {
 #[derive(Clone, Copy)]
 enum InlineReceiver {
     Expr(AstExprId),
+    /// An already-lowered receiver value with its semantic type — an IMPLICIT receiver
+    /// (`with(r) { services<T>() }`, an extension body's own `this`) has no receiver expression
+    /// to re-lower.
+    Value(u32, Ty),
 }
 
 /// Lowering info for a local delegated property (`val x by Del()` in a function body). Reads compile to
@@ -18005,6 +18009,32 @@ impl<'a> Lower<'a> {
             let call = self.coerce_to_static(call, ret, physical_ret);
             return Some(self.wrap_arg_prelude(call, prelude));
         }
+        // A MODULE MustInline (reified) extension reached through an IMPLICIT receiver: splice it
+        // exactly like the qualified `recv.name(args)` path, with the already-lowered receiver
+        // value bound as `this`, and bail on decline — its facade method embeds the reified name
+        // markers (`ldc T`) and is never a legal direct target. Deliberately NOT widened to every
+        // CanInline extension: those have a correct direct-call fallback below, and the splice
+        // path is not yet exercised for their inline-lambda argument shapes from this channel.
+        if let Some(target) = self.info.resolved_calls.get(&e).cloned().filter(|target| {
+            matches!(
+                target,
+                ResolvedCall::Extension(extension)
+                    if extension.source.is_some_and(|(file, _)| file == self.file_index)
+                        && extension.callable.inline.must_inline()
+            )
+        }) {
+            if let Some(r) = self.lower_inline_fn_call(
+                name,
+                args,
+                e.0,
+                Some(InlineReceiver::Value(this_value, this_ty)),
+                None,
+                Some(&target),
+            ) {
+                return Some(r);
+            }
+            return None;
+        }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) —
         // `invokestatic <facade>.name(this, args)` (the receiver is the first parameter of the lowered
         // static impl). Mirrors a qualified `recv.name(args)` module-extension call. Prefer the overload
@@ -20606,6 +20636,17 @@ impl<'a> Lower<'a> {
                     }
                     Some(t)
                 }
+                (Some(r), Some(InlineReceiver::Value(_, vt))) => {
+                    let t = if f.type_params.iter().any(|tp| tp == &r.name) {
+                        vt
+                    } else {
+                        checked_type(self.info, r)
+                    };
+                    if t == Ty::Error {
+                        return None;
+                    }
+                    Some(t)
+                }
                 (None, None) => None,
                 _ => return None,
             }
@@ -20836,6 +20877,10 @@ impl<'a> Lower<'a> {
                         // binds `R = String` for `validate(x)`).
                         .or_else(|| tbinds.get(tp).copied());
                     let Some(actual) = actual else {
+                        crate::trace_compiler!(
+                            "lower",
+                            "reified bind missing call={call_id} tp={tp} resolved={resolved:?} tbinds={tbinds:?}",
+                        );
                         self.inline_active.truncate(active_depth);
                         return None;
                     };
@@ -20875,6 +20920,7 @@ impl<'a> Lower<'a> {
                         Some(InlineReceiver::Expr(receiver)) => {
                             self.lower_arg(receiver, &ty_to_ir(rt))
                         }
+                        Some(InlineReceiver::Value(value, _)) => Some(value),
                         None => self.member_extension_dispatch_value(member.owner),
                     }
                 } else {
@@ -20882,6 +20928,7 @@ impl<'a> Lower<'a> {
                         Some(InlineReceiver::Expr(receiver)) => {
                             self.lower_arg(receiver, &ty_to_ir(rt))
                         }
+                        Some(InlineReceiver::Value(value, _)) => Some(value),
                         None => None,
                     }
                 };
@@ -24960,6 +25007,10 @@ impl<'a> Lower<'a> {
                         ) {
                             return Some(inlined);
                         }
+                        // A REIFIED declaration is never a legal direct target whatever its
+                        // `InlineKind`: the compiled facade embeds the reified name markers
+                        // (`ldc T`) and dies at runtime (`NoClassDefFoundError: T`). kotlinc's
+                        // rule — a reified function must inline — so a declined splice bails.
                         if target.callable.inline.must_inline() {
                             crate::trace_compiler!(
                                 "lower",
@@ -25095,6 +25146,11 @@ impl<'a> Lower<'a> {
                             .flatten()
                     })
             {
+                // The direct-call arm consumes the same resolved capability. A source declaration's
+                // modifiers must not be re-read here after selection.
+                if target.callable.inline.must_inline() {
+                    return self.bail("gate:required-inline-expansion-failed");
+                }
                 crate::trace_compiler!(
                     "lower",
                     "selected local top-level call={} target={}.{} fid={} suspend={} inline={:?}",

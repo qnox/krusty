@@ -953,6 +953,8 @@ pub struct MetadataCallFacts {
     pub suspend: bool,
     /// Kotlin's source-level `inline` modifier from the same selected declaration.
     pub is_inline: bool,
+    /// Whether the declaration has at least one reified type parameter.
+    pub has_reified_type_params: bool,
     /// Kotlin's source-level `operator` modifier. The JVM descriptor/name cannot encode it.
     pub is_operator: bool,
     /// Kotlin's source-level `infix` modifier. The JVM descriptor/name cannot encode it.
@@ -992,6 +994,7 @@ impl MetadataCallFacts {
             generic_sig: None,
             suspend: false,
             is_inline: false,
+            has_reified_type_params: false,
             is_operator: false,
             is_infix: false,
             low_priority: false,
@@ -1098,6 +1101,7 @@ struct BuiltinFunction {
     vararg: Option<usize>,
     visibility: crate::types::Visibility,
     is_inline: bool,
+    has_reified_type_params: bool,
     is_suspend: bool,
     is_operator: bool,
     is_infix: bool,
@@ -1114,6 +1118,7 @@ pub(super) struct BuiltinPackageFunction {
     pub vararg: Option<usize>,
     pub visibility: crate::types::Visibility,
     pub is_inline: bool,
+    pub has_reified_type_params: bool,
     pub is_suspend: bool,
     pub is_operator: bool,
     pub is_infix: bool,
@@ -1278,6 +1283,7 @@ impl BuiltinsFile {
                 vararg: function.vararg,
                 visibility: function.visibility,
                 is_inline: function.is_inline,
+                has_reified_type_params: function.has_reified_type_params,
                 is_suspend: function.is_suspend,
                 is_operator: function.is_operator,
                 is_infix: function.is_infix,
@@ -2178,6 +2184,7 @@ impl Classpath {
             generic_sig: c.generic_sig.clone(),
             suspend: c.is_suspend(),
             is_inline: c.is_inline(),
+            has_reified_type_params: c.has_reified_type_params(),
             is_operator: c.is_operator(),
             is_infix: c.is_infix(),
             low_priority: c.low_priority(),
@@ -2444,6 +2451,7 @@ impl Classpath {
                 vararg: function.vararg,
                 visibility: function.visibility,
                 is_inline: function.is_inline,
+                has_reified_type_params: function.has_reified_type_params,
                 is_suspend: function.is_suspend,
                 is_operator: function.is_operator,
                 is_infix: function.is_infix,
@@ -2668,6 +2676,7 @@ impl Classpath {
                             .with_is_operator(m.is_operator)
                             .with_is_infix(m.is_infix),
                         inline: crate::libraries::InlineKind::None,
+                        reified: false,
                         inline_body_plan: None,
                         // Builtin (`.kotlin_builtins`) members are all public API.
                         visibility: crate::libraries::Visibility::Public,

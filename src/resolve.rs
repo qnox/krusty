@@ -423,7 +423,8 @@ pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
 pub(crate) use crate::symbol_resolver::FunctionImportScope;
 
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
-/// `is_override`/`is_final`/`is_suspend`/`requires_splice`/`is_abstract`/`low_priority` into one word. Read through the
+/// `is_override`/`is_final`/`is_suspend`/`requires_splice`/`has_reified_type_params`/`is_abstract`/
+/// `low_priority` into one word. Read through the
 /// `Signature` accessors of the same names; `vararg` is also mutated through `set_vararg`; built with
 /// the `with_*` chain.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -440,6 +441,7 @@ impl SigFlags {
     const IS_ABSTRACT: u16 = 1 << 7;
     const LOW_PRIORITY: u16 = 1 << 8;
     const IS_INFIX: u16 = 1 << 9;
+    const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 10;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -482,6 +484,10 @@ impl SigFlags {
     #[inline]
     pub const fn with_requires_splice(self, on: bool) -> Self {
         self.with(Self::REQUIRES_SPLICE, on)
+    }
+    #[inline]
+    pub const fn with_has_reified_type_params(self, on: bool) -> Self {
+        self.with(Self::HAS_REIFIED_TYPE_PARAMS, on)
     }
     #[inline]
     pub const fn with_is_abstract(self, on: bool) -> Self {
@@ -651,6 +657,10 @@ impl Signature {
         self.flags.has(SigFlags::REQUIRES_SPLICE)
     }
     #[inline]
+    pub fn has_reified_type_params(&self) -> bool {
+        self.flags.has(SigFlags::HAS_REIFIED_TYPE_PARAMS)
+    }
+    #[inline]
     pub fn is_abstract(&self) -> bool {
         self.flags.has(SigFlags::IS_ABSTRACT)
     }
@@ -718,6 +728,7 @@ fn signature_from_resolved_function(function: &crate::libraries::FunctionInfo) -
             .with_is_infix(function.flags.infix)
             .with_is_suspend(function.flags.suspend)
             .with_low_priority(function.flags.low_priority)
+            .with_has_reified_type_params(function.flags.reified)
             .with_requires_splice(function.flags.inline.must_inline()),
         vararg_index: function.call_sig.vararg_index,
         required: function.call_sig.required,
@@ -5556,7 +5567,8 @@ fn collect_signatures_with_cp_impl(
                             // the signature itself so every source callable origin maps it to the
                             // shared `InlineKind::MustInline` state instead of consulting a parallel
                             // declaration set or rediscovering `reified` in individual call paths.
-                            .with_requires_splice(!f.reified_type_params.is_empty()),
+                            .with_requires_splice(!f.reified_type_params.is_empty())
+                            .with_has_reified_type_params(!f.reified_type_params.is_empty()),
                         vararg_index,
                         required,
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
@@ -34926,6 +34938,14 @@ impl<'a> Checker<'a> {
                 // Otherwise it's a BOUND literal on a value (`x::class`, `this::class`): type-check the
                 // receiver — a non-reference receiver (a primitive `Int::class`, an unresolved name) is
                 // skipped, not mis-read.
+                // The checker-visible representation of a reified `T::class`: the SEMANTIC type
+                // parameter, distinct from the lowering marker below. `KClass<T>` must carry the
+                // enclosing function's own `T` so a delegated generic member call infers its formal
+                // from the argument (`fun <T : Any> services(type: KClass<T>): List<T>` called as
+                // `services(T::class)` from a reified extension returns the EXTENSION's `List<T>`,
+                // not the member's unbound formal). The `Obj(T)` name marker must not leak into
+                // inference: it reads as a plain classifier named "T" and poisons every binding it
+                // reaches.
                 let unbound = if let Expr::Name(n) = self.file.expr(recv).clone() {
                     // `T::class` on a REIFIED type parameter is an unbound literal: the lowerer
                     // substitutes its declaration-owned identity to the call-site type
@@ -35805,6 +35825,32 @@ impl<'a> Checker<'a> {
             args,
             arg_tys,
         } = call_args;
+        // Record the selected extension's resolved type arguments — explicit first, then the
+        // selection's own bindings. An inline REIFIED extension whose `T` is inferred purely from
+        // the expected type (`val s: List<String> = r.services()`) has no explicit arguments and no
+        // argument-derived binding for the splicer to recover; without this record the expansion
+        // declines and the whole file bails. This is a provider-neutral checked-call fact; lowering
+        // must not infer it again from the declaration origin or source AST.
+        if let Some(signature) = selected
+            .generic_sig
+            .as_ref()
+            .filter(|_| selected.flags.reified)
+        {
+            let resolved = signature
+                .formals
+                .iter()
+                .enumerate()
+                .map(|(index, formal)| {
+                    type_args
+                        .get(index)
+                        .copied()
+                        .or_else(|| selected.bindings.get(formal).copied())
+                })
+                .collect::<Vec<_>>();
+            if resolved.iter().any(Option::is_some) {
+                self.resolved_call_type_args.insert(e, resolved);
+            }
+        }
         let argument_names = self.file.call_arg_names.get(&e.0).map(Vec::as_slice);
         let shape = self.contextual_call_shape(
             scope,
@@ -36603,6 +36649,7 @@ impl<'a> Checker<'a> {
             arg_tys,
         } = call_args;
         let rt = self.apply_postponed_call_bindings(rt);
+        let type_args = self.resolved_explicit_type_args(scope, call);
         if rt == Ty::String || matches!(rt, Ty::Obj(..)) {
             match self.record_member_call_with_slots(scope, call, rt, name, args, true, expected) {
                 MemberSlotCall::Resolved(ret) => {
@@ -36626,7 +36673,7 @@ impl<'a> Checker<'a> {
             },
             rt,
             name,
-            &[],
+            &type_args,
             expected,
         ) {
             self.mark_implicit_receiver_selection(call, receiver);
@@ -51202,6 +51249,7 @@ fun box(): String {
                         generic_sig: None,
                         flags: crate::libraries::LmFlags::default(),
                         inline: crate::libraries::InlineKind::None,
+                        reified: false,
                         inline_body_plan: None,
                         visibility: crate::types::Visibility::Public,
                         call_sig: CallSig::default(),

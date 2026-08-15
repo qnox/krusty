@@ -880,6 +880,7 @@ pub(crate) fn member_from_signature(
     m.set_suspend(sig.is_suspend());
     m.visibility = sig.visibility;
     m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline(), sig.requires_splice());
+    m.reified = sig.has_reified_type_params();
     m.call_sig = sig.call_sig();
     m.context_count = sig.context_count;
     m.default_values = sig.param_default_values.clone();
@@ -965,6 +966,7 @@ fn fn_info(
         source_member: sig.source_member,
         flags: FnFlags {
             inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
+            reified: sig.has_reified_type_params(),
             // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver
             // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
             suspend: sig.is_suspend(),
@@ -1904,12 +1906,13 @@ mod tests {
         let receiver = Ty::obj("demo/Receiver");
         let mut signature = sig(vec![Ty::Int], Ty::Boolean);
         // An emitted method and a legal direct fallback are independent capabilities. Reified
-        // source declarations use this signature bit even when their facade exists, and all module
-        // callable projections must preserve it as the shared `MustInline` semantic state.
+        // source declarations carry both facts even when their facade exists, and all module
+        // callable projections must preserve them independently.
         signature.flags = signature
             .flags
             .with_is_inline(true)
-            .with_requires_splice(true);
+            .with_requires_splice(true)
+            .with_has_reified_type_params(true);
         symbols
             .ext_funs
             .entry("check".into())
@@ -1927,6 +1930,7 @@ mod tests {
         };
         assert_eq!(functions.len(), 1);
         assert!(functions[0].flags.inline.must_inline());
+        assert!(functions[0].flags.reified);
         assert!(functions[0].callable.inline.must_inline());
     }
 
