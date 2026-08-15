@@ -35616,7 +35616,7 @@ impl<'a> Checker<'a> {
                     })
                 })
                 .collect::<Vec<_>>();
-            let Some(callable) = self.resolver().build_extension_callable_for_slots(
+            let Some(mut callable) = self.resolver().build_extension_callable_for_slots(
                 name,
                 selected_receiver,
                 type_args,
@@ -35637,6 +35637,45 @@ impl<'a> Checker<'a> {
                 );
                 return Some(Ty::Error);
             };
+            // The realization re-derives its return from the receiver and arguments alone; a
+            // formal bound only by the EXPECTED type (a classpath reified `Resp.body(): T` under
+            // `fun readPlan(r): Plan = r.body()`) is invisible to it and the call would record the
+            // erased return. The SELECTION already inferred those bindings — substitute them when
+            // they refine a return the realization demonstrably did not learn (still
+            // type-parameter-shaped, erased to Any/Object, or erased to the formal's declared
+            // BOUND, as `<reified T : Number>` erases to Number).
+            if let Some(signature) = selected.generic_sig.as_ref() {
+                let refined = crate::symbol_resolver::ty_subst_keep_unbound(
+                    signature.ret,
+                    &selected.bindings,
+                );
+                let declared_bound_erasure = match signature.ret.non_null() {
+                    Ty::TyParam(_, bound) => Some(*bound),
+                    _ => None,
+                };
+                let unlearned = callable.ret.mentions_ty_param()
+                    || callable.ret.is_erased_top()
+                    || declared_bound_erasure
+                        .is_some_and(|bound| callable.ret.non_null() == bound.non_null());
+                if refined != signature.ret && !refined.mentions_ty_param() && unlearned {
+                    callable.ret = signature.apply_return_policy(&*self.syms.libraries, refined);
+                    // The splicer reifies from `resolved_call_type_args` — an INLINE classpath
+                    // body carries reification markers, so a direct call to it throws at runtime.
+                    // Publish the selection's bindings (declaration order, only when every formal
+                    // is bound) so the expansion substitutes the same `T` the checker selected.
+                    // Deliberately narrow: recording classpath bindings unconditionally reordered
+                    // the sumOf/maxBy splice family — the guard only fires when the realization
+                    // learned nothing, which those argument-driven calls never hit.
+                    let targs: Vec<Option<Ty>> = signature
+                        .formals
+                        .iter()
+                        .map(|formal| selected.bindings.get(formal).copied())
+                        .collect();
+                    if !targs.is_empty() && targs.iter().all(Option::is_some) {
+                        self.resolved_call_type_args.insert(e, targs);
+                    }
+                }
+            }
             let ret = callable.ret;
             let mut resolved = ResolvedExtensionCall::library(callable.clone());
             resolved.context_args = context_args;

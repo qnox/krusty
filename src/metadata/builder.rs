@@ -3,8 +3,9 @@
 //! names use `predefinedIndex` into `JvmNameResolverBase.PREDEFINED_STRINGS` (see METADATA_NOTES.md).
 
 use crate::metadata::type_encoder::{
-    encode_metadata_type_parameter, encode_type, encode_type_parameter, semantic_type_parameters,
-    type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
+    encode_metadata_type_parameter, encode_type, encode_type_parameter,
+    semantic_named_type_parameters, type_parameters, MetadataTypeParameter, StringTable,
+    TypeParameters,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::Ty;
@@ -253,7 +254,7 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let tps = semantic_type_parameters(
+    let tps = semantic_named_type_parameters(
         f.type_params.iter().map(|(name, _)| name.as_str()),
         semantic_names.into_iter(),
     );
