@@ -300,6 +300,273 @@ fn incdec_trailing_branch_value_and_index_target() {
     assert_eq!(run(SRC).expect("trailing incdec access values"), "OK");
 }
 
+#[test]
+fn member_and_index_incdec_values_work_in_ordinary_expression_positions() {
+    const SRC: &str = "class Box(var value: Int)\n\
+        fun box(): String {\n\
+        \x20 val holder = Box(10)\n\
+        \x20 val memberPost = holder.value++\n\
+        \x20 val memberPre = ++holder.value\n\
+        \x20 val values = intArrayOf(20)\n\
+        \x20 val indexPost = values[0]++\n\
+        \x20 val indexPre = ++values[0]\n\
+        \x20 return if (memberPost == 10 && memberPre == 12 && holder.value == 12\n\
+        \x20     && indexPost == 20 && indexPre == 22 && values[0] == 22) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("ordinary incdec access values"), "OK");
+}
+
+#[test]
+fn access_incdec_value_reads_custom_property_once() {
+    const SRC: &str = r#"
+class Box {
+    var reads = 0
+    var writes = 0
+    private var backing = 10
+    var value: Int
+        get() { reads++; return backing }
+        set(next) { writes++; backing = next }
+
+    fun raw(): Int = backing
+}
+
+fun box(): String {
+    val holder = Box()
+    val post = holder.value++
+    val pre = ++holder.value
+    return if (post == 10 && pre == 12 && holder.raw() == 12
+        && holder.reads == 2 && holder.writes == 2) "OK" else "fail"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("AccessIncDecGetterOnce", SRC);
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected custom-property inc/dec: {stderr}"
+    );
+    assert_eq!(run(SRC).expect("custom-property incdec value"), "OK");
+}
+
+#[test]
+fn nary_index_incdec_value_uses_one_get_and_one_set() {
+    const SRC: &str = r#"
+class Grid {
+    var gets = 0
+    var sets = 0
+    var stored = 20
+
+    operator fun get(row: Int, column: Int): Int {
+        gets++
+        return stored + row - row + column - column
+    }
+
+    operator fun set(row: Int, column: Int, value: Int) {
+        sets++
+        stored = value + row - row + column - column
+    }
+}
+
+fun use(value: Int): Int = value
+
+fun box(): String {
+    val grid = Grid()
+    val post = use(grid[1, 2]++)
+    val pre = use(++grid[1, 2])
+    return if (post == 20 && pre == 22 && grid.stored == 22
+        && grid.gets == 2 && grid.sets == 2) "OK" else "fail"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("NaryIndexIncDecValue", SRC);
+    assert_eq!(code, 0, "kotlinc rejected n-ary index inc/dec: {stderr}");
+    assert_eq!(run(SRC).expect("n-ary index incdec value"), "OK");
+}
+
+#[test]
+fn access_incdec_caches_side_effecting_receiver_and_indices() {
+    const SRC: &str = r#"
+class Box(var value: Int)
+
+var receiverCalls = 0
+var indexCalls = 0
+val holder = Box(10)
+
+fun nextBox(): Box { receiverCalls++; return holder }
+fun nextIndex(): Int { indexCalls++; return 0 }
+
+fun box(): String {
+    val memberPost = nextBox().value++
+    val memberPre = ++nextBox().value
+    val values = intArrayOf(20)
+    val indexPost = values[nextIndex()]++
+    val indexPre = ++values[nextIndex()]
+    return if (memberPost == 10 && memberPre == 12 && holder.value == 12
+        && receiverCalls == 2 && indexPost == 20 && indexPre == 22
+        && values[0] == 22 && indexCalls == 2) "OK" else "fail"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("IncDecSideEffectCaching", SRC);
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected side-effecting access inc/dec: {stderr}"
+    );
+    assert_eq!(run(SRC).expect("side-effecting incdec access"), "OK");
+}
+
+#[test]
+fn explicit_property_prefix_result_keeps_the_storage_type() {
+    const SRC: &str = r#"
+open class Base
+class Derived : Base()
+operator fun Base.inc(): Derived = Derived()
+class Holder(var value: Base)
+
+fun box(): String {
+    val holder = Holder(Base())
+    val result: Derived = ++holder.value
+    return "unreachable: $result"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("AccessPrefixStorageType", SRC);
+    assert_ne!(
+        code, 0,
+        "kotlinc unexpectedly exposed the inc return subtype"
+    );
+    assert!(
+        stderr.contains("expected 'Derived', actual 'Base'"),
+        "unexpected kotlinc diagnostic: {stderr}"
+    );
+    let diags = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.contains("expected 'Derived', actual 'Base'")),
+        "expected storage-typed prefix diagnostic, got: {diags:?}"
+    );
+
+    const RUN_SRC: &str = r#"
+open class Base
+class Derived : Base()
+operator fun Base.inc(): Derived = Derived()
+class Holder(var value: Base)
+
+fun box(): String {
+    val holder = Holder(Base())
+    val result: Base = ++holder.value
+    return if (result is Derived && holder.value is Derived) "OK" else "fail"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("AccessPrefixStorageTypeRun", RUN_SRC);
+    assert_eq!(code, 0, "kotlinc rejected storage-typed prefix: {stderr}");
+    assert_eq!(run(RUN_SRC).expect("storage-typed access prefix"), "OK");
+}
+
+#[test]
+fn access_incdec_requires_the_operator_modifier() {
+    const SRC: &str = r#"
+class Counter { fun inc(): Counter = this }
+class Holder(var value: Counter)
+
+fun box(): String {
+    val holder = Holder(Counter())
+    holder.value++
+    return "unreachable"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("AccessIncDecOperatorRequired", SRC);
+    assert_ne!(code, 0, "kotlinc unexpectedly accepted non-operator inc");
+    assert!(
+        stderr.contains("'operator' modifier is required"),
+        "unexpected kotlinc diagnostic: {stderr}"
+    );
+    let diags = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.contains("'operator' modifier is required")),
+        "expected operator-required diagnostic, got: {diags:?}"
+    );
+}
+
+#[test]
+fn access_incdec_preserves_super_and_package_qualifiers() {
+    const SUPER_SRC: &str = r#"
+open class Base { open var value = 0 }
+class Derived : Base() {
+    fun bump(): String {
+        val old = super.value++
+        val updated = ++super.value
+        return if (old == 0 && updated == 2 && super.value == 2) "OK" else "fail"
+    }
+}
+fun box(): String = Derived().bump()
+"#;
+    let (code, stderr) = common::kotlinc_source_result("SuperAccessIncDec", SUPER_SRC);
+    assert_eq!(code, 0, "kotlinc rejected super inc/dec: {stderr}");
+    assert_eq!(run(SUPER_SRC).expect("super access incdec"), "OK");
+
+    const PACKAGE_SRC: &str = r#"
+package sample
+var value = 10
+fun box(): String {
+    val old = sample.value++
+    val updated = ++sample.value
+    return if (old == 10 && updated == 12 && sample.value == 12) "OK" else "fail"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("PackageAccessIncDec", PACKAGE_SRC);
+    assert_eq!(code, 0, "kotlinc rejected package inc/dec: {stderr}");
+    assert_eq!(run(PACKAGE_SRC).expect("package access incdec"), "OK");
+}
+
+#[test]
+fn access_incdec_caches_a_runtime_member_chain() {
+    const SRC: &str = r#"
+class Leaf(var value: Int)
+class Holder {
+    var reads = 0
+    private val leaf = Leaf(10)
+    val child: Leaf get() { reads++; return leaf }
+    fun raw(): Int = leaf.value
+}
+
+fun box(): String {
+    val holder = Holder()
+    val old = holder.child.value++
+    val updated = ++holder.child.value
+    return if (old == 10 && updated == 12 && holder.raw() == 12 && holder.reads == 2) {
+        "OK"
+    } else {
+        "fail: ${holder.reads}/${holder.raw()}"
+    }
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("MemberChainIncDecCaching", SRC);
+    assert_eq!(code, 0, "kotlinc rejected member-chain inc/dec: {stderr}");
+    assert_eq!(run(SRC).expect("member-chain incdec"), "OK");
+}
+
+#[test]
+fn index_incdec_captures_a_local_receiver_before_later_indices() {
+    const SRC: &str = r#"
+fun box(): String {
+    var values = intArrayOf(10)
+    val original = values
+    val nextIndex = { ->
+        values = intArrayOf(99)
+        0
+    }
+
+    val old = values[nextIndex()]++
+    return if (old == 10 && original[0] == 11 && values[0] == 99) "OK" else "fail"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("IndexIncDecLocalCaptureOrder", SRC);
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected index capture-order case: {stderr}"
+    );
+    assert_eq!(run(SRC).expect("index incdec local capture order"), "OK");
+}
+
 /// The `inline/lambdaReassignmentWithCapture.kt` shape: aliased, reassigning lambdas passed as
 /// function-typed VARIABLE arguments to a cross-file inline facade static.
 #[test]
@@ -348,7 +615,7 @@ fn non_lvalue_trailing_incdec_is_a_parse_error() {
     assert!(
         diags
             .iter()
-            .any(|d| d.contains("only supported on a simple variable or pure access path")),
+            .any(|d| d.contains("only supported on a variable, property, or indexed access")),
         "expected the non-lvalue inc/dec diagnostic, got: {diags:?}"
     );
 }

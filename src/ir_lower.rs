@@ -21398,9 +21398,33 @@ impl<'a> Lower<'a> {
             Expr::Block { stmts, trailing } => {
                 let depth = self.scope.len();
                 let mut out = Vec::new();
+                let mut spilled = Vec::new();
+                if let Some(ExprLowering::IncDecAccessOperands(operands)) =
+                    self.info.expr_lowers.get(&e).cloned()
+                {
+                    for operand in operands {
+                        // Resolution excluded qualifier-only candidates. Every remaining runtime
+                        // operand is captured in source order, including local names: a later index
+                        // expression may reassign an earlier local before the access itself runs.
+                        if self.index_subst.contains_key(&operand) {
+                            continue;
+                        }
+                        let lowered = self.expr(operand)?;
+                        let slot = self.fresh_value();
+                        let declaration =
+                            self.emit_variable(slot, ty_to_ir(self.info.ty(operand)), Some(lowered));
+                        let read = self.emit_get_value(slot);
+                        self.index_subst.insert(operand, read);
+                        spilled.push(operand);
+                        out.push(declaration);
+                    }
+                }
                 let mut diverged = false;
                 for &s in &stmts {
                     if self.append_stmt(s, &mut out).is_none() {
+                        for operand in &spilled {
+                            self.index_subst.remove(operand);
+                        }
                         self.scope.truncate(depth);
                         return None;
                     }
@@ -21416,12 +21440,18 @@ impl<'a> Lower<'a> {
                             Some(v)
                         }
                         None => {
+                            for operand in &spilled {
+                                self.index_subst.remove(operand);
+                            }
                             self.scope.truncate(depth);
                             return None;
                         }
                     },
                     _ => None,
                 };
+                for operand in spilled {
+                    self.index_subst.remove(&operand);
+                }
                 self.scope.truncate(depth);
                 self.emit_block(out, value)
             }

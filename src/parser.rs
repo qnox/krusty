@@ -4957,74 +4957,168 @@ impl<'a> Parser<'a> {
         self.finish_assignment_stmt(Stmt::IncDec { name, dec, prefix }, start, target)
     }
 
-    /// Preserve the value of a member/index inc/dec at the end of ANY value-capable block. Both
-    /// forms evaluate the getter/index read exactly once: postfix saves the old value before
-    /// assigning `old.inc()`, while prefix saves `target.inc()` before assigning and returning that
-    /// same new value. Keeping the result in a parser-reserved local also avoids the tempting but
-    /// incorrect prefix expansion `target = target.inc(); target`, which invokes a custom getter a
-    /// second time. Receiver/index expressions still have to be pure because the assignment side of
-    /// the current AST reuses them; unsupported targets produce a diagnostic rather than being
-    /// double-evaluated.
-    fn incdec_access_value(
+    /// Expand a member/index increment into an `Expr::Block`, letting it retain its value in an
+    /// initializer, argument, return, or larger expression. Receiver and index operands are saved
+    /// left-to-right before the read, so calls and custom access paths are evaluated exactly once.
+    /// Saving the accessed value separately also ensures one getter call for both prefix and postfix.
+    fn incdec_access_value_expr(
         &mut self,
         e: ExprId,
         target: ExprId,
         dec: bool,
         prefix: bool,
         start: Span,
-    ) -> StmtId {
+    ) -> ExprId {
         let target_span = self.assignment_target_span(target);
-        if !self.incdec_access_is_pure(target) {
+        let Some((operands, target_read, target_write)) =
+            self.share_incdec_access_target(target, target_span)
+        else {
             self.diags.error(
                 self.file.expr_spans[e.0 as usize],
-                "krusty: '++'/'--' is only supported on a simple variable or pure access path",
+                "krusty: '++'/'--' is only supported on a variable, property, or indexed access",
             );
-            return self.finish_stmt(Stmt::Expr(e), start);
-        }
-        let op_name = if dec { "dec" } else { "inc" };
-        let target_read = self
-            .file
-            .add_expr(self.file.expr(target).clone(), target_span);
-        let saved_value = if prefix {
-            self.build_inc_dec_call(target_read, op_name, target_span)
-        } else {
-            target_read
+            // Recover with the already-parsed target. Keeping the invalid `Expr::IncDec` reachable
+            // would make statement parsing and resolution report the same error again.
+            return target;
         };
-        // Keep the saved value in the parser's synthetic-name namespace. Even an escaped source
+        // Keep the working value in the parser's synthetic-name namespace. Even an escaped source
         // binding with the same spelling cannot interfere: this generated block contains only its
         // own local and generated reads, and repeated expansions have independent scopes.
-        const SAVED: &str = "$$incDecValue";
-        let local = self.file.add_stmt(
+        const VALUE: &str = "$$incDecValue";
+        const ORIGINAL: &str = "$$incDecOriginal";
+        let mut statements = Vec::new();
+        let value_local = self.file.add_stmt(
             Stmt::Local {
-                is_var: false,
-                name: SAVED.to_string(),
+                is_var: true,
+                name: VALUE.to_string(),
                 ty: None,
-                init: saved_value,
+                init: target_read,
             },
             start,
         );
-        let saved_read = self
+        statements.push(value_local);
+        let original_init = self
             .file
-            .add_expr(Expr::Name(SAVED.to_string()), target_span);
-        let assigned_value = if prefix {
-            saved_read
-        } else {
-            self.build_inc_dec_call(saved_read, op_name, target_span)
-        };
+            .add_expr(Expr::Name(VALUE.to_string()), target_span);
+        let original_local = self.file.add_stmt(
+            Stmt::Local {
+                is_var: false,
+                name: ORIGINAL.to_string(),
+                ty: None,
+                init: original_init,
+            },
+            start,
+        );
+        statements.push(original_local);
+
+        // Preserve the canonical inc/dec node on a lexical variable. The resolver therefore owns
+        // operator-convention validation and exact overload selection instead of seeing an ordinary
+        // `.inc()` call manufactured by the parser.
+        statements.push(self.parse_incdec(VALUE.to_string(), dec, prefix, start, target_span));
+        let assigned_value = self
+            .file
+            .add_expr(Expr::Name(VALUE.to_string()), target_span);
         let assignment = self
-            .finish_incdec_access_assignment(target, assigned_value, start, target_span)
-            .expect("pure member/index target has an assignment form");
-        let trailing = self
+            .finish_incdec_access_assignment(target_write, assigned_value, start, target_span)
+            .expect("cached member/index target has an assignment form");
+        statements.push(assignment);
+        let original_read = self
             .file
-            .add_expr(Expr::Name(SAVED.to_string()), target_span);
+            .add_expr(Expr::Name(ORIGINAL.to_string()), target_span);
+        let trailing = if prefix {
+            // A lexical `var` acquires the exact operator-result flow type after increment, while a
+            // property/index prefix expression keeps its declared get/storage type. This unreachable
+            // old-value arm makes the expression join that storage type without a second getter call.
+            let condition = self.file.add_expr(Expr::BoolLit(false), target_span);
+            let updated_read = self
+                .file
+                .add_expr(Expr::Name(VALUE.to_string()), target_span);
+            self.file.add_expr(
+                Expr::If {
+                    cond: condition,
+                    then_branch: original_read,
+                    else_branch: Some(updated_read),
+                },
+                target_span,
+            )
+        } else {
+            original_read
+        };
         let block = self.file.add_expr(
             Expr::Block {
-                stmts: vec![local, assignment],
+                stmts: statements,
                 trailing: Some(trailing),
             },
             Span::new(start.lo, self.file.expr_spans[e.0 as usize].hi),
         );
-        self.finish_stmt(Stmt::Expr(block), start)
+        self.file.incdec_access_operands.insert(block, operands);
+        block
+    }
+
+    /// Drop the saved old/new result from a generated access increment whose value is discarded by
+    /// its enclosing statement. The receiver/index spill, canonical `Stmt::IncDec`, and write-back
+    /// remain, so statement form still evaluates access operands once and validates the operator
+    /// convention without introducing a dead result local into later lowering passes.
+    fn discard_incdec_access_value(&mut self, expression: ExprId) -> bool {
+        if !self.file.incdec_access_operands.contains_key(&expression) {
+            return false;
+        }
+        let original = match self.file.expr(expression) {
+            Expr::Block { stmts, .. } => stmts.iter().position(|&statement| {
+                matches!(
+                    self.file.stmt(statement),
+                    Stmt::Local { name, .. } if name == "$$incDecOriginal"
+                )
+            }),
+            _ => return false,
+        };
+        let Expr::Block { stmts, trailing } = &mut self.file.expr_arena[expression.0 as usize]
+        else {
+            return false;
+        };
+        if let Some(original) = original {
+            stmts.remove(original);
+        }
+        *trailing = None;
+        true
+    }
+
+    /// Share the receiver/index expression IDs between the read and write halves of a value-producing
+    /// access inc/dec. The block records those operands for lowering, where resolved value types can
+    /// distinguish runtime expressions (spill once) from package/classifier/`super` qualifiers.
+    fn share_incdec_access_target(
+        &mut self,
+        target: ExprId,
+        span: Span,
+    ) -> Option<(Vec<ExprId>, ExprId, ExprId)> {
+        match self.file.expr(target).clone() {
+            Expr::Member { receiver, name } => {
+                let read = self.file.add_expr(
+                    Expr::Member {
+                        receiver,
+                        name: name.clone(),
+                    },
+                    span,
+                );
+                let write = self.file.add_expr(Expr::Member { receiver, name }, span);
+                Some((vec![receiver], read, write))
+            }
+            Expr::Index { array, indices } => {
+                let mut operands = Vec::with_capacity(indices.len() + 1);
+                operands.push(array);
+                operands.extend(indices.iter().copied());
+                let read = self.file.add_expr(
+                    Expr::Index {
+                        array,
+                        indices: indices.clone(),
+                    },
+                    span,
+                );
+                let write = self.file.add_expr(Expr::Index { array, indices }, span);
+                Some((operands, read, write))
+            }
+            _ => None,
+        }
     }
 
     /// A full-form destructuring statement starts with `(` (name-based) or `[` (positional, only
@@ -5482,35 +5576,33 @@ impl<'a> Parser<'a> {
             _ if self.at_full_form_destructure() => self.parse_full_form_destructure(start),
             _ => {
                 let e = self.parse_expr();
-                // Increment/decrement *statement* (`target++` / `++target`): `parse_prefix`/
-                // `parse_postfix` built an `Expr::IncDec`; in statement position the value is
-                // discarded, so re-route to the statement helper (which desugars a `Name` to
-                // `Stmt::IncDec` and a member/index target to an assignment). Immediately before a
-                // closing brace of a VALUE-CONSUMING block, keep the expression value. The enclosing
-                // parser context marks lambda/if/when/try value blocks; function/accessor/init/
-                // constructor/loop/finally blocks stay on this statement path. This avoids both a
-                // lambda-only fork and accidentally treating a Unit function's trailing implicit
-                // property increment as a local-variable expression.
-                if let Expr::IncDec {
-                    target,
-                    dec,
-                    prefix,
-                } = self.file.expr(e).clone()
-                {
-                    // Peek WITHOUT consuming: only a `}` (after newlines) makes this the body's last
-                    // statement — consuming the newlines here would shift the statement's spans.
-                    let after_nl = (self.i..self.t.len())
-                        .find(|&i| self.t[i].kind != TokenKind::Newline)
-                        .map(|i| self.t[i].kind);
-                    if after_nl != Some(TokenKind::RBrace) || !self.block_trailing_is_value {
+                // Increment/decrement *statement* (`target++` / `++target`): a name remains an
+                // `Expr::IncDec`, while member/index parsing already built its single-evaluation
+                // result block. In statement position re-route the name to `Stmt::IncDec` and prune
+                // only the unused result of an access block. Immediately before a closing brace of a
+                // VALUE-CONSUMING block, keep the expression value. The enclosing parser context
+                // marks lambda/if/when/try value blocks; function/accessor/init/constructor/loop/
+                // finally blocks stay on this statement path. This avoids both a lambda-only fork and
+                // accidentally treating a Unit function's trailing implicit property increment as a
+                // local-variable expression.
+                // Peek WITHOUT consuming: only a `}` (after newlines) makes this the body's last
+                // statement — consuming the newlines here would shift the statement's spans.
+                let after_nl = (self.i..self.t.len())
+                    .find(|&i| self.t[i].kind != TokenKind::Newline)
+                    .map(|i| self.t[i].kind);
+                if after_nl != Some(TokenKind::RBrace) || !self.block_trailing_is_value {
+                    if let Expr::IncDec {
+                        target,
+                        dec,
+                        prefix,
+                    } = self.file.expr(e).clone()
+                    {
                         let op_span = self.file.expr_spans[e.0 as usize];
                         return self.incdec_target(target, dec, prefix, op_span, start);
                     }
-                    // A block's trailing statement can be its VALUE. A `Name` target lowers directly
-                    // as an expression; member/index targets use the shared, single-read expansion.
-                    if !matches!(self.file.expr(target), Expr::Name(_)) {
-                        return self.incdec_access_value(e, target, dec, prefix, start);
-                    }
+                    // Access increments were expanded before statement context was known. Retain the
+                    // single-evaluation update block but prune its unused expression result.
+                    self.discard_incdec_access_value(e);
                 }
                 // assignment: `name = value` or `receiver.name = value`.
                 if self.at(TokenKind::Eq) {
@@ -6755,7 +6847,7 @@ impl<'a> Parser<'a> {
             self.bump();
             let target = self.parse_bp(BP_PREFIX);
             let end = self.file.expr_spans[target.0 as usize];
-            return self.file.add_expr(
+            let expression = self.file.add_expr(
                 Expr::IncDec {
                     target,
                     dec,
@@ -6763,6 +6855,11 @@ impl<'a> Parser<'a> {
                 },
                 Span::new(start.lo, end.hi),
             );
+            return if matches!(self.file.expr(target), Expr::Name(_)) {
+                expression
+            } else {
+                self.incdec_access_value_expr(expression, target, dec, true, start)
+            };
         }
         let primary = self.parse_primary();
         self.parse_postfix(primary)
@@ -6834,14 +6931,20 @@ impl<'a> Parser<'a> {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.tok().span;
                     self.bump();
-                    lhs = self.file.add_expr(
+                    let target = lhs;
+                    let expression = self.file.add_expr(
                         Expr::IncDec {
-                            target: lhs,
+                            target,
                             dec,
                             prefix: false,
                         },
                         Span::new(lspan.lo, end.hi),
                     );
+                    lhs = if matches!(self.file.expr(target), Expr::Name(_)) {
+                        expression
+                    } else {
+                        self.incdec_access_value_expr(expression, target, dec, false, lspan)
+                    };
                 }
                 // `!!` not-null assertion in postfix position = two consecutive `Not` tokens.
                 TokenKind::Not
@@ -7580,42 +7683,6 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// Desugar a `++`/`--` statement on an already-parsed lvalue `e` (the operator at `op_span`,
-    /// statement starting at `start`). A simple `Name` uses the `IncDec` node (overloadable-operator
-    /// aware); `obj.x` / `arr[i]` desugar to `target = target ± 1` (the old value is discarded in
-    /// statement position). `dec` selects subtraction.
-    /// Build `receiver.inc()` / `receiver.dec()` — the desugar of `receiver++`/`receiver--` for a
-    /// member/index target (works for the built-in numeric operators and a user `inc`/`dec`).
-    fn build_inc_dec_call(&mut self, receiver: ExprId, op_name: &str, span: Span) -> ExprId {
-        let callee = self.file.add_expr(
-            Expr::Member {
-                receiver,
-                name: op_name.to_string(),
-            },
-            span,
-        );
-        self.file.add_expr(
-            Expr::Call {
-                callee,
-                args: Vec::new(),
-            },
-            span,
-        )
-    }
-
-    /// Whether a member/index target can use the current assignment AST without evaluating its
-    /// receiver or indices more than once. Name targets have their dedicated `Stmt::IncDec` path;
-    /// every other expression is rejected consistently by statement and value inc/dec handling.
-    fn incdec_access_is_pure(&self, target: ExprId) -> bool {
-        match self.file.expr(target) {
-            Expr::Member { receiver, .. } => self.is_pure_path(*receiver),
-            Expr::Index { array, indices } => {
-                self.is_pure_path(*array) && indices.iter().all(|&i| self.is_pure_path(i))
-            }
-            _ => false,
-        }
-    }
-
     /// Build the store half shared by discarded-value and value-producing member/index inc/dec.
     /// Centralizing this match keeps the accepted lvalue families, source spans, and future property
     /// or index-store extensions identical across both syntactic contexts.
@@ -7651,46 +7718,16 @@ impl<'a> Parser<'a> {
         op_span: Span,
         start: Span,
     ) -> StmtId {
-        // The desugar `target = target.inc()` re-evaluates `target`, so its receiver/index must be
-        // side-effect-free (a pure access path). For a complex receiver (`f().x++`) kotlinc evaluates
-        // it exactly once — not yet modeled — so bail (skip the file) rather than double-evaluate.
-        // `.inc()`/`.dec()` covers both the built-in numeric operators and a user `inc`/`dec` operator.
-        let op_name = if dec { "dec" } else { "inc" };
         let target_span = self.assignment_target_span(e);
         match self.file.expr(e).clone() {
             Expr::Name(n) => self.parse_incdec(n, dec, prefix, start, target_span),
-            Expr::Member { .. } | Expr::Index { .. } if self.incdec_access_is_pure(e) => {
-                let lhs = self.file.add_expr(self.file.expr(e).clone(), op_span);
-                let value = self.build_inc_dec_call(lhs, op_name, op_span);
-                self.finish_incdec_access_assignment(e, value, start, target_span)
-                    .expect("pure member/index target has an assignment form")
-            }
             _ => {
                 self.diags.error(
                     op_span,
-                    "krusty: '++'/'--' is only supported on a simple variable or pure access path",
+                    "krusty: '++'/'--' is only supported on a variable, property, or indexed access",
                 );
                 self.finish_stmt(Stmt::Expr(e), start)
             }
-        }
-    }
-
-    /// Whether `e` is a side-effect-free access path — a name, a literal, or a member/index chain
-    /// bottoming out at one. Such an expression can be re-evaluated safely (used to gate the
-    /// `++`/`--` desugar, which reads its target twice).
-    fn is_pure_path(&self, e: ExprId) -> bool {
-        match self.file.expr(e) {
-            Expr::Name(_)
-            | Expr::IntLit(_)
-            | Expr::LongLit(_)
-            | Expr::CharLit(_)
-            | Expr::BoolLit(_)
-            | Expr::NullLit => true,
-            Expr::Member { receiver, .. } => self.is_pure_path(*receiver),
-            Expr::Index { array, indices } => {
-                self.is_pure_path(*array) && indices.iter().all(|&i| self.is_pure_path(i))
-            }
-            _ => false,
         }
     }
 
@@ -9620,9 +9657,9 @@ class HeaderHost {
     #[test]
     fn prefix_member_value_expansion_reads_the_property_once() {
         // A prefix value must be the value produced by `inc()`, not a second read after the setter.
-        // The debug tree exposes member READS as `(. probe value)`; the assignment target is a
-        // distinct `set-member` node. Exactly one read therefore pins the single-evaluation
-        // invariant without requiring the backend to support a custom-accessor fixture.
+        // The parser shares the receiver ID between the sole member READ and the distinct
+        // `set-member`; lowering uses the block's `incdec_access_operands` handoff to spill a runtime
+        // receiver once while leaving semantic qualifiers attached.
         let parsed =
             tree("fun f(probe: SyntheticProbe): Int = if (true) { ++probe.value } else { 0 }");
         assert_eq!(
