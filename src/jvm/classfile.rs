@@ -1720,10 +1720,31 @@ impl ClassWriter {
         signature: Option<&str>,
         ann_types: &[&str],
     ) {
+        self.reserve_method_pool_with_annotations(name, desc, signature, ann_types, &[], &[]);
+    }
+
+    /// [`Self::reserve_method_pool`] plus the DECLARED annotations' constants. kotlinc interns a
+    /// method's header — name, descriptor, `Signature`, its own annotations, then the compiler's
+    /// `@NotNull`/`@Nullable` types — before visiting the body, so the payload of a user annotation
+    /// must be reserved here rather than when the annotation is attached after code generation.
+    /// Encoding is pure interning plus a discarded buffer; attaching later re-encodes and finds the
+    /// same entries.
+    pub fn reserve_method_pool_with_annotations(
+        &mut self,
+        name: &str,
+        desc: &str,
+        signature: Option<&str>,
+        ann_types: &[&str],
+        visible: &[crate::ir::AppliedAnnotation],
+        invisible: &[crate::ir::AppliedAnnotation],
+    ) {
         self.cp.utf8(name);
         self.cp.utf8(desc);
         if let Some(s) = signature {
             self.cp.utf8(s);
+        }
+        for annotation in visible.iter().chain(invisible) {
+            let _ = self.encode_annotation(annotation);
         }
         for a in ann_types {
             self.cp.utf8(a);
@@ -1887,7 +1908,9 @@ impl ClassWriter {
             .collect();
         if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
             m.visible_anns = vis;
-            m.invisible_anns.extend(invis);
+            // A DECLARED annotation precedes the compiler's own `@NotNull`/`@Nullable` on the
+            // return, whichever order the two setters ran in — kotlinc writes the user's first.
+            m.invisible_anns.splice(0..0, invis);
         }
     }
 
@@ -2132,6 +2155,7 @@ impl ClassWriter {
         enum An {
             Lnt,
             Lvt,
+            Dep,
             Ria,
             Rva,
             Smt,
@@ -2185,6 +2209,11 @@ impl ClassWriter {
             if m.signature.is_some() && !seq.contains(&An::Sig) {
                 seq.push(An::Sig);
             }
+            // `Deprecated` interns with the method that carries it, before that method's
+            // annotation attribute names — kotlinc's per-method order.
+            if self.deprecated_methods.contains(&(m.name, m.desc)) && !seq.contains(&An::Dep) {
+                seq.push(An::Dep);
+            }
             if !m.visible_anns.is_empty() && !seq.contains(&An::Rva) {
                 seq.push(An::Rva);
             }
@@ -2201,6 +2230,9 @@ impl ClassWriter {
         // annotations when both are present; the class table is written later, so intern on first
         // METHOD use here and let that later write reuse the index.
         let mut vis_ann_name: Option<u16> = None;
+        // `Deprecated` interned from the per-method sequence above; the class-level fallback below
+        // dedups onto it when a method already introduced the name.
+        let mut method_dep_name: Option<u16> = None;
         // A method-level RIA first use dedups onto the field-level index when both are present.
         let mut invis_ann_name = field_ria;
         for k in &seq {
@@ -2209,6 +2241,7 @@ impl ClassWriter {
                 An::Lvt => lvt_attr_name = Some(self.cp.utf8("LocalVariableTable")),
                 An::Ria => invis_ann_name = Some(self.cp.utf8("RuntimeInvisibleAnnotations")),
                 An::Rva => vis_ann_name = Some(self.cp.utf8("RuntimeVisibleAnnotations")),
+                An::Dep => method_dep_name = Some(self.cp.utf8("Deprecated")),
                 An::Smt => stackmap_attr_name = Some(self.cp.utf8("StackMapTable")),
                 An::Ripa => {
                     ripa_attr_name = Some(self.cp.utf8("RuntimeInvisibleParameterAnnotations"))
@@ -2228,12 +2261,12 @@ impl ClassWriter {
             (class_has_sig || self.methods.iter().any(|m| m.signature.is_some()))
                 .then(|| self.cp.utf8("Signature"))
         });
-        // Intern `Deprecated` only if the class or a method carries it.
-        let deprecated_attr_name = if self.class_deprecated || !self.deprecated_methods.is_empty() {
-            Some(self.cp.utf8("Deprecated"))
-        } else {
-            None
-        };
+        // Intern `Deprecated` only if the class or a method carries it; a method's own use already
+        // interned it in the per-method sequence above.
+        let deprecated_attr_name = method_dep_name.or_else(|| {
+            (self.class_deprecated || !self.deprecated_methods.is_empty())
+                .then(|| self.cp.utf8("Deprecated"))
+        });
         // Field annotation attribute names, interned only when a field actually carries them.
         let field_vis_ann_name = if self.fields.iter().any(|f| !f.visible_anns.is_empty()) {
             Some(self.cp.utf8("RuntimeVisibleAnnotations"))

@@ -27550,9 +27550,11 @@ fn eval_anno_value(
     })
 }
 
-/// Fold `@Name(args…)` (positional) to an `AppliedAnnotation`, pairing each argument with the annotation's
-/// constructor-parameter name. `None` unless `Name` is a RUNTIME-retained file annotation class and every
-/// argument folds to a constant.
+/// Fold `@Name(args…)` to an `AppliedAnnotation`, pairing each argument with the annotation's
+/// constructor-parameter name — by LABEL for a named argument, by position otherwise (the same rule
+/// the classpath fold uses; an annotation's elements have defaults and may be written in any
+/// order). `None` unless `Name` is a RUNTIME-retained file annotation class and every argument
+/// folds to a constant.
 fn build_applied_annotation(
     file: &ast::File,
     file_index: u32,
@@ -27563,13 +27565,34 @@ fn build_applied_annotation(
 ) -> Option<crate::ir::AppliedAnnotation> {
     let cd = runtime_annotation_decl(file, syms, internal)?;
     let mut values = Vec::new();
-    for (i, &arg) in args.iter().enumerate() {
-        let pname = cd.props.get(i)?.name.clone();
+    let mut positional = 0usize;
+    for &arg in args {
+        let index = match file.annotation_arg_names.get(&arg.0) {
+            Some(label) => {
+                let index = cd.props.iter().position(|prop| &prop.name == label)?;
+                positional = index + 1;
+                index
+            }
+            None => {
+                let index = positional;
+                positional += 1;
+                index
+            }
+        };
+        let name = cd.props.get(index)?.name.clone();
         values.push((
-            pname,
+            index,
+            name,
             eval_anno_value(file, file_index, syms, ir, arg, None)?,
         ));
     }
+    // kotlinc writes `element_value_pairs` in the annotation's DECLARATION order, not the order
+    // the call site happened to name them.
+    values.sort_by_key(|(index, _, _)| *index);
+    let values = values
+        .into_iter()
+        .map(|(_, name, value)| (name, value))
+        .collect();
     Some(crate::ir::AppliedAnnotation { internal, values })
 }
 
@@ -27682,22 +27705,34 @@ fn library_field_annotation(
     // targets `level`, not the second element (`replaceWith`).
     let mut positional = 0usize;
     for &arg in args {
-        let (ename, element_ty) = match file.annotation_arg_names.get(&arg.0) {
+        let index = match file.annotation_arg_names.get(&arg.0) {
             Some(label) => {
-                let (element, ty) = elements.iter().find(|(element, _)| element == label)?;
-                (element.clone(), Some(*ty))
+                let index = elements.iter().position(|(element, _)| element == label)?;
+                // Kotlin allows a positional argument AFTER a named one when it lands in its own
+                // position (`@T(1, b = 2, 3)`), so the positional cursor resumes past the element
+                // just bound — leaving it behind would bind `3` to `b` a second time.
+                positional = index + 1;
+                index
             }
             None => {
-                let (element, ty) = elements.get(positional)?;
+                let index = positional;
                 positional += 1;
-                (element.clone(), Some(*ty))
+                index
             }
         };
+        let (ename, element_ty) = elements.get(index).map(|(e, t)| (e.clone(), Some(*t)))?;
         values.push((
+            index,
             ename,
             eval_anno_value(file, file_index, syms, ir, arg, element_ty)?,
         ));
     }
+    // Declaration order, as kotlinc writes them (see the same-file fold).
+    values.sort_by_key(|(index, _, _)| *index);
+    let values: Vec<_> = values
+        .into_iter()
+        .map(|(_, name, value)| (name, value))
+        .collect();
     Some((
         crate::ir::AppliedAnnotation {
             internal: name,
@@ -27724,7 +27759,11 @@ fn ctor_annotations(
         match library_field_annotation(file, file_index, syms, internal, arguments, ir) {
             Some((anno, Retention::Runtime)) => out.visible.push(anno),
             Some((anno, Retention::Binary)) => out.invisible.push(anno),
-            None => {}
+            // An annotation class declared in THIS module has no classpath record yet; it folds
+            // through its same-file declaration, which is RUNTIME-retained by construction.
+            None => out.visible.extend(build_applied_annotation(
+                file, file_index, syms, internal, arguments, ir,
+            )),
         }
     }
     out
@@ -27748,7 +27787,11 @@ fn fn_applied_annotations(
         match library_field_annotation(file, file_index, syms, internal, arguments, ir) {
             Some((anno, Retention::Runtime)) => out.visible.push(anno),
             Some((anno, Retention::Binary)) => out.invisible.push(anno),
-            None => {}
+            // An annotation class declared in THIS module has no classpath record yet; it folds
+            // through its same-file declaration, which is RUNTIME-retained by construction.
+            None => out.visible.extend(build_applied_annotation(
+                file, file_index, syms, internal, arguments, ir,
+            )),
         }
     }
     crate::trace_compiler!(
