@@ -2262,6 +2262,9 @@ fn lower_file_at_reporting_impl(
                 if f.is_inline() && f.visibility.is_public() {
                     lo.ir.public_inline_functions.insert(id);
                 }
+                if f.is_inline() {
+                    lo.ir.top_level_inline_functions.insert(id);
+                }
                 // A `private` top-level extension is `private static` on the facade (kotlinc); a
                 // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
                 if f.visibility.is_private() {
@@ -2332,6 +2335,9 @@ fn lower_file_at_reporting_impl(
                 lo.ir.top_level_function_fids.insert(d.0, id);
                 if f.is_inline() && f.visibility.is_public() {
                     lo.ir.public_inline_functions.insert(id);
+                }
+                if f.is_inline() {
+                    lo.ir.top_level_inline_functions.insert(id);
                 }
                 // A `private` top-level function is `private static` on the facade (kotlinc); a
                 // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
@@ -27429,7 +27435,12 @@ fn fn_generic_sig(
     let params = f
         .params
         .iter()
-        .map(|parameter| info.resolved_declaration_type(&parameter.ty))
+        .map(|parameter| {
+            info.resolved_declaration_type(&parameter.ty)
+                .map(|declared| {
+                    crate::resolve::semantic_value_parameter_ty(declared, parameter.is_vararg)
+                })
+        })
         .collect::<Option<Vec<_>>>()
         .ok_or("internal:missing-checked-generic-declaration-type")?;
     let ret = match f.ret.as_ref() {

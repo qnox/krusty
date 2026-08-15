@@ -594,7 +594,7 @@ fn facade_package_metadata_inner(
     ir: Option<&crate::ir::IrFile>,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let mut metas: Vec<crate::metadata::builder::FnMeta> = Vec::new();
-    for &d in &file.decls {
+    for (decl_order, &d) in file.decls.iter().enumerate() {
         let Decl::Fun(f) = file.decl(d) else { continue };
         // The decl's collected signature: a plain fn under `funs[name]`, an extension under
         // `ext_funs[name][semantic receiver]` — matched by source decl id so overloads can't mix.
@@ -718,6 +718,7 @@ fn facade_package_metadata_inner(
         metas.push(crate::metadata::builder::FnMeta {
             name: f.name.clone(),
             params,
+            decl_order,
             annotations,
             jvm_name,
             ret: declared_ret,
@@ -771,7 +772,7 @@ fn facade_package_metadata_inner(
     // property has no receiver but still needs a declaration record for Kotlin consumers (`::value`,
     // imports, mutability, and its Kotlin type). Accessor descriptors are realization data only.
     let mut prop_metas: Vec<crate::metadata::builder::PropMeta> = Vec::new();
-    for &d in &file.decls {
+    for (decl_order, &d) in file.decls.iter().enumerate() {
         let Decl::Property(p) = file.decl(d) else {
             continue;
         };
@@ -833,6 +834,8 @@ fn facade_package_metadata_inner(
             receiver,
             getter,
             setter,
+            is_const: p.is_const,
+            decl_order,
             visibility: p.visibility,
         });
     }

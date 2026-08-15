@@ -2034,8 +2034,9 @@ impl JvmLibraries {
                         alias.name = source_name.to_string();
                         alias.physical_name = Some(m.name.clone());
                         members.push(alias);
+                    } else {
+                        members.push(member);
                     }
-                    members.push(member);
                 }
             }
             // A MAPPED Kotlin COLLECTION (`kotlin/collections/MutableList`, …) or `kotlin/String` takes
@@ -5953,6 +5954,34 @@ mod tests {
             panic!("Function1 callable signature is not a function")
         };
         assert_eq!(signature.params.len(), 1);
+    }
+
+    #[test]
+    fn mapped_number_members_publish_only_their_kotlin_names() {
+        let (Some(stdlib), Some(jdk)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::jdk_modules(),
+        ) else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
+        ));
+        let classifier = libraries
+            .classifier_record(type_name("java/lang/Number"))
+            .expect("Number classifier");
+        assert!(classifier
+            .members
+            .iter()
+            .any(|member| member.name == "toInt"
+                && member.physical_name.as_deref() == Some("intValue")));
+        assert!(
+            classifier
+                .members
+                .iter()
+                .all(|member| member.name != "intValue"),
+            "provider boundary must not leak the physical Java spelling"
+        );
     }
 
     #[test]

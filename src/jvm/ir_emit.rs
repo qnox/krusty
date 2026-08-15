@@ -3436,15 +3436,31 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
             0x001A // PRIVATE | STATIC | FINAL
         };
         let desc = ir_type_desc(&s.ty);
+        // A reference-typed facade static carries kotlinc's nullability annotation like any other
+        // backing field.
+        let field_ann = (desc.starts_with('L') || desc.starts_with('[')).then(|| {
+            if s.ty.is_nullable() {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
         // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
         // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
-        if s.is_const {
+        let folded = s.is_const && const_value_idx_peek(ir, s.init);
+        if folded {
             if let Some(cv) = const_value_idx(ir, s.init, cw) {
                 cw.add_field_const(acc, &s.name, &desc, cv);
+                if let Some(a) = field_ann {
+                    cw.set_field_nullability(&s.name, a);
+                }
                 continue;
             }
         }
         cw.add_field(acc, &s.name, &desc);
+        if let Some(a) = field_ann {
+            cw.set_field_nullability(&s.name, a);
+        }
     }
     // Which statics a CLASS body (a different JVM class than the facade) reads/writes — a PRIVATE
     // top-level property has no public accessors, so those references need kotlinc's `access$get<X>$p` /
@@ -7455,6 +7471,20 @@ fn emit_method_inner(
             }
         }
     }
+    // kotlinc opens every EMITTED `inline fun` body with an inline-depth marker: `iconst_0;
+    // istore_<n>` into a synthetic `$i$f$<name>` int local covering the body — its inliner tracks
+    // splice depth through these. Emitted after the parameter guards; the body's LineNumberTable
+    // then naturally starts at the post-store pc.
+    let inline_marker: Option<(u16, u16)> = (!instance
+        && ir.top_level_inline_functions.contains(&fid)
+        && !ir.suspend_funs.contains(&fid))
+    .then(|| {
+        let slot = e.next_slot;
+        e.next_slot += 1;
+        code.push_int(0, e.cw);
+        store(Ty::Int, slot, &mut code);
+        (slot, code.bytes.len() as u16)
+    });
     e.emit(body, &mut code);
     // The implicit `return` for a `Unit` function is dead code when the body already diverges
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
@@ -7467,6 +7497,11 @@ fn emit_method_inner(
             code.mark_line(close);
         }
         code.ret_void();
+    }
+    // The `$i$f$<name>` marker's LocalVariableTable entry covers the body from the post-store pc —
+    // kotlinc writes it even when no other local is recorded.
+    if let Some((slot, start)) = inline_marker {
+        code.add_local_entry(start, None, slot, &format!("$i$f${}", f.name), "I");
     }
     // Method locals precede `this` and parameters in kotlinc's table order.
     if e.record_locals {

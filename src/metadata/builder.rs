@@ -14,6 +14,8 @@ pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
+    /// Position of the declaration in the FILE (see [`PropMeta::decl_order`]).
+    pub decl_order: usize,
     /// Argument-less BINARY/RUNTIME-retained annotations applied to the function, recorded as
     /// `Function.annotation` (field 12) `Annotation { id }` entries — how a separate compilation reads
     /// resolution-affecting markers like `@kotlin.internal.LowPriorityInOverloadResolution` back from
@@ -238,9 +240,6 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         | (vis << 1)
         | (u64::from(f.suspend) << 13)
         | (u64::from(f.inline) << 10);
-    if flags != 0x06 {
-        p.field_varint(9, flags);
-    }
     p.field_varint(2, st.local(&f.name) as u64); // Function.name = 2
                                                  // The function's type-parameter table (Function.type_parameter = 4): indices are the
                                                  // `Type.type_parameter` ids generic types and contract conclusions reference.
@@ -310,6 +309,12 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
             p.repeated_message(6, &vp); // Function.value_parameter = 6
         }
     }
+    // Function.flags = 9 — in kotlinc's ASCENDING field order (after name/types/params), emitted
+    // only when non-default (`6` = public final is the proto default; an `internal fun`'s 0 is
+    // explicit). Bit 13 = IS_SUSPEND, bit 10 = IS_INLINE; visibility bits ride along.
+    if flags != 0x06 {
+        p.field_varint(9, flags);
+    }
     // Applied annotations (Function.annotation = 12): `Annotation.id` (field 1) referencing the class
     // through the string table's DESC_TO_CLASS_ID form, exactly as kotlinc records e.g.
     // `@LowPriorityInOverloadResolution`.
@@ -350,6 +355,13 @@ pub struct PropMeta {
     pub receiver: Option<Ty>,
     pub getter: (String, String),
     pub setter: Option<(String, String)>,
+    /// A `const val`: kotlinc sets the CONST flag bit and records a field-only
+    /// `JvmPropertySignature` (no accessor exists — reads inline the `ConstantValue`).
+    pub is_const: bool,
+    /// Position of the declaration in the FILE (across kinds) — kotlinc interns package-member
+    /// strings in SOURCE DECLARATION order even though the proto groups functions before
+    /// properties, so the d2 indices only match when the string table is built in this order.
+    pub decl_order: usize,
     /// Declaration visibility — `Property.flags` visibility bits (INTERNAL=0, PRIVATE=1, PUBLIC=3).
     /// An `internal val`'s public JVM getter must not leak the property: a consuming module reads
     /// the metadata visibility (kotlinc: `internal val` flags `8704` vs public `8710`).
@@ -422,14 +434,23 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     } else {
         PKG_VAL_FLAGS
     };
-    p.field_varint(11, (base & !property_flags::VISIBILITY_MASK) | (vis << 1)); // flags
+    // A `const val` sets the CONST flag bit (kotlinc: public const `10758` = `8710 | 2048`).
+    let const_bit = if m.is_const { 1 << 11 } else { 0 };
+    p.field_varint(
+        11,
+        (base & !property_flags::VISIBILITY_MASK) | (vis << 1) | const_bit,
+    ); // flags
     let mut jvm = Pb::new();
     jvm.field_message(1, &Pb::new()); // field (empty → derived)
-    let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
-    jvm.field_message(3, &getter);
-    if let Some((sn, sd)) = &m.setter {
-        let setter = jvm_method_sig(st, sn, sd);
-        jvm.field_message(4, &setter);
+                                      // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
+                                      // entry alone.
+    if !m.is_const {
+        let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
+        jvm.field_message(3, &getter);
+        if let Some((sn, sd)) = &m.setter {
+            let setter = jvm_method_sig(st, sn, sd);
+            jvm.field_message(4, &setter);
+        }
     }
     p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
     p
@@ -443,13 +464,35 @@ pub fn build_package(
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
     let mut package = Pb::new();
-    for f in funcs {
-        let fp = function_pb(&mut st, f);
-        package.repeated_message(3, &fp); // Package.function = 3
+    // STRINGS INTERN IN SOURCE DECLARATION ORDER across kinds (a `const val` before a `fun`
+    // interns first), while the proto still writes functions (f3) before properties (f4) — so the
+    // d2 indices match kotlinc's. Build each sub-message in declaration order, emit by field.
+    let mut build_order: Vec<(usize, bool, usize)> = funcs
+        .iter()
+        .enumerate()
+        .map(|(index, f)| (f.decl_order, false, index))
+        .chain(
+            props
+                .iter()
+                .enumerate()
+                .map(|(index, m)| (m.decl_order, true, index)),
+        )
+        .collect();
+    build_order.sort();
+    let mut fn_pbs: Vec<Option<Pb>> = (0..funcs.len()).map(|_| None).collect();
+    let mut prop_pbs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
+    for (_, is_prop, index) in build_order {
+        if is_prop {
+            prop_pbs[index] = Some(property_pb(&mut st, &props[index]));
+        } else {
+            fn_pbs[index] = Some(function_pb(&mut st, &funcs[index]));
+        }
     }
-    for m in props {
-        let pp = property_pb(&mut st, m);
-        package.repeated_message(4, &pp); // Package.property = 4
+    for fp in fn_pbs.iter().flatten() {
+        package.repeated_message(3, fp); // Package.function = 3
+    }
+    for pp in prop_pbs.iter().flatten() {
+        package.repeated_message(4, pp); // Package.property = 4
     }
     for alias in aliases {
         let alias = type_alias_pb(&mut st, alias);
@@ -487,6 +530,7 @@ mod tests {
         let (d1, d2) = build_package(
             &[FnMeta {
                 annotations: Vec::new(),
+                decl_order: 0,
                 jvm_name: None,
                 name: "f".into(),
                 params: vec![("a".into(), Ty::Int)],
@@ -530,6 +574,8 @@ mod tests {
                     "(Ljava/lang/String;)Ljava/lang/String;".into(),
                 ),
                 setter: None,
+                is_const: false,
+                decl_order: 0,
             }],
             &[],
         );
@@ -566,6 +612,8 @@ mod tests {
                 receiver: Some(receiver),
                 getter: ("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into()),
                 setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
+                is_const: false,
+                decl_order: 0,
             }],
             &[],
         );
@@ -611,6 +659,7 @@ mod tests {
         let (d1, d2) = build_package(
             &[FnMeta {
                 annotations: Vec::new(),
+                decl_order: 0,
                 jvm_name: None,
                 name: "validate".into(),
                 params: vec![("value".into(), Ty::obj("kotlin/Any"))],
@@ -651,6 +700,7 @@ mod tests {
         let (_d1, d2) = build_package(
             &[FnMeta {
                 annotations: Vec::new(),
+                decl_order: 0,
                 jvm_name: None,
                 name: "g".into(),
                 params: vec![("x".into(), Ty::Int)],

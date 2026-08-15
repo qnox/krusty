@@ -10175,7 +10175,7 @@ fn write_source_params(out: &mut BoundedSourceDisplay, params: &[Param]) -> fmt:
 /// after `:`; for `vararg element: T`, the binding and callable signature expose `Array<T>` (or the
 /// corresponding primitive array). Applying this once while collecting a signature keeps parser,
 /// checker, and lowering from carrying different representations of the same declaration.
-fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
+pub(crate) fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
     if is_vararg {
         Ty::array(declared)
     } else {
@@ -27028,6 +27028,60 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether the nearest declaration of every callable in `owner`'s normalized hierarchy is
+    /// concrete. Providers expose only direct declarations and direct supertypes; core performs this
+    /// one breadth-first walk so a source override can discharge an abstract obligation inherited
+    /// from a dependency (`class N : Number() { override fun toInt() = ... }`).
+    fn has_no_unimplemented_abstract_members(&self, owner: TypeName) -> bool {
+        type MemberKey = (String, Vec<ErasedTypeKey>);
+
+        let resolver = self.resolver();
+        let mut declarations: HashMap<MemberKey, (usize, bool)> = HashMap::new();
+        let mut pending = std::collections::VecDeque::from([(owner, 0usize)]);
+        let mut visited = std::collections::HashSet::new();
+        while let Some((current, depth)) = pending.pop_front() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(classifier) = resolver.classifier(current) else {
+                return false;
+            };
+            for member in &classifier.members {
+                let key = (
+                    member.name.clone(),
+                    member.params.iter().copied().map(erased_type_key).collect(),
+                );
+                declarations
+                    .entry(key)
+                    .and_modify(|(nearest_depth, is_abstract)| {
+                        if *nearest_depth == depth {
+                            // Two declarations at the same hierarchy depth may be an abstract
+                            // interface declaration and a concrete inherited implementation. The
+                            // concrete declaration satisfies that shared semantic signature.
+                            *is_abstract &= member.is_abstract();
+                        }
+                    })
+                    .or_insert((depth, member.is_abstract()));
+            }
+            pending.extend(
+                classifier
+                    .supertypes
+                    .iter_ids()
+                    .map(|supertype| (supertype, depth + 1)),
+            );
+        }
+        let unresolved = declarations
+            .iter()
+            .filter_map(|(key, (_, is_abstract))| is_abstract.then_some(key))
+            .collect::<Vec<_>>();
+        crate::trace_compiler!(
+            "lower",
+            "abstract obligations owner={} unresolved={unresolved:?}",
+            owner.render(),
+        );
+        unresolved.is_empty()
+    }
+
     /// Fix the virtual `hashCode` dispatch owner of every generated data-class property while
     /// classifier metadata is available. Lowering receives this closed decision; it does not inspect
     /// source or dependency symbols while building the synthetic method body.
@@ -27224,18 +27278,20 @@ impl<'a> Checker<'a> {
         if let Some(owner) = current_owner {
             self.lexical_class_context.insert(0, owner);
         }
-        if let Some((superclass, separate_emission)) = current_owner
-            .and_then(|owner| self.syms.class_by_type_name(owner))
-            .and_then(|class| class.super_internal_name())
-            .map(|superclass| {
-                (
-                    superclass,
-                    self.syms
-                        .class_by_type_name(superclass)
-                        .is_none_or(|class| class.source_file != self.file_index),
-                )
-            })
-        {
+        if let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
+            self.syms
+                .class_by_type_name(owner)
+                .and_then(|class| class.super_internal_name())
+                .map(|superclass| {
+                    (
+                        owner,
+                        superclass,
+                        self.syms
+                            .class_by_type_name(superclass)
+                            .is_none_or(|class| class.source_file != self.file_index),
+                    )
+                })
+        }) {
             let inheritance = self
                 .resolver()
                 .classifier(superclass)
@@ -27263,7 +27319,10 @@ impl<'a> Checker<'a> {
             }
             let unsupported = match inheritance {
                 _ if cl.is_enum() || !separate_emission => None,
-                Some(shape) if !shape.supports_external_subclassing => {
+                Some(shape)
+                    if !shape.supports_external_subclassing
+                        && !self.has_no_unimplemented_abstract_members(owner) =>
+                {
                     Some("gate:nonlocal-superclass-abstract-obligations")
                 }
                 Some(shape)
@@ -48915,7 +48974,7 @@ val result = object { fun value(): String = captured }
             .expect("generic extension declaration");
         let files = vec![file];
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(Vec::new()),
+            crate::toolchain::stdlib_classpath(),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
@@ -51401,11 +51460,11 @@ fun box(): String {
         // Extension-function types include their receiver in FunctionN's arity. The signature-clash
         // check must retain that semantic shape instead of reducing both syntactic refs to `<fun>`.
         ok("class Box\n\
-            class Ui {\n\
-              fun <T> choose(seed: Any, init: T.() -> Unit): T = TODO()\n\
-              fun choose(seed: Any, init: () -> Unit): Box = TODO()\n\
-              fun mixed(init: Box.() -> Unit): Box = TODO()\n\
-              fun mixed(init: () -> Unit): Box = TODO()\n\
+            interface Ui {\n\
+              fun <T> choose(seed: Any, init: T.() -> Unit): T\n\
+              fun choose(seed: Any, init: () -> Unit): Box\n\
+              fun mixed(init: Box.() -> Unit): Box\n\
+              fun mixed(init: () -> Unit): Box\n\
             }");
     }
 

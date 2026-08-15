@@ -1459,6 +1459,10 @@ pub struct IrFile {
     /// would carry the enclosing fn's return type, mismatching the lambda's). The splice reads the
     /// lambda's `inline_body`, not this method, so the backend must NOT emit a `FunId` in this set.
     pub inline_only_fns: std::collections::HashSet<u32>,
+    /// Top-level functions declared `inline`. This is a source-semantic fact; each backend decides
+    /// how an inline declaration is represented (the JVM emitter, for example, adds kotlinc's
+    /// `$i$f$<name>` local marker to emitted non-suspend bodies).
+    pub top_level_inline_functions: std::collections::HashSet<u32>,
     /// `FunId`s of `suspend fun`s, tagged by ir_lower. The coroutine pass (`jvm::suspend`) owns the
     /// whole transform: it rewrites each to the continuation-passing-style ABI (an extra
     /// `kotlin.coroutines.Continuation` parameter, return type erased to `Object`) and, for a function

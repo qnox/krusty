@@ -1998,6 +1998,14 @@ impl ClassWriter {
             .iter()
             .any(|f| f.signature.is_some())
             .then(|| self.cp.utf8("Signature"));
+        // `ConstantValue` interns in the field-first window too — a field's attribute list puts it
+        // BEFORE its annotations (`const val MARK`: pool `ConstantValue`,
+        // `RuntimeInvisibleAnnotations`, `Code`).
+        let constval_attr_name = self
+            .fields
+            .iter()
+            .any(|f| f.const_value.is_some())
+            .then(|| self.cp.utf8("ConstantValue"));
         let field_has_invis = self.fields.iter().any(|f| !f.invisible_anns.is_empty());
         // Field-level RIA, if any field is annotated: interns before `Code` (fields precede methods).
         let field_ria = field_has_invis.then(|| self.cp.utf8("RuntimeInvisibleAnnotations"));
@@ -2060,12 +2068,6 @@ impl ClassWriter {
             (class_has_sig || self.methods.iter().any(|m| m.signature.is_some()))
                 .then(|| self.cp.utf8("Signature"))
         });
-        // Intern `ConstantValue` only if a `const val` field carries one.
-        let constval_attr_name = if self.fields.iter().any(|f| f.const_value.is_some()) {
-            Some(self.cp.utf8("ConstantValue"))
-        } else {
-            None
-        };
         // Intern `Deprecated` only if the class or a method carries it.
         let deprecated_attr_name = if self.class_deprecated || !self.deprecated_methods.is_empty() {
             Some(self.cp.utf8("Deprecated"))
