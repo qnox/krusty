@@ -16839,6 +16839,27 @@ impl<'a> Lower<'a> {
         if slots.len() != params.len() {
             return None;
         }
+        // The spill temps below exist to preserve SOURCE evaluation order for REORDERED named
+        // arguments (and vararg packs). When the source order already matches the slot order and
+        // nothing packs, push order == source order, so the values pass straight to the operand
+        // stack — kotlinc's shape (the temps read as `astore`/`aload` pairs it never emits).
+        // Suspend bodies keep the temps: the CPS flattener's operand hoisting builds on them.
+        let fixed_positions: Vec<usize> = source_args
+            .iter()
+            .filter_map(|arg| slots.iter().position(|slot| *slot == Some(*arg)))
+            .filter(|index| vararg_pack != Some(*index))
+            .collect();
+        let any_vararg_contribution = source_args.iter().any(|arg| {
+            let index = slots.iter().position(|slot| *slot == Some(*arg));
+            match (index, vararg_pack) {
+                (Some(fixed), Some(vararg)) => fixed == vararg,
+                (None, Some(_)) => true,
+                _ => false,
+            }
+        });
+        let direct_ok = !self.cur_fn_suspend
+            && !any_vararg_contribution
+            && fixed_positions.windows(2).all(|pair| pair[0] < pair[1]);
         let mut slot_values: Vec<Option<LoweredCallSlot>> = vec![None; params.len()];
         let mut vararg_temp: Vec<LoweredVarargContribution> = Vec::new();
         let mut prelude = Vec::new();
@@ -16911,8 +16932,9 @@ impl<'a> Lower<'a> {
                 let value = self.lower_arg(arg, &ty_to_ir(semantic))?;
                 self.coerce_argument_value(value, semantic, ir_ty)?
             };
-            if matches!(self.afile.expr(arg), Expr::Lambda { .. })
-                && lambda_info(self.info, arg).capture == LambdaCapture::InlineSplice
+            if direct_ok
+                || matches!(self.afile.expr(arg), Expr::Lambda { .. })
+                    && lambda_info(self.info, arg).capture == LambdaCapture::InlineSplice
             {
                 slot_values[slot_idx] = Some(LoweredCallSlot::InlineLambda(value));
             } else {
