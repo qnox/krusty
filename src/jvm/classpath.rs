@@ -838,14 +838,12 @@ fn global_entry_body_cache(key: &EntryKey) -> BodyCache {
         .get_or_build(key, Default::default)
 }
 
-/// Process-global memoized inline-body plans, one [`EntryCache`] slot per jar/jimage entry, keyed by
-/// [`PlanKey`]. Like the body cache above, a slot survives the per-case `Classpath` instances the
-/// conformance/e2e harnesses build for scratch-dir classpaths. The decode is ALMOST a pure function
-/// of the owning entry's bytes under that key — the one assumption this global slot adds is that a
-/// multifile facade's part classes (and a callable's `$default` bridge owner) co-reside with the
-/// facade in the same artifact and are not shadowed or overlaid independently, which is how kotlinc
-/// emits them; the method-code fallback walk could otherwise read a part body from a different
-/// entry than the facade's.
+/// Process-global memoized inline-body plans, keyed by the COMPLETE archive/jimage classpath
+/// composition. Unlike a method body, a decoded plan is not an entry-local fact: a multifile
+/// facade's body lookup may walk into a part class selected from another classpath entry. Sharing by
+/// the facade's owning entry alone would therefore leak a plan between compositions that shadow the
+/// part differently. Compositions containing a mutable directory get no global slot and retain only
+/// the per-instance LRU.
 /// The full input set a plan decode reads: owner + source name + body descriptor locate the
 /// bytecode, but the SAME method surfaces through several provider channels (plain, suspend
 /// facade, extension) whose `physical_params` slot layouts and `$default` bridges differ — and the
@@ -853,12 +851,17 @@ fn global_entry_body_cache(key: &EntryKey) -> BodyCache {
 type PlanKey = (TypeName, String, String, Vec<u16>, Option<String>);
 type PlanMap = HashMap<PlanKey, Option<Box<crate::libraries::InlineBodyPlan>>>;
 type PlanCache = std::sync::Arc<std::sync::RwLock<PlanMap>>;
-fn global_entry_plan_cache(key: &EntryKey) -> PlanCache {
-    static CACHE: std::sync::OnceLock<EntryCache<std::sync::RwLock<PlanMap>>> =
+fn global_plan_cache(key: &[EntryKey]) -> PlanCache {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<EntryKey>, PlanCache>>> =
         std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(EntryCache::new)
-        .get_or_build(key, Default::default)
+    let mut cache = CACHE
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    cache
+        .entry(key.to_vec())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())))
+        .clone()
 }
 
 /// Process-global cache of parsed `.kotlin_builtins` fragments, one [`EntryCache`] slot per entry,
@@ -1619,9 +1622,9 @@ pub struct Classpath {
     /// `entries`); `None` for directory entries, which are per-test/module-local and never shared.
     entry_body_caches: Vec<Option<BodyCache>>,
     entry_builtins_caches: Vec<Option<BuiltinsCache>>,
-    /// Per-entry global inline-plan cache slots (parallel to `entries`, jar/jimage only) — see
-    /// [`global_entry_plan_cache`].
-    entry_plan_caches: Vec<Option<PlanCache>>,
+    /// Process-global inline-plan cache for this complete archive/jimage composition. A composition
+    /// containing a mutable directory stays instance-local; see [`global_plan_cache`].
+    shared_inline_plans: Option<PlanCache>,
     /// Open archives are hard-capped because each entry owns a file descriptor.
     archives: RefCell<crate::lru::LruCache<PathBuf, zip::ZipArchive<File>>>,
     /// Per-entry ext contributions (each cached process-globally by its path), fetched once per
@@ -1772,14 +1775,10 @@ impl Classpath {
                 Entry::Dir(_) => None,
             })
             .collect();
-        let entry_plan_caches: Vec<Option<PlanCache>> = entries
+        let shared_inline_plans = entries
             .iter()
-            .zip(&cache_key)
-            .map(|(entry, key)| match entry {
-                Entry::Jar(_) | Entry::Jimage(_) => Some(global_entry_plan_cache(key)),
-                Entry::Dir(_) => None,
-            })
-            .collect();
+            .all(|entry| matches!(entry, Entry::Jar(_) | Entry::Jimage(_)))
+            .then(|| global_plan_cache(&cache_key));
         let entry_builtins_caches: Vec<Option<BuiltinsCache>> = entries
             .iter()
             .zip(&cache_key)
@@ -1797,7 +1796,7 @@ impl Classpath {
             entry_caches: cache_key.iter().map(global_entry_class_cache).collect(),
             entry_body_caches,
             entry_builtins_caches,
-            entry_plan_caches,
+            shared_inline_plans,
             archives: RefCell::new(crate::lru::LruCache::new_fixed(OPEN_ARCHIVE_CAP)),
             ext: RefCell::new(None),
             types: RefCell::new(None),
@@ -3500,7 +3499,7 @@ impl Classpath {
         parameter_slots: &[u16],
         default_descriptor: Option<&str>,
     ) -> Option<Option<Box<crate::libraries::InlineBodyPlan>>> {
-        if !self.plan_owner_is_cacheable(owner) {
+        if !self.plan_is_cacheable() {
             cache_stat!(inline_plans, false);
             return None;
         }
@@ -3515,9 +3514,8 @@ impl Classpath {
             cache_stat!(inline_plans, true);
             return Some(hit.clone());
         }
-        // L1 miss → the owning entry's process-global map, which survives the fresh per-case
-        // `Classpath` instances scratch-dir classpaths force the harnesses to build.
-        if let Some(global) = self.owning_plan_cache(owner) {
+        // L1 miss → the process-global map for this exact immutable classpath composition.
+        if let Some(global) = self.shared_inline_plans.as_ref() {
             if let Some(hit) = global.read().unwrap().get(&key).cloned() {
                 self.inline_plans.borrow_mut().insert(key, hit.clone());
                 cache_stat!(inline_plans, true);
@@ -3538,7 +3536,7 @@ impl Classpath {
         default_descriptor: Option<&str>,
         plan: Option<Box<crate::libraries::InlineBodyPlan>>,
     ) {
-        if !self.plan_owner_is_cacheable(owner) {
+        if !self.plan_is_cacheable() {
             return;
         }
         let key = (
@@ -3548,28 +3546,18 @@ impl Classpath {
             parameter_slots.to_vec(),
             default_descriptor.map(str::to_string),
         );
-        if let Some(global) = self.owning_plan_cache(owner) {
+        if let Some(global) = self.shared_inline_plans.as_ref() {
             global.write().unwrap().insert(key.clone(), plan.clone());
         }
         self.inline_plans.borrow_mut().insert(key, plan);
     }
 
-    /// Whether a plan under `owner` may be remembered at all. An overlay class is per-request,
-    /// in-memory bytecode: two compiles can overlay DIFFERENT classes under the same internal name,
-    /// so caching its plan even instance-locally would leak one compile's bytecode facts into the
-    /// next (the same reason `own_method_code` special-cases the overlay before its caches). An
-    /// incomplete catalog cannot promise a stable owner→entry mapping.
-    fn plan_owner_is_cacheable(&self, owner: TypeName) -> bool {
-        let jvm_id = super::jvm_class_map::to_jvm_type_name(owner);
-        self.catalog_complete() && !self.stub_overlay.borrow().contains_key(&jvm_id)
-    }
-
-    /// The owning jar/jimage entry's process-global plan cache — `None` when the owner lives in a
-    /// directory entry (per-case scratch classes must not outlive their case).
-    fn owning_plan_cache(&self, owner: TypeName) -> Option<&PlanCache> {
-        let jvm_id = super::jvm_class_map::to_jvm_type_name(owner);
-        let entry_index = self.owning_entry(jvm_id)?;
-        self.entry_plan_caches.get(entry_index)?.as_ref()
+    /// Whether a plan may be remembered at all. Any overlay can replace a multifile part reached
+    /// from `owner`, so caching while an overlay is active—even when the owner itself is untouched—
+    /// could leak one request's composed bytecode facts into the next. An incomplete catalog likewise
+    /// cannot promise stable lookup composition.
+    fn plan_is_cacheable(&self) -> bool {
+        self.catalog_complete() && self.stub_overlay.borrow().is_empty()
     }
 
     /// One class's own body read (no facade super-chain walk), served from the process-global
@@ -6613,6 +6601,45 @@ mod fq_tests {
         // Directory entries never get a global slot: they are per-test/module-local.
         assert!(b.entry_body_caches[0].is_none());
         assert!(b.entry_builtins_caches[0].is_none());
+    }
+
+    #[test]
+    fn inline_plan_cache_is_scoped_to_the_complete_archive_classpath() {
+        let facade = PathBuf::from("/nonexistent/facade.jar");
+        let left_part = PathBuf::from("/nonexistent/left-part.jar");
+        let right_part = PathBuf::from("/nonexistent/right-part.jar");
+        let left = Classpath::new(vec![facade.clone(), left_part]);
+        let same_left = Classpath::new(vec![
+            facade.clone(),
+            PathBuf::from("/nonexistent/left-part.jar"),
+        ]);
+        let right = Classpath::new(vec![facade, right_part]);
+
+        assert!(std::sync::Arc::ptr_eq(
+            left.shared_inline_plans
+                .as_ref()
+                .expect("archive-only cache"),
+            same_left
+                .shared_inline_plans
+                .as_ref()
+                .expect("same archive-only cache"),
+        ));
+        assert!(
+            !std::sync::Arc::ptr_eq(
+                left.shared_inline_plans.as_ref().expect("left cache"),
+                right.shared_inline_plans.as_ref().expect("right cache"),
+            ),
+            "a facade entry must not share decoded plans across classpaths that can resolve its body part differently",
+        );
+
+        let with_directory = Classpath::new(vec![
+            PathBuf::from("/nonexistent/module-out"),
+            PathBuf::from("/nonexistent/facade.jar"),
+        ]);
+        assert!(
+            with_directory.shared_inline_plans.is_none(),
+            "mutable directory compositions stay instance-local",
+        );
     }
 
     // A FAILED byte read must never populate the process-global body cache: a transient error
