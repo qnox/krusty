@@ -771,6 +771,16 @@ pub struct IrProperty {
     pub name: String,
     /// The property's language-level type. This is also the type exposed by its accessors.
     pub ty: Ty,
+    /// Kotlin declaration visibility. Backends consume this semantic fact when choosing the
+    /// visibility of an accessor or a target-specific storage realization; they must not recover it
+    /// from a rendered owner/property-name key.
+    pub visibility: crate::types::Visibility,
+    /// The declaration initializer after common lowering, before any backend chooses storage.
+    /// `None` means the declaration has no initializer (or its source shape is not represented),
+    /// which is distinct from an explicit nullable initializer lowered to `IrConst::Null`.
+    /// Keeping this on the declaration lets a backend relocate storage without re-reading the AST
+    /// or mistaking a later assignment in an `init` block for the declaration initializer.
+    pub initializer: Option<ExprId>,
     /// The declared type of an explicit backing field when it differs from the property's public type.
     /// The JVM value-class pass may erase the physical [`IrField`] to its carrier, so retaining this
     /// semantic storage boundary lets the backend box/unbox at the accessor without resolving anything.
@@ -1280,12 +1290,6 @@ pub struct IrStatic {
     /// = a specific class — a `companion object`'s `const val` lives on the OUTER class (kotlinc emits
     /// `public static final` + `ConstantValue` there), not the facade.
     pub owner: Option<TypeName>,
-    /// A COMPANION property hoisted onto the outer class as a static (kotlinc's layout): the field
-    /// is `private static [final]` on the OUTER class, the outer emits PUBLIC synthetic
-    /// `access$get<X>$cp()`/`access$set<X>$cp(v)` bridges, the companion's instance accessors
-    /// delegate through them, and the initializer runs in the outer's `<clinit>` AFTER the
-    /// `Companion` instance store.
-    pub companion_hoisted: bool,
     /// Declaration visibility (`public` by default). A PRIVATE top-level property gets NO public
     /// accessors; cross-class reads inside the file go through a synthesized `access$get<X>$p` bridge
     /// (kotlinc's shape).
@@ -1340,6 +1344,9 @@ pub struct IrFile {
     pub classes: Vec<IrClass>,
     /// Top-level properties — static fields on the facade, initialized in `<clinit>` in order.
     pub statics: Vec<IrStatic>,
+    /// Static indices whose storage was moved from a companion declaration to its outer class by the
+    /// JVM companion-storage pass. Common lowering never populates this physical realization table.
+    jvm_companion_hoisted_statics: std::collections::HashSet<u32>,
     pub exprs: Vec<IrExpr>,
     /// Sparse `ExprId` → 1-based source line for the `LineNumberTable`: statement roots, loop
     /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
@@ -1969,6 +1976,17 @@ impl IrFile {
             .iter()
             .any(|c| c.is_value && c.fq_name == internal)
             || self.has_external_value_class_name(internal)
+    }
+
+    /// Record/query the JVM-only companion backing-storage realization selected after common
+    /// lowering. Keeping this in a backend-populated side table prevents a physical JVM layout bit
+    /// from becoming part of an ordinary common-IR static declaration.
+    pub(crate) fn mark_jvm_companion_hoisted_static(&mut self, index: u32) {
+        self.jvm_companion_hoisted_statics.insert(index);
+    }
+
+    pub(crate) fn is_jvm_companion_hoisted_static(&self, index: u32) -> bool {
+        self.jvm_companion_hoisted_statics.contains(&index)
     }
 
     pub fn param_defaults(&self, fid: u32) -> Option<&Vec<Option<ExprId>>> {

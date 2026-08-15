@@ -5,6 +5,7 @@ pub mod bridges;
 pub mod classfile;
 pub mod classpath;
 pub mod classreader;
+pub mod companion;
 pub mod inline;
 pub mod inline_class;
 pub mod ir_emit;

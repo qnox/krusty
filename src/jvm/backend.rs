@@ -30,16 +30,18 @@ pub enum SkipReason {
 /// Runs, in order:
 /// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
 ///    declarations from the file's annotations; no-op without a trigger annotation.
-/// 2. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
+/// 2. `lower_companion_properties` — realize supported companion backing fields as JVM outer statics.
+///    Common IR keeps the ordinary declaration and semantic initializer for other targets.
+/// 3. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
 ///    declaration, so lowering records only the declarations and this pass derives the bridges.
-/// 3. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
-/// 4. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
+/// 4. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
+/// 5. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
-/// 5. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
-/// 6. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+/// 6. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+/// 7. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
 ///    (`require`/`check`) message lambda; it is spliced at the call site.
-/// 7. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+/// 8. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
 ///    its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
 ///    be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
 ///    ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
@@ -74,6 +76,9 @@ pub fn run_backend_passes_with_metadata(
         &resolve_class_name,
         jvm_plugin_type_descriptor,
     );
+    // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
+    // property declaration and semantic initializer; this pass selects the outer-static realization.
+    crate::jvm::companion::lower_companion_properties(ir);
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
@@ -1028,6 +1033,10 @@ mod tests {
         // internal/recursive uses, and the shared pipeline in this file).
         let rules: &[(&str, &[&str])] = &[
             (
+                "lower_companion_properties(",
+                &["src/jvm/companion.rs", "src/jvm/backend.rs"],
+            ),
+            (
                 "lower_value_classes(",
                 &["src/jvm/value_classes.rs", "src/jvm/backend.rs"],
             ),
@@ -1075,6 +1084,13 @@ mod tests {
              in every pipeline by construction), but:\n  {}",
             offenders.join("\n  ")
         );
+    }
+
+    #[test]
+    fn common_lowering_does_not_choose_jvm_companion_storage() {
+        let lowering = include_str!("../ir_lower.rs");
+        assert!(!lowering.contains("lower_companion_properties"));
+        assert!(!lowering.contains("mark_jvm_companion_hoisted_static"));
     }
 
     #[test]

@@ -1804,8 +1804,11 @@ fn seed_plain_class_pool(
         let hoisted: Vec<(String, String, bool, u8, Option<crate::kt_string::KtString>)> = ir
             .statics
             .iter()
-            .filter(|s| s.companion_hoisted && s.owner_matches(fq_name))
-            .map(|s| {
+            .enumerate()
+            .filter(|(index, s)| {
+                ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(fq_name)
+            })
+            .map(|(_, s)| {
                 let string_const = match ir.expr(init_operand(ir, s.init)) {
                     IrExpr::Const(crate::ir::IrConst::String(t)) => Some(t.clone()),
                     _ => None,
@@ -1936,9 +1939,12 @@ fn hoisted_static_for<'a>(
     }
     let fq = c.fq_name();
     let outer = fq.rsplit_once('$')?.0;
-    ir.statics
-        .iter()
-        .find(|s| s.companion_hoisted && s.name == name && s.owner_matches(outer))
+    ir.statics.iter().enumerate().find_map(|(index, s)| {
+        (ir.is_jvm_companion_hoisted_static(index as u32)
+            && s.name == name
+            && s.owner_matches(outer))
+        .then_some(s)
+    })
 }
 
 fn attach_synth_debug_tables(
@@ -2094,7 +2100,7 @@ fn attach_synth_debug_tables(
         };
         let pline = ir
             .prop_decl_lines
-            .get(&(c.fq_name(), property.name.clone()))
+            .get(&(c.fq_name, property.name.clone()))
             .copied()
             .filter(|&l| l != 0)
             .unwrap_or(line);
@@ -2124,7 +2130,11 @@ fn attach_synth_debug_tables(
     for s in ir
         .statics
         .iter()
-        .filter(|s| s.companion_hoisted && s.owner_matches(&c.fq_name()))
+        .enumerate()
+        .filter(|(index, s)| {
+            ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
+        })
+        .map(|(_, s)| s)
     {
         let pd = crate::jvm::names::type_descriptor(ir_ty_to_jvm(&s.ty));
         let getter_bridge = format!("access${}$cp", crate::names::property_getter_name(&s.name));
@@ -2305,7 +2315,11 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         for s in ir
             .statics
             .iter()
-            .filter(|s| s.companion_hoisted && s.owner_matches(&c.fq_name()))
+            .enumerate()
+            .filter(|(index, s)| {
+                ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
+            })
+            .map(|(_, s)| s)
         {
             if let Some(a) = ann(&s.name, ir_ty_to_jvm(&s.ty)) {
                 cw.set_field_nullability(&s.name, a);
@@ -4142,7 +4156,12 @@ fn emit_class(
     }
     // A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
     // `ConstantValue` fields (kotlinc's layout); they have no `<clinit>` store (the JVM initializes them).
-    for s in ir.statics.iter().filter(|s| s.owner_matches(&fq_name)) {
+    for (static_index, s) in ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.owner_matches(&fq_name))
+    {
         let desc = ir_type_desc(&s.ty);
         // A `private const val`/`private val` on an object/companion keeps its declared visibility
         // (kotlinc: PRIVATE static final; const reads are inlined so no cross-class getstatic needs it).
@@ -4151,7 +4170,8 @@ fn emit_class(
         let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
         // A HOISTED companion property's field is PRIVATE regardless of the property's declared
         // visibility (kotlinc: every access goes through the accessors/bridges, never the field).
-        let acc = if s.visibility.is_private() || s.companion_hoisted {
+        let hoisted = ir.is_jvm_companion_hoisted_static(static_index as u32);
+        let acc = if s.visibility.is_private() || hoisted {
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
@@ -4161,7 +4181,7 @@ fn emit_class(
         // folds either — kotlinc initializes it in `<clinit>` (only `const val` gets the attribute).
         // The eligibility check runs FIRST: `const_value_idx` interns the constant as a side effect,
         // and a pool entry for a value the class never `ldc`s diverges from kotlinc's pool.
-        let fold = !s.is_var && !s.companion_hoisted;
+        let fold = !s.is_var && !hoisted;
         match fold.then(|| const_value_idx(ir, s.init, &mut cw)).flatten() {
             Some(cv) => cw.add_field_const(acc, &s.name, &desc, cv),
             None => cw.add_field(acc, &s.name, &desc),
@@ -4670,7 +4690,11 @@ fn emit_class(
     for s in ir
         .statics
         .iter()
-        .filter(|s| s.companion_hoisted && s.owner_matches(&fq_name))
+        .enumerate()
+        .filter(|(index, s)| {
+            ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&fq_name)
+        })
+        .map(|(_, s)| s)
     {
         let jt = ir_ty_to_jvm(&s.ty);
         let desc = type_descriptor(jt);
@@ -4708,12 +4732,14 @@ fn emit_class(
     // hoisted companion property, or a companion `const val` whose initializer isn't a compile-time
     // literal — the `ConstantValue` path covers only folded consts). One shared `<clinit>`.
     {
-        let clinit_statics: Vec<&crate::ir::IrStatic> = ir
+        let clinit_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
             .statics
             .iter()
+            .enumerate()
             .filter(|s| {
-                s.owner_matches(&fq_name) && !(s.is_const && const_value_idx_peek(ir, s.init))
+                s.1.owner_matches(&fq_name) && !(s.1.is_const && const_value_idx_peek(ir, s.1.init))
             })
+            .map(|(index, s)| (index as u32, s))
             .collect();
         if c.companion_class.is_some() || !clinit_statics.is_empty() {
             let mut e = Emitter::new(
@@ -4723,7 +4749,7 @@ fn emit_class(
                 &fq_name,
                 facade,
                 Ty::Unit,
-                clinit_statics.iter().map(|property| property.init),
+                clinit_statics.iter().map(|(_, property)| property.init),
             );
             let mut clinit = CodeBuilder::new(0);
             emit_companion_init(e.cw, &mut clinit, &fq_name, c);
@@ -4731,13 +4757,14 @@ fn emit_class(
             // store's pc, mapping to the property's declaration line in the COMPANION source. The
             // `Companion` construction itself has no entry.
             let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
-            for s in &clinit_statics {
+            for (static_index, s) in &clinit_statics {
                 let pc = clinit.bytes.len() as u16;
-                if s.companion_hoisted {
-                    if let Some(&line) = c.companion_class.as_ref().and_then(|companion| {
-                        ir.prop_decl_lines
-                            .get(&(companion.render(), s.name.clone()))
-                    }) {
+                if ir.is_jvm_companion_hoisted_static(*static_index) {
+                    if let Some(&line) = c
+                        .companion_class
+                        .as_ref()
+                        .and_then(|companion| ir.prop_decl_lines.get(&(*companion, s.name.clone())))
+                    {
                         if line != 0 {
                             clinit_lines.push((pc, line));
                         }
@@ -9393,9 +9420,7 @@ impl<'a> Emitter<'a> {
                 // PUBLIC synthetic `access$set<X>$cp` bridge (kotlinc's hoisted-companion shape).
                 if let Some(owner) = self.ir.statics[index as usize].owner {
                     let owner_name = owner.render();
-                    if self.owner == owner_name
-                        || !self.ir.statics[index as usize].companion_hoisted
-                    {
+                    if self.owner == owner_name || !self.ir.is_jvm_companion_hoisted_static(index) {
                         let fref = self.cw.fieldref(&owner_name, &name, &type_descriptor(jt));
                         code.putstatic(fref, slot_words(jt) as i32);
                     } else {
@@ -10545,7 +10570,7 @@ impl<'a> Emitter<'a> {
                 // bridge, kotlinc's hoisted-companion-property access shape.
                 if let Some(owner) = self.ir.statics[*i as usize].owner {
                     let owner_name = owner.render();
-                    if self.owner == owner_name || !self.ir.statics[*i as usize].companion_hoisted {
+                    if self.owner == owner_name || !self.ir.is_jvm_companion_hoisted_static(*i) {
                         let fref = self.cw.fieldref(&owner_name, &name, &type_descriptor(jt));
                         code.getstatic(fref, slot_words(jt) as i32);
                     } else {
