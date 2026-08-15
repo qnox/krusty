@@ -4580,17 +4580,9 @@ fn emit_class(
         // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
         // defaults, then `invokespecial` the real `<init>`).
         if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
+            // (The stub emits its own LineNumberTable — class line, per-fill parameter lines, the
+            // ctor's closing-`)` line at `return` — collapsed for single-line declarations.)
             emit_ctor_default_stub(ir, &fq_name, facade, &param_tys, defaults, &mut cw, env);
-            // kotlinc gives the `$default` ctor overload a one-entry LineNumberTable at the class
-            // declaration line.
-            if byte_parity && c.decl_line != 0 {
-                let masks = "I".repeat(defaults.len().div_ceil(32).max(1));
-                let stub_desc = format!(
-                    "({}{masks}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-                    ctor_field_descs(c)
-                );
-                cw.set_method_lines("<init>", &stub_desc, &[(0, c.decl_line)]);
-            }
         }
         // A COMPANION's synthetic marker ctor is emitted LAST, after the instance accessors
         // (kotlinc's member order — see below); every other shape keeps it beside the primary.
@@ -8722,6 +8714,15 @@ fn emit_ctor_default_stub(
         }
         out
     };
+    // kotlinc's `$default` ctor LineNumberTable: the CLASS declaration line at entry, each masked
+    // fill's value at its PARAMETER's declaration line, the delegation back at the class line, and
+    // the `return` at the primary ctor's closing-`)` line — consecutive same-line entries collapse.
+    let class_decl = ir
+        .classes
+        .iter()
+        .find(|candidate| candidate.fq_name() == owner);
+    let class_line = class_decl.map_or(0, |candidate| candidate.decl_line);
+    let mut lines: Vec<(u16, u32)> = vec![(0, class_line)];
     let mut code = CodeBuilder::new(slot);
     for (i, def) in defaults.iter().enumerate().take(n) {
         if let Some(def_expr) = def {
@@ -8732,12 +8733,21 @@ fn emit_ctor_default_stub(
             let skip = code.new_label();
             code.add_frame_if_new(skip, branch_locals.clone(), vec![]);
             code.ifeq(skip);
+            if let Some(param_line) = class_decl.and_then(|candidate| {
+                candidate.fields.get(i).and_then(|field| {
+                    ir.prop_decl_lines
+                        .get(&(candidate.fq_name_id(), field.name.clone()))
+                })
+            }) {
+                lines.push((code.bytes.len() as u16, *param_line));
+            }
             e.emit_value(*def_expr, &mut code);
             store(pty, pslot, &mut code);
             code.bind(skip);
         }
     }
     // `invokespecial <owner>.<init>(realparams)V` — delegate to the real primary constructor.
+    lines.push((code.bytes.len() as u16, class_line));
     code.aload(0);
     for &(pslot, pty) in &param_slots {
         load(pty, pslot, &mut code);
@@ -8749,6 +8759,11 @@ fn emit_ctor_default_stub(
         .sum::<i32>();
     let m = e.cw.methodref(owner, "<init>", &init_desc);
     code.invokespecial(m, aw, 0);
+    if let Some(&close) =
+        class_decl.and_then(|candidate| ir.ctor_close_lines.get(&candidate.fq_name_id()))
+    {
+        lines.push((code.bytes.len() as u16, close));
+    }
     code.ret_void();
     code.ensure_locals(e.next_slot);
     code.link();
@@ -8761,6 +8776,10 @@ fn emit_ctor_default_stub(
     stub_params.push(marker);
     let desc = method_descriptor(&stub_params, Ty::Unit);
     e.cw.add_method(0x1001 /* PUBLIC | SYNTHETIC */, "<init>", &desc, &code);
+    if class_line != 0 {
+        lines.dedup_by_key(|(_, line)| *line);
+        e.cw.set_method_lines("<init>", &desc, &lines);
+    }
 }
 
 /// Emit the PUBLIC|SYNTHETIC accessor `<init>(…args, DefaultConstructorMarker)` for a class whose primary

@@ -216,6 +216,10 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
         match decl {
             Decl::Class(c) => {
                 c.decl_line = line_at(c.span.lo);
+                // The parser stored the primary ctor's `)` OFFSET here — rewrite it to the line.
+                if c.ctor_close_line != 0 {
+                    c.ctor_close_line = line_at(c.ctor_close_line);
+                }
                 // A class's methods live INSIDE the class decl, not in `decl_arena` — walk them too,
                 // or every member method keeps line 0 and gets no `LineNumberTable`.
                 for m in &mut c.methods {
@@ -300,6 +304,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         primary_ctor_annotations: Some(Vec::new()),
         secondary_ctors: Vec::new(),
         span,
+        ctor_close_line: 0,
         decl_line: 0,
     }
 }
@@ -2294,6 +2299,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
             span: Span::new(start.lo, end.hi),
+            ctor_close_line: 0,
             decl_line: 0,
         };
         let id = self.file.add_decl(Decl::Class(declaration));
@@ -2652,6 +2658,7 @@ impl<'a> Parser<'a> {
             secondary_ctors,
             primary_ctor_annotations: has_primary_ctor.then_some(Vec::new()),
             span: Span::new(start.lo, end.hi),
+            ctor_close_line: 0,
             decl_line: 0,
         }
     }
@@ -3258,6 +3265,7 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         let mut props = Vec::new();
+        let mut ctor_close_lo = 0u32;
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
@@ -3322,6 +3330,9 @@ impl<'a> Parser<'a> {
                 }
                 self.skip_newlines();
             }
+            // The byte offset of the primary ctor's `)` — rewritten to a source LINE by the
+            // decl-line post-pass; kotlinc maps the ctor `$default`'s `return` to it.
+            ctor_close_lo = self.tok().span.lo;
             self.expect(TokenKind::RParen, "')'");
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
@@ -3507,6 +3518,7 @@ impl<'a> Parser<'a> {
                 .then_some(primary_constructor_annotations),
             secondary_ctors,
             span: Span::new(start.lo, end.hi),
+            ctor_close_line: ctor_close_lo,
             decl_line: 0,
         }
     }
@@ -3840,6 +3852,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
             span: Span::new(start.lo, end.hi),
+            ctor_close_line: 0,
             decl_line: 0,
         }
     }
@@ -3962,6 +3975,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
             span: Span::new(span.lo, end.hi),
+            ctor_close_line: 0,
             decl_line: 0,
         };
         let did = self.file.add_decl(Decl::Class(synth));
@@ -4095,6 +4109,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
             span: Span::new(start.lo, end.hi),
+            ctor_close_line: 0,
             decl_line: 0,
         }
     }

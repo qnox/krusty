@@ -786,6 +786,13 @@ fn lower_file_at_reporting_impl(
                     .prop_visibilities
                     .insert((internal.clone(), p.name.clone()), p.visibility);
             }
+            // The primary ctor's closing-`)` line: the ctor `$default` overload's `return` maps
+            // there in kotlinc's LineNumberTable.
+            if c.ctor_close_line != 0 {
+                lo.ir
+                    .ctor_close_lines
+                    .insert(class_identity, c.ctor_close_line);
+            }
             let mut ctor_fields: Vec<(String, Ty)> = anonymous_captures
                 .iter()
                 .map(|capture| (capture.name.clone(), capture.ty))

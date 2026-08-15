@@ -974,6 +974,10 @@ pub struct ClassDecl {
     /// kotlinc's synthesized members (ctor/accessors), which all map to the class's declaration line.
     /// 0 = unknown (no debug tables emitted). Filled by a parser post-pass.
     pub decl_line: u32,
+    /// AT PARSE: the byte offset of the primary constructor's closing `)`; the same parser
+    /// post-pass that fills `decl_line` REWRITES it to the 1-based source line. 0 = no primary
+    /// parameter list. kotlinc maps the ctor `$default` overload's `return` to this line.
+    pub ctor_close_line: u32,
 }
 
 /// What a declaration *is*. Mutually exclusive at the source level (`data`/`value` are modifiers on a
