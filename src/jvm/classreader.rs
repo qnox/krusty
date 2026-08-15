@@ -37,6 +37,10 @@ pub struct MethodSig {
     pub parameter_nullability: Vec<Option<JavaNullability>>,
     /// Return nullability annotation. An absent annotation on a Java reference denotes `T!`.
     pub return_nullability: Option<JavaNullability>,
+    /// `@kotlin.Deprecated(level = DeprecationLevel.HIDDEN)` on the declaration. A hidden
+    /// callable exists only for binary compatibility: kotlinc removes it from overload
+    /// resolution entirely, so it must never enter a candidate set.
+    pub deprecated_hidden: bool,
 }
 
 impl MethodSig {
@@ -117,6 +121,7 @@ struct MemberAttributes {
     parameter_nullability: Vec<Option<JavaNullability>>,
     declaration_nullability: Option<JavaNullability>,
     parameter_access: Vec<u16>,
+    deprecated_hidden: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -492,6 +497,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             signature: member.attributes.signature,
             parameter_nullability: member.attributes.parameter_nullability,
             return_nullability: member.attributes.declaration_nullability,
+            deprecated_hidden: member.attributes.deprecated_hidden,
         })
         .collect();
 
@@ -757,7 +763,12 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                 if s == "RuntimeVisibleAnnotations" || s == "RuntimeInvisibleAnnotations" =>
             {
                 let body = r.take(len)?;
-                read_declaration_nullability(body, cp, &mut attributes.declaration_nullability)?;
+                read_declaration_annotations(
+                    body,
+                    cp,
+                    &mut attributes.declaration_nullability,
+                    &mut attributes.deprecated_hidden,
+                )?;
             }
             _ => {
                 r.take(len)?;
@@ -767,10 +778,11 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
     Ok(attributes)
 }
 
-fn read_declaration_nullability(
+fn read_declaration_annotations(
     body: &[u8],
     cp: &[C],
-    out: &mut Option<JavaNullability>,
+    nullability_out: &mut Option<JavaNullability>,
+    deprecated_hidden_out: &mut bool,
 ) -> Result<(), ReadError> {
     let utf8 = |index: u16| match cp.get(index as usize) {
         Some(C::Utf8(value)) => value.as_str(),
@@ -787,11 +799,27 @@ fn read_declaration_nullability(
         };
         let pair_count = r.u2()?;
         for _ in 0..pair_count {
-            r.u2()?;
+            let element_name = utf8(r.u2()?);
+            // `@kotlin.Deprecated`'s `level` element is an enum_const_value; any other element
+            // (or any other annotation's) is skipped structurally.
+            if annotation == "Lkotlin/Deprecated;" && element_name == "level" {
+                let tag = r.u1()? as char;
+                if tag == 'e' {
+                    let type_name = utf8(r.u2()?);
+                    let const_name = utf8(r.u2()?);
+                    if type_name == "Lkotlin/DeprecationLevel;" && const_name == "HIDDEN" {
+                        *deprecated_hidden_out = true;
+                    }
+                } else {
+                    // Unexpected shape — stop parsing rather than desync the reader.
+                    return Ok(());
+                }
+                continue;
+            }
             skip_element_value_extract_string_array(&mut r, cp, false)?;
         }
         if nullability.is_some() {
-            *out = nullability;
+            *nullability_out = nullability;
         }
     }
     Ok(())
@@ -1006,6 +1034,7 @@ mod tests {
             signature: None,
             parameter_nullability: Vec::new(),
             return_nullability: None,
+            deprecated_hidden: false,
         };
         let concrete = method("(Ljava/lang/String;I)Ljava/lang/String;");
         let return_bridge = method("(Ljava/lang/String;I)Ljava/lang/Object;");
