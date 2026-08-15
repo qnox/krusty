@@ -633,6 +633,13 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         Vec::new()
     }
 
+    /// The still-unimplemented abstract instance methods a subclass of `internal` must override,
+    /// as `(name, descriptor)` — nearest declaration in the super chain wins, so a mid-hierarchy
+    /// implementation discharges the obligation. Empty when the classifier is unknown or concrete.
+    fn abstract_obligations(&self, _internal: TypeName) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Element type for platform iterable/range/progression values.
     fn iterable_element_type(&self, _internal: &str) -> Option<Ty> {
         None

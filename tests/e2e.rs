@@ -138,6 +138,8 @@ mod class_tparam_cast_e2e;
 mod classfile_e2e;
 #[path = "classifier_precedence_e2e.rs"]
 mod classifier_precedence_e2e;
+#[path = "classpath_abstract_obligations_e2e.rs"]
+mod classpath_abstract_obligations_e2e;
 #[path = "classpath_abstract_subclass_e2e.rs"]
 mod classpath_abstract_subclass_e2e;
 #[path = "classpath_annotation_emit_e2e.rs"]

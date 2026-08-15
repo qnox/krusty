@@ -43,12 +43,24 @@ fn unsafe_abstract_classpath_bases_are_declined() {
     };
     let cp = vec![libout, sl];
 
+    // A subclass that DISCHARGES every abstract obligation now compiles (the gate checks the
+    // obligation list against the class's overrides); one that leaves an obligation open still
+    // declines.
     let implements_abstract =
         "import lib.RequiresOverride\nclass Child : RequiresOverride() { override fun value() = \"x\" }\n";
     assert!(
         common::compile_in_process(implements_abstract, "Override", &cp, Some(jdk.as_path()))
-            .is_none()
+            .is_some(),
+        "discharging every abstract obligation must subclass"
     );
+    let leaves_abstract_open = "import lib.RequiresOverride\nclass Child : RequiresOverride()\n";
+    assert!(common::compile_in_process(
+        leaves_abstract_open,
+        "OverrideOpen",
+        &cp,
+        Some(jdk.as_path())
+    )
+    .is_none());
 
     let inaccessible_constructor = "import lib.Closed\nclass Child : Closed()\n";
     assert!(common::compile_in_process(
