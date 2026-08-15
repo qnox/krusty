@@ -206,6 +206,30 @@ fn harness_classpath(paths: Vec<PathBuf>) -> std::rc::Rc<Classpath> {
     })
 }
 
+/// In-memory dependency classes applied to the (usually thread-cached, SHARED) `Classpath` for one
+/// compile, and ALWAYS cleared afterward — a stale overlay on the shared instance would leak one
+/// case's classes into the next case on the same worker thread. Passing dependency classes this way
+/// (instead of a scratch directory on the classpath) keeps the classpath entry set all-files, so
+/// the per-thread instance — and its composed package tree — is reused instead of being rebuilt
+/// per case, which profiling showed was ~a third of harness CPU.
+struct OverlayGuard(std::rc::Rc<Classpath>);
+
+impl OverlayGuard {
+    fn set(cp: &std::rc::Rc<Classpath>, classes: &[(String, Vec<u8>)]) -> Option<OverlayGuard> {
+        if classes.is_empty() {
+            return None;
+        }
+        cp.set_stub_overlay(classes.to_vec());
+        Some(OverlayGuard(cp.clone()))
+    }
+}
+
+impl Drop for OverlayGuard {
+    fn drop(&mut self) {
+        self.0.clear_stub_overlay();
+    }
+}
+
 fn compile_source(
     src: &str,
     stem: &str,
@@ -378,8 +402,8 @@ fn compile_multifile(
 ) -> Option<Vec<(String, Vec<u8>)>> {
     // Split on `// FILE: name.kt` markers (the preamble before the first marker is directives).
     // `.java` blocks are collected separately: javac compiles them first (in-process, via the
-    // persistent JavaRunner) and their output dir joins krusty's classpath, mirroring how kotlinc's
-    // test infra makes Java sources visible to the Kotlin compile.
+    // persistent JavaRunner) and their classes join krusty's classpath as an in-memory overlay,
+    // mirroring how kotlinc's test infra makes Java sources visible to the Kotlin compile.
     let (mut blocks, java_blocks) = krusty::conformance::split_files(src);
     // Single-file (no `// FILE:` markers) but routed here for coroutine-helper injection: the whole
     // source is the one main block.
@@ -394,17 +418,20 @@ fn compile_multifile(
         return None; // not actually multi-file (and nothing for javac either)
     }
 
-    // Compile the Java blocks first (in-process javac, persistent JVM — no per-test spawn) and put
-    // their class dir on krusty's classpath; the emitted classes ride along to BoxRunner's loader.
-    // When javac-first fails — the Java references Kotlin declarations, so it cannot be ordered
-    // first — fall back to the KOTLIN-FIRST pipeline: signature stubs → krusty → real javac
-    // (docs/JAVA_INTEROP.md slice 2).
-    let mut cp: Vec<std::path::PathBuf> = cp_jars.to_vec();
+    // Compile the Java blocks first (in-process javac, persistent JVM — no per-test spawn); krusty
+    // sees the emitted classes as an overlay on the shared jar classpath, and they ride along to
+    // BoxRunner's loader. When javac-first fails — the Java references Kotlin declarations, so it
+    // cannot be ordered first — fall back to the KOTLIN-FIRST pipeline: signature stubs → krusty →
+    // real javac (docs/JAVA_INTEROP.md slice 2).
     let mut java_classes: Vec<(String, Vec<u8>)> = Vec::new();
     if !java_blocks.is_empty() {
         match common::javac_compile(&java_blocks, cp_jars) {
             Some((javadir, classes)) => {
-                cp.push(javadir);
+                // The classes were read into memory (BoxRunner loads from bytes, and krusty sees
+                // them as an overlay on the shared jar classpath), so the scratch tree can go now.
+                if let Some(root) = javadir.parent() {
+                    let _ = fs::remove_dir_all(root);
+                }
                 java_classes = classes;
             }
             None => return compile_kotlin_first(src, &blocks, &java_blocks, cp_jars, jdk_modules),
@@ -414,14 +441,14 @@ fn compile_multifile(
     // `// LANGUAGE:` directives live in the preamble before the first `// FILE:` — read them from the
     // whole source and apply to every block.
     let features = krusty::features::LangFeatures::from_source(src);
-    let compiled = compile_blocks(&blocks, &cp, jdk_modules, &features, None);
-    // The javac classes were read into memory (and BoxRunner loads from bytes), so the scratch
-    // src+classes tree is no longer needed — success or skip.
-    if let Some(javadir) = cp.last().filter(|_| !java_classes.is_empty()) {
-        if let Some(root) = javadir.parent() {
-            let _ = fs::remove_dir_all(root);
-        }
-    }
+    let compiled = compile_blocks(
+        &blocks,
+        cp_jars,
+        jdk_modules,
+        &features,
+        None,
+        &java_classes,
+    );
     let mut out = compiled?;
     out.extend(java_classes);
     Some(out)
@@ -480,18 +507,20 @@ fn compile_kotlin_first(
         &resolve,
     )?;
 
+    // krusty compiles against the stubs as an in-memory overlay — no scratch stub dir, so a
+    // jar-only classpath stays the shared per-thread instance. (Stubs are plain classes with no
+    // Kotlin facades, exactly what the overlay's class-lookup channels serve.)
+    let kotlin_classes = compile_blocks(blocks, cp_jars, jdk_modules, &features, None, &stubs)?;
+
     static UID: AtomicU64 = AtomicU64::new(0);
     let uid = UID.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("krusty_ktfirst_{uid}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let result = (|| {
-        let stubdir = root.join("stubs");
-        write_classes_to_dir(&stubs, &stubdir)?;
-        let mut cp = cp_jars.to_vec();
-        cp.push(stubdir);
-        let kotlin_classes = compile_blocks(blocks, &cp, jdk_modules, &features, None)?;
         // Real javac against krusty's output (the stubs are DISCARDED — javac must see the real
-        // Kotlin classes so Java→Kotlin references type-check for real).
+        // Kotlin classes so Java→Kotlin references type-check for real). javac reads files, so the
+        // Kotlin classes are materialized, and any DIRECTORY entries of the caller's classpath
+        // (module dependency dirs) stay on javac's classpath.
         let kotlindir = root.join("kotlin");
         write_classes_to_dir(&kotlin_classes, &kotlindir)?;
         let mut javac_cp = cp_jars.to_vec();
@@ -500,7 +529,7 @@ fn compile_kotlin_first(
         if let Some(jroot) = javadir.parent() {
             let _ = fs::remove_dir_all(jroot);
         }
-        let mut out = kotlin_classes;
+        let mut out = kotlin_classes.clone();
         out.extend(java_classes);
         Some(out)
     })();
@@ -518,6 +547,7 @@ fn compile_blocks(
     jdk_modules: Option<&std::path::Path>,
     features: &krusty::features::LangFeatures,
     progress: Option<&dyn Fn(&str)>,
+    overlay: &[(String, Vec<u8>)],
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let report = |phase: &str| {
         if let Some(progress) = progress {
@@ -547,6 +577,7 @@ fn compile_blocks(
         cp_paths.push(p.to_path_buf());
     }
     let cp = harness_classpath(cp_paths);
+    let _overlay = OverlayGuard::set(&cp, overlay);
     report("module signatures");
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
@@ -671,20 +702,24 @@ fn compile_module_test(
         // only deps/JDK); when that fails — the Java references THIS module's Kotlin — fall back to
         // the Kotlin-first stub pipeline, exactly like the single-module path.
         let classes = if java_files.is_empty() {
-            compile_blocks(files, &cp, jdk_modules, &features, Some(&report))
+            compile_blocks(files, &cp, jdk_modules, &features, Some(&report), &[])
         } else {
             match common::javac_compile(java_files, &cp) {
                 Some((javadir, java_classes)) => {
-                    let kotlin = if files.is_empty() {
-                        Some(Vec::new()) // a Java-only module
-                    } else {
-                        let mut kcp = cp.clone();
-                        kcp.push(javadir.clone());
-                        compile_blocks(files, &kcp, jdk_modules, &features, None)
-                    };
                     if let Some(root) = javadir.parent() {
                         let _ = fs::remove_dir_all(root);
                     }
+                    let kotlin = if files.is_empty() {
+                        Some(Vec::new()) // a Java-only module
+                    } else {
+                        // The javac classes ride the overlay (Java classes carry no Kotlin
+                        // facades, so the class-lookup channels the overlay feeds suffice). The
+                        // Kotlin dependency DIRS stay on the classpath: dependency-module
+                        // top-level functions resolve through the package catalog, which only
+                        // directory/jar entries contribute to — an overlaid dependency module
+                        // loses them (measured: -95 box passes).
+                        compile_blocks(files, &cp, jdk_modules, &features, None, &java_classes)
+                    };
                     kotlin.map(|mut k| {
                         k.extend(java_classes);
                         k
