@@ -1807,11 +1807,8 @@ fn seed_plain_class_pool(
         superclass,
         (&ctor_desc, &super_ctor_desc),
         &fields,
-        &[],
         &crate::jvm::classfile::MemberSignatures {
             ctor: ctor_sig,
-            accessors: &[],
-            fields: if c.is_data { &[] } else { &field_sigs },
         },
         ctor_default_seed.as_ref(),
         &{

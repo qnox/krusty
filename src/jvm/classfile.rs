@@ -94,19 +94,6 @@ pub struct SeedCtorDefaults {
     pub string_consts: Vec<KtString>,
 }
 
-/// A HOISTED companion property's accessor delegates through an outer-class `access$…$cp` bridge;
-/// the seeder interns the bridge (and the getter's return annotation) right after the accessor's
-/// name/descriptor — kotlinc's per-method first-use order.
-pub struct SeedAccessorBridge {
-    pub owner: String,
-    pub name: String,
-    /// Getter return-annotation kind (0 = none, 1 = `@NotNull`, 2 = `@Nullable`).
-    pub ann_kind: u8,
-    /// A setter's value-parameter `LocalVariableTable` descriptor, interned after `<set-?>` — only
-    /// needed for a primitive (a reference descriptor is already in the pool by then).
-    pub lvt_desc: Option<String>,
-}
-
 /// One backing field, as the plain-class pool seeder sees it.
 pub struct SeedField {
     pub name: String,
@@ -131,17 +118,11 @@ pub struct SeedField {
     pub value_class_ctor: Option<(String, String)>,
 }
 
-/// Per-member JVM generic `Signature` strings for a plain class, in kotlinc's interning positions, passed
-/// to [`ClassWriter::seed_plain_class_pool`]. `None`/empty entries mean "no `Signature`" (a member whose
-/// erased descriptor already captures its type). `accessors` and `fields` are index-parallel to the
-/// `seed_plain_class_pool` arguments of the same name.
+/// Primary-constructor JVM generic `Signature`, passed to
+/// [`ClassWriter::seed_plain_class_pool`] at the constructor's interning position.
 pub struct MemberSignatures<'a> {
     /// The primary constructor's generic `Signature` (`(Ljava/util/List<Ljava/lang/String;>;)V`).
     pub ctor: Option<&'a str>,
-    /// Per-accessor generic `Signature` (a getter/setter of a parameterized-type property).
-    pub accessors: &'a [Option<String>],
-    /// Per-field generic `Signature` (a parameterized-type backing field).
-    pub fields: &'a [Option<String>],
 }
 
 /// Extra per-member data a `data class` needs when seeding [`ClassWriter::seed_data_class_pool`], all
@@ -1164,10 +1145,6 @@ impl ClassWriter {
         super_internal: &str,
         ctor_descs: (&str, &str),
         fields: &[SeedField],
-        // (name, descriptor, setter_kind, bridge): 0 = getter, 1 = primitive/other setter, 2 = non-null
-        // reference setter (its `checkNotNullParameter` guard also interns a `<set-?>` String constant).
-        // `bridge` is a hoisted companion accessor's outer delegation target.
-        accessors: &[(String, String, u8, Option<SeedAccessorBridge>)],
         // Per-member generic `Signature`s (parameterized-type ctor/accessor/field members).
         sigs: &MemberSignatures,
         // The primary ctor's `$default` overload entries (marker desc, default string constants,
@@ -1258,155 +1235,6 @@ impl ClassWriter {
                 self.cp.string_kt(s);
             }
             self.cp.methodref(this_internal, "<init>", ctor_desc);
-        }
-        // Each accessor: name + descriptor at entry (its body reuses the field Fieldref above). A setter
-        // then interns `<set-?>` right after — its LocalVariableTable value-parameter name (kotlinc's
-        // synthetic name), plus a `<set-?>` String constant for a non-null reference setter's
-        // `checkNotNullParameter` guard. Interleaved per-setter (deduped) so it lands before the next
-        // accessor, as kotlinc does — not batched at the end.
-        for (i, (name, desc, setter_kind, bridge)) in accessors.iter().enumerate() {
-            self.cp.utf8(name);
-            self.cp.utf8(desc);
-            // A hoisted companion accessor: the getter's return annotation, then the outer bridge's
-            // class/name/NameAndType/Methodref — interned here because the accessor BODY is the
-            // delegation (kotlinc's first-use order), before any `<set-?>` entries.
-            if let Some(b) = bridge {
-                if *setter_kind == 0 {
-                    match b.ann_kind {
-                        1 => {
-                            self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
-                        }
-                        2 => {
-                            self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
-                        }
-                        _ => {}
-                    }
-                }
-                // A GUARDED delegating setter's body runs `checkNotNullParameter(value, "<set-?>")`
-                // BEFORE the bridge call, so its `<set-?>` constant and the `Intrinsics` machinery
-                // intern first (kotlinc's first-use order); the unguarded shapes reach the bridge
-                // call directly.
-                if *setter_kind == 2 {
-                    self.cp.utf8("<set-?>");
-                    self.cp.string("<set-?>");
-                    self.cp.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "checkNotNullParameter",
-                        "(Ljava/lang/Object;Ljava/lang/String;)V",
-                    );
-                }
-                self.cp.methodref(&b.owner, &b.name, desc);
-            }
-            // A getter/setter of a parameterized-type property carries a generic Signature, interned
-            // right after its descriptor (kotlinc's order).
-            if let Some(Some(s)) = sigs.accessors.get(i) {
-                self.cp.utf8(s);
-            }
-            // A field the constructor never stores (a body property initialized to `null`) first
-            // appears at its GETTER: kotlinc interns the return annotation, then the field's name and
-            // descriptor at the `getfield`.
-            if *setter_kind == 0 {
-                if let Some(f) = fields.iter().find(|f| {
-                    let mut ch = f.name.chars();
-                    let cap = ch
-                        .next()
-                        .map(|c| c.to_uppercase().collect::<String>() + ch.as_str())
-                        .unwrap_or_default();
-                    *name == format!("get{cap}")
-                }) {
-                    // The getter's return annotation interns at its method-attribute write —
-                    // usually a dedup no-op (ctor parameter annotations came first), but a class
-                    // whose only reference property is a BODY property first interns it here.
-                    match f.ann_kind {
-                        1 => {
-                            self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
-                        }
-                        2 => {
-                            self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
-                        }
-                        _ => {}
-                    }
-                    // A field the constructor never stores (a body property initialized to `null`)
-                    // first appears at its GETTER: its name/descriptor intern at the `getfield`.
-                    if !f.stores_in_ctor {
-                        self.cp.utf8(&f.name);
-                        self.cp.utf8(&f.desc);
-                        self.cp.fieldref(this_internal, &f.name, &f.desc);
-                    }
-                }
-            }
-            if *setter_kind >= 1 {
-                self.cp.utf8("<set-?>");
-            }
-            if *setter_kind == 2 {
-                self.cp.string("<set-?>");
-            }
-            // The hoisted setter's value-parameter LVT descriptor (primitives only) lands right
-            // after `<set-?>` in kotlinc's pool.
-            if let Some(lvt) = bridge.as_ref().and_then(|b| b.lvt_desc.as_ref()) {
-                self.cp.utf8(lvt);
-            }
-        }
-        // Each parameterized-type FIELD's `Signature` value, in field order — kotlinc interns these after
-        // all accessors, right before the class's `@Metadata` (a field's Signature attribute serializes
-        // after the methods but its Utf8 lands here).
-        for s in sigs.fields.iter().flatten() {
-            self.cp.utf8(s);
-        }
-    }
-
-    /// Seed a companion OUTER's hoisted-property entries in kotlinc's first-use order, AFTER
-    /// [`Self::seed_plain_class_pool`]: the `access$…$cp` bridges (each interning its static's
-    /// field entries at the body's `getstatic`), then `<clinit>` with the `Companion` construction
-    /// and the hoisted initializers' string constants. Pre-interning here makes the field-table and
-    /// method-emission interning downstream a dedup no-op, so the pool ORDER matches kotlinc even
-    /// though krusty writes the field table first.
-    #[allow(clippy::too_many_arguments)]
-    pub fn seed_companion_outer_pool(
-        &mut self,
-        this_internal: &str,
-        // (name, descriptor, is_var, ann_kind, string_const) per hoisted static, declaration order.
-        statics: &[(String, String, bool, u8, Option<KtString>)],
-        companion_internal: &str,
-        companion_field: (&str, &str),
-    ) {
-        for (name, desc, is_var, ann_kind, _) in statics {
-            match ann_kind {
-                1 => {
-                    self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
-                }
-                2 => {
-                    self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
-                }
-                _ => {}
-            }
-            let mut ch = name.chars();
-            let cap = ch
-                .next()
-                .map(|c| c.to_uppercase().collect::<String>() + ch.as_str())
-                .unwrap_or_default();
-            self.cp.utf8(&format!("access$get{cap}$cp"));
-            self.cp.utf8(&format!("(){desc}"));
-            self.cp.fieldref(this_internal, name, desc);
-            if *is_var {
-                self.cp.utf8(&format!("access$set{cap}$cp"));
-                self.cp.utf8(&format!("({desc})V"));
-                self.cp.utf8("<set-?>");
-            }
-        }
-        self.cp.utf8("<clinit>");
-        self.cp.class(companion_internal);
-        self.cp.methodref(
-            companion_internal,
-            "<init>",
-            "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-        );
-        self.cp
-            .fieldref(this_internal, companion_field.0, companion_field.1);
-        for (_, _, _, _, string_const) in statics {
-            if let Some(sc) = string_const {
-                self.cp.string_kt(sc);
-            }
         }
     }
 
