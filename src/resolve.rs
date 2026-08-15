@@ -2331,6 +2331,13 @@ pub struct SymbolTable {
     /// file's package is folded into the key here. Kept beside the per-file map rather than in
     /// [`Self::classes`], whose keys must stay real classifier identities.
     pub source_alias_fqns: HashMap<TypeName, TypeName>,
+    /// Source `typealias` EXPANSIONS by fully-qualified alias name: the alias's own formal names
+    /// and its target applied to its own arguments, with those formals as `Ty::TyParam`
+    /// (`typealias Box<S, A> = PBox<S, S, A, A>`). The name edge above records only the target
+    /// CLASSIFIER, which is all name resolution needs; `@Metadata` must describe the expansion so a
+    /// consumer can place a use site's arguments. Every valid source alias has one; an unresolved
+    /// declaration is a frontend error and compilation stops before emission.
+    pub source_alias_expansions: HashMap<TypeName, (Vec<String>, Ty)>,
     anonymous_object_types: HashMap<(u32, DeclId), TypeName>,
     anonymous_object_captures: HashMap<(u32, DeclId), Vec<AnonymousObjectCapture>>,
     anonymous_object_capture_discovered: std::collections::HashSet<(u32, DeclId)>,
@@ -2427,6 +2434,7 @@ impl Default for SymbolTable {
             source_class_headers: HashMap::new(),
             source_class_aliases: HashMap::new(),
             source_alias_fqns: HashMap::new(),
+            source_alias_expansions: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),
             anonymous_object_capture_discovered: std::collections::HashSet::new(),
@@ -7956,16 +7964,92 @@ fn collect_signatures_with_cp_impl(
                 table
                     .source_class_aliases
                     .insert((file_index as u32, alias.clone()), internal);
-                // The qualified spelling of the same edge. A reference from another file names the
-                // alias by its package, which no per-file key can answer.
-                let package = file.package.as_deref().unwrap_or("").replace('.', "/");
-                let fqn = if package.is_empty() {
-                    alias.clone()
-                } else {
-                    format!("{package}/{alias}")
-                };
-                table.source_alias_fqns.insert(type_name(&fqn), internal);
             }
+        }
+        // Resolve every alias declaration to the one authoritative expansion consumed by metadata.
+        // Alias chains are structurally expanded first; the remaining classifier spellings then bind
+        // through this declaration file's ordinary imports and class table.
+        let package = file.package.as_deref().unwrap_or("").replace('.', "/");
+        let package_source = file.package.as_deref().unwrap_or("");
+        let mut visible_aliases = Vec::new();
+        // Qualified spellings are absolute and independent of import precedence.
+        for declaration_file in files {
+            let declaration_package = declaration_file.package.as_deref().unwrap_or("");
+            for (name, formals, target) in &declaration_file.type_alias_fun {
+                let qualified = if declaration_package.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{declaration_package}.{name}")
+                };
+                visible_aliases.push((qualified, formals.clone(), target.clone()));
+            }
+        }
+        // Star imports contribute below same-package declarations.
+        for imported_package in file
+            .imports
+            .iter()
+            .filter_map(|import| import.strip_suffix(".*"))
+        {
+            for declaration_file in files
+                .iter()
+                .filter(|candidate| candidate.package.as_deref().unwrap_or("") == imported_package)
+            {
+                visible_aliases.extend(declaration_file.type_alias_fun.iter().cloned());
+            }
+        }
+        // Same-package declarations outrank star imports and include aliases from sibling files.
+        for declaration_file in files
+            .iter()
+            .filter(|candidate| candidate.package.as_deref().unwrap_or("") == package_source)
+        {
+            visible_aliases.extend(declaration_file.type_alias_fun.iter().cloned());
+        }
+        // Explicit imports are final and may rename the lookup spelling.
+        for (spelling, path) in import_map(file) {
+            let internal_path = path.replace('.', "/");
+            for declaration_file in files {
+                let declaration_package = declaration_file
+                    .package
+                    .as_deref()
+                    .unwrap_or("")
+                    .replace('.', "/");
+                for (name, formals, target) in &declaration_file.type_alias_fun {
+                    let qualified = if declaration_package.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{declaration_package}/{name}")
+                    };
+                    if qualified == internal_path {
+                        visible_aliases.push((spelling.clone(), formals.clone(), target.clone()));
+                    }
+                }
+            }
+        }
+        for (alias, formals, target) in &file.type_alias_fun {
+            let names = &file_class_names[file_index];
+            let symbolic = TParams::symbolic_from_decl_with(formals, &[], &|candidate| {
+                names.get_class(candidate)
+            });
+            let expanded_target =
+                crate::parser::expanded_type_alias_target(&visible_aliases, target);
+            let expansion = ty_of_ref(&expanded_target, names, &symbolic, diags);
+            if expansion == Ty::Error {
+                // `ty_of_ref` has already emitted the frontend diagnostic. A compilation with an
+                // invalid declaration never reaches metadata emission; do not synthesize a target.
+                continue;
+            }
+            let fqn = if package.is_empty() {
+                alias.clone()
+            } else {
+                format!("{package}/{alias}")
+            };
+            let identity = type_name(&fqn);
+            if let Some(target) = expansion.kotlin_class_internal() {
+                table.source_alias_fqns.insert(identity, target);
+            }
+            table
+                .source_alias_expansions
+                .insert(identity, (formals.clone(), expansion));
         }
     }
 
