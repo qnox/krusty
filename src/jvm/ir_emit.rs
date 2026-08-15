@@ -2483,7 +2483,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
 /// shape — a class's `$$serializer` (inner name `$serializer`) and its `Companion`, both `public static
 /// final` — emitted in kotlinc's order ($serializer before Companion). Anonymous nested classes (the
 /// suspend continuations) are not yet registered (they also need an `EnclosingMethod` attribute).
-fn inner_class_access(c: &IrClass) -> u16 {
+fn inner_class_access(ir: &IrFile, c: &IrClass) -> u16 {
     const PUBLIC: u16 = 0x0001;
     const STATIC: u16 = 0x0008;
     const FINAL: u16 = 0x0010;
@@ -2495,7 +2495,14 @@ fn inner_class_access(c: &IrClass) -> u16 {
     // Inner/static nesting is a source-level class property, not a consequence of a field spelling.
     // In particular, another synthetic class may conventionally call an ordinary capture `this$0`.
     let is_inner = c.is_inner_class;
-    let mut access = PUBLIC | if is_inner { 0 } else { STATIC };
+    // The InnerClasses access carries the SOURCE visibility (`protected class Category` reads
+    // `protected static final` there), unlike the class's own access flags.
+    let visibility = match ir.class_visibilities.get(&c.fq_name_id()) {
+        Some(crate::types::Visibility::Protected) => 0x0004,
+        Some(crate::types::Visibility::Private) => 0x0002,
+        _ => PUBLIC,
+    };
+    let mut access = visibility | if is_inner { 0 } else { STATIC };
     if c.is_annotation {
         access |= INTERFACE | ABSTRACT | ANNOTATION;
     } else if c.is_interface {
@@ -2577,7 +2584,7 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
                 inner: fq.clone(),
                 outer: Some(outer.to_string()),
                 name: Some("$serializer".to_string()),
-                access: inner_class_access(c),
+                access: inner_class_access(ir, c),
             });
         }
     }
@@ -2596,7 +2603,7 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
                             .iter()
                             .find(|candidate| candidate.fq_name_id() == name)
                     })
-                    .map_or(0x0019, inner_class_access),
+                    .map_or(0x0019, |candidate| inner_class_access(ir, candidate)),
             });
         }
     }
@@ -2649,7 +2656,7 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
             } else if anonymous {
                 0x0008 | 0x0010
             } else {
-                inner_class_access(c)
+                inner_class_access(ir, c)
             },
         });
     }
@@ -2689,7 +2696,7 @@ fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit
                     .classes
                     .iter()
                     .find(|candidate| candidate.fq_name_matches(sub))
-                    .map_or(0x0019, inner_class_access),
+                    .map_or(0x0019, |candidate| inner_class_access(ir, candidate)),
             });
         }
     }
@@ -4582,45 +4589,6 @@ fn emit_class(
                 );
                 cw.set_method_lines("<init>", &stub_desc, &[(0, c.decl_line)]);
             }
-            // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
-            // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a
-            // full mask.
-            if !param_tys.is_empty()
-                && defaults.len() == param_tys.len()
-                && defaults.iter().all(Option::is_some)
-                && !c.is_sealed
-                && ctor_access == 0x0001
-            {
-                let mut z = CodeBuilder::new(1);
-                z.aload(0);
-                for &t in &param_tys {
-                    push_zero(t, &mut z, &mut cw);
-                }
-                for mask in full_default_masks(param_tys.len()) {
-                    z.push_int(mask, &mut cw);
-                }
-                z.aconst_null();
-                let mut stub_params = param_tys.clone();
-                stub_params.extend(std::iter::repeat_n(
-                    Ty::Int,
-                    default_mask_count(param_tys.len()),
-                ));
-                stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                let aw: i32 = 1 + stub_params
-                    .iter()
-                    .map(|t| slot_words(*t) as i32)
-                    .sum::<i32>();
-                let m = cw.methodref(
-                    &fq_name,
-                    "<init>",
-                    &method_descriptor(&stub_params, Ty::Unit),
-                );
-                z.invokespecial(m, aw, 0);
-                z.ret_void();
-                z.ensure_locals(1);
-                z.link();
-                cw.add_method(0x0001, "<init>", "()V", &z);
-            }
         }
         // A COMPANION's synthetic marker ctor is emitted LAST, after the instance accessors
         // (kotlinc's member order — see below); every other shape keeps it beside the primary.
@@ -4831,6 +4799,69 @@ fn emit_class(
                 );
             } else {
                 emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, false);
+            }
+        }
+    }
+    // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
+    // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
+    // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
+    // visibility (a PROTECTED primary gets a protected convenience ctor).
+    if c.has_primary_ctor {
+        let param_tys = class_ctor_jvm_tys(c);
+        let value_param_ctor = ir.has_value_param_ctor(&fq_name);
+        let ctor_access = if c.is_singleton() || c.is_value || value_param_ctor || c.is_sealed {
+            0x0002
+        } else if is_continuation || anonymous_scope(c).is_some() {
+            0x0000
+        } else {
+            match ir.ctor_visibilities.get(&c.fq_name_id()) {
+                Some(crate::types::Visibility::Protected) => 0x0004,
+                _ => 0x0001,
+            }
+        };
+        if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
+            if !param_tys.is_empty()
+                && defaults.len() == param_tys.len()
+                && defaults.iter().all(Option::is_some)
+                && !c.is_sealed
+                && (ctor_access == 0x0001 || ctor_access == 0x0004)
+            {
+                let mut z = CodeBuilder::new(1);
+                z.aload(0);
+                for &t in &param_tys {
+                    push_zero(t, &mut z, &mut cw);
+                }
+                for mask in full_default_masks(param_tys.len()) {
+                    z.push_int(mask, &mut cw);
+                }
+                z.aconst_null();
+                let mut stub_params = param_tys.clone();
+                stub_params.extend(std::iter::repeat_n(
+                    Ty::Int,
+                    default_mask_count(param_tys.len()),
+                ));
+                stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+                let aw: i32 = 1 + stub_params
+                    .iter()
+                    .map(|t| slot_words(*t) as i32)
+                    .sum::<i32>();
+                let m = cw.methodref(
+                    &fq_name,
+                    "<init>",
+                    &method_descriptor(&stub_params, Ty::Unit),
+                );
+                z.invokespecial(m, aw, 0);
+                z.ret_void();
+                z.ensure_locals(1);
+                z.link();
+                cw.add_method(ctor_access, "<init>", "()V", &z);
+                // kotlinc gives the convenience ctor a `this` LocalVariableTable (no line table).
+                cw.set_method_debug(
+                    "<init>",
+                    "()V",
+                    None,
+                    &[("this".to_string(), format!("L{fq_name};"), 0)],
+                );
             }
         }
     }
