@@ -29,7 +29,7 @@ use scope::{ContextValue, NarrowPath, Ns, ScopeKind};
 mod context_capture;
 mod dependency_platform;
 mod scope;
-pub(crate) use context_capture::selected_context_values;
+pub(crate) use context_capture::{selected_context_values, SelectedContextSources};
 pub(crate) use dependency_platform::DependencyPlatform;
 
 const MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES: usize = 64;
@@ -11227,6 +11227,9 @@ fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
 
 #[derive(Clone, Debug)]
 pub struct ResolvedSuperCall {
+    /// Exact dispatch receiver selected by `super` / `super@Label`. A labeled super may target an
+    /// enclosing class instance, so the callable target alone is not enough for lowering.
+    pub receiver: ImplicitReceiverSelection,
     pub owner: TypeName,
     pub name: String,
     pub params: Vec<Ty>,
@@ -11240,6 +11243,7 @@ pub struct ResolvedSuperCall {
 
 impl ResolvedSuperCall {
     fn source(
+        receiver: ImplicitReceiverSelection,
         owner: TypeName,
         name: String,
         interface: bool,
@@ -11248,6 +11252,7 @@ impl ResolvedSuperCall {
         source_member: Option<crate::libraries::SourceMember>,
     ) -> Self {
         Self {
+            receiver,
             owner,
             name,
             params,
@@ -11259,10 +11264,14 @@ impl ResolvedSuperCall {
         }
     }
 
-    fn classpath(member: crate::libraries::LibraryMember) -> Option<Self> {
+    fn classpath(
+        receiver: ImplicitReceiverSelection,
+        member: crate::libraries::LibraryMember,
+    ) -> Option<Self> {
         let interface = member.is_interface();
         let source_member = member.source_member;
         Some(Self {
+            receiver,
             owner: member.owner?,
             name: member.name,
             params: member.params,
@@ -20283,6 +20292,34 @@ impl<'a> Checker<'a> {
             .and_then(Symbol::property_setter)
     }
 
+    /// Select the runtime receiver denoted by a `super` spelling. Bare `super` uses the current
+    /// dispatch receiver; `super@Label` and `super<T>@Label` use the exact labeled receiver-stack
+    /// coordinate. The type drives supertype/member selection, while the coordinate is preserved for
+    /// lowering so it never reconstructs a label or searches for a same-typed enclosing instance.
+    fn super_receiver_selection(
+        &self,
+        scope: &CheckerScope<'_>,
+        spelling: &str,
+    ) -> Option<ImplicitReceiverSelection> {
+        let (ty, current, receiver_depth) = if let Some((_, label)) = spelling.rsplit_once('@') {
+            let index = self
+                .this_labels
+                .iter()
+                .rposition(|(candidate, _, is_class)| *is_class && candidate == label)?;
+            let top = self.this_labels.len().checked_sub(1)?;
+            (self.this_labels[index].1, index == top, top - index)
+        } else {
+            (scope.this_ty()?, true, 0)
+        };
+        Some(self.implicit_receiver_selection(ImplicitReceiver {
+            ty,
+            identity: (0, receiver_depth),
+            extension_receiver: None,
+            current,
+            receiver_depth,
+        }))
+    }
+
     /// Select a `super[<T>].property` accessor from the current class's direct supertypes.
     ///
     /// A superclass wins before interfaces. With no superclass declaration, exactly one matching
@@ -20291,12 +20328,12 @@ impl<'a> Checker<'a> {
     /// may physically live farther up the hierarchy.
     fn select_super_property_accessor(
         &self,
-        scope: &CheckerScope<'_>,
+        receiver: ImplicitReceiverSelection,
         qualifier: Option<&str>,
         name: &str,
         setter: bool,
     ) -> Option<ResolvedSuperCall> {
-        let current = scope.this_ty()?.obj_internal()?;
+        let current = receiver.ty.obj_internal()?;
         let class = self.syms.class_by_type_name(current)?;
         let matches_qualifier =
             |owner: TypeName| qualifier.is_none_or(|qualifier| owner.qualifier_matches(qualifier));
@@ -20305,6 +20342,7 @@ impl<'a> Checker<'a> {
                 let selected = self.select_property_setter(Ty::obj_name(owner), name)?;
                 let callable = selected.callable;
                 Some(ResolvedSuperCall {
+                    receiver: receiver.clone(),
                     owner,
                     name: callable.name,
                     params: callable.params,
@@ -20316,7 +20354,7 @@ impl<'a> Checker<'a> {
                 })
             } else {
                 let member = self.select_property_member(Ty::obj_name(owner), name)?;
-                let mut target = ResolvedSuperCall::classpath(member.member)?;
+                let mut target = ResolvedSuperCall::classpath(receiver.clone(), member.member)?;
                 target.owner = owner;
                 target.interface = interface;
                 Some(target)
@@ -34119,19 +34157,23 @@ impl<'a> Checker<'a> {
             // value. The same target structure as a super method call crosses into lowering.
             if let Expr::Name(super_name) = self.file.expr(receiver) {
                 if super_name.starts_with("super") {
-                    if super_name.contains('@') {
+                    let Some(dispatch_receiver) = self.super_receiver_selection(scope, super_name)
+                    else {
                         self.diags.error(
                             self.span(e),
-                            "labeled super property access is not supported",
+                            format!("unresolved labeled super receiver '{super_name}'"),
                         );
                         return self.set(e, Ty::Error);
-                    }
+                    };
                     let qualifier = super_name
                         .strip_prefix("super<")
                         .and_then(|tail| tail.split('>').next());
-                    if let Some(target) =
-                        self.select_super_property_accessor(scope, qualifier, &name, false)
-                    {
+                    if let Some(target) = self.select_super_property_accessor(
+                        dispatch_receiver,
+                        qualifier,
+                        &name,
+                        false,
+                    ) {
                         let ret = target.ret;
                         self.resolved_super_calls.insert(e, target);
                         return self.set(e, ret);
@@ -43682,15 +43724,17 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 if let Some(super_ty) = super_qual {
-                    // A LABELED super (`super@A.f()`) selects an ENCLOSING class's supertype — not
-                    // modeled; reject so the file skips rather than dispatching to the wrong receiver.
-                    if matches!(self.file.expr(receiver), Expr::Name(r) if r.contains('@')) {
+                    let Expr::Name(super_name) = self.file.expr(receiver) else {
+                        unreachable!("super qualifier was recognized from a name")
+                    };
+                    let Some(dispatch_receiver) = self.super_receiver_selection(scope, super_name)
+                    else {
                         self.diags.error(
                             span,
-                            format!("krusty: labeled super '{name}' is not supported"),
+                            format!("unresolved labeled super receiver '{super_name}'"),
                         );
                         return Ty::Error;
-                    }
+                    };
                     let arg_tys = self.arg_tys(scope, args);
                     let arg_kinds = self.call_arg_kinds(scope, args);
                     // A `super<T>` qualifier matches a supertype by its simple name.
@@ -43699,7 +43743,7 @@ impl<'a> Checker<'a> {
                             .as_deref()
                             .is_none_or(|t| internal.qualifier_matches(t))
                     };
-                    if let Some(Ty::Obj(internal, _)) = scope.this_ty() {
+                    if let Some(internal) = dispatch_receiver.ty.obj_internal() {
                         let declared = self.syms.class_by_type_name(internal);
                         let sup = declared.and_then(|c| c.super_internal);
                         // The base spelled WITH its declared type arguments (`ArrayList<Int>`) — a
@@ -43726,6 +43770,7 @@ impl<'a> Checker<'a> {
                                 self.resolved_super_calls.insert(
                                     call,
                                     ResolvedSuperCall::source(
+                                        dispatch_receiver.clone(),
                                         owner,
                                         name.clone(),
                                         false,
@@ -43741,7 +43786,9 @@ impl<'a> Checker<'a> {
                                 self.select_super_instance(recv, &name, &arg_kinds)
                             }) {
                                 let ret = m.ret;
-                                if let Some(mut target) = ResolvedSuperCall::classpath(m) {
+                                if let Some(mut target) =
+                                    ResolvedSuperCall::classpath(dispatch_receiver.clone(), m)
+                                {
                                     // `invokespecial` must name the DIRECT superclass. JVM method
                                     // resolution continues from there to the inherited declaration;
                                     // naming the declaration's indirect interface is verifier-invalid.
@@ -43778,6 +43825,7 @@ impl<'a> Checker<'a> {
                             self.resolved_super_calls.insert(
                                 call,
                                 ResolvedSuperCall::source(
+                                    dispatch_receiver.clone(),
                                     *iface,
                                     name.clone(),
                                     true,
@@ -48329,18 +48377,19 @@ impl<'a> Checker<'a> {
         // value named `super`. Select the exact direct-super accessor now and hand it to lowering.
         if let Expr::Name(super_name) = self.file.expr(receiver) {
             if super_name.starts_with("super") {
-                if super_name.contains('@') {
+                let Some(dispatch_receiver) = self.super_receiver_selection(scope, super_name)
+                else {
                     self.diags.error(
                         self.file.stmt_spans[s.0 as usize],
-                        "labeled super property assignment is not supported",
+                        format!("unresolved labeled super receiver '{super_name}'"),
                     );
                     return;
-                }
+                };
                 let qualifier = super_name
                     .strip_prefix("super<")
                     .and_then(|tail| tail.split('>').next());
                 let Some(target) =
-                    self.select_super_property_accessor(scope, qualifier, &name, true)
+                    self.select_super_property_accessor(dispatch_receiver, qualifier, &name, true)
                 else {
                     self.diags.error(
                         self.file.stmt_spans[s.0 as usize],
@@ -49204,11 +49253,14 @@ impl<'a> Checker<'a> {
         if let FunBody::Expr(body) | FunBody::Block(body) = &f.body {
             let (selected_contexts, direct_receivers) = selected_context_values(
                 self.file,
-                &self.expr_types,
-                &self.implicit_receiver_selections,
-                &self.context_args,
-                &self.resolved_calls,
-                &self.stmt_lowers,
+                SelectedContextSources {
+                    expr_types: &self.expr_types,
+                    implicit_receiver_selections: &self.implicit_receiver_selections,
+                    context_args: &self.context_args,
+                    resolved_calls: &self.resolved_calls,
+                    resolved_super_calls: &self.resolved_super_calls,
+                    stmt_lowers: &self.stmt_lowers,
+                },
                 *body,
                 true,
             );

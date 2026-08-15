@@ -3108,7 +3108,7 @@ pub fn lower_value_classes(
                         .collect()
                 }
                 IrExpr::Call {
-                    callee: Callee::Local(cfid),
+                    callee: Callee::Local(cfid) | Callee::ClassStatic { function: cfid, .. },
                     args,
                     ..
                 } => args
@@ -3749,7 +3749,7 @@ fn unboxed_vc_class(
         // A local call returning an unboxed value class — only considered when `calls` is set (the
         // `Any`-return case); the lambda case must NOT box these (they already satisfy `Object`).
         IrExpr::Call {
-            callee: Callee::Local(fid),
+            callee: Callee::Local(fid) | Callee::ClassStatic { function: fid, .. },
             ..
         } if calls => match rets.get(*fid as usize) {
             Some(Ty::Obj(fq_name, _)) if under.contains_key(fq_name) => Some(*fq_name),
@@ -4066,7 +4066,7 @@ fn operand_nonnull(
             ..
         } if name == "constructor-impl" || name == "box-impl" => true,
         IrExpr::Call {
-            callee: Callee::Local(fid),
+            callee: Callee::Local(fid) | Callee::ClassStatic { function: fid, .. },
             ..
         } => rets.get(*fid as usize).is_some_and(non_null_ty),
         IrExpr::GetValue(i) => slots.get(i).is_some_and(non_null_ty),
@@ -4227,7 +4227,7 @@ fn repr(
             value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Unboxed)
         }
         IrExpr::Call {
-            callee: Callee::Local(fid),
+            callee: Callee::Local(fid) | Callee::ClassStatic { function: fid, .. },
             ..
         } => rets
             .get(*fid as usize)
@@ -4633,7 +4633,7 @@ fn is_boxed_vc(
             ..
         } if *owner == x && name == "box-impl" => true,
         IrExpr::Call {
-            callee: Callee::Local(fid),
+            callee: Callee::Local(fid) | Callee::ClassStatic { function: fid, .. },
             ..
         } => funcs.get(*fid as usize).is_some_and(|f| is_x(&f.ret)),
         // A cross-file call returning the value class `x` (or `x?`) hands back a BOXED `x` — the sibling

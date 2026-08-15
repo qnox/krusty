@@ -8,6 +8,11 @@ use crate::types::Ty;
 /// top-level function).
 pub fn emit_file(ir: &IrFile) -> String {
     let mut out = String::new();
+    let class_methods: std::collections::HashSet<u32> = ir
+        .classes
+        .iter()
+        .flat_map(|class| class.methods.iter().copied())
+        .collect();
     for c in &ir.classes {
         // Constructor params are the leading `ctor_param_count` fields, named `v1..=vN` to match the
         // IR value numbering (value 0 = `this`); fields after them are body properties set by
@@ -27,10 +32,20 @@ pub fn emit_file(ir: &IrFile) -> String {
         for &fid in &c.methods {
             let f = &ir.functions[fid as usize];
             let Some(body) = f.body else { continue };
-            // Instance method: value 0 = `this`, params are values 1..n.
-            let params: Vec<String> = (0..f.params.len()).map(|i| format!("v{}", i + 1)).collect();
-            out.push_str(&format!("  {}({}) {{\n", f.name, params.join(", ")));
-            emit_stmt(ir, body, 2, true, &mut out);
+            // An instance method reserves value 0 for `this`; a class-owned static method starts its
+            // ordinary parameters at value 0 and remains owned by the class in JS too.
+            let params: Vec<String> = if f.is_static {
+                (0..f.params.len()).map(|i| format!("v{i}")).collect()
+            } else {
+                (0..f.params.len()).map(|i| format!("v{}", i + 1)).collect()
+            };
+            let static_prefix = if f.is_static { "static " } else { "" };
+            out.push_str(&format!(
+                "  {static_prefix}{}({}) {{\n",
+                f.name,
+                params.join(", ")
+            ));
+            emit_stmt(ir, body, 2, !f.is_static, &mut out);
             out.push_str("  }\n");
         }
         out.push_str("}\n");
@@ -45,7 +60,7 @@ pub fn emit_file(ir: &IrFile) -> String {
         ));
     }
     for (i, f) in ir.functions.iter().enumerate() {
-        if f.dispatch_receiver.is_some() {
+        if f.dispatch_receiver.is_some() || class_methods.contains(&(i as u32)) {
             continue; // emitted as a class method above
         }
         let Some(body) = f.body else { continue };
@@ -334,6 +349,16 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 let name = &ir.functions[*fid as usize].name;
                 format!("{}({})", name, emit_args(ir, args, inst))
             }
+            Callee::ClassStatic { owner, function } => {
+                let name = &ir.functions[*function as usize].name;
+                let owner = owner.render();
+                format!(
+                    "{}.{}({})",
+                    class_simple(&owner),
+                    name,
+                    emit_args(ir, args, inst)
+                )
+            }
             Callee::LocalDefault(fid) => {
                 let name = format!("{}$default", ir.functions[*fid as usize].name);
                 format!("{}({})", name, emit_args(ir, args, inst))
@@ -353,10 +378,22 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     .unwrap_or_default();
                 format!("{}.{}({})", recv, name, emit_args(ir, args, inst))
             }
-            // `super.name(args)` → JS `<base>.prototype.name.call(this, …)` is the closest, but the JS
-            // backend doesn't track the base name; emit the plain super form.
-            Callee::Special { name, .. } => {
-                format!("super.{}({})", name, emit_args(ir, args, inst))
+            Callee::Special { owner, name, .. } => {
+                let receiver = dispatch_receiver
+                    .map(|receiver| emit_expr(ir, receiver, inst))
+                    .unwrap_or_else(|| "this".to_string());
+                if inst && receiver == "this" {
+                    format!("super.{}({})", name, emit_args(ir, args, inst))
+                } else {
+                    let owner = owner.render();
+                    let args = emit_args(ir, args, inst);
+                    let comma = if !args.is_empty() { ", " } else { "" };
+                    format!(
+                        "{}.prototype.{}.call({receiver}{comma}{args})",
+                        class_simple(&owner),
+                        name
+                    )
+                }
             }
             Callee::Intrinsic { operation, .. } => match operation {
                 crate::ir::IrIntrinsic::StringPlus => {
@@ -581,4 +618,124 @@ fn js_string(s: &KtString) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{IrClass, IrFunction};
+
+    fn blank_class(name: &str) -> IrClass {
+        IrClass {
+            fq_name: name.into(),
+            is_source_declared: true,
+            is_anonymous_object: false,
+            enclosing_function: None,
+            is_inner_class: false,
+            is_local_class: false,
+            is_value: false,
+            is_data: false,
+            decl_line: 0,
+            type_param_bounds: Vec::new(),
+            type_params: Vec::new(),
+            captured_type_params: Vec::new(),
+            supertypes: Vec::new(),
+            properties: Vec::new(),
+            fields: Vec::new(),
+            field_annotations: Vec::new(),
+            ctor_param_count: 0,
+            ctor_args: Vec::new(),
+            init_body: None,
+            pre_super_param_fields: Vec::new(),
+            explicit_param_stores: false,
+            methods: Vec::new(),
+            is_interface: false,
+            is_fun_interface: false,
+            is_annotation: false,
+            annotation_impl_of: None,
+            is_sealed: false,
+            sealed_subclasses: Default::default(),
+            is_abstract: false,
+            is_open: true,
+            superclass: "Base".into(),
+            super_args: Vec::new(),
+            super_ctor_params: Vec::new(),
+            enum_entries: Vec::new(),
+            enum_entry_of: None,
+            prop_ref: None,
+            func_ref: None,
+            bridges: Vec::new(),
+            interfaces: Default::default(),
+            is_object: false,
+            is_companion: false,
+            companion_class: None,
+            secondary_ctors: Vec::new(),
+            has_primary_ctor: true,
+            applied_annotations: Vec::new(),
+            annotation_retention: None,
+        }
+    }
+
+    #[test]
+    fn class_static_call_preserves_owner_and_is_not_emitted_globally() {
+        let mut ir = IrFile::default();
+        let receiver = ir.add_expr(IrExpr::GetValue(0));
+        let special = ir.add_expr(IrExpr::Call {
+            callee: Callee::Special {
+                owner: "Base".into(),
+                name: "value".to_string(),
+                descriptor: "()I".to_string(),
+                interface: false,
+            },
+            dispatch_receiver: Some(receiver),
+            args: Vec::new(),
+        });
+        let ret = ir.add_expr(IrExpr::Return(Some(special)));
+        let bridge_body = ir.add_expr(IrExpr::Block {
+            stmts: vec![ret],
+            value: None,
+        });
+        let bridge = ir.add_fun(IrFunction {
+            name: "access$super".to_string(),
+            params: vec![Ty::obj("Outer")],
+            ret: Ty::Int,
+            body: Some(bridge_body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let mut outer = blank_class("Outer");
+        outer.methods.push(bridge);
+        ir.add_class(outer);
+
+        let argument = ir.add_expr(IrExpr::Const(IrConst::Null));
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::ClassStatic {
+                owner: "Outer".into(),
+                function: bridge,
+            },
+            dispatch_receiver: None,
+            args: vec![argument],
+        });
+        let caller_ret = ir.add_expr(IrExpr::Return(Some(call)));
+        let caller_body = ir.add_expr(IrExpr::Block {
+            stmts: vec![caller_ret],
+            value: None,
+        });
+        ir.add_fun(IrFunction {
+            name: "box".to_string(),
+            params: Vec::new(),
+            ret: Ty::Int,
+            body: Some(caller_body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+
+        let js = emit_file(&ir);
+        assert!(js.contains("static access$super(v0)"), "{js}");
+        assert!(js.contains("Outer.access$super(null)"), "{js}");
+        assert!(js.contains("Base.prototype.value.call(v0)"), "{js}");
+        assert!(!js.contains("function access$super"), "{js}");
+    }
 }

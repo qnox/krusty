@@ -8,7 +8,6 @@ use crate::features::LangFeatures;
 pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 pub(crate) use crate::resolve::class_internal_resolver;
-pub(crate) use crate::resolve::selected_context_values;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassModel as FrontendClassModel;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
@@ -32,6 +31,7 @@ pub(crate) use crate::resolve::{
     ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
     SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
+pub(crate) use crate::resolve::{selected_context_values, SelectedContextSources};
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
 pub use crate::source::{SourceInput, SourceKind};

@@ -39,6 +39,13 @@ pub enum IrIntrinsic {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Callee {
     Local(FunId),
+    /// A static method defined on a class in this IR file. Unlike [`Callee::Local`], whose owner is
+    /// the file facade, this carries the declaring class explicitly. The `FunId` keeps the call tied
+    /// to the function's semantic parameter/return types through backend ABI transformations.
+    ClassStatic {
+        owner: TypeName,
+        function: FunId,
+    },
     /// The `$default` synthetic of a same-file top-level function/extension (`FunId`) — emitted as
     /// `invokestatic <facade>.<name>$default(realparams, int mask, Object marker)ret`. Like `Local` the
     /// facade is resolved at emit (`self.facade`); the descriptor appends the trailing `I` mask +

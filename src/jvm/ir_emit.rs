@@ -620,7 +620,7 @@ fn build_class_metadata(
         .iter()
         .copied()
         .filter(|&fid| {
-            if ir.lambda_own_params_from.contains_key(&fid) {
+            if ir.lambda_own_params_from.contains_key(&fid) || ir.synthetic_methods.contains(&fid) {
                 return false;
             }
             if ext_prop_accessor_fids.contains(&fid) {
@@ -3347,7 +3347,10 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
                 None => true,
             },
             Callee::CrossFile { params, ret, .. } => params.iter().all(ty_ok) && ty_ok(ret),
-            Callee::Local(_) | Callee::LocalDefault(_) | Callee::Intrinsic { .. } => true,
+            Callee::Local(_)
+            | Callee::LocalDefault(_)
+            | Callee::ClassStatic { .. }
+            | Callee::Intrinsic { .. } => true,
         }
     }
     fn generic_value_class_ok(ir: &IrFile, class_idx: usize) -> bool {
@@ -10870,7 +10873,9 @@ impl<'a> Emitter<'a> {
                 ret_is_nothing(&self.ir.functions[fid as usize].ret)
             }
             IrExpr::Call { callee, .. } => match callee {
-                Callee::Local(fid) | Callee::LocalDefault(fid) => {
+                Callee::Local(fid)
+                | Callee::LocalDefault(fid)
+                | Callee::ClassStatic { function: fid, .. } => {
                     ret_is_nothing(&self.ir.functions[*fid as usize].ret)
                 }
                 Callee::CrossFile { ret, .. } => ret_is_nothing(ret),
@@ -10896,7 +10901,10 @@ impl<'a> Emitter<'a> {
         match node {
             IrExpr::MethodCall { .. } => true,
             IrExpr::Call { callee, .. } => match callee {
-                Callee::Local(_) | Callee::LocalDefault(_) | Callee::CrossFile { .. } => true,
+                Callee::Local(_)
+                | Callee::LocalDefault(_)
+                | Callee::ClassStatic { .. }
+                | Callee::CrossFile { .. } => true,
                 Callee::Special { .. } | Callee::Virtual { .. } => true,
                 Callee::Static { inline, .. } => !inline.can_inline(),
                 Callee::Intrinsic { .. } => false,
@@ -11390,6 +11398,37 @@ impl<'a> Emitter<'a> {
                         .cw
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
                     code.invokestatic(m, aw, slot_words(ret) as i32);
+                }
+                Callee::ClassStatic { owner, function } => {
+                    let f = &self.ir.functions[*function as usize];
+                    let param_tys = jvm_tys(&f.params);
+                    let ret = ir_ty_to_jvm(&f.ret);
+                    if args.len() != param_tys.len() {
+                        crate::trace_compiler!(
+                            "emit",
+                            "class-static call arity mismatch for {}.{} ({} args vs {} params)",
+                            owner,
+                            f.name,
+                            args.len(),
+                            param_tys.len()
+                        );
+                        self.run.set_inline_bail("call arity mismatch");
+                        if ret != Ty::Unit {
+                            push_zero(ret, code, self.cw);
+                        }
+                        return;
+                    }
+                    self.emit_operands(args, code);
+                    let argument_words: i32 =
+                        param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
+                    let descriptor = method_descriptor(&param_tys, ret);
+                    let owner = owner.render();
+                    let method = if self.bodies.owner_is_interface(&owner) {
+                        self.cw.interface_methodref(&owner, &f.name, &descriptor)
+                    } else {
+                        self.cw.methodref(&owner, &f.name, &descriptor)
+                    };
+                    code.invokestatic(method, argument_words, slot_words(ret) as i32);
                 }
                 Callee::LocalDefault(fid) => {
                     // The `foo$default(realparams, mask..., Object marker)` synthetic on the self facade
@@ -14228,7 +14267,9 @@ impl<'a> Emitter<'a> {
                 call_ret_ty(&self.ir.functions[fid as usize].ret)
             }
             IrExpr::Call { callee, .. } => match callee {
-                Callee::Local(fid) | Callee::LocalDefault(fid) => {
+                Callee::Local(fid)
+                | Callee::LocalDefault(fid)
+                | Callee::ClassStatic { function: fid, .. } => {
                     call_ret_ty(&self.ir.functions[*fid as usize].ret)
                 }
                 Callee::CrossFile { ret, .. } => call_ret_ty(ret),

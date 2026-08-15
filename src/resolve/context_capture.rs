@@ -2,25 +2,40 @@ use std::collections::HashMap;
 
 use crate::ast::{Expr, ExprId, File, Stmt, StmtId};
 use crate::resolve::{
-    ImplicitReceiverSelection, ResolvedCall, ResolvedContextArgument, StmtLowering,
+    ImplicitReceiverSelection, ResolvedCall, ResolvedContextArgument, ResolvedSuperCall,
+    StmtLowering,
 };
 use crate::types::Ty;
+
+/// Semantic selections consumed by context-capture analysis. Keeping the related checker handoff
+/// maps together prevents each new selected operation from widening the shared traversal's API.
+pub(crate) struct SelectedContextSources<'a> {
+    pub(crate) expr_types: &'a [Ty],
+    pub(crate) implicit_receiver_selections: &'a HashMap<ExprId, ImplicitReceiverSelection>,
+    pub(crate) context_args: &'a HashMap<ExprId, Vec<ResolvedContextArgument>>,
+    pub(crate) resolved_calls: &'a HashMap<ExprId, ResolvedCall>,
+    pub(crate) resolved_super_calls: &'a HashMap<ExprId, ResolvedSuperCall>,
+    pub(crate) stmt_lowers: &'a HashMap<StmtId, StmtLowering>,
+}
 
 /// Every checker-selected context source used by `body`, normalized to the callable boundary that
 /// owns `body`. Direct implicit receivers stay separate because their receiver coordinates still
 /// include that callable's own receiver rungs; sources used through nested callables have those
 /// nested bindings and receiver rungs removed.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn selected_context_values(
     file: &File,
-    expr_types: &[Ty],
-    implicit_receiver_selections: &HashMap<ExprId, ImplicitReceiverSelection>,
-    context_args: &HashMap<ExprId, Vec<ResolvedContextArgument>>,
-    resolved_calls: &HashMap<ExprId, ResolvedCall>,
-    stmt_lowers: &HashMap<StmtId, StmtLowering>,
+    sources: SelectedContextSources<'_>,
     body: ExprId,
     deep: bool,
 ) -> (Vec<ResolvedContextArgument>, Vec<ImplicitReceiverSelection>) {
+    let SelectedContextSources {
+        expr_types,
+        implicit_receiver_selections,
+        context_args,
+        resolved_calls,
+        resolved_super_calls,
+        stmt_lowers,
+    } = sources;
     #[derive(Clone, Copy, Default)]
     struct NestedReceiverCounts {
         all: usize,
@@ -110,6 +125,7 @@ pub(crate) fn selected_context_values(
         implicit_receiver_selections: &HashMap<ExprId, ImplicitReceiverSelection>,
         context_args: &HashMap<ExprId, Vec<ResolvedContextArgument>>,
         resolved_calls: &HashMap<ExprId, ResolvedCall>,
+        resolved_super_calls: &HashMap<ExprId, ResolvedSuperCall>,
         stmt_lowers: &HashMap<StmtId, StmtLowering>,
         e: ExprId,
         deep: bool,
@@ -124,6 +140,16 @@ pub(crate) fn selected_context_values(
                 out,
                 direct_implicit_receivers,
                 &ResolvedContextArgument::ImplicitReceiver(selection.clone()),
+                nested_callable,
+                nested_bound_names,
+                nested_receiver_count,
+            );
+        }
+        if let Some(target) = resolved_super_calls.get(&e) {
+            record_source(
+                out,
+                direct_implicit_receivers,
+                &ResolvedContextArgument::ImplicitReceiver(target.receiver.clone()),
                 nested_callable,
                 nested_bound_names,
                 nested_receiver_count,
@@ -226,6 +252,18 @@ pub(crate) fn selected_context_values(
         if let Expr::Block { stmts, trailing } = file.expr(e) {
             let saved_bound_len = nested_bound_names.len();
             for &statement in stmts {
+                if let Some(StmtLowering::SuperPropertyWrite { target }) =
+                    stmt_lowers.get(&statement)
+                {
+                    record_source(
+                        out,
+                        direct_implicit_receivers,
+                        &ResolvedContextArgument::ImplicitReceiver(target.receiver.clone()),
+                        nested_callable,
+                        nested_bound_names,
+                        nested_receiver_count,
+                    );
+                }
                 match file.stmt(statement) {
                     Stmt::For {
                         name, range, body, ..
@@ -236,6 +274,7 @@ pub(crate) fn selected_context_values(
                             implicit_receiver_selections,
                             context_args,
                             resolved_calls,
+                            resolved_super_calls,
                             stmt_lowers,
                             range.start,
                             deep,
@@ -251,6 +290,7 @@ pub(crate) fn selected_context_values(
                             implicit_receiver_selections,
                             context_args,
                             resolved_calls,
+                            resolved_super_calls,
                             stmt_lowers,
                             range.end,
                             deep,
@@ -267,6 +307,7 @@ pub(crate) fn selected_context_values(
                             implicit_receiver_selections,
                             context_args,
                             resolved_calls,
+                            resolved_super_calls,
                             stmt_lowers,
                             *body,
                             deep,
@@ -290,6 +331,7 @@ pub(crate) fn selected_context_values(
                             implicit_receiver_selections,
                             context_args,
                             resolved_calls,
+                            resolved_super_calls,
                             stmt_lowers,
                             *iterable,
                             deep,
@@ -306,6 +348,7 @@ pub(crate) fn selected_context_values(
                             implicit_receiver_selections,
                             context_args,
                             resolved_calls,
+                            resolved_super_calls,
                             stmt_lowers,
                             *body,
                             deep,
@@ -328,6 +371,7 @@ pub(crate) fn selected_context_values(
                                 implicit_receiver_selections,
                                 context_args,
                                 resolved_calls,
+                                resolved_super_calls,
                                 stmt_lowers,
                                 child,
                                 deep,
@@ -361,6 +405,7 @@ pub(crate) fn selected_context_values(
                     implicit_receiver_selections,
                     context_args,
                     resolved_calls,
+                    resolved_super_calls,
                     stmt_lowers,
                     *trailing,
                     deep,
@@ -386,6 +431,7 @@ pub(crate) fn selected_context_values(
                 implicit_receiver_selections,
                 context_args,
                 resolved_calls,
+                resolved_super_calls,
                 stmt_lowers,
                 *body,
                 deep,
@@ -403,6 +449,7 @@ pub(crate) fn selected_context_values(
                     implicit_receiver_selections,
                     context_args,
                     resolved_calls,
+                    resolved_super_calls,
                     stmt_lowers,
                     catch.body,
                     deep,
@@ -421,6 +468,7 @@ pub(crate) fn selected_context_values(
                     implicit_receiver_selections,
                     context_args,
                     resolved_calls,
+                    resolved_super_calls,
                     stmt_lowers,
                     *finally,
                     deep,
@@ -501,6 +549,7 @@ pub(crate) fn selected_context_values(
                 implicit_receiver_selections,
                 context_args,
                 resolved_calls,
+                resolved_super_calls,
                 stmt_lowers,
                 child,
                 deep,
@@ -527,6 +576,7 @@ pub(crate) fn selected_context_values(
         implicit_receiver_selections,
         context_args,
         resolved_calls,
+        resolved_super_calls,
         stmt_lowers,
         body,
         deep,
