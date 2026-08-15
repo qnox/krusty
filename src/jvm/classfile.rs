@@ -1970,6 +1970,15 @@ impl ClassWriter {
 
     pub fn finish(mut self) -> Vec<u8> {
         self.resolve_inner_classes();
+        // The `EnclosingMethod` refs (owner Class, method NameAndType) intern BEFORE the
+        // `InnerClasses` entries' refs — kotlinc's attribute visit order on an anonymous class.
+        // (The attribute NAME interns later, with the other attribute names.)
+        if let Some((owner, method, desc)) = self.enclosing_method.clone() {
+            self.cp.class(&owner);
+            if !method.is_empty() {
+                self.cp.name_and_type(&method, &desc);
+            }
+        }
         // Every EMITTED `InnerClasses` entry's refs (outer Class, simple name) intern here — before
         // the `SourceFile` value and the attribute names (kotlinc visits the InnerClasses table
         // ahead of both; a nested class's own entry otherwise interned its outer at serialization,
@@ -2158,6 +2167,23 @@ impl ClassWriter {
             })
         };
         // `SourceFile`: name_index + a 2-byte body = the CP index of the source-file UTF8 (its VALUE was
+        // The `EnclosingMethod` attribute NAME interns between `InnerClasses` and `SourceFile`
+        // (kotlinc's anonymous-class attribute order); its refs were interned at the top of
+        // `finish`, so this build only adds the name.
+        let enclosing_method_attr = self.enclosing_method.take().map(|(owner, method, desc)| {
+            let name = self.cp.utf8("EnclosingMethod");
+            let class_idx = self.cp.class(&owner);
+            // An empty method name is the class-only form: `method_index = 0`.
+            let nat_idx = if method.is_empty() {
+                0
+            } else {
+                self.cp.name_and_type(&method, &desc)
+            };
+            let mut body = Vec::new();
+            u2(&mut body, class_idx);
+            u2(&mut body, nat_idx);
+            (name, body)
+        });
         // interned at the top of `finish`). kotlinc interns the `SourceFile` name BEFORE the
         // `RuntimeVisibleAnnotations` name, so build this attribute first.
         let sourcefile_attr = sourcefile_value.map(|file_idx| {
@@ -2204,20 +2230,6 @@ impl ClassWriter {
         // this class actually references as a class constant (the `has_class` filter), in registration
         // order. `inner` is already interned (that is why it passed the filter); `outer`/`name` intern
         // here — before the pool is serialized.
-        let enclosing_method_attr = self.enclosing_method.take().map(|(owner, method, desc)| {
-            let name = self.cp.utf8("EnclosingMethod");
-            let class_idx = self.cp.class(&owner);
-            // An empty method name is the class-only form: `method_index = 0`.
-            let nat_idx = if method.is_empty() {
-                0
-            } else {
-                self.cp.name_and_type(&method, &desc)
-            };
-            let mut body = Vec::new();
-            u2(&mut body, class_idx);
-            u2(&mut body, nat_idx);
-            (name, body)
-        });
         let permitted_attr = (!self.permitted_subclasses.is_empty()).then(|| {
             let name = self.cp.utf8("PermittedSubclasses");
             let mut body = Vec::new();

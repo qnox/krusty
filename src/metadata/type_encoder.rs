@@ -64,6 +64,9 @@ pub(crate) struct StringTable {
     strings: Vec<String>,
     records: Vec<Pb>,
     dedup: HashMap<(String, Vec<u8>), u32>,
+    /// Indices of LOCAL class-name strings (`StringTableTypes.localName`, packed field 5): the
+    /// string is the RAW internal name of a local/anonymous class, used as a class id verbatim.
+    local_names: Vec<u32>,
 }
 
 impl StringTable {
@@ -105,7 +108,17 @@ impl StringTable {
     }
 
     pub(crate) fn serialize_types(&self) -> Pb {
-        serialize_string_table_types(&self.records)
+        serialize_string_table_types(&self.records, &self.local_names)
+    }
+
+    /// Intern a LOCAL/ANONYMOUS class's RAW internal name as a class id: an EMPTY record plus a
+    /// `StringTableTypes.localName` entry marking the index (kotlinc's local-class encoding).
+    pub(crate) fn local_class_id(&mut self, internal: &str) -> u32 {
+        let index = self.intern(internal.to_string(), Pb::new());
+        if !self.local_names.contains(&index) {
+            self.local_names.push(index);
+        }
+        index
     }
 
     pub(crate) fn into_strings(self) -> Vec<String> {

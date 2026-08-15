@@ -769,6 +769,29 @@ pub fn build_class(
     (bytes, st.into_strings())
 }
 
+/// Build the `(d1, d2)` payload for an ANONYMOUS class (`object : P2 {}` inside a function):
+/// kotlinc's record is `Class { flags = LOCAL visibility (10), fq_name = <raw internal, marked
+/// localName in the string table>, supertype* }` — no members, no constructor record.
+pub fn build_anonymous_class(internal: &str, supertypes: &[Ty]) -> (Vec<u8>, Vec<String>) {
+    let mut st = StringTable::default();
+    let mut class = Pb::new();
+    class.field_varint(1, 10); // flags: visibility LOCAL (5 << 1), final, kind CLASS
+    let self_idx = st.local_class_id(internal);
+    class.field_varint(3, self_idx as u64); // Class.fq_name = 3
+    for &supertype in supertypes {
+        let sup = type_pb(&mut st, supertype, &TypeParameters::new());
+        class.field_message(6, &sup); // Class.supertype = 6
+    }
+    let stt = st.serialize_types();
+    let mut bytes = vec![0x00u8]; // UTF8 mode marker
+    let mut prefix = Pb::new();
+    prefix.varint(stt.as_bytes().len() as u64); // writeDelimitedTo length prefix
+    bytes.extend_from_slice(&prefix.into_bytes());
+    bytes.extend_from_slice(stt.as_bytes());
+    bytes.extend_from_slice(class.as_bytes());
+    (bytes, st.into_strings())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

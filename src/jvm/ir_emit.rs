@@ -2595,18 +2595,22 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
         if c.is_companion {
             continue; // handled above
         }
-        let anonymous = is_coroutine_state_machine(c);
+        let anonymous_object = c.is_anonymous_object;
+        let anonymous = is_coroutine_state_machine(c) || anonymous_object;
         // A LOCAL class is not a member of anything: its name is qualified by the DECLARATION it
         // was written in, so the text before the last `$` names no class. The JVM spells that with
         // `outer_class_info_index = 0` and a non-zero `inner_name_index` — which is also what
         // reflection reads back as `simpleName`. Treating the prefix as an outer class makes the
-        // loader look for a class that does not exist.
+        // loader look for a class that does not exist. An ANONYMOUS class carries neither outer nor
+        // simple name (kotlinc's inner-only entry, access `public static final`).
         let member = !anonymous && !c.is_local_class;
         cw.add_inner_class(InnerClassSpec {
             inner: fq.clone(),
             outer: member.then(|| fq[..pos].to_string()),
             name: (!anonymous).then(|| name.to_string()),
-            access: if anonymous {
+            access: if anonymous_object {
+                0x0019
+            } else if anonymous {
                 0x0008 | 0x0010
             } else {
                 inner_class_access(c)
@@ -4113,12 +4117,6 @@ fn emit_class(
     if let Some((owner, function)) = anonymous_scope(ir, c, facade) {
         let descriptor = ir_method_desc(&function.params, &function.ret);
         cw.set_enclosing_method(&owner, &function.name, &descriptor);
-        cw.add_inner_class(crate::jvm::classfile::InnerClassSpec {
-            inner: fq_name.clone(),
-            outer: None,
-            name: None,
-            access: 0x0019,
-        });
     }
     register_inner_classes(&mut cw, ir);
     // The class HEADER's interface refs intern BEFORE any member entry (kotlinc visits the header
@@ -5006,8 +5004,30 @@ fn emit_class(
     }
     cw.set_runtime_annotations(&c.applied_annotations);
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
+    // An ANONYMOUS class gets kotlinc's minimal k=1 record (LOCAL flags, raw-internal fq_name via
+    // the string table's localName marker, supertypes — no members).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, c, opts))
+        .then(|| {
+            if c.is_anonymous_object {
+                let mut supers: Vec<Ty> = Vec::new();
+                if c.has_non_top_superclass() {
+                    supers.push(Ty::obj_name(c.superclass));
+                }
+                supers.extend(c.interfaces.iter_ids().map(Ty::obj_name));
+                let (d1_bytes, d2) =
+                    crate::metadata::class_builder::build_anonymous_class(&fq_name, &supers);
+                let d1: String = d1_bytes.iter().map(|&b| b as char).collect();
+                Some(KotlinMetadata {
+                    k: 1,
+                    mv: vec![2, 4, 0],
+                    xi: 48,
+                    d1: vec![d1],
+                    d2,
+                })
+            } else {
+                build_class_metadata(ir, c, opts)
+            }
+        })
         .flatten();
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
@@ -5060,8 +5080,10 @@ fn emit_class(
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     // Seed the nested OUTER class ref + simple name at kotlinc's post-metadata pool position
-    // (its `InnerClasses` visit interns the outer's Class entry, then the simple name).
-    if !is_coroutine_state_machine(c) {
+    // (its `InnerClasses` visit interns the outer's Class entry, then the simple name). An
+    // ANONYMOUS class has neither — its entry is inner-only and its refs seed via the
+    // `EnclosingMethod` window in `finish`.
+    if !is_coroutine_state_machine(c) && !c.is_anonymous_object {
         if let Some(pos) = fq_name.rfind('$') {
             cw.seed_class(&fq_name[..pos]);
             cw.seed_utf8(&fq_name[pos + 1..]);
