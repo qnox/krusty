@@ -1254,6 +1254,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (differential class sets and public method realization vs kotlinc, emitted `jvmClassFlags`, the
   1.4.0 requirement, behavior parity, and refusal without output) and the `-jvm-default` parsing
   tests in `crates/krusty-cli/src/cli.rs`.
+- `-Xno-param-assertions` / `-Xno-call-assertions`: the two null-check families kotlinc emits, and
+  which a build can turn off. Measured against kotlinc 2.4.10:
+  * `-Xno-param-assertions` removes every `Intrinsics.checkNotNullParameter` — the guard at the entry
+    of any function reachable from Java, including constructors that store a property. krusty honors
+    it in three places, because a guard has three origins and each must agree or the class is
+    malformed: the lowered guards are cleared from the IR before emission
+    (`jvm::ir_emit::strip_param_assertions`); a property SETTER's `<set-?>` guard, derived at emission
+    from the property type, is gated by `EmitOptions::param_assertions`; and the same option stops
+    `ClassWriter` seeding the pool with the guard's `Methodref` and `String` constants. Every
+    debug-table offset measured PAST a guard is gated too — the primary constructor's
+    `LineNumberTable` start pc counted guards that were no longer emitted, which put the entry past
+    the end of the method and made the JVM reject the class outright (`ClassFormatError: Invalid pc
+    in LineNumberTable`).
+  * `-Xno-call-assertions` removes `Intrinsics.checkNotNullExpressionValue` on platform-typed values
+    returned by a CLASSPATH Java class — but not the one kotlinc emits for `String.substring`, a
+    mapped builtin, which the flag leaves in place. krusty emits no call assertions of its own
+    (`checkNotNullExpressionValue` appears in the compiler only in the inliner's recognizer), so the
+    option is accepted and recorded but changes no bytes today; a future call-assertion emitter has
+    to gate on it.
+
+  Both are set per module by intellij-community (`build/compiler-options.bzl`). Tests:
+  `tests/no_assertions_flags_e2e.rs`.
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

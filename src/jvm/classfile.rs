@@ -519,6 +519,9 @@ struct LateField {
 
 pub struct ClassWriter {
     cp: ConstPool,
+    /// Emit (and therefore seed the pool for) `Intrinsics.checkNotNullParameter` guards. Cleared by
+    /// `-Xno-param-assertions`.
+    param_assertions: bool,
     access: u16,
     this_class: u16,
     super_class: u16,
@@ -610,6 +613,7 @@ impl ClassWriter {
         let super_class = cp.class(super_internal);
         ClassWriter {
             cp,
+            param_assertions: true,
             access: ACC_PUBLIC | ACC_FINAL | ACC_SUPER,
             this_class,
             super_class,
@@ -692,6 +696,14 @@ impl ClassWriter {
     }
 
     /// Intern a class constant before natural first use.
+    /// Whether `Intrinsics.checkNotNullParameter` machinery is seeded into the pool for non-null
+    /// reference constructor parameters. `-Xno-param-assertions` emits no guards, so seeding their
+    /// methodref and `String` constants would leave a pool referencing nothing and shift every later
+    /// index away from kotlinc's.
+    pub fn set_param_assertions(&mut self, enabled: bool) {
+        self.param_assertions = enabled;
+    }
+
     pub fn seed_class(&mut self, internal: &str) {
         self.cp.class(internal);
     }
@@ -1214,7 +1226,7 @@ impl ClassWriter {
         // (its name + a String constant), then, at the FIRST guard, the shared `Intrinsics` machinery.
         let mut seeded_intrinsics = false;
         for f in fields.iter().filter(|f| f.is_ctor_param) {
-            if f.ann_kind == 1 {
+            if f.ann_kind == 1 && self.param_assertions {
                 let name = &f.name;
                 self.cp.utf8(name);
                 self.cp.string(name);
