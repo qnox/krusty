@@ -36,7 +36,7 @@ const LIB: &str = "package lib\n\
 fn classpath_nested_ctor_reordered_named_valueclass_runs() {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
-    let Some(lo) = common::compile_lib_ref("nested_vc_ctor", LIB) else {
+    let Some(lo) = common::compile_lib("nested_vc_ctor", LIB) else {
         return;
     };
     // Named args deliberately out of declaration order (id, a, b, n); value-class-typed arguments.

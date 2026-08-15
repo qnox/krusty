@@ -53,13 +53,7 @@ class Catalog {
 fun box(): String = Catalog().read()
 "#;
 
-    let Some(diagnostics) = common::checker_diags_with_stdlib(src) else {
-        return;
-    };
-    assert!(
-        diagnostics.is_empty(),
-        "expected no diagnostics, got: {diagnostics:?}"
-    );
+    common::expect_true_e2e("nested_enum_entry_uses_lexical_class_scope", src, &[]);
     common::expect_box_ok_with_stdlib(src, "LexicalNestedEnum");
 }
 

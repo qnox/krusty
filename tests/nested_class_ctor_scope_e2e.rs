@@ -59,8 +59,10 @@ fn a_later_private_inner_class_constructor_resolves_in_an_anonymous_super_call()
     \x20   private inner class FilterAction { override fun toString(): String = \"OK\" }\n\
     }\n\
     fun box(): String = Outer().build()\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
+    // gap - upgrade to `expect_true_e2e` when the backend admits it.
+    let bail_diags = common::front_end_diagnostics(SRC, &[], None);
+    assert!(bail_diags.is_empty(), "{bail_diags:?}");
 }
 
 #[test]
@@ -73,8 +75,10 @@ fn an_anonymous_sibling_method_preinfers_a_lexically_nested_return() {
     \x20   }\n\
     \x20   private inner class Inner(val value: String)\n\
     }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
+    // gap - upgrade to `expect_true_e2e` when the backend admits it.
+    let bail_diags = common::front_end_diagnostics(SRC, &[], None);
+    assert!(bail_diags.is_empty(), "{bail_diags:?}");
 }
 
 #[test]
@@ -108,8 +112,11 @@ fn an_anonymous_synthetic_name_does_not_create_a_lexical_owner() {
     \x20       fun pick(): Outer.Expected = FilterAction()\n\
     \x20   }\n\
     }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    common::expect_true_e2e(
+        "an_anonymous_synthetic_name_does_not_create_a_lexical_owner",
+        SRC,
+        &[],
+    );
 }
 
 #[test]
@@ -120,8 +127,11 @@ fn anonymous_member_signatures_see_the_source_class_classifier_scope() {
     \x20       fun take(value: Inner): Inner = value\n\
     \x20   }\n\
     }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    common::expect_true_e2e(
+        "anonymous_member_signatures_see_the_source_class_classifier_scope",
+        SRC,
+        &[],
+    );
 }
 
 #[test]
@@ -131,8 +141,11 @@ fn anonymous_supertype_arguments_see_the_source_class_classifier_scope() {
     \x20   private class Inner\n\
     \x20   fun build() = object : Base<Inner>() {}\n\
     }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    common::expect_true_e2e(
+        "anonymous_supertype_arguments_see_the_source_class_classifier_scope",
+        SRC,
+        &[],
+    );
 }
 
 /// The same, with NAMED arguments, one of which omits a default — the reported shape. Needs all three

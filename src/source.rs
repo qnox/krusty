@@ -38,11 +38,24 @@ impl SourceKind {
 pub struct SourceInput<'a> {
     pub kind: SourceKind,
     pub text: &'a str,
+    /// Source-file stem when the caller has one. Declaration identities whose language-defined
+    /// generated name is file-scoped must be assigned before signature collection, so the frontend
+    /// cannot recover this later from an emitted facade name.
+    pub file_stem: Option<&'a str>,
 }
 
 impl<'a> SourceInput<'a> {
     pub fn new(kind: SourceKind, text: &'a str) -> Self {
-        Self { kind, text }
+        Self {
+            kind,
+            text,
+            file_stem: None,
+        }
+    }
+
+    pub fn with_file_stem(mut self, file_stem: &'a str) -> Self {
+        self.file_stem = Some(file_stem);
+        self
     }
 
     pub fn kotlin(text: &'a str) -> Self {

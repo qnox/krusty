@@ -10,5 +10,5 @@ fn classpath_member_defaults_follow_the_descriptor_overload() {
     let main = "import lib.Api\n\
         fun box(): String = if (Api().choose() == \"byte\") \"OK\" else \"fail\"\n";
 
-    common::expect_box_ok_against_ref("membermetadataalignment", library, main);
+    common::expect_box_ok_against("membermetadataalignment", library, main);
 }

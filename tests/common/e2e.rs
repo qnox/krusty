@@ -8,6 +8,38 @@ use std::process::Command;
 
 use super::common_core as common;
 
+/// A positive front-end coverage test upgraded to true e2e: the source must be checker-clean, the
+/// backend must emit it (a lowering/emit bail is a failure, not a skip), and when it declares
+/// `fun box()`, running it must return "OK". This belongs in the e2e-only helper module so the
+/// conformance target does not compile an unused helper or require a dead-code suppression.
+pub fn expect_true_e2e(tag: &str, src: &str, extra_cp: &[PathBuf]) {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let mut cp = extra_cp.to_vec();
+    cp.push(stdlib);
+    let diagnostics = common::front_end_diagnostics(src, &cp, Some(jdk.as_path()));
+    assert!(
+        diagnostics.is_empty(),
+        "{tag}: expected a checker-clean source, got: {diagnostics:?}"
+    );
+    let Some(classes) = common::compile_in_process(src, "Main", &cp, Some(jdk.as_path())) else {
+        panic!("{tag}: the front end accepted the source but the backend bailed on emitting it");
+    };
+    if let Some(box_class) = common::find_box_class(&classes) {
+        let out = common::run_box(&classes, &box_class, &cp)
+            .unwrap_or_else(|| panic!("{tag}: emitted classes but the box() run failed to start"));
+        assert!(
+            !out.trim().starts_with("ERROR:"),
+            "{tag}: box() threw: {out}"
+        );
+        // Only fixtures written for the convention are held to it; some upgraded checker tests
+        // intentionally return a domain value such as `RED`.
+        if src.contains("\"OK\"") {
+            assert_eq!(out.trim(), "OK", "{tag}: box() returned {out:?}");
+        }
+    }
+}
+
 pub struct CompilerDiagnosticResult {
     pub krusty_code: i32,
     pub krusty_stdout: String,

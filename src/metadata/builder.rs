@@ -14,6 +14,14 @@ pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
+    /// Position of the declaration in the FILE (see [`PropMeta::decl_order`]).
+    pub decl_order: usize,
+    /// Argument-less BINARY/RUNTIME-retained annotations applied to the function, recorded as
+    /// `Function.annotation` (field 12) `Annotation { id }` entries — how a separate compilation reads
+    /// resolution-affecting markers like `@kotlin.internal.LowPriorityInOverloadResolution` back from
+    /// the classpath. Also sets `Function.flags` `HAS_ANNOTATIONS` (bit 0). SOURCE-retained annotations
+    /// never appear here (kotlinc drops them from metadata too).
+    pub annotations: Vec<crate::types::TypeName>,
     /// Extension-receiver type (`Function.receiver_type` = 5), `Some` for an extension function. Recorded
     /// SEPARATELY from `params` (the LOGICAL value params, receiver excluded), so a reader recovers the
     /// extension's true source arity — `fun T.f(a)` is one value param, not two. `None` for a plain fn.
@@ -29,6 +37,11 @@ pub struct FnMeta {
     /// a suspend fn) recorded as the `JvmMethodSignature` extension, so a kotlinc reader maps the
     /// metadata function to its bytecode method. `None` omits the extension.
     pub jvm_desc: Option<String>,
+    /// The PHYSICAL JVM method NAME (`JvmMethodSignature.name`, f1) when it differs from the Kotlin
+    /// one — a value-class-parametered function's mangled `taggedOnly-rnqsQGE`. `None` ⇒ omitted
+    /// (the name defaults to the function's), kotlinc's usual shape. Only read when `jvm_desc` is
+    /// recorded.
+    pub jvm_name: Option<String>,
     /// `inline fun` — sets `Function.flags` `IS_INLINE` (bit 10) so a reader resolves the function
     /// as inline (splice candidate), not a plain callable.
     pub inline: bool,
@@ -48,6 +61,15 @@ pub struct FnMeta {
     /// `Function.context_parameter` (field 13) so a caller fills them implicitly from the
     /// enclosing context instead of positionally.
     pub context_count: usize,
+    /// Index into `params` of a `vararg` parameter. Emits `ValueParameter.vararg_element_type`
+    /// (field 4) carrying the ELEMENT type next to the declared array type — the only place
+    /// vararg-ness survives (`ACC_VARARGS` is not part of `@Metadata`), so a reader admits
+    /// element-form and spread arguments instead of demanding one literal array.
+    pub vararg_index: Option<usize>,
+    /// Declaration visibility — `Function.flags` visibility bits (INTERNAL=0, PRIVATE=1,
+    /// PUBLIC=3); an `internal fun`'s flags word differs from the omitted public-final default (6),
+    /// so it is written explicitly and a consuming module enforces the boundary.
+    pub visibility: crate::types::Visibility,
 }
 
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
@@ -206,12 +228,18 @@ fn flatten_condition<'a>(
 fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     let mut p = Pb::new();
     // Function.flags = 9 — emitted only when non-default (`6` = public final is the proto default).
-    // Bit 13 = IS_SUSPEND, bit 10 = IS_INLINE; the visibility/modality bits (`0x06`) ride along so
-    // the reader keeps public-final. kotlinc orders `flags` before `name`.
-    let flags = 0x06u64 | (u64::from(f.suspend) << 13) | (u64::from(f.inline) << 10);
-    if flags != 0x06 {
-        p.field_varint(9, flags);
-    }
+    // Bit 13 = IS_SUSPEND, bit 10 = IS_INLINE; the visibility bits ride along (final modality = 0).
+    // The field is elided at the public-final default (6) — an `internal fun`'s 0 is explicit.
+    let vis: u64 = match f.visibility {
+        crate::types::Visibility::Internal => 0,
+        crate::types::Visibility::Private => 1,
+        crate::types::Visibility::Protected => 2,
+        crate::types::Visibility::Public => 3,
+    };
+    let flags = u64::from(!f.annotations.is_empty())
+        | (vis << 1)
+        | (u64::from(f.suspend) << 13)
+        | (u64::from(f.inline) << 10);
     p.field_varint(2, st.local(&f.name) as u64); // Function.name = 2
                                                  // The function's type-parameter table (Function.type_parameter = 4): indices are the
                                                  // `Type.type_parameter` ids generic types and contract conclusions reference.
@@ -262,6 +290,17 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
         let ty = type_pb_generic(st, *pty, &tps);
         vp.field_message(3, &ty); // ValueParameter.type = 3
+                                  // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
+                                  // kotlinc's declared type stays the array.
+        if f.vararg_index == Some(i) {
+            let elem = pty
+                .array_elem()
+                .or_else(|| pty.type_args().first().copied());
+            if let Some(elem) = elem {
+                let et = type_pb_generic(st, elem, &tps);
+                vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
+            }
+        }
         if i < f.context_count {
             // Leading context parameters → Function.context_parameter = 13 (filled implicitly
             // by callers), NOT the positional value_parameter list.
@@ -269,6 +308,20 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         } else {
             p.repeated_message(6, &vp); // Function.value_parameter = 6
         }
+    }
+    // Function.flags = 9 — in kotlinc's ASCENDING field order (after name/types/params), emitted
+    // only when non-default (`6` = public final is the proto default; an `internal fun`'s 0 is
+    // explicit). Bit 13 = IS_SUSPEND, bit 10 = IS_INLINE; visibility bits ride along.
+    if flags != 0x06 {
+        p.field_varint(9, flags);
+    }
+    // Applied annotations (Function.annotation = 12): `Annotation.id` (field 1) referencing the class
+    // through the string table's DESC_TO_CLASS_ID form, exactly as kotlinc records e.g.
+    // `@LowPriorityInOverloadResolution`.
+    for &annotation in &f.annotations {
+        let mut ab = Pb::new();
+        ab.field_varint(1, u64::from(st.class_id(annotation)));
+        p.repeated_message(12, &ab);
     }
     // The declared contract (Function.contract = 32) — `returns(…) implies …` / `callsInPlace`
     // effects a separate compilation applies at call sites.
@@ -280,6 +333,9 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     // name defaults to the function's, exactly as kotlinc emits for a top-level function.
     if let Some(desc) = &f.jvm_desc {
         let mut sig = Pb::new();
+        if let Some(name) = &f.jvm_name {
+            sig.field_varint(1, st.local(name) as u64); // JvmMethodSignature.name = 1 (mangled)
+        }
         sig.field_varint(2, st.local(desc) as u64); // JvmMethodSignature.desc = 2
         p.field_message(100, &sig); // Function.methodSignature = 100
     }
@@ -299,16 +355,39 @@ pub struct PropMeta {
     pub receiver: Option<Ty>,
     pub getter: (String, String),
     pub setter: Option<(String, String)>,
+    /// A `const val`: kotlinc sets the CONST flag bit and records a field-only
+    /// `JvmPropertySignature` (no accessor exists — reads inline the `ConstantValue`).
+    pub is_const: bool,
+    /// Position of the declaration in the FILE (across kinds) — kotlinc interns package-member
+    /// strings in SOURCE DECLARATION order even though the proto groups functions before
+    /// properties, so the d2 indices only match when the string table is built in this order.
+    pub decl_order: usize,
+    /// Declaration visibility — `Property.flags` visibility bits (INTERNAL=0, PRIVATE=1, PUBLIC=3).
+    /// An `internal val`'s public JVM getter must not leak the property: a consuming module reads
+    /// the metadata visibility (kotlinc: `internal val` flags `8704` vs public `8710`).
+    pub visibility: crate::types::Visibility,
 }
 
 /// A public top-level typealias declaration in package metadata.
 pub struct TypeAliasMeta {
     pub name: String,
     pub target: Ty,
+    /// Declared visibility — `TypeAlias.flags` (f1) carries it; elided at the public default so an
+    /// `internal typealias` writes an explicit 0 and stays module-bound for consumers.
+    pub visibility: crate::types::Visibility,
 }
 
 fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
     let mut p = Pb::new();
+    let vis: u64 = match alias.visibility {
+        crate::types::Visibility::Internal => 0,
+        crate::types::Visibility::Private => 1,
+        crate::types::Visibility::Protected => 2,
+        crate::types::Visibility::Public => 3,
+    };
+    if vis != 3 {
+        p.field_varint(1, vis << 1); // TypeAlias.flags = 1 (elided at the public default 6)
+    }
     p.field_varint(2, st.local(&alias.name) as u64); // TypeAlias.name = 2
     let target = type_pb(st, alias.target);
     p.field_message(4, &target); // TypeAlias.underlying_type = 4
@@ -344,21 +423,34 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         let rt = type_pb_generic(st, recv, &tps);
         p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
     }
+    let vis: u64 = match m.visibility {
+        crate::types::Visibility::Internal => 0,
+        crate::types::Visibility::Private => 1,
+        crate::types::Visibility::Protected => 2,
+        crate::types::Visibility::Public => 3,
+    };
+    let base = if m.is_var {
+        PKG_VAR_FLAGS
+    } else {
+        PKG_VAL_FLAGS
+    };
+    // A `const val` sets the CONST flag bit (kotlinc: public const `10758` = `8710 | 2048`).
+    let const_bit = if m.is_const { 1 << 11 } else { 0 };
     p.field_varint(
         11,
-        if m.is_var {
-            PKG_VAR_FLAGS
-        } else {
-            PKG_VAL_FLAGS
-        },
+        (base & !property_flags::VISIBILITY_MASK) | (vis << 1) | const_bit,
     ); // flags
     let mut jvm = Pb::new();
     jvm.field_message(1, &Pb::new()); // field (empty → derived)
-    let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
-    jvm.field_message(3, &getter);
-    if let Some((sn, sd)) = &m.setter {
-        let setter = jvm_method_sig(st, sn, sd);
-        jvm.field_message(4, &setter);
+                                      // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
+                                      // entry alone.
+    if !m.is_const {
+        let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
+        jvm.field_message(3, &getter);
+        if let Some((sn, sd)) = &m.setter {
+            let setter = jvm_method_sig(st, sn, sd);
+            jvm.field_message(4, &setter);
+        }
     }
     p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
     p
@@ -372,13 +464,35 @@ pub fn build_package(
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
     let mut package = Pb::new();
-    for f in funcs {
-        let fp = function_pb(&mut st, f);
-        package.repeated_message(3, &fp); // Package.function = 3
+    // STRINGS INTERN IN SOURCE DECLARATION ORDER across kinds (a `const val` before a `fun`
+    // interns first), while the proto still writes functions (f3) before properties (f4) — so the
+    // d2 indices match kotlinc's. Build each sub-message in declaration order, emit by field.
+    let mut build_order: Vec<(usize, bool, usize)> = funcs
+        .iter()
+        .enumerate()
+        .map(|(index, f)| (f.decl_order, false, index))
+        .chain(
+            props
+                .iter()
+                .enumerate()
+                .map(|(index, m)| (m.decl_order, true, index)),
+        )
+        .collect();
+    build_order.sort();
+    let mut fn_pbs: Vec<Option<Pb>> = (0..funcs.len()).map(|_| None).collect();
+    let mut prop_pbs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
+    for (_, is_prop, index) in build_order {
+        if is_prop {
+            prop_pbs[index] = Some(property_pb(&mut st, &props[index]));
+        } else {
+            fn_pbs[index] = Some(function_pb(&mut st, &funcs[index]));
+        }
     }
-    for m in props {
-        let pp = property_pb(&mut st, m);
-        package.repeated_message(4, &pp); // Package.property = 4
+    for fp in fn_pbs.iter().flatten() {
+        package.repeated_message(3, fp); // Package.function = 3
+    }
+    for pp in prop_pbs.iter().flatten() {
+        package.repeated_message(4, pp); // Package.property = 4
     }
     for alias in aliases {
         let alias = type_alias_pb(&mut st, alias);
@@ -415,6 +529,9 @@ mod tests {
     fn matches_kotlinc_reference_for_f_int_int() {
         let (d1, d2) = build_package(
             &[FnMeta {
+                annotations: Vec::new(),
+                decl_order: 0,
+                jvm_name: None,
                 name: "f".into(),
                 params: vec![("a".into(), Ty::Int)],
                 ret: Ty::Int,
@@ -428,6 +545,8 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 context_count: 0,
+                vararg_index: None,
+                visibility: crate::types::Visibility::Public,
             }],
             &[],
             &[],
@@ -444,6 +563,7 @@ mod tests {
         let (d1, d2) = build_package(
             &[],
             &[PropMeta {
+                visibility: crate::types::Visibility::Public,
                 name: "doubled".into(),
                 ty: Ty::String,
                 is_var: false,
@@ -454,6 +574,8 @@ mod tests {
                     "(Ljava/lang/String;)Ljava/lang/String;".into(),
                 ),
                 setter: None,
+                is_const: false,
+                decl_order: 0,
             }],
             &[],
         );
@@ -482,6 +604,7 @@ mod tests {
         let (d1, d2) = build_package(
             &[],
             &[PropMeta {
+                visibility: crate::types::Visibility::Public,
                 name: "live".into(),
                 ty: t,
                 is_var: true,
@@ -489,6 +612,8 @@ mod tests {
                 receiver: Some(receiver),
                 getter: ("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into()),
                 setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
+                is_const: false,
+                decl_order: 0,
             }],
             &[],
         );
@@ -533,6 +658,9 @@ mod tests {
         };
         let (d1, d2) = build_package(
             &[FnMeta {
+                annotations: Vec::new(),
+                decl_order: 0,
+                jvm_name: None,
                 name: "validate".into(),
                 params: vec![("value".into(), Ty::obj("kotlin/Any"))],
                 ret: Ty::Boolean,
@@ -549,6 +677,8 @@ mod tests {
                 type_param_bounds: Vec::new(),
                 contract: Some(std::sync::Arc::new(contract.clone())),
                 context_count: 0,
+                vararg_index: None,
+                visibility: crate::types::Visibility::Public,
             }],
             &[],
             &[],
@@ -569,6 +699,9 @@ mod tests {
         // return Int + param Int must share one string-table entry (index 1).
         let (_d1, d2) = build_package(
             &[FnMeta {
+                annotations: Vec::new(),
+                decl_order: 0,
+                jvm_name: None,
                 name: "g".into(),
                 params: vec![("x".into(), Ty::Int)],
                 ret: Ty::Int,
@@ -582,6 +715,8 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 context_count: 0,
+                vararg_index: None,
+                visibility: crate::types::Visibility::Public,
             }],
             &[],
             &[],

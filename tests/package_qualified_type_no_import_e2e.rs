@@ -28,7 +28,7 @@ fn package_qualified_ctor_call_single_segment_package() {
 
 #[test]
 fn package_qualified_internal_class_is_rejected() {
-    let Some(diagnostics) = common::diagnostics_against_ref(
+    let Some(diagnostics) = common::diagnostics_against(
         "pkg_qual_internal_no_import",
         LIB,
         "fun take(h: lib.Hidden): Int = 0\n\

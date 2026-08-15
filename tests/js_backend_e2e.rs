@@ -115,6 +115,24 @@ fn class_field_and_method() {
 }
 
 #[test]
+fn body_property_jvm_defaults_remain_semantic_initializers() {
+    // JVM storage starts as zero/null and may omit these physical stores. JavaScript fields start as
+    // `undefined`, so common IR must retain the Kotlin initializers for this backend to realize.
+    check(
+        "class Defaults {\n\
+           val count: Int = 0\n\
+           val enabled: Boolean = false\n\
+           val text: String? = null\n\
+         }\n\
+         fun box(): String {\n\
+           val d = Defaults()\n\
+           return if (d.count == 0 && d.enabled == false && d.text == null) \"OK\" else \"fail\"\n\
+         }",
+        "OK",
+    );
+}
+
+#[test]
 fn class_property_custom_accessors() {
     // A semantic PropertyRead/PropertyWrite is not necessarily a direct JavaScript field operation:
     // source-written accessor bodies remain real methods in the shared IR. The JS realization must call

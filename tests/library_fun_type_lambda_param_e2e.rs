@@ -53,7 +53,7 @@ const LIB: &str = "package lib\n\
 fn run_with_lib_ref(tag: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let lib = common::compile_lib_ref(tag, LIB)?;
+    let lib = common::compile_lib(tag, LIB)?;
     common::compile_and_run_box(main, "Main", &[lib, stdlib, jdk.clone()], Some(&jdk))
 }
 
@@ -97,7 +97,7 @@ fn trailing_lambda_reads_its_own_parameter_past_an_omitted_default() {
 fn wrong_parameter_shape_is_not_borrowed_for_a_trailing_lambda() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let Some(lib) = common::compile_lib_ref("libfun_default_diag", LIB) else {
+    let Some(lib) = common::compile_lib("libfun_default_diag", LIB) else {
         return;
     };
     // `it` is not in scope in a `Cfg.() -> String` lambda; borrowing `pre`'s `(Int) -> Unit` shape
@@ -195,7 +195,7 @@ fn safe_call_lambda_param_of_classpath_java_sam_member() {
 fn safe_call_named_lambda_arguments_resolve_in_frontend() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(lib) = common::compile_lib_ref("libfun_safe_named", LIB) else {
+    let Some(lib) = common::compile_lib("libfun_safe_named", LIB) else {
         return;
     };
     const MAIN: &str = "import lib.*\n\

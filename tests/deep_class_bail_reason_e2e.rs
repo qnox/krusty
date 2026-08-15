@@ -33,13 +33,32 @@ fun box(): String = "OK"
 }
 
 #[test]
-fn suspend_lambda_in_class_member_reports_gate() {
-    // A suspend lambda expression inside a class member isn't modeled (the synthesized lambda class
-    // shape assumes a top-level owner).
+fn suspend_lambda_in_class_member_emits_unless_body_suspends() {
+    // A suspend lambda inside a class member is modeled when its body does not itself SUSPEND
+    // (`reparent_lambda_impls` places the state-machine class); a body that calls a member suspend
+    // function still gates — the machine would need the enclosing instance threaded through the
+    // continuation (corpus kt44221 miscompiled when admitted).
+    if !common::stdlib_toolchain_ready() {
+        return;
+    }
+    assert_eq!(
+        common::inline_source_backend_outcome(
+            r#"
+class C {
+    fun g(): suspend () -> Int = suspend { 1 }
+}
+
+fun box(): String = "OK"
+"#,
+        ),
+        Some(common::BackendOutcome::Emitted),
+        "a non-suspending suspend lambda in a class member must lower"
+    );
     common::assert_inline_source_lower_bail(
         r#"
 class C {
-    fun g(): suspend () -> Int = suspend { 1 }
+    suspend fun m(): Int = 1
+    fun g(): suspend () -> Int = suspend { m() }
 }
 
 fun box(): String = "OK"

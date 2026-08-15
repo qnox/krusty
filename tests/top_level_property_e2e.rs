@@ -39,11 +39,9 @@ fn top_level_properties_run_and_round_trip() {
 }
 
 /// Reverse-direction interop: the REAL kotlinc imports krusty-compiled top-level properties via the
-/// facade `@Metadata`. kotlinc currently reports `unresolved reference` for the property records
-/// krusty emits — a tracked drop-in gap. Ignored (visibly, with this reason) instead of
-/// soft-skipping inside a passing test; run with `--ignored` to check progress.
+/// facade `@Metadata` `Package.property` records (name, return type, flags, and the
+/// `JvmPropertySignature` naming the emitted accessors).
 #[test]
-#[ignore = "krusty's facade @Metadata property records are not yet consumable by kotlinc"]
 fn kotlinc_consumes_krusty_top_level_property_metadata() {
     let root = common::scratch_dir().expect("scratch dir");
     let lib = root.join("lib");

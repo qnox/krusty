@@ -8,6 +8,7 @@
 //! omitted-with-defaults).
 
 use super::common;
+use krusty::jvm::classpath::Classpath;
 
 fn run_box(src: &str, stem: &str) {
     common::expect_box_ok_with_stdlib(src, stem);
@@ -55,6 +56,44 @@ fun box(): String = A().test()
 "#,
         "InnerExtTwoDefaults",
     );
+}
+
+/// A member extension also has one physical receiver ahead of 32 logical value parameters. Its
+/// `$default` descriptor and call site must agree on the single logical mask word.
+#[test]
+fn thirty_two_logical_member_extension_parameters_use_one_default_mask() {
+    let params = (0..32)
+        .map(|index| format!("p{index}: Int = {index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let src = format!(
+        "class Host {{\n\
+         \x20 fun String.pick({params}): String = this + p31\n\
+         \x20 fun test(): String = if (\"O\".pick() == \"O31\") \"OK\" else \"FAIL\"\n\
+         }}\n\
+         fun box(): String = Host().test()\n"
+    );
+    let abi_src = format!("package masks\n{src}");
+    if common::compile_lib_ref("MemberExtensionDefaultMask32", &abi_src).is_none() {
+        eprintln!("skip kotlinc comparison: reference compiler unavailable");
+    }
+    let library = common::compile_lib("MemberExtensionDefaultMask32Abi", &abi_src)
+        .expect("compile member-extension-mask ABI fixture");
+    let classpath = Classpath::new(vec![library]);
+    let host = classpath
+        .find("masks/Host")
+        .expect("member-extension owner");
+    let default = host
+        .methods
+        .iter()
+        .find(|method| method.name == "pick$default")
+        .expect("member extension default stub");
+    let expected = format!(
+        "(Lmasks/Host;Ljava/lang/String;{}ILjava/lang/Object;)Ljava/lang/String;",
+        "I".repeat(32)
+    );
+    assert_eq!(default.descriptor, expected);
+    run_box(&src, "MemberExtensionDefaultMask32");
 }
 
 /// The same on an `object` and a `private` member extension.

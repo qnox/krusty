@@ -413,11 +413,12 @@ fn a_body_property_adds_no_component_or_copy_parameter() {
 }
 
 /// A VALUE-CLASS-typed constructor parameter gives the class kotlinc's private-primary +
-/// `DefaultConstructorMarker` ABI, which the record cannot describe: krusty named the PRIVATE
-/// `<init>(Ljava/lang/String;)V`, typed `id` as `String` rather than `ItemId`, and dropped the
-/// getter's mangled name. `ir.has_value_param_ctor` is the signal (recorded before erasure).
+/// `DefaultConstructorMarker` ABI, and the record describes exactly that: the parameter keeps its
+/// DECLARED type (`id: ItemId` — `vc_ctor_declared_params`, captured before erasure), the ctor's
+/// `JvmMethodSignature` names the PUBLIC synthetic marker form (the private erased `<init>` is not
+/// callable cross-class), and the property record carries the mangled getter + erased field desc.
 #[test]
-fn a_value_class_constructor_parameter_withholds_the_record() {
+fn a_value_class_constructor_parameter_records_the_marker_ctor() {
     let (_, classes) = krusty_lib_dir(
         "vcctor",
         "@JvmInline\nvalue class ItemId(val v: String)\nclass Holder(val id: ItemId)\n",
@@ -426,11 +427,22 @@ fn a_value_class_constructor_parameter_withholds_the_record() {
         .iter()
         .find(|(name, _)| name == "Holder")
         .expect("krusty emits Holder.class");
+    let contains = |needle: &str| {
+        bytes
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    };
     assert!(
-        !bytes
-            .windows(b"Lkotlin/Metadata;".len())
-            .any(|w| w == b"Lkotlin/Metadata;"),
-        "a value-class ctor parameter means the class carries NO @Metadata at all",
+        contains("Lkotlin/Metadata;"),
+        "a value-class ctor parameter class carries @Metadata",
+    );
+    assert!(
+        contains("(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V"),
+        "the ctor record names the public synthetic marker form",
+    );
+    assert!(
+        contains("LItemId;"),
+        "the ctor parameter keeps its declared value-class type",
     );
 }
 

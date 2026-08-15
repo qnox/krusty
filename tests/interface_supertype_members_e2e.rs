@@ -9,7 +9,7 @@ use super::common;
 
 /// Compile `main` against the kotlinc-built `lib` and run its `box()` on the JVM.
 fn run_box_against(lib: &str, main: &str, tag: &str) -> String {
-    common::expect_box_run_against_ref(tag, lib, main).expect("reference compiler unavailable")
+    common::expect_box_run_against(tag, lib, main).expect("reference compiler unavailable")
 }
 
 #[test]
@@ -132,8 +132,7 @@ fn suspend_interface_member() {
         \x20 override suspend fun findById(id: String): Config? = Config(id)\n\
         }\n";
     let work = common::scratch_dir().expect("allocate suspend-interface scratch directory");
-    let libout =
-        common::compile_lib_ref("susp_iface", lib).expect("reference compiler unavailable");
+    let libout = common::compile_lib("susp_iface", lib).expect("reference compiler unavailable");
     let stdlib = common::stdlib_jar();
 
     let main_src = "package app\n\

@@ -38,7 +38,7 @@ const LIB: &str = r#"
 
 #[test]
 fn member_extensions_imported_from_an_object_or_companion_resolve_and_run() {
-    let Some(libout) = common::compile_lib_ref("object_member_extension_import", LIB) else {
+    let Some(libout) = common::compile_lib("object_member_extension_import", LIB) else {
         return;
     };
     let stdlib = common::stdlib_jar();

@@ -111,5 +111,25 @@ fun box(): String {
 }
 "#;
 
-    common::expect_box_ok_against_ref("classpath_iterator_element_parameter", LIBRARY, MAIN);
+    common::expect_box_ok_against("classpath_iterator_element_parameter", LIBRARY, MAIN);
+}
+
+#[test]
+fn expected_constructor_seed_does_not_hide_an_outside_argument() {
+    const SOURCE: &str = r#"
+interface Entry
+class Other
+class Bag<V>(val values: List<V>)
+
+fun invalid(): Bag<Entry> = Bag(listOf(Other()))
+"#;
+    let (code, _) = common::kotlinc_source_result("CtorSeedOutsideArgument", SOURCE);
+    assert_ne!(code, 0, "kotlinc must reject Bag<Other> as Bag<Entry>");
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SOURCE);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("type mismatch")),
+        "an outside argument must dislodge the expected seed: {diagnostics:?}"
+    );
 }

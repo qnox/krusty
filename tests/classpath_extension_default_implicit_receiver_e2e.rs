@@ -28,7 +28,7 @@ fn an_implicit_receiver_extension_call_may_omit_a_default() {
         \x20 if (seen != \"a9\") return \"fail: \" + seen\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against_ref("cpextdefaultimplicit", LIB, main);
+    common::expect_box_ok_against("cpextdefaultimplicit", LIB, main);
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn the_explicit_receiver_spelling_keeps_working() {
         \x20 if (host.seen != \"a9\") return \"fail: \" + host.seen\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against_ref("cpextdefaultexplicit", LIB, main);
+    common::expect_box_ok_against("cpextdefaultexplicit", LIB, main);
 }
 
 /// A TRAILING LAMBDA binds the LAST parameter, so an omitted default can sit BETWEEN the positional
@@ -80,7 +80,7 @@ fn a_trailing_lambda_binds_the_last_parameter_past_an_omitted_default() {
         \x20 if (seen != \"a9L\") return \"fail: \" + seen\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against_ref("cpextdefaultmidlambda", LIB, main);
+    common::expect_box_ok_against("cpextdefaultmidlambda", LIB, main);
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn a_trailing_lambda_binds_the_last_parameter_past_a_leading_omitted_default() {
         \x20 if (seen != \"9L\") return \"fail: \" + seen\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against_ref("cpextdefaultleadlambda", LIB, main);
+    common::expect_box_ok_against("cpextdefaultleadlambda", LIB, main);
 }
 
 #[test]

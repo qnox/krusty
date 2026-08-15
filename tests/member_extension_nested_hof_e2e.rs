@@ -20,12 +20,10 @@ fn nested_hof_keeps_member_extension_element_type() {
         fun useRegistry(): String = Registry().result()
     "#;
 
-    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
-        return;
-    };
-    assert!(
-        diagnostics.is_empty(),
-        "expected no diagnostics, got: {diagnostics:?}"
+    common::expect_true_e2e(
+        "nested_hof_keeps_member_extension_element_type",
+        SOURCE,
+        &[],
     );
 }
 
@@ -42,11 +40,9 @@ fn generic_extension_property_keeps_receiver_element_type() {
         }
     "#;
 
-    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
-        return;
-    };
-    assert!(
-        diagnostics.is_empty(),
-        "expected no diagnostics, got: {diagnostics:?}"
+    common::expect_true_e2e(
+        "generic_extension_property_keeps_receiver_element_type",
+        SOURCE,
+        &[],
     );
 }

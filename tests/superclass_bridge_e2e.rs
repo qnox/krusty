@@ -7,7 +7,7 @@ fn classpath_generic_superclass_override_dispatches_through_erased_descriptor() 
     // `choose(String): String`. Calling through `Base<String>` therefore exercises both halves of the
     // bridge descriptor. If bridge derivation looks only at same-file IR classes, the inherited base
     // implementation runs instead of `Child.choose`, which is a silent virtual-dispatch miscompile.
-    common::expect_box_ok_against_ref(
+    common::expect_box_ok_against(
         "classpath_superclass_bridge",
         r#"
 package lib

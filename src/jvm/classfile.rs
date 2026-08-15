@@ -77,6 +77,23 @@ fn verif_eq(a: &VerifType, b: &VerifType, cp: &ConstPool) -> bool {
         _ => a == b,
     }
 }
+/// One pool entry a `super(…)` argument's evaluation interns before the super `<init>` Methodref,
+/// in code order: a construction's Class ref, a string constant's CONSTANT_String, or a
+/// constructor Methodref (`class Basic : Engine(Cfg(false), "basic")`).
+pub enum SeedSuperArg {
+    Class(String),
+    Str(KtString),
+    Ctor { owner: String, desc: String },
+}
+
+/// A primary constructor with defaulted parameters: kotlinc emits the `$default` `<init>` overload
+/// right after the primary one, interning its marker descriptor, the default STRING constants and
+/// the delegating own-`<init>` Methodref BEFORE the accessors — the seeder mirrors that window.
+pub struct SeedCtorDefaults {
+    pub marker_desc: String,
+    pub string_consts: Vec<KtString>,
+}
+
 /// One backing field, as the plain-class pool seeder sees it.
 pub struct SeedField {
     pub name: String,
@@ -101,22 +118,27 @@ pub struct SeedField {
     pub value_class_ctor: Option<(String, String)>,
 }
 
-/// Per-member JVM generic `Signature` strings for a plain class, in kotlinc's interning positions, passed
-/// to [`ClassWriter::seed_plain_class_pool`]. `None`/empty entries mean "no `Signature`" (a member whose
-/// erased descriptor already captures its type). `accessors` and `fields` are index-parallel to the
-/// `seed_plain_class_pool` arguments of the same name.
+/// Primary-constructor JVM generic `Signature`, passed to
+/// [`ClassWriter::seed_plain_class_pool`] at the constructor's interning position.
 pub struct MemberSignatures<'a> {
     /// The primary constructor's generic `Signature` (`(Ljava/util/List<Ljava/lang/String;>;)V`).
     pub ctor: Option<&'a str>,
-    /// Per-accessor generic `Signature` (a getter/setter of a parameterized-type property).
-    pub accessors: &'a [Option<String>],
-    /// Per-field generic `Signature` (a parameterized-type backing field).
-    pub fields: &'a [Option<String>],
+}
+
+/// One declared data-class property accessor at its JVM method-header interning position.
+pub struct DataAccessorInfo {
+    pub name: String,
+    pub desc: String,
+    /// 0 = getter, 1 = unguarded setter, 2 = non-null reference setter.
+    pub setter_kind: u8,
+    pub signature: Option<String>,
 }
 
 /// Extra per-member data a `data class` needs when seeding [`ClassWriter::seed_data_class_pool`], all
 /// index-parallel to its `fields`. Bundled to keep the seeder's arity in check.
 pub struct DataMemberInfo<'a> {
+    /// Declared property accessors in emission order. These precede `componentN` in a data class.
+    pub accessors: &'a [DataAccessorInfo],
     /// Per-field JVM `hashCode` owner override — an interface/collection field dispatches
     /// `java/lang/Object.hashCode`, not `<field-class>.hashCode`. `None` ⇒ derive from the descriptor.
     pub hashcode_owners: &'a [Option<String>],
@@ -271,6 +293,27 @@ impl ConstPool {
             })
             .collect()
     }
+    fn utf8_value(&self, index: u16) -> Option<&str> {
+        match self.entry_at(index) {
+            Some(Const::Utf8(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Whether a typed constant-pool descriptor mentions `internal`. Arbitrary `Utf8` entries are
+    /// deliberately excluded: a source string literal can itself spell `Lowner/Nested;`.
+    fn typed_descriptor_mentions(&self, internal: &str) -> bool {
+        let needle = format!("L{internal};");
+        self.entries.iter().any(|entry| {
+            let descriptor = match entry {
+                Const::NameAndType(_, descriptor) | Const::MethodType(descriptor) => *descriptor,
+                _ => return false,
+            };
+            self.utf8_value(descriptor)
+                .is_some_and(|value| value.contains(&needle))
+        })
+    }
+
     fn integer(&mut self, v: i32) -> u16 {
         self.intern(Const::Integer(v))
     }
@@ -452,6 +495,24 @@ struct FieldInfo {
     invisible_anns: Vec<Vec<u8>>,
 }
 
+/// A field whose constant-pool interning is DEFERRED to the field-table visit: kotlinc's writer
+/// visits methods first and fields last, so a field entry the method bodies never introduced (a
+/// `const val`'s name + `ConstantValue`, a facade backing field) interns AFTER every method window.
+/// Realized into a [`FieldInfo`] (appended after the eagerly-added fields) by `intern_late_fields`.
+struct LateField {
+    access: u16,
+    name: String,
+    desc: String,
+    signature: Option<String>,
+    /// The `ConstantValue` payload, interned at realization (`None` for a `<clinit>`-initialized field).
+    const_value: Option<crate::ir::IrConst>,
+    /// BINARY-retention nullability annotation type descriptor (`Lorg/jetbrains/annotations/NotNull;`).
+    ann: Option<String>,
+    /// `true` ⇒ the realized field LEADS the field table (before the eagerly-added fields) — the
+    /// `Companion` field's position — while its pool entries still intern late.
+    lead: bool,
+}
+
 pub struct ClassWriter {
     cp: ConstPool,
     access: u16,
@@ -459,6 +520,7 @@ pub struct ClassWriter {
     super_class: u16,
     interfaces: Vec<u16>,
     fields: Vec<FieldInfo>,
+    late_fields: Vec<LateField>,
     methods: Vec<MethodInfo>,
     class_attributes: Vec<(u16, Vec<u8>)>, // (name_index, raw bytes)
     /// Constant-pool index of the class's generic `Signature` VALUE, when it has one.
@@ -509,6 +571,21 @@ pub struct InnerClassDetails {
 pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 impl ClassWriter {
+    /// Whether a declared member or typed constant-pool descriptor references `internal`.
+    fn descriptor_mentions(&self, internal: &str) -> bool {
+        let needle = format!("L{internal};");
+        self.fields
+            .iter()
+            .map(|field| field.desc)
+            .chain(self.methods.iter().map(|method| method.desc))
+            .any(|descriptor| {
+                self.cp
+                    .utf8_value(descriptor)
+                    .is_some_and(|value| value.contains(&needle))
+            })
+            || self.cp.typed_descriptor_mentions(internal)
+    }
+
     pub fn new(internal_name: &str, super_internal: &str) -> ClassWriter {
         ClassWriter::new_generic(internal_name, None, super_internal)
     }
@@ -534,6 +611,7 @@ impl ClassWriter {
             super_class,
             interfaces: Vec::new(),
             fields: Vec::new(),
+            late_fields: Vec::new(),
             methods: Vec::new(),
             class_attributes: Vec::new(),
             class_signature: None,
@@ -707,6 +785,106 @@ impl ClassWriter {
         });
     }
 
+    /// Declare a field whose pool entries intern at the FIELD-TABLE visit (after every method) —
+    /// kotlinc's writer order. Use for a field the method bodies don't introduce; a field whose
+    /// name/descriptor the bodies DO intern can use either form (the table interning dedups).
+    pub fn add_field_late(
+        &mut self,
+        access: u16,
+        name: &str,
+        desc: &str,
+        const_value: Option<crate::ir::IrConst>,
+        ann: Option<&str>,
+    ) {
+        self.add_field_late_sig(access, name, desc, None, const_value, ann);
+    }
+
+    /// Deferred field declaration with an optional generic `Signature` value.
+    pub fn add_field_late_sig(
+        &mut self,
+        access: u16,
+        name: &str,
+        desc: &str,
+        signature: Option<&str>,
+        const_value: Option<crate::ir::IrConst>,
+        ann: Option<&str>,
+    ) {
+        self.late_fields.push(LateField {
+            access,
+            name: name.to_string(),
+            desc: desc.to_string(),
+            signature: signature.map(str::to_string),
+            const_value,
+            ann: ann.map(str::to_string),
+            lead: false,
+        });
+    }
+
+    /// [`add_field_late`], but the realized field LEADS the field table (kotlinc puts a class's
+    /// `Companion` field before the instance fields, while interning it with the field visit).
+    pub fn add_field_late_leading(&mut self, access: u16, name: &str, desc: &str) {
+        self.late_fields.push(LateField {
+            access,
+            name: name.to_string(),
+            desc: desc.to_string(),
+            signature: None,
+            const_value: None,
+            // The `Companion` field is a non-null reference — kotlinc annotates it.
+            ann: Some("Lorg/jetbrains/annotations/NotNull;".to_string()),
+            lead: true,
+        });
+    }
+
+    /// Realize every [`LateField`] into the field table, interning name/descriptor/`ConstantValue`/
+    /// annotation NOW — called at the earliest class-attribute interning point (`set_kotlin_metadata`
+    /// or `finish`), so the entries land after the method windows like kotlinc's field visit.
+    fn intern_late_fields(&mut self) {
+        let mut lead_at = 0usize;
+        for lf in std::mem::take(&mut self.late_fields) {
+            let n = self.cp.utf8(&lf.name);
+            let d = self.cp.utf8(&lf.desc);
+            let signature = lf.signature.as_ref().map(|value| self.cp.utf8(value));
+            let cv = lf.const_value.as_ref().and_then(|c| {
+                use crate::ir::IrConst;
+                Some(match c {
+                    IrConst::Boolean(b) => self.const_int(*b as i32),
+                    IrConst::Byte(v) => self.const_int(*v as i32),
+                    IrConst::Short(v) => self.const_int(*v as i32),
+                    IrConst::Int(v) => self.const_int(*v),
+                    IrConst::Char(ch) => self.const_int(*ch as i32),
+                    IrConst::Long(v) => self.const_long(*v),
+                    IrConst::Float(v) => self.const_float(*v),
+                    IrConst::Double(v) => self.const_double(*v),
+                    IrConst::String(s) => self.const_string_kt(s),
+                    IrConst::Null => return None,
+                })
+            });
+            let invisible_anns = lf
+                .ann
+                .as_ref()
+                .map(|a| {
+                    let ti = self.cp.utf8(a);
+                    vec![vec![(ti >> 8) as u8, ti as u8, 0, 0]]
+                })
+                .unwrap_or_default();
+            let info = FieldInfo {
+                access: lf.access,
+                name: n,
+                desc: d,
+                signature,
+                const_value: cv,
+                visible_anns: Vec::new(),
+                invisible_anns,
+            };
+            if lf.lead {
+                self.fields.insert(lead_at, info);
+                lead_at += 1;
+            } else {
+                self.fields.push(info);
+            }
+        }
+    }
+
     /// Add a field carrying a `ConstantValue` attribute (`const_idx` = a constant-pool index from
     /// `const_string`/`const_int`/… ). kotlinc emits this on a `const val`; the JVM initializes the
     /// field, so its `<clinit>` store is omitted.
@@ -759,6 +937,8 @@ impl ClassWriter {
         d1: &[String],
         d2: &[String],
     ) {
+        // The field-table visit precedes the class annotations in kotlinc's writer.
+        self.intern_late_fields();
         // kotlinc interns each element's KEY immediately before that element's VALUE constants (mv key
         // then the mv integers, then k key then its integer, …) rather than all keys up front — so the
         // constant pool interleaves keys and values. Match that by interning each key inline.
@@ -984,19 +1164,23 @@ impl ClassWriter {
     /// the natural emission that follows reuses these indices (interning dedups). kotlinc visits each
     /// method [name, descriptor, body refs, LVT strings] before the next, and interns backing-field
     /// name/descriptor lazily at the `putfield` — an order krusty's field-then-method emission does not
-    /// otherwise reproduce. Call BEFORE any `add_field`/`add_method` for the class. `accessors` are the
-    /// getters (and, for a `var`, setters) in declaration order as `(name, descriptor)`.
+    /// otherwise reproduce. Call BEFORE any `add_field`/`add_method` for the class. Declared methods
+    /// and property accessors then intern at their own exact emission sites.
+    #[allow(clippy::too_many_arguments)]
     pub fn seed_plain_class_pool(
         &mut self,
         this_internal: &str,
         super_internal: &str,
         ctor_descs: (&str, &str),
         fields: &[SeedField],
-        // (name, descriptor, setter_kind): 0 = getter, 1 = primitive/other setter, 2 = non-null
-        // reference setter (its `checkNotNullParameter` guard also interns a `<set-?>` String constant).
-        accessors: &[(String, String, u8)],
         // Per-member generic `Signature`s (parameterized-type ctor/accessor/field members).
         sigs: &MemberSignatures,
+        // The primary ctor's `$default` overload entries (marker desc, default string constants,
+        // delegating `<init>` ref) — interned between the ctor and the accessors, kotlinc's order.
+        ctor_defaults: Option<&SeedCtorDefaults>,
+        // Entries the `super(…)` call's arguments intern in code order, BEFORE the super `<init>`
+        // Methodref (`class Basic : Engine(Cfg(false), "basic")`).
+        super_arg_entries: &[SeedSuperArg],
     ) {
         let (ctor_desc, super_ctor_desc) = ctor_descs;
         // Primary constructor: name + descriptor are interned at method entry, before its body.
@@ -1039,6 +1223,19 @@ impl ClassWriter {
                 }
             }
         }
+        for entry in super_arg_entries {
+            match entry {
+                SeedSuperArg::Class(internal) => {
+                    self.cp.class(internal);
+                }
+                SeedSuperArg::Str(s) => {
+                    self.cp.string_kt(s);
+                }
+                SeedSuperArg::Ctor { owner, desc } => {
+                    self.cp.methodref(owner, "<init>", desc);
+                }
+            }
+        }
         self.cp.methodref(super_internal, "<init>", super_ctor_desc);
         // One `putfield` per property-backed parameter: field name, descriptor, NameAndType, Fieldref.
         for f in fields.iter().filter(|f| f.stores_in_ctor) {
@@ -1057,67 +1254,23 @@ impl ClassWriter {
         // field name/descriptor entries interned just above.
         self.cp.utf8("this");
         self.cp.utf8(&format!("L{this_internal};"));
-        // Each accessor: name + descriptor at entry (its body reuses the field Fieldref above). A setter
-        // then interns `<set-?>` right after — its LocalVariableTable value-parameter name (kotlinc's
-        // synthetic name), plus a `<set-?>` String constant for a non-null reference setter's
-        // `checkNotNullParameter` guard. Interleaved per-setter (deduped) so it lands before the next
-        // accessor, as kotlinc does — not batched at the end.
-        for (i, (name, desc, setter_kind)) in accessors.iter().enumerate() {
-            self.cp.utf8(name);
-            self.cp.utf8(desc);
-            // A getter/setter of a parameterized-type property carries a generic Signature, interned
-            // right after its descriptor (kotlinc's order).
-            if let Some(Some(s)) = sigs.accessors.get(i) {
-                self.cp.utf8(s);
+        // The `$default` ctor overload follows the primary immediately: its marker descriptor, the
+        // default STRING constants its body `ldc`s (in parameter order), then the NameAndType +
+        // Methodref of the delegating `invokespecial` to the real `<init>`.
+        if let Some(d) = ctor_defaults {
+            self.cp.utf8(&d.marker_desc);
+            for s in &d.string_consts {
+                self.cp.string_kt(s);
             }
-            // A field the constructor never stores (a body property initialized to `null`) first
-            // appears at its GETTER: kotlinc interns the return annotation, then the field's name and
-            // descriptor at the `getfield`.
-            if *setter_kind == 0 {
-                if let Some(f) = fields.iter().find(|f| {
-                    !f.stores_in_ctor && {
-                        let mut ch = f.name.chars();
-                        let cap = ch
-                            .next()
-                            .map(|c| c.to_uppercase().collect::<String>() + ch.as_str())
-                            .unwrap_or_default();
-                        *name == format!("get{cap}")
-                    }
-                }) {
-                    match f.ann_kind {
-                        1 => {
-                            self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
-                        }
-                        2 => {
-                            self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
-                        }
-                        _ => {}
-                    }
-                    self.cp.utf8(&f.name);
-                    self.cp.utf8(&f.desc);
-                    self.cp.fieldref(this_internal, &f.name, &f.desc);
-                }
-            }
-            if *setter_kind >= 1 {
-                self.cp.utf8("<set-?>");
-            }
-            if *setter_kind == 2 {
-                self.cp.string("<set-?>");
-            }
-        }
-        // Each parameterized-type FIELD's `Signature` value, in field order — kotlinc interns these after
-        // all accessors, right before the class's `@Metadata` (a field's Signature attribute serializes
-        // after the methods but its Utf8 lands here).
-        for s in sigs.fields.iter().flatten() {
-            self.cp.utf8(s);
+            self.cp.methodref(this_internal, "<init>", ctor_desc);
         }
     }
 
     /// Seed a `data class`'s synthesized-method constant-pool entries in kotlinc's first-use order,
-    /// AFTER [`seed_plain_class_pool`] (which seeds `<init>`/fields/accessors). `fields` is
-    /// `(name, jvm_descriptor)` in declaration order. Mirrors the bodies kotlinc emits for
-    /// `componentN`/`copy`/`copy$default`/`toString`/`hashCode`/`equals` so the natural emission reuses
-    /// these indices. `simple` is the class's simple name (for the `toString` prefix `Simple(field=`).
+    /// AFTER [`seed_plain_class_pool`] (which seeds `<init>` and its field stores). It first seeds the
+    /// data class's declared property accessors, then mirrors the synthesized bodies kotlinc emits for
+    /// `componentN`/`copy`/`copy$default`/`toString`/`hashCode`/`equals`. `fields` is
+    /// `(name, jvm_descriptor)` in declaration order; `simple` is the class's simple name.
     pub fn seed_data_class_pool(
         &mut self,
         this_internal: &str,
@@ -1158,6 +1311,23 @@ impl ClassWriter {
             }
         };
         let is_ref = |d: &str| d.starts_with('L') || d.starts_with('[');
+
+        // Declared property accessors precede the synthesized data members. Ordinary classes intern
+        // accessors at their exact declaration sites, but a data class's synthetic-member seeder must
+        // preserve this boundary before it interns `componentN`/`copy`/the Object overrides.
+        for accessor in info.accessors {
+            self.cp.utf8(&accessor.name);
+            self.cp.utf8(&accessor.desc);
+            if let Some(signature) = &accessor.signature {
+                self.cp.utf8(signature);
+            }
+            if accessor.setter_kind >= 1 {
+                self.cp.utf8("<set-?>");
+            }
+            if accessor.setter_kind == 2 {
+                self.cp.string("<set-?>");
+            }
+        }
 
         // componentN — each body is a field read; only the method name is new.
         for i in 1..=fields.len() {
@@ -1813,38 +1983,86 @@ impl ClassWriter {
     }
 
     fn resolve_inner_classes(&mut self) {
-        let Some(resolve) = self.inner_class_resolver.clone() else {
-            return;
-        };
-        let referenced = self.cp.class_names();
-        for inner in referenced {
-            if self
-                .inner_class_candidates
-                .iter()
-                .any(|candidate| candidate.inner == inner)
-            {
-                continue;
+        if let Some(resolve) = self.inner_class_resolver.clone() {
+            let referenced = self.cp.class_names();
+            for inner in referenced {
+                if self
+                    .inner_class_candidates
+                    .iter()
+                    .any(|candidate| candidate.inner == inner)
+                {
+                    continue;
+                }
+                let Some(details) = resolve(&inner) else {
+                    continue;
+                };
+                if let Some(outer) = &details.outer {
+                    self.cp.class(outer);
+                }
+                if let Some(name) = &details.name {
+                    self.cp.utf8(name);
+                }
+                self.add_inner_class(InnerClassSpec {
+                    inner,
+                    outer: details.outer,
+                    name: details.name,
+                    access: details.access,
+                });
             }
-            let Some(details) = resolve(&inner) else {
-                continue;
-            };
-            if let Some(outer) = &details.outer {
-                self.cp.class(outer);
-            }
-            if let Some(name) = &details.name {
-                self.cp.utf8(name);
-            }
-            self.add_inner_class(InnerClassSpec {
-                inner,
-                outer: details.outer,
-                name: details.name,
-                access: details.access,
-            });
         }
+        // kotlinc writes the complete table sorted by inner internal name (`C$Companion`,
+        // `C$NestObj`, `C$Nested` — case-sensitive), including classpath-discovered entries.
+        self.inner_class_candidates
+            .sort_by(|a, b| a.inner.cmp(&b.inner));
     }
 
     pub fn finish(mut self) -> Vec<u8> {
+        // A class that never attached `@Metadata` still realizes its deferred fields first —
+        // kotlinc's field visit precedes every class-attribute window.
+        self.intern_late_fields();
         self.resolve_inner_classes();
+        // The `EnclosingMethod` refs (owner Class, method NameAndType) intern BEFORE the
+        // `InnerClasses` entries' refs — kotlinc's attribute visit order on an anonymous class.
+        // (The attribute NAME interns later, with the other attribute names.)
+        if let Some((owner, method, desc)) = self.enclosing_method.clone() {
+            self.cp.class(&owner);
+            if !method.is_empty() {
+                self.cp.name_and_type(&method, &desc);
+            }
+        }
+        // Every EMITTED `InnerClasses` entry's refs (outer Class, simple name) intern here — before
+        // the `SourceFile` value and the attribute names (kotlinc visits the InnerClasses table
+        // ahead of both; a nested class's own entry otherwise interned its outer at serialization,
+        // after everything else). Only candidates whose inner class is ALREADY a pool constant
+        // qualify — an unreferenced candidate emits no entry, and interning it here would falsely
+        // mark it referenced.
+        let referenced: std::collections::HashSet<String> =
+            self.cp.class_names().into_iter().collect();
+        let inner_specs: Vec<(String, Option<String>, Option<String>)> = self
+            .inner_class_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.outer.as_deref() == Some(self.internal_name.as_str())
+                    || referenced.contains(&candidate.inner)
+                    || self.descriptor_mentions(&candidate.inner)
+            })
+            .map(|candidate| {
+                (
+                    candidate.inner.clone(),
+                    candidate.outer.clone(),
+                    candidate.name.clone(),
+                )
+            })
+            .collect();
+        for (inner, outer, name) in inner_specs {
+            self.cp.class(&inner);
+            if let Some(outer) = outer {
+                self.cp.class(&outer);
+            }
+            if let Some(name) = name {
+                self.cp.utf8(&name);
+            }
+        }
         // kotlinc interns the `SourceFile` VALUE (the `.kt` name) right after the class annotations and
         // before the Code-attribute names, then the `SourceFile` attribute NAME later, and
         // `RuntimeVisibleAnnotations` last. Intern the value up front to match.
@@ -1875,14 +2093,24 @@ impl ClassWriter {
         // `Code` — kotlinc visits fields first, and a field's `Signature` attribute precedes its
         // annotations (`class C(val xs: List<String>)` pool: `Signature`, `RuntimeInvisibleAnnotations`,
         // `Code`). The later `signature_attr_name` intern dedups onto this index.
-        let field_sig_name = self
-            .fields
-            .iter()
-            .any(|f| f.signature.is_some())
-            .then(|| self.cp.utf8("Signature"));
-        let field_has_invis = self.fields.iter().any(|f| !f.invisible_anns.is_empty());
-        // Field-level RIA, if any field is annotated: interns before `Code` (fields precede methods).
-        let field_ria = field_has_invis.then(|| self.cp.utf8("RuntimeInvisibleAnnotations"));
+        // `ConstantValue` and field-level `RuntimeInvisibleAnnotations` intern in the field-first
+        // window too — in PER-FIELD first-use order over the field table (a leading `const val`
+        // interns `ConstantValue` before any annotation name; a facade whose consts come LAST
+        // interns the annotation name first).
+        let mut field_sig_name: Option<u16> = None;
+        let mut constval_attr_name: Option<u16> = None;
+        let mut field_ria: Option<u16> = None;
+        for i in 0..self.fields.len() {
+            if self.fields[i].signature.is_some() && field_sig_name.is_none() {
+                field_sig_name = Some(self.cp.utf8("Signature"));
+            }
+            if self.fields[i].const_value.is_some() && constval_attr_name.is_none() {
+                constval_attr_name = Some(self.cp.utf8("ConstantValue"));
+            }
+            if !self.fields[i].invisible_anns.is_empty() && field_ria.is_none() {
+                field_ria = Some(self.cp.utf8("RuntimeInvisibleAnnotations"));
+            }
+        }
         // kotlinc interns `Code` only when a method actually has one — an `interface` with no bodies
         // has none, and an unused attribute name would diverge.
         let code_attr_name = if self.methods.iter().any(|m| m.code.is_some()) {
@@ -1942,12 +2170,6 @@ impl ClassWriter {
             (class_has_sig || self.methods.iter().any(|m| m.signature.is_some()))
                 .then(|| self.cp.utf8("Signature"))
         });
-        // Intern `ConstantValue` only if a `const val` field carries one.
-        let constval_attr_name = if self.fields.iter().any(|f| f.const_value.is_some()) {
-            Some(self.cp.utf8("ConstantValue"))
-        } else {
-            None
-        };
         // Intern `Deprecated` only if the class or a method carries it.
         let deprecated_attr_name = if self.class_deprecated || !self.deprecated_methods.is_empty() {
             Some(self.cp.utf8("Deprecated"))
@@ -1979,7 +2201,11 @@ impl ClassWriter {
             let referenced: Vec<InnerClassSpec> = self
                 .inner_class_candidates
                 .iter()
-                .filter(|s| own_member(s) || self.cp.has_class(&s.inner))
+                .filter(|s| {
+                    own_member(s)
+                        || self.cp.has_class(&s.inner)
+                        || self.descriptor_mentions(&s.inner)
+                })
                 .cloned()
                 .collect();
             (!referenced.is_empty()).then(|| {
@@ -1999,6 +2225,23 @@ impl ClassWriter {
             })
         };
         // `SourceFile`: name_index + a 2-byte body = the CP index of the source-file UTF8 (its VALUE was
+        // The `EnclosingMethod` attribute NAME interns between `InnerClasses` and `SourceFile`
+        // (kotlinc's anonymous-class attribute order); its refs were interned at the top of
+        // `finish`, so this build only adds the name.
+        let enclosing_method_attr = self.enclosing_method.take().map(|(owner, method, desc)| {
+            let name = self.cp.utf8("EnclosingMethod");
+            let class_idx = self.cp.class(&owner);
+            // An empty method name is the class-only form: `method_index = 0`.
+            let nat_idx = if method.is_empty() {
+                0
+            } else {
+                self.cp.name_and_type(&method, &desc)
+            };
+            let mut body = Vec::new();
+            u2(&mut body, class_idx);
+            u2(&mut body, nat_idx);
+            (name, body)
+        });
         // interned at the top of `finish`). kotlinc interns the `SourceFile` name BEFORE the
         // `RuntimeVisibleAnnotations` name, so build this attribute first.
         let sourcefile_attr = sourcefile_value.map(|file_idx| {
@@ -2045,20 +2288,6 @@ impl ClassWriter {
         // this class actually references as a class constant (the `has_class` filter), in registration
         // order. `inner` is already interned (that is why it passed the filter); `outer`/`name` intern
         // here — before the pool is serialized.
-        let enclosing_method_attr = self.enclosing_method.take().map(|(owner, method, desc)| {
-            let name = self.cp.utf8("EnclosingMethod");
-            let class_idx = self.cp.class(&owner);
-            // An empty method name is the class-only form: `method_index = 0`.
-            let nat_idx = if method.is_empty() {
-                0
-            } else {
-                self.cp.name_and_type(&method, &desc)
-            };
-            let mut body = Vec::new();
-            u2(&mut body, class_idx);
-            u2(&mut body, nat_idx);
-            (name, body)
-        });
         let permitted_attr = (!self.permitted_subclasses.is_empty()).then(|| {
             let name = self.cp.utf8("PermittedSubclasses");
             let mut body = Vec::new();
@@ -3376,6 +3605,30 @@ mod tests {
         assert!(has(b"InnerClasses"));
         assert!(has(b"C$Companion"));
         assert!(has(b"Companion"));
+    }
+
+    #[test]
+    fn inner_class_descriptor_references_are_typed() {
+        let candidate = InnerClassSpec {
+            inner: "dep/Outer$Nested".to_string(),
+            outer: Some("dep/Outer".to_string()),
+            name: Some("Nested".to_string()),
+            access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+        };
+
+        let mut field_ref = ClassWriter::new("Use", "java/lang/Object");
+        field_ref.add_inner_class(candidate.clone());
+        field_ref.add_field(ACC_PUBLIC, "nested", "Ldep/Outer$Nested;");
+        let info = crate::jvm::classreader::parse_class(&field_ref.finish()).expect("parse class");
+        assert_eq!(info.inner_classes.len(), 1);
+
+        // The same bytes as an ordinary string constant are not a descriptor reference.
+        let mut string_literal = ClassWriter::new("Use", "java/lang/Object");
+        string_literal.add_inner_class(candidate);
+        string_literal.const_string("Ldep/Outer$Nested;");
+        let info =
+            crate::jvm::classreader::parse_class(&string_literal.finish()).expect("parse class");
+        assert!(info.inner_classes.is_empty());
     }
 
     /// kotlinc emits an `InnerClasses` entry for a class's OWN member classes whether or not its code

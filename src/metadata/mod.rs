@@ -24,7 +24,7 @@ pub(crate) mod property_flags {
     pub const MODALITY_ABSTRACT: u64 = 1 << 5;
 }
 
-pub(crate) fn serialize_string_table_types(records: &[Pb]) -> Pb {
+pub(crate) fn serialize_string_table_types(records: &[Pb], local_names: &[u32]) -> Pb {
     let mut out = Pb::new();
     let mut i = 0;
     while i < records.len() {
@@ -45,6 +45,15 @@ pub(crate) fn serialize_string_table_types(records: &[Pb]) -> Pb {
         out.repeated_message(1, &record);
         i = end;
     }
+    // `StringTableTypes.localName` (packed field 5): the indices whose strings are LOCAL class
+    // names — raw internal names used as class ids verbatim (kotlinc's anonymous-class encoding).
+    if !local_names.is_empty() {
+        let mut packed = Pb::new();
+        for &index in local_names {
+            packed.varint(index as u64);
+        }
+        out.field_bytes(5, packed.as_bytes());
+    }
     out
 }
 
@@ -60,13 +69,16 @@ mod tests {
         let mut operation = Pb::new();
         operation.field_varint(3, 2);
 
-        let encoded = serialize_string_table_types(&[
-            plain.clone(),
-            plain,
-            predefined,
-            operation.clone(),
-            operation,
-        ]);
+        let encoded = serialize_string_table_types(
+            &[
+                plain.clone(),
+                plain,
+                predefined,
+                operation.clone(),
+                operation,
+            ],
+            &[],
+        );
 
         assert_eq!(
             encoded.as_bytes(),

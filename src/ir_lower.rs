@@ -220,9 +220,8 @@ fn lower_file_at_reporting_impl(
         class_storage_parameter_subst: Vec::new(),
         field_accessor_props: std::collections::HashSet::new(),
         field_accessor_var_props: std::collections::HashSet::new(),
-        cur_fn_name: String::new(),
+        cur_fn: crate::ir::IrFunctionScope::default(),
         cur_fn_suspend: false,
-        cur_tparams: Vec::new(),
         synthetic_seq_by_owner: HashMap::new(),
         local_class_captures: HashMap::new(),
         shared_cell_vars: std::collections::HashSet::new(),
@@ -681,67 +680,6 @@ fn lower_file_at_reporting_impl(
                 }
             }
         }
-        // A member `suspend fn` overriding a supertype method may need a generic-erasure BRIDGE (the CPS
-        // override's descriptor vs the supertype's erased one), which the coroutine lowering does not
-        // synthesize — that mismatch would miscompile (`SuspendingMutableMap : Map<K,V>`). But a bridge is
-        // needed ONLY when generics are involved: if the class has NO type parameters AND every supertype
-        // is a RAW (non-parameterized) type, the override's erased signature equals the supertype method's,
-        // so the single CPS method directly implements it — no bridge (the common suspend-decorator /
-        // interface-impl shape: a class implementing a large suspend interface). Bail only for the generic
-        // shape, which still can't be modeled.
-        // Whether a supertype's transitive closure contains a GENERIC type — a generic ancestor could carry
-        // a suspend method that, when overridden concretely, needs an erasure bridge the coroutine pass can't
-        // fix up. Walk module symbols first, then libraries; otherwise a source class in another file can
-        // hide the relevant ancestry from this guard.
-        let super_has_generic = |name: &str| -> bool {
-            let Some(start) = syms
-                .class_names
-                .get(name)
-                .or_else(|| existing_type_name(name))
-            else {
-                return false;
-            };
-            let mut stack = vec![start];
-            let mut seen = std::collections::HashSet::new();
-            while let Some(i) = stack.pop() {
-                if !seen.insert(i) {
-                    continue;
-                }
-                if let Some(c) = syms.class_by_type_name(i) {
-                    if !c.type_params.is_empty() {
-                        return true;
-                    }
-                    if let Some(s) = c.super_internal_name() {
-                        stack.push(s);
-                    }
-                    stack.extend(c.interface_names());
-                } else if let Some(t) = syms.libraries.classifier(i) {
-                    if !t.type_params.is_empty() {
-                        return true;
-                    }
-                    stack.extend(t.supertypes.iter_ids());
-                }
-            }
-            false
-        };
-        let suspend_member_needs_bridge = file.decls.iter().any(|&d| {
-            matches!(file.decl(d), Decl::Class(c)
-                if (!c.supertypes.is_empty() || c.base_class.is_some())
-                    && c.methods.iter().any(|m| m.is_suspend())
-                    && (!c.type_params.is_empty()
-                        || c.supertypes.iter().any(|s| {
-                            !s.targs.is_empty()
-                                || s.arg.is_some()
-                                || super_has_generic(&s.name)
-                        })
-                        // A GENERIC classpath BASE CLASS with an open suspend fn overridden concretely
-                        // needs an erasure bridge the superclass loop can't build (a classpath base breaks
-                        // `resolve_method`), so check the base's own genericity and closure directly.
-                        || c.base_class.as_deref().is_some_and(super_has_generic)))
-        });
-        if suspend_member_needs_bridge {
-            return lo.bail("gate:suspend-erasure-bridge");
-        }
         // A NON-suspend body may not directly call any suspend fn: call-site continuation threading is
         // only modeled inside a suspend body (and Kotlin rejects such a call anyway). Read the exact
         // checker-selected target and stop at nested lambda/local-function execution boundaries. A
@@ -804,6 +742,7 @@ fn lower_file_at_reporting_impl(
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
             let class_sig = syms.class_by_internal(&internal)?;
+            let class_identity = class_sig.internal;
             if c.props
                 .iter()
                 .filter(|property| property.is_property)
@@ -847,6 +786,13 @@ fn lower_file_at_reporting_impl(
                     .prop_visibilities
                     .insert((internal.clone(), p.name.clone()), p.visibility);
             }
+            // The primary ctor's closing-`)` line: the ctor `$default` overload's `return` maps
+            // there in kotlinc's LineNumberTable.
+            if c.ctor_close_line != 0 {
+                lo.ir
+                    .ctor_close_lines
+                    .insert(class_identity, c.ctor_close_line);
+            }
             let mut ctor_fields: Vec<(String, Ty)> = anonymous_captures
                 .iter()
                 .map(|capture| (capture.name.clone(), capture.ty))
@@ -887,14 +833,14 @@ fn lower_file_at_reporting_impl(
             for p in c.body_props.iter().filter(|p| is_backing_field_prop(p)) {
                 lo.ir
                     .prop_decl_lines
-                    .insert((internal.clone(), p.name.clone()), p.decl_line);
+                    .insert((class_identity, p.name.clone()), p.decl_line);
             }
             // Primary-constructor `val`/`var` parameters carry a line too — kotlinc maps each one's
             // field store in `<init>` to the parameter's own source line.
             for p in c.props.iter().filter(|p| p.is_property) {
                 lo.ir
                     .prop_decl_lines
-                    .insert((internal.clone(), p.name.clone()), p.decl_line);
+                    .insert((class_identity, p.name.clone()), p.decl_line);
             }
             for p in c.body_props.iter().filter(|p| is_field_accessor_prop(p)) {
                 lo.field_accessor_props
@@ -1091,8 +1037,21 @@ fn lower_file_at_reporting_impl(
                     }
                 })
                 .collect();
+            // Declaration visibility for `Class.flags` — `internal class` must survive into
+            // `@Metadata` so a consuming module enforces the boundary.
+            lo.ir
+                .class_visibilities
+                .insert(class_identity, c.visibility);
+            if c.primary_ctor_visibility != crate::types::Visibility::Public {
+                lo.ir
+                    .ctor_visibilities
+                    .insert(class_identity, c.primary_ctor_visibility);
+            }
             let id = lo.ir.add_class(IrClass {
                 fq_name: type_name(&internal),
+                is_source_declared: true,
+                is_anonymous_object: file.is_anonymous_object_class(d),
+                enclosing_function: None,
                 is_inner_class: inner_outer.is_some(),
                 is_local_class: file.is_local_declaration(d) || file.is_anonymous_object_class(d),
                 is_value: c.is_value,
@@ -1120,6 +1079,7 @@ fn lower_file_at_reporting_impl(
                         ty: ty_to_ir(Ty::obj(o)),
                         is_field: true,
                         has_default: false,
+                        is_vararg: false,
                         type_param: None,
                         check: None,
                     })
@@ -1129,6 +1089,7 @@ fn lower_file_at_reporting_impl(
                             ty: ty_to_ir(capture.ty),
                             is_field: true,
                             has_default: false,
+                            is_vararg: false,
                             type_param: None,
                             check: capture
                                 .ty
@@ -1161,6 +1122,7 @@ fn lower_file_at_reporting_impl(
                             ty: t,
                             is_field: p.is_property,
                             has_default: p.default.is_some(),
+                            is_vararg: p.is_vararg,
                             type_param: c
                                 .type_params
                                 .iter()
@@ -1218,11 +1180,10 @@ fn lower_file_at_reporting_impl(
                     &lo.ir,
                 ),
                 field_annotations: class_field_annotations(file, lo.file_index, c, syms, &lo.ir),
-                // A Kotlin `annotation class` is RUNTIME-retained unless it opts out — emit the
-                // `@Retention(RUNTIME)` meta-annotation so its uses stay visible to reflection.
-                runtime_retained: c.kind == ast::ClassKind::Annotation
-                    && runtime_annotation_decl(file, lo.file_index, syms, type_name(&internal))
-                        .is_some(),
+                annotation_retention: (c.kind == ast::ClassKind::Annotation).then(|| {
+                    syms.annotation_retention(class_identity)
+                        .unwrap_or(crate::ir::AnnoRetention::Default)
+                }),
             });
             // Record a LOCAL class's captures against its IR id, so every construction supplies
             // them (`emit_new`). An anonymous object is not recorded: its single construction site
@@ -1321,6 +1282,21 @@ fn lower_file_at_reporting_impl(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks,
                 });
+                // A member EXTENSION realizes its extension receiver as `params[0]` — record the
+                // fid so class `@Metadata` can restore `Function.receiver_type` (f5) instead of
+                // publishing the receiver as an ordinary value parameter.
+                if extension_receiver.is_some() {
+                    lo.ir.extension_receiver_fns.insert(fid);
+                }
+                if m.is_operator() {
+                    lo.ir.operator_fns.insert(fid);
+                }
+                if m.is_inline() && m.visibility.is_public() {
+                    lo.ir.public_inline_functions.insert(fid);
+                }
+                if let Some(vi) = m.params.iter().position(|p| p.is_vararg) {
+                    lo.ir.fn_vararg_index.insert(fid, vi);
+                }
                 // Record the declared nullability of each parameter for `@Metadata`/annotations (see
                 // `IrFile::fn_param_declared_nullable`) — kept off `IrFunction::params` so the mangle
                 // is untouched. Only when at least one parameter is nullable (else the non-null default).
@@ -1343,6 +1319,9 @@ fn lower_file_at_reporting_impl(
                 // foo() }` called on a `B : A` with its own private `foo` would wrongly run `B.foo`).
                 if m.visibility.is_private() {
                     lo.ir.private_methods.insert(fid);
+                }
+                if m.visibility == crate::types::Visibility::Internal {
+                    lo.ir.internal_methods.insert(fid);
                 }
                 // An `open`/`override` member is overridable — kotlinc's member modality stays OPEN
                 // (no `ACC_FINAL`) even when nothing in this module extends the class: a separately
@@ -1467,6 +1446,38 @@ fn lower_file_at_reporting_impl(
                 if m.is_suspend() {
                     lo.ir.suspend_funs.push(fid);
                 }
+                // A non-generic member whose DECLARED types mention an enclosing-class type parameter
+                // (`class Base<T> { open fun choose(value: T): T }`): the erased IrFunction says `Any`,
+                // so record the semantic shape for `@Metadata` (`Type.type_parameter` refs) — or a
+                // consumer rejects a `Base<String>` override with "return type mismatch". Extension
+                // members are excluded: their `params[0]` receiver alignment has its own channel.
+                if m.type_params.is_empty() && m.receiver.is_none() {
+                    let semantic_params: Option<Vec<Ty>> = m
+                        .params
+                        .iter()
+                        .map(|parameter| info.resolved_declaration_type(&parameter.ty))
+                        .collect();
+                    let semantic_ret = match m.ret.as_ref() {
+                        Some(reference) => info.resolved_declaration_type(reference),
+                        None => Some(Ty::Unit),
+                    };
+                    if let (Some(semantic_params), Some(semantic_ret)) =
+                        (semantic_params, semantic_ret)
+                    {
+                        // Semantic type-parameter identities are checker-generated, so a
+                        // source-name comparison cannot see them; with no function-owned params
+                        // and no receiver, ANY type variable here is an enclosing-class one.
+                        let mentions_class_param = semantic_params
+                            .iter()
+                            .chain(std::iter::once(&semantic_ret))
+                            .any(|t| crate::types::ty_mentions_any_param(*t));
+                        if mentions_class_param {
+                            lo.ir
+                                .member_semantic_sigs
+                                .insert(fid, (semantic_params, semantic_ret));
+                        }
+                    }
+                }
                 // A generic member method gets the same JVM `Signature` as a generic top-level function.
                 match fn_generic_sig(info, m) {
                     Ok(Some(signature)) => {
@@ -1480,6 +1491,7 @@ fn lower_file_at_reporting_impl(
                     .or_default()
                     .push((mi as u32, fid, ret));
                 method_fids.push(fid);
+                lo.ir.fn_source_order.insert(fid, m.span.lo);
             }
             // Computed body properties → `getX()` instance methods (no backing field).
             for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
@@ -1512,7 +1524,11 @@ fn lower_file_at_reporting_impl(
                     .properties
                     .push(crate::ir::IrProperty {
                         name: p.name.clone(),
+                        source_order: p.span.lo,
+                        decl_line: p.decl_line,
                         ty,
+                        visibility: p.visibility,
+                        initializer: None,
                         storage_ty: None,
                         backing_field: None,
                         is_var: p.is_var,
@@ -1613,6 +1629,7 @@ fn lower_file_at_reporting_impl(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks: vec![None; getter_params.len()],
                 });
+                lo.ir.fn_source_order.insert(gfid, p.span.lo);
                 if p.visibility.is_private() {
                     lo.ir.private_methods.insert(gfid);
                 }
@@ -1621,6 +1638,7 @@ fn lower_file_at_reporting_impl(
                 lo.ir.fresh_method_decls.push(gfid);
                 methods.entry(gname).or_default().push((mi, gfid, ret));
                 method_fids.push(gfid);
+                let mut ext_setter = None;
                 if p.is_var {
                     let setter = p.setter.as_ref()?;
                     let sname = property_setter_name(&p.name);
@@ -1646,13 +1664,30 @@ fn lower_file_at_reporting_impl(
                         dispatch_receiver: Some(type_name(&internal)),
                         param_checks: vec![None; setter_params.len()],
                     });
+                    lo.ir.fn_source_order.insert(sfid, p.span.lo);
                     if setter.is_private {
                         lo.ir.private_methods.insert(sfid);
                     }
                     lo.ir.fresh_method_decls.push(sfid);
                     methods.entry(sname).or_default().push((mi, sfid, Ty::Unit));
                     method_fids.push(sfid);
+                    ext_setter = Some(sfid);
                 }
+                // The PROPERTY declaration these accessors realize, for class `@Metadata`: the record
+                // must be a `Property` with `receiver_type`, not `Function`s named after accessors.
+                lo.ir
+                    .member_ext_props
+                    .entry(class_identity)
+                    .or_default()
+                    .push(crate::ir::MemberExtProp {
+                        name: p.name.clone(),
+                        receiver: sig.receiver,
+                        ty: ret,
+                        is_var: p.is_var,
+                        getter: gfid,
+                        setter: ext_setter,
+                        visibility: p.visibility,
+                    });
             }
             // Delegated body properties (`val/var x by Del()`) → a `getX()` (and `setX()` for a `var`)
             // instance method that calls the delegate's `getValue`/`setValue`. Bodies built in pass 2.
@@ -1685,7 +1720,11 @@ fn lower_file_at_reporting_impl(
                     .properties
                     .push(crate::ir::IrProperty {
                         name: p.name.clone(),
+                        source_order: p.span.lo,
+                        decl_line: p.decl_line,
                         ty: prop_ty,
+                        visibility: p.visibility,
+                        initializer: None,
                         storage_ty: None,
                         backing_field: None,
                         is_var: p.is_var,
@@ -1768,7 +1807,11 @@ fn lower_file_at_reporting_impl(
                         .properties
                         .push(crate::ir::IrProperty {
                             name: p.name.clone(),
+                            source_order: p.span.lo,
+                            decl_line: p.decl_line,
                             ty,
+                            visibility: p.visibility,
+                            initializer: None,
                             storage_ty: None,
                             backing_field: None,
                             is_var: p.is_var,
@@ -1796,6 +1839,7 @@ fn lower_file_at_reporting_impl(
                             dispatch_receiver: Some(type_name(&internal)),
                             param_checks: vec![],
                         });
+                        lo.ir.fn_source_order.insert(fid, p.span.lo);
                         methods.entry(gname).or_default().push((mi, fid, ty));
                         method_fids.push(fid);
                     }
@@ -1812,6 +1856,7 @@ fn lower_file_at_reporting_impl(
                                 dispatch_receiver: Some(type_name(&internal)),
                                 param_checks: vec![],
                             });
+                            lo.ir.fn_source_order.insert(fid, p.span.lo);
                             methods.entry(sname).or_default().push((mi, fid, Ty::Unit));
                             method_fids.push(fid);
                         }
@@ -1823,7 +1868,7 @@ fn lower_file_at_reporting_impl(
             // Interfaces have no backing fields. An enum's ctor properties get getters here too (kotlinc
             // emits `private` fields + `getX()`); `emit_enum_class` emits those fields private to match.
             if !c.is_interface() {
-                let field_props: Vec<(String, bool, bool, Ty)> = c
+                let field_props: Vec<(String, bool, crate::types::Visibility, Ty, u32, u32)> = c
                     .props
                     .iter()
                     .filter(|p| p.is_property)
@@ -1831,8 +1876,10 @@ fn lower_file_at_reporting_impl(
                         (
                             p.name.clone(),
                             p.is_var,
-                            p.visibility.is_private(),
+                            p.visibility,
                             declared_prop_ty(&p.name),
+                            p.span.lo,
+                            p.decl_line,
                         )
                     })
                     .chain(
@@ -1843,8 +1890,10 @@ fn lower_file_at_reporting_impl(
                                 (
                                     p.name.clone(),
                                     p.is_var,
-                                    p.visibility.is_private(),
+                                    p.visibility,
                                     declared_prop_ty(&p.name),
+                                    p.span.lo,
+                                    p.decl_line,
                                 )
                             }),
                     )
@@ -1861,7 +1910,8 @@ fn lower_file_at_reporting_impl(
                 // another class — the companion, a nested class, an inlined body — goes through the
                 // synthetic `access$…$p` bridge instead (`mark_private_access_bridge_if_outside`).
                 // A value class keeps its getter: its unboxed-support synthesis expects one.
-                for (pi, (pname, is_var, is_private, property_ty)) in field_props.iter().enumerate()
+                for (pi, (pname, is_var, visibility, property_ty, source_order, decl_line)) in
+                    field_props.iter().enumerate()
                 {
                     let fidx = pi + field_offset;
                     let fty = fields[fidx].1;
@@ -1901,12 +1951,16 @@ fn lower_file_at_reporting_impl(
                         .properties
                         .push(crate::ir::IrProperty {
                             name: pname.clone(),
+                            source_order: *source_order,
+                            decl_line: *decl_line,
                             ty: *property_ty,
+                            visibility: *visibility,
+                            initializer: None,
                             storage_ty: (fty != *property_ty).then_some(fty),
                             backing_field: Some(fidx as u32),
                             is_var: *is_var,
                             is_open: prop_open,
-                            is_private: *is_private,
+                            is_private: visibility.is_private(),
                             setter_is_private: c.body_props.iter().any(|property| {
                                 property.name == *pname
                                     && property
@@ -2041,6 +2095,15 @@ fn lower_file_at_reporting_impl(
                     }
                 }
             }
+            // Source-written property accessor ids stay attached to their declaration. Consume that
+            // exact linkage instead of recovering a property from the accessor/property spelling.
+            for property in &lo.ir.classes[id as usize].properties {
+                for function in [property.getter, property.setter].into_iter().flatten() {
+                    lo.ir
+                        .fn_source_order
+                        .insert(function, property.source_order);
+                }
+            }
             lo.ir.classes[id as usize].methods = method_fids;
             let _ = class_ty;
             lo.insert_class_info(
@@ -2073,8 +2136,12 @@ fn lower_file_at_reporting_impl(
                                 init,
                                 is_var: false,
                                 is_const: true,
+                                // Common IR keeps the declaration on its semantic object owner.
+                                // A target may choose different physical storage later.
                                 owner: Some(type_name(&internal)),
                                 custom_accessor: false,
+                                line: bp.decl_line,
+                                source_order: bp.span.lo,
                             });
                             lo.ir
                                 .declared_class_statics
@@ -2231,10 +2298,31 @@ fn lower_file_at_reporting_impl(
                     .entry((recv_key, f.name.clone()))
                     .or_insert(id);
                 lo.fun_ids_by_decl.insert(d, id);
+                lo.ir.top_level_function_fids.insert(d.0, id);
+                lo.ir.extension_receiver_fns.insert(id);
+                if f.is_inline() && f.visibility.is_public() {
+                    lo.ir.public_inline_functions.insert(id);
+                }
+                if f.is_inline() {
+                    lo.ir.top_level_inline_functions.insert(id);
+                }
                 // A `private` top-level extension is `private static` on the facade (kotlinc); a
                 // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
                 if f.visibility.is_private() {
                     lo.ir.private_methods.insert(id);
+                }
+                // A generic EXTENSION gets a JVM `Signature` like a generic top-level function, with
+                // the receiver as the leading parameter (kotlinc: `<T:…>(Llib/Core;…)TT;`). A
+                // consumer's reified-inline SPLICE reads the formal names from exactly this attribute
+                // — without it a krusty-built `inline fun <reified T> Recv.f(…)` cannot bind `T` and
+                // the call falls back to the compiled body, which exists only to throw.
+                match fn_generic_sig(info, f) {
+                    Ok(Some(mut signature)) => {
+                        signature.params.insert(0, recv_ty);
+                        lo.ir.signatures.insert(id, signature);
+                    }
+                    Ok(None) => {}
+                    Err(reason) => return lo.bail(reason),
                 }
                 // Tag a `suspend` extension exactly like a plain top-level `suspend fun`: the receiver
                 // is already an ordinary leading static parameter, so the coroutine pass appends the
@@ -2285,6 +2373,13 @@ fn lower_file_at_reporting_impl(
                 });
                 lo.fun_ids.insert((f.name.clone(), sig.params.clone()), id);
                 lo.fun_ids_by_decl.insert(d, id);
+                lo.ir.top_level_function_fids.insert(d.0, id);
+                if f.is_inline() && f.visibility.is_public() {
+                    lo.ir.public_inline_functions.insert(id);
+                }
+                if f.is_inline() {
+                    lo.ir.top_level_inline_functions.insert(id);
+                }
                 // A `private` top-level function is `private static` on the facade (kotlinc); a
                 // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
                 if f.visibility.is_private() {
@@ -2337,6 +2432,41 @@ fn lower_file_at_reporting_impl(
                 lo.local_fun_ids.insert(stmt_id, id);
             }
         }
+    }
+    // Bind every anonymous class to its exact enclosing callable once all source callables have
+    // stable IR ids. JVM enclosure metadata consumes this identity directly; it must never recover
+    // a method by splitting the generated class name or scanning same-spelled overloads.
+    let anonymous_enclosures = file
+        .anonymous_object_enclosing_functions
+        .iter()
+        .filter_map(|(&anonymous, &enclosing)| {
+            let Decl::Class(anonymous_class) = file.decl(anonymous) else {
+                return None;
+            };
+            let class_id = lo
+                .class_info(&class_internal(file, &anonymous_class.name))?
+                .id;
+            let function = match enclosing {
+                crate::ast::AnonymousEnclosingFunction::TopLevel(declaration) => {
+                    lo.fun_ids_by_decl.get(&declaration).copied()
+                }
+                crate::ast::AnonymousEnclosingFunction::Member { class, method } => {
+                    let Decl::Class(owner) = file.decl(class) else {
+                        return None;
+                    };
+                    let source_method = owner.methods.get(method as usize)?;
+                    lo.class_info(&class_internal(file, &owner.name))?
+                        .methods
+                        .get(&source_method.name)?
+                        .iter()
+                        .find_map(|&(source_index, fid, _)| (source_index == method).then_some(fid))
+                }
+            }?;
+            Some((class_id, function))
+        })
+        .collect::<Vec<_>>();
+    for (class, function) in anonymous_enclosures {
+        lo.ir.classes[class as usize].enclosing_function = Some(function);
     }
     // Pass 1c: assign top-level-property indices (initializers lowered in pass 2). Registered before
     // any body so a function may read a top-level property as `GetStatic`.
@@ -2547,7 +2677,6 @@ fn lower_file_at_reporting_impl(
                 lo.boxed_elem.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
-                lo.cur_fn_name = f.name.clone();
                 lo.cur_fn_suspend = f.is_suspend();
                 let (fid, sig) = if f.receiver.is_some() {
                     // Extension bodies bind `this` to parameter zero.
@@ -2568,8 +2697,9 @@ fn lower_file_at_reporting_impl(
                     let fid = *lo.fun_ids_by_decl.get(&d)?;
                     (fid, sig)
                 };
-                lo.cur_tparams =
-                    callable_tparams(sig.generic_sig.as_ref(), &f.non_null_type_params);
+                let emitted_reified = emitted_reified_parameters(info, f)?;
+                lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, f.name.clone())
+                    .with_emitted_reified_parameters(emitted_reified);
                 let mut param_vals = Vec::new();
                 for (p, t) in f.params.iter().zip(&sig.params) {
                     let v = lo.fresh_value();
@@ -2767,7 +2897,7 @@ fn lower_file_at_reporting_impl(
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
-                    lo.cur_fn_name = m.name.clone();
+                    lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, m.name.clone());
                     lo.cur_fn_suspend = m.is_suspend();
                     // A member extension has dispatch `this` at slot 0 and extension `this` at slot 1.
                     let dispatch_v = lo.fresh_value();
@@ -2791,19 +2921,6 @@ fn lower_file_at_reporting_impl(
                                 .get(signature_index)
                                 .cloned()
                         })?;
-                    // Method parameters shadow same-named class parameters. Both shapes come from
-                    // checker-owned signatures; lowering does not decode their AST declarations.
-                    lo.cur_tparams =
-                        callable_tparams(sig.generic_sig.as_ref(), &m.non_null_type_params);
-                    for ct in class_tparams(
-                        class_sig.type_params(),
-                        class_sig.type_param_bounds(),
-                        c.is_value,
-                    ) {
-                        if !lo.cur_tparams.iter().any(|(n, _, _)| *n == ct.0) {
-                            lo.cur_tparams.push(ct);
-                        }
-                    }
                     if let Some(extension) = extension_signature.as_ref() {
                         lo.scope
                             .push(("$dispatch".to_string(), dispatch_v, Ty::obj(&internal)));
@@ -2877,12 +2994,7 @@ fn lower_file_at_reporting_impl(
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
-                    lo.cur_fn_name = gname;
-                    lo.cur_tparams = class_tparams(
-                        class_sig.type_params(),
-                        class_sig.type_param_bounds(),
-                        c.is_value,
-                    );
+                    lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, gname);
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -2905,12 +3017,7 @@ fn lower_file_at_reporting_impl(
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(type_name(&internal));
-                        lo.cur_fn_name = sname;
-                        lo.cur_tparams = class_tparams(
-                            class_sig.type_params(),
-                            class_sig.type_param_bounds(),
-                            c.is_value,
-                        );
+                        lo.cur_fn = crate::ir::IrFunctionScope::declared(sfid, sname);
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -2952,12 +3059,7 @@ fn lower_file_at_reporting_impl(
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
-                    lo.cur_fn_name = gname;
-                    lo.cur_tparams = class_tparams(
-                        class_sig.type_params(),
-                        class_sig.type_param_bounds(),
-                        c.is_value,
-                    );
+                    lo.cur_fn = crate::ir::IrFunctionScope::declared(gfid, gname);
                     lo.ir.fn_params.entry(gfid).or_insert_with(|| {
                         let mut names = vec!["$receiver".to_string()];
                         names.extend(
@@ -2990,12 +3092,7 @@ fn lower_file_at_reporting_impl(
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(type_name(&internal));
-                        lo.cur_fn_name = sname;
-                        lo.cur_tparams = class_tparams(
-                            class_sig.type_params(),
-                            class_sig.type_param_bounds(),
-                            c.is_value,
-                        );
+                        lo.cur_fn = crate::ir::IrFunctionScope::declared(sfid, sname);
                         let setter_param = ast::setter_param_or_value(setter.param.as_ref());
                         lo.ir.fn_params.entry(sfid).or_insert_with(|| {
                             let mut names = vec!["$receiver".to_string()];
@@ -3050,12 +3147,7 @@ fn lower_file_at_reporting_impl(
                         lo.next_value = 0;
                         lo.cur_class = Some(type_name(&internal));
                         lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
-                        lo.cur_fn_name = gname;
-                        lo.cur_tparams = class_tparams(
-                            class_sig.type_params(),
-                            class_sig.type_param_bounds(),
-                            c.is_value,
-                        );
+                        lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, gname);
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3082,12 +3174,7 @@ fn lower_file_at_reporting_impl(
                             lo.next_value = 0;
                             lo.cur_class = Some(type_name(&internal));
                             lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
-                            lo.cur_fn_name = sname;
-                            lo.cur_tparams = class_tparams(
-                                class_sig.type_params(),
-                                class_sig.type_param_bounds(),
-                                c.is_value,
-                            );
+                            lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, sname);
                             let this_v = lo.fresh_value();
                             lo.scope
                                 .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3428,11 +3515,6 @@ fn lower_file_at_reporting_impl(
                             lo.boxed_elem.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(type_name(&internal));
-                            lo.cur_tparams = class_tparams(
-                                class_sig.type_params(),
-                                class_sig.type_param_bounds(),
-                                c.is_value,
-                            );
                             let pty = class_sig.ctor_params[parameter];
                             let v = lo.fresh_value(); // value-index 0 = the underlying param
                             lo.scope.push((p.name.clone(), v, pty));
@@ -3457,11 +3539,6 @@ fn lower_file_at_reporting_impl(
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
-                    lo.cur_tparams = class_tparams(
-                        class_sig.type_params(),
-                        class_sig.type_param_bounds(),
-                        c.is_value,
-                    );
                     let this_v = lo.fresh_value(); // value 0 = `this`
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3543,13 +3620,6 @@ fn lower_file_at_reporting_impl(
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
-                    // Property initializers run here (`var s: T = x as T`), so class type params are
-                    // in scope as `as T` cast targets.
-                    lo.cur_tparams = class_tparams(
-                        class_sig.type_params(),
-                        class_sig.type_param_bounds(),
-                        c.is_value,
-                    );
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3666,13 +3736,12 @@ fn lower_file_at_reporting_impl(
                                     [field_idx as usize]
                                     .ty
                                     .clone();
+                                let property_index = lo.ir.classes[class_id as usize]
+                                    .properties
+                                    .iter()
+                                    .position(|property| property.backing_field == Some(field_idx))
+                                    .expect("backing-field property registered in pass 1");
                                 let init_e = c.body_props[*i].init.unwrap();
-                                // `val s: String? = null` — the JVM already zero-initializes the field,
-                                // so kotlinc emits no store at all. Skipping it also keeps the field's
-                                // name/descriptor out of the pool until the getter's `getfield`.
-                                if matches!(lo.afile.expr(init_e), Expr::NullLit) {
-                                    continue;
-                                }
                                 // A branchy body-property initializer (`val k = when { … }`) emits
                                 // merge-point frames in the constructor's init context that the flat
                                 // emitter doesn't reconcile yet — bail rather than miscompile.
@@ -3692,11 +3761,15 @@ fn lower_file_at_reporting_impl(
                                 let val = lo.with_init_shared_cells(init_e, |lo| {
                                     lo.lower_arg(init_e, &field_ty)
                                 })?;
+                                lo.ir.classes[class_id as usize].properties[property_index]
+                                    .initializer = Some(val);
                                 if lo.expr_diverges(init_e) {
                                     stmts.push(val);
                                 } else {
                                     let recv = lo.emit_get_value(this_v);
-                                    stmts.push(lo.emit_set_field(recv, class_id, field_idx, val));
+                                    let store = lo.emit_set_field(recv, class_id, field_idx, val);
+                                    lo.ir.property_initializer_stores.insert(store);
+                                    stmts.push(store);
                                 }
                             }
                             ast::ClassInit::Block(e) => {
@@ -3775,11 +3848,6 @@ fn lower_file_at_reporting_impl(
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(type_name(&internal));
-                        lo.cur_tparams = class_tparams(
-                            class_sig.type_params(),
-                            class_sig.type_param_bounds(),
-                            c.is_value,
-                        );
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3917,12 +3985,19 @@ fn lower_file_at_reporting_impl(
                         };
                         secs.push(crate::ir::IrSecondaryCtor {
                             params: param_irs,
+                            named_params: sc
+                                .params
+                                .iter()
+                                .map(|p| p.name.clone())
+                                .zip(class_sig.secondary_ctors[sc_idx].iter().copied())
+                                .collect(),
                             defaults,
                             delegate_prelude,
                             delegate_args,
                             body,
                             delegate,
                             synthetic: false,
+                            vc_params: false,
                         });
                     }
                     lo.ir.classes[class_id as usize].secondary_ctors = secs;
@@ -4095,6 +4170,9 @@ fn lower_file_at_reporting_impl(
                         }
                         let sub_id = lo.ir.add_class(IrClass {
                             fq_name: type_name(&sub_fq),
+                            is_source_declared: false,
+                            is_anonymous_object: false,
+                            enclosing_function: None,
                             is_inner_class: false,
                             is_local_class: false,
                             is_value: false,
@@ -4143,7 +4221,7 @@ fn lower_file_at_reporting_impl(
                             has_primary_ctor: true,
                             applied_annotations: Vec::new(),
                             field_annotations: Vec::new(),
-                            runtime_retained: false,
+                            annotation_retention: None,
                         });
                         // Register the subclass so an override body resolves a prop as `this.<field>` and
                         // getter synthesis can attach. Methods are filled in below.
@@ -4168,7 +4246,7 @@ fn lower_file_at_reporting_impl(
                             lo.boxed_elem.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(type_name(&sub_fq));
-                            lo.cur_fn_name = "<init>".to_string();
+                            lo.cur_fn = crate::ir::IrFunctionScope::synthetic("<init>".to_string());
                             let this_v = lo.fresh_value();
                             lo.scope
                                 .push(("this".to_string(), this_v, Ty::obj(&sub_fq)));
@@ -4215,11 +4293,14 @@ fn lower_file_at_reporting_impl(
                                 dispatch_receiver: Some(type_name(&sub_fq)),
                                 param_checks: vec![],
                             });
+                            if bm.is_inline() && bm.visibility.is_public() {
+                                lo.ir.public_inline_functions.insert(fid);
+                            }
                             lo.scope.clear();
                             lo.boxed_elem.clear();
                             lo.next_value = 0;
                             lo.cur_class = Some(type_name(&body_cur));
-                            lo.cur_fn_name = bm.name.clone();
+                            lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, bm.name.clone());
                             let this_v = lo.fresh_value();
                             lo.scope
                                 .push(("this".to_string(), this_v, Ty::obj(&body_cur)));
@@ -4268,7 +4349,8 @@ fn lower_file_at_reporting_impl(
                         .unwrap_or_default();
                     let property_ty = body_prop_ty(file, info, p, &*syms.libraries);
                     let (getter, setter) = *lo.source_property_accessors.get(&d)?;
-                    lo.cur_fn_name = property_getter_name(&p.name);
+                    lo.cur_fn =
+                        crate::ir::IrFunctionScope::declared(getter, property_getter_name(&p.name));
                     for (parameter, ty) in p.context_params.iter().zip(&context_types) {
                         let value = lo.fresh_value();
                         if parameter.name != "_" {
@@ -4281,7 +4363,10 @@ fn lower_file_at_reporting_impl(
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
-                        lo.cur_fn_name = property_setter_name(&p.name);
+                        lo.cur_fn = crate::ir::IrFunctionScope::declared(
+                            setter_id,
+                            property_setter_name(&p.name),
+                        );
                         for (parameter, ty) in p.context_params.iter().zip(&context_types) {
                             let value = lo.fresh_value();
                             if parameter.name != "_" {
@@ -4303,7 +4388,8 @@ fn lower_file_at_reporting_impl(
                     let recv_key = recv_ty.erased_recv();
                     let pty = stored_value_ty(signature.ty);
                     let gfid = *lo.ext_prop_get_ids.get(&(recv_key, p.name.clone()))?;
-                    lo.cur_fn_name = property_getter_name(&p.name);
+                    lo.cur_fn =
+                        crate::ir::IrFunctionScope::declared(gfid, property_getter_name(&p.name));
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
                     for (parameter, &ty) in p.context_params.iter().zip(&signature.context_params) {
@@ -4323,7 +4409,10 @@ fn lower_file_at_reporting_impl(
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
-                        lo.cur_fn_name = property_setter_name(&p.name);
+                        lo.cur_fn = crate::ir::IrFunctionScope::declared(
+                            sfid,
+                            property_setter_name(&p.name),
+                        );
                         let this_v = lo.fresh_value();
                         lo.scope.push(("this".to_string(), this_v, recv_ty));
                         for (parameter, &ty) in
@@ -4358,12 +4447,17 @@ fn lower_file_at_reporting_impl(
                         is_const: p.is_const,
                         owner: None,
                         custom_accessor: true,
+                        line: p.decl_line,
+                        source_order: p.span.lo,
                     });
                     if let Some(&(gfid, _)) = lo.computed_props.get(&p.name) {
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
-                        lo.cur_fn_name = property_getter_name(&p.name);
+                        lo.cur_fn = crate::ir::IrFunctionScope::declared(
+                            gfid,
+                            property_getter_name(&p.name),
+                        );
                         lo.cur_static_field = Some((sidx, ir_ty));
                         if let Some(getter) = p.getter.clone() {
                             lo.lower_body(&getter, &ir_ty, gfid)?;
@@ -4380,7 +4474,10 @@ fn lower_file_at_reporting_impl(
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
-                        lo.cur_fn_name = property_setter_name(&p.name);
+                        lo.cur_fn = crate::ir::IrFunctionScope::declared(
+                            sfid,
+                            property_setter_name(&p.name),
+                        );
                         let pty = body_prop_ty(file, info, p, &*syms.libraries);
                         let custom = p.setter.as_ref().filter(|s| s.body.is_some()).cloned();
                         let pname = ast::setter_param_or_value(
@@ -4404,7 +4501,7 @@ fn lower_file_at_reporting_impl(
                     }
                 } else {
                     // Property-initializer lambdas use the property name as their synthetic owner.
-                    lo.cur_fn_name = p.name.clone();
+                    lo.cur_fn = crate::ir::IrFunctionScope::synthetic(p.name.clone());
                     let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
                     let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
                     lo.ir.statics.push(crate::ir::IrStatic {
@@ -4416,6 +4513,8 @@ fn lower_file_at_reporting_impl(
                         is_const: p.is_const,
                         owner: None,
                         custom_accessor: false,
+                        line: p.decl_line,
+                        source_order: p.span.lo,
                     });
                 }
             }
@@ -4445,7 +4544,8 @@ fn lower_file_at_reporting_impl(
         lo.boxed_elem.clear();
         lo.next_value = 0;
         lo.cur_class = None;
-        lo.cur_fn_name = lo.ir.functions[fid as usize].name.clone();
+        lo.cur_fn =
+            crate::ir::IrFunctionScope::declared(fid, lo.ir.functions[fid as usize].name.clone());
         let local_fun = info.local_fun(*stmt_id)?;
         let sig = local_fun.sig.clone();
         // Captured outer locals occupy the leading value slots; a boxed one binds its `Ref` holder
@@ -4577,61 +4677,33 @@ fn checked_type(info: &FrontendTypeInfo, reference: &ast::TypeRef) -> Ty {
     })
 }
 
-/// A class is in the IR subset if: a primary constructor of only `val`/`var` properties, no base
-/// class/interfaces, no body properties, no companion/secondary/init, and methods (expr- or
-/// The type parameters of a generic function as `(name, bound, non_null)`, for lowering `as T`. `bound`
-/// is the declared upper bound kept VERBATIM as an `IrType` — `<T : CharSequence>` → `CharSequence`,
-/// an unbounded `<T>` → `kotlin/Any` (NOT erased here; the JVM emitter collapses it to a concrete
-/// class). `non_null` marks a non-nullable bound (`<T : Any>`, `<T : Foo>`) — such a cast null-checks
-/// (kotlinc emits `Intrinsics.checkNotNull`); an unbounded `<T>` (= `<T : Any?>`) does not.
-fn callable_tparams(
-    signature: Option<&crate::libraries::GenericSig>,
-    non_null: &std::collections::HashSet<String>,
-) -> Vec<(String, Ty, bool)> {
-    let Some(signature) = signature else {
-        return Vec::new();
-    };
-    signature
-        .formals
-        .iter()
-        .zip(&signature.formal_bounds)
-        .map(|(name, bounds)| {
-            // An empty bound list is the semantic representation of Kotlin's implicit `Any?` bound.
-            let bound = bounds
-                .first()
-                .copied()
-                .unwrap_or(Ty::nullable(Ty::obj("kotlin/Any")));
-            (
-                name.clone(),
-                ty_to_ir(bound),
-                non_null.contains(name) || !bound.is_nullable(),
-            )
-        })
-        .collect()
-}
-
-/// Class-level type parameters (`class C<T : B>`) as cast targets, so an `x as T` in a member body or
-/// property initializer erases to its bound (`Object` for an unbounded `T`) exactly like kotlinc —
-/// rather than falling through to `ty_ref` (which rejects a bare `T`) and bailing the whole file.
-fn class_tparams(names: &[String], bounds: &[Ty], is_value: bool) -> Vec<(String, Ty, bool)> {
-    // A value/inline class's generic underlying (`value class Foo<T : String>(val x: T)`) has a
-    // box/unbox erasure krusty doesn't model — an `as T` there must keep bailing (skip the file),
-    // not lower to a checkcast against the bound (which would store the wrong runtime type).
-    if is_value {
-        return Vec::new();
+/// Declaration-owned identities of the parameters marked `reified` on `function`.
+///
+/// The parser's ordered declarations identify which modifier belongs to which formal; the checker
+/// supplies the parallel semantic identities. Once paired at this boundary, lowering never compares
+/// a use against the source spelling again.
+fn emitted_reified_parameters(
+    info: &FrontendTypeInfo,
+    function: &ast::FunDecl,
+) -> Option<std::collections::HashSet<String>> {
+    if function.reified_type_params.is_empty() {
+        return Some(Default::default());
     }
-    names
-        .iter()
-        .cloned()
-        .zip(bounds.iter().copied())
-        .map(|(name, bound)| (name, ty_to_ir(bound), !bound.is_nullable()))
-        .collect()
+    let semantic = info.resolved_declaration_type_parameters(function.signature_span.lo);
+    if semantic.len() != function.type_params.len() {
+        return None;
+    }
+    Some(
+        function
+            .type_params
+            .iter()
+            .zip(semantic)
+            .filter(|(source, _)| function.reified_type_params.contains(*source))
+            .map(|(_, identity)| identity.clone())
+            .collect(),
+    )
 }
 
-/// block-bodied) without an extension receiver.
-/// A `const val`'s compile-time literal initializer as an `IrConst`, narrowed to its declared type
-/// (`const val b: Byte = 1` → `Byte(1)`). `None` for any non-literal initializer (then the read stays a
-/// `getstatic`). Lets a same-file const read inline the value (`ldc`), byte-identical to kotlinc.
 /// Whether every `break`/`continue` EXPRESSION in `e` sits in a TAIL position — one where the operand
 /// stack is empty at the jump (an elvis RHS, an `if`/`when`-branch value, a block's trailing value). A
 /// `break`/`continue` used mid-expression (`x + break`, `inc() downTo continue`, `while (break)`) would
@@ -4770,6 +4842,9 @@ fn library_const_ir(lc: &crate::libraries::LibraryConst) -> crate::ir::IrConst {
     }
 }
 
+/// A `const val`'s compile-time literal initializer as an `IrConst`, narrowed to its declared type
+/// (`const val b: Byte = 1` → `Byte(1)`). `None` for any non-literal initializer (then the read stays a
+/// `getstatic`). Lets a same-file const read inline the value (`ldc`), byte-identical to kotlinc.
 fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir::IrConst> {
     use crate::ir::IrConst;
     use ast::Expr;
@@ -5033,28 +5108,6 @@ fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
         && p.init.is_some()
 }
 
-/// Whether a body-property initializer *AST expression* is the field's JVM default value:
-/// `0`/`0L`/`0.0`/`0.0f`/`false`/`'\0'`/`null`, or such a zero literal under a primitive conversion
-/// (`0.toByte()`/`0.toChar()`). kotlinc elides a field initializer equal to the field's default — the
-/// JVM zero-initializes the field, so re-storing the default would clobber a value a base constructor's
-/// virtual call already wrote. Decided on the AST (a default-value literal has no side effect to lose).
-fn ast_init_is_jvm_default(file: &ast::File, e: AstExprId) -> bool {
-    match file.expr(e) {
-        Expr::IntLit(0) | Expr::LongLit(0) | Expr::NullLit | Expr::BoolLit(false) => true,
-        Expr::DoubleLit(d) => *d == 0.0,
-        Expr::FloatLit(f) => *f == 0.0,
-        Expr::CharLit(c) => *c as u32 == 0,
-        // `0.toByte()` / `0.toChar()` — a primitive conversion of a zero literal is still the default.
-        Expr::Call { callee, args } if args.is_empty() => match file.expr(*callee) {
-            Expr::Member { receiver, name } if is_conversion_call_name(name) => {
-                ast_init_is_jvm_default(file, *receiver)
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
 /// A *deferred* body property: declared with an explicit type and NO initializer/getter/setter
 /// (`val a: Int`), assigned in an `init` block or a constructor body. It's a real backing field, just
 /// initialized in the constructor body rather than at the declaration.
@@ -5275,7 +5328,7 @@ struct InlineLambda {
     label: String,
     lexical_scope: Vec<(String, u32, Ty)>,
     lexical_class: Option<TypeName>,
-    lexical_fn_name: String,
+    lexical_fn: crate::ir::IrFunctionScope,
 }
 
 struct InlineMemberTarget {
@@ -5436,18 +5489,14 @@ pub(crate) struct Lower<'a> {
     /// custom `setX`. A `val` custom-accessor property (no setter) is NOT here: it is assigned once
     /// in a constructor by writing its backing field directly.
     field_accessor_var_props: std::collections::HashSet<(TypeName, String)>,
-    /// Name of the enclosing function/method being lowered — used to name synthesized lambda impl
-    /// methods `<enclosing>$lambda$<n>` (matching kotlinc).
-    cur_fn_name: String,
+    /// Exact IR function body being lowered plus its source naming stem. Semantic properties of the
+    /// owner are keyed by `function`; temporary inline-splice name changes do not alter the identity.
+    cur_fn: crate::ir::IrFunctionScope,
     /// Whether the enclosing function is `suspend`. A non-suspend function cannot call a suspend fn, so
     /// `&&`/`||` short-circuit safely there; inside a suspend body the right operand may carry a
     /// suspension that the CPS flattener models only at unconditional positions, so `&&`/`||` keep the
     /// eager (operands-unconditional) form there until the flattener models conditional suspension.
     cur_fn_suspend: bool,
-    /// Type parameters in scope for the function body being lowered: `(name, bound, non_null)`. `bound`
-    /// is the declared upper bound as an un-erased `IrType` (`kotlin/Any` when unbounded); `non_null`
-    /// is set for a non-nullable bound (`<T : Any>`, `<T : Foo>`) — drives the `as T` null assertion.
-    cur_tparams: Vec<(String, Ty, bool)>,
     /// Synthetic-method sequence shared by declarations with the same JVM owner and name.
     synthetic_seq_by_owner: HashMap<(Option<TypeName>, String), u32>,
     /// A local class's captures, by IR class id. The class carries each one as a leading constructor
@@ -6614,6 +6663,15 @@ impl<'a> Lower<'a> {
     }
 
     fn emit_type_op(&mut self, op: IrTypeOp, arg: u32, type_operand: Ty) -> u32 {
+        #[cfg(feature = "trace")]
+        if std::env::var("KRUSTY_CAST_TRAP").is_ok() {
+            if let Some(internal) = type_operand.non_null().obj_internal() {
+                let name = internal.render();
+                if !name.contains('/') && name.len() <= 2 {
+                    panic!("cast trap: {op:?} to {name}; cur_fn={:?}", self.cur_fn);
+                }
+            }
+        }
         self.ir.add_expr(IrExpr::TypeOp {
             op,
             arg,
@@ -7500,6 +7558,54 @@ impl<'a> Lower<'a> {
         )
     }
 
+    /// The JVM marker payload for a declaration-owned type parameter of the function currently
+    /// lowered as an EMITTED reified method. Membership is decided by semantic identity; converting
+    /// that identity to its source parameter name happens only for the marker ABI payload.
+    fn emitted_reified_parameter(&self, ty: Ty) -> Option<(String, TypeName)> {
+        let Ty::TyParam(identity, bound) = ty else {
+            return None;
+        };
+        if !self.cur_fn.emitted_reified_parameters.contains(identity) {
+            return None;
+        }
+        let erased = bound
+            .non_null()
+            .obj_internal()
+            .unwrap_or_else(crate::types::wk::any);
+        Some((
+            crate::types::type_parameter_source_name(identity).to_string(),
+            erased,
+        ))
+    }
+
+    /// A `ReifiedClassMarker` node when `ty` is a type parameter of the fn body currently lowered
+    /// as an EMITTED reified method; `None` otherwise (the caller resolves the class normally).
+    fn emitted_reified_marker(&mut self, ty: Ty) -> Option<u32> {
+        let (name, erased) = self.emitted_reified_parameter(ty)?;
+        Some(
+            self.ir
+                .add_expr(IrExpr::ReifiedClassMarker { name, erased }),
+        )
+    }
+
+    /// A `ReifiedTypeOp` marker node for `is`/`as` on the emitted fn's own reified parameter.
+    fn emitted_reified_type_op(
+        &mut self,
+        ty: Ty,
+        cast: bool,
+        negated: bool,
+        arg: u32,
+    ) -> Option<u32> {
+        let (name, erased) = self.emitted_reified_parameter(ty)?;
+        Some(self.ir.add_expr(IrExpr::ReifiedTypeOp {
+            cast,
+            negated,
+            arg,
+            name,
+            erased,
+        }))
+    }
+
     /// Emit the RAW `java.lang.Class` for a class literal `X::class` (`ce` is the `CallableRef`).
     /// UNBOUND `T::class` → a `Class` constant (reified `T` resolved to the call-site type first);
     /// BOUND `expr::class` → `expr.getClass()` (evaluated once). A bare `X::class` wraps this in
@@ -7525,6 +7631,11 @@ impl<'a> Lower<'a> {
                     .find_map(|frame| frame.get(&n).copied())
                     .map(|ty| self.apply_reified_substitution(ty));
                 if let Some(ty) = ty {
+                    // Inside an EMITTED reified body, a nested splice may resolve a reified
+                    // parameter back to the enclosing fn's own `T` — that stays a marker.
+                    if let Some(marker) = self.emitted_reified_marker(ty) {
+                        return Some(marker);
+                    }
                     let internal = self.class_literal_ldc_internal(ty)?;
                     return Some(self.emit_class_const(internal));
                 }
@@ -7532,6 +7643,12 @@ impl<'a> Lower<'a> {
         }
         match unbound {
             Some(ty) => {
+                // `T::class` on the CURRENT fn's own reified parameter, lowered as an EMITTED
+                // method (not a splice): the erased placeholder + reifiedOperationMarker pattern
+                // kotlinc emits, patched by whichever compiler later inlines this body.
+                if let Some(marker) = self.emitted_reified_marker(ty) {
+                    return Some(marker);
+                }
                 let internal = self.class_literal_ldc_internal(ty)?;
                 Some(self.emit_class_const(internal))
             }
@@ -8108,12 +8225,6 @@ impl<'a> Lower<'a> {
                         .ty
                         .clone();
                     let init_e = c.body_props[*i].init.unwrap();
-                    // kotlinc elides a field initializer that stores the field's JVM default value — a
-                    // base-class constructor's virtual call may have already written the field, and a
-                    // default-value store would clobber it (see `fieldInitializerOptimization`).
-                    if ast_init_is_jvm_default(self.afile, init_e) {
-                        continue;
-                    }
                     if matches!(
                         self.afile.expr(init_e),
                         Expr::When { .. }
@@ -8129,7 +8240,9 @@ impl<'a> Lower<'a> {
                         stmts.push(val);
                     } else {
                         let recv = self.emit_get_value(this_v);
-                        stmts.push(self.emit_set_field(recv, class_id, field_idx, val));
+                        let store = self.emit_set_field(recv, class_id, field_idx, val);
+                        self.ir.property_initializer_stores.insert(store);
+                        stmts.push(store);
                     }
                 }
                 ast::ClassInit::Block(e) => {
@@ -8258,6 +8371,8 @@ impl<'a> Lower<'a> {
         self.ir.statics.push(crate::ir::IrStatic {
             visibility: crate::types::Visibility::Public,
             name: format!("{}$delegate", p.name),
+            line: p.decl_line,
+            source_order: p.span.lo,
             owner: None,
             ty: delegate_ir,
             init: init_d,
@@ -8284,6 +8399,8 @@ impl<'a> Lower<'a> {
         self.ir.statics.push(crate::ir::IrStatic {
             visibility: crate::types::Visibility::Public,
             name: format!("{}$kprop", p.name),
+            line: p.decl_line,
+            source_order: p.span.lo,
             owner: None,
             ty: kprop_ty,
             init: propref,
@@ -9570,7 +9687,7 @@ impl<'a> Lower<'a> {
     }
 
     fn next_synthetic_seq(&mut self) -> u32 {
-        let key = (self.cur_class, self.cur_fn_name.clone());
+        let key = (self.cur_class, self.cur_fn.source_name.clone());
         let slot = self.synthetic_seq_by_owner.entry(key).or_insert(0);
         let idx = *slot;
         *slot += 1;
@@ -9935,12 +10052,21 @@ impl<'a> Lower<'a> {
             (ty_to_ir(method_ret), b, inline)
         };
         let seq = self.next_synthetic_seq();
-        let impl_name = format!("{}$lambda${}", self.cur_fn_name, seq);
+        let impl_name = format!("{}$lambda${}", self.cur_fn.source_name, seq);
         // Impl parameters: captured variables first, then the lambda's own parameters.
         let mut params_ir: Vec<Ty> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
         let own_params_from = params_ir.len() as u32;
         params_ir.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
         let params_len = params_ir.len() as u32;
+        // kotlinc guards a RECEIVER lambda's non-null reference receiver in the static impl with
+        // `checkNotNullParameter(…, "<this>")`; captures are locals and get no guard.
+        let mut param_checks: Vec<Option<String>> = vec![None; captures.len()];
+        for (i, t) in sig.params.iter().enumerate() {
+            param_checks.push(
+                (sig.has_receiver && i == 0 && t.is_reference() && !t.is_nullable())
+                    .then(|| "<this>".to_string()),
+            );
+        }
         let fid = self.ir.add_fun(IrFunction {
             name: impl_name,
             params: params_ir,
@@ -9948,7 +10074,31 @@ impl<'a> Lower<'a> {
             body: Some(block),
             is_static: true,
             dispatch_receiver: None,
-            param_checks: Vec::new(),
+            param_checks,
+        });
+        // kotlinc gives the impl DEBUG tables: a LineNumberTable from the lambda body's line, and a
+        // LocalVariableTable naming the parameters (`<this>` for a receiver, source names else).
+        if let Some(&line) = self
+            .afile
+            .expr_source_lines
+            .get(body.0 as usize)
+            .filter(|&&line| line != 0)
+        {
+            self.ir.fn_decl_lines.insert(fid, line);
+        }
+        self.ir.fn_params.entry(fid).or_insert_with(|| {
+            let mut names: Vec<String> = captures.iter().map(|(name, _, _)| name.clone()).collect();
+            for (i, _) in sig.params.iter().enumerate() {
+                names.push(if sig.has_receiver && i == 0 {
+                    "<this>".to_string()
+                } else {
+                    params
+                        .get(i - usize::from(sig.has_receiver))
+                        .cloned()
+                        .unwrap_or_else(|| "it".to_string())
+                });
+            }
+            FnParamInfo::names(names)
         });
         crate::trace_compiler!(
             "lower",
@@ -10449,7 +10599,13 @@ impl<'a> Lower<'a> {
         bind_names: Vec<String>,
     ) -> Option<u32> {
         let arity = params.len();
-        if self.cur_class.is_some() {
+        // A suspend lambda inside a CLASS body is admitted only when its body does not itself
+        // SUSPEND: the state machine then never threads the enclosing instance through a
+        // continuation, which is the part this path does not model (a member suspend call from the
+        // lambda — corpus kt44221 — miscompiled with a verifier error when admitted). Non-suspending
+        // suspend lambdas (the classpath builder-DSL shape, `AsyncFactory { mark() }`) lower fine —
+        // `reparent_lambda_impls` places the state-machine class.
+        if self.cur_class.is_some() && self.ast_body_suspends(body) {
             self.set_bail("gate:suspend-lambda-in-class");
             return None;
         }
@@ -10511,7 +10667,10 @@ impl<'a> Lower<'a> {
             .obj_internal()?
             .to_string();
         let seq = self.next_synthetic_seq();
-        let internal = class_internal(self.afile, &format!("{}$suspend${}", self.cur_fn_name, seq));
+        let internal = class_internal(
+            self.afile,
+            &format!("{}$suspend${}", self.cur_fn.source_name, seq),
+        );
         let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
         let object_ir = ty_to_ir(Ty::obj("kotlin/Any"));
 
@@ -10537,6 +10696,7 @@ impl<'a> Lower<'a> {
                 ty: ty_to_ir(*ty),
                 is_field: false,
                 has_default: false,
+                is_vararg: false,
                 type_param: None,
                 check: None,
             })
@@ -10545,6 +10705,7 @@ impl<'a> Lower<'a> {
                 ty: cont_ir.clone(),
                 is_field: false,
                 has_default: false,
+                is_vararg: false,
                 type_param: None,
                 check: None,
             }))
@@ -10573,6 +10734,9 @@ impl<'a> Lower<'a> {
             .collect();
         let class = IrClass {
             fq_name: type_name(&internal),
+            is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -10615,7 +10779,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
             field_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         };
         let class_id = self.ir.add_class(class);
         // Patch the `<init>` field stores with the now-known class id.
@@ -12780,13 +12944,16 @@ impl<'a> Lower<'a> {
         let seq = self.next_synthetic_seq();
         let synth_fq = class_internal(
             self.afile,
-            &format!("{}$propref${}${}", self.cur_fn_name, name, seq),
+            &format!("{}$propref${}${}", self.cur_fn.source_name, name, seq),
         );
         let superclass = self
             .property_reference_impl(if bound { 0 } else { 1 }, is_var)?
             .internal;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -12844,7 +13011,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
             field_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         });
         if let Some(recv_e) = capture {
             // `new <Synth>(receiver)` — the captured receiver is the constructor's `Object` argument.
@@ -12910,7 +13077,7 @@ impl<'a> Lower<'a> {
         let seq = self.next_synthetic_seq();
         let synth_fq = class_internal(
             self.afile,
-            &format!("{}$propref${}${}", self.cur_fn_name, name, seq),
+            &format!("{}$propref${}${}", self.cur_fn.source_name, name, seq),
         );
         let superclass = self
             .property_reference_impl(if bound { 0 } else { 1 }, mutable)?
@@ -12931,6 +13098,9 @@ impl<'a> Lower<'a> {
         };
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -12987,7 +13157,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
             field_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         });
         match capture {
             Some(cap) => self.emit_new(
@@ -13129,7 +13299,7 @@ impl<'a> Lower<'a> {
         };
         let adapter_ret = ty_to_ir(stored_value_ty(ret));
         let adapter_fid = self.ir.add_fun(IrFunction {
-            name: format!("{}$adapt${}", self.cur_fn_name, e.0),
+            name: format!("{}$adapt${}", self.cur_fn.source_name, e.0),
             params: adapted_params.iter().map(|t| ty_to_ir(*t)).collect(),
             ret: adapter_ret,
             body: Some(body),
@@ -13165,10 +13335,13 @@ impl<'a> Lower<'a> {
         let seq = self.next_synthetic_seq();
         let synth_fq = class_internal(
             self.afile,
-            &format!("{}$propref${}${}", self.cur_fn_name, name, seq),
+            &format!("{}$propref${}${}", self.cur_fn.source_name, name, seq),
         );
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -13228,7 +13401,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
             field_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         });
         Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE"))
     }
@@ -13252,7 +13425,7 @@ impl<'a> Lower<'a> {
         let unit = self.emit_unit();
         let ret_e = self.emit_return(Some(unit));
         let block = self.emit_block(vec![call, ret_e], None);
-        let impl_name = format!("{}$unitref${}", self.cur_fn_name, uniq);
+        let impl_name = format!("{}$unitref${}", self.cur_fn.source_name, uniq);
         self.ir.add_fun(IrFunction {
             name: impl_name,
             params,
@@ -13329,7 +13502,7 @@ impl<'a> Lower<'a> {
         };
         let ret = self.emit_return(Some(value));
         let body = self.emit_block(vec![ret], None);
-        let adapter_name = format!("{}$intrinsicRef${}", self.cur_fn_name, e.0);
+        let adapter_name = format!("{}$intrinsicRef${}", self.cur_fn.source_name, e.0);
         self.ir.add_fun(IrFunction {
             name: adapter_name.clone(),
             params: tys_to_ir(&target_params),
@@ -13387,7 +13560,7 @@ impl<'a> Lower<'a> {
         let value = self.emit_intrinsic_call(operation, callable.ret, Some(recv), vec![]);
         let ret = self.emit_return(Some(value));
         let body = self.emit_block(vec![ret], None);
-        let adapter_name = format!("{}$intrinsicRef${}", self.cur_fn_name, e.0);
+        let adapter_name = format!("{}$intrinsicRef${}", self.cur_fn.source_name, e.0);
         self.ir.add_fun(IrFunction {
             name: adapter_name.clone(),
             params: vec![ty_to_ir(target_receiver)],
@@ -13536,7 +13709,7 @@ impl<'a> Lower<'a> {
             let mut adapter_params = vec![ty_to_ir(receiver)];
             adapter_params.extend(reference.params.iter().map(|ty| ty_to_ir(*ty)));
             let adapter = self.ir.add_fun(IrFunction {
-                name: format!("{}$boundref${}", self.cur_fn_name, e.0),
+                name: format!("{}$boundref${}", self.cur_fn.source_name, e.0),
                 params: adapter_params,
                 ret: adapter_ret,
                 body: Some(body),
@@ -13723,7 +13896,7 @@ impl<'a> Lower<'a> {
         };
         let body = self.emit_block(statements, None);
         let adapter = self.ir.add_fun(IrFunction {
-            name: format!("{}$adaptedMemberRef${}", self.cur_fn_name, e.0),
+            name: format!("{}$adaptedMemberRef${}", self.cur_fn.source_name, e.0),
             params: tys_to_ir(&adapter_params),
             ret: ty_to_ir(stored_value_ty(signature.ret)),
             body: Some(body),
@@ -13845,7 +14018,22 @@ impl<'a> Lower<'a> {
         } else {
             "$fnref$"
         };
-        let synth_fq = class_internal(self.afile, &format!("{}{marker}{}", self.cur_fn_name, uniq));
+        let synth_fq = class_internal(
+            self.afile,
+            &format!("{}{marker}{}", self.cur_fn.source_name, uniq),
+        );
+        // A reference synthesized inside an INLINE function's body is copied by the splicer into
+        // arbitrary other packages/modules — the class must be PUBLIC there (kotlinc's rule; see
+        // `IrFile::public_synthetics`).
+        if self
+            .cur_fn
+            .function
+            .is_some_and(|fid| self.ir.public_inline_functions.contains(&fid))
+        {
+            self.ir
+                .public_synthetics
+                .insert(crate::types::type_name(&synth_fq));
+        }
         // Synthetic private accessors are invocation-only, not reflection declarations.
         let reflection_name = (matches!(
             &dispatch,
@@ -13858,6 +14046,9 @@ impl<'a> Lower<'a> {
             .obj_internal()?;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -13924,7 +14115,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
             field_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         });
         match capture {
             Some(cap) => self.emit_new(
@@ -15101,7 +15292,7 @@ impl<'a> Lower<'a> {
         };
         let seq = self.next_synthetic_seq();
         let fid = self.ir.add_fun(IrFunction {
-            name: format!("{}$sam${seq}", self.cur_fn_name),
+            name: format!("{}$sam${seq}", self.cur_fn.source_name),
             params: std::iter::once(ty_to_ir(capture_ty))
                 .chain(params.iter().copied().map(ty_to_ir))
                 .collect(),
@@ -15314,6 +15505,13 @@ impl<'a> Lower<'a> {
                 "lower argument lambda {arg:?} target={target:?} selected_sam={}",
                 self.info.resolved_sam_conversions.contains_key(&arg)
             );
+        }
+        // The frontend has already established that this `null` is assignable to the nullable target.
+        // Preserve it before function/SAM adaptation: a nullable suspend-function type becomes a
+        // non-null `Ty::Fun(suspend)` for shape inspection below, but `null` is not a function value
+        // that needs a suspend adapter.
+        if matches!(self.afile.expr(arg), Expr::NullLit) {
+            return self.expr(arg);
         }
         // A lambda flowing into a CLASSPATH suspend-lambda parameter (`runBlocking { … }` and the other
         // coroutine builders). The JVM descriptor erases the parameter to a bare `FunctionN`, so neither the
@@ -16756,6 +16954,27 @@ impl<'a> Lower<'a> {
         if slots.len() != params.len() {
             return None;
         }
+        // The spill temps below exist to preserve SOURCE evaluation order for REORDERED named
+        // arguments (and vararg packs). When the source order already matches the slot order and
+        // nothing packs, push order == source order, so the values pass straight to the operand
+        // stack — kotlinc's shape (the temps read as `astore`/`aload` pairs it never emits).
+        // Suspend bodies keep the temps: the CPS flattener's operand hoisting builds on them.
+        let fixed_positions: Vec<usize> = source_args
+            .iter()
+            .filter_map(|arg| slots.iter().position(|slot| *slot == Some(*arg)))
+            .filter(|index| vararg_pack != Some(*index))
+            .collect();
+        let any_vararg_contribution = source_args.iter().any(|arg| {
+            let index = slots.iter().position(|slot| *slot == Some(*arg));
+            match (index, vararg_pack) {
+                (Some(fixed), Some(vararg)) => fixed == vararg,
+                (None, Some(_)) => true,
+                _ => false,
+            }
+        });
+        let direct_ok = !self.cur_fn_suspend
+            && !any_vararg_contribution
+            && fixed_positions.windows(2).all(|pair| pair[0] < pair[1]);
         let mut slot_values: Vec<Option<LoweredCallSlot>> = vec![None; params.len()];
         let mut vararg_temp: Vec<LoweredVarargContribution> = Vec::new();
         let mut prelude = Vec::new();
@@ -16828,8 +17047,9 @@ impl<'a> Lower<'a> {
                 let value = self.lower_arg(arg, &ty_to_ir(semantic))?;
                 self.coerce_argument_value(value, semantic, ir_ty)?
             };
-            if matches!(self.afile.expr(arg), Expr::Lambda { .. })
-                && lambda_info(self.info, arg).capture == LambdaCapture::InlineSplice
+            if direct_ok
+                || matches!(self.afile.expr(arg), Expr::Lambda { .. })
+                    && lambda_info(self.info, arg).capture == LambdaCapture::InlineSplice
             {
                 slot_values[slot_idx] = Some(LoweredCallSlot::InlineLambda(value));
             } else {
@@ -19512,7 +19732,7 @@ impl<'a> Lower<'a> {
             label,
             lexical_scope: self.scope.clone(),
             lexical_class: self.cur_class,
-            lexical_fn_name: self.cur_fn_name.clone(),
+            lexical_fn: self.cur_fn.clone(),
         });
         let lowered = self.lower_inline_lambda_invoke(index, args);
         self.inline_lambdas.truncate(index);
@@ -20486,7 +20706,7 @@ impl<'a> Lower<'a> {
         let depth = self.scope.len();
         let caller_scope = self.scope.clone();
         let caller_class = self.cur_class;
-        let caller_fn_name = self.cur_fn_name.clone();
+        let caller_fn = self.cur_fn.clone();
         let lam_depth = self.inline_lambdas.len();
         let mut stmts = Vec::new();
         let mut prelowered_args = HashMap::new();
@@ -20723,7 +20943,7 @@ impl<'a> Lower<'a> {
                         label: lam_label,
                         lexical_scope: caller_scope.clone(),
                         lexical_class: caller_class,
-                        lexical_fn_name: caller_fn_name.clone(),
+                        lexical_fn: caller_fn.clone(),
                     });
                 } else {
                     // A function-typed argument that is NOT a lambda literal — a callable reference
@@ -20857,7 +21077,7 @@ impl<'a> Lower<'a> {
             None
         };
         let saved_class = self.cur_class;
-        let saved_fn_name = self.cur_fn_name.clone();
+        let saved_fn = self.cur_fn.clone();
         let member_callsite_depth = self.inline_member_callsites.len();
         if let Some(member) = member {
             let callsite = self
@@ -20867,11 +21087,11 @@ impl<'a> Lower<'a> {
                 .unwrap_or(saved_class);
             self.inline_member_callsites.push(callsite);
             self.cur_class = Some(member.owner);
-            self.cur_fn_name = fname.to_string();
+            self.cur_fn.source_name = fname.to_string();
         }
         let body_val = self.expr(body);
         self.cur_class = saved_class;
-        self.cur_fn_name = saved_fn_name;
+        self.cur_fn = saved_fn;
         self.inline_member_callsites.truncate(member_callsite_depth);
         self.scope.truncate(depth);
         self.inline_lambdas.truncate(lam_depth);
@@ -21044,7 +21264,7 @@ impl<'a> Lower<'a> {
             label: lam_label,
             lexical_scope,
             lexical_class,
-            lexical_fn_name,
+            lexical_fn,
             ..
         } = self.inline_lambdas[idx].clone();
         if args.len() != lam_params.len() || lam_params.len() != lam_param_tys.len() {
@@ -21059,7 +21279,7 @@ impl<'a> Lower<'a> {
         );
         let callee_scope = self.scope.clone();
         let callee_class = self.cur_class;
-        let callee_fn_name = self.cur_fn_name.clone();
+        let callee_fn = self.cur_fn.clone();
         let mut stmts = Vec::new();
         let mut bindings = Vec::new();
         for ((pname, pty), &arg) in lam_params.iter().zip(&lam_param_tys).zip(args) {
@@ -21077,7 +21297,7 @@ impl<'a> Lower<'a> {
         self.scope = lexical_scope;
         self.scope.extend(bindings);
         self.cur_class = lexical_class;
-        self.cur_fn_name = lexical_fn_name;
+        self.cur_fn = lexical_fn;
         // A `return@<inlineFn>` in the lambda body is a LOCAL return from this lambda invocation. Wrap the
         // spliced body in a `while(true){ … break }` labeled `brk` and register a frame so the labeled
         // return lowers to `break@brk` — exactly the inline-fn return mechanism, one level in. Only a
@@ -21107,7 +21327,7 @@ impl<'a> Lower<'a> {
                 self.inline_lambda_ret.pop();
                 self.scope = callee_scope;
                 self.cur_class = callee_class;
-                self.cur_fn_name = callee_fn_name;
+                self.cur_fn = callee_fn;
                 let body_val = body_val?;
                 // Normal fall-through: the body's own value is the result.
                 let assign = self.emit_set_value(result_slot, body_val);
@@ -21126,7 +21346,7 @@ impl<'a> Lower<'a> {
             self.inline_lambda_ret.pop();
             self.scope = callee_scope;
             self.cur_class = callee_class;
-            self.cur_fn_name = callee_fn_name;
+            self.cur_fn = callee_fn;
             let body_val = body_val?;
             let brk_stmt = self.emit_break(Some(brk.clone()));
             let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
@@ -21146,7 +21366,7 @@ impl<'a> Lower<'a> {
         self.inline_return = saved_inl_ret;
         self.scope = callee_scope;
         self.cur_class = callee_class;
-        self.cur_fn_name = callee_fn_name;
+        self.cur_fn = callee_fn;
         let body_val = body_val?;
         if stmts.is_empty() {
             Some(body_val)
@@ -22657,7 +22877,7 @@ impl<'a> Lower<'a> {
                 let ret_e = self.emit_return(Some(new_e));
                 let block = self.emit_block(vec![ret_e], None);
                 let seq = self.next_synthetic_seq();
-                let impl_name = format!("{}$ctorref${}", self.cur_fn_name, seq);
+                let impl_name = format!("{}$ctorref${}", self.cur_fn.source_name, seq);
                 self.ir.add_fun(IrFunction {
                     name: impl_name.clone(),
                     params: field_tys.clone(),
@@ -22699,6 +22919,26 @@ impl<'a> Lower<'a> {
         }
 
         let t = {
+            // A BARE classifier property read (`entries` inside an enum's companion) records the
+            // same `ClassifierPropertyRead` the qualified `Color.entries` member read does — the
+            // realization is identical: a static accessor call with no receiver.
+            if let Some(ExprLowering::ClassifierPropertyRead { owner, property }) =
+                self.info.expr_lowers.get(&e).cloned()
+            {
+                let Some(accessor) = property.getter else {
+                    self.set_bail("classifier property has no direct accessor");
+                    return None;
+                };
+                let target_owner = accessor.owner.unwrap_or(owner);
+                let target_name = accessor.physical_name.unwrap_or(accessor.name);
+                return Some(self.emit_static_call(
+                    target_owner,
+                    target_name,
+                    accessor.descriptor,
+                    accessor.inline,
+                    vec![],
+                ));
+            }
             if let Some(ExprLowering::ClassStorageRead { field }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
@@ -23575,6 +23815,20 @@ impl<'a> Lower<'a> {
             }
             let raw = self.expr(operand)?;
             let arg = self.box_operand_for_instanceof(operand, raw);
+            // `x is T` on the CURRENT fn's own reified parameter, lowered as an EMITTED method:
+            // the marker + instanceof placeholder kotlinc emits.
+            let declared_target = match self.info.expr_lowers.get(&source) {
+                Some(ExprLowering::RuntimeTypeOperand(target)) => *target,
+                _ => self.info.resolved_type(&ty)?,
+            };
+            let specialized_target = self.apply_reified_substitution(declared_target);
+            if !ty.nullable() {
+                if let Some(marker) =
+                    self.emitted_reified_type_op(specialized_target, false, negated, arg)
+                {
+                    return Some(marker);
+                }
+            }
             let op = if negated {
                 IrTypeOp::NotInstanceOf
             } else {
@@ -23582,10 +23836,7 @@ impl<'a> Lower<'a> {
             };
             // A reference target, or a primitive (`x is Int` → `instanceof` the boxed wrapper, which
             // the backend resolves from the primitive type_operand).
-            let target = match self.info.expr_lowers.get(&source) {
-                Some(ExprLowering::RuntimeTypeOperand(target)) => Some(*target),
-                _ => Some(self.resolved_type_ref(&ty)?),
-            }?;
+            let target = specialized_target;
             // An unsigned target tests against its inline-class object (`kotlin/UInt`), not the
             // representation's wrapper (`Integer`).
             let type_operand = if target.is_unsigned() {
@@ -23969,6 +24220,16 @@ impl<'a> Lower<'a> {
         let t = {
             let declared_target = self.info.resolved_type(&ty)?;
             let specialized_target = self.apply_reified_substitution(declared_target);
+            // `x as T` on the CURRENT fn's own reified parameter, lowered as an EMITTED method:
+            // the marker + checkcast placeholder kotlinc emits (`as?` stays splice-only).
+            if !nullable
+                && !ty.nullable()
+                && self.emitted_reified_parameter(specialized_target).is_some()
+            {
+                let raw = self.expr(operand)?;
+                let boxed = self.box_operand_for_instanceof(operand, raw);
+                return self.emitted_reified_type_op(specialized_target, true, false, boxed);
+            }
             let reified_target =
                 (specialized_target != declared_target).then_some(specialized_target);
             // `x as? T` (safe cast): `{ val t = x; if (t is T) t as T else null }` — `instanceof`
@@ -25047,6 +25308,19 @@ impl<'a> Lower<'a> {
         receiver: AstExprId,
         name: String,
     ) -> Option<u32> {
+        // A checker-selected invoke-operator call reached through the MEMBER spelling
+        // (`b.op?.invoke(a, b)` — the safe-call assembly delegates its non-null branch here):
+        // the same lowering as the call-position `Invoke` record.
+        if let Some(ExprLowering::Invoke {
+            receiver: recorded_receiver,
+            params,
+            kind,
+        }) = self.info.expr_lowers.get(&e).cloned()
+        {
+            if !(matches!(kind, InvokeKind::Function { .. }) && params.len() != args.len()) {
+                return self.lower_invoke(e, recorded_receiver, &params, kind, &args);
+            }
+        }
         {
             // Constant string normalization belongs to the selected compiler-supplied declaration.
             // A same-named source function carries no intrinsic tag and therefore keeps its own body.
@@ -26972,26 +27246,18 @@ fn file_class_decl_by_internal(file: &ast::File, internal: TypeName) -> Option<&
 /// `SOURCE`/`BINARY`-retained annotation. Kotlin's default retention is RUNTIME.
 fn runtime_annotation_decl<'a>(
     file: &'a ast::File,
-    file_index: u32,
     syms: &FrontendSymbols,
     internal: TypeName,
 ) -> Option<&'a ast::ClassDecl> {
     let cd = file_class_decl_by_internal(file, internal)
         .filter(|class| class.kind == ast::ClassKind::Annotation)?;
-    // `@Retention(AnnotationRetention.SOURCE|BINARY)` opts out; anything else (incl. no `@Retention`) is
-    // RUNTIME. The retention argument is `AnnotationRetention.<X>` — an `Expr::Member`.
-    let non_runtime = cd
-        .annotations
-        .iter()
-        .zip(cd.annotation_args.iter())
-        .any(|(annotation, arguments)| {
-            syms.resolved_annotation(file_index, annotation)
-                .is_some_and(|name| name.matches("kotlin/annotation/Retention"))
-                && arguments.first().is_some_and(|&arg| {
-                    matches!(file.expr(arg), ast::Expr::Member { name, .. } if name == "SOURCE" || name == "BINARY")
-                })
-        });
-    (!non_runtime).then_some(cd)
+    matches!(
+        syms.annotation_retention(internal),
+        Some(
+            crate::types::AnnotationRetention::Default | crate::types::AnnotationRetention::Runtime
+        )
+    )
+    .then_some(cd)
 }
 
 /// Fold an annotation argument expression to an encodable `AnnoValue` (JVMS §4.7.16.1), or `None` for a
@@ -27066,7 +27332,7 @@ fn build_applied_annotation(
     args: &[AstExprId],
     ir: &crate::ir::IrFile,
 ) -> Option<crate::ir::AppliedAnnotation> {
-    let cd = runtime_annotation_decl(file, file_index, syms, internal)?;
+    let cd = runtime_annotation_decl(file, syms, internal)?;
     let mut values = Vec::new();
     for (i, &arg) in args.iter().enumerate() {
         let pname = cd.props.get(i)?.name.clone();
@@ -27170,10 +27436,12 @@ fn library_field_annotation(
     if !lt.is_annotation() {
         return None;
     }
-    let retention = match lt.retention.as_deref()? {
-        "RUNTIME" => Retention::Runtime,
-        "CLASS" => Retention::Binary,
-        _ => return None, // SOURCE — kotlinc emits nothing
+    let retention = match syms.annotation_retention(name)? {
+        crate::types::AnnotationRetention::Default | crate::types::AnnotationRetention::Runtime => {
+            Retention::Runtime
+        }
+        crate::types::AnnotationRetention::Binary => Retention::Binary,
+        crate::types::AnnotationRetention::Source => return None,
     };
     let elements = lt.annotation_members()?;
     let mut values = Vec::new();
@@ -27306,7 +27574,12 @@ fn fn_generic_sig(
     let params = f
         .params
         .iter()
-        .map(|parameter| info.resolved_declaration_type(&parameter.ty))
+        .map(|parameter| {
+            info.resolved_declaration_type(&parameter.ty)
+                .map(|declared| {
+                    crate::types::semantic_value_parameter_ty(declared, parameter.is_vararg)
+                })
+        })
         .collect::<Option<Vec<_>>>()
         .ok_or("internal:missing-checked-generic-declaration-type")?;
     let ret = match f.ret.as_ref() {

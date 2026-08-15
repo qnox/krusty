@@ -20,7 +20,7 @@ fn branchless_inline_fn_is_spliced_not_called() {
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     // 1. A library with a branchless `inline fun`, compiled by the *real* kotlinc (persistent server).
-    let Some(libout) = common::compile_libs_ref(
+    let Some(libout) = common::compile_libs(
         "inline_splice",
         &[(
             "Lib.kt",

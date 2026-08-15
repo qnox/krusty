@@ -639,6 +639,70 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   helper` lib, then krusty resolves + runs a caller against it → 43
   (`tests/suspend_e2e.rs::krusty_compiled_suspend_dep_is_consumable`); the real kotlinc 2.4.0 also reads
   the annotation and compiles the same caller without error.
+- **`@Metadata` writer — plain top-level PROPERTY records.** The facade `Package` proto used to
+  record extension properties only; plain top-level `val`/`var`s resolved through krusty's OWN
+  static-field fallback, but the REAL kotlinc resolves an `import demo.greeting` exclusively from a
+  `Package.property` record, so it reported `unresolved reference` against krusty-built libs.
+  Every plain top-level property now gets a record mirroring kotlinc's observed encoding (verified
+  by decoding kotlinc 2.4.0 output; matrix in `docs/METADATA_NOTES.md`): `flags` (f11, elided at
+  the 518 wire default) composed from visibility bits, `IS_VAR|HAS_SETTER`, `IS_CONST|HAS_CONSTANT`
+  for `const val`, `HAS_CONSTANT` for a `val` with a compile-time-constant initializer (never for a
+  `var`), `IS_LATEINIT`; `getter_flags`/`setter_flags` (f7/f8) only for CUSTOM accessor bodies
+  (visibility | `isNotDefault`); a custom setter's value parameter (f6); and a
+  `JvmPropertySignature` naming exactly the accessors the emitter really produces — none for
+  `const` (inlined) or `private` (direct field access; the synthetic `access$…$p` bridges are not
+  metadata surface), and a backing-field entry (f100.f1) present iff the property has an
+  initializer or is `lateinit`, carrying an explicit desc only when a nullable primitive boxes the
+  stored type (`var e: Double?` → `Ljava/lang/Double;`). Extension-property records were aligned to
+  the same observed shape (no backing-field entry, not-default accessor flags, f11 elided for a
+  plain `val`). Delegated properties (`by lazy`) still emit no record — a tracked gap. Proven by
+  `tests/top_level_property_e2e.rs::kotlinc_consumes_krusty_top_level_property_metadata`
+  (previously `#[ignore]`): kotlinc 2.4.0 imports, compiles and runs against the krusty-built lib.
+- **`@Metadata` writer — top-level `typealias` records.** A `typealias Name = Target` exists ONLY
+  in metadata (`Package.typeAlias` = 5, `{name=2, underlying_type=4, expanded_type=6}` — decoded
+  from kotlinc 2.4.0); krusty emitted nothing, so a consumer reported `unresolved reference` for
+  the alias. Plain classifier aliases now emit records (underlying = expanded, the resolved
+  target); a facade with ONLY aliases gets its `@Metadata` too. Function-type aliases
+  (`type_alias_fun`) remain a tracked gap. The builder's class-id interning is now DEDUPED
+  (repeated references share one d2 slot, as kotlinc does).
+- **Generic-value-class members: the object-erased decline is narrowed to the real miscompile.**
+  `build_class_metadata` declined ANY member whose value-class type erases its carrier to `Object`
+  (a generic `TokenBox<T>`), so `class Factory { operator fun invoke(): TokenBox<String> }` got NO
+  class `@Metadata` at all and a consumer reported "expression is not callable". The recorded
+  rationale applies specifically to krusty's CPS BOXING divergence
+  (`suspend_boxed_value_class_returns`): a NON-suspend member returns the raw carrier
+  byte-identically to kotlinc (verified: `constructor-impl; areturn` on both sides, same mangle
+  hash), so those members are now described; only a CPS return krusty boxes still disqualifies
+  (and erased PARAMS keep declining pending the same verification). All four decline branches now
+  emit a `trace_compiler!("emit", …)` reason — the silent-None debugging cost an hour.
+- **Declared visibility reaches `@Metadata` (and ctor JVM access).** krusty hardcoded PUBLIC into
+  every metadata flags word, so a consuming module could not enforce `internal`/`protected`
+  boundaries against krusty-built libs. Now carried per declaration: `Class.flags` (an
+  `internal class` writes explicit visibility 0 — `IrFile::class_visibilities`), `Function.flags`
+  for top-level fns (`FnMeta::visibility` from the signature) and members
+  (`IrFile::internal_methods`, alongside the dispatch-relevant `private_methods`),
+  `Constructor.flags` for a DECLARED primary-ctor visibility (`class C protected constructor(…)` →
+  4, private → 2 — `IrFile::ctor_visibilities`), and `TypeAlias.flags` (`internal typealias`,
+  parser now keeps the modifier in `File::type_alias_visibility`). A declared ctor visibility also
+  reaches the JVM `<init>` access flags (protected/private; `internal` stays JVM-public, the
+  boundary lives in metadata alone), including the all-defaults convenience `<init>()`, which
+  mirrors the primary's visibility exactly as kotlinc emits it.
+- **Companion member properties — accessors + records.** A companion property's backing field is a
+  static on the OUTER class; kotlinc realizes the property as `public final` INSTANCE accessors on
+  `C$Companion` (via `access$…$cp` bridges over its private fields) and records it on the
+  COMPANION's `@Metadata` (kind 390 class). krusty emitted only the outer static — no accessors,
+  no records — so a cross-module WRITE of a companion `var` had no setter to resolve. Every
+  companion property now registers under `declared_class_statics[C$Companion]`: the companion's
+  class metadata gets a Property record per member (accessor signatures for non-const,
+  `hasConstant` for constant-initialized `val`s — matching kotlinc's 8710/1798 words, d2
+  byte-identical on the probe), and emission synthesizes the delegating accessors (direct
+  `getstatic`/`putstatic` of the outer field, which krusty still emits public — the `access$…$cp`
+  bridge + private-field shape is the remaining byte-parity delta). `const val`s stay
+  accessor-less (inlined), as before. The module index's version
+  words now match the reference toolchain (`[2,4,0]`, was the 1.9.24-era `[1,9,0]` — readable but
+  byte-divergent), and the file is written UNCONDITIONALLY: kotlinc emits it with an empty parts
+  list for a class-only module, so omitting it diverged the artifact set. Byte-identical against
+  kotlinc for both the with-parts and empty shapes (unit tests pin the exact bytes).
 - **`@Metadata` writer — the CLASS round-trip (a `@Metadata` on every emitted class, not just the
   facade).** A file facade's `@Metadata` describes that file's TOP-LEVEL declarations only, so krusty
   used to emit nothing at all for a CLASS — and a krusty-compiled class was therefore unreadable by
@@ -1155,9 +1219,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   defaults exactly as kotlinc: a synthetic `name$default(self, params…, int mask, Object marker)` stub
   that, for each defaulted parameter, does `if ((mask & (1<<i)) != 0) param = <default>;` then tail-calls
   the real method; a call with holes passes the computed mask + null marker. Byte-identical to kotlinc
-  for data-class `copy` and instance methods. Not yet modeled (such files are skipped, never
-  miscompiled): interface defaults (kotlinc routes them through `$DefaultImpls`) and >31 parameters
-  (kotlinc's multi-`int` mask).
+  for data-class `copy` and instance methods. **Mask bits are LOGICAL**: kotlinc numbers them over
+  the DECLARED value parameters, so an EXTENSION's receiver — physically the leading parameter of
+  the static realization — does not shift them (`fun Host.tag(name, port = 9)` → `port` is bit 2
+  = 1<<1, decoded from kotlinc 2.4.0; krusty once numbered physically, bit 4, so a kotlinc-convention
+  caller's omitted `port` silently kept the zero placeholder). The stub emitters slice the receiver
+  prefix off the registered defaults and offset the parameter slots; member-`$default` call sites
+  subtract the member-extension receiver from the bit index the same way. Not yet modeled (such
+  files are skipped, never miscompiled): interface defaults (kotlinc routes them through
+  `$DefaultImpls`) and >31 parameters (kotlinc's multi-`int` mask).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration
@@ -2001,6 +2071,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor is package-private so the outer `<clinit>` can call it (kotlinc uses a private constructor
   plus a `DefaultConstructorMarker` synthetic — a byte-parity gap, not a behavioural one). Companion
   properties are not yet modeled.
+- A NAMED `companion object Default { … }`: the parser now keeps the declared name
+  (`ClassDecl::companion_name` → `ClassSig::companion_name`), and both the checker and the lowerer
+  resolve `Fmt.Default` exactly like `Fmt.Companion` (same singleton; kotlinc additionally REJECTS
+  the `Companion` spelling when a name is declared — krusty is permissive there for now). The
+  synthesized class/field keep the `$Companion`/`Companion` spelling; kotlinc names them
+  `Fmt$Default`/`Default` — a tracked byte-parity gap. A companion whose base-class clause carries
+  EXPLICIT full-arity arguments (`companion object Default : Fmt(Cfg(false), "default")`) is now
+  modeled: the checker types the args (static context, outer `this` masked) so their calls are
+  resolved, and the lowerer lowers each against the declared base parameter type into the
+  synthesized `super(…)`; partial-arity explicit args (rest defaulted) still bail
+  (`tests/classpath_ctor_vs_same_named_function_e2e.rs` exercises the whole shape krusty-built).
 - Non-null reference primary-constructor parameters are guarded with `Intrinsics.checkNotNullParameter`
   at the start of `<init>` (before `super()`), matching kotlinc.
 - Constructing a classpath (non-IR) class (`RuntimeException("x")`, an imported Java type): `new` +
@@ -5453,3 +5534,218 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   substitution into each `splice_unified` attempt. This keeps default-slotting, intrinsic behavior,
   reification, and module/classpath origin orthogonal. Test:
   `tests/fq_targ_trailing_lambda_e2e.rs`.
+
+- **Annotation-class retention is stamped on the compiled annotation interface, kotlinc-style.** An
+  `annotation class` records its declared Kotlin retention as meta-annotations in its own
+  `RuntimeVisibleAnnotations`: an EXPLICIT `@Retention(X)` stamps `kotlin.annotation.Retention(X)`
+  first, and every annotation class carries `java.lang.annotation.Retention(RUNTIME|CLASS|SOURCE)`
+  (RUNTIME when defaulted, CLASS for Kotlin BINARY). The java stamp is the channel consumers — the
+  JVM, javac, and krusty's own classpath reader (`LibraryType::retention`) — read the retention back
+  from; without it a krusty-built annotation lib made every use-site annotation drop (retention
+  unreadable → treated as unusable). IR: `IrClass::annotation_retention: Option<AnnoRetention>`
+  (`Default` ≠ explicit `Runtime`: kotlinc omits the kotlin stamp when the retention is defaulted).
+  Test: `tests/classpath_annotation_emit_e2e.rs` (krusty-built lib by default).
+
+- **Top-level function annotations survive into `@Metadata` `Function.annotation` records.** An
+  argument-less BINARY/RUNTIME-retained annotation applied to a top-level function is recorded as
+  `Function.annotation` (field 12) `Annotation { id }` with the class in the string table's
+  DESC_TO_CLASS_ID form, plus `Function.flags` `HAS_ANNOTATIONS` (bit 0) — exactly kotlinc's shape
+  (probe: `choose` with `@kotlin.internal.LowPriorityInOverloadResolution` → `f12 { f1: <id> }`,
+  flags `7`). This is the channel a separate compilation reads resolution markers from
+  (`MfnFlags::low_priority` via `has_annotation`). SOURCE-retained annotations (`@Suppress`) are
+  dropped from metadata, matching kotlinc; annotations WITH arguments are not yet modeled and are
+  omitted rather than recorded argument-less (a wrong record is worse than none). Test:
+  `tests/classpath_annotation_emit_e2e.rs::classpath_low_priority_annotation_reaches_overload_selection`.
+
+- **Member extension properties are metadata `Property` records, not accessor `Function`s.** A member
+  extension property (`object Tools { val Int.doubled get() = … }`) lowers to accessor METHODS
+  (`getDoubled(I)I`), but its class `@Metadata` record must be a `Property` carrying
+  `Property.receiver_type` (f5) and the accessor `JvmPropertySignature` — kotlinc emits NO `Function`
+  record for the accessor. Krusty previously recorded the getter as a member extension FUNCTION
+  (`getDoubled` + `$receiver`), so `import Tools.doubled` from a krusty-built classpath was
+  `unresolved reference` while sibling extension FUNCTIONS resolved. The declaration facts ride
+  `IrFile::member_ext_props` (semantic receiver/type + accessor fids, per class) — the accessor fids
+  are excluded from the declared-function records and re-emitted as `Property` records with
+  `receiver` (`metadata::class_builder::PropMeta::receiver`). Test:
+  `tests/classpath_object_member_extension_import_e2e.rs` (krusty-built dependency by default).
+
+- **Declared secondary constructors are described in class `@Metadata`.** A class with secondary
+  constructors previously published NO metadata at all (blanket admission bail), so a krusty-built
+  `class Dual { constructor(a: Int, f: Cfg.() -> Unit); constructor(a: String, g: (Int) -> Unit) }`
+  was not a Kotlin class to consumers — `unresolved function 'Dual'`. Each DECLARED secondary
+  constructor now emits a `Class.constructor` record (flags 22 = public + `IS_SECONDARY`, kotlinc
+  2.4.0) built from `IrSecondaryCtor::named_params` — the SOURCE names paired with checker-resolved
+  SEMANTIC types, recorded at lowering because the erased realization loses fun-type shapes
+  (`Cfg.() -> Unit` erases to a bare `Function1`). Synthetic constructors (`@Serializable`
+  deserialization) get no record, matching kotlinc. A class with ONLY secondary constructors emits
+  no primary record; an `enum class` without a declared constructor still records the implicit
+  private `(String, I)` one (byte-identity test pins this). Value classes with secondary
+  constructors keep declining (static `constructor-impl` overloads unmodeled). Test:
+  `tests/classpath_ctor_receiver_lambda_e2e.rs` (krusty-built dependency by default).
+
+- **Primary-ctor varargs and non-derivable member descriptors survive into class `@Metadata`.** A
+  `vararg` primary-constructor parameter records `ValueParameter.vararg_element_type` (f4) — without
+  it a consumer demands a literal array argument and rejects `Words()` ("no value passed for
+  parameter"). `IrCtorArg::is_vararg` carries the fact from lowering. A member function record also
+  carries its physical `JvmMethodSignature` descriptor whenever a reader could not derive it from
+  the proto types: a signature mentioning a TYPE PARAMETER (`fun <T> genericJoin(vararg parts: T)`
+  erases to `[Ljava/lang/Object;`, which nothing in the record names) or a vararg member — kotlinc
+  records both. Derivable signatures keep omitting it. Tests:
+  `tests/interface_supertype_members_e2e.rs`, `tests/named_args_classpath_e2e.rs` (both krusty-built
+  by default).
+
+- **Members mentioning enclosing-class type parameters publish their semantic shape.** A non-generic
+  member whose declared types mention a CLASS type parameter (`open class Base<T> { open fun
+  choose(value: T): T }`) lowers to an erased `IrFunction` (`Any`), and `IrFile::signatures` only
+  describes function-OWNED type parameters — so the class `@Metadata` published `choose(Any): Any`
+  and a consumer rejected a `Base<String>` override with "return type mismatch: expected 'String',
+  actual 'Any'". Lowering now records the checker-resolved shape in
+  `IrFile::member_semantic_sigs` (fid → semantic params + ret) and the class metadata prefers it,
+  encoding `Type.type_parameter` references against the class table. Semantic type-parameter
+  identities are checker-generated (`\0tp:…`), so the mention test is "any type variable at all"
+  (`ty_mentions_any_param`) — with no function-owned parameters and no receiver, any type variable
+  is an enclosing-class one. Extension members are excluded (their `params[0]` receiver alignment
+  is a separate channel). Also fixed the same way: generic member-extension lambdas and one
+  generic-suspend shape. Test: `tests/superclass_bridge_e2e.rs` (krusty-built by default).
+
+- **Value-class-rewritten top-level functions record their mangled JVM handle.** A top-level function
+  with a value-class parameter realizes as a MANGLED method (`taggedOnly(tag: Tag)` →
+  `taggedOnly-rnqsQGE(Ljava/lang/String;)`), neither name nor descriptor derivable from the declared
+  facade record — kotlinc records both in the `JvmMethodSignature` (name f1 + desc f2). The facade
+  writer now recovers them from the value-class pass's `vc_declared_sigs` table (declared name +
+  arity → the post-pass `IrFunction`'s physical name/descriptor;
+  `facade_package_metadata_with_ir`), so a consumer can map the record to bytecode — previously
+  every such function was `unresolved function` from a krusty-built classpath.
+  `FnMeta::jvm_name` carries the f1 name (written only when it differs from the Kotlin name).
+  Test: `tests/classpath_value_class_param_e2e.rs` (krusty-built by default).
+
+- **Classes with value-class constructor parameters publish full metadata; secondary VC ctors get
+  the marker ABI.** The blanket "no @Metadata for a value-param ctor class" decline is lifted — the
+  bytecode already carried kotlinc's ABI for PRIMARY ctors (private erased `<init>` + public
+  synthetic marker ctor + mangled accessors), so the record now describes it: ctor params keep their
+  DECLARED types (`IrFile::vc_ctor_declared_params`, captured before erasure), the ctor
+  `JvmMethodSignature` names the public marker form (an inner class's leading enclosing-instance
+  param included), member records ride `vc_declared_sigs` (mangled f100), and property records carry
+  the mangled getter + erased field desc (already-existing channels). SECONDARY constructors with
+  value-class params now get the same private+marker realization (`IrSecondaryCtor::vc_params`,
+  recorded by the VC pass pre-erasure) — bytecode, same-module construction routing (`emit_new`
+  matches the erased shape), and the marker-form metadata desc. Also fixed while lifting: the
+  ordinary ctor record desc now spells UNNAMED leading `<init>` params (an inner class's enclosing
+  instance — consumers were one slot short), and `Class.flags` records `IS_INNER` (bit 9, kotlinc's
+  518). Value classes with secondary ctors still decline (static `constructor-impl` overloads).
+  Byte-parity probes: `Holder`/`Overloaded` metadata byte-identical to kotlinc 2.4.0. Tests:
+  build688, enum_regex_vc, nested_ctor_reordered_named_valueclass, synthetic_ctor,
+  value_class_default, value_class_nullable_widen_return — all krusty-built by default now.
+
+- **Named `object` properties realize as JVM static fields, kotlinc's shape.** A named (non-local,
+  non-companion) `object`'s property backing fields are `static` on the object class: accessors are
+  instance methods reading/writing `getstatic`/`putstatic`, property initializers and `init {}`
+  blocks run in `<clinit>` AFTER the `INSTANCE` store, and `<init>` is a bare `super()` call —
+  byte-comparable to kotlinc (probe: `object Counter { var slot = "" }` code-identical; residual
+  divergence is constant-pool/method order only). Reads/writes route statically at every level:
+  the synthesized accessors, `IrExpr::GetField`/`SetField` (receiver evaluated only for effects),
+  and the declared-property direct-field path (`PropertyAccess::Field { is_static }`). A pure list
+  of own-field stores needs no local (kotlinc's `ldc; putstatic` sequence); only an initializer
+  actually reading `this` materializes INSTANCE into slot 0 (`init_body_reads_this`).
+  Local/anonymous objects and companions keep instance fields (companion static hoisting to the
+  outer class is a separate, upcoming relayout).
+
+- **Reified inline functions emit real erased methods with reification markers.** A `<reified T>`
+  inline fun whose reified-parameter uses are all CLASS LITERALS (`T::class`/`T::class.java`) now
+  emits a standalone erased method — kotlinc's own realization: each literal lowers to
+  `Intrinsics.reifiedOperationMarker(4, "T")` followed by the ERASED class constant
+  (`IrExpr::ReifiedClassMarker`), the placeholder pattern every inliner (kotlinc's and krusty's)
+  patches with the call-site class. Real kotlinc consuming a krusty-built lib inlines it correctly
+  (pinned by `kotlinc_inlines_krusty_reified_method`). Admission is
+  `reified_uses_are_class_literals`: an `is T`/`as T` (INSTANCEOF/CHECKCAST markers, unmodeled) or
+  a reified name in a nested call's explicit type arguments keeps the function splice-only, as
+  before. Nested splices inside an emitted body that resolve back to the enclosing `T` also emit
+  the marker rather than a resolved class.
+
+- **Reified `is`/`as` markers and body-inlined `$default` stubs.** A non-safe `is T`/`as T` on the
+  emitted fn's own reified parameter lowers to `IrExpr::ReifiedTypeOp` — `reifiedOperationMarker(3)`
+  + `instanceof` / `marker(1)` + `checkcast` against the erasure, kotlinc's exact placeholder pair
+  (`as? T` and nullable `is T?` targets stay splice-only). The `$default` synthetic of a reified fn
+  INLINES the whole body after the default fills instead of delegating — the real method throws at
+  runtime by design (the marker intrinsic), so kotlinc's `$default` carries the body and every
+  splicer patches it there; krusty's delegating stub left a live direct call in spliced output. The
+  spurious `JvmMethodSignature` on plain inline facade records is gone (kotlinc emits none; suspend
+  and type-parameter-mentioning signatures keep theirs).
+
+- **Return-only generic suspend overrides need no erasure bridge.** The CPS rewrite gives BOTH the
+  supertype declaration and the override the same physical shape — a trailing `Continuation`
+  parameter and an `Object` return — so a type parameter appearing only in RETURN position erases
+  identically on both sides and no bridge exists to build (probed: kotlinc emits a single
+  `byId(int, Continuation)` for `class RealRepo : Repo<Cfg> { override suspend fun byId(id: Int):
+  Cfg? }`). The JVM bridge pass compares the semantic parameter shapes in both its superclass and
+  interface-obligation paths and skips only when a VALUE-parameter erasure difference remains;
+  common lowering does not pre-classify bridge needs from source type spellings. Return-only
+  generic suspend overrides therefore compile and run. Test:
+  `tests/generic_suspend_member_return_e2e.rs`
+  (krusty-built by default).
+
+- **Value-class-mangled suspend functions emit their `$default` synthetic.** The CPS-appended
+  `Continuation` is just another loaded parameter in the stub (kotlinc:
+  `pick-<hash>$default(int, String, Continuation, int, Object)` delegating to the CPS method); the
+  mask covers only the DECLARED defaulted parameters, and the stub-safe gate already restricts
+  defaults to simple constants, which cannot suspend — so the previously-rejected shape is modeled
+  by the ordinary facade stub emitter unchanged. Tests: `tests/metadata_kept_params.rs`,
+  `tests/unsigned_classpath_call_e2e.rs` (both krusty-built by default).
+
+- **Safe-call `invoke` on a nullable fun-typed value resolves through the invoke convention.** For
+  `op?.invoke(a, b)` where `op: ((Int, Int) -> Int)?`, the ordinary member paths know no `invoke`
+  member on `Function{N}` and typed the call `Error` (the whole file then bailed at SafeCall
+  lowering). The checker selects the invoke convention directly for `invoke` on a `Ty::Fun`
+  receiver and calls `record_invoke` with the non-null receiver — the same convention the
+  call-position spelling uses — and `expr_inner_call_member` lowers the recorded
+  `ExprLowering::Invoke` reached through the
+  member spelling (the safe-call assembly's non-null branch delegates there). Test:
+  `tests/classpath_fun_typed_property_lambda_e2e.rs` (krusty-built by default).
+
+- **Direct `val value: T?` members retain their semantic declaration type.** The
+  per-class `nullable_tparam_props` table (name → type-parameter index) records direct
+  nullable-type-parameter properties, deliberately separate from `generic_props`/
+  `generic_property_shapes`. The module-symbol provider exposes the resulting
+  `Nullable(TyParam)` template consistently to the property, getter, and setter, while
+  `applied_declared_member_prop_ty` substitutes the receiver's semantic binding for source reads
+  and stable-path analysis. Scalar bindings remain semantic nullable primitives here; boxing and
+  storage are backend decisions. Thus `val <T> Box<T>.maybe: T? get() = value` type-checks as
+  `T?`, and a stable `ReadBox<Int>.value` narrows to `Int` after a null check.
+  Tests: `tests/classpath_static_call_inference_e2e.rs` (krusty-built by default).
+
+- **A `try` body keeps a reified fn emittable.** The splice-only body screen rejected any `try` in
+  an inline fn — but a REIFIED fn is emitted as a real method (kotlinc always emits one), where a
+  standalone `try` lowers exactly as in any ordinary function; only the splice-time re-lowering
+  concern applies, which the emitted-body path never takes. `try` now recurses into its children
+  for reified fns instead of rejecting outright (non-local returns inside its lambdas stay
+  rejected). This makes the assertFailsWith shape (`inline fun <reified T : Throwable>
+  failsWith(...) { try { ... } catch ... }`) a real facade method + `$default`, so the
+  fully-qualified no-import spelling resolves against krusty-built libs. Test:
+  `tests/fq_targ_trailing_lambda_e2e.rs` (krusty-built by default).
+
+- **Expected-seeded constructor bindings survive interface-implementing argument evidence.** For
+  `fun entries(): Bag<String, Entry> = Bag(listOf(Item("OK")))` the expected type seeds `V = Entry`,
+  but the argument-evidence merge joins types over superclass chains only, so joining the `Item`
+  argument (a class IMPLEMENTING Entry) collapsed `V` to `Any` — and the invariant result then
+  mismatched the very expectation that seeded it. Constructor constraint collection now preserves
+  the seed as each lower argument constraint is added while that argument remains assignable to it.
+  Once an argument falls outside the seed, ordinary joining takes over; there is no post-merge
+  recovery pass. Test:
+  `tests/build840_collection_property_element_e2e.rs` (krusty-built by default).
+
+- **Companion `val`/`var` properties are hoisted onto the OUTER class as statics.** kotlinc's
+  layout, now krusty's: the backing field is `private static [final]` on the outer class
+  (regardless of the property's declared visibility), initialized in the outer's `<clinit>`
+  AFTER the `Companion` instance store; the companion keeps the property declaration and its
+  instance accessors, which reach the field through `public static final synthetic`
+  `access$get<X>$cp`/`access$set<X>$cp` bridges on the outer; an outer INSTANCE property with
+  the same source name keeps the metadata/accessor name but its JVM field is suffixed
+  (`result` → `result$1`). Member order matches kotlinc: `Companion` field first, `<clinit>`
+  last, bridges between the instance methods and `<clinit>`. An initializer may read sibling
+  companion members (`this` = the just-stored Companion instance); one that doesn't reads as a
+  bare expression in `<clinit>`. Conservative subset: public, non-const, non-lateinit,
+  non-delegated, plain-accessor, initialized, non-value-class-typed properties on a PLAIN class
+  outer — interface/enum/value-class outers keep the previous instance layout (their emit paths
+  lack the bridge synthesis). Tests: `tests/companion_member_read_e2e.rs`
+  (`kotlinc_member_companion_property_field_shape` pins the kotlinc shape; krusty-built by
+  default).

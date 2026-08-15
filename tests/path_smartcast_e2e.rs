@@ -13,10 +13,7 @@ fn run(src: &str) -> Option<String> {
 }
 
 fn assert_ok(src: &str) {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()));
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    common::expect_true_e2e("None", src, &[]);
     assert_eq!(run(src), Some("OK".to_string()));
 }
 

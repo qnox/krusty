@@ -58,7 +58,7 @@ fn classpath_box(tag: &str, main: &str) {
 /// Reference-compiled dependency variant: these cases consume kotlinc-emitted metadata
 /// shapes krusty does not produce yet (see `common::compile_lib_ref`).
 fn classpath_box_ref(tag: &str, main: &str) {
-    common::expect_box_ok_against_ref(tag, LIB, main);
+    common::expect_box_ok_against(tag, LIB, main);
 }
 
 /// Both origins for one qualified-name spelling.

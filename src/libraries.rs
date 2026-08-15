@@ -56,6 +56,11 @@ pub struct ClassifierInheritance {
     pub is_extensible: bool,
     pub has_no_arg_constructor: bool,
     pub supports_external_subclassing: bool,
+    /// The provider can realize a source override for each normalized abstract obligation even
+    /// though the classifier is not directly subclassable without such overrides. This is a
+    /// declaration capability, not an origin check: providers derive it from their normalized
+    /// callable records and exact physical realizations.
+    pub supports_external_abstract_overrides: bool,
 }
 
 impl Default for ClassifierInheritance {
@@ -65,6 +70,7 @@ impl Default for ClassifierInheritance {
             is_extensible: false,
             has_no_arg_constructor: true,
             supports_external_subclassing: false,
+            supports_external_abstract_overrides: false,
         }
     }
 }

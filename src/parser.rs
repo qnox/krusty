@@ -216,6 +216,10 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
         match decl {
             Decl::Class(c) => {
                 c.decl_line = line_at(c.span.lo);
+                // The parser stored the primary ctor's `)` OFFSET here — rewrite it to the line.
+                if c.ctor_close_line != 0 {
+                    c.ctor_close_line = line_at(c.ctor_close_line);
+                }
                 // A class's methods live INSIDE the class decl, not in `decl_arena` — walk them too,
                 // or every member method keeps line 0 and gets no `LineNumberTable`.
                 for m in &mut c.methods {
@@ -238,7 +242,10 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                 f.decl_line = body_line(&f.body, line_at(f.span.lo));
                 f.body_close_line = body_close(&f.body);
             }
-            _ => {}
+            // A top-level property's accessors and `<clinit>` store map to its declaration line.
+            Decl::Property(p) => {
+                p.decl_line = line_at(p.span.lo);
+            }
         }
     }
 }
@@ -272,6 +279,7 @@ fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
 /// empty body gives the later passes nothing to recurse over.
 fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
     ClassDecl {
+        primary_ctor_visibility: Visibility::Public,
         name: "<error>".to_string(),
         visibility: Visibility::Public,
         annotations: Vec::new(),
@@ -299,6 +307,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         primary_ctor_annotations: Some(Vec::new()),
         secondary_ctors: Vec::new(),
         span,
+        ctor_close_line: 0,
         decl_line: 0,
     }
 }
@@ -1342,7 +1351,13 @@ impl<'a> Parser<'a> {
                         String::new()
                     };
                     if !alias.is_empty() && !target.is_empty() {
-                        self.file.type_aliases.push((alias, target));
+                        self.file.type_aliases.push((alias.clone(), target));
+                        // The alias's declared visibility survives into `@Metadata`
+                        // (`internal typealias` must stay module-bound for consumers).
+                        let vis = visibility_of(&mods);
+                        if vis != Visibility::Public {
+                            self.file.type_alias_visibility.insert(alias, vis);
+                        }
                     }
                 }
                 _ => {
@@ -2255,6 +2270,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         let declaration = ClassDecl {
+            primary_ctor_visibility: Visibility::Public,
             name,
             visibility: visibility_of(modifiers),
             annotations,
@@ -2286,6 +2302,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
             span: Span::new(start.lo, end.hi),
+            ctor_close_line: 0,
             decl_line: 0,
         };
         let id = self.file.add_decl(Decl::Class(declaration));
@@ -2612,6 +2629,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
+            primary_ctor_visibility: Visibility::Public,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -2643,6 +2661,7 @@ impl<'a> Parser<'a> {
             secondary_ctors,
             primary_ctor_annotations: has_primary_ctor.then_some(Vec::new()),
             span: Span::new(start.lo, end.hi),
+            ctor_close_line: 0,
             decl_line: 0,
         }
     }
@@ -3232,10 +3251,14 @@ impl<'a> Parser<'a> {
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         let mut primary_constructor_annotations = Vec::new();
         // An explicit constructor prefix may continue across physical newlines.
+        let mut primary_ctor_visibility = Visibility::Public;
         if self.primary_constructor_header_follows() {
             self.skip_newlines();
             if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                self.skip_decl_prefix();
+                let ctor_mods = self.skip_decl_prefix();
+                // The declared constructor visibility survives into `@Metadata` (and, for
+                // `protected`, the JVM `<init>` access flags).
+                primary_ctor_visibility = visibility_of(&ctor_mods);
                 primary_constructor_annotations = self.take_pending_annotations();
                 let _ = self.take_pending_annotation_args();
             }
@@ -3245,6 +3268,7 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         let mut props = Vec::new();
+        let mut ctor_close_lo = 0u32;
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
@@ -3309,6 +3333,9 @@ impl<'a> Parser<'a> {
                 }
                 self.skip_newlines();
             }
+            // The byte offset of the primary ctor's `)` — rewritten to a source LINE by the
+            // decl-line post-pass; kotlinc maps the ctor `$default`'s `return` to it.
+            ctor_close_lo = self.tok().span.lo;
             self.expect(TokenKind::RParen, "')'");
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
@@ -3458,6 +3485,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         self.pop_lexical_type_params(lexical_type_param_lens);
         ClassDecl {
+            primary_ctor_visibility,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -3493,6 +3521,7 @@ impl<'a> Parser<'a> {
                 .then_some(primary_constructor_annotations),
             secondary_ctors,
             span: Span::new(start.lo, end.hi),
+            ctor_close_line: ctor_close_lo,
             decl_line: 0,
         }
     }
@@ -3794,6 +3823,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
+            primary_ctor_visibility: Visibility::Public,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -3825,6 +3855,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
             span: Span::new(start.lo, end.hi),
+            ctor_close_line: 0,
             decl_line: 0,
         }
     }
@@ -3916,6 +3947,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         let name = format!("Anon$anon${}", span.lo);
         let synth = ClassDecl {
+            primary_ctor_visibility: Visibility::Public,
             name: name.clone(),
             visibility: Visibility::Public,
             annotations: Vec::new(),
@@ -3946,6 +3978,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
             span: Span::new(span.lo, end.hi),
+            ctor_close_line: 0,
             decl_line: 0,
         };
         let did = self.file.add_decl(Decl::Class(synth));
@@ -4047,6 +4080,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
+            primary_ctor_visibility: Visibility::Public,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -4078,6 +4112,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
             span: Span::new(start.lo, end.hi),
+            ctor_close_line: 0,
             decl_line: 0,
         }
     }

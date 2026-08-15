@@ -5559,6 +5559,7 @@ fn build_continuation_class(
             ty: recv_ty,
             is_field: false,
             has_default: false,
+            is_vararg: false,
             type_param: None,
             check: None,
         });
@@ -5569,6 +5570,7 @@ fn build_continuation_class(
         ty: continuation_ty(),
         is_field: false,
         has_default: false,
+        is_vararg: false,
         type_param: None,
         check: None,
     });
@@ -5577,6 +5579,9 @@ fn build_continuation_class(
     let super_arg = ir.add_expr(IrExpr::GetValue(super_completion_idx));
     let class = IrClass {
         fq_name: crate::types::type_name(internal),
+        is_source_declared: false,
+        is_anonymous_object: false,
+        enclosing_function: None,
         is_inner_class: false,
         is_local_class: false,
         is_value: false,
@@ -5618,7 +5623,7 @@ fn build_continuation_class(
         has_primary_ctor: true,
         applied_annotations: Vec::new(),
         field_annotations: Vec::new(),
-        runtime_retained: false,
+        annotation_retention: None,
     };
     ir.add_class(class)
 }

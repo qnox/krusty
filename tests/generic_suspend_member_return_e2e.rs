@@ -20,7 +20,7 @@ const LIB: &str = "package lib\n\
 #[test]
 fn generic_suspend_nullable_return_binds_receiver_type_argument() {
     // Checker-level: the recovered return binds `T = Cfg`, so `?: error(…)` then `c.at` resolves.
-    let Some(diags) = common::checker_diags_against_ref(
+    let Some(diags) = common::checker_diags_against(
         "aa1_check",
         LIB,
         "import lib.Repo\nimport lib.Cfg\n\
@@ -39,7 +39,7 @@ fn generic_suspend_nullable_return_binds_receiver_type_argument() {
 #[test]
 fn generic_suspend_nonnull_return_binds_receiver_type_argument() {
     // The non-null `T` return (no elvis) must also bind `T = Cfg`.
-    let Some(diags) = common::checker_diags_against_ref(
+    let Some(diags) = common::checker_diags_against(
         "aa1_nn",
         "package lib\nclass Cfg(val at: String)\ninterface Repo<T> { suspend fun byId(id: Int): T }\n",
         "import lib.Repo\nimport lib.Cfg\n\
@@ -58,7 +58,7 @@ fn generic_suspend_return_runs_via_runblocking() {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
     let corou = common::coroutines_jar();
-    let Some(libout) = common::compile_lib_ref("aa1_run", LIB) else {
+    let Some(libout) = common::compile_lib("aa1_run", LIB) else {
         return;
     };
     let cp = vec![libout, sl, corou, jdk.clone()];

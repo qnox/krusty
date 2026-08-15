@@ -591,6 +591,9 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
     let fq_name = fq_name.into();
     crate::ir::IrClass {
         fq_name: fq_name.into(),
+        is_source_declared: false,
+        is_anonymous_object: false,
+        enclosing_function: None,
         is_inner_class: false,
         is_local_class: false,
         is_value: false,
@@ -632,7 +635,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         has_primary_ctor: true,
         applied_annotations: Vec::new(),
         field_annotations: Vec::new(),
-        runtime_retained: false,
+        annotation_retention: None,
     }
 }
 

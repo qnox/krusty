@@ -88,12 +88,10 @@ fun box(): String {\n\
     if (!acceptsSerializable(strings) || !acceptsSerializable(ints)) return \"serializable\"\n\
     return \"OK\"\n\
 }\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], Some(jdk.as_path()));
-    assert!(
-        diagnostics.is_empty(),
-        "kotlinc's JVM array customization should resolve without diagnostics: {diagnostics:?}"
+    common::expect_true_e2e(
+        "jvm_array_clone_has_exact_array_type_and_object_realization",
+        SRC,
+        &[],
     );
     assert_eq!(run(SRC).expect("JVM Array.clone"), "OK");
 }
@@ -130,12 +128,6 @@ fun box(): String {\n\
     if (holder.block().javaClass.componentType.name != \"java.lang.String\") return \"block type\"\n\
     return \"OK\"\n\
 }\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], Some(jdk.as_path()));
-    assert!(
-        diagnostics.is_empty(),
-        "context-typed empty arrayOf should be frontend-valid: {diagnostics:?}"
-    );
+    common::expect_true_e2e("context_typed_empty_arrayof_compiles_and_runs", SRC, &[]);
     assert_eq!(run(SRC).expect("context-typed empty arrayOf"), "OK");
 }

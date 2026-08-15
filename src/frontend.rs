@@ -474,7 +474,12 @@ where
         features.apply_source_directives(source.text);
         multiplatform |= features.has("MultiPlatformProjects");
         let diagnostics_before = diags.diags.len();
-        let file = parse_source_kind(source.text, source.kind, &features, diags);
+        let mut file = parse_source_kind(source.text, source.kind, &features, diags);
+        if source.kind == SourceKind::Kotlin {
+            if let Some(stem) = source.file_stem {
+                name_anonymous_classes(&mut file, &format!("{stem}Kt"));
+            }
+        }
         parse_errors.push(
             source.kind == SourceKind::Java
                 || diags.diags[diagnostics_before..]
@@ -608,6 +613,90 @@ pub fn analyze_source_standalone(
     analyze_source(src, Box::new(EmptySymbolSource), diags)
 }
 
+/// Rename anonymous-object classes from the parse-time placeholder (`Anon$anon$<offset>`) to
+/// kotlinc's enclosing-scoped spelling (`P2$Companion$build$1`): the innermost enclosing FUNCTION
+/// body (a member's or a top-level one) names the scope, with a per-scope 1-based ordinal in
+/// source order. Must run BEFORE checking — the checker records these internals in every type it
+/// hands the backend. A construction outside any function body (a property initializer, an `init`
+/// block) keeps the placeholder for now; a nested anonymous class picks up its enclosing anonymous
+/// class's fresh name because constructions rename in source order.
+pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) {
+    use crate::ast::{Decl, Expr};
+    let mut anons: Vec<(crate::ast::ExprId, crate::ast::DeclId)> = file
+        .anonymous_object_classes
+        .iter()
+        .map(|(&construction, &decl)| (construction, decl))
+        .collect();
+    anons.sort_by_key(|(construction, _)| file.expr_spans[construction.0 as usize].lo);
+    let mut counters: std::collections::HashMap<String, u32> = Default::default();
+    for (construction, decl) in anons {
+        let span = file.expr_spans[construction.0 as usize];
+        let mut best: Option<(u32, String, crate::ast::AnonymousEnclosingFunction)> = None;
+        for &candidate in &file.decls {
+            match file.decl(candidate) {
+                Decl::Fun(function) => {
+                    if function.span.lo <= span.lo && span.hi <= function.span.hi {
+                        let size = function.span.hi - function.span.lo;
+                        if best
+                            .as_ref()
+                            .is_none_or(|(smallest, _, _)| size < *smallest)
+                        {
+                            best = Some((
+                                size,
+                                format!("{facade_simple}${}", function.name),
+                                crate::ast::AnonymousEnclosingFunction::TopLevel(candidate),
+                            ));
+                        }
+                    }
+                }
+                Decl::Class(class) => {
+                    if candidate == decl {
+                        continue;
+                    }
+                    let chain = class.name.replace('.', "$");
+                    for (method_index, method) in class.methods.iter().enumerate() {
+                        if method.span.lo <= span.lo && span.hi <= method.span.hi {
+                            let size = method.span.hi - method.span.lo;
+                            if best
+                                .as_ref()
+                                .is_none_or(|(smallest, _, _)| size < *smallest)
+                            {
+                                best = Some((
+                                    size,
+                                    format!("{chain}${}", method.name),
+                                    crate::ast::AnonymousEnclosingFunction::Member {
+                                        class: candidate,
+                                        method: method_index as u32,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some((_, scope, enclosing)) = best else {
+            continue;
+        };
+        file.anonymous_object_enclosing_functions
+            .insert(decl, enclosing);
+        let ordinal = counters.entry(scope.clone()).or_insert(0);
+        *ordinal += 1;
+        let fresh = format!("{scope}${ordinal}");
+        let Expr::Call { callee, .. } = file.expr(construction) else {
+            continue;
+        };
+        let callee = *callee;
+        if let Decl::Class(class) = file.decl_mut(decl) {
+            class.name = fresh.clone();
+        }
+        if let Expr::Name(name) = &mut file.expr_arena[callee.0 as usize] {
+            *name = fresh;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,6 +707,42 @@ mod tests {
     };
     use crate::source::SourceInput;
     use crate::types::{Ty, TypeName, TypeNameList, Visibility};
+
+    #[test]
+    fn source_set_assigns_anonymous_identity_from_the_real_file_stem() {
+        let source = "fun build(): Any = object {}";
+        let inputs = [SourceInput::kotlin(source).with_file_stem("Widget")];
+        let mut diagnostics = DiagSink::new();
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+        let declaration = *analysis.files[0]
+            .anonymous_object_classes
+            .values()
+            .next()
+            .expect("anonymous declaration");
+        let crate::ast::Decl::Class(class) = analysis.files[0].decl(declaration) else {
+            panic!("anonymous declaration was not a class");
+        };
+        assert_eq!(class.name, "WidgetKt$build$1");
+        let enclosing = analysis.files[0]
+            .anonymous_object_enclosing_functions
+            .get(&declaration)
+            .copied()
+            .expect("anonymous enclosure identity");
+        let crate::ast::AnonymousEnclosingFunction::TopLevel(function) = enclosing else {
+            panic!("top-level build owner was not recorded exactly");
+        };
+        assert!(matches!(
+            analysis.files[0].decl(function),
+            crate::ast::Decl::Fun(function) if function.name == "build"
+        ));
+    }
 
     struct ExistingLibrary;
 
