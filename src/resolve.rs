@@ -11191,7 +11191,10 @@ struct CtorDelegationCandidate {
 }
 
 enum SourceConstructorSelection {
-    Selected(ResolvedCtorDelegation),
+    Selected {
+        candidate_index: usize,
+        resolved: Box<ResolvedCtorDelegation>,
+    },
     NoMatch,
     Ambiguous,
 }
@@ -20784,16 +20787,6 @@ impl<'a> Checker<'a> {
             .select_symbol(SymRecv::TypeName(internal), name, args, type_args)
             .and_then(Symbol::companion)
     }
-    fn select_constructor(
-        &self,
-        internal: TypeName,
-        args: &[CallArgKind],
-    ) -> Option<crate::symbol_resolver::SelectedConstructorCall> {
-        use crate::symbol_resolver::{SymRecv, Symbol};
-        self.resolver()
-            .select_symbol(SymRecv::TypeName(internal), "", args, &[])
-            .and_then(Symbol::constructor)
-    }
     /// Whether the current module declares a top-level function `name` (shadow-precedence test) — asked
     /// through the module source rather than touching `syms.funs` directly.
     fn module_declares(&self, name: &str) -> bool {
@@ -24423,6 +24416,20 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
+    fn normalized_constructor_call_sig(constructor: &crate::libraries::LibraryMember) -> CallSig {
+        let parameter_count = constructor.params.len();
+        let mut call_sig = constructor.call_sig.clone();
+        if call_sig.param_names.len() != parameter_count {
+            call_sig.param_names = vec![String::new(); parameter_count];
+        }
+        if call_sig.param_defaults.len() != parameter_count {
+            call_sig.param_defaults = vec![false; parameter_count];
+        }
+        call_sig.required = required_arity(parameter_count, &call_sig.param_defaults);
+        call_sig.vararg = call_sig.vararg_index.is_some();
+        call_sig
+    }
+
     fn this_ctor_delegation_candidates(
         &self,
         class: &ClassDecl,
@@ -24790,7 +24797,8 @@ impl<'a> Checker<'a> {
             .then_some(arguments.names.as_slice());
         let mut scored = candidates
             .iter()
-            .filter_map(|candidate| {
+            .enumerate()
+            .filter_map(|(candidate_index, candidate)| {
                 let selected = self.match_ctor_delegation_candidate(arguments, candidate)?;
                 let params = candidate.target.params();
                 let call_sig = CallSig::source(
@@ -24827,7 +24835,13 @@ impl<'a> Checker<'a> {
                         },
                     )
                     .map_or((0, std::cmp::Reverse(0), true), |score| score.rank);
-                Some((candidate.low_priority, rank, selected, params.to_vec()))
+                Some((
+                    candidate.low_priority,
+                    rank,
+                    candidate_index,
+                    selected,
+                    params.to_vec(),
+                ))
             })
             .collect::<Vec<_>>();
         if scored.iter().any(|candidate| !candidate.0) {
@@ -24837,12 +24851,12 @@ impl<'a> Checker<'a> {
             return SourceConstructorSelection::NoMatch;
         };
         scored.retain(|candidate| candidate.1 == best);
-        let selected = if let [(_, _, selected, _)] = scored.as_slice() {
-            selected
+        let selected = if let [(_, _, candidate_index, selected, _)] = scored.as_slice() {
+            (*candidate_index, selected)
         } else {
             let parameter_shapes = scored
                 .iter()
-                .map(|(_, _, _, params)| params.clone())
+                .map(|(_, _, _, _, params)| params.clone())
                 .collect::<Vec<_>>();
             let argument_kinds = arguments
                 .args
@@ -24856,14 +24870,19 @@ impl<'a> Checker<'a> {
                 &parameter_shapes,
                 &argument_kinds,
             ) {
-                crate::symbol_resolver::CandidateSelection::Selected(index) => &scored[index].2,
+                crate::symbol_resolver::CandidateSelection::Selected(index) => {
+                    (scored[index].2, &scored[index].3)
+                }
                 crate::symbol_resolver::CandidateSelection::Ambiguous
                 | crate::symbol_resolver::CandidateSelection::None => {
                     return SourceConstructorSelection::Ambiguous;
                 }
             }
         };
-        SourceConstructorSelection::Selected(selected.clone())
+        SourceConstructorSelection::Selected {
+            candidate_index: selected.0,
+            resolved: Box::new(selected.1.clone()),
+        }
     }
 
     fn super_ctor_delegation_candidates(
@@ -25040,39 +25059,35 @@ impl<'a> Checker<'a> {
             return Vec::new();
         };
         let mut candidates = Vec::new();
-        for (index, constructor) in base.constructors.iter().enumerate() {
-            let metadata = base
-                .ctor_named_params
-                .get(index)
-                .filter(|params| params.names.len() == constructor.params.len());
+        for constructor in &base.constructors {
             if !self.member_accessible(constructor.visibility, owner) {
                 continue;
             }
-            let param_names = metadata
-                .map(|params| params.names.clone())
-                .unwrap_or_else(|| {
-                    (0..constructor.params.len())
-                        .map(|index| format!("p{index}"))
-                        .collect()
-                });
-            let defaults = metadata
-                .map(|params| params.defaults.clone())
-                .unwrap_or_else(|| vec![false; constructor.params.len()]);
-            let vararg = metadata.and_then(|params| params.vararg);
+            let parameter_count = constructor.params.len();
+            let call_sig = Self::normalized_constructor_call_sig(constructor);
             let supports_default_abi = constructor.default_realization.is_some();
             candidates.push(CtorDelegationCandidate {
                 target: ResolvedCtorDelegationTarget::Super {
                     owner,
                     params: constructor.params.clone(),
                 },
-                param_names,
-                defaults,
-                vararg,
+                param_names: call_sig.param_names,
+                defaults: call_sig.param_defaults,
+                vararg: call_sig.vararg_index,
                 supports_default_abi,
-                low_priority: false,
-                parameter_constraints: Vec::new(),
-                implicit_integer_coercion: Vec::new(),
-                lambda_receivers: Self::semantic_lambda_receiver_flags(&constructor.params),
+                low_priority: constructor.low_priority,
+                parameter_constraints: constructor
+                    .params
+                    .iter()
+                    .copied()
+                    .map(Self::constructor_shape_constraint)
+                    .collect(),
+                implicit_integer_coercion: call_sig.implicit_integer_coercion,
+                lambda_receivers: if call_sig.lambda_receiver_params.len() == parameter_count {
+                    call_sig.lambda_receiver_params
+                } else {
+                    Self::semantic_lambda_receiver_flags(&constructor.params)
+                },
             });
         }
         candidates
@@ -25138,10 +25153,12 @@ impl<'a> Checker<'a> {
         let mut argument_types = Vec::with_capacity(arguments.args.len());
         let mut argument_implicit_integer_coercion = Vec::with_capacity(arguments.args.len());
         let mut argument_lambda_receivers = Vec::with_capacity(arguments.args.len());
-        for (&argument, &slot) in arguments.args.iter().zip(&argument_slots) {
+        for (source, (&argument, &slot)) in arguments.args.iter().zip(&argument_slots).enumerate() {
             let parameter = *params.get(slot)?;
             let expected = if candidate.vararg == Some(slot) {
-                if self.file.is_spread_arg(argument) {
+                if self.file.is_spread_arg(argument)
+                    || arguments.names.get(source).is_some_and(Option::is_some)
+                {
                     parameter
                 } else {
                     parameter.array_elem()?
@@ -25179,6 +25196,7 @@ impl<'a> Checker<'a> {
                 // agree instead of teaching the class-header path a private lambda exception.
                 ConstructorParameterConstraint::Concrete if lambda_literal => {
                     matches!(expected.non_null(), Ty::Fun(_))
+                        || self.semantic_sam_signature(expected).is_some()
                 }
                 // A numeric argument reaches another primitive slot the same way it does at a function
                 // call (`L(b: Long)` accepts `L(1)`): the emit site inserts the conversion. Subtyping
@@ -25297,7 +25315,9 @@ impl<'a> Checker<'a> {
             value_class,
         } = site;
         let selected = match self.select_source_constructor(scope, arguments, &candidates) {
-            SourceConstructorSelection::Selected(selected) => selected,
+            SourceConstructorSelection::Selected {
+                resolved: selected, ..
+            } => *selected,
             SourceConstructorSelection::NoMatch => {
                 self.diags.error(
                     span,
@@ -28839,9 +28859,11 @@ impl<'a> Checker<'a> {
                             trailing_lambda: false,
                         };
                         let candidates = c.super_ctor_delegation_candidates(cl);
-                        if let SourceConstructorSelection::Selected(selected) =
-                            c.select_source_constructor(scope, &arguments, &candidates)
+                        if let SourceConstructorSelection::Selected {
+                            resolved: selected, ..
+                        } = c.select_source_constructor(scope, &arguments, &candidates)
                         {
+                            let selected = *selected;
                             // A receiver lambda's implicit label is the source-level base class's SIMPLE
                             // name. Split every internal/nested separator so `Outer.Base` and `Outer$Base`
                             // both expose `Base`, rather than exposing a JVM-internal spelling as a label.
@@ -38558,76 +38580,12 @@ impl<'a> Checker<'a> {
         crate::symbol_resolver::ty_subst(gm.ret_shape, &binds)
     }
 
-    /// Preserve syntax-only argument provenance for constructor selection. The semantic provider may
-    /// expose source, dependency, or runtime declarations; none of those origins changes how a lambda
-    /// literal participates in selection.
-    fn constructor_arg_kinds(&self, args: &[ExprId], arg_tys: &[Ty]) -> Vec<CallArgKind> {
-        args.iter()
-            .zip(arg_tys)
-            .map(|(&argument, &ty)| call_arg_kind(self.file, argument, ty))
-            .collect()
-    }
-
-    /// Select a semantic-provider constructor target. The checker owns overload, named/default,
-    /// value-class, and marker-constructor selection; lowering only emits the recorded target.
-    fn select_library_constructor_name(
-        &self,
-        internal: TypeName,
-        args: Vec<ExprId>,
-        arg_tys: &[Ty],
-    ) -> Option<ResolvedConstructor> {
-        // Lambda arguments keep their literal provenance (as method-call overload selection does) so
-        // a provider SAM-interface parameter admits them through the shared SAM signature operation;
-        // every other argument stays a typed value with any independent literal provenance intact.
-        let arg_kinds = self.constructor_arg_kinds(&args, arg_tys);
-        match self.select_constructor(internal, &arg_kinds)? {
-            crate::symbol_resolver::SelectedConstructorCall::Direct(member) => {
-                // An opaque semantic constructor (notably a value class) is lowered as the exact
-                // checker-selected callable; the backend alone realizes its platform representation.
-                Some(ResolvedConstructor::Plain {
-                    owner: internal,
-                    outer: None,
-                    member: *member,
-                    args,
-                })
-            }
-            crate::symbol_resolver::SelectedConstructorCall::Platform(ctor) => {
-                Some(ResolvedConstructor::Synthetic {
-                    owner: internal,
-                    outer: None,
-                    ctor: *ctor,
-                    args,
-                })
-            }
-        }
-    }
-
     /// Commit the one semantic target of a construction call. Rechecking during inference may have
     /// left an earlier callable probe for the same expression; that probe is not an alternative target
     /// and must not cross the checker/lowerer boundary beside the selected constructor.
     fn commit_constructor(&mut self, call: ExprId, target: ResolvedConstructor) {
         self.resolved_calls.remove(&call);
         self.resolved_constructors.insert(call, target);
-    }
-
-    fn record_library_constructor_name(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        internal: TypeName,
-        args: Vec<ExprId>,
-        arg_tys: &[Ty],
-    ) -> Option<ResolvedConstructor> {
-        let target = self.select_library_constructor_name(internal, args, arg_tys)?;
-        if !self.expect_selected_constructor_args(scope, call, &target) {
-            return None;
-        }
-        if let Expr::Call { callee, .. } = self.file.expr(call) {
-            self.reject_inaccessible_classifier_expression(*callee, internal);
-        }
-        self.check_selected_constructor_lambdas(scope, &target);
-        self.commit_constructor(call, target.clone());
-        Some(target)
     }
 
     /// Commit source arguments against the declaration selected for an ordinary dependency
@@ -38676,7 +38634,8 @@ impl<'a> Checker<'a> {
     fn check_selected_constructor_lambdas(
         &mut self,
         scope: &CheckerScope<'_>,
-        target: &ResolvedConstructor,
+        args: &[ExprId],
+        argument_types: &[Ty],
     ) {
         // A lambda argument whose checking the argument pass DEFERRED (still unchecked now) gets its
         // first check here, against the selected constructor's parameter: a SAM-interface parameter
@@ -38698,77 +38657,16 @@ impl<'a> Checker<'a> {
                 }
             }
         };
-        match target {
-            ResolvedConstructor::Plain { member, args, .. } => {
-                for (&argument, &parameter) in args.iter().zip(&member.params) {
-                    recheck(self, parameter, argument);
-                }
-            }
-            ResolvedConstructor::Synthetic { ctor, args, .. } => {
-                for (&argument, &parameter) in args.iter().zip(&ctor.declaration.params) {
-                    recheck(self, parameter, argument);
-                }
-            }
-            ResolvedConstructor::PlainSlots { member, slots, .. } => {
-                for (argument, &parameter) in slots.iter().zip(&member.params) {
-                    if let Some(argument) = argument {
-                        recheck(self, parameter, *argument);
-                    }
-                }
-            }
-            ResolvedConstructor::Source { .. } => {}
+        for (&argument, &parameter) in args.iter().zip(argument_types) {
+            recheck(self, parameter, argument);
         }
     }
 
-    fn record_inherited_library_constructor_name(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        internal: TypeName,
-        classifier: &crate::libraries::LibraryType,
-        args: Vec<ExprId>,
-        arg_tys: &[Ty],
-    ) -> Option<ResolvedConstructor> {
-        let arg_kinds = self.constructor_arg_kinds(&args, arg_tys);
-        let target = match crate::symbol_resolver::select_constructor_call_from_type(
-            &*self.syms.libraries,
-            &*self.syms.libraries,
-            internal,
-            classifier,
-            &arg_kinds,
-        )? {
-            crate::symbol_resolver::SelectedConstructorCall::Direct(member) => {
-                if !self.member_accessible(member.visibility, internal) {
-                    return None;
-                }
-                ResolvedConstructor::Plain {
-                    owner: internal,
-                    outer: None,
-                    member: *member,
-                    args,
-                }
-            }
-            crate::symbol_resolver::SelectedConstructorCall::Platform(ctor) => {
-                if !self.member_accessible(ctor.declaration.visibility, internal) {
-                    return None;
-                }
-                ResolvedConstructor::Synthetic {
-                    owner: internal,
-                    outer: None,
-                    ctor: *ctor,
-                    args,
-                }
-            }
-        };
-        if !self.expect_selected_constructor_args(scope, call, &target) {
-            return None;
-        }
-        self.check_selected_constructor_lambdas(scope, &target);
-        self.commit_constructor(call, target.clone());
-        Some(target)
-    }
-
-    fn record_named_inherited_library_constructor_name(
+    /// Select one provider constructor family through the same argument mapper and specificity
+    /// operation used by source primary/secondary constructors. Every provider declaration already
+    /// owns its source call shape in `LibraryMember::call_sig`; no detached parameter-list inventory
+    /// or origin-specific retry participates in selection.
+    fn record_library_constructor(
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
@@ -38777,122 +38675,187 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         arg_names: Option<&[Option<String>]>,
     ) -> Result<Option<ResolvedConstructor>, CallArgMappingFailure> {
-        let Some(ctor_params) = classifier.constructor_named_params(args.len()) else {
-            crate::trace_compiler!(
-                "resolve",
-                "named constructor {internal}: no source parameter list for {} arguments",
-                args.len()
-            );
-            return Ok(None);
-        };
-        let slots = map_param_list_args(
-            args,
-            arg_names,
-            &ctor_params,
-            self.file.call_has_trailing_lambda.contains(&call.0),
-        )?;
-        // Preserve unchecked lambdas through mapping just as the ordinary named-constructor path
-        // does. The inherited classifier is a different metadata view, not a different call model.
-        for &argument in slots.iter().flatten() {
-            if !matches!(self.file.expr(argument), Expr::Lambda { .. })
-                && self.expr_types[argument.0 as usize] == Ty::Error
+        for &argument in args {
+            if self.expr_types[argument.0 as usize] == Ty::Error
+                && !matches!(
+                    self.file.expr(argument),
+                    Expr::Lambda { .. } | Expr::CallableRef { .. }
+                )
             {
                 self.expr(scope, argument);
             }
         }
-        let target = if let Some(ordered) = slots.iter().copied().collect::<Option<Vec<ExprId>>>() {
-            let arg_kinds = ordered
-                .iter()
-                .map(|&argument| self.call_arg_kind(scope, argument))
-                .collect::<Vec<_>>();
-            let Some(selected) = crate::symbol_resolver::select_constructor_call_from_type(
-                &*self.syms.libraries,
-                &*self.syms.libraries,
-                internal,
-                classifier,
-                &arg_kinds,
-            ) else {
-                return Ok(None);
-            };
-            match selected {
-                crate::symbol_resolver::SelectedConstructorCall::Direct(member) => {
-                    if !self.member_accessible(member.visibility, internal) {
-                        return Ok(None);
-                    }
-                    ResolvedConstructor::PlainSlots {
-                        owner: internal,
-                        outer: None,
-                        member: *member,
-                        slots,
-                    }
-                }
-                crate::symbol_resolver::SelectedConstructorCall::Platform(ctor) => {
-                    if !self.member_accessible(ctor.declaration.visibility, internal) {
-                        return Ok(None);
-                    }
-                    ResolvedConstructor::Synthetic {
-                        owner: internal,
-                        outer: None,
-                        ctor: *ctor,
-                        args: args.to_vec(),
-                    }
-                }
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let names = arg_names
+            .map(<[Option<String>]>::to_vec)
+            .unwrap_or_else(|| vec![None; args.len()]);
+        let arguments = CtorDelegationCall {
+            args: args.to_vec(),
+            names,
+            trailing_lambda,
+        };
+        let mut members = Vec::new();
+        let mut candidates = Vec::new();
+        let mut mapping_failures = Vec::new();
+
+        for declaration in &classifier.constructors {
+            if !self.member_accessible(declaration.visibility, internal) {
+                continue;
             }
-        } else {
-            let slot_kinds = slots
-                .iter()
-                .map(|argument| argument.map(|argument| self.call_arg_kind(scope, argument)))
-                .collect::<Vec<_>>();
-            let Some(member) = crate::symbol_resolver::select_constructor_declaration_from_slots(
-                &*self.syms.libraries,
-                &*self.syms.libraries,
-                classifier,
-                &ctor_params,
-                &slot_kinds,
-            ) else {
-                return Ok(None);
+            let mut member = declaration.clone();
+            let parameter_count = member.params.len();
+            let call_sig = Self::normalized_constructor_call_sig(&member);
+            let argument_slots = match call_argument_parameter_indices_result(
+                args.len(),
+                parameter_count,
+                arg_names,
+                trailing_lambda,
+                &call_sig,
+            ) {
+                Ok(slots) => slots,
+                Err(failure) => {
+                    mapping_failures.push((failure, ()));
+                    continue;
+                }
             };
-            if !self.member_accessible(member.visibility, internal) {
-                return Ok(None);
+
+            if let Some(signature) = member
+                .generic_sig
+                .as_ref()
+                .filter(|signature| signature.params.len() == parameter_count)
+            {
+                let bindings = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
+                    &self.fed_source(),
+                    signature,
+                    args.iter().zip(&argument_slots).enumerate().filter_map(
+                        |(source, (&argument, &parameter))| {
+                            (!matches!(
+                                self.file.expr(argument),
+                                Expr::Lambda { .. } | Expr::CallableRef { .. }
+                            ))
+                            .then_some((
+                                parameter,
+                                self.expr_types[argument.0 as usize],
+                                self.file.is_spread_arg(argument)
+                                    || (call_sig.vararg_index == Some(parameter)
+                                        && arg_names
+                                            .and_then(|names| names.get(source))
+                                            .is_some_and(Option::is_some)),
+                            ))
+                        },
+                    ),
+                    call_sig.vararg_index,
+                );
+                member.params = signature
+                    .params
+                    .iter()
+                    .map(|parameter| {
+                        crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
+                    })
+                    .collect();
             }
-            if let Some(realization) = member.default_realization.as_deref() {
-                if !self.member_accessible(member.visibility, internal) {
+            member.call_sig = call_sig;
+            candidates.push(CtorDelegationCandidate {
+                target: ResolvedCtorDelegationTarget::Super {
+                    owner: internal,
+                    params: member.params.clone(),
+                },
+                param_names: member.call_sig.param_names.clone(),
+                defaults: member.call_sig.param_defaults.clone(),
+                vararg: member.call_sig.vararg_index,
+                supports_default_abi: member.default_realization.is_some(),
+                low_priority: member.low_priority,
+                parameter_constraints: member
+                    .params
+                    .iter()
+                    .copied()
+                    .map(Self::constructor_shape_constraint)
+                    .collect(),
+                implicit_integer_coercion: member.call_sig.implicit_integer_coercion.clone(),
+                lambda_receivers: if member.call_sig.lambda_receiver_params.len() == parameter_count
+                {
+                    member.call_sig.lambda_receiver_params.clone()
+                } else {
+                    Self::semantic_lambda_receiver_flags(&member.params)
+                },
+            });
+            members.push(member);
+        }
+
+        let (candidate_index, selected) =
+            match self.select_source_constructor(scope, &arguments, &candidates) {
+                SourceConstructorSelection::Selected {
+                    candidate_index,
+                    resolved,
+                } => (candidate_index, *resolved),
+                SourceConstructorSelection::NoMatch | SourceConstructorSelection::Ambiguous => {
+                    if candidates.is_empty() {
+                        if let Some((failure, ())) =
+                            take_unanimous_mapping_error(&mut mapping_failures)
+                        {
+                            return Err(failure);
+                        }
+                    }
                     return Ok(None);
                 }
-                let descriptor = realization.descriptor.clone();
-                let real_params = realization.real_params.clone();
-                let mask_count = realization.mask_count;
-                ResolvedConstructor::Synthetic {
-                    owner: internal,
-                    outer: None,
-                    ctor: crate::symbol_resolver::SyntheticCtorCall {
-                        declaration: member,
-                        descriptor,
-                        real_params,
-                        mask_count,
-                    },
-                    args: args.to_vec(),
-                }
-            } else if member.descriptor.is_empty() {
-                ResolvedConstructor::PlainSlots {
-                    owner: internal,
-                    outer: None,
-                    member,
-                    slots,
-                }
-            } else {
-                return Ok(None);
+            };
+        let Some(member) = members.get(candidate_index).cloned() else {
+            return Ok(None);
+        };
+        let mut slots = vec![None; member.params.len()];
+        for (&argument, &slot) in args.iter().zip(&selected.argument_slots) {
+            if let Some(target) = slots.get_mut(slot) {
+                target.get_or_insert(argument);
+            }
+        }
+        let target = if (!selected.omitted.is_empty()
+            || (member.descriptor.is_empty() && member.default_realization.is_some()))
+            && member.default_realization.is_some()
+        {
+            let realization = member
+                .default_realization
+                .as_deref()
+                .expect("checked above");
+            ResolvedConstructor::Synthetic {
+                owner: internal,
+                outer: None,
+                ctor: crate::symbol_resolver::SyntheticCtorCall {
+                    declaration: member.clone(),
+                    descriptor: realization.descriptor.clone(),
+                    real_params: realization.real_params.clone(),
+                    mask_count: realization.mask_count,
+                },
+                args: args.to_vec(),
+            }
+        } else if selected.argument_slots == (0..args.len()).collect::<Vec<_>>()
+            && selected.omitted.is_empty()
+        {
+            ResolvedConstructor::Plain {
+                owner: internal,
+                outer: None,
+                member: member.clone(),
+                args: args.to_vec(),
+            }
+        } else {
+            ResolvedConstructor::PlainSlots {
+                owner: internal,
+                outer: None,
+                member: member.clone(),
+                slots,
             }
         };
         if !self.expect_selected_constructor_args(scope, call, &target) {
             return Ok(None);
         }
-        self.check_selected_constructor_lambdas(scope, &target);
+        if let Expr::Call { callee, .. } = self.file.expr(call) {
+            self.reject_inaccessible_classifier_expression(*callee, internal);
+        }
+        self.check_selected_constructor_lambdas(scope, args, &selected.argument_types);
         self.commit_constructor(call, target.clone());
         Ok(Some(target))
     }
 
-    fn record_named_library_constructor_name(
+    fn record_resolved_library_constructor(
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
@@ -38903,156 +38866,7 @@ impl<'a> Checker<'a> {
         let Some(classifier) = self.resolved_type_name(internal) else {
             return Ok(None);
         };
-        let Some(ctor_params) = classifier.constructor_named_params(args.len()) else {
-            return Ok(None);
-        };
-        let slots = map_param_list_args(
-            args,
-            arg_names,
-            &ctor_params,
-            self.file.call_has_trailing_lambda.contains(&call.0),
-        )?;
-        // Type only NON-LAMBDA arguments this call has not typed yet. This constructor is one CANDIDATE for a
-        // `Name(args)` whose name may also be a top-level function; re-checking an argument that already
-        // has a type would overwrite it with the expected-type-free one — a trailing lambda already shaped
-        // against the function's receiver parameter (`Cfg.() -> Unit`) would fall back to `() -> Unit`,
-        // after which neither this constructor nor the function accepts the call.
-        for &a in slots.iter().flatten() {
-            if self.expr_types[a.0 as usize] == Ty::Error
-                && !matches!(self.file.expr(a), Expr::Lambda { .. })
-            {
-                self.expr(scope, a);
-            }
-        }
-        if let Some(ordered) = slots.iter().copied().collect::<Option<Vec<ExprId>>>() {
-            let tys: Vec<Ty> = ordered
-                .iter()
-                .map(|&a| {
-                    if matches!(self.file.expr(a), Expr::Lambda { .. })
-                        && self.expr_types[a.0 as usize] == Ty::Error
-                    {
-                        self.lambda_probe_ty(scope, a).unwrap_or(Ty::Error)
-                    } else {
-                        self.expr_types[a.0 as usize]
-                    }
-                })
-                .collect();
-            let Some(target) = self.select_library_constructor_name(internal, ordered, &tys) else {
-                return Ok(None);
-            };
-            let target = match target {
-                ResolvedConstructor::Plain { member, owner, .. } => {
-                    ResolvedConstructor::PlainSlots {
-                        owner,
-                        outer: None,
-                        member,
-                        slots,
-                    }
-                }
-                other => other,
-            };
-            if !self.expect_selected_constructor_args(scope, call, &target) {
-                return Ok(None);
-            }
-            self.check_selected_constructor_lambdas(scope, &target);
-            self.commit_constructor(call, target.clone());
-            return Ok(Some(target));
-        }
-        let slot_kinds = slots
-            .iter()
-            .map(|argument| argument.map(|argument| self.call_arg_kind(scope, argument)))
-            .collect::<Vec<_>>();
-        let source = self.fed_source();
-        let Some(member) = crate::symbol_resolver::select_constructor_declaration_from_slots(
-            &*self.syms.libraries,
-            &source,
-            &classifier,
-            &ctor_params,
-            &slot_kinds,
-        ) else {
-            crate::trace_compiler!(
-                "resolve",
-                "named constructor {internal}: no declaration for slots={slot_kinds:?} metadata={ctor_params:?}"
-            );
-            return Ok(None);
-        };
-        if !self.member_accessible(member.visibility, internal) {
-            return Ok(None);
-        }
-        if let Some(realization) = member.default_realization.as_deref() {
-            if !self.member_accessible(member.visibility, internal) {
-                return Ok(None);
-            }
-            let descriptor = realization.descriptor.clone();
-            let real_params = realization.real_params.clone();
-            let mask_count = realization.mask_count;
-            let target = ResolvedConstructor::Synthetic {
-                owner: internal,
-                outer: None,
-                ctor: crate::symbol_resolver::SyntheticCtorCall {
-                    declaration: member,
-                    descriptor,
-                    real_params,
-                    mask_count,
-                },
-                args: args.to_vec(),
-            };
-            if !self.expect_selected_constructor_args(scope, call, &target) {
-                return Ok(None);
-            }
-            self.check_selected_constructor_lambdas(scope, &target);
-            self.commit_constructor(call, target.clone());
-            return Ok(Some(target));
-        }
-        crate::trace_compiler!(
-            "resolve",
-            "named constructor {internal}: selected declaration {:?}, but no default realization",
-            member.params
-        );
-        if member.descriptor.is_empty() {
-            let target = ResolvedConstructor::PlainSlots {
-                owner: internal,
-                outer: None,
-                member,
-                slots,
-            };
-            crate::trace_compiler!(
-                "resolve",
-                "record opaque default constructor call={call:?} owner={internal}"
-            );
-            if !self.expect_selected_constructor_args(scope, call, &target) {
-                return Ok(None);
-            }
-            self.check_selected_constructor_lambdas(scope, &target);
-            self.commit_constructor(call, target.clone());
-            return Ok(Some(target));
-        }
-        Ok(None)
-    }
-
-    /// Whether this call needs the constructor's source-parameter slots rather than ordinary
-    /// positional overload selection. Named/trailing arguments always do; a shorter positional call
-    /// does only when every omitted suffix parameter has a default. This decision is made once so a
-    /// failed slot-mapped constructor is never retried as an unrelated exact-arity path.
-    fn constructor_uses_argument_slots(
-        classifier: &crate::libraries::LibraryType,
-        argument_count: usize,
-        has_named_arguments: bool,
-        has_trailing_lambda: bool,
-    ) -> bool {
-        has_named_arguments
-            || (has_trailing_lambda
-                && classifier
-                    .ctor_named_params
-                    .iter()
-                    .any(|parameters| parameters.names.len() > argument_count))
-            || classifier.ctor_named_params.iter().any(|parameters| {
-                parameters.names.len() > argument_count
-                    && parameters.defaults.len() == parameters.names.len()
-                    && parameters.defaults[argument_count..]
-                        .iter()
-                        .all(|default| *default)
-            })
+        self.record_library_constructor(scope, call, internal, &classifier, args, arg_names)
     }
 
     fn record_default_member_call(
@@ -43560,9 +43374,11 @@ impl<'a> Checker<'a> {
                                     .contains(&call.0),
                             };
                             let candidates = self.source_constructor_candidates(&declaration, &cls);
-                            if let SourceConstructorSelection::Selected(selected) =
-                                self.select_source_constructor(scope, &arguments, &candidates)
+                            if let SourceConstructorSelection::Selected {
+                                resolved: selected, ..
+                            } = self.select_source_constructor(scope, &arguments, &candidates)
                             {
+                                let selected = *selected;
                                 return self.finish_source_constructor_call(
                                     scope,
                                     CallArgs {
@@ -43603,60 +43419,24 @@ impl<'a> Checker<'a> {
                 {
                     if let Ok(ResolvedQualifier::Classifier(internal)) = member_qualifier {
                         let qualified = internal.render();
-                        // Named classpath constructors use metadata names/defaults; lowering selects
-                        // either the plain constructor or the default-argument synthetic.
-                        let has_trailing_lambda =
-                            self.file.call_has_trailing_lambda.contains(&call.0);
-                        let classifier = self.resolved_type_name(internal);
-                        let uses_argument_slots = classifier.as_deref().is_some_and(|classifier| {
-                            Self::constructor_uses_argument_slots(
-                                classifier,
-                                args.len(),
-                                arg_names.is_some(),
-                                has_trailing_lambda,
-                            )
-                        });
-                        if uses_argument_slots {
-                            match self.record_named_library_constructor_name(
-                                scope,
-                                call,
-                                internal,
-                                args,
-                                arg_names.as_deref(),
-                            ) {
-                                Ok(Some(_)) => {
-                                    return self.ctor_result_name(scope, call, internal, expected);
-                                }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    self.report_call_arg_mapping_error(call, args, error);
-                                    return Ty::Error;
-                                }
-                            }
-                        } else {
-                            // Constructor selection consumes the same literal-aware argument facts as
-                            // every other provider call. In particular, leave a lambda body unchecked
-                            // until the selected constructor supplies its SAM/function expectation.
-                            let arg_tys = self
-                                .call_arg_kinds(scope, args)
-                                .into_iter()
-                                .map(|argument| argument.ty())
-                                .collect::<Vec<_>>();
-                            if self
-                                .record_library_constructor_name(
-                                    scope,
-                                    call,
-                                    internal,
-                                    args.to_vec(),
-                                    &arg_tys,
-                                )
-                                .is_some()
-                            {
+                        match self.record_resolved_library_constructor(
+                            scope,
+                            call,
+                            internal,
+                            args,
+                            arg_names.as_deref(),
+                        ) {
+                            Ok(Some(_)) => {
                                 crate::trace_compiler!(
                                     "resolve",
                                     "classpath nested constructor {qualified} -> {internal}"
                                 );
                                 return self.ctor_result_name(scope, call, internal, expected);
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                self.report_call_arg_mapping_error(call, args, error);
+                                return Ty::Error;
                             }
                         }
                     }
@@ -44442,9 +44222,13 @@ impl<'a> Checker<'a> {
                                 };
                                 let candidates =
                                     self.source_constructor_candidates(&declaration, &class);
-                                if let SourceConstructorSelection::Selected(selected) =
+                                if let SourceConstructorSelection::Selected {
+                                    resolved: selected,
+                                    ..
+                                } =
                                     self.select_source_constructor(scope, &arguments, &candidates)
                                 {
+                                    let selected = *selected;
                                     let result = self.finish_source_constructor_call(
                                         scope,
                                         CallArgs {
@@ -44465,33 +44249,25 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         } else {
-                            let selected = if arg_names.is_some()
-                                || self.file.call_has_trailing_lambda.contains(&call.0)
-                            {
-                                self.record_named_library_constructor_name(
-                                    scope,
-                                    call,
-                                    internal,
-                                    args,
-                                    arg_names.as_deref(),
-                                )
-                                .ok()
-                                .flatten()
-                            } else {
-                                self.record_library_constructor_name(
-                                    scope,
-                                    call,
-                                    internal,
-                                    args.to_vec(),
-                                    &arg_tys,
-                                )
-                            };
-                            if selected.is_some() {
-                                self.resolved_constructors
-                                    .get_mut(&call)
-                                    .expect("selected dependency constructor")
-                                    .bind_outer(receiver);
-                                return self.ctor_result_name(scope, call, internal, expected);
+                            match self.record_resolved_library_constructor(
+                                scope,
+                                call,
+                                internal,
+                                args,
+                                arg_names.as_deref(),
+                            ) {
+                                Ok(Some(_)) => {
+                                    self.resolved_constructors
+                                        .get_mut(&call)
+                                        .expect("selected dependency constructor")
+                                        .bind_outer(receiver);
+                                    return self.ctor_result_name(scope, call, internal, expected);
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    self.report_call_arg_mapping_error(call, args, error);
+                                    return Ty::Error;
+                                }
                             }
                         }
                     }
@@ -46735,9 +46511,10 @@ impl<'a> Checker<'a> {
                                         &arguments,
                                         &candidates,
                                     ) {
-                                        SourceConstructorSelection::Selected(selected) => {
-                                            Some(selected)
-                                        }
+                                        SourceConstructorSelection::Selected {
+                                            resolved: selected,
+                                            ..
+                                        } => Some(*selected),
                                         SourceConstructorSelection::NoMatch
                                         | SourceConstructorSelection::Ambiguous => None,
                                     }
@@ -46781,40 +46558,18 @@ impl<'a> Checker<'a> {
                     // model. Constructor selection must consume the callable record and leave a concrete
                     // target for lowering; classifier existence alone is not a successful call.
                     if !has_source_constructor_declaration {
-                        let has_trailing_lambda =
-                            self.file.call_has_trailing_lambda.contains(&call.0);
                         let argument_classifier = inherited_shape
                             .clone()
                             .or_else(|| self.resolved_type_name(scoped_internal));
-                        let uses_argument_slots =
-                            argument_classifier.as_deref().is_some_and(|classifier| {
-                                Self::constructor_uses_argument_slots(
-                                    classifier,
-                                    args.len(),
-                                    arg_names.is_some(),
-                                    has_trailing_lambda,
-                                )
-                            });
-                        if uses_argument_slots {
-                            let resolved = if let Some(classifier) = inherited_shape.as_deref() {
-                                self.record_named_inherited_library_constructor_name(
-                                    scope,
-                                    call,
-                                    scoped_internal,
-                                    classifier,
-                                    args,
-                                    arg_names.as_deref(),
-                                )
-                            } else {
-                                self.record_named_library_constructor_name(
-                                    scope,
-                                    call,
-                                    scoped_internal,
-                                    args,
-                                    arg_names.as_deref(),
-                                )
-                            };
-                            match resolved {
+                        if let Some(classifier) = argument_classifier.as_deref() {
+                            match self.record_library_constructor(
+                                scope,
+                                call,
+                                scoped_internal,
+                                classifier,
+                                args,
+                                arg_names.as_deref(),
+                            ) {
                                 Ok(Some(_)) => {
                                     return self.ctor_result_name(
                                         scope,
@@ -46827,33 +46582,6 @@ impl<'a> Checker<'a> {
                                 Err(error) => {
                                     constructor_mapping_failure = Some(error);
                                 }
-                            }
-                        } else {
-                            let resolved = if let Some(classifier) = inherited_shape.as_deref() {
-                                self.record_inherited_library_constructor_name(
-                                    scope,
-                                    call,
-                                    scoped_internal,
-                                    classifier,
-                                    args.to_vec(),
-                                    &arg_tys,
-                                )
-                            } else {
-                                self.record_library_constructor_name(
-                                    scope,
-                                    call,
-                                    scoped_internal,
-                                    args.to_vec(),
-                                    &arg_tys,
-                                )
-                            };
-                            if resolved.is_some() {
-                                return self.ctor_result_name(
-                                    scope,
-                                    call,
-                                    scoped_internal,
-                                    expected,
-                                );
                             }
                         }
                     }

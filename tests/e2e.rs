@@ -162,6 +162,8 @@ mod classpath_companion_invoke_e2e;
 mod classpath_companion_invoke_lambda_e2e;
 #[path = "classpath_covariant_override_e2e.rs"]
 mod classpath_covariant_override_e2e;
+#[path = "classpath_ctor_overload_slots_e2e.rs"]
+mod classpath_ctor_overload_slots_e2e;
 #[path = "classpath_ctor_receiver_lambda_e2e.rs"]
 mod classpath_ctor_receiver_lambda_e2e;
 #[path = "classpath_ctor_vs_same_named_function_e2e.rs"]
