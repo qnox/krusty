@@ -1058,6 +1058,12 @@ impl ClassFlags {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SourceClassHeader {
+    flags: ClassFlags,
+    direct_supertypes: crate::types::TypeNameList,
+}
+
 /// One source of truth for declaration-level classifier flags. The same packed value seeds the
 /// all-files header index and is later installed on the complete `ClassSig`, preventing early
 /// inference and final checking from classifying a declaration differently.
@@ -2320,7 +2326,7 @@ pub struct SymbolTable {
     /// Declaration-header facts keyed by classifier identity, available before full signatures are
     /// collected. Forward property inference may need to classify a later-file source singleton; this
     /// identity table avoids both source-order dependence and the old global simple-name object set.
-    source_class_headers: HashMap<TypeName, ClassFlags>,
+    source_class_headers: HashMap<TypeName, SourceClassHeader>,
     /// Source `typealias` bindings by declaring file and alias spelling. An alias is a name-resolution
     /// edge to a classifier identity, not another class declaration; keeping it separate prevents a
     /// simple alias key from corrupting the internal-name invariant of [`Self::classes`].
@@ -2784,14 +2790,33 @@ impl SymbolTable {
             || self
                 .source_class_headers
                 .get(&internal)
-                .is_some_and(|flags| flags.has(ClassFlags::OBJECT))
+                .is_some_and(|header| header.flags.has(ClassFlags::OBJECT))
     }
 
-    /// Whether the all-files declaration pass has established this source classifier's identity.
-    /// Full signatures are collected afterward, but name resolution must already see the classifier
-    /// through the ordinary [`SymbolSource`] record while inferring an earlier declaration.
-    pub(crate) fn has_source_class_header(&self, internal: TypeName) -> bool {
-        self.source_class_headers.contains_key(&internal)
+    /// The normalized classifier record available before full member signatures are collected.
+    /// Early inference uses the same direct-supertype graph as every later hierarchy traversal.
+    pub(crate) fn source_class_header_shape(
+        &self,
+        internal: TypeName,
+    ) -> Option<crate::libraries::LibraryType> {
+        let header = self.source_class_headers.get(&internal)?;
+        let mut shape = crate::libraries::LibraryType::declaration_header();
+        shape.kind = if header.flags.has(ClassFlags::ANNOTATION) {
+            crate::libraries::TypeKind::Annotation
+        } else if header.flags.has(ClassFlags::INTERFACE) {
+            crate::libraries::TypeKind::Interface
+        } else if header.flags.has(ClassFlags::OBJECT) {
+            crate::libraries::TypeKind::Object
+        } else {
+            crate::libraries::TypeKind::Class
+        };
+        shape.supertypes = header.direct_supertypes.clone();
+        shape.supertype_templates = header
+            .direct_supertypes
+            .iter_ids()
+            .map(Ty::obj_name)
+            .collect();
+        Some(shape)
     }
 
     /// Find the source declaration that owns a member property across the complete module hierarchy.
@@ -5491,9 +5516,17 @@ fn collect_signatures_with_cp_impl(
         for &d in &file.decls {
             if let Decl::Class(c) = file.decl(d) {
                 let internal = type_name(&class_internal(file, &c.name));
-                table
-                    .source_class_headers
-                    .insert(internal, source_class_flags(c));
+                table.source_class_headers.insert(
+                    internal,
+                    SourceClassHeader {
+                        flags: source_class_flags(c),
+                        direct_supertypes: source_direct_supertypes
+                            .get(&internal)
+                            .cloned()
+                            .unwrap_or_default()
+                            .into(),
+                    },
+                );
                 if c.is_enum() {
                     for entry in &c.enum_entries {
                         table
@@ -6444,9 +6477,11 @@ fn collect_signatures_with_cp_impl(
                                 .and_then(|class| class.companion_internal)
                         });
                     let implicit_value = direct_companion.or(lexical_companion).map(Ty::obj_name);
+                    let member_this = Ty::obj_name(type_name(&internal));
                     let member_inference_source = InferenceSource::file(file, i as u32)
                         .with_implicit_classifier(implicit_classifier)
-                        .with_implicit_value(implicit_value);
+                        .with_implicit_value(implicit_value)
+                        .with_implicit_instance(Some(member_this));
                     for (body_property_index, bp) in c.body_props.iter().enumerate() {
                         validate_context_property(bp, c.is_interface() || bp.is_abstract, diags);
                         validate_explicit_backing_field(bp, diags);
@@ -6514,6 +6549,7 @@ fn collect_signatures_with_cp_impl(
                                         &table,
                                         &*libraries,
                                         dt,
+                                        member_this,
                                     )
                                     .unwrap_or(Ty::Error)
                                 }
@@ -7785,8 +7821,14 @@ fn collect_signatures_with_cp_impl(
                             None => {
                                 let dt =
                                     infer_lit_ty(file, de, &class_names, &fun_rets, &*libraries);
-                                delegated_getvalue_ret_for_signature(file, &table, &*libraries, dt)
-                                    .unwrap_or(Ty::Error)
+                                delegated_getvalue_ret_for_signature(
+                                    file,
+                                    &table,
+                                    &*libraries,
+                                    dt,
+                                    Ty::Null,
+                                )
+                                .unwrap_or(Ty::Error)
                             }
                         }
                     } else {
@@ -8951,13 +8993,11 @@ fn delegated_getvalue_ret_for_signature(
     table: &SymbolTable,
     libraries: &dyn SemanticPlatform,
     delegate_ty: Ty,
+    this_ref: Ty,
 ) -> Option<Ty> {
     let internal = delegate_ty.obj_internal()?;
     if internal.starts_with("kotlin/reflect/") {
         return None;
-    }
-    if let Some(sig) = table.method_of_name(internal, "getValue") {
-        return Some(sig.ret);
     }
     let module = crate::module_symbols::ModuleSymbols::new(table);
     let scope = function_import_scope_with(
@@ -8965,17 +9005,55 @@ fn delegated_getvalue_ret_for_signature(
         libraries.platform_default_import_packages(),
         libraries,
     );
-    crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
+    let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
         libraries, &module, &scope,
+    );
+    let kproperty = Ty::obj("kotlin/reflect/KProperty");
+    let convention_args = [this_ref, kproperty];
+    let stored_ty = select_delegate_operator_return(
+        &resolver,
+        delegate_ty,
+        "provideDelegate",
+        &convention_args,
     )
-    .resolve_symbol(
-        crate::symbol_resolver::SymRecv::Value(delegate_ty),
-        "getValue",
-        &[Ty::obj("kotlin/Any"), Ty::obj("kotlin/reflect/KProperty")],
+    .unwrap_or(delegate_ty);
+    select_delegate_operator_return(&resolver, stored_ty, "getValue", &convention_args)
+}
+
+/// Select one delegated-property convention from the normalized member/extension family. Operator
+/// filtering happens before applicability and overload selection, so a same-named ordinary method
+/// can neither satisfy the convention nor displace a valid operator declaration.
+fn select_delegate_operator_return(
+    resolver: &crate::symbol_resolver::SymbolResolver,
+    receiver: Ty,
+    name: &str,
+    args: &[Ty],
+) -> Option<Ty> {
+    let callables = resolver.receiver_callables(receiver, name);
+    let overloads = callables
+        .functions()
+        .iter()
+        .filter(|candidate| candidate.flags.operator)
+        .cloned()
+        .collect::<Vec<_>>();
+    let callables =
+        crate::libraries::Callables::Functions(crate::libraries::FunctionSet { overloads });
+    let args = args
+        .iter()
+        .copied()
+        .map(CallArgKind::Typed)
+        .collect::<Vec<_>>();
+    match resolver.select_receiver_function_with_params_tracking(
+        receiver,
+        name,
+        &args,
         &[],
-    )
-    .and_then(crate::symbol_resolver::Symbol::extension_call)
-    .map(|c| c.ret)
+        &callables,
+    ) {
+        crate::symbol_resolver::CandidateSelection::Selected((_, _, ret)) => Some(ret),
+        crate::symbol_resolver::CandidateSelection::None
+        | crate::symbol_resolver::CandidateSelection::Ambiguous => None,
+    }
 }
 
 /// The return type a top-level call's EXPLICIT type arguments determine on their own, for the
@@ -9050,9 +9128,10 @@ struct InferEnv<'a> {
     /// Resolve a static value declared by a same-module classifier. The lightweight inferer receives
     /// only the external platform source, so source enum entries need this module-table bridge.
     static_classifier_value: &'a dyn Fn(TypeName, &str) -> Option<Ty>,
-    /// Select a call from the current file's import-scoped, federated symbol source. `None` is
-    /// receiverless syntax; `Some(ty)` is the semantic type of the written receiver expression.
-    /// Member and extension remain candidate metadata inside selection, not separate operations.
+    /// Select a call from the current file's import-scoped, federated symbol source. `None` is an
+    /// unqualified call and therefore includes the lexical implicit receiver tower; `Some(ty)` is
+    /// the semantic type of a written receiver expression. Member and extension remain candidate
+    /// metadata inside selection, not separate operations.
     call: &'a dyn Fn(Option<Ty>, &str, &[CallArgKind], &[Ty]) -> Option<Ty>,
     /// Read a property from a receiver through the same selected symbol family.
     property: &'a dyn Fn(Ty, &str) -> Option<Ty>,
@@ -9077,19 +9156,25 @@ struct InferEnv<'a> {
 /// semantic context: alias/import edges are file-scoped, so passing either independently invites a
 /// mismatched lookup and needlessly widens every inference helper's argument list.
 #[derive(Clone, Copy)]
-struct InferenceSource<'a>(&'a File, u32, Option<TypeName>, Option<Ty>);
+struct InferenceSource<'a>(&'a File, u32, Option<TypeName>, Option<Ty>, Option<Ty>);
 
 impl<'a> InferenceSource<'a> {
     fn file(file: &'a File, file_index: u32) -> Self {
-        Self(file, file_index, None, None)
+        Self(file, file_index, None, None, None)
     }
 
     fn with_implicit_classifier(self, classifier: Option<TypeName>) -> Self {
-        Self(self.0, self.1, classifier, self.3)
+        Self(self.0, self.1, classifier, self.3, self.4)
     }
 
     fn with_implicit_value(self, value: Option<Ty>) -> Self {
-        Self(self.0, self.1, self.2, value)
+        Self(self.0, self.1, self.2, value, self.4)
+    }
+
+    /// The enclosing class instance identity. Unqualified-call selection includes it in the lexical
+    /// receiver tower (`by option(...)` where the extension is declared on a base type).
+    fn with_implicit_instance(self, instance: Option<Ty>) -> Self {
+        Self(self.0, self.1, self.2, self.3, instance)
     }
 }
 
@@ -9363,7 +9448,8 @@ fn infer_lit_ty_scoped(
     src: &dyn SemanticPlatform,
     table: &SymbolTable,
 ) -> Ty {
-    let InferenceSource(file, file_index, implicit_classifier, implicit_value) = source;
+    let InferenceSource(file, file_index, implicit_classifier, implicit_value, implicit_instance) =
+        source;
     let up = |recv: Ty, name: &str| table.applied_member_prop_ty(recv, name);
     let module = crate::module_symbols::ModuleSymbols::for_file(table, file_index);
     let qualifier_source = crate::symbol_source::CompositeSource::new(vec![
@@ -9467,15 +9553,31 @@ fn infer_lit_ty_scoped(
     };
     let call = |receiver, name: &str, args: &[CallArgKind], type_args: &[Ty]| {
         let selected = match receiver {
-            None => callable_resolver
-                .select_symbol(
-                    crate::symbol_resolver::SymRecv::TopLevel,
-                    name,
-                    args,
-                    type_args,
-                )
-                .and_then(crate::symbol_resolver::Symbol::top_level_call)
-                .map(|call| call.ret),
+            None => {
+                let implicit = implicit_instance.and_then(|instance| {
+                    callable_resolver
+                        .select_symbol(
+                            crate::symbol_resolver::SymRecv::ImplicitValue(instance),
+                            name,
+                            args,
+                            type_args,
+                        )
+                        .and_then(crate::symbol_resolver::Symbol::call_return)
+                });
+                if implicit.is_some() {
+                    implicit
+                } else {
+                    callable_resolver
+                        .select_symbol(
+                            crate::symbol_resolver::SymRecv::TopLevel,
+                            name,
+                            args,
+                            type_args,
+                        )
+                        .and_then(crate::symbol_resolver::Symbol::top_level_call)
+                        .map(|call| call.ret)
+                }
+            }
             Some(receiver) => callable_resolver
                 .select_symbol(
                     crate::symbol_resolver::SymRecv::Value(receiver),
@@ -11096,9 +11198,8 @@ pub struct TypeInfo {
     /// Delegated-property `setValue` targets selected by the checker. Mutable delegate lowering
     /// consumes this exact overload instead of querying the delegate class again.
     pub delegate_setvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
-    /// Selected `provideDelegate` conventions. Their presence currently makes lowering decline the
-    /// unsupported transformation, but that decision is based on the checked callable, never a name
-    /// probe in the backend.
+    /// Selected `provideDelegate` conventions. Lowering stores the selected call's semantic result
+    /// type and consumes this exact target to emit the initialization call.
     pub delegate_provide_targets: HashMap<ExprId, DelegateGetValueTarget>,
     /// For a call to a function with CONTEXT PARAMETERS (`context(a: A) fun f()`) where the context
     /// arguments are supplied IMPLICITLY, the checker-selected source for each leading context
@@ -38011,20 +38112,17 @@ impl<'a> Checker<'a> {
             return None;
         }
         let kproperty = Ty::obj("kotlin/reflect/KProperty");
-        if let Some(target) = self.select_delegate_operator(
-            delegate_ty,
-            "provideDelegate",
-            &[this_ref, kproperty],
-            &[this_ref, kproperty],
-        ) {
+        let stored_ty = if let Some(target) =
+            self.select_delegate_operator(delegate_ty, "provideDelegate", &[this_ref, kproperty])
+        {
+            let provided = target.ret();
             self.delegate_provide_targets.insert(delegate, target);
-        }
-        let target = self.select_delegate_operator(
-            delegate_ty,
-            "getValue",
-            &[this_ref, kproperty],
-            &[this_ref, kproperty],
-        )?;
+            provided
+        } else {
+            delegate_ty
+        };
+        let target =
+            self.select_delegate_operator(stored_ty, "getValue", &[this_ref, kproperty])?;
         let ret = target.ret();
         self.delegate_getvalue_targets.insert(delegate, target);
         Some(ret)
@@ -38038,10 +38136,14 @@ impl<'a> Checker<'a> {
         property_ty: Ty,
     ) -> Option<()> {
         let kproperty = Ty::obj("kotlin/reflect/KProperty");
+        let stored_ty = self
+            .delegate_provide_targets
+            .get(&delegate)
+            .map(DelegateGetValueTarget::ret)
+            .unwrap_or(delegate_ty);
         let target = self.select_delegate_operator(
-            delegate_ty,
+            stored_ty,
             "setValue",
-            &[this_ref, kproperty, property_ty],
             &[this_ref, kproperty, property_ty],
         )?;
         self.delegate_setvalue_targets.insert(delegate, target);
@@ -38052,36 +38154,64 @@ impl<'a> Checker<'a> {
         &self,
         delegate_ty: Ty,
         name: &str,
-        member_args: &[Ty],
-        extension_args: &[Ty],
+        args: &[Ty],
     ) -> Option<DelegateGetValueTarget> {
-        if let Some(internal) = delegate_ty.obj_internal() {
-            if let Some(resolved) = self.select_instance_member(delegate_ty, name, member_args) {
-                let owner = resolved.member.owner.unwrap_or(internal);
-                let interface = resolved.member.is_interface()
-                    || self
-                        .resolver()
-                        .classifier(owner)
-                        .is_some_and(|classifier| classifier.is_interface());
-                return Some(DelegateGetValueTarget::Member {
-                    owner,
-                    name: resolved
-                        .member
-                        .physical_name
-                        .clone()
-                        .unwrap_or_else(|| resolved.member.name.clone()),
-                    params: resolved.member.params,
-                    ret: resolved.ret,
-                    physical_params: resolved.physical_params,
-                    physical_ret: resolved.member.physical_ret,
-                    descriptor: resolved.member.descriptor,
-                    interface,
-                });
+        let resolver = self.resolver();
+        let callables = resolver.receiver_callables(delegate_ty, name);
+        let overloads = callables
+            .functions()
+            .iter()
+            .filter(|candidate| candidate.flags.operator)
+            .cloned()
+            .collect::<Vec<_>>();
+        let callables =
+            crate::libraries::Callables::Functions(crate::libraries::FunctionSet { overloads });
+        let call_args = args
+            .iter()
+            .copied()
+            .map(CallArgKind::Typed)
+            .collect::<Vec<_>>();
+        let selected = match resolver.select_receiver_function_with_params_tracking(
+            delegate_ty,
+            name,
+            &call_args,
+            &[],
+            &callables,
+        ) {
+            crate::symbol_resolver::CandidateSelection::Selected((selected, _, ret)) => {
+                (selected, ret)
             }
+            crate::symbol_resolver::CandidateSelection::None
+            | crate::symbol_resolver::CandidateSelection::Ambiguous => return None,
+        };
+        let (selected, ret) = selected;
+        if selected.is_extension() {
+            return resolver
+                .build_extension_callable(name, delegate_ty, args, &[], &selected)
+                .map(Box::new)
+                .map(DelegateGetValueTarget::Extension);
         }
-        self.library_extension_callable(name, delegate_ty, extension_args, &[])
-            .map(Box::new)
-            .map(DelegateGetValueTarget::Extension)
+        let internal = delegate_ty.obj_internal()?;
+        let resolved = resolver.materialize_member_function(delegate_ty, &call_args, &[], selected);
+        let owner = resolved.member.owner.unwrap_or(internal);
+        let interface = resolved.member.is_interface()
+            || resolver
+                .classifier(owner)
+                .is_some_and(|classifier| classifier.is_interface());
+        Some(DelegateGetValueTarget::Member {
+            owner,
+            name: resolved
+                .member
+                .physical_name
+                .clone()
+                .unwrap_or_else(|| resolved.member.name.clone()),
+            params: resolved.member.params,
+            ret,
+            physical_params: resolved.physical_params,
+            physical_ret: resolved.member.physical_ret,
+            descriptor: resolved.member.descriptor,
+            interface,
+        })
     }
 
     fn library_extension_callable(
@@ -49443,7 +49573,10 @@ mod tests {
         // the same flag function as the completed signature; it must never become a second, divergent
         // classification table while making source-order-independent inference possible.
         assert!(symbols.classes.iter().all(|(internal, signature)| {
-            symbols.source_class_headers.get(internal) == Some(&signature.flags)
+            symbols
+                .source_class_headers
+                .get(internal)
+                .is_some_and(|header| header.flags == signature.flags)
         }));
         assert_eq!(
             symbols
@@ -52067,6 +52200,12 @@ fun box(): String {
                 owner, name, params, ret, ret, descriptor,
             );
             let mut info = crate::libraries::FunctionInfo::plain(kind, receiver, callable);
+            if name == "getValue" {
+                // Delegated-property conventions are selected by declaration metadata, never by
+                // spelling. This fake classpath record must model kotlinc's `operator` flag just as
+                // the real Kotlin metadata provider does.
+                info.flags.operator = true;
+            }
             info.call_sig = CallSig {
                 param_names: if matches!(name, "knownTop" | "knownPair" | "mixExt" | "typedExt") {
                     vec!["a".to_string(), "b".to_string()]
