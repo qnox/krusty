@@ -469,8 +469,12 @@ struct MethodInfo {
     /// mid-method (e.g. a `hashCode` `result` accumulator, live from its first store) — written as
     /// `start_pc=pc, length=code_len-pc`.
     lvt: Vec<LvtEntry>,
+    /// Method-level `RuntimeVisibleAnnotations` (each entry a pre-encoded annotation) — a
+    /// RUNTIME-retained user annotation applied to the function (`@Deprecated`, `@Marker(...)`).
+    visible_anns: Vec<Vec<u8>>,
     /// Method-level `RuntimeInvisibleAnnotations` (each entry a pre-encoded annotation) — e.g. the
-    /// `@org.jetbrains.annotations.NotNull` kotlinc puts on a non-null reference RETURN.
+    /// `@org.jetbrains.annotations.NotNull` kotlinc puts on a non-null reference RETURN, and
+    /// BINARY-retained user annotations.
     invisible_anns: Vec<Vec<u8>>,
     /// `RuntimeInvisibleParameterAnnotations`: one entry per method parameter (in order), each a list
     /// of that parameter's pre-encoded annotations. Empty ⇒ no attribute; kotlinc annotates each
@@ -758,6 +762,7 @@ impl ClassWriter {
             signature: sig,
             lnt: Vec::new(),
             lvt: Vec::new(),
+            visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
             param_anns: Vec::new(),
         });
@@ -1802,6 +1807,7 @@ impl ClassWriter {
                     })
                     .collect()
             },
+            visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
             param_anns: Vec::new(),
         });
@@ -1852,6 +1858,48 @@ impl ClassWriter {
         if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
             m.invisible_anns = invisible_anns;
             m.param_anns = param_anns;
+        }
+    }
+
+    /// Attach USER annotations to a previously-added method (matched by name+descriptor), split by
+    /// retention: RUNTIME → `RuntimeVisibleAnnotations`, BINARY → `RuntimeInvisibleAnnotations` —
+    /// the method analogue of [`Self::set_last_field_annotations`]. Interning the annotation types
+    /// here fixes their constant-pool position. No-op if the method isn't found.
+    pub fn set_method_annotations(
+        &mut self,
+        name: &str,
+        desc: &str,
+        visible: &[crate::ir::AppliedAnnotation],
+        invisible: &[crate::ir::AppliedAnnotation],
+    ) {
+        // Resolve WITHOUT interning first (as `set_method_nullability` does): describing a method
+        // that was never emitted must not leave orphan name/descriptor entries in the pool.
+        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
+            return;
+        };
+        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
+            return;
+        }
+        let vis: Vec<Vec<u8>> = visible.iter().map(|a| self.encode_annotation(a)).collect();
+        let invis: Vec<Vec<u8>> = invisible
+            .iter()
+            .map(|a| self.encode_annotation(a))
+            .collect();
+        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
+            m.visible_anns = vis;
+            m.invisible_anns.extend(invis);
+        }
+    }
+
+    /// Mark a previously-added method `ACC_SYNTHETIC` (matched by name+descriptor). kotlinc emits a
+    /// `@Deprecated(level = HIDDEN)` declaration's realization synthetic: it exists for binary
+    /// compatibility and no source-level call may resolve to it. No-op if the method isn't found.
+    pub fn set_method_synthetic(&mut self, name: &str, desc: &str) {
+        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
+            return;
+        };
+        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
+            m.access |= 0x1000;
         }
     }
 
@@ -2085,6 +2133,7 @@ impl ClassWriter {
             Lnt,
             Lvt,
             Ria,
+            Rva,
             Smt,
             Ripa,
             Sig,
@@ -2136,6 +2185,9 @@ impl ClassWriter {
             if m.signature.is_some() && !seq.contains(&An::Sig) {
                 seq.push(An::Sig);
             }
+            if !m.visible_anns.is_empty() && !seq.contains(&An::Rva) {
+                seq.push(An::Rva);
+            }
             if !m.invisible_anns.is_empty() && !seq.contains(&An::Ria) {
                 seq.push(An::Ria);
             }
@@ -2145,6 +2197,10 @@ impl ClassWriter {
         }
         let (mut lnt_attr_name, mut lvt_attr_name, mut stackmap_attr_name, mut ripa_attr_name) =
             (None, None, None, None);
+        // A method-level `RuntimeVisibleAnnotations` shares its attribute-name entry with the class
+        // annotations when both are present; the class table is written later, so intern on first
+        // METHOD use here and let that later write reuse the index.
+        let mut vis_ann_name: Option<u16> = None;
         // A method-level RIA first use dedups onto the field-level index when both are present.
         let mut invis_ann_name = field_ria;
         for k in &seq {
@@ -2152,6 +2208,7 @@ impl ClassWriter {
                 An::Lnt => lnt_attr_name = Some(self.cp.utf8("LineNumberTable")),
                 An::Lvt => lvt_attr_name = Some(self.cp.utf8("LocalVariableTable")),
                 An::Ria => invis_ann_name = Some(self.cp.utf8("RuntimeInvisibleAnnotations")),
+                An::Rva => vis_ann_name = Some(self.cp.utf8("RuntimeVisibleAnnotations")),
                 An::Smt => stackmap_attr_name = Some(self.cp.utf8("StackMapTable")),
                 An::Ripa => {
                     ripa_attr_name = Some(self.cp.utf8("RuntimeInvisibleParameterAnnotations"))
@@ -2162,6 +2219,7 @@ impl ClassWriter {
             }
         }
         let method_invis_ann_name = invis_ann_name;
+        let method_vis_ann_name = vis_ann_name;
         // The `Signature` attribute name: reuse the early field-Signature index when a field carries one
         // (interned before `Code`), else intern here if a METHOD carries a signature. Only interned when
         // actually used — an unused entry would diverge from kotlinc's output for non-generic classes.
@@ -2347,9 +2405,10 @@ impl ClassWriter {
             };
             // Method-level `RuntimeInvisibleAnnotations` (annotated return) and
             // `RuntimeInvisibleParameterAnnotations` (annotated params) each count as one attribute.
+            let mrva_attr: u16 = u16::from(!m.visible_anns.is_empty());
             let mria_attr: u16 = u16::from(!m.invisible_anns.is_empty());
             let ripa_attr: u16 = u16::from(!m.param_anns.is_empty());
-            let ann_attr = mria_attr + ripa_attr;
+            let ann_attr = mrva_attr + mria_attr + ripa_attr;
             match &m.code {
                 None => u2(&mut out, sig_attr + dep_attr + ann_attr), // abstract: optional Signature [+ Deprecated] [+ anns]
                 Some(code) => {
@@ -2437,8 +2496,18 @@ impl ClassWriter {
                 u4(&mut out, 2);
                 u2(&mut out, si);
             }
-            // Method-level `RuntimeInvisibleAnnotations` (the annotated return), then
-            // `RuntimeInvisibleParameterAnnotations` — kotlinc's order, after `Code`/`Signature`.
+            // `Deprecated` (a zero-length attribute) precedes the annotation attributes, as
+            // kotlinc writes them: `Code`, `Signature`, `Deprecated`, then the annotations.
+            if dep_attr == 1 {
+                u2(&mut out, deprecated_attr_name.unwrap());
+                u4(&mut out, 0);
+            }
+            // Method-level `RuntimeVisibleAnnotations` (declared user annotations), then
+            // `RuntimeInvisibleAnnotations` (the annotated return + BINARY-retained user
+            // annotations), then `RuntimeInvisibleParameterAnnotations` — kotlinc's order.
+            if mrva_attr == 1 {
+                write_annotation_attr(&mut out, method_vis_ann_name, &m.visible_anns);
+            }
             if mria_attr == 1 {
                 write_annotation_attr(&mut out, method_invis_ann_name, &m.invisible_anns);
             }
@@ -2458,11 +2527,6 @@ impl ClassWriter {
                         out.extend_from_slice(a);
                     }
                 }
-            }
-            // `Deprecated` attribute: a zero-length attribute (name_index, length=0).
-            if dep_attr == 1 {
-                u2(&mut out, deprecated_attr_name.unwrap());
-                u4(&mut out, 0);
             }
         }
         // Assemble the class attribute table in kotlinc's fixed order. `self.class_attributes` is empty
