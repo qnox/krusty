@@ -6411,7 +6411,9 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         | IrExpr::StaticInstance { .. }
         | IrExpr::ExternalStaticField { .. }
         | IrExpr::UnitInstance => true,
-        IrExpr::TypeOp { arg, .. } | IrExpr::NotNullAssert { operand: arg } => box_returns(ir, arg),
+        IrExpr::TypeOp { arg, .. }
+        | IrExpr::ReifiedTypeOp { arg, .. }
+        | IrExpr::NotNullAssert { operand: arg } => box_returns(ir, arg),
         IrExpr::Throw { operand } => box_returns(ir, operand),
         IrExpr::StringConcat(parts) => parts.into_iter().all(|p| box_returns(ir, p)),
         IrExpr::PrimitiveBinOp { lhs, rhs, .. } => box_returns(ir, lhs) && box_returns(ir, rhs),

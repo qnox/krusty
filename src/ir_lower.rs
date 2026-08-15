@@ -2283,6 +2283,18 @@ fn lower_file_at_reporting_impl(
                 let mut params = vec![recv_param];
                 params.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
                 let ret = ty_to_ir(sig.ret);
+                let receiver_nullable_type_parameter =
+                    recv_ty.is_ty_param() && recv_ty.upper_bound_admits_null();
+                let mut param_checks = vec![(!recv_ref.nullable()
+                    && !receiver_nullable_type_parameter
+                    && recv_ty.is_reference())
+                .then(|| "<this>".to_string())];
+                param_checks.extend(param_checks_for(
+                    f,
+                    &sig.params,
+                    &[],
+                    &std::collections::HashSet::new(),
+                ));
                 let id = lo.ir.add_fun(IrFunction {
                     name: f.name.clone(),
                     params,
@@ -2290,7 +2302,7 @@ fn lower_file_at_reporting_impl(
                     body: None,
                     is_static: true,
                     dispatch_receiver: None,
-                    param_checks: vec![],
+                    param_checks,
                 });
                 lo.ext_fun_id_by_sig
                     .insert((recv_key, f.name.clone(), sig.params.clone()), id);
@@ -2305,6 +2317,9 @@ fn lower_file_at_reporting_impl(
                 }
                 if f.is_inline() {
                     lo.ir.top_level_inline_functions.insert(id);
+                }
+                if !f.reified_type_params.is_empty() {
+                    lo.ir.synthetic_methods.insert(id);
                 }
                 // A `private` top-level extension is `private static` on the facade (kotlinc); a
                 // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
@@ -2738,7 +2753,7 @@ fn lower_file_at_reporting_impl(
                             None => defaults.push(None),
                         }
                     }
-                    let mut names = vec!["$receiver".to_string(); recv_off];
+                    let mut names = vec![format!("$this${}", f.name); recv_off];
                     names.extend(f.params.iter().map(|p| p.name.clone()));
                     lo.ir
                         .fn_params
@@ -2747,7 +2762,7 @@ fn lower_file_at_reporting_impl(
                 // Names-only metadata supports named-argument reorder without a default stub.
                 if !lo.ir.fn_params.contains_key(&fid) && !f.params.iter().any(|p| p.is_vararg) {
                     let recv_off = usize::from(f.receiver.is_some());
-                    let mut names = vec!["$receiver".to_string(); recv_off];
+                    let mut names = vec![format!("$this${}", f.name); recv_off];
                     names.extend(f.params.iter().map(|p| p.name.clone()));
                     lo.ir.fn_params.insert(fid, FnParamInfo::names(names));
                 }
@@ -27982,7 +27997,7 @@ fn param_checks_for(
     class_type_params: &[String],
     class_nonnull_type_params: &std::collections::HashSet<String>,
 ) -> Vec<Option<String>> {
-    if f.visibility.is_private() || f.receiver.is_some() || f.params.len() != param_tys.len() {
+    if f.visibility.is_private() || f.params.len() != param_tys.len() {
         return vec![None; param_tys.len()];
     }
     f.params

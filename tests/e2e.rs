@@ -228,6 +228,8 @@ mod classpath_qualified_nested_named_ctor_e2e;
 mod classpath_receiver_lambda_e2e;
 #[path = "classpath_receiver_lambda_overload_e2e.rs"]
 mod classpath_receiver_lambda_overload_e2e;
+#[path = "classpath_reified_expected_return_e2e.rs"]
+mod classpath_reified_expected_return_e2e;
 #[path = "classpath_reified_inline_toplevel_e2e.rs"]
 mod classpath_reified_inline_toplevel_e2e;
 #[path = "classpath_reified_named_default_vararg_e2e.rs"]
