@@ -26722,18 +26722,25 @@ impl<'a> Checker<'a> {
         // distinctions the target ABI cannot retain.
         let declaration_scope = scope.child(ScopeKind::Function { receiver: None });
         declaration_scope.declare_tparams(&f.type_params, &tparams, |_| false);
-        let key = |reference: &TypeRef| {
+        let key = |reference: &TypeRef, is_vararg: bool| {
             let ty = self.type_ref_ty_silent(&declaration_scope, reference);
             if ty == Ty::Error {
                 ErasedTypeKey::Unresolved(reference.name.clone())
             } else {
-                erased_type_key(ty)
+                // A `vararg` parameter is PASSED as an array (`vararg a: Int` → `[I`), so it keys as
+                // its array type: `of(e: Int)` and `of(vararg a: Int)` have different descriptors and
+                // are legal overloads, while `Array<String>` and `vararg String` still collide.
+                erased_type_key(semantic_value_parameter_ty(ty, is_vararg))
             }
         };
         ErasedSigKey {
             name: f.name.clone(),
-            receiver: f.receiver.as_ref().map(&key),
-            params: f.params.iter().map(|p| key(&p.ty)).collect(),
+            receiver: f.receiver.as_ref().map(|receiver| key(receiver, false)),
+            params: f
+                .params
+                .iter()
+                .map(|parameter| key(&parameter.ty, parameter.is_vararg))
+                .collect(),
         }
     }
 
