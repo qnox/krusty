@@ -1458,34 +1458,32 @@ fn build_class_metadata(
     // described from their recorded source names + SEMANTIC types (fun-type parameters keep their
     // shape — `Cfg.() -> Unit` — where the erased realization is a bare `Function1`). Synthetic
     // ctors get no record, matching kotlinc.
-    let secondary_ctor_shapes: Vec<(Vec<(String, Ty)>, String)> = c
+    let secondary_ctor_shapes: Vec<SecondaryCtorShape> = c
         .secondary_ctors
         .iter()
         .filter(|sc| !sc.synthetic)
-        .map(|sc| {
-            (
-                sc.named_params.clone(),
-                format!(
-                    "({}{})V",
-                    sc.params.iter().map(|&t| desc(t)).collect::<String>(),
-                    if sc.vc_params {
-                        "Lkotlin/jvm/internal/DefaultConstructorMarker;"
-                    } else {
-                        ""
-                    }
-                ),
-            )
+        .map(|sc| SecondaryCtorShape {
+            params: sc.named_params.clone(),
+            desc: format!(
+                "({}{})V",
+                sc.params.iter().map(|&t| desc(t)).collect::<String>(),
+                if sc.vc_params {
+                    "Lkotlin/jvm/internal/DefaultConstructorMarker;"
+                } else {
+                    ""
+                }
+            ),
+            vararg_index: sc.vararg_index,
         })
         .collect();
     let secondary_ctor_metas: Vec<crate::metadata::class_builder::CtorMeta> = secondary_ctor_shapes
         .iter()
-        .map(
-            |(params, ctor_desc)| crate::metadata::class_builder::CtorMeta {
-                params,
-                desc: ctor_desc,
-                flags: crate::metadata::class_builder::SECONDARY_CTOR_FLAGS,
-            },
-        )
+        .map(|shape| crate::metadata::class_builder::CtorMeta {
+            params: &shape.params,
+            desc: &shape.desc,
+            vararg_index: shape.vararg_index,
+            flags: crate::metadata::class_builder::SECONDARY_CTOR_FLAGS,
+        })
         .collect();
     let (d1_bytes, d2) = build_class(
         &c.fq_name(),
@@ -4133,6 +4131,14 @@ fn anonymous_scope<'a>(
         .map(TypeName::render)
         .unwrap_or_else(|| facade.to_string());
     Some((owner, function))
+}
+
+/// One DECLARED secondary constructor's metadata shape: its source parameter names/types, its JVM
+/// descriptor, and the position of a `vararg` parameter.
+struct SecondaryCtorShape {
+    params: Vec<(String, Ty)>,
+    desc: String,
+    vararg_index: Option<usize>,
 }
 
 fn emit_class(
