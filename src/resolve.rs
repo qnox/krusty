@@ -26,8 +26,10 @@ use crate::types::{
 };
 use scope::{ContextValue, NarrowPath, Ns, ScopeKind};
 
+mod context_capture;
 mod dependency_platform;
 mod scope;
+pub(crate) use context_capture::selected_context_values;
 pub(crate) use dependency_platform::DependencyPlatform;
 
 const MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES: usize = 64;

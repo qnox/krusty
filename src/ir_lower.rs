@@ -9834,29 +9834,96 @@ impl<'a> Lower<'a> {
         // `outer` in scope for it. (A splice accesses its OWN direct captures inline; a deeper name it
         // only threads through for the nested closure.)
         let deep = true;
-        let selected_context_values = self.lambda_selected_context_values(body, deep);
+        let (selected_context_values, direct_implicit_receivers) =
+            self.lambda_selected_context_values(body, deep);
+        // Named context parameters are materialized by name, but they still occupy rungs in the
+        // checker's implicit-receiver tower and therefore count when translating outer coordinates.
+        let local_receiver_count = implicit_count;
+        // Anonymous context and extension-receiver rungs bind as `this`; named context parameters
+        // are already represented in `bound_names` and must not be counted twice.
+        let local_implicit_this_count = implicit_count - named_context_count;
+        // A captured receiver can retain a non-contiguous checker coordinate from an enclosing lambda.
+        // Carry that coordinate by exact local-slot identity instead of renumbering the compact scope.
+        let inherited_receiver_coordinates = self.captured_implicit_receivers.last();
+        let outer_receiver_coordinates: Vec<(usize, u32, Ty)> = self
+            .implicit_receivers()
+            .into_iter()
+            .enumerate()
+            .map(|(direct_depth, (slot, ty))| {
+                inherited_receiver_coordinates
+                    .and_then(|receivers| {
+                        receivers
+                            .iter()
+                            .find(|(_, captured_slot, _)| *captured_slot == slot)
+                    })
+                    .map(|(depth, _, _)| (*depth, slot, ty))
+                    .unwrap_or((direct_depth, slot, ty))
+            })
+            .collect();
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
         let mut captured_receivers: Vec<(usize, u32, Ty)> = Vec::new();
         let mut same_name_depths = std::collections::HashMap::<&str, usize>::new();
-        let mut receiver_depth = 0usize;
         for (name, v, ty) in self.scope.iter().rev() {
             let shadow_depth = *same_name_depths.get(name.as_str()).unwrap_or(&0);
-            let this_depth = (name == "this" || name == "$dispatch").then_some(receiver_depth);
             let selected_context_value =
                 selected_context_values.iter().any(|source| match source {
                     ResolvedContextArgument::Binding {
                         name: binding,
                         shadow_depth: selected_depth,
-                    } => binding == name && *selected_depth == shadow_depth,
-                    ResolvedContextArgument::ImplicitReceiver(selection) => {
-                        selection.singleton.is_none()
-                            && this_depth == Some(selection.receiver_depth)
+                    } => {
+                        let local_depth =
+                            bound_names.iter().filter(|bound| *bound == binding).count();
+                        binding == name
+                            && selected_depth.checked_sub(local_depth) == Some(shadow_depth)
                     }
+                    ResolvedContextArgument::ImplicitReceiver(selection) => {
+                        if let Some((binding, selected_depth)) = selection.context_binding.as_ref()
+                        {
+                            let local_depth =
+                                bound_names.iter().filter(|bound| *bound == binding).count()
+                                    + usize::from(binding == "this") * local_implicit_this_count;
+                            binding == name
+                                && selected_depth.checked_sub(local_depth) == Some(shadow_depth)
+                        } else {
+                            selection.singleton.is_none()
+                                && selection
+                                    .receiver_depth
+                                    .checked_sub(local_receiver_count)
+                                    .is_some_and(|selected_depth| {
+                                        outer_receiver_coordinates.iter().any(
+                                            |(outer_depth, outer_slot, _)| {
+                                                *outer_depth == selected_depth && outer_slot == v
+                                            },
+                                        )
+                                    })
+                        }
+                    }
+                }) || direct_implicit_receivers.iter().any(|selection| {
+                    if selection.singleton.is_some() {
+                        return false;
+                    }
+                    if let Some((binding, selected_shadow_depth)) =
+                        selection.context_binding.as_ref()
+                    {
+                        let local_depth =
+                            bound_names.iter().filter(|bound| *bound == binding).count()
+                                + usize::from(binding == "this") * local_implicit_this_count;
+                        return binding == name
+                            && selected_shadow_depth.checked_sub(local_depth)
+                                == Some(shadow_depth);
+                    }
+                    selection
+                        .receiver_depth
+                        .checked_sub(local_receiver_count)
+                        .is_some_and(|selected_depth| {
+                            outer_receiver_coordinates
+                                .iter()
+                                .any(|(outer_depth, outer_slot, _)| {
+                                    *outer_depth == selected_depth && outer_slot == v
+                                })
+                        })
                 });
             *same_name_depths.entry(name).or_default() += 1;
-            if this_depth.is_some() {
-                receiver_depth += 1;
-            }
             if has_implicit_receiver && name == "this" && !selected_context_value {
                 continue;
             }
@@ -9866,6 +9933,7 @@ impl<'a> Lower<'a> {
             // dropped `this` from an ordinary lambda inside an extension function.
             if name == "this"
                 && self.cur_class.is_some()
+                && !selected_context_value
                 && !self.lambda_uses_enclosing_this(body, &bound_names, deep)
             {
                 continue;
@@ -9879,7 +9947,8 @@ impl<'a> Lower<'a> {
             let already_captured = captures
                 .iter()
                 .any(|(_, captured_value, _)| captured_value == v);
-            if !bound_names.contains(name) && !already_captured && used {
+            if (!bound_names.contains(name) || selected_context_value) && !already_captured && used
+            {
                 captures.push((name.clone(), *v, *ty));
             }
         }
@@ -9906,17 +9975,15 @@ impl<'a> Lower<'a> {
             && self.lambda_uses_outer_this_param(body, &bound_names, deep);
         if captures_this {
             let tty = Ty::obj_name(self.cur_class.unwrap());
-            captures.insert(0, ("this".to_string(), 0, tty));
-            captured_receivers.push((0, 0, tty));
+            if !captures
+                .iter()
+                .any(|(_, value, ty)| *value == 0 && *ty == tty)
+            {
+                captures.insert(0, ("this".to_string(), 0, tty));
+            }
         } else if captures_outer_this {
             let (v, tty) = self.lookup("this$0")?;
             captures.insert(0, ("this".to_string(), v, tty));
-            let outer_depth = self.implicit_receivers().len();
-            for selection in self.lambda_selected_implicit_receivers(body, deep) {
-                if selection.receiver_depth == outer_depth {
-                    captured_receivers.push((selection.receiver_depth, 0, tty));
-                }
-            }
         }
         let recv_lambda_captures_outer = self.cur_class.is_some()
             && has_implicit_receiver
@@ -9933,7 +10000,41 @@ impl<'a> Lower<'a> {
         }
         if recv_lambda_captures_outer {
             let tty = Ty::obj_name(self.cur_class.unwrap());
-            captures.push(("this".to_string(), 0, tty));
+            if !captures
+                .iter()
+                .any(|(_, value, ty)| *value == 0 && *ty == tty)
+            {
+                captures.push(("this".to_string(), 0, tty));
+            }
+        }
+        // Map every captured lexical receiver by exact source slot. This preserves checker-tower gaps
+        // transitively without assigning a nested call's receiver depth to its enclosing lambda.
+        for (outer_depth, original_slot, _) in &outer_receiver_coordinates {
+            if let Some((capture_index, (_, _, captured_ty))) = captures
+                .iter()
+                .enumerate()
+                .find(|(_, (_, slot, _))| slot == original_slot)
+            {
+                captured_receivers.push((
+                    local_receiver_count + outer_depth,
+                    capture_index as u32,
+                    *captured_ty,
+                ));
+            }
+        }
+        if captures_outer_this {
+            let (outer_slot, outer_ty) = self.lookup("this$0")?;
+            if let Some((capture_index, _)) = captures
+                .iter()
+                .enumerate()
+                .find(|(_, (_, slot, _))| *slot == outer_slot)
+            {
+                captured_receivers.push((
+                    local_receiver_count + outer_receiver_coordinates.len(),
+                    capture_index as u32,
+                    outer_ty,
+                ));
+            }
         }
         // The capture values are read in the *enclosing* scope before it's swapped out.
         let capture_vals: Vec<u32> = captures
@@ -10353,93 +10454,21 @@ impl<'a> Lower<'a> {
         scan(self, cur, bound, body, deep)
     }
 
-    /// Collect every checker-selected context source in one body walk. Capture discovery then matches
-    /// this inventory against the lexical scope without rescanning the AST once per scope entry.
+    /// Collect every checker-selected context source in one shared body walk.
     fn lambda_selected_context_values(
         &self,
         body: AstExprId,
         deep: bool,
-    ) -> Vec<ResolvedContextArgument> {
-        fn push_unique(out: &mut Vec<ResolvedContextArgument>, source: &ResolvedContextArgument) {
-            if !out.contains(source) {
-                out.push(source.clone());
-            }
-        }
-
-        fn scan(lo: &Lower<'_>, e: AstExprId, deep: bool, out: &mut Vec<ResolvedContextArgument>) {
-            if let Some(selection) = lo.info.implicit_receiver_selections.get(&e) {
-                push_unique(
-                    out,
-                    &ResolvedContextArgument::ImplicitReceiver(selection.clone()),
-                );
-            }
-            if let Some(sources) = lo.info.context_args.get(&e) {
-                for source in sources {
-                    push_unique(out, source);
-                }
-            }
-            if let Some(call) = lo.info.resolved_calls.get(&e) {
-                match call {
-                    ResolvedCall::TopLevel(target) => target
-                        .context_args
-                        .iter()
-                        .flatten()
-                        .for_each(|source| push_unique(out, source)),
-                    ResolvedCall::Extension(target) => target
-                        .context_args
-                        .iter()
-                        .for_each(|source| push_unique(out, source)),
-                    ResolvedCall::MemberExtension { context_args, .. } => context_args
-                        .iter()
-                        .flatten()
-                        .for_each(|source| push_unique(out, source)),
-                    ResolvedCall::LocalFunction(target) => target
-                        .context_args
-                        .iter()
-                        .for_each(|source| push_unique(out, source)),
-                    ResolvedCall::Member(_) | ResolvedCall::Companion(_) => {}
-                }
-            }
-            if !deep && matches!(lo.afile.expr(e), Expr::Lambda { .. }) {
-                return;
-            }
-            let children = std::cell::RefCell::new(Vec::new());
-            lo.afile.any_child_expr(
-                e,
-                &mut |child| {
-                    children.borrow_mut().push(child);
-                    false
-                },
-                &mut |statement| {
-                    lo.afile.any_child_stmt(statement, &mut |child| {
-                        children.borrow_mut().push(child);
-                        false
-                    });
-                    false
-                },
-            );
-            for child in children.into_inner() {
-                scan(lo, child, deep, out);
-            }
-        }
-
-        let mut out = Vec::new();
-        scan(self, body, deep, &mut out);
-        out
-    }
-
-    fn lambda_selected_implicit_receivers(
-        &self,
-        body: AstExprId,
-        deep: bool,
-    ) -> Vec<ImplicitReceiverSelection> {
-        self.lambda_selected_context_values(body, deep)
-            .into_iter()
-            .filter_map(|source| match source {
-                ResolvedContextArgument::ImplicitReceiver(selection) => Some(selection),
-                ResolvedContextArgument::Binding { .. } => None,
-            })
-            .collect()
+    ) -> (Vec<ResolvedContextArgument>, Vec<ImplicitReceiverSelection>) {
+        crate::frontend::selected_context_values(
+            self.afile,
+            &self.info.expr_types,
+            &self.info.implicit_receiver_selections,
+            &self.info.context_args,
+            &self.info.resolved_calls,
+            body,
+            deep,
+        )
     }
 
     /// In an inner-class constructor prelude (`super(...)` arguments), the captured outer instance is a
@@ -16587,6 +16616,18 @@ impl<'a> Lower<'a> {
         if let Some(singleton) = selection.singleton.as_ref() {
             return Some((self.lower_singleton_value(singleton)?, expected));
         }
+        if let Some((_, slot, ty)) = self
+            .captured_implicit_receivers
+            .last()
+            .and_then(|receivers| {
+                receivers
+                    .iter()
+                    .find(|(depth, _, _)| *depth == selection.receiver_depth)
+            })
+            .copied()
+        {
+            return Some((self.emit_get_value(slot), ty));
+        }
         if let Some((name, shadow_depth)) = selection.context_binding.as_ref() {
             let (slot, ty) = self
                 .scope
@@ -16595,19 +16636,6 @@ impl<'a> Lower<'a> {
                 .filter(|(candidate, _, _)| candidate == name)
                 .nth(*shadow_depth)
                 .map(|(_, slot, ty)| (*slot, *ty))?;
-            return Some((self.emit_get_value(slot), ty));
-        }
-        if let Some((_, slot, ty)) = self
-            .captured_implicit_receivers
-            .iter()
-            .rev()
-            .find_map(|receivers| {
-                receivers
-                    .iter()
-                    .find(|(depth, _, _)| *depth == selection.receiver_depth)
-            })
-            .copied()
-        {
             return Some((self.emit_get_value(slot), ty));
         }
         if selection.current {
