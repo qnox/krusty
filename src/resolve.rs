@@ -13012,6 +13012,33 @@ fn declared_tparam_semantic_bounds(
 }
 
 /// Resolve a type-parameter bound without erasing nullability.
+/// Parameter count of a JVM method descriptor — top-level types between `(` and `)`.
+fn descriptor_param_arity(descriptor: &str) -> usize {
+    let inner = descriptor
+        .strip_prefix('(')
+        .and_then(|rest| rest.split(')').next())
+        .unwrap_or("");
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    let mut count = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i] == b'[' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b'L' {
+            while i < bytes.len() && bytes[i] != b';' {
+                i += 1;
+            }
+        }
+        i += 1;
+        count += 1;
+    }
+    count
+}
+
 fn tparam_bound_semantic(b: &TypeRef, resolve: &dyn Fn(&str) -> Option<TypeName>) -> Ty {
     let base = if let Some(prim) = Ty::from_name(&b.name) {
         prim
@@ -27623,12 +27650,62 @@ impl<'a> Checker<'a> {
             }
             let unsupported = match inheritance {
                 _ if cl.is_enum() || !separate_emission => None,
-                Some(shape)
-                    if !(shape.supports_external_subclassing
-                        || shape.supports_external_abstract_overrides
-                            && self.has_no_unimplemented_abstract_members(owner)) =>
-                {
-                    Some("gate:nonlocal-superclass-abstract-obligations")
+                Some(shape) if !shape.supports_external_subclassing => {
+                    // The superclass carries abstract obligations. The class is still emittable
+                    // when it discharges every one, or when it is itself abstract and passes them
+                    // on (kotlinc's rule). Two independent views of "discharged" apply, and either
+                    // suffices: the resolved-member view, which needs every abstract member to
+                    // carry a physical name before it can compare erased signatures; and the
+                    // OBLIGATION view below, which reads the superclass chain's remaining
+                    // `(name, descriptor)` obligations and matches them against source overrides —
+                    // the only view available when a member has no physical name to compare.
+                    let discharged = cl.modality == crate::ast::Modality::Abstract
+                        || (shape.supports_external_abstract_overrides
+                            && self.has_no_unimplemented_abstract_members(owner))
+                        || {
+                            // Count overrides as a MULTISET per (name, arity): two same-name
+                            // same-arity abstract overloads (distinct descriptors) need two distinct
+                            // source methods — one override must not clear both. A property override
+                            // discharges its accessor obligations (`override val x` → `getX()`; a
+                            // `var` also `setX(value)`).
+                            let mut overrides: std::collections::HashMap<(String, usize), usize> =
+                                std::collections::HashMap::new();
+                            for m in &cl.methods {
+                                *overrides
+                                    .entry((m.name.clone(), m.params.len()))
+                                    .or_default() += 1;
+                            }
+                            for p in &cl.body_props {
+                                *overrides
+                                    .entry((crate::names::property_getter_name(&p.name), 0))
+                                    .or_default() += 1;
+                                if p.is_var {
+                                    *overrides
+                                        .entry((crate::names::property_setter_name(&p.name), 1))
+                                        .or_default() += 1;
+                                }
+                            }
+                            let mut demanded: std::collections::HashMap<(String, usize), usize> =
+                                std::collections::HashMap::new();
+                            for (name, descriptor) in
+                                self.syms.libraries.abstract_obligations(superclass)
+                            {
+                                *demanded
+                                    .entry((name, descriptor_param_arity(&descriptor)))
+                                    .or_default() += 1;
+                            }
+                            // An EMPTY obligation set is a legitimate discharge: a mid-hierarchy class
+                            // between this one and the abstract root already implemented every member,
+                            // so nothing remains for the source class to override.
+                            demanded.iter().all(|(key, needed)| {
+                                overrides.get(key).copied().unwrap_or(0) >= *needed
+                            })
+                        };
+                    if discharged {
+                        None
+                    } else {
+                        Some("gate:nonlocal-superclass-abstract-obligations")
+                    }
                 }
                 Some(shape)
                     if cl.primary_ctor_annotations.is_some()

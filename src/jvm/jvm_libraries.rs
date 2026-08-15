@@ -5479,6 +5479,56 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         signature_formals(signature)
     }
 
+    fn abstract_obligations(&self, internal: TypeName) -> Vec<(String, String)> {
+        // The ENTIRE superclass chain decides first: a class-side declaration of a
+        // `(name, descriptor)` — abstract or concrete — pre-empts any interface declaration at ANY
+        // depth (JLS: a class-chain abstract kills an interface default). Within the chain the
+        // nearest declaration wins, so a mid-hierarchy implementation discharges an ancestor's
+        // abstract and a re-abstracted member re-imposes it. Interfaces then fill the rest
+        // breadth-first.
+        let mut decided: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let mut obligations = Vec::new();
+        let mut interfaces = std::collections::VecDeque::new();
+        let mut seen = std::collections::HashSet::new();
+        let decide = |class: &crate::jvm::classreader::ClassInfo,
+                      decided: &mut std::collections::HashSet<(String, String)>,
+                      obligations: &mut Vec<(String, String)>| {
+            for method in &class.methods {
+                if method.is_static() || method.name == "<init>" {
+                    continue;
+                }
+                let key = (method.name.clone(), method.descriptor.clone());
+                if decided.insert(key.clone()) && method.is_abstract() {
+                    obligations.push(key);
+                }
+            }
+        };
+        let mut current = Some(internal);
+        while let Some(name) = current.take() {
+            if !seen.insert(name) {
+                break;
+            }
+            let Some(class) = self.cp.find_name(name) else {
+                break;
+            };
+            decide(&class, &mut decided, &mut obligations);
+            interfaces.extend(class.interfaces.iter_ids());
+            current = class.super_class;
+        }
+        while let Some(name) = interfaces.pop_front() {
+            if !seen.insert(name) {
+                continue;
+            }
+            let Some(interface) = self.cp.find_name(name) else {
+                continue;
+            };
+            decide(&interface, &mut decided, &mut obligations);
+            interfaces.extend(interface.interfaces.iter_ids());
+        }
+        obligations
+    }
+
     fn iterable_element_type(&self, internal: &str) -> Option<Ty> {
         self.counted_loop_info_for_type(internal)
             .map(|info| info.elem)
