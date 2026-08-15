@@ -27799,11 +27799,27 @@ impl<'a> Checker<'a> {
         &self,
         parameters: &ParamList,
         arguments: &[ExprId],
+        nested_call: Option<ExprId>,
     ) -> Result<Vec<usize>, CallArgMappingFailure> {
-        let argument_names = arguments
-            .iter()
-            .map(|argument| self.file.annotation_arg_names.get(&argument.0).cloned())
-            .collect::<Vec<_>>();
+        // A TOP-LEVEL annotation's labels are recorded per argument in `annotation_arg_names`. A
+        // NESTED annotation (`@Outer(Inner(b = "BB", a = "AA"))`) is parsed as an ordinary call, so
+        // its labels live in the call's own `call_arg_names` instead. Reading only the former bound
+        // every nested argument positionally and silently swapped the values.
+        let argument_names = match nested_call {
+            // A nested annotation's labels are the CALL's, positionally parallel to its arguments.
+            // An unlabelled call records no names at all, which is all-positional — never a reason
+            // to consult the annotation map, whose keys are direct `@Ann(...)` arguments.
+            Some(call) => {
+                let names = self.file.call_arg_names.get(&call.0);
+                (0..arguments.len())
+                    .map(|position| names.and_then(|names| names.get(position).cloned().flatten()))
+                    .collect::<Vec<_>>()
+            }
+            None => arguments
+                .iter()
+                .map(|argument| self.file.annotation_arg_names.get(&argument.0).cloned())
+                .collect::<Vec<_>>(),
+        };
         let signature = CallSig {
             param_names: parameters.names.clone(),
             param_defaults: parameters.defaults.clone(),
@@ -27885,7 +27901,7 @@ impl<'a> Checker<'a> {
                 }
                 _ => {
                     let internal = self.expr_types[e.0 as usize].kotlin_class_internal()?;
-                    let values = self.fold_annotation_values(internal, args)?;
+                    let values = self.fold_annotation_values(internal, args, Some(e))?;
                     AnnotationValue::Annotation { internal, values }
                 }
             },
@@ -27907,10 +27923,11 @@ impl<'a> Checker<'a> {
         &mut self,
         internal: TypeName,
         arguments: &[ExprId],
+        nested_call: Option<ExprId>,
     ) -> Option<Vec<(String, crate::types::AnnotationValue)>> {
         let (elements, parameters) = self.annotation_shape(internal)?;
         let parameter_indices = self
-            .annotation_argument_parameter_indices(&parameters, arguments)
+            .annotation_argument_parameter_indices(&parameters, arguments, nested_call)
             .ok()?;
         let mut values = Vec::with_capacity(arguments.len());
         for (&argument, index) in arguments.iter().zip(parameter_indices) {
@@ -27966,7 +27983,7 @@ impl<'a> Checker<'a> {
         internal: TypeName,
         arguments: &[ExprId],
     ) -> Option<crate::types::AppliedAnnotation> {
-        let values = self.fold_annotation_values(internal, arguments)?;
+        let values = self.fold_annotation_values(internal, arguments, None)?;
         let retention = self.syms.annotation_retention(internal)?;
         Some(crate::types::AppliedAnnotation {
             internal,
@@ -28001,6 +28018,7 @@ impl<'a> Checker<'a> {
             &elements,
             &parameters,
             arguments,
+            None,
         ) {
             return;
         }
@@ -28053,9 +28071,10 @@ impl<'a> Checker<'a> {
         elements: &[(String, Ty)],
         parameters: &ParamList,
         arguments: &[ExprId],
+        nested_call: Option<ExprId>,
     ) -> bool {
         let parameter_indices =
-            match self.annotation_argument_parameter_indices(parameters, arguments) {
+            match self.annotation_argument_parameter_indices(parameters, arguments, nested_call) {
                 Ok(indices) => indices,
                 Err(failure) => {
                     self.report_annotation_mapping_failure(application_span, arguments, failure);
@@ -28102,6 +28121,7 @@ impl<'a> Checker<'a> {
                             &elements,
                             &parameters,
                             &args,
+                            Some(expression),
                         ) {
                             return self.set(expression, Ty::obj_name(expected_internal));
                         }
