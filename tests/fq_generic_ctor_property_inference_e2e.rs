@@ -10,15 +10,7 @@
 use super::common;
 
 fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
-    let jdk = common::jdk_modules();
-    let sl = common::stdlib_jar();
-    let libout = common::compile_lib(tag, lib)?;
-    Some(common::expect_box_run(
-        main,
-        "Main",
-        &[libout, sl],
-        Some(jdk.as_path()),
-    ))
+    common::expect_box_run_against(tag, lib, main)
 }
 
 const LIB: &str = "package lib\n\
