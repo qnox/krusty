@@ -371,9 +371,6 @@ impl<'a> ModuleSymbols<'a> {
                 is_abstract: c.is_abstract() || c.is_interface(),
                 is_extensible: !c.is_interface() && !c.is_final(),
                 has_no_arg_constructor: !c.is_sealed() && c.has_no_arg_constructor(),
-                supports_external_subclassing: !c.is_sealed()
-                    && (!c.is_abstract() || (!c.has_abstract_members() && c.interfaces.is_empty())),
-                supports_external_abstract_overrides: false,
             },
             supertypes: supertypes.into(),
             supertype_templates,
@@ -2229,14 +2226,9 @@ mod tests {
         let abstract_with_interface = source
             .classifier(type_name("demo/AbstractWithInterface"))
             .unwrap();
-        assert!(
-            !abstract_with_interface
-                .inheritance
-                .supports_external_subclassing
-        );
+        assert!(abstract_with_interface.inheritance.is_abstract);
 
         let sealed = source.classifier(type_name("demo/Sealed")).unwrap();
-        assert!(!sealed.inheritance.supports_external_subclassing);
         assert!(!sealed.inheritance.has_no_arg_constructor);
     }
 }

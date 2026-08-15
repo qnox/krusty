@@ -13012,33 +13012,6 @@ fn declared_tparam_semantic_bounds(
 }
 
 /// Resolve a type-parameter bound without erasing nullability.
-/// Parameter count of a JVM method descriptor — top-level types between `(` and `)`.
-fn descriptor_param_arity(descriptor: &str) -> usize {
-    let inner = descriptor
-        .strip_prefix('(')
-        .and_then(|rest| rest.split(')').next())
-        .unwrap_or("");
-    let bytes = inner.as_bytes();
-    let mut i = 0;
-    let mut count = 0;
-    while i < bytes.len() {
-        while i < bytes.len() && bytes[i] == b'[' {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            break;
-        }
-        if bytes[i] == b'L' {
-            while i < bytes.len() && bytes[i] != b';' {
-                i += 1;
-            }
-        }
-        i += 1;
-        count += 1;
-    }
-    count
-}
-
 fn tparam_bound_semantic(b: &TypeRef, resolve: &dyn Fn(&str) -> Option<TypeName>) -> Ty {
     let base = if let Some(prim) = Ty::from_name(&b.name) {
         prim
@@ -27360,50 +27333,95 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether the nearest declaration of every callable in `owner`'s normalized hierarchy is
-    /// concrete. Providers expose only direct declarations and direct supertypes; core performs this
-    /// one breadth-first walk so a source override can discharge an abstract obligation inherited
-    /// from a dependency (`class N : Number() { override fun toInt() = ... }`).
+    /// concrete. Providers expose only direct declarations and direct supertypes; core performs the
+    /// complete traversal. The class chain decides before interfaces at every depth (a class-side
+    /// abstract declaration suppresses an interface default), while equally-near interface
+    /// declarations merge so a concrete default satisfies the shared semantic signature.
     fn has_no_unimplemented_abstract_members(&self, owner: TypeName) -> bool {
         type MemberKey = (String, Vec<ErasedTypeKey>);
 
         let resolver = self.resolver();
-        let mut declarations: HashMap<MemberKey, (usize, bool)> = HashMap::new();
-        let mut pending = std::collections::VecDeque::from([(owner, 0usize)]);
-        let mut visited = std::collections::HashSet::new();
-        while let Some((current, depth)) = pending.pop_front() {
-            if !visited.insert(current) {
+        let member_key = |member: &crate::libraries::LibraryMember| {
+            (
+                member.name.clone(),
+                member.params.iter().copied().map(erased_type_key).collect(),
+            )
+        };
+
+        // First walk the single class chain, nearest declaration first. Interfaces encountered on
+        // every class are queued for the second pass, but cannot pre-empt a class declaration.
+        let mut class_declarations: HashMap<MemberKey, bool> = HashMap::new();
+        let mut interfaces = std::collections::VecDeque::new();
+        let mut visited_classes = std::collections::HashSet::new();
+        let mut current = Some((owner, 0usize));
+        while let Some((name, depth)) = current.take() {
+            if !visited_classes.insert(name) {
+                return false;
+            }
+            let Some(classifier) = resolver.classifier(name) else {
+                return false;
+            };
+            if classifier.is_interface() {
+                interfaces.push_back((name, depth));
+                break;
+            }
+            for member in &classifier.members {
+                class_declarations
+                    .entry(member_key(member))
+                    .or_insert(member.is_abstract());
+            }
+            let mut superclass = None;
+            for supertype in classifier.supertypes.iter_ids() {
+                let Some(shape) = resolver.classifier(supertype) else {
+                    return false;
+                };
+                if shape.is_interface() {
+                    interfaces.push_back((supertype, depth + 1));
+                } else if superclass.replace(supertype).is_some() {
+                    return false;
+                }
+            }
+            current = superclass.map(|superclass| (superclass, depth + 1));
+        }
+
+        let mut interface_declarations: HashMap<MemberKey, (usize, bool)> = HashMap::new();
+        let mut visited_interfaces = std::collections::HashSet::new();
+        while let Some((name, depth)) = interfaces.pop_front() {
+            if !visited_interfaces.insert(name) {
                 continue;
             }
-            let Some(classifier) = resolver.classifier(current) else {
+            let Some(classifier) = resolver.classifier(name) else {
                 return false;
             };
             for member in &classifier.members {
-                let key = (
-                    member.name.clone(),
-                    member.params.iter().copied().map(erased_type_key).collect(),
-                );
-                declarations
+                let key = member_key(member);
+                if class_declarations.contains_key(&key) {
+                    continue;
+                }
+                interface_declarations
                     .entry(key)
                     .and_modify(|(nearest_depth, is_abstract)| {
                         if *nearest_depth == depth {
-                            // Two declarations at the same hierarchy depth may be an abstract
-                            // interface declaration and a concrete inherited implementation. The
-                            // concrete declaration satisfies that shared semantic signature.
                             *is_abstract &= member.is_abstract();
                         }
                     })
                     .or_insert((depth, member.is_abstract()));
             }
-            pending.extend(
+            interfaces.extend(
                 classifier
                     .supertypes
                     .iter_ids()
                     .map(|supertype| (supertype, depth + 1)),
             );
         }
-        let unresolved = declarations
+        let unresolved = class_declarations
             .iter()
-            .filter_map(|(key, (_, is_abstract))| is_abstract.then_some(key))
+            .filter_map(|(key, is_abstract)| is_abstract.then_some(key))
+            .chain(
+                interface_declarations
+                    .iter()
+                    .filter_map(|(key, (_, is_abstract))| is_abstract.then_some(key)),
+            )
             .collect::<Vec<_>>();
         crate::trace_compiler!(
             "resolve",
@@ -27648,73 +27666,24 @@ impl<'a> Checker<'a> {
                     ),
                 );
             }
-            let unsupported = match inheritance {
-                _ if cl.is_enum() || !separate_emission => None,
-                Some(shape) if !shape.supports_external_subclassing => {
-                    // The superclass carries abstract obligations. The class is still emittable
-                    // when it discharges every one, or when it is itself abstract and passes them
-                    // on (kotlinc's rule). Two independent views of "discharged" apply, and either
-                    // suffices: the resolved-member view, which needs every abstract member to
-                    // carry a physical name before it can compare erased signatures; and the
-                    // OBLIGATION view below, which reads the superclass chain's remaining
-                    // `(name, descriptor)` obligations and matches them against source overrides —
-                    // the only view available when a member has no physical name to compare.
-                    let discharged = cl.modality == crate::ast::Modality::Abstract
-                        || (shape.supports_external_abstract_overrides
-                            && self.has_no_unimplemented_abstract_members(owner))
-                        || {
-                            // Count overrides as a MULTISET per (name, arity): two same-name
-                            // same-arity abstract overloads (distinct descriptors) need two distinct
-                            // source methods — one override must not clear both. A property override
-                            // discharges its accessor obligations (`override val x` → `getX()`; a
-                            // `var` also `setX(value)`).
-                            let mut overrides: std::collections::HashMap<(String, usize), usize> =
-                                std::collections::HashMap::new();
-                            for m in &cl.methods {
-                                *overrides
-                                    .entry((m.name.clone(), m.params.len()))
-                                    .or_default() += 1;
-                            }
-                            for p in &cl.body_props {
-                                *overrides
-                                    .entry((crate::names::property_getter_name(&p.name), 0))
-                                    .or_default() += 1;
-                                if p.is_var {
-                                    *overrides
-                                        .entry((crate::names::property_setter_name(&p.name), 1))
-                                        .or_default() += 1;
-                                }
-                            }
-                            let mut demanded: std::collections::HashMap<(String, usize), usize> =
-                                std::collections::HashMap::new();
-                            for (name, descriptor) in
-                                self.syms.libraries.abstract_obligations(superclass)
-                            {
-                                *demanded
-                                    .entry((name, descriptor_param_arity(&descriptor)))
-                                    .or_default() += 1;
-                            }
-                            // An EMPTY obligation set is a legitimate discharge: a mid-hierarchy class
-                            // between this one and the abstract root already implemented every member,
-                            // so nothing remains for the source class to override.
-                            demanded.iter().all(|(key, needed)| {
-                                overrides.get(key).copied().unwrap_or(0) >= *needed
-                            })
-                        };
-                    if discharged {
-                        None
-                    } else {
-                        Some("gate:nonlocal-superclass-abstract-obligations")
-                    }
-                }
-                Some(shape)
-                    if cl.primary_ctor_annotations.is_some()
-                        && cl.base_args.is_empty()
-                        && !shape.has_no_arg_constructor =>
+            let unsupported = if cl.is_enum() || !separate_emission {
+                None
+            } else if let Some(shape) = inheritance {
+                let discharged = !shape.is_abstract
+                    || cl.modality == crate::ast::Modality::Abstract
+                    || self.has_no_unimplemented_abstract_members(owner);
+                if !discharged {
+                    Some("gate:nonlocal-superclass-abstract-obligations")
+                } else if cl.primary_ctor_annotations.is_some()
+                    && cl.base_args.is_empty()
+                    && !shape.has_no_arg_constructor
                 {
                     Some("gate:nonlocal-superclass-no-zero-arg-constructor")
+                } else {
+                    None
                 }
-                _ => None,
+            } else {
+                None
             };
             if let Some(reason) = unsupported {
                 self.unsupported_class_emission.insert(d, reason);
