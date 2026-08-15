@@ -19,11 +19,11 @@ use crate::frontend::{
     CompoundAssignmentTarget, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget,
     ExprLowering, FrontendClassModel, FrontendSymbols, FrontendTypeInfo, FunctionImportScope,
     ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InlineCall, InvokeKind,
-    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ResolvedCall,
-    ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
-    ResolvedExtensionCall, ResolvedIncDec, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedPropertyAccess, ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef,
-    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
+    LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
+    ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
+    ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
+    ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
+    SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -8010,6 +8010,7 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let ResolvedCall::MemberExtension {
             owner,
+            dispatch_receiver,
             physical_receiver,
             name,
             params,
@@ -8030,7 +8031,9 @@ impl<'a> Lower<'a> {
         if inline.must_inline() {
             return None;
         }
-        let dispatch = self.member_extension_dispatch_value(*owner)?;
+        let dispatch = self
+            .materialize_implicit_receiver(dispatch_receiver.clone())?
+            .0;
         let extension_value = self.emit_type_op(
             IrTypeOp::ImplicitCoercion,
             extension_value,
@@ -9831,29 +9834,96 @@ impl<'a> Lower<'a> {
         // `outer` in scope for it. (A splice accesses its OWN direct captures inline; a deeper name it
         // only threads through for the nested closure.)
         let deep = true;
-        let selected_context_values = self.lambda_selected_context_values(body, deep);
+        let (selected_context_values, direct_implicit_receivers) =
+            self.lambda_selected_context_values(body, deep);
+        // Named context parameters are materialized by name, but they still occupy rungs in the
+        // checker's implicit-receiver tower and therefore count when translating outer coordinates.
+        let local_receiver_count = implicit_count;
+        // Anonymous context and extension-receiver rungs bind as `this`; named context parameters
+        // are already represented in `bound_names` and must not be counted twice.
+        let local_implicit_this_count = implicit_count - named_context_count;
+        // A captured receiver can retain a non-contiguous checker coordinate from an enclosing lambda.
+        // Carry that coordinate by exact local-slot identity instead of renumbering the compact scope.
+        let inherited_receiver_coordinates = self.captured_implicit_receivers.last();
+        let outer_receiver_coordinates: Vec<(usize, u32, Ty)> = self
+            .implicit_receivers()
+            .into_iter()
+            .enumerate()
+            .map(|(direct_depth, (slot, ty))| {
+                inherited_receiver_coordinates
+                    .and_then(|receivers| {
+                        receivers
+                            .iter()
+                            .find(|(_, captured_slot, _)| *captured_slot == slot)
+                    })
+                    .map(|(depth, _, _)| (*depth, slot, ty))
+                    .unwrap_or((direct_depth, slot, ty))
+            })
+            .collect();
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
         let mut captured_receivers: Vec<(usize, u32, Ty)> = Vec::new();
         let mut same_name_depths = std::collections::HashMap::<&str, usize>::new();
-        let mut receiver_depth = 0usize;
         for (name, v, ty) in self.scope.iter().rev() {
             let shadow_depth = *same_name_depths.get(name.as_str()).unwrap_or(&0);
-            let this_depth = (name == "this" || name == "$dispatch").then_some(receiver_depth);
             let selected_context_value =
                 selected_context_values.iter().any(|source| match source {
                     ResolvedContextArgument::Binding {
                         name: binding,
                         shadow_depth: selected_depth,
-                    } => binding == name && *selected_depth == shadow_depth,
-                    ResolvedContextArgument::ImplicitReceiver(selection) => {
-                        selection.singleton.is_none()
-                            && this_depth == Some(selection.receiver_depth)
+                    } => {
+                        let local_depth =
+                            bound_names.iter().filter(|bound| *bound == binding).count();
+                        binding == name
+                            && selected_depth.checked_sub(local_depth) == Some(shadow_depth)
                     }
+                    ResolvedContextArgument::ImplicitReceiver(selection) => {
+                        if let Some((binding, selected_depth)) = selection.context_binding.as_ref()
+                        {
+                            let local_depth =
+                                bound_names.iter().filter(|bound| *bound == binding).count()
+                                    + usize::from(binding == "this") * local_implicit_this_count;
+                            binding == name
+                                && selected_depth.checked_sub(local_depth) == Some(shadow_depth)
+                        } else {
+                            selection.singleton.is_none()
+                                && selection
+                                    .receiver_depth
+                                    .checked_sub(local_receiver_count)
+                                    .is_some_and(|selected_depth| {
+                                        outer_receiver_coordinates.iter().any(
+                                            |(outer_depth, outer_slot, _)| {
+                                                *outer_depth == selected_depth && outer_slot == v
+                                            },
+                                        )
+                                    })
+                        }
+                    }
+                }) || direct_implicit_receivers.iter().any(|selection| {
+                    if selection.singleton.is_some() {
+                        return false;
+                    }
+                    if let Some((binding, selected_shadow_depth)) =
+                        selection.context_binding.as_ref()
+                    {
+                        let local_depth =
+                            bound_names.iter().filter(|bound| *bound == binding).count()
+                                + usize::from(binding == "this") * local_implicit_this_count;
+                        return binding == name
+                            && selected_shadow_depth.checked_sub(local_depth)
+                                == Some(shadow_depth);
+                    }
+                    selection
+                        .receiver_depth
+                        .checked_sub(local_receiver_count)
+                        .is_some_and(|selected_depth| {
+                            outer_receiver_coordinates
+                                .iter()
+                                .any(|(outer_depth, outer_slot, _)| {
+                                    *outer_depth == selected_depth && outer_slot == v
+                                })
+                        })
                 });
             *same_name_depths.entry(name).or_default() += 1;
-            if this_depth.is_some() {
-                receiver_depth += 1;
-            }
             if has_implicit_receiver && name == "this" && !selected_context_value {
                 continue;
             }
@@ -9863,6 +9933,7 @@ impl<'a> Lower<'a> {
             // dropped `this` from an ordinary lambda inside an extension function.
             if name == "this"
                 && self.cur_class.is_some()
+                && !selected_context_value
                 && !self.lambda_uses_enclosing_this(body, &bound_names, deep)
             {
                 continue;
@@ -9876,7 +9947,8 @@ impl<'a> Lower<'a> {
             let already_captured = captures
                 .iter()
                 .any(|(_, captured_value, _)| captured_value == v);
-            if !bound_names.contains(name) && !already_captured && used {
+            if (!bound_names.contains(name) || selected_context_value) && !already_captured && used
+            {
                 captures.push((name.clone(), *v, *ty));
             }
         }
@@ -9903,17 +9975,15 @@ impl<'a> Lower<'a> {
             && self.lambda_uses_outer_this_param(body, &bound_names, deep);
         if captures_this {
             let tty = Ty::obj_name(self.cur_class.unwrap());
-            captures.insert(0, ("this".to_string(), 0, tty));
-            captured_receivers.push((0, 0, tty));
+            if !captures
+                .iter()
+                .any(|(_, value, ty)| *value == 0 && *ty == tty)
+            {
+                captures.insert(0, ("this".to_string(), 0, tty));
+            }
         } else if captures_outer_this {
             let (v, tty) = self.lookup("this$0")?;
             captures.insert(0, ("this".to_string(), v, tty));
-            let outer_depth = self.implicit_receivers().len();
-            for selection in self.lambda_selected_implicit_receivers(body, deep) {
-                if selection.receiver_depth == outer_depth {
-                    captured_receivers.push((selection.receiver_depth, 0, tty));
-                }
-            }
         }
         let recv_lambda_captures_outer = self.cur_class.is_some()
             && has_implicit_receiver
@@ -9930,7 +10000,41 @@ impl<'a> Lower<'a> {
         }
         if recv_lambda_captures_outer {
             let tty = Ty::obj_name(self.cur_class.unwrap());
-            captures.push(("this".to_string(), 0, tty));
+            if !captures
+                .iter()
+                .any(|(_, value, ty)| *value == 0 && *ty == tty)
+            {
+                captures.push(("this".to_string(), 0, tty));
+            }
+        }
+        // Map every captured lexical receiver by exact source slot. This preserves checker-tower gaps
+        // transitively without assigning a nested call's receiver depth to its enclosing lambda.
+        for (outer_depth, original_slot, _) in &outer_receiver_coordinates {
+            if let Some((capture_index, (_, _, captured_ty))) = captures
+                .iter()
+                .enumerate()
+                .find(|(_, (_, slot, _))| slot == original_slot)
+            {
+                captured_receivers.push((
+                    local_receiver_count + outer_depth,
+                    capture_index as u32,
+                    *captured_ty,
+                ));
+            }
+        }
+        if captures_outer_this {
+            let (outer_slot, outer_ty) = self.lookup("this$0")?;
+            if let Some((capture_index, _)) = captures
+                .iter()
+                .enumerate()
+                .find(|(_, (_, slot, _))| *slot == outer_slot)
+            {
+                captured_receivers.push((
+                    local_receiver_count + outer_receiver_coordinates.len(),
+                    capture_index as u32,
+                    outer_ty,
+                ));
+            }
         }
         // The capture values are read in the *enclosing* scope before it's swapped out.
         let capture_vals: Vec<u32> = captures
@@ -10350,93 +10454,22 @@ impl<'a> Lower<'a> {
         scan(self, cur, bound, body, deep)
     }
 
-    /// Collect every checker-selected context source in one body walk. Capture discovery then matches
-    /// this inventory against the lexical scope without rescanning the AST once per scope entry.
+    /// Collect every checker-selected context source in one shared body walk.
     fn lambda_selected_context_values(
         &self,
         body: AstExprId,
         deep: bool,
-    ) -> Vec<ResolvedContextArgument> {
-        fn push_unique(out: &mut Vec<ResolvedContextArgument>, source: &ResolvedContextArgument) {
-            if !out.contains(source) {
-                out.push(source.clone());
-            }
-        }
-
-        fn scan(lo: &Lower<'_>, e: AstExprId, deep: bool, out: &mut Vec<ResolvedContextArgument>) {
-            if let Some(selection) = lo.info.implicit_receiver_selections.get(&e) {
-                push_unique(
-                    out,
-                    &ResolvedContextArgument::ImplicitReceiver(selection.clone()),
-                );
-            }
-            if let Some(sources) = lo.info.context_args.get(&e) {
-                for source in sources {
-                    push_unique(out, source);
-                }
-            }
-            if let Some(call) = lo.info.resolved_calls.get(&e) {
-                match call {
-                    ResolvedCall::TopLevel(target) => target
-                        .context_args
-                        .iter()
-                        .flatten()
-                        .for_each(|source| push_unique(out, source)),
-                    ResolvedCall::Extension(target) => target
-                        .context_args
-                        .iter()
-                        .for_each(|source| push_unique(out, source)),
-                    ResolvedCall::MemberExtension { context_args, .. } => context_args
-                        .iter()
-                        .flatten()
-                        .for_each(|source| push_unique(out, source)),
-                    ResolvedCall::LocalFunction(target) => target
-                        .context_args
-                        .iter()
-                        .for_each(|source| push_unique(out, source)),
-                    ResolvedCall::Member(_) | ResolvedCall::Companion(_) => {}
-                }
-            }
-            if !deep && matches!(lo.afile.expr(e), Expr::Lambda { .. }) {
-                return;
-            }
-            let children = std::cell::RefCell::new(Vec::new());
-            lo.afile.any_child_expr(
-                e,
-                &mut |child| {
-                    children.borrow_mut().push(child);
-                    false
-                },
-                &mut |statement| {
-                    lo.afile.any_child_stmt(statement, &mut |child| {
-                        children.borrow_mut().push(child);
-                        false
-                    });
-                    false
-                },
-            );
-            for child in children.into_inner() {
-                scan(lo, child, deep, out);
-            }
-        }
-
-        let mut out = Vec::new();
-        scan(self, body, deep, &mut out);
-        out
-    }
-
-    fn lambda_selected_implicit_receivers(
-        &self,
-        body: AstExprId,
-        deep: bool,
-    ) -> Vec<ImplicitReceiverSelection> {
-        self.lambda_selected_context_values(body, deep)
-            .into_iter()
-            .filter_map(|source| match source {
-                ResolvedContextArgument::ImplicitReceiver(selection) => Some(selection),
-                ResolvedContextArgument::Binding { .. } => None,
-            })
-            .collect()
+    ) -> (Vec<ResolvedContextArgument>, Vec<ImplicitReceiverSelection>) {
+        crate::frontend::selected_context_values(
+            self.afile,
+            &self.info.expr_types,
+            &self.info.implicit_receiver_selections,
+            &self.info.context_args,
+            &self.info.resolved_calls,
+            &self.info.stmt_lowers,
+            body,
+            deep,
+        )
     }
 
     /// In an inner-class constructor prelude (`super(...)` arguments), the captured outer instance is a
@@ -15198,11 +15231,10 @@ impl<'a> Lower<'a> {
             hof_splice,
         } = opts;
         let protocol = self.info.iterator_protocol(iterable).cloned()?;
-        let iter_dispatch = protocol.iterator;
+        let iter_dispatch = *protocol.iterator;
         let iter_ty = protocol.iter_ty;
-        let iter_internal = iter_ty.obj_internal()?;
-        let hasnext_m = protocol.has_next;
-        let next_m = protocol.next;
+        let hasnext = *protocol.has_next;
+        let next = *protocol.next;
         let elem = protocol.elem_ty;
         let depth = self.scope.len();
         // `forEachIndexed`: an `Int` index counter, declared before the loop and bound to the lambda's
@@ -15231,35 +15263,17 @@ impl<'a> Lower<'a> {
         } else {
             (recv, None)
         };
-        let iter_call = self.lower_iterator_call(recv, iter_dispatch)?;
+        let iter_call = self.lower_iterator_protocol_call(recv, it_ty, iter_dispatch)?;
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
         // cond: it.hasNext()
         let it_g = self.emit_get_value(it_v);
-        let hasnext_ret = hasnext_m.ret;
-        let hasnext_suspend = hasnext_m.suspend();
-        let cond = self.emit_library_member_call(
-            it_g,
-            iter_internal,
-            hasnext_m,
-            hasnext_ret,
-            hasnext_suspend,
-            vec![],
-        )?;
+        let cond = self.lower_iterator_protocol_call(it_g, iter_ty, hasnext)?;
 
         // x = (elem) it.next()  — unbox a primitive element, checkcast a specific reference.
         let it_g2 = self.emit_get_value(it_v);
-        let next_ret = next_m.ret;
-        let next_suspend = next_m.suspend();
-        let next_call = self.emit_library_member_call(
-            it_g2,
-            iter_internal,
-            next_m,
-            next_ret,
-            next_suspend,
-            vec![],
-        )?;
+        let next_call = self.lower_iterator_protocol_call(it_g2, iter_ty, next)?;
         let x_init = if self.has_scalar_value_repr(elem) {
             self.emit_type_op(IrTypeOp::ImplicitCoercion, next_call, ty_to_ir(elem))
         } else if !elem.is_erased_top() {
@@ -15322,35 +15336,15 @@ impl<'a> Lower<'a> {
         Some(self.emit_block(stmts, None))
     }
 
-    fn lower_iterator_call(
+    fn lower_iterator_protocol_call(
         &mut self,
         receiver: u32,
-        target: IteratorDispatchTarget,
+        receiver_ty: Ty,
+        target: ResolvedCall,
     ) -> Option<u32> {
-        match target {
-            IteratorDispatchTarget::Member {
-                owner_fallback,
-                resolved,
-            } => {
-                let crate::symbol_resolver::ResolvedMember {
-                    member,
-                    ret,
-                    suspend,
-                    ..
-                } = *resolved;
-                self.emit_library_member_call(
-                    receiver,
-                    owner_fallback,
-                    member,
-                    ret,
-                    suspend,
-                    vec![],
-                )
-            }
-            IteratorDispatchTarget::Extension(callable) => {
-                self.emit_library_static_call(*callable, vec![receiver], false)
-            }
-        }
+        let name = target.emit_name()?.to_string();
+        self.lower_selected_op_call(receiver, receiver_ty, &name, &[], target, None, &[], None)
+            .map(|(value, _)| value)
     }
 
     /// Lower a positional argument list against parallel parameter types, coercing each argument to its
@@ -16623,6 +16617,18 @@ impl<'a> Lower<'a> {
         if let Some(singleton) = selection.singleton.as_ref() {
             return Some((self.lower_singleton_value(singleton)?, expected));
         }
+        if let Some((_, slot, ty)) = self
+            .captured_implicit_receivers
+            .last()
+            .and_then(|receivers| {
+                receivers
+                    .iter()
+                    .find(|(depth, _, _)| *depth == selection.receiver_depth)
+            })
+            .copied()
+        {
+            return Some((self.emit_get_value(slot), ty));
+        }
         if let Some((name, shadow_depth)) = selection.context_binding.as_ref() {
             let (slot, ty) = self
                 .scope
@@ -16631,19 +16637,6 @@ impl<'a> Lower<'a> {
                 .filter(|(candidate, _, _)| candidate == name)
                 .nth(*shadow_depth)
                 .map(|(_, slot, ty)| (*slot, *ty))?;
-            return Some((self.emit_get_value(slot), ty));
-        }
-        if let Some((_, slot, ty)) = self
-            .captured_implicit_receivers
-            .iter()
-            .rev()
-            .find_map(|receivers| {
-                receivers
-                    .iter()
-                    .find(|(depth, _, _)| *depth == selection.receiver_depth)
-            })
-            .copied()
-        {
             return Some((self.emit_get_value(slot), ty));
         }
         if selection.current {
@@ -19716,11 +19709,10 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let it_ty = self.info.ty(receiver);
         let protocol = self.info.iterator_protocol(receiver).cloned()?;
-        let iter_dispatch = protocol.iterator;
+        let iter_dispatch = *protocol.iterator;
         let iter_ty = protocol.iter_ty;
-        let iter_internal = iter_ty.obj_internal()?;
-        let hasnext_m = protocol.has_next;
-        let next_m = protocol.next;
+        let hasnext = *protocol.has_next;
+        let next = *protocol.next;
         let elem = protocol.elem_ty;
 
         // acc = new ArrayList()
@@ -19740,35 +19732,17 @@ impl<'a> Lower<'a> {
         let recv_to_v = self.fresh_value();
         let var_recv_to = self.emit_named_variable(recv_to_v, ty_to_ir(it_ty), Some(recv_g0));
         let recv_g = self.emit_get_value(recv_to_v);
-        let iter_call = self.lower_iterator_call(recv_g, iter_dispatch)?;
+        let iter_call = self.lower_iterator_protocol_call(recv_g, it_ty, iter_dispatch)?;
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
         // cond: it.hasNext()
         let it_g = self.emit_get_value(it_v);
-        let hasnext_ret = hasnext_m.ret;
-        let hasnext_suspend = hasnext_m.suspend();
-        let cond = self.emit_library_member_call(
-            it_g,
-            iter_internal,
-            hasnext_m,
-            hasnext_ret,
-            hasnext_suspend,
-            vec![],
-        )?;
+        let cond = self.lower_iterator_protocol_call(it_g, iter_ty, hasnext)?;
 
         // body: e = (elem) it.next(); acc.add/addAll(<inlined lambda body>)
         let it_g2 = self.emit_get_value(it_v);
-        let next_ret = next_m.ret;
-        let next_suspend = next_m.suspend();
-        let next_call = self.emit_library_member_call(
-            it_g2,
-            iter_internal,
-            next_m,
-            next_ret,
-            next_suspend,
-            vec![],
-        )?;
+        let next_call = self.lower_iterator_protocol_call(it_g2, iter_ty, next)?;
         // Coerce the `Object` iterator result to the element type through the same semantic scalar
         // boundary as an ordinary generic read; the backend owns its physical wrapper adapter.
         let elem_val = if self.has_scalar_value_repr(elem) {
@@ -25114,8 +25088,8 @@ impl<'a> Lower<'a> {
             // member (a non-invokable value never claims call syntax), so the shadowing parameter
             // in `lookup` must not divert lowering onto the (nonexistent) top-level route.
             let checker_selected_receiver = self.info.implicit_receiver_selections.contains_key(&e);
-            if (self.lookup(&fname).is_none() || checker_selected_receiver)
-                && (self.cur_class.is_none() || checker_selected_receiver)
+            if checker_selected_receiver
+                || (self.lookup(&fname).is_none() && self.cur_class.is_none())
             {
                 if let Some(r) = self.lower_implicit_receiver_call(&fname, &args, e) {
                     return Some(r);

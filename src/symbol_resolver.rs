@@ -3919,11 +3919,52 @@ impl<'a> SymbolResolver<'a> {
         type_args: &[Ty],
         callables: &Callables,
     ) -> Option<(FunctionInfo, Vec<Ty>)> {
-        let selected = self.select_receiver_function(receiver, name, args, type_args, callables)?;
+        match self.select_receiver_function_with_params_tracking(
+            receiver, name, args, type_args, callables,
+        ) {
+            CandidateSelection::Selected((selected, params, _)) => Some((selected, params)),
+            CandidateSelection::None | CandidateSelection::Ambiguous => None,
+        }
+    }
+
+    /// Tracking form used by synthesized language conventions. It preserves ambiguity and the exact
+    /// specialized return beside the selected declaration so the checker can commit one target and
+    /// lowering never has to repeat receiver or overload resolution.
+    pub(crate) fn select_receiver_function_with_params_tracking(
+        &self,
+        receiver: Ty,
+        name: &str,
+        args: &[CallArgKind],
+        type_args: &[Ty],
+        callables: &Callables,
+    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
+        let selected = match select_receiver_overload_from_functions_tracking(
+            self.lib,
+            receiver,
+            name,
+            args,
+            type_args,
+            ExtCtx {
+                fn_scope: self.fn_scope,
+                source: &self.src,
+            },
+            callables.functions(),
+            IndexedConvention::Ordinary,
+        ) {
+            CandidateSelection::Selected(selected) => selected,
+            CandidateSelection::None => return CandidateSelection::None,
+            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+        };
+        let binding_receiver = selected
+            .semantic_receiver()
+            .and_then(|declared| {
+                ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
+            })
+            .unwrap_or(receiver);
         let semantic = selected.semantic_signature();
         let mut bindings = seeded_gsig_binds(&semantic, type_args);
         if let Some(declared_receiver) = semantic.receiver {
-            unify_ty(declared_receiver, receiver, &mut bindings);
+            unify_ty(declared_receiver, binding_receiver, &mut bindings);
         }
         let value_params = &semantic.params[selected.context_count.min(semantic.params.len())..];
         for (&parameter, argument) in value_params.iter().zip(args) {
@@ -3934,8 +3975,35 @@ impl<'a> SymbolResolver<'a> {
         let params = value_params
             .iter()
             .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
-            .collect();
-        Some((selected, params))
+            .collect::<Vec<_>>();
+        let ret = if selected.is_extension() {
+            selected.generic_sig.as_ref().map_or(
+                selected.ret.apply(selected.callable.ret),
+                |signature| {
+                    specialized_extension_return(
+                        self.lib,
+                        &selected,
+                        bind_ext_ret(
+                            signature,
+                            binding_receiver,
+                            &args.iter().map(CallArgKind::ty).collect::<Vec<_>>(),
+                            type_args,
+                        ),
+                    )
+                },
+            )
+        } else {
+            resolved_member_from_info(
+                self.lib,
+                &self.src,
+                receiver,
+                args,
+                type_args,
+                selected.clone(),
+            )
+            .ret
+        };
+        CandidateSelection::Selected((selected, params, ret))
     }
 
     pub(crate) fn materialize_member_function(
