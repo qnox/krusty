@@ -1347,3 +1347,97 @@ suspend fun t(): Boolean = p().equals({arg_call})\n"
         );
     }
 }
+
+const EXTENSION_GUARDS_SOURCE: &str = "class H\n\
+    class Host {\n\
+    \x20 fun H.member(a: String, b: String?, c: Int): String = a\n\
+    }\n\
+    fun H.ext(a: String, b: String?, c: Int): String = a\n\
+    fun H?.optional(a: String): String = a\n\
+    fun box() = \"OK\"\n";
+
+const EXTENSION_GUARD_SHAPES_SOURCE: &str = "class H\n\
+    fun H.ext(a: String, b: String?, c: Int): String = a\n\
+    fun H?.optional(a: String): String = a\n\
+    private fun H.hidden(a: String): String = a\n\
+    fun <T> T.generic(a: String): String = a\n\
+    fun <T : Any> T.bounded(a: String): String = a\n\
+    fun box() = \"OK\"\n";
+
+#[test]
+fn extension_function_null_checks_its_receiver_and_params() {
+    // kotlinc guards an EXTENSION's receiver with `checkNotNullParameter(…, "<this>")` and its
+    // non-null reference value parameters just like a plain function's — a nullable receiver, a
+    // nullable parameter, and a primitive get none. The receiver's `LocalVariableTable` entry is
+    // named `$this$<function>` (not the parameter's own name).
+    let Some((dir, jh)) = krusty_compile("extrecvnull", EXTENSION_GUARD_SHAPES_SOURCE) else {
+        return;
+    };
+    // `-v` so the receiver's `LocalVariableTable` name is visible alongside the guards.
+    let text = common::javap(&["-v", "-p", &dir.join("BKt.class").to_string_lossy()])
+        .expect("pooled JavaRunner unavailable");
+    let _ = &jh;
+    let _ = std::fs::remove_dir_all(&dir);
+    let method = |name: &str| {
+        let start = text.find(name).unwrap_or_else(|| panic!("{name}:\n{text}"));
+        let rest = &text[start..];
+        rest[..rest[1..]
+            .find("public static")
+            .map(|i| i + 1)
+            .unwrap_or(rest.len())]
+            .to_string()
+    };
+    let ext = method(" ext(");
+    assert!(
+        ext.contains("// String <this>"),
+        "an extension guards its receiver as `<this>`:\n{ext}"
+    );
+    assert_eq!(
+        ext.matches("checkNotNullParameter").count(),
+        2,
+        "exactly the receiver and the non-null `a` are guarded — not `b: String?`, not `c: Int`:\n{ext}"
+    );
+    assert!(
+        ext.contains("$this$ext"),
+        "the receiver's LocalVariableTable name is `$this$<function>`:\n{ext}"
+    );
+    let optional = method(" optional(");
+    assert_eq!(
+        optional.matches("checkNotNullParameter").count(),
+        1,
+        "a NULLABLE receiver is not guarded; only the non-null parameter is:\n{optional}"
+    );
+    let hidden = method(" hidden(");
+    assert_eq!(
+        hidden.matches("checkNotNullParameter").count(),
+        0,
+        "a PRIVATE extension has no entry guards:\n{hidden}"
+    );
+    let generic = method(" generic(");
+    assert_eq!(
+        generic.matches("checkNotNullParameter").count(),
+        1,
+        "an unbounded type-parameter receiver admits null; only the value parameter is guarded:\n{generic}"
+    );
+    let bounded = method(" bounded(");
+    assert_eq!(
+        bounded.matches("checkNotNullParameter").count(),
+        2,
+        "an Any-bounded receiver and its non-null value parameter are guarded:\n{bounded}"
+    );
+}
+
+#[test]
+fn extension_guard_fixture_is_byte_identical_to_kotlinc() {
+    for class in ["H", "Host", "ExtensionReceiverGuardsKt"] {
+        match common::byte_diff_against_kotlinc(
+            "ExtensionReceiverGuards",
+            EXTENSION_GUARDS_SOURCE,
+            class,
+        ) {
+            None => panic!("extension guard parity: reference toolchain unavailable"),
+            Some(Ok(())) => {}
+            Some(Err(error)) => panic!("{error}"),
+        }
+    }
+}

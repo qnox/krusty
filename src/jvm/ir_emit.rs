@@ -1163,9 +1163,8 @@ fn build_class_metadata(
                     .unwrap_or_default();
                 // A member EXTENSION realized its receiver as `params[0]` — restore it to
                 // `Function.receiver_type` so the record's value parameters are the LOGICAL ones.
-                // Side tables have DIFFERENT indexing: `fn_params` (names, defaults) holds SOURCE
-                // parameters only in registration, while `fn_param_declared_nullable` leads with
-                // the receiver when one exists — align both by the receiver offset.
+                // Both parameter side tables use the physical IR order. An extension receiver is the
+                // first parameter, while Kotlin metadata exposes it separately from value parameters.
                 let is_ext =
                     ir.extension_receiver_fns.contains(&fid) && !metadata_params.is_empty();
                 let recv_offset = usize::from(is_ext);
@@ -1186,8 +1185,10 @@ fn build_class_metadata(
                     .iter()
                     .enumerate()
                     .map(|(i, t)| {
+                        // `fn_params` leads with the extension receiver (`$this$<fn>`) when one exists,
+                        // exactly like `param_defaults`; read past that explicitly recorded IR slot.
                         let n = names
-                            .and_then(|ns| ns.get(i).cloned())
+                            .and_then(|ns| ns.get(i + recv_offset).cloned())
                             .unwrap_or_else(|| format!("p{i}"));
                         (n, apply_nullable(i + recv_offset, *t))
                     })

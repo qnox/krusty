@@ -1261,8 +1261,15 @@ fn lower_file_at_reporting_impl(
                     .collect();
                 let mut param_checks =
                     param_checks_for(m, &logical_params, &c.type_params, &class_nonnull_tps);
-                if extension_receiver.is_some() {
-                    param_checks.insert(0, None);
+                // A member EXTENSION's receiver is JVM parameter 0 and carries kotlinc's `<this>`
+                // guard ahead of the value parameters' own.
+                if let Some(extension) = extension_receiver.as_ref() {
+                    param_checks.insert(
+                        0,
+                        (!m.visibility.is_private())
+                            .then(|| receiver_check_for(m, ty_to_ir(extension.receiver_ty())))
+                            .flatten(),
+                    );
                 }
                 // The checker `Ty` carries no nullability, so recover the declared `?` from the method's
                 // AST return type (`fun f(): T?`) — same as a top-level function. A nullable value-class
@@ -1379,8 +1386,10 @@ fn lower_file_at_reporting_impl(
                             }
                         }
                     }
-                    let mut names =
-                        vec!["$receiver".to_string(); usize::from(extension_receiver.is_some())];
+                    let mut names = vec![
+                        format!("$this${}", m.name);
+                        usize::from(extension_receiver.is_some())
+                    ];
                     names.extend(m.params.iter().map(|p| p.name.clone()));
                     if c.is_interface() && !all_const {
                         // An interface's non-constant default may reference a class declared LATER in
@@ -1419,7 +1428,7 @@ fn lower_file_at_reporting_impl(
                     let arr_ty = ty_to_ir(logical_params[m.params.len() - 1]);
                     let size0 = lo.emit_const(IrConst::Int(0));
                     let empty = lo.emit_new_array(arr_ty, size0);
-                    let mut names = vec!["$receiver".to_string(); receiver_offset];
+                    let mut names = vec![format!("$this${}", m.name); receiver_offset];
                     names.extend(m.params.iter().map(|p| p.name.clone()));
                     let mut info = lo
                         .ir
@@ -2285,7 +2294,8 @@ fn lower_file_at_reporting_impl(
                 let ret = ty_to_ir(sig.ret);
                 let receiver_nullable_type_parameter =
                     recv_ty.is_ty_param() && recv_ty.upper_bound_admits_null();
-                let mut param_checks = vec![(!recv_ref.nullable()
+                let mut param_checks = vec![(!f.visibility.is_private()
+                    && !recv_ref.nullable()
                     && !receiver_nullable_type_parameter
                     && recv_ty.is_reference())
                 .then(|| "<this>".to_string())];
@@ -2861,7 +2871,7 @@ fn lower_file_at_reporting_impl(
                         {
                             lo.ir.fn_params.entry(fid).or_insert_with(|| {
                                 let mut names = vec![
-                                    "$receiver".to_string();
+                                    format!("$this${}", m.name);
                                     usize::from(m.receiver.is_some())
                                 ];
                                 names.extend(
@@ -2904,7 +2914,7 @@ fn lower_file_at_reporting_impl(
                     }
                     lo.ir.fn_params.entry(fid).or_insert_with(|| {
                         let mut names =
-                            vec!["$receiver".to_string(); usize::from(m.receiver.is_some())];
+                            vec![format!("$this${}", m.name); usize::from(m.receiver.is_some())];
                         names.extend(m.params.iter().map(|parameter| parameter.name.clone()));
                         FnParamInfo::names(names)
                     });
@@ -2972,7 +2982,7 @@ fn lower_file_at_reporting_impl(
                                 None => defaults.push(None),
                             }
                         }
-                        let mut names = vec!["$receiver".to_string(); receiver_offset];
+                        let mut names = vec![format!("$this${}", m.name); receiver_offset];
                         names.extend(m.params.iter().map(|parameter| parameter.name.clone()));
                         let info = lo
                             .ir
@@ -3076,7 +3086,7 @@ fn lower_file_at_reporting_impl(
                     lo.cur_class = Some(type_name(&internal));
                     lo.cur_fn = crate::ir::IrFunctionScope::declared(gfid, gname);
                     lo.ir.fn_params.entry(gfid).or_insert_with(|| {
-                        let mut names = vec!["$receiver".to_string()];
+                        let mut names = vec![format!("$this${}", p.name)];
                         names.extend(
                             p.context_params
                                 .iter()
@@ -3110,7 +3120,7 @@ fn lower_file_at_reporting_impl(
                         lo.cur_fn = crate::ir::IrFunctionScope::declared(sfid, sname);
                         let setter_param = ast::setter_param_or_value(setter.param.as_ref());
                         lo.ir.fn_params.entry(sfid).or_insert_with(|| {
-                            let mut names = vec!["$receiver".to_string()];
+                            let mut names = vec![format!("$this${}", p.name)];
                             names.extend(
                                 p.context_params
                                     .iter()
@@ -28126,6 +28136,17 @@ fn expr_tree_calls_name_where(
             })
         },
     )
+}
+
+/// The `checkNotNullParameter` guard an EXTENSION receiver carries: kotlinc names it `<this>` and
+/// guards it exactly like a value parameter — a non-null reference receiver, but not a nullable one
+/// and not a bare type parameter without a non-null bound (`fun <T> T.f()` accepts null).
+fn receiver_check_for(f: &ast::FunDecl, receiver_ty: Ty) -> Option<String> {
+    let reference = f.receiver.as_ref()?;
+    let nullable_type_parameter =
+        receiver_ty.is_ty_param() && receiver_ty.upper_bound_admits_null();
+    (!reference.nullable() && !nullable_type_parameter && receiver_ty.is_reference())
+        .then(|| "<this>".to_string())
 }
 
 fn param_checks_for(
