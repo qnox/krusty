@@ -111,7 +111,8 @@ fn serializable_class_encode_round_trips() {
             json.clone(),
             jimage.clone(),
         ]));
-        let src = "@Serializable class Foo(val a: Int, val b: String)\n\
+        let src = "import kotlinx.serialization.Serializable\n\
+                   @Serializable class Foo(val a: Int, val b: String)\n\
                    @Serializable class Rich(val n: Int, val flag: Boolean, val ratio: Float, val name: String)\n\
                    @Serializable class Wide(val big: Long, val d: Double, val tag: String)\n\
                    @Serializable class Inner(val v: Int)\n\

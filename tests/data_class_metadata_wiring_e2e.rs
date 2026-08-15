@@ -148,7 +148,7 @@ fn value_class_parameter_member_is_byte_identical() {
     assert_byte_identical(
         "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\ninterface I {\n    suspend fun f(a: K): String\n}\n",
         "demo/I",
-        &[],
+        &[common::stdlib_jar()],
     );
 }
 
@@ -158,7 +158,7 @@ fn value_class_return_member_is_byte_identical() {
     assert_byte_identical(
         "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\ninterface I {\n    fun f(): K\n}\n",
         "demo/I",
-        &[],
+        &[common::stdlib_jar()],
     );
 }
 
@@ -172,7 +172,7 @@ fn value_class_body_property_is_byte_identical() {
     assert_byte_identical(
         "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\nclass Holder {\n    val k: K = K(\"OK\")\n}\n",
         "demo/Holder",
-        &[],
+        &[common::stdlib_jar()],
     );
 }
 
@@ -269,7 +269,7 @@ fn suspend_returning_nullable_value_class_is_byte_identical() {
     assert_byte_identical(
         "package demo\n@JvmInline\nvalue class Id(val v: String)\ninterface R {\n    suspend fun resolve(k: String): Id?\n}\n",
         "demo/R",
-        &[],
+        &[common::stdlib_jar()],
     );
 }
 

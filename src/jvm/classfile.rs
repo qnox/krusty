@@ -1113,7 +1113,7 @@ impl ClassWriter {
             }
             AnnoValue::Class(internal) => {
                 out.push(b'c');
-                let internal = internal.render();
+                let internal = super::jvm_class_map::to_jvm_type_name(*internal).render();
                 let ci = self.cp.utf8(&format!("L{internal};"));
                 u2(out, ci);
             }

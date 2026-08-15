@@ -293,13 +293,15 @@ fun result() = Token.serializer()
 
 #[test]
 fn singleton_member_calls_use_the_shared_source_set_harness() {
+    let stdlib = common::stdlib_jar();
     for case in CASES {
         let source_texts = case
             .sources
             .iter()
             .map(|(_, source)| *source)
             .collect::<Vec<_>>();
-        let diagnostics = common::front_end_diagnostics_files(&source_texts, &[], None);
+        let diagnostics =
+            common::front_end_diagnostics_files(&source_texts, std::slice::from_ref(&stdlib), None);
         match case.outcome {
             Outcome::Clean | Outcome::BoxOk => assert!(
                 diagnostics.is_empty(),

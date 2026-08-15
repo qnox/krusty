@@ -320,38 +320,70 @@ fn binary_retained_annotation_precedes_the_nullability_one() {
 }
 
 #[test]
-fn nested_annotation_argument_is_dropped_whole() {
-    // KNOWN GAP, pinned so it stays visible: a nested annotation value (`ReplaceWith`) does not
-    // fold, and because the deprecation facts are derived from the folded records, the annotation,
-    // the `Deprecated` attribute and ACC_SYNTHETIC all go with it. kotlinc emits all three. The
-    // fold's contract is preserved — nothing WRONG is emitted — but this spelling is the common
-    // one, so the divergence is asserted rather than left to be discovered.
-    let Some((krusty_dir, kotlinc_dir)) = compile_both(
+fn nested_annotation_argument_matches_kotlinc() {
+    assert_same_annotations(
         "nested",
         "Nest.kt",
+        "q/NestKt",
+        &["older(java.lang.String)"],
         "package q\n\
          @Deprecated(\"gone\", ReplaceWith(\"newer(x)\"), DeprecationLevel.HIDDEN)\n\
          fun older(x: String): String = x\n\
          fun newer(x: String): String = x\n",
-    ) else {
-        eprintln!("skip (nested: provisioned kotlinc/JAVA_HOME unavailable)");
+    );
+}
+
+#[test]
+fn imported_class_literal_annotation_argument_matches_kotlinc() {
+    assert_same_annotations(
+        "imported_class_literal",
+        "ClassLiteral.kt",
+        "q/ClassLiteralKt",
+        &["marked()"],
+        "package q\n\
+         import kotlin.reflect.KClass\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         @Target(AnnotationTarget.FUNCTION)\n\
+         annotation class ClassValue(val value: KClass<*>)\n\
+         @ClassValue(String::class)\n\
+         fun marked(): String = \"OK\"\n",
+    );
+}
+
+#[test]
+fn argument_bearing_function_annotation_round_trips_through_krusty_metadata() {
+    const LIB: &str = "package lib\n\
+        import kotlin.jvm.JvmName\n\
+        @JvmName(\"physicalName\")\n\
+        fun sourceName(): String = \"OK\"\n";
+    const MAIN: &str = "import lib.sourceName\n\
+        fun box(): String = sourceName()\n";
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let Some(library) = common::compile_lib("annotation-metadata-args", LIB) else {
+        eprintln!("skip (toolchain unavailable)");
         return;
     };
-    let krusty = annotation_shapes(&krusty_dir, "q/NestKt");
-    let kotlinc = annotation_shapes(&kotlinc_dir, "q/NestKt");
-    let older = |shapes: &std::collections::HashMap<String, Vec<String>>| {
-        shapes
-            .iter()
-            .find(|(declaration, _)| declaration.contains("older(java.lang.String)"))
-            .map(|(_, lines)| lines.join("\n"))
-            .expect("older() present")
-    };
-    assert!(
-        older(&kotlinc).contains("ACC_SYNTHETIC") && older(&kotlinc).contains("Deprecated:"),
-        "fixture must exercise kotlinc's hidden-deprecation shape"
+    assert_eq!(
+        common::compile_and_run_box(MAIN, "Main", &[library, stdlib], Some(jdk.as_path()))
+            .expect("argument-bearing @JvmName must survive Krusty metadata round-trip"),
+        "OK",
+    );
+}
+
+#[test]
+fn missing_required_annotation_argument_is_a_frontend_error() {
+    let diagnostics = common::front_end_diagnostics(
+        "annotation class Required(val value: String)\n\
+         @Required()\n\
+         fun marked(): String = \"bad\"\n",
+        &[],
+        None,
     );
     assert!(
-        !older(&krusty).contains("ACC_SYNTHETIC"),
-        "nested-value gap closed — fold the nested annotation and drop this test's inversion"
+        diagnostics
+            .iter()
+            .any(|message| message.contains("no value passed for parameter 'value'")),
+        "missing required annotation element must not reach lowering: {diagnostics:?}"
     );
 }

@@ -2596,7 +2596,12 @@ impl JvmLibraries {
                 enum_entries,
                 enum_entries_accessor,
                 ctor_named_params: metadata::class_constructor_params(&ci),
-                retention: ci.retention.clone(),
+                // JLS default: an annotation declaration without `@Retention` has CLASS retention.
+                // Normalize that provider fact here so common checking never branches on declaration
+                // origin or tries to interpret an absent classfile attribute.
+                retention: ci.retention.clone().or_else(|| {
+                    (kind == crate::libraries::TypeKind::Annotation).then(|| "CLASS".to_string())
+                }),
             })
         }
     }

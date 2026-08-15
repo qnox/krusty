@@ -22,8 +22,16 @@ use super::common;
 /// Lower a source through krusty's full front end to its parsed `File` + real `IrFile`, or `None` if
 /// it can't compile (or no stdlib is available).
 fn lower(src: &str) -> Option<(krusty::ast::File, krusty::ir::IrFile)> {
-    let jar = common::stdlib_jar();
-    let cp = Rc::new(krusty::jvm::classpath::Classpath::new(vec![jar]));
+    lower_with_classpath(src, &[])
+}
+
+fn lower_with_classpath(
+    src: &str,
+    extra_classpath: &[std::path::PathBuf],
+) -> Option<(krusty::ast::File, krusty::ir::IrFile)> {
+    let mut jars = vec![common::stdlib_jar()];
+    jars.extend_from_slice(extra_classpath);
+    let cp = Rc::new(krusty::jvm::classpath::Classpath::new(jars));
 
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
@@ -131,8 +139,16 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
 fn serialization_activates_from_source_annotation() {
     // The keystone: the surface activates from a REAL `@Serializable` in source — parser captures the
     // annotation, `PluginContext::from_source` indexes it, the plugin fires. No manual injection.
-    let Some((file, mut ir)) = lower("@Serializable class Foo(val a: Int, val b: String)") else {
-        eprintln!("skipping: no stdlib jar / class outside IR subset");
+    let Some(serialization) = common::find_jar("kotlinx-serialization-core-jvm-", &["sources"])
+    else {
+        eprintln!("skipping: no kotlinx-serialization core jar");
+        return;
+    };
+    let Some((file, mut ir)) = lower_with_classpath(
+        "import kotlinx.serialization.Serializable\n@Serializable class Foo(val a: Int, val b: String)",
+        &[serialization],
+    ) else {
+        eprintln!("skipping: class outside IR subset");
         return;
     };
 

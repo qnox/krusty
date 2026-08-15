@@ -8,11 +8,12 @@
 //! check.
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures};
+use krusty::frontend::{check_file, collect_signatures_with_cp};
 use krusty::ir_lower::lower_file;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::classreader::parse_class;
 use krusty::jvm::ir_emit::emit_all;
+use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
 use krusty::parser::parse;
@@ -30,18 +31,19 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
     assert!(!d.has_errors(), "unexpected parse errors");
 
     // `check_file` accepts value-class files (use-site unboxing is wired); the file resolves clean.
-    let mut syms = collect_signatures(&files, &mut d);
+    let cp = std::rc::Rc::new(Classpath::new(vec![common::stdlib_jar()]));
+    let mut syms =
+        collect_signatures_with_cp(&files, Box::new(JvmLibraries::new(cp.clone())), &mut d);
     let info = check_file(&files[0], &mut syms, &mut d);
     assert!(!d.has_errors(), "value-class file should check clean");
 
-    let runtime = krusty::libraries::EmptySymbolSource;
+    let runtime = JvmLibraries::new(cp.clone());
     let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("value class should lower");
     let facade = file_class_name("S", None);
     // The value-class `-impl` members are synthesized by the JVM passes (not `ir_lower`).
     krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms)
         .expect("backend passes should accept this value class");
-    let cp = Classpath::new(vec![]);
-    let classes = emit_all(&ir, &facade, &cp, None, &syms).expect("emit");
+    let classes = emit_all(&ir, &facade, &*cp, None, &syms).expect("emit");
 
     let (_, bytes) = classes
         .iter()
@@ -96,17 +98,18 @@ fn value_class_is_property_uses_javabean_getter_name() {
     let files = vec![parse(src, &toks, &mut d)];
     assert!(!d.has_errors(), "unexpected parse errors");
 
-    let mut syms = collect_signatures(&files, &mut d);
+    let cp = std::rc::Rc::new(Classpath::new(vec![common::stdlib_jar()]));
+    let mut syms =
+        collect_signatures_with_cp(&files, Box::new(JvmLibraries::new(cp.clone())), &mut d);
     let info = check_file(&files[0], &mut syms, &mut d);
     assert!(!d.has_errors(), "value-class file should check clean");
 
-    let runtime = krusty::libraries::EmptySymbolSource;
+    let runtime = JvmLibraries::new(cp.clone());
     let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("value class should lower");
     let facade = file_class_name("Flag", None);
     krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms)
         .expect("backend passes should accept this value class");
-    let cp = Classpath::new(vec![]);
-    let classes = emit_all(&ir, &facade, &cp, None, &syms).expect("emit");
+    let classes = emit_all(&ir, &facade, &*cp, None, &syms).expect("emit");
 
     let (_, bytes) = classes
         .iter()

@@ -2,7 +2,8 @@
 //! `Function` messages (`@kotlin.Metadata.d1`). Proto2 semantics: we only write fields that are set.
 //!
 //! Wire format: each field is `tag = (field_number << 3) | wire_type` (a varint), followed by the
-//! value. Wire types used here: 0 = varint, 2 = length-delimited (bytes / nested message).
+//! value. Wire types used here: 0 = varint, 1 = fixed64, 2 = length-delimited (bytes / nested
+//! message), and 5 = fixed32.
 
 #[derive(Default, Clone)]
 pub struct Pb {
@@ -47,6 +48,16 @@ impl Pb {
     pub fn field_varint(&mut self, field: u32, v: u64) {
         self.tag(field, 0);
         self.varint(v);
+    }
+
+    pub fn field_fixed32(&mut self, field: u32, v: u32) {
+        self.tag(field, 5);
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn field_fixed64(&mut self, field: u32, v: u64) {
+        self.tag(field, 1);
+        self.buf.extend_from_slice(&v.to_le_bytes());
     }
 
     /// `field: bytes/string` (wire type 2).

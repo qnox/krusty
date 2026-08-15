@@ -1172,14 +1172,8 @@ fn lower_file_at_reporting_impl(
                 companion_class: None,
                 secondary_ctors: vec![],
                 has_primary_ctor: c.primary_ctor_annotations.is_some(),
-                applied_annotations: class_applied_annotations(
-                    file,
-                    lo.file_index,
-                    syms,
-                    c,
-                    &lo.ir,
-                ),
-                field_annotations: class_field_annotations(file, lo.file_index, c, syms, &lo.ir),
+                applied_annotations: class_applied_annotations(c, info),
+                field_annotations: class_field_annotations(c, info),
                 annotation_retention: (c.kind == ast::ClassKind::Annotation).then(|| {
                     syms.annotation_retention(class_identity)
                         .unwrap_or(crate::ir::AnnoRetention::Default)
@@ -1495,7 +1489,7 @@ fn lower_file_at_reporting_impl(
                     Ok(None) => {}
                     Err(reason) => return lo.bail(reason),
                 }
-                let annotations = fn_applied_annotations(file, file_index, syms, m, &lo.ir);
+                let annotations = fn_applied_annotations(m, info);
                 if !annotations.visible.is_empty() || !annotations.invisible.is_empty() {
                     lo.ir.function_annotations.insert(fid, annotations);
                 }
@@ -2318,7 +2312,7 @@ fn lower_file_at_reporting_impl(
                     dispatch_receiver: None,
                     param_checks,
                 });
-                let annotations = fn_applied_annotations(file, file_index, syms, f, &lo.ir);
+                let annotations = fn_applied_annotations(f, info);
                 if !annotations.visible.is_empty() || !annotations.invisible.is_empty() {
                     lo.ir.function_annotations.insert(id, annotations);
                 }
@@ -2404,7 +2398,7 @@ fn lower_file_at_reporting_impl(
                     dispatch_receiver: None,
                     param_checks,
                 });
-                let annotations = fn_applied_annotations(file, file_index, syms, f, &lo.ir);
+                let annotations = fn_applied_annotations(f, info);
                 if !annotations.visible.is_empty() || !annotations.invisible.is_empty() {
                     lo.ir.function_annotations.insert(id, annotations);
                 }
@@ -4021,7 +4015,7 @@ fn lower_file_at_reporting_impl(
                             Some(lo.emit_block(out, None))
                         };
                         secs.push(crate::ir::IrSecondaryCtor {
-                            annotations: ctor_annotations(file, file_index, syms, sc, &lo.ir),
+                            annotations: ctor_annotations(sc, info),
                             vararg_index: sc.params.iter().position(|p| p.is_vararg),
                             params: param_irs,
                             named_params: sc
@@ -27433,259 +27427,94 @@ fn class_internal(file: &ast::File, name: &str) -> String {
     }
 }
 
-/// The `ClassDecl` for a class named `name` (simple name) declared in this file, if any.
-fn file_class_decl<'a>(file: &'a ast::File, name: &str) -> Option<&'a ast::ClassDecl> {
-    file.decls.iter().find_map(|&d| match file.decl(d) {
-        ast::Decl::Class(c) if c.name == name => Some(c),
-        _ => None,
-    })
-}
-
-fn file_class_decl_by_internal(file: &ast::File, internal: TypeName) -> Option<&ast::ClassDecl> {
-    file.decls
-        .iter()
-        .find_map(|&declaration| match file.decl(declaration) {
-            ast::Decl::Class(class) if internal.matches(&class_internal(file, &class.name)) => {
-                Some(class)
-            }
-            _ => None,
-        })
-}
-
-/// The `ClassDecl` of a RUNTIME-retained `annotation class` named `name` declared in this file — the only
-/// annotations krusty emits into `RuntimeVisibleAnnotations`. `None` for a non-annotation / non-file /
-/// `SOURCE`/`BINARY`-retained annotation. Kotlin's default retention is RUNTIME.
-fn runtime_annotation_decl<'a>(
-    file: &'a ast::File,
-    syms: &FrontendSymbols,
-    internal: TypeName,
-) -> Option<&'a ast::ClassDecl> {
-    let cd = file_class_decl_by_internal(file, internal)
-        .filter(|class| class.kind == ast::ClassKind::Annotation)?;
-    matches!(
-        syms.annotation_retention(internal),
-        Some(
-            crate::types::AnnotationRetention::Default | crate::types::AnnotationRetention::Runtime
-        )
-    )
-    .then_some(cd)
-}
-
-/// Fold an annotation argument expression to an encodable `AnnoValue` (JVMS §4.7.16.1), or `None` for a
-/// shape not modeled — in which case the whole annotation is dropped (never emitted with a wrong value).
-/// Fold one annotation argument to its class-file `element_value`. `element_ty` is the DECLARED
-/// type of the element this value binds to, when known: an enum constant's own type. A classpath
-/// enum (`DeprecationLevel.HIDDEN`) has no declaration in this file to look up, and its receiver
-/// spelling may be an import alias — the element type names the enum directly, so no name
-/// resolution is needed or attempted.
-fn eval_anno_value(
-    file: &ast::File,
-    _file_index: u32,
-    _syms: &FrontendSymbols,
-    _ir: &crate::ir::IrFile,
-    e: AstExprId,
-    element_ty: Option<Ty>,
-) -> Option<crate::ir::AnnoValue> {
-    use crate::ir::{AnnoValue, IrConst};
-    Some(match file.expr(e) {
-        Expr::StringLit(s) => AnnoValue::Const(IrConst::String(s.clone())),
-        Expr::IntLit(v) | Expr::UIntLit(v) => AnnoValue::Const(IrConst::Int(*v as i32)),
-        Expr::LongLit(v) | Expr::ULongLit(v) => AnnoValue::Const(IrConst::Long(*v)),
-        Expr::DoubleLit(v) => AnnoValue::Const(IrConst::Double(*v)),
-        Expr::FloatLit(v) => AnnoValue::Const(IrConst::Float(*v)),
-        Expr::BoolLit(v) => AnnoValue::Const(IrConst::Boolean(*v)),
-        Expr::CharLit(v) => AnnoValue::Const(IrConst::Char(*v)),
-        // `E.E0` — an ENUM constant (`receiver` names an enum class declared in this file).
-        Expr::Member { receiver, name } => {
-            let Expr::Name(enum_name) = file.expr(*receiver) else {
-                return None;
-            };
-            if file_class_decl(file, enum_name).is_some_and(|c| c.kind == ast::ClassKind::Enum) {
-                let internal = class_internal(file, enum_name);
-                AnnoValue::Enum(type_name(&internal), name.clone())
-            } else {
-                // Not declared here: bind the constant to the ELEMENT's declared enum type.
-                let internal = element_ty?.kotlin_class_internal()?;
-                if !_syms
-                    .libraries
-                    .classifier(internal)
-                    .is_some_and(|classifier| classifier.is_enum())
-                {
-                    return None;
-                }
-                AnnoValue::Enum(internal, name.clone())
-            }
+/// Convert one frontend-checked semantic annotation value into backend-agnostic IR. This conversion
+/// is intentionally total: lowering must neither reopen source expressions nor discard a checked
+/// value it does not understand.
+fn checked_annotation_value_to_ir(value: &crate::types::AnnotationValue) -> crate::ir::AnnoValue {
+    use crate::types::AnnotationValue;
+    match value {
+        AnnotationValue::Int(value) => crate::ir::AnnoValue::Const(crate::ir::IrConst::Int(*value)),
+        AnnotationValue::Long(value) => {
+            crate::ir::AnnoValue::Const(crate::ir::IrConst::Long(*value))
         }
-        // `A::class` — a class literal. Only a class DECLARED in this file has an internal name
-        // lowering can name on its own: `class_internal` prefixes the current package, which for an
-        // imported classifier (`String::class` → `p/String`) fabricates a class that does not
-        // exist. Drop rather than emit a wrong value, exactly as the enum branch above does.
-        Expr::CallableRef {
-            receiver: Some(r),
-            name,
-        } if name == "class" => {
-            let Expr::Name(cn) = file.expr(*r) else {
-                return None;
-            };
-            file_class_decl(file, cn)?;
-            let internal = class_internal(file, cn);
-            AnnoValue::Class(type_name(&internal))
+        AnnotationValue::Float(value) => {
+            crate::ir::AnnoValue::Const(crate::ir::IrConst::Float(*value))
         }
-        Expr::Call { callee, args } => {
-            let Expr::Name(fname) = file.expr(*callee) else {
-                return None;
-            };
-            match fname.as_str() {
-                "emptyArray" => AnnoValue::Array(Vec::new()),
-                "arrayOf" | "intArrayOf" | "longArrayOf" | "doubleArrayOf" | "floatArrayOf"
-                | "booleanArrayOf" | "charArrayOf" | "byteArrayOf" | "shortArrayOf" => {
-                    let items: Option<Vec<_>> = args
-                        .iter()
-                        .map(|&a| eval_anno_value(file, _file_index, _syms, _ir, a, element_ty))
-                        .collect();
-                    AnnoValue::Array(items?)
-                }
-                // A nested annotation expression needs its own resolved callee identity. Until the
-                // frontend records that fact, do not reinterpret its spelling in lowering.
-                _ => return None,
-            }
+        AnnotationValue::Double(value) => {
+            crate::ir::AnnoValue::Const(crate::ir::IrConst::Double(*value))
         }
-        _ => return None,
-    })
-}
-
-/// The same-file fold plus the declared JVM retention, for callers that can emit either
-/// `RuntimeVisibleAnnotations` or `RuntimeInvisibleAnnotations`. `None` when `Name` is not a
-/// file-declared annotation class, is SOURCE-retained, or an argument does not fold.
-fn file_applied_annotation(
-    file: &ast::File,
-    file_index: u32,
-    syms: &FrontendSymbols,
-    internal: TypeName,
-    args: &[AstExprId],
-    ir: &crate::ir::IrFile,
-) -> Option<(crate::ir::AppliedAnnotation, Retention)> {
-    file_class_decl_by_internal(file, internal)
-        .filter(|class| class.kind == ast::ClassKind::Annotation)?;
-    let retention = match syms.annotation_retention(internal)? {
-        crate::types::AnnotationRetention::Default | crate::types::AnnotationRetention::Runtime => {
-            Retention::Runtime
+        AnnotationValue::Boolean(value) => {
+            crate::ir::AnnoValue::Const(crate::ir::IrConst::Boolean(*value))
         }
-        crate::types::AnnotationRetention::Binary => Retention::Binary,
-        crate::types::AnnotationRetention::Source => return None,
-    };
-    let annotation = fold_file_annotation(file, file_index, syms, internal, args, ir)?;
-    Some((annotation, retention))
-}
-
-/// Fold `@Name(args…)` to an `AppliedAnnotation`, pairing each argument with the annotation's
-/// constructor-parameter name — by LABEL for a named argument, by position otherwise (the same rule
-/// the classpath fold uses; an annotation's elements have defaults and may be written in any
-/// order). `None` unless `Name` is a RUNTIME-retained file annotation class and every argument
-/// folds to a constant.
-fn build_applied_annotation(
-    file: &ast::File,
-    file_index: u32,
-    syms: &FrontendSymbols,
-    internal: TypeName,
-    args: &[AstExprId],
-    ir: &crate::ir::IrFile,
-) -> Option<crate::ir::AppliedAnnotation> {
-    runtime_annotation_decl(file, syms, internal)?;
-    fold_file_annotation(file, file_index, syms, internal, args, ir)
-}
-
-/// Pair each argument of a FILE-declared annotation with its element name — by label for a named
-/// argument, by position otherwise — and fold the values. Retention is the caller's concern.
-fn fold_file_annotation(
-    file: &ast::File,
-    file_index: u32,
-    syms: &FrontendSymbols,
-    internal: TypeName,
-    args: &[AstExprId],
-    ir: &crate::ir::IrFile,
-) -> Option<crate::ir::AppliedAnnotation> {
-    let cd = file_class_decl_by_internal(file, internal)
-        .filter(|class| class.kind == ast::ClassKind::Annotation)?;
-    let mut values = Vec::new();
-    let mut positional = 0usize;
-    for &arg in args {
-        let index = match file.annotation_arg_names.get(&arg.0) {
-            Some(label) => {
-                let index = cd.props.iter().position(|prop| &prop.name == label)?;
-                positional = index + 1;
-                index
-            }
-            None => {
-                let index = positional;
-                positional += 1;
-                index
-            }
-        };
-        let name = cd.props.get(index)?.name.clone();
-        values.push((
-            index,
-            name,
-            eval_anno_value(file, file_index, syms, ir, arg, None)?,
-        ));
+        AnnotationValue::Char(value) => {
+            crate::ir::AnnoValue::Const(crate::ir::IrConst::Char(*value))
+        }
+        AnnotationValue::String(value) => {
+            crate::ir::AnnoValue::Const(crate::ir::IrConst::String(value.clone()))
+        }
+        AnnotationValue::Enum(internal, constant) => {
+            crate::ir::AnnoValue::Enum(*internal, constant.clone())
+        }
+        AnnotationValue::Class(internal) => crate::ir::AnnoValue::Class(*internal),
+        AnnotationValue::Annotation { internal, values } => {
+            crate::ir::AnnoValue::Annotation(crate::ir::AppliedAnnotation {
+                internal: *internal,
+                values: values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), checked_annotation_value_to_ir(value)))
+                    .collect(),
+            })
+        }
+        AnnotationValue::Array(values) => {
+            crate::ir::AnnoValue::Array(values.iter().map(checked_annotation_value_to_ir).collect())
+        }
     }
-    // kotlinc writes `element_value_pairs` in the annotation's DECLARATION order, not the order
-    // the call site happened to name them.
-    values.sort_by_key(|(index, _, _)| *index);
-    let values = values
-        .into_iter()
-        .map(|(_, name, value)| (name, value))
-        .collect();
-    Some(crate::ir::AppliedAnnotation { internal, values })
 }
 
-fn build_applied_annotations(
-    file: &ast::File,
-    file_index: u32,
-    syms: &FrontendSymbols,
-    annotations: &[ast::AnnotationRef],
-    args: &[Vec<AstExprId>],
-    ir: &crate::ir::IrFile,
-) -> Vec<crate::ir::AppliedAnnotation> {
-    annotations
-        .iter()
-        .zip(args.iter())
-        .filter_map(|(annotation, args)| {
-            let internal = syms.resolved_annotation(file_index, annotation)?;
-            build_applied_annotation(file, file_index, syms, internal, args, ir)
-        })
-        .collect()
+fn checked_annotation_to_ir(
+    annotation: &crate::types::AppliedAnnotation,
+) -> crate::ir::AppliedAnnotation {
+    crate::ir::AppliedAnnotation {
+        internal: annotation.internal,
+        values: annotation
+            .values
+            .iter()
+            .map(|(name, value)| (name.clone(), checked_annotation_value_to_ir(value)))
+            .collect(),
+    }
 }
 
-/// User annotations on enum-constant fields. Same-file runtime annotations are folded; unsupported
-/// annotations are skipped rather than emitted with wrong values.
+fn checked_applied_annotation<'a>(
+    info: &'a FrontendTypeInfo,
+    annotation: &ast::AnnotationRef,
+) -> &'a crate::types::AppliedAnnotation {
+    info.applied_annotation(annotation).unwrap_or_else(|| {
+        panic!(
+            "frontend did not record checked annotation application at {}..{}",
+            annotation.span.lo, annotation.span.hi
+        )
+    })
+}
+
 fn class_field_annotations(
-    file: &ast::File,
-    file_index: u32,
     c: &ast::ClassDecl,
-    syms: &FrontendSymbols,
-    ir: &crate::ir::IrFile,
+    info: &FrontendTypeInfo,
 ) -> Vec<crate::ir::FieldAnnotations> {
     let mut out = Vec::new();
     for e in &c.enum_entries {
         let mut visible = Vec::new();
         let mut invisible = Vec::new();
-        for (annotation, arguments) in e.annotations.iter().zip(e.annotation_args.iter()) {
-            let Some(internal) = syms.resolved_annotation(file_index, annotation) else {
-                continue;
-            };
-            match library_field_annotation(file, file_index, syms, internal, arguments, ir) {
-                Some((anno, Retention::Runtime)) => visible.push(anno),
-                Some((anno, Retention::Binary)) => invisible.push(anno),
-                // SAME-FILE RUNTIME annotations still resolve through build_applied_annotation directly
-                // when the classpath path can't (a file-local annotation class isn't on the classpath).
-                None => {
-                    if let Some(anno) =
-                        build_applied_annotation(file, file_index, syms, internal, arguments, ir)
-                    {
-                        visible.push(anno);
-                    }
+        for annotation in &e.annotations {
+            let applied = checked_applied_annotation(info, annotation);
+            match applied.retention {
+                crate::types::AnnotationRetention::Default
+                | crate::types::AnnotationRetention::Runtime => {
+                    visible.push(checked_annotation_to_ir(applied))
                 }
+                crate::types::AnnotationRetention::Binary => {
+                    invisible.push(checked_annotation_to_ir(applied))
+                }
+                crate::types::AnnotationRetention::Source => {}
             }
         }
         if !visible.is_empty() || !invisible.is_empty() {
@@ -27699,118 +27528,21 @@ fn class_field_annotations(
     out
 }
 
-/// JVM retention of an annotation whose uses krusty emits: RUNTIME → `RuntimeVisibleAnnotations`,
-/// BINARY (`RetentionPolicy.CLASS`) → `RuntimeInvisibleAnnotations`. SOURCE is dropped (returns `None`).
-enum Retention {
-    Runtime,
-    Binary,
-}
-
-/// Resolve `@Name(args…)` applied to a FIELD to `(AppliedAnnotation, retention)`, handling a CLASSPATH
-/// annotation (e.g. `@SerialName`): resolve the type through the file's imports, read its `@Retention`
-/// and element names from the compiled annotation class. `None` for a same-file annotation (caller
-/// falls back to [`build_applied_annotation`]), a SOURCE-retained one, an unresolved type, or a
-/// non-constant argument.
-fn library_field_annotation(
-    file: &ast::File,
-    file_index: u32,
-    syms: &FrontendSymbols,
-    name: TypeName,
-    args: &[AstExprId],
-    ir: &crate::ir::IrFile,
-) -> Option<(crate::ir::AppliedAnnotation, Retention)> {
-    // The frontend owns symbol resolution. Lowering consumes the selected classifier identity and must
-    // never retry source spelling through imports or the classpath.
-    crate::trace_compiler!("annotations", "field annotation classifier={}", name,);
-    let lt = syms.libraries.classifier(name)?;
-    crate::trace_compiler!(
-        "annotations",
-        "field annotation classifier={} kind={:?} retention={:?} members={:?}",
-        name,
-        lt.kind,
-        lt.retention,
-        lt.annotation_members(),
-    );
-    if !lt.is_annotation() {
-        return None;
-    }
-    let retention = match syms.annotation_retention(name)? {
-        crate::types::AnnotationRetention::Default | crate::types::AnnotationRetention::Runtime => {
-            Retention::Runtime
-        }
-        crate::types::AnnotationRetention::Binary => Retention::Binary,
-        crate::types::AnnotationRetention::Source => return None,
-    };
-    let elements = lt.annotation_members()?;
-    let mut values = Vec::new();
-    // Kotlin requires positional arguments before named ones, so a positional argument binds to the
-    // element at its own index while a NAMED one binds by label — `@Deprecated("x", level = …)`
-    // targets `level`, not the second element (`replaceWith`).
-    let mut positional = 0usize;
-    for &arg in args {
-        let index = match file.annotation_arg_names.get(&arg.0) {
-            Some(label) => {
-                let index = elements.iter().position(|(element, _)| element == label)?;
-                // Kotlin allows a positional argument AFTER a named one when it lands in its own
-                // position (`@T(1, b = 2, 3)`), so the positional cursor resumes past the element
-                // just bound — leaving it behind would bind `3` to `b` a second time.
-                positional = index + 1;
-                index
-            }
-            None => {
-                let index = positional;
-                positional += 1;
-                index
-            }
-        };
-        let (ename, element_ty) = elements.get(index).map(|(e, t)| (e.clone(), Some(*t)))?;
-        values.push((
-            index,
-            ename,
-            eval_anno_value(file, file_index, syms, ir, arg, element_ty)?,
-        ));
-    }
-    // Declaration order, as kotlinc writes them (see the same-file fold).
-    values.sort_by_key(|(index, _, _)| *index);
-    let values: Vec<_> = values
-        .into_iter()
-        .map(|(_, name, value)| (name, value))
-        .collect();
-    Some((
-        crate::ir::AppliedAnnotation {
-            internal: name,
-            values,
-        },
-        retention,
-    ))
-}
-
 /// The user annotations applied to a secondary CONSTRUCTOR declaration, split by JVM retention.
 /// Same fold as a function's: a constructor's `@Anno(...)` is the same applied-annotation shape.
-fn ctor_annotations(
-    file: &ast::File,
-    file_index: u32,
-    syms: &FrontendSymbols,
-    sc: &ast::SecondaryCtor,
-    ir: &crate::ir::IrFile,
-) -> crate::ir::FnAnnotations {
+fn ctor_annotations(sc: &ast::SecondaryCtor, info: &FrontendTypeInfo) -> crate::ir::FnAnnotations {
     let mut out = crate::ir::FnAnnotations::default();
-    for (annotation, arguments) in sc.annotations.iter().zip(sc.annotation_args.iter()) {
-        let Some(internal) = syms.resolved_annotation(file_index, annotation) else {
-            continue;
-        };
-        match library_field_annotation(file, file_index, syms, internal, arguments, ir) {
-            Some((anno, Retention::Runtime)) => out.visible.push(anno),
-            Some((anno, Retention::Binary)) => out.invisible.push(anno),
-            // An annotation class declared in THIS module has no classpath record yet; it folds
-            // through its same-file declaration, which carries its own declared retention.
-            None => {
-                match file_applied_annotation(file, file_index, syms, internal, arguments, ir) {
-                    Some((anno, Retention::Runtime)) => out.visible.push(anno),
-                    Some((anno, Retention::Binary)) => out.invisible.push(anno),
-                    None => {}
-                }
+    for annotation in &sc.annotations {
+        let applied = checked_applied_annotation(info, annotation);
+        match applied.retention {
+            crate::types::AnnotationRetention::Default
+            | crate::types::AnnotationRetention::Runtime => {
+                out.visible.push(checked_annotation_to_ir(applied))
             }
+            crate::types::AnnotationRetention::Binary => {
+                out.invisible.push(checked_annotation_to_ir(applied))
+            }
+            crate::types::AnnotationRetention::Source => {}
         }
     }
     out
@@ -27819,30 +27551,19 @@ fn ctor_annotations(
 /// The user annotations applied to a FUNCTION declaration, split by JVM retention. Reuses the same
 /// per-annotation fold as fields: a function's `@Anno(...)` is the same applied-annotation shape,
 /// and SOURCE-retained annotations drop out of both.
-fn fn_applied_annotations(
-    file: &ast::File,
-    file_index: u32,
-    syms: &FrontendSymbols,
-    f: &ast::FunDecl,
-    ir: &crate::ir::IrFile,
-) -> crate::ir::FnAnnotations {
+fn fn_applied_annotations(f: &ast::FunDecl, info: &FrontendTypeInfo) -> crate::ir::FnAnnotations {
     let mut out = crate::ir::FnAnnotations::default();
-    for (annotation, arguments) in f.annotations.iter().zip(f.annotation_args.iter()) {
-        let Some(internal) = syms.resolved_annotation(file_index, annotation) else {
-            continue;
-        };
-        match library_field_annotation(file, file_index, syms, internal, arguments, ir) {
-            Some((anno, Retention::Runtime)) => out.visible.push(anno),
-            Some((anno, Retention::Binary)) => out.invisible.push(anno),
-            // An annotation class declared in THIS module has no classpath record yet; it folds
-            // through its same-file declaration, which carries its own declared retention.
-            None => {
-                match file_applied_annotation(file, file_index, syms, internal, arguments, ir) {
-                    Some((anno, Retention::Runtime)) => out.visible.push(anno),
-                    Some((anno, Retention::Binary)) => out.invisible.push(anno),
-                    None => {}
-                }
+    for annotation in &f.annotations {
+        let applied = checked_applied_annotation(info, annotation);
+        match applied.retention {
+            crate::types::AnnotationRetention::Default
+            | crate::types::AnnotationRetention::Runtime => {
+                out.visible.push(checked_annotation_to_ir(applied))
             }
+            crate::types::AnnotationRetention::Binary => {
+                out.invisible.push(checked_annotation_to_ir(applied))
+            }
+            crate::types::AnnotationRetention::Source => {}
         }
     }
     crate::trace_compiler!(
@@ -27857,20 +27578,21 @@ fn fn_applied_annotations(
 
 /// The RUNTIME-retained applied annotations on a class declaration, folded for `RuntimeVisibleAnnotations`.
 fn class_applied_annotations(
-    file: &ast::File,
-    file_index: u32,
-    syms: &FrontendSymbols,
     c: &ast::ClassDecl,
-    ir: &crate::ir::IrFile,
+    info: &FrontendTypeInfo,
 ) -> Vec<crate::ir::AppliedAnnotation> {
-    build_applied_annotations(
-        file,
-        file_index,
-        syms,
-        &c.annotations,
-        &c.annotation_args,
-        ir,
-    )
+    c.annotations
+        .iter()
+        .map(|annotation| checked_applied_annotation(info, annotation))
+        .filter(|annotation| {
+            matches!(
+                annotation.retention,
+                crate::types::AnnotationRetention::Default
+                    | crate::types::AnnotationRetention::Runtime
+            )
+        })
+        .map(checked_annotation_to_ir)
+        .collect()
 }
 
 /// Extract the BACKEND-AGNOSTIC generic-signature shape of a generic class (`class Box<T>`), or `None`

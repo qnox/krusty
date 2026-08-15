@@ -10660,6 +10660,9 @@ pub struct TypeInfo {
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
     /// Classifier identity represented by an unbound `X::class` expression.
     class_literal_targets: HashMap<ExprId, TypeName>,
+    /// Fully checked annotation applications keyed by their classifier-reference occurrence.
+    /// Lowering consumes these values directly and never reopens source scope or providers.
+    applied_annotations: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
     pub anonymous_object_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     pub anonymous_object_captures_by_construction: HashMap<ExprId, Vec<AnonymousObjectCapture>>,
     /// The enclosing bindings a statement-position local class reads, keyed by its hoisted
@@ -11522,6 +11525,14 @@ impl TypeInfo {
 
     pub fn class_literal_target(&self, expression: ExprId) -> Option<TypeName> {
         self.class_literal_targets.get(&expression).copied()
+    }
+
+    pub fn applied_annotation(
+        &self,
+        annotation: &AnnotationRef,
+    ) -> Option<&crate::types::AppliedAnnotation> {
+        self.applied_annotations
+            .get(&(annotation.span.lo, annotation.span.hi))
     }
 
     /// Whether a checked call selected a class/object member rather than a top-level, extension, or
@@ -13423,6 +13434,7 @@ fn make_checker<'a>(
         resolved_declaration_types: HashMap::new(),
         resolved_declaration_type_parameters: HashMap::new(),
         class_literal_targets: HashMap::new(),
+        applied_annotations: HashMap::new(),
         ret_ty: Ty::Unit,
         diagnostic_function: None,
         expected: None,
@@ -15076,6 +15088,7 @@ fn check_file_at_impl_mode(
         resolved_declaration_types,
         resolved_declaration_type_parameters,
         class_literal_targets,
+        applied_annotations,
         expr_lowers,
         inherited_method_constraints,
         data_class_hash_owners,
@@ -15257,6 +15270,7 @@ fn check_file_at_impl_mode(
         resolved_declaration_types,
         resolved_declaration_type_parameters,
         class_literal_targets,
+        applied_annotations,
         anonymous_object_captures_by_class,
         anonymous_object_captures_by_construction,
         local_class_captures_by_class: discovered_local_class_captures,
@@ -15758,6 +15772,9 @@ struct LambdaCheckMode {
     expected_return: Option<Ty>,
 }
 
+type AnnotationElements = Vec<(String, Ty)>;
+type AnnotationShape = (AnnotationElements, ParamList);
+
 struct Checker<'a> {
     file: &'a File,
     syms: &'a SymbolTable,
@@ -15783,6 +15800,7 @@ struct Checker<'a> {
     resolved_declaration_types: HashMap<(u32, u32), Ty>,
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
     class_literal_targets: HashMap<ExprId, TypeName>,
+    applied_annotations: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
     ret_ty: Ty,
     /// Current declaration solely for kotlinc-compatible type-parameter wording in diagnostics.
     diagnostic_function: Option<(String, Vec<String>)>,
@@ -26867,7 +26885,311 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn annotation_shape(&self, internal: TypeName) -> Option<AnnotationShape> {
+        let classifier = self.resolver().classifier(internal)?;
+        let members = classifier.annotation_members()?;
+        let parameters = classifier
+            .constructor_named_params(0)
+            .unwrap_or_else(|| ParamList {
+                names: members.iter().map(|(name, _)| name.clone()).collect(),
+                defaults: vec![false; members.len()],
+                types: members.iter().map(|(_, ty)| *ty).collect(),
+                ..ParamList::default()
+            });
+        Some((members, parameters))
+    }
+
+    fn annotation_argument_parameter_indices(
+        &self,
+        parameters: &ParamList,
+        arguments: &[ExprId],
+    ) -> Result<Vec<usize>, CallArgMappingFailure> {
+        let argument_names = arguments
+            .iter()
+            .map(|argument| self.file.annotation_arg_names.get(&argument.0).cloned())
+            .collect::<Vec<_>>();
+        let signature = CallSig {
+            param_names: parameters.names.clone(),
+            param_defaults: parameters.defaults.clone(),
+            required: required_arity(parameters.names.len(), &parameters.defaults),
+            vararg: parameters.vararg.is_some(),
+            vararg_index: parameters.vararg,
+            ..CallSig::default()
+        };
+        call_argument_parameter_indices_result(
+            arguments.len(),
+            parameters.names.len(),
+            Some(&argument_names),
+            false,
+            &signature,
+        )
+    }
+
+    fn report_annotation_mapping_failure(
+        &mut self,
+        application_span: Span,
+        arguments: &[ExprId],
+        failure: CallArgMappingFailure,
+    ) {
+        for error in failure.errors {
+            let argument = match &error {
+                CallArgMappingError::NoParameterNamed { argument, .. }
+                | CallArgMappingError::AlreadyPassed { argument }
+                | CallArgMappingError::PositionalAfterNamed { argument }
+                | CallArgMappingError::TooManyArguments { argument, .. }
+                | CallArgMappingError::TrailingLambdaOnVararg { argument } => Some(*argument),
+                CallArgMappingError::MissingRequired { .. } => None,
+            };
+            let span = argument
+                .and_then(|index| arguments.get(index).copied())
+                .map_or(application_span, |argument| self.span(argument));
+            self.diags.error(span, error.to_string());
+        }
+    }
+
+    fn fold_annotation_value(
+        &mut self,
+        e: ExprId,
+        expected: Option<Ty>,
+    ) -> Option<crate::types::AnnotationValue> {
+        use crate::libraries::LibConst;
+        use crate::synthetics::SyntheticKind;
+        use crate::types::AnnotationValue;
+
+        let value = match self.file.expr(e) {
+            Expr::StringLit(value) => AnnotationValue::String(value.clone()),
+            Expr::IntLit(value) | Expr::UIntLit(value) => AnnotationValue::Int(*value as i32),
+            Expr::LongLit(value) | Expr::ULongLit(value) => AnnotationValue::Long(*value),
+            Expr::DoubleLit(value) => AnnotationValue::Double(*value),
+            Expr::FloatLit(value) => AnnotationValue::Float(*value),
+            Expr::BoolLit(value) => AnnotationValue::Boolean(*value),
+            Expr::CharLit(value) => AnnotationValue::Char(*value),
+            Expr::Member { name, .. } => {
+                let owner = self.resolved_enum_entries.get(&e).copied()?;
+                AnnotationValue::Enum(owner, name.clone())
+            }
+            Expr::CallableRef {
+                receiver: Some(_),
+                name,
+            } if name == "class" => {
+                AnnotationValue::Class(self.class_literal_targets.get(&e).copied()?)
+            }
+            Expr::Call { args, .. } => match self.expr_lowers.get(&e) {
+                Some(ExprLowering::CompilerSynthetic(
+                    SyntheticKind::PrimitiveVararg(_)
+                    | SyntheticKind::ReferenceVararg
+                    | SyntheticKind::EmptyReference,
+                )) => {
+                    let element = expected.and_then(Ty::array_elem);
+                    AnnotationValue::Array(
+                        args.iter()
+                            .map(|argument| self.fold_annotation_value(*argument, element))
+                            .collect::<Option<Vec<_>>>()?,
+                    )
+                }
+                _ => {
+                    let internal = self.expr_types[e.0 as usize].kotlin_class_internal()?;
+                    let values = self.fold_annotation_values(internal, args)?;
+                    AnnotationValue::Annotation { internal, values }
+                }
+            },
+            _ => {
+                let constant = self.resolved_constants.get(&e)?;
+                match &constant.value {
+                    LibConst::Int(value) => AnnotationValue::Int(*value),
+                    LibConst::Long(value) => AnnotationValue::Long(*value),
+                    LibConst::Float(value) => AnnotationValue::Float(*value),
+                    LibConst::Double(value) => AnnotationValue::Double(*value),
+                    LibConst::Str(value) => AnnotationValue::String(value.clone()),
+                }
+            }
+        };
+        Some(value)
+    }
+
+    fn fold_annotation_values(
+        &mut self,
+        internal: TypeName,
+        arguments: &[ExprId],
+    ) -> Option<Vec<(String, crate::types::AnnotationValue)>> {
+        let (elements, parameters) = self.annotation_shape(internal)?;
+        let parameter_indices = self
+            .annotation_argument_parameter_indices(&parameters, arguments)
+            .ok()?;
+        let mut values = Vec::with_capacity(arguments.len());
+        for (&argument, index) in arguments.iter().zip(parameter_indices) {
+            let (name, declared) = elements.get(index)?.clone();
+            let expected = if parameters.vararg == Some(index) && !self.file.is_spread_arg(argument)
+            {
+                declared.array_elem()?
+            } else {
+                declared
+            };
+            let value = self.fold_annotation_value(argument, Some(expected))?;
+            if parameters.vararg == Some(index) {
+                let item_values = match value {
+                    crate::types::AnnotationValue::Array(values) => values,
+                    value => vec![value],
+                };
+                if let Some((_, _, crate::types::AnnotationValue::Array(existing))) =
+                    values.iter_mut().find(|(slot, _, _)| *slot == index)
+                {
+                    existing.extend(item_values);
+                } else {
+                    values.push((
+                        index,
+                        name,
+                        crate::types::AnnotationValue::Array(item_values),
+                    ));
+                }
+            } else {
+                values.push((index, name, value));
+            }
+        }
+        if let Some(index) = parameters.vararg {
+            if !values.iter().any(|(slot, _, _)| *slot == index) {
+                let (name, _) = elements.get(index)?.clone();
+                values.push((
+                    index,
+                    name,
+                    crate::types::AnnotationValue::Array(Vec::new()),
+                ));
+            }
+        }
+        values.sort_by_key(|(index, _, _)| *index);
+        Some(
+            values
+                .into_iter()
+                .map(|(_, name, value)| (name, value))
+                .collect(),
+        )
+    }
+
+    fn fold_annotation_application(
+        &mut self,
+        internal: TypeName,
+        arguments: &[ExprId],
+    ) -> Option<crate::types::AppliedAnnotation> {
+        let values = self.fold_annotation_values(internal, arguments)?;
+        let retention = self.syms.annotation_retention(internal)?;
+        Some(crate::types::AppliedAnnotation {
+            internal,
+            values,
+            retention,
+        })
+    }
+
+    fn check_annotation_application(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        annotation: &AnnotationRef,
+        arguments: &[ExprId],
+    ) {
+        let Some(internal) = self.syms.resolved_annotation(self.file_index, annotation) else {
+            self.diags.error(
+                annotation.span,
+                format!("unresolved reference '{}'.", annotation.name),
+            );
+            return;
+        };
+        let Some((elements, parameters)) = self.annotation_shape(internal) else {
+            self.diags.error(
+                annotation.span,
+                "resolved annotation has no semantic element declaration".to_string(),
+            );
+            return;
+        };
+        if !self.check_annotation_arguments(
+            scope,
+            annotation.span,
+            &elements,
+            &parameters,
+            arguments,
+        ) {
+            return;
+        }
+        let Some(applied) = self.fold_annotation_application(internal, arguments) else {
+            self.diags.error(
+                annotation.span,
+                "annotation argument is not a supported compile-time constant".to_string(),
+            );
+            return;
+        };
+        self.applied_annotations
+            .insert((annotation.span.lo, annotation.span.hi), applied);
+    }
+
+    fn check_annotation_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        application_span: Span,
+        elements: &[(String, Ty)],
+        parameters: &ParamList,
+        arguments: &[ExprId],
+    ) -> bool {
+        let parameter_indices =
+            match self.annotation_argument_parameter_indices(parameters, arguments) {
+                Ok(indices) => indices,
+                Err(failure) => {
+                    self.report_annotation_mapping_failure(application_span, arguments, failure);
+                    return false;
+                }
+            };
+        for (&argument, index) in arguments.iter().zip(parameter_indices) {
+            let Some((_, declared)) = elements.get(index) else {
+                self.diags.error(
+                    self.span(argument),
+                    "annotation parameter metadata does not match its element declarations"
+                        .to_string(),
+                );
+                return false;
+            };
+            let expected = if parameters.vararg == Some(index) && !self.file.is_spread_arg(argument)
+            {
+                declared.array_elem().unwrap_or(*declared)
+            } else {
+                *declared
+            };
+            let actual = self.check_annotation_value_expression(scope, argument, expected);
+            self.expect_assignable(expected, actual, self.span(argument), "annotation argument");
+        }
+        true
+    }
+
+    fn check_annotation_value_expression(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        expected: Ty,
+    ) -> Ty {
+        if let Expr::Call { callee, args } = self.file.expr(expression).clone() {
+            if let Some(expected_internal) = expected.kotlin_class_internal() {
+                if let Some((elements, parameters)) = self.annotation_shape(expected_internal) {
+                    let selected = self
+                        .qualifier(scope, QualifierInput::Expression(callee))
+                        .ok();
+                    if selected == Some(ResolvedQualifier::Classifier(expected_internal)) {
+                        if self.check_annotation_arguments(
+                            scope,
+                            self.span(expression),
+                            &elements,
+                            &parameters,
+                            &args,
+                        ) {
+                            return self.set(expression, Ty::obj_name(expected_internal));
+                        }
+                        return Ty::Error;
+                    }
+                }
+            }
+        }
+        self.expr_expected(scope, expression, expected)
+    }
+
     fn check_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, source_decl: Option<DeclId>) {
+        for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
+            self.check_annotation_application(scope, annotation, arguments);
+        }
         self.check_infix_declaration(f, false);
         let previous_diagnostic_function = self.diagnostic_function.replace((
             f.name.clone(),
@@ -27492,11 +27814,22 @@ impl<'a> Checker<'a> {
             .and_then(|scope| scope.class_plans.get(&d))
             .cloned();
         let is_anonymous_object = self.anonymous_lexical_scope.declarations.contains(&d);
-        // Annotation arguments are semantic expressions too. Resolve them while the frontend owns
-        // lexical/import scope so lowering can consume identities such as `with = X::class`
-        // directly instead of interpreting source spelling.
-        for argument in cl.annotation_args.iter().flatten() {
-            self.expr(scope, *argument);
+        for (annotation, arguments) in cl.annotations.iter().zip(&cl.annotation_args) {
+            self.check_annotation_application(scope, annotation, arguments);
+        }
+        for entry in &cl.enum_entries {
+            for (annotation, arguments) in entry.annotations.iter().zip(&entry.annotation_args) {
+                self.check_annotation_application(scope, annotation, arguments);
+            }
+        }
+        for constructor in &cl.secondary_ctors {
+            for (annotation, arguments) in constructor
+                .annotations
+                .iter()
+                .zip(&constructor.annotation_args)
+            {
+                self.check_annotation_application(scope, annotation, arguments);
+            }
         }
         // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
         // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
@@ -28833,6 +29166,9 @@ impl<'a> Checker<'a> {
         });
         for (_, bound) in &f.type_param_bounds {
             self.check_type_parameter_bound(scope, bound);
+        }
+        for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
+            self.check_annotation_application(scope, annotation, arguments);
         }
         let dispatch_this = scope.this_ty();
         let dispatch_extension_receiver = self.this_extension_receiver;
@@ -49505,6 +49841,37 @@ val result = object { fun value(): String = captured }
         (errs, Some(info))
     }
 
+    fn check_with_annotation_fixtures(
+        src: &str,
+        detected_features: bool,
+    ) -> (Vec<String>, Option<TypeInfo>) {
+        let mut diagnostics = DiagSink::new();
+        let kotlin_annotations = parse_file(
+            "package kotlin\n\
+             annotation class Suppress(vararg val names: String)\n\
+             annotation class JvmInline",
+            &mut diagnostics,
+        );
+        let exact_annotation = parse_file(
+            "package kotlin.internal\nannotation class Exact",
+            &mut diagnostics,
+        );
+        let file = if detected_features {
+            parse_file_with_detected_features(src, &mut diagnostics)
+        } else {
+            parse_file(src, &mut diagnostics)
+        };
+        let files = vec![kotlin_annotations, exact_annotation, file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[2], &mut symbols, &mut diagnostics);
+        let errors = diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.clone())
+            .collect();
+        (errors, Some(info))
+    }
+
     fn check_with_detected_features(src: &str) -> Vec<String> {
         let mut diagnostics = DiagSink::new();
         let file = parse_file_with_detected_features(src, &mut diagnostics);
@@ -49835,9 +50202,17 @@ val result = object { fun value(): String = captured }
         );
     }
 
+    fn oks(src: &str) {
+        let (errors, _) = check_with_annotation_fixtures(src, false);
+        assert!(
+            errors.is_empty(),
+            "unexpected errors: {errors:?}\nsource:\n{src}"
+        );
+    }
+
     #[test]
     fn postponed_receiver_lambda_constraints_specialize_the_outer_call() {
-        ok(r#"
+        oks(r#"
 class Buildee<T> { fun yield(value: T) {} }
 class Value
 fun <T> build(block: Buildee<T>.() -> Unit): Buildee<T> = Buildee<T>()
@@ -49861,7 +50236,7 @@ fun <T> Content<T>.read() { consume<T>(value) }
 
     #[test]
     fn postponed_receiver_lambda_preserves_an_enclosing_class_type_parameter() {
-        ok(r#"
+        oks(r#"
 class Buildee<CT> {
     fun yield(value: CT) {}
     fun materialize(): CT = null as CT
@@ -49885,7 +50260,7 @@ class Context<T> {
 
     #[test]
     fn postponed_receiver_lambda_preserves_an_applied_enclosing_class_type() {
-        ok(r#"
+        oks(r#"
 class Buildee<CT> {
     fun yield(value: CT) {}
     fun materialize(): CT = Context<Marker>() as CT
@@ -49920,7 +50295,7 @@ class Context<T> {
 
     #[test]
     fn postponed_receiver_lambda_preserves_cast_local_class_parameter() {
-        ok(r#"
+        oks(r#"
 class UserKlass
 class Buildee<CT> {
     fun yield(arg: CT) {}
@@ -49954,7 +50329,7 @@ private fun <T> checkExactType(value: @kotlin.internal.Exact T) {}
 
     #[test]
     fn postponed_lambda_upper_constraints_choose_the_narrowest_type() {
-        ok(r#"
+        oks(r#"
 open class Base
 class Value : Base()
 class Builder<T>
@@ -49999,7 +50374,7 @@ fun use() {
 
     #[test]
     fn postponed_receiver_lambda_infers_nullable_nothing_from_null() {
-        ok(r#"
+        oks(r#"
 class Builder<T> { fun yield(value: T) {} }
 fun <T> build(block: Builder<T>.() -> Unit): Builder<T> = Builder<T>()
 @Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
@@ -50093,7 +50468,7 @@ fun forward(consumer: Consumer, callback: () -> Unit) {
 
     #[test]
     fn expected_member_result_constrains_the_enclosing_builder() {
-        ok(r#"
+        oks(r#"
 class Product
 class Builder<C> {
     fun yield(value: C) {}
@@ -50132,7 +50507,7 @@ fun use() {
 
     #[test]
     fn expected_result_flows_through_nested_generic_suspend_calls() {
-        ok(r#"
+        oks(r#"
 suspend fun <T> produce(): T = null as T
 suspend fun <T> identity(value: T): T = value
 suspend fun consume(): Int = identity(produce())
@@ -50156,7 +50531,7 @@ class ValueCalls {
 
     #[test]
     fn generic_local_function_transfers_postponed_lambda_constraints() {
-        ok(r#"
+        oks(r#"
 class Buildee<T> { fun materialize(): T = Value() as T }
 class Value
 fun <T> build(block: Buildee<T>.() -> Unit): Buildee<T> = Buildee<T>()
@@ -50193,7 +50568,7 @@ fun use() {
 
     #[test]
     fn unshaped_generic_lambda_has_the_calls_implicit_return_label() {
-        ok(r#"
+        oks(r#"
 fun <T> identity(value: T): T = value
 @Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
 fun <T> exact(value: @kotlin.internal.Exact T) {}
@@ -50222,7 +50597,7 @@ fun use() {
 
     #[test]
     fn exact_generic_parameters_share_one_inferred_anonymous_type() {
-        ok(r#"
+        oks(r#"
 @Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
 fun <T> same(first: @kotlin.internal.Exact T, second: @kotlin.internal.Exact T) {}
 fun use() {
@@ -53692,13 +54067,15 @@ fun box(): String {
 
     #[test]
     fn explicit_backing_field_accepts_semantic_value_class_type() {
-        let errors = check_with_detected_features(
+        let errors = check_with_annotation_fixtures(
             "// LANGUAGE: +ExplicitBackingFields\n\
              @JvmInline value class Label(val text: String)\n\
              class Holder {\n\
                  val value: Any field: Label = Label(\"value\")\n\
              }",
-        );
+            true,
+        )
+        .0;
         assert!(errors.is_empty(), "{errors:?}");
     }
 
