@@ -1043,6 +1043,8 @@ fn lower_file_at_reporting_impl(
             let id = lo.ir.add_class(IrClass {
                 fq_name: type_name(&internal),
                 is_source_declared: true,
+                is_anonymous_object: file.is_anonymous_object_class(d),
+                enclosing_function: None,
                 is_inner_class: inner_outer.is_some(),
                 is_local_class: file.is_local_declaration(d) || file.is_anonymous_object_class(d),
                 is_value: c.is_value,
@@ -2392,6 +2394,41 @@ fn lower_file_at_reporting_impl(
                 lo.local_fun_ids.insert(stmt_id, id);
             }
         }
+    }
+    // Bind every anonymous class to its exact enclosing callable once all source callables have
+    // stable IR ids. JVM enclosure metadata consumes this identity directly; it must never recover
+    // a method by splitting the generated class name or scanning same-spelled overloads.
+    let anonymous_enclosures = file
+        .anonymous_object_enclosing_functions
+        .iter()
+        .filter_map(|(&anonymous, &enclosing)| {
+            let Decl::Class(anonymous_class) = file.decl(anonymous) else {
+                return None;
+            };
+            let class_id = lo
+                .class_info(&class_internal(file, &anonymous_class.name))?
+                .id;
+            let function = match enclosing {
+                crate::ast::AnonymousEnclosingFunction::TopLevel(declaration) => {
+                    lo.fun_ids_by_decl.get(&declaration).copied()
+                }
+                crate::ast::AnonymousEnclosingFunction::Member { class, method } => {
+                    let Decl::Class(owner) = file.decl(class) else {
+                        return None;
+                    };
+                    let source_method = owner.methods.get(method as usize)?;
+                    lo.class_info(&class_internal(file, &owner.name))?
+                        .methods
+                        .get(&source_method.name)?
+                        .iter()
+                        .find_map(|&(source_index, fid, _)| (source_index == method).then_some(fid))
+                }
+            }?;
+            Some((class_id, function))
+        })
+        .collect::<Vec<_>>();
+    for (class, function) in anonymous_enclosures {
+        lo.ir.classes[class as usize].enclosing_function = Some(function);
     }
     // Pass 1c: assign top-level-property indices (initializers lowered in pass 2). Registered before
     // any body so a function may read a top-level property as `GetStatic`.
@@ -4103,6 +4140,8 @@ fn lower_file_at_reporting_impl(
                         let sub_id = lo.ir.add_class(IrClass {
                             fq_name: type_name(&sub_fq),
                             is_source_declared: false,
+                            is_anonymous_object: false,
+                            enclosing_function: None,
                             is_inner_class: false,
                             is_local_class: false,
                             is_value: false,
@@ -10650,6 +10689,8 @@ impl<'a> Lower<'a> {
         let class = IrClass {
             fq_name: type_name(&internal),
             is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -12865,6 +12906,8 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -13010,6 +13053,8 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -13249,6 +13294,8 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -13954,6 +14001,8 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,

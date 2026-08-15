@@ -5580,6 +5580,8 @@ fn build_continuation_class(
     let class = IrClass {
         fq_name: crate::types::type_name(internal),
         is_source_declared: false,
+        is_anonymous_object: false,
+        enclosing_function: None,
         is_inner_class: false,
         is_local_class: false,
         is_value: false,

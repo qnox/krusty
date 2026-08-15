@@ -823,6 +823,10 @@ pub struct IrClass {
     /// classes must not be published as declared nested classifiers in language metadata, even when
     /// their backend name happens to look nested.
     pub is_source_declared: bool,
+    /// A source anonymous-object declaration. Its lexical function is recorded separately as an
+    /// exact [`FunId`], so a backend can realize enclosure metadata without parsing generated names.
+    pub is_anonymous_object: bool,
+    pub enclosing_function: Option<FunId>,
     /// A language-level non-static nested class. Backends consume this declaration property directly;
     /// a synthetic receiver field or its physical name does not imply inner-class semantics.
     pub is_inner_class: bool,
@@ -2599,6 +2603,8 @@ mod tests {
         IrClass {
             fq_name: fq.into(),
             is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,

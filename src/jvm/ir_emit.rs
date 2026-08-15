@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrTypeOp};
+use crate::ir::{
+    Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
+};
 use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
 };
@@ -4006,6 +4008,24 @@ fn emit_declared_property_accessors(
     }
 }
 
+/// The checker/lowerer-bound callable that encloses an anonymous class, with its JVM owner. The
+/// callable identity is exact; only the final owner rendering is a backend boundary conversion.
+fn anonymous_scope<'a>(
+    ir: &'a IrFile,
+    c: &crate::ir::IrClass,
+    facade: &str,
+) -> Option<(String, &'a IrFunction)> {
+    if !c.is_anonymous_object {
+        return None;
+    }
+    let function = &ir.functions[c.enclosing_function? as usize];
+    let owner = function
+        .dispatch_receiver
+        .map(TypeName::render)
+        .unwrap_or_else(|| facade.to_string());
+    Some((owner, function))
+}
+
 fn emit_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -4049,7 +4069,7 @@ fn emit_class(
     // top-level and `simpleName` reports the whole `owner$Local` name instead of `Local`. The
     // enclosing class is the longest `$`-prefix of the name that is itself an emitted class (a local
     // class inside a member) — otherwise the file facade, which is where a top-level function lives.
-    if c.is_local_class {
+    if c.is_local_class && !c.is_anonymous_object {
         let owner = fq_name
             .match_indices('$')
             .map(|(at, _)| &fq_name[..at])
@@ -4085,6 +4105,21 @@ fn emit_class(
         c,
         opts.class_major.unwrap_or(MAJOR_JAVA8) >= 61,
     );
+    // An ANONYMOUS class carries kotlinc's enclosure record: the `EnclosingMethod` attribute
+    // (owner + the exact enclosing method's name/descriptor) and an INNER-ONLY `InnerClasses` entry
+    // (`outer_class_info_index = 0`, no simple name — the JVM's anonymous-class shape). Registered
+    // BEFORE the file-nest registration below: the first registration for a class wins, and the
+    // nest derives an outer+name shape kotlinc doesn't give anonymous classes.
+    if let Some((owner, function)) = anonymous_scope(ir, c, facade) {
+        let descriptor = ir_method_desc(&function.params, &function.ret);
+        cw.set_enclosing_method(&owner, &function.name, &descriptor);
+        cw.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+            inner: fq_name.clone(),
+            outer: None,
+            name: None,
+            access: 0x0019,
+        });
+    }
     register_inner_classes(&mut cw, ir);
     // The class HEADER's interface refs intern BEFORE any member entry (kotlinc visits the header
     // first — `object Fast : Factory` pool: this, super, `lib/Factory`, then `<init>`), so add them
@@ -4470,8 +4505,9 @@ fn emit_class(
         // through the PUBLIC|SYNTHETIC `(…args, DefaultConstructorMarker)` accessor (kotlinc's shape).
         let ctor_access = if c.is_singleton() || c.is_value || value_param_ctor || c.is_sealed {
             0x0002
-        } else if is_continuation {
-            // A continuation class's ctor is package-private (constructed only by its own file).
+        } else if is_continuation || c.is_anonymous_object {
+            // A continuation class's ctor is package-private (constructed only by its own file);
+            // kotlinc gives an ANONYMOUS class's ctor the same access (flags 0x0000).
             0x0000
         } else {
             // A DECLARED protected constructor reaches the JVM method too (kotlinc emits `<init>`
@@ -14639,6 +14675,41 @@ mod fail_soft_tests {
         fn body(&self, _o: &str, _n: &str, _d: &str) -> Option<MethodCode> {
             None
         }
+    }
+
+    #[test]
+    fn anonymous_enclosure_uses_the_bound_function_id_not_name_shape() {
+        let mut ir = IrFile::default();
+        let owner = crate::types::type_name("demo/Owner");
+        ir.add_fun(IrFunction {
+            name: "build".into(),
+            params: vec![Ty::Int],
+            ret: Ty::Unit,
+            body: None,
+            is_static: false,
+            dispatch_receiver: Some(owner),
+            param_checks: vec![],
+        });
+        let selected = ir.add_fun(IrFunction {
+            name: "build".into(),
+            params: vec![Ty::String],
+            ret: Ty::Unit,
+            body: None,
+            is_static: false,
+            dispatch_receiver: Some(owner),
+            param_checks: vec![],
+        });
+        let mut anonymous = crate::plugins::synthetic_class("demo/opaque_identity");
+        anonymous.is_anonymous_object = true;
+        anonymous.enclosing_function = Some(selected);
+
+        let (resolved_owner, function) =
+            anonymous_scope(&ir, &anonymous, "IgnoredFacade").expect("bound enclosure");
+        assert_eq!(resolved_owner, "demo/Owner");
+        assert_eq!(
+            ir_method_desc(&function.params, &function.ret),
+            "(Ljava/lang/String;)V"
+        );
     }
 
     #[test]

@@ -631,14 +631,21 @@ pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) 
     let mut counters: std::collections::HashMap<String, u32> = Default::default();
     for (construction, decl) in anons {
         let span = file.expr_spans[construction.0 as usize];
-        let mut best: Option<(u32, String)> = None; // (enclosing span size, scope)
+        let mut best: Option<(u32, String, crate::ast::AnonymousEnclosingFunction)> = None;
         for &candidate in &file.decls {
             match file.decl(candidate) {
                 Decl::Fun(function) => {
                     if function.span.lo <= span.lo && span.hi <= function.span.hi {
                         let size = function.span.hi - function.span.lo;
-                        if best.as_ref().is_none_or(|(smallest, _)| size < *smallest) {
-                            best = Some((size, format!("{facade_simple}${}", function.name)));
+                        if best
+                            .as_ref()
+                            .is_none_or(|(smallest, _, _)| size < *smallest)
+                        {
+                            best = Some((
+                                size,
+                                format!("{facade_simple}${}", function.name),
+                                crate::ast::AnonymousEnclosingFunction::TopLevel(candidate),
+                            ));
                         }
                     }
                 }
@@ -647,11 +654,21 @@ pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) 
                         continue;
                     }
                     let chain = class.name.replace('.', "$");
-                    for method in &class.methods {
+                    for (method_index, method) in class.methods.iter().enumerate() {
                         if method.span.lo <= span.lo && span.hi <= method.span.hi {
                             let size = method.span.hi - method.span.lo;
-                            if best.as_ref().is_none_or(|(smallest, _)| size < *smallest) {
-                                best = Some((size, format!("{chain}${}", method.name)));
+                            if best
+                                .as_ref()
+                                .is_none_or(|(smallest, _, _)| size < *smallest)
+                            {
+                                best = Some((
+                                    size,
+                                    format!("{chain}${}", method.name),
+                                    crate::ast::AnonymousEnclosingFunction::Member {
+                                        class: candidate,
+                                        method: method_index as u32,
+                                    },
+                                ));
                             }
                         }
                     }
@@ -659,7 +676,11 @@ pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) 
                 _ => {}
             }
         }
-        let Some((_, scope)) = best else { continue };
+        let Some((_, scope, enclosing)) = best else {
+            continue;
+        };
+        file.anonymous_object_enclosing_functions
+            .insert(decl, enclosing);
         let ordinal = counters.entry(scope.clone()).or_insert(0);
         *ordinal += 1;
         let fresh = format!("{scope}${ordinal}");
@@ -709,6 +730,18 @@ mod tests {
             panic!("anonymous declaration was not a class");
         };
         assert_eq!(class.name, "WidgetKt$build$1");
+        let enclosing = analysis.files[0]
+            .anonymous_object_enclosing_functions
+            .get(&declaration)
+            .copied()
+            .expect("anonymous enclosure identity");
+        let crate::ast::AnonymousEnclosingFunction::TopLevel(function) = enclosing else {
+            panic!("top-level build owner was not recorded exactly");
+        };
+        assert!(matches!(
+            analysis.files[0].decl(function),
+            crate::ast::Decl::Fun(function) if function.name == "build"
+        ));
     }
 
     struct ExistingLibrary;

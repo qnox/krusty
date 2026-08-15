@@ -1224,6 +1224,15 @@ pub enum Decl {
     Property(PropDecl),
 }
 
+/// The exact source declaration that lexically encloses an anonymous-object construction.
+/// Recorded before resolution so lowering can bind it once to a [`crate::ir::FunId`]; backends must
+/// not reconstruct this relationship from generated class or method spellings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnonymousEnclosingFunction {
+    TopLevel(DeclId),
+    Member { class: DeclId, method: u32 },
+}
+
 /// One parsed source file: its package, and arenas for every node kind.
 #[derive(Default)]
 pub struct File {
@@ -1310,6 +1319,9 @@ pub struct File {
     /// so member/element types resolve. Absent ⇒ no explicit type arguments.
     pub call_type_args: std::collections::HashMap<u32, Vec<TypeRef>>,
     pub anonymous_object_classes: std::collections::HashMap<ExprId, DeclId>,
+    /// Anonymous class declaration → exact lexically enclosing source function.
+    pub anonymous_object_enclosing_functions:
+        std::collections::HashMap<DeclId, AnonymousEnclosingFunction>,
     /// The hoisted `Decl::Class` of each statement-position local class (`Stmt::LocalClass`). The
     /// declaration carries the class for signature collection and lowering; the STATEMENT is where
     /// the checker enters it, so that it is checked in the lexical scope it was written in rather
@@ -1477,6 +1489,7 @@ impl File {
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
         self.anonymous_object_classes = Default::default();
+        self.anonymous_object_enclosing_functions = Default::default();
         self.local_class_decls = Default::default();
         self.local_class_nested = Default::default();
         self.lambda_param_types = Default::default();
