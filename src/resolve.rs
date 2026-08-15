@@ -11751,6 +11751,10 @@ pub enum ExprLowering {
     /// this way when they occupy a block's trailing-expression slot; statement-position contracts
     /// use [`StmtLowering::Erased`].
     Erased,
+    /// Runtime receiver/index operands of a parser-desugared access inc/dec block, in Kotlin's
+    /// left-to-right capture order. Qualifier-only candidates (`super`, packages, classifiers) are
+    /// excluded by resolution; lowering spills exactly this list and performs no qualifier guessing.
+    IncDecAccessOperands(Vec<ExprId>),
     /// A call whose selected lowering is an inline/custom emit form rather than the normal function-call
     /// path: value-class companion calls (`Result.success`) or receiver-lambda scope calls.
     InlineCall(InlineCall),
@@ -33330,6 +33334,22 @@ impl<'a> Checker<'a> {
         let t = {
             let block_scope = scope.child(ScopeKind::Block);
             let scope = &block_scope;
+            if let Some(candidates) = self.file.incdec_access_operands.get(&e) {
+                let runtime_operands = candidates
+                    .iter()
+                    .copied()
+                    .filter(|operand| {
+                        !matches!(self.file.expr(*operand), Expr::Name(name) if name.starts_with("super"))
+                            && matches!(
+                                self.qualifier(scope, QualifierInput::Expression(*operand)),
+                                Ok(ResolvedQualifier::Value)
+                                    | Err(QualifierError::NotANameChain { .. })
+                            )
+                    })
+                    .collect();
+                self.expr_lowers
+                    .insert(e, ExprLowering::IncDecAccessOperands(runtime_operands));
+            }
             // True once a statement always transfers control (`throw`/`return`/break/continue/a
             // `Nothing` call): everything after it — including the trailing value — is unreachable,
             // so the block's type is `Nothing` (it never falls through). Without this, a `try` whose

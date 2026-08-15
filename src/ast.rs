@@ -1259,6 +1259,11 @@ pub struct File {
     pub value_operator_spans: std::collections::HashMap<u32, Span>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: std::collections::HashMap<u32, Span>,
+    /// Parser-desugared member/index inc/dec value blocks whose access operands are deliberately
+    /// shared between the read and write. Lowering spills the operands that semantic resolution
+    /// proved are runtime values; package/classifier/`super` qualifiers have no value type and stay
+    /// attached to both accesses.
+    pub incdec_access_operands: std::collections::HashMap<ExprId, Vec<ExprId>>,
     /// 1-based source line of each expression's start (parallel to `expr_spans`; 0 = unknown).
     /// Filled by the parser post-pass for the `LineNumberTable`.
     pub expr_lines: Vec<u32>,
@@ -1459,6 +1464,7 @@ impl File {
         self.stmt_lines = Vec::new();
         self.value_operator_spans = Default::default();
         self.assignment_target_spans = Default::default();
+        self.incdec_access_operands = Default::default();
         self.call_arg_names = Default::default();
         self.call_arg_name_spans = Default::default();
         self.empty_call_open_paren_spans = Default::default();

@@ -2165,39 +2165,56 @@ fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
 /// locals (numbered from the old parameter count) must move up by the number of new parameters so
 /// they don't collide with the inserted parameter slots.
 pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) {
-    match &mut ir.exprs[e as usize] {
-        IrExpr::GetValue(i) if *i >= threshold => *i += by,
-        IrExpr::SetValue { var, .. } if *var >= threshold => *var += by,
-        IrExpr::Variable { index, .. } if *index >= threshold => *index += by,
-        // A `catch (e) { … }` variable is DECLARED by the `IrCatch.var` field (not a `Variable` node); its
-        // uses inside the catch body are `GetValue`s shifted by the recursion below, so the field must
-        // shift too or the binding and its reads desync.
-        IrExpr::Try { catches, .. } => {
-            for c in catches.iter_mut() {
-                if c.var >= threshold {
-                    c.var += by;
+    fn shift(
+        ir: &mut IrFile,
+        e: ExprId,
+        threshold: u32,
+        by: u32,
+        visited: &mut std::collections::HashSet<ExprId>,
+    ) {
+        // Operands may be shared deliberately (for example, the receiver of the read and write halves
+        // of an access increment). The arena is therefore a DAG, not necessarily a tree: rewrite each
+        // expression once even when multiple parents reference it.
+        if !visited.insert(e) {
+            return;
+        }
+        match &mut ir.exprs[e as usize] {
+            IrExpr::GetValue(i) if *i >= threshold => *i += by,
+            IrExpr::SetValue { var, .. } if *var >= threshold => *var += by,
+            IrExpr::Variable { index, .. } if *index >= threshold => *index += by,
+            // A `catch (e) { … }` variable is DECLARED by the `IrCatch.var` field (not a `Variable`
+            // node); its uses inside the catch body are shifted by the recursion below, so the field
+            // must shift too or the binding and its reads desync.
+            IrExpr::Try { catches, .. } => {
+                for c in catches.iter_mut() {
+                    if c.var >= threshold {
+                        c.var += by;
+                    }
                 }
             }
+            _ => {}
         }
-        _ => {}
-    }
-    // A nested `Lambda`'s CAPTURES reference the ENCLOSING scope's value slots (shift them), but its
-    // `inline_body` is a copy of the lambda's own body in the lambda's OWN value numbering (captures +
-    // params) — recursing into it would corrupt those internal slots with this enclosing threshold/delta.
-    // So for a `Lambda`, shift only the captures (the impl method's body is a separate function, already
-    // untouched here).
-    if let IrExpr::Lambda { captures, .. } = &ir.exprs[e as usize] {
-        let caps = captures.clone();
-        for c in caps {
-            shift_value_indices(ir, c, threshold, by);
+        // A nested `Lambda`'s CAPTURES reference the ENCLOSING scope's value slots (shift them), but
+        // its `inline_body` is a copy of the lambda's own body in the lambda's OWN value numbering
+        // (captures + params) — recursing into it would corrupt those internal slots with this
+        // enclosing threshold/delta. So for a `Lambda`, shift only the captures (the impl method's
+        // body is a separate function, already untouched here).
+        if let IrExpr::Lambda { captures, .. } = &ir.exprs[e as usize] {
+            let caps = captures.clone();
+            for c in caps {
+                shift(ir, c, threshold, by, visited);
+            }
+            return;
         }
-        return;
+        let mut kids = Vec::new();
+        for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
+        for c in kids {
+            shift(ir, c, threshold, by, visited);
+        }
     }
-    let mut kids = Vec::new();
-    for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
-    for c in kids {
-        shift_value_indices(ir, c, threshold, by);
-    }
+
+    let mut visited = std::collections::HashSet::new();
+    shift(ir, e, threshold, by, &mut visited);
 }
 
 #[cfg(test)]
@@ -2296,6 +2313,20 @@ mod tests {
             matches!(f.exprs[inner as usize], IrExpr::GetValue(1)),
             "lambda-internal inline_body ref must NOT shift"
         );
+    }
+
+    #[test]
+    fn shift_value_indices_rewrites_shared_children_once() {
+        let mut f = IrFile::default();
+        let shared = f.add_expr(IrExpr::GetValue(1));
+        let block = f.add_expr(IrExpr::Block {
+            stmts: vec![shared],
+            value: Some(shared),
+        });
+
+        shift_value_indices(&mut f, block, 1, 1);
+
+        assert!(matches!(f.expr(shared), IrExpr::GetValue(2)));
     }
 
     #[test]

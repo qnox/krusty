@@ -144,6 +144,7 @@ struct SemanticClassifier<'a> {
     token_by_span: HashMap<(u32, u32), usize>,
     statement_scopes: HashMap<(u32, u32), Span>,
     statement_inc_dec_spans: HashSet<(u32, u32)>,
+    synthetic_index_inc_dec_statements: HashSet<StmtId>,
     callees: HashMap<ExprId, ExprId>,
     highlight_symbols: &'a HighlightSymbols,
     definition_symbols: &'a DefinitionSymbols,
@@ -664,6 +665,26 @@ impl<'a> SemanticClassifier<'a> {
                 }
             })
             .collect();
+        // An indexed access increment expands to a block containing a canonical increment of a
+        // synthetic local followed by `set`. Kotlin's official LSP omits the source `++`/`--` token
+        // for indexed storage, so keep that parity without hiding the corresponding member-property
+        // token. The parser's access-block marker makes this structural rather than name/span based.
+        let synthetic_index_inc_dec_statements = file
+            .incdec_access_operands
+            .keys()
+            .filter_map(|&expression| {
+                let Expr::Block { stmts, .. } = file.expr(expression) else {
+                    return None;
+                };
+                stmts.last().filter(|&&statement| {
+                    matches!(file.stmt(statement), Stmt::AssignIndex { .. })
+                })?;
+                stmts
+                    .iter()
+                    .copied()
+                    .find(|&statement| matches!(file.stmt(statement), Stmt::IncDec { .. }))
+            })
+            .collect();
         let callees = file
             .expr_arena
             .iter()
@@ -700,6 +721,7 @@ impl<'a> SemanticClassifier<'a> {
             token_by_span,
             statement_scopes,
             statement_inc_dec_spans,
+            synthetic_index_inc_dec_statements,
             callees,
             highlight_symbols,
             definition_symbols,
@@ -1654,6 +1676,12 @@ impl<'a> SemanticClassifier<'a> {
         span: Span,
         statement: &Stmt,
     ) {
+        if self
+            .synthetic_index_inc_dec_statements
+            .contains(&statement_id)
+        {
+            return;
+        }
         let Stmt::IncDec { dec, .. } = statement else {
             return;
         };
