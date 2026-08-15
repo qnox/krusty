@@ -1769,9 +1769,9 @@ fn seed_plain_class_pool(
     };
     let ctor_sig = ctor_signature;
     let field_sigs: Vec<Option<String>> = c.fields.iter().map(field_sig_of).collect();
-    // A `data class` interns its parameterized-field `Signature`s LATE (in `seed_data_class_pool`, before
-    // `@Metadata`), not with the field/accessors — so hand the plain seeder an EMPTY field-sig list and
-    // pass the real ones to the data seeder below.
+    // A data class's accessor signatures join its accessor window below, while its backing-field
+    // signatures land late after the synthesized data methods. Ordinary classes intern both naturally
+    // at the exact accessor/field visits.
     let (super_param_tys, _) = super_ctor_jvm_tys(ir, c, superclass, |a| {
         ir.logical_types
             .get(&a)
@@ -1874,6 +1874,46 @@ fn seed_plain_class_pool(
             .iter()
             .map(|f| ir.data_hashcode_owner(fq_name, &f.name).map(str::to_string))
             .collect();
+        let mut data_accessors = Vec::new();
+        for property in &c.properties {
+            if property.is_private {
+                continue;
+            }
+            let Some(field) = property
+                .backing_field
+                .and_then(|index| c.fields.get(index as usize))
+            else {
+                continue;
+            };
+            let accessor_ty = declared_property_accessor_jvm(ir, property, field);
+            let accessor_desc = desc(accessor_ty);
+            let field_sig = field_sig_of(field);
+            let getter = property
+                .getter_jvm_name
+                .clone()
+                .unwrap_or_else(|| crate::names::property_getter_name(&property.name));
+            data_accessors.push(crate::jvm::classfile::DataAccessorInfo {
+                name: getter,
+                desc: format!("(){accessor_desc}"),
+                setter_kind: 0,
+                signature: field_sig.as_ref().map(|signature| format!("(){signature}")),
+            });
+            if property.is_var {
+                let setter = property
+                    .setter_jvm_name
+                    .clone()
+                    .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
+                let guarded = accessor_ty.is_reference()
+                    && !property.ty.is_nullable()
+                    && !is_type_parameter_field(ir, fq_name, &field.name);
+                data_accessors.push(crate::jvm::classfile::DataAccessorInfo {
+                    name: setter,
+                    desc: format!("({accessor_desc})V"),
+                    setter_kind: if guarded { 2 } else { 1 },
+                    signature: field_sig.map(|signature| format!("({signature})V")),
+                });
+            }
+        }
         // `copy`'s generic Signature shares the ctor's parameter list, returning `self` instead of `void`.
         let copy_sig = ctor_sig
             .and_then(|s| s.strip_suffix('V'))
@@ -1884,6 +1924,7 @@ fn seed_plain_class_pool(
             simple,
             &data_fields,
             &crate::jvm::classfile::DataMemberInfo {
+                accessors: &data_accessors,
                 hashcode_owners: &hashcode_owners,
                 copy_sig: copy_sig.as_deref(),
                 field_sigs: &field_sigs,
@@ -4009,6 +4050,10 @@ fn emit_declared_property_accessor(
                 sig.as_deref(),
                 &setter_ann.into_iter().collect::<Vec<_>>(),
             );
+            // `<set-?>` is the setter value parameter's JVM debug name even when no non-null guard
+            // uses it as a String constant. Its UTF8 belongs to this method's header/debug window,
+            // before the following declared member.
+            cw.seed_utf8("<set-?>");
             let words = slot_words(accessor_jt);
             let mut st = CodeBuilder::new(1 + words);
             // kotlinc guards a non-null REFERENCE setter parameter, naming it `<set-?>`. A primitive
@@ -4319,23 +4364,32 @@ fn emit_class(
             .or_else(|| parameterized_sig(&signature_formatter, ty));
         let physical_name = instance_field_jvm_name(ir, c, field);
         let field_desc = ir_type_desc(ty);
-        let field_ann = ((field_desc.starts_with('L') || field_desc.starts_with('['))
-            && field.type_param.is_none())
-        .then(|| {
-            if ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
-        cw.add_field_late_sig(
-            acc,
-            &physical_name,
-            &field_desc,
-            field_sig.as_deref(),
-            None,
-            field_ann,
-        );
+        // Data-class field headers are part of the synthesized-member seed order, while coroutine
+        // continuation fields are compiler-generated storage rather than Kotlin properties. Both are
+        // therefore visited eagerly and neither receives property nullability annotations here.
+        // Ordinary declared properties use the later field-table visit: their methods establish the
+        // preceding pool window and their backing fields carry Kotlin's nullability annotation.
+        if c.is_data || is_continuation {
+            cw.add_field_sig(acc, &physical_name, &field_desc, field_sig.as_deref());
+        } else {
+            let field_ann = ((field_desc.starts_with('L') || field_desc.starts_with('['))
+                && field.type_param.is_none())
+            .then(|| {
+                if ty.is_nullable() {
+                    "Lorg/jetbrains/annotations/Nullable;"
+                } else {
+                    "Lorg/jetbrains/annotations/NotNull;"
+                }
+            });
+            cw.add_field_late_sig(
+                acc,
+                &physical_name,
+                &field_desc,
+                field_sig.as_deref(),
+                None,
+                field_ann,
+            );
+        }
     }
     // A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
     // `ConstantValue` fields (kotlinc's layout); they have no `<clinit>` store (the JVM initializes them).

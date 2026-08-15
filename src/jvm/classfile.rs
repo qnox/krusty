@@ -125,9 +125,20 @@ pub struct MemberSignatures<'a> {
     pub ctor: Option<&'a str>,
 }
 
+/// One declared data-class property accessor at its JVM method-header interning position.
+pub struct DataAccessorInfo {
+    pub name: String,
+    pub desc: String,
+    /// 0 = getter, 1 = unguarded setter, 2 = non-null reference setter.
+    pub setter_kind: u8,
+    pub signature: Option<String>,
+}
+
 /// Extra per-member data a `data class` needs when seeding [`ClassWriter::seed_data_class_pool`], all
 /// index-parallel to its `fields`. Bundled to keep the seeder's arity in check.
 pub struct DataMemberInfo<'a> {
+    /// Declared property accessors in emission order. These precede `componentN` in a data class.
+    pub accessors: &'a [DataAccessorInfo],
     /// Per-field JVM `hashCode` owner override — an interface/collection field dispatches
     /// `java/lang/Object.hashCode`, not `<field-class>.hashCode`. `None` ⇒ derive from the descriptor.
     pub hashcode_owners: &'a [Option<String>],
@@ -1153,8 +1164,8 @@ impl ClassWriter {
     /// the natural emission that follows reuses these indices (interning dedups). kotlinc visits each
     /// method [name, descriptor, body refs, LVT strings] before the next, and interns backing-field
     /// name/descriptor lazily at the `putfield` — an order krusty's field-then-method emission does not
-    /// otherwise reproduce. Call BEFORE any `add_field`/`add_method` for the class. `accessors` are the
-    /// getters (and, for a `var`, setters) in declaration order as `(name, descriptor)`.
+    /// otherwise reproduce. Call BEFORE any `add_field`/`add_method` for the class. Declared methods
+    /// and property accessors then intern at their own exact emission sites.
     #[allow(clippy::too_many_arguments)]
     pub fn seed_plain_class_pool(
         &mut self,
@@ -1256,10 +1267,10 @@ impl ClassWriter {
     }
 
     /// Seed a `data class`'s synthesized-method constant-pool entries in kotlinc's first-use order,
-    /// AFTER [`seed_plain_class_pool`] (which seeds `<init>`/fields/accessors). `fields` is
-    /// `(name, jvm_descriptor)` in declaration order. Mirrors the bodies kotlinc emits for
-    /// `componentN`/`copy`/`copy$default`/`toString`/`hashCode`/`equals` so the natural emission reuses
-    /// these indices. `simple` is the class's simple name (for the `toString` prefix `Simple(field=`).
+    /// AFTER [`seed_plain_class_pool`] (which seeds `<init>` and its field stores). It first seeds the
+    /// data class's declared property accessors, then mirrors the synthesized bodies kotlinc emits for
+    /// `componentN`/`copy`/`copy$default`/`toString`/`hashCode`/`equals`. `fields` is
+    /// `(name, jvm_descriptor)` in declaration order; `simple` is the class's simple name.
     pub fn seed_data_class_pool(
         &mut self,
         this_internal: &str,
@@ -1300,6 +1311,23 @@ impl ClassWriter {
             }
         };
         let is_ref = |d: &str| d.starts_with('L') || d.starts_with('[');
+
+        // Declared property accessors precede the synthesized data members. Ordinary classes intern
+        // accessors at their exact declaration sites, but a data class's synthetic-member seeder must
+        // preserve this boundary before it interns `componentN`/`copy`/the Object overrides.
+        for accessor in info.accessors {
+            self.cp.utf8(&accessor.name);
+            self.cp.utf8(&accessor.desc);
+            if let Some(signature) = &accessor.signature {
+                self.cp.utf8(signature);
+            }
+            if accessor.setter_kind >= 1 {
+                self.cp.utf8("<set-?>");
+            }
+            if accessor.setter_kind == 2 {
+                self.cp.string("<set-?>");
+            }
+        }
 
         // componentN — each body is a field read; only the method name is new.
         for i in 1..=fields.len() {
