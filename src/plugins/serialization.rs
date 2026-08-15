@@ -1867,6 +1867,7 @@ impl IrPlugin for SerializationPlugin {
                     .secondary_ctors
                     .push(crate::ir::IrSecondaryCtor {
                         annotations: crate::ir::FnAnnotations::default(),
+                        vararg_index: None,
                         params: deser_params,
                         named_params: Vec::new(),
                         defaults: vec![],
