@@ -930,6 +930,8 @@ mod reference_adaptation_e2e;
 mod reference_in_range_e2e;
 #[path = "reference_range_expression_e2e.rs"]
 mod reference_range_expression_e2e;
+#[path = "reified_class_literal_member_inference_e2e.rs"]
+mod reified_class_literal_member_inference_e2e;
 #[path = "reified_inline_check_e2e.rs"]
 mod reified_inline_check_e2e;
 #[path = "reified_inline_return_infer_e2e.rs"]

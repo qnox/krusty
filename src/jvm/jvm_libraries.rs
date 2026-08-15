@@ -663,6 +663,7 @@ impl JvmLibraries {
                 context_count,
                 flags: FnFlags {
                     inline: inline_kind,
+                    reified: meta.has_reified_type_params,
                     suspend,
                     operator: meta.is_operator,
                     infix: meta.is_infix,
@@ -737,6 +738,7 @@ impl JvmLibraries {
             function.visibility = builtin.visibility;
             function.flags = FnFlags {
                 inline,
+                reified: builtin.has_reified_type_params,
                 suspend: builtin.is_suspend,
                 operator: builtin.is_operator,
                 infix: builtin.is_infix,
@@ -903,6 +905,7 @@ impl JvmLibraries {
                 call_sig: function.member_call_sig(),
                 flags: FnFlags {
                     inline: InlineKind::None,
+                    reified: function.has_reified_type_params(),
                     suspend: function.is_suspend(),
                     operator: function.is_operator(),
                     infix: function.is_infix(),
@@ -1829,6 +1832,7 @@ impl JvmLibraries {
                         declaration.is_inline(),
                         declaration.is_inline() && !m.is_public(),
                     );
+                    member.reified = declaration.has_reified_type_params();
                     member.low_priority = declaration.low_priority();
                     member.contract = declaration.contract.clone();
                     member.set_is_member_extension(declaration.is_extension());
@@ -4153,6 +4157,7 @@ impl JvmLibraries {
                     context_count: mf.context_count(),
                     flags: FnFlags {
                         inline,
+                        reified: mf.has_reified_type_params(),
                         suspend: mf.is_suspend(),
                         operator: mf.is_operator(),
                         infix: mf.is_infix(),
@@ -4994,6 +4999,7 @@ impl JvmLibraries {
                             context_count: m.context_count,
                             flags: FnFlags {
                                 inline: m.inline,
+                                reified: m.reified,
                                 suspend,
                                 operator: m.is_operator(),
                                 infix: m.is_infix(),
