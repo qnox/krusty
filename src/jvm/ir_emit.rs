@@ -42,6 +42,29 @@ fn object_static_storage(c: &IrClass) -> bool {
     c.is_object && !c.is_companion && !c.is_local_class && c.enum_entry_of.is_none()
 }
 
+/// A companion of an INTERFACE uses OBJECT-style static storage (kotlinc's interface-companion
+/// layout): its instance lives in a `static final $$INSTANCE` on the companion itself, its
+/// properties back `static` fields there, and the interface's `Companion` field merely aliases
+/// `$$INSTANCE` in the interface `<clinit>` — nothing hoists onto the interface (whose fields
+/// would be forced `public static final`).
+fn companion_of_interface(ir: &IrFile, c: &IrClass) -> bool {
+    if !c.is_companion {
+        return false;
+    }
+    let fq = c.fq_name();
+    let Some((outer, _)) = fq.rsplit_once('$') else {
+        return false;
+    };
+    ir.classes
+        .iter()
+        .any(|candidate| candidate.is_interface && candidate.fq_name() == outer)
+}
+
+/// [`object_static_storage`] plus the interface-companion case — the storage rule emission keys on.
+fn static_storage(ir: &IrFile, c: &IrClass) -> bool {
+    object_static_storage(c) || companion_of_interface(ir, c)
+}
+
 /// Whether a static-storage object's `init_body` reads `this` (`GetValue(0)`) anywhere OTHER than
 /// as the receiver of a store to its own (now static) field — those receivers are dropped by the
 /// `putstatic` lowering, so only remaining reads force materializing INSTANCE into a local.
@@ -75,8 +98,12 @@ fn init_body_reads_this(ir: &IrFile, body: crate::ir::ExprId) -> bool {
 }
 
 fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
+    // An INTERFACE's companion self-constructs in its own `<clinit>` (no cross-class construction),
+    // so kotlinc emits no marker ctor for it.
     class.has_primary_ctor
-        && (class.is_sealed || class.is_companion || ir.has_value_param_ctor(&class.fq_name()))
+        && (class.is_sealed
+            || (class.is_companion && !companion_of_interface(ir, class))
+            || ir.has_value_param_ctor(&class.fq_name()))
 }
 
 /// Mutable per-emit-run accumulators, owned by the caller and shared (by `&`, via interior mutability)
@@ -1665,7 +1692,7 @@ fn seed_plain_class_pool(
     // A static-storage object's `<init>` stores nothing (initializers run in `<clinit>`, emitted
     // last) — its fields first appear at their GETTERS, which the seeder already orders correctly
     // for never-stored fields.
-    let statics_storage = object_static_storage(c);
+    let statics_storage = static_storage(ir, c);
     let fields: Vec<crate::jvm::classfile::SeedField> = c
         .fields
         .iter()
@@ -2500,6 +2527,15 @@ fn emit_companion_init(cw: &mut ClassWriter, code: &mut CodeBuilder, owner: &str
     };
     let companion_name = companion.render();
     let descriptor = format!("L{companion_name};");
+    // An INTERFACE's companion self-hosts its singleton (`static final $$INSTANCE`, built in the
+    // companion's own `<clinit>`); the interface's `Companion` field merely aliases it.
+    if class.is_interface {
+        let instance = cw.fieldref(&companion_name, "$$INSTANCE", &descriptor);
+        code.getstatic(instance, 1);
+        let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
+        code.putstatic(field, 1);
+        return;
+    }
     let classifier = cw.class_ref(&companion_name);
     code.new_obj(classifier);
     code.dup();
@@ -2631,6 +2667,12 @@ fn sorted_sealed_subclasses(c: &IrClass) -> Vec<String> {
 
 fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit_permitted: bool) {
     use crate::jvm::classfile::InnerClassSpec;
+    // The IR records subtype relationships for EVERY class; only a SEALED classifier turns them
+    // into PermittedSubclasses + eager nest entries (a plain interface with an anonymous
+    // implementor was seeding that implementor's class constant into its own pool).
+    if !c.is_sealed {
+        return;
+    }
     let self_fq = c.fq_name();
     let subs = sorted_sealed_subclasses(c);
     if subs.is_empty() {
@@ -3882,7 +3924,7 @@ fn emit_declared_property_accessors(
             let mut g = CodeBuilder::new(1);
             let physical_name = instance_field_jvm_name(ir, c, field);
             let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
-            if object_static_storage(c) {
+            if static_storage(ir, c) {
                 g.getstatic(fref, slot_words(field_jt) as i32);
             } else {
                 g.aload(0);
@@ -3956,7 +3998,7 @@ fn emit_declared_property_accessors(
                     );
                     st.invokestatic(m, 2, 0);
                 }
-                let statics_storage = object_static_storage(c);
+                let statics_storage = static_storage(ir, c);
                 if !statics_storage {
                     st.aload(0);
                 }
@@ -4212,7 +4254,7 @@ fn emit_class(
     // (kotlinc does the same) — for both normal classes and objects.
     // A static-storage object's field table leads with INSTANCE (kotlinc's order) — its backing
     // fields are added in the object block below, after the INSTANCE field.
-    let mut field_order: Vec<&crate::ir::IrField> = if object_static_storage(c) {
+    let mut field_order: Vec<&crate::ir::IrField> = if static_storage(ir, c) {
         Vec::new()
     } else {
         c.fields.iter().collect()
@@ -4244,7 +4286,7 @@ fn emit_class(
         } else {
             (if private { 0x0002 } else { 0x0001 })
                 | if field.is_final() { 0x0010 } else { 0 }
-                | if object_static_storage(c) { 0x0008 } else { 0 }
+                | if static_storage(ir, c) { 0x0008 } else { 0 }
         };
         // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`); a
         // PARAMETERIZED concrete type (`val xs: List<String>`) carries its full generic signature. Both
@@ -4446,7 +4488,7 @@ fn emit_class(
                     slot += slot_words(*t);
                 }
             }
-            if let Some(init_body) = c.init_body.filter(|_| !object_static_storage(c)) {
+            if let Some(init_body) = c.init_body.filter(|_| !static_storage(ir, c)) {
                 // kotlinc gives the ctor one LineNumberTable entry per body-property initializer, on
                 // that property's own source line. Emit the initializer statements one at a time so
                 // each one's real start pc is known; only for a pure list of `SetField` stores (the
@@ -4900,7 +4942,17 @@ fn emit_class(
     }
     // A singleton `object` (emitted AFTER the instance methods — kotlinc's method order, which
     // also matches its constant-pool interning sequence): a `public static final INSTANCE` built in `<clinit>`.
-    if c.is_object {
+    if c.is_object || companion_of_interface(ir, c) {
+        // An INTERFACE's companion self-hosts its singleton: a package-private `static final
+        // $$INSTANCE` on the companion (the interface's `Companion` field aliases it in the
+        // interface `<clinit>`), with the companion's properties as statics here — kotlinc's
+        // interface-companion layout. A plain object uses `public static final INSTANCE`.
+        let interface_companion = !c.is_object;
+        let (instance_name, instance_access) = if interface_companion {
+            ("$$INSTANCE", 0x1018) // STATIC | FINAL | SYNTHETIC (package-private)
+        } else {
+            ("INSTANCE", 0x0019) // PUBLIC | STATIC | FINAL
+        };
         let self_desc = format!("L{};", fq_name);
         // kotlinc reaches `<clinit>` before the INSTANCE field, so the pool follows its BODY: the
         // method name, the `<init>` Methodref of `new demo/O`, then the field entries at the
@@ -4908,12 +4960,14 @@ fn emit_class(
         cw.reserve_method_name("<clinit>");
         let ci = cw.class_ref(&fq_name);
         let init = cw.methodref(&fq_name, "<init>", "()V");
-        let fref = cw.fieldref(&fq_name, "INSTANCE", &self_desc);
-        cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
-        cw.set_field_nullability("INSTANCE", "Lorg/jetbrains/annotations/NotNull;");
+        let fref = cw.fieldref(&fq_name, instance_name, &self_desc);
+        cw.add_field(instance_access, instance_name, &self_desc);
+        if !interface_companion {
+            cw.set_field_nullability("INSTANCE", "Lorg/jetbrains/annotations/NotNull;");
+        }
         // The backing fields FOLLOW the INSTANCE entry in the field table (kotlinc's order); their
         // Utf8s were interned by the accessor bodies, so the pool is undisturbed.
-        if object_static_storage(c) {
+        if static_storage(ir, c) {
             for field in &c.fields {
                 let private = field.is_private();
                 let acc = (if private { 0x0002 } else { 0x0001 })
@@ -4944,7 +4998,7 @@ fn emit_class(
         // (the common shape) needs no local at all, matching kotlinc's `ldc; putstatic` sequence.
         let mut clinit_max = 0u16;
         let mut clinit_line_entries: Vec<(u16, u32)> = Vec::new();
-        if let Some(init_body) = c.init_body.filter(|_| object_static_storage(c)) {
+        if let Some(init_body) = c.init_body.filter(|_| static_storage(ir, c)) {
             let mut e = Emitter::new(
                 ir,
                 &mut cw,
@@ -4955,7 +5009,7 @@ fn emit_class(
                 std::iter::once(init_body),
             );
             if init_body_reads_this(ir, init_body) {
-                let iref = e.cw.fieldref(&fq_name, "INSTANCE", &self_desc);
+                let iref = e.cw.fieldref(&fq_name, instance_name, &self_desc);
                 clinit.getstatic(iref, 1);
                 store(Ty::obj(&fq_name), 0, &mut clinit);
                 e.slots.insert(0, (0, Ty::obj(&fq_name)));
@@ -6908,14 +6962,17 @@ fn emit_interface_class(
         }
     }
     // A `companion object` with methods: a `public static final Companion` field of the synthesized
-    // `C$Companion` type, constructed in the interface's `<clinit>` (alongside any non-const statics).
-    add_companion_field(&mut cw, c);
+    // `C$Companion` type, constructed (or, for the interface layout, ALIASED from the companion's
+    // own `$$INSTANCE`) in the interface's `<clinit>`. kotlinc writes the `<clinit>` BEFORE the
+    // field, so its name and body refs intern first — the field add then dedups.
     let clinit_statics: Vec<&crate::ir::IrStatic> = ir
         .statics
         .iter()
         .filter(|s| s.owner_matches(&fq_name) && !(s.is_const && const_value_idx_peek(ir, s.init)))
         .collect();
     if c.companion_class.is_some() || !clinit_statics.is_empty() {
+        cw.reserve_method_name("<clinit>");
+        cw.seed_utf8("()V");
         let mut e = Emitter::new(
             ir,
             &mut cw,
@@ -6938,6 +6995,7 @@ fn emit_interface_class(
         clinit.link();
         e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
     }
+    add_companion_field(&mut cw, c);
     // An interface is a VIEW of the same `IrClass` every other kind is — compute its `@Metadata` (and
     // therefore its debug tables/annotations) through the shared path, exactly like `emit_class`.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
@@ -9579,7 +9637,7 @@ impl<'a> Emitter<'a> {
                 let fty = c.fields[index as usize].ty.clone();
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name();
-                if object_static_storage(c) {
+                if static_storage(self.ir, c) {
                     // A static-storage object field: no instance operand (evaluate the receiver only
                     // for its effects), and a branchy value runs on an already-clean stack.
                     if !matches!(self.ir.expr(receiver), crate::ir::IrExpr::GetValue(_)) {
@@ -10144,7 +10202,7 @@ impl<'a> Emitter<'a> {
             name: instance_field_jvm_name(self.ir, class, field),
             descriptor: type_descriptor(ir_ty_to_jvm(&field.ty)),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
-            is_static: object_static_storage(class),
+            is_static: static_storage(self.ir, class),
         })
     }
 
@@ -10254,7 +10312,7 @@ impl<'a> Emitter<'a> {
             name: instance_field_jvm_name(self.ir, class, field),
             descriptor: type_descriptor(ir_ty_to_jvm(&field.ty)),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
-            is_static: object_static_storage(class),
+            is_static: static_storage(self.ir, class),
         })
     }
 
@@ -10710,7 +10768,7 @@ impl<'a> Emitter<'a> {
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name();
                 let is_lateinit = c.fields[*index as usize].is_lateinit();
-                if object_static_storage(c) {
+                if static_storage(self.ir, c) {
                     // A static-storage object field: no instance operand. The receiver is `this`
                     // (or the INSTANCE read) — evaluate it only if it could have effects.
                     if !matches!(self.ir.expr(*receiver), crate::ir::IrExpr::GetValue(_)) {
