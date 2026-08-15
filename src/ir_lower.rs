@@ -14688,6 +14688,10 @@ impl<'a> Lower<'a> {
                                         let params = tys_to_ir(physical_explicit);
                                         self.lower_call_args_in_slot_order(call, args, &params)?
                                     }
+                                    None if !vararg && args.len() == physical_explicit.len() => {
+                                        let params = tys_to_ir(physical_explicit);
+                                        (self.lower_args(args, &params)?, Vec::new())
+                                    }
                                     None => return None,
                                 }
                             }
