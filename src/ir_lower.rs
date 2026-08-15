@@ -27860,6 +27860,14 @@ fn param_checks_for(
                     && !class_nonnull_type_params.contains(&p.ty.name));
             // A value-class parameter is erased to its underlying type; the null-check applies to that
             // (a primitive underlying gets none — the param is a primitive local, not a reference).
+            crate::trace_compiler!(
+                "lower",
+                "param check {}::{} ty={ty:?} nullable={} ntp={nullable_type_param} ref={}",
+                f.name,
+                p.name,
+                p.ty.nullable(),
+                ty.is_reference(),
+            );
             if !p.ty.nullable() && !nullable_type_param && ty.is_reference() {
                 Some(p.name.clone())
             } else {

@@ -5200,6 +5200,13 @@ fn is_ref(t: &Ty) -> bool {
     if t.is_jvm_scalar() {
         return false;
     }
+    // A FUNCTION type realizes as a `FunctionN` object and an array as its array class — both are
+    // references with no `kotlin_class_internal`, and the `None => false` fallback below silently
+    // stripped their `checkNotNullParameter` guards (kotlinc guards a `block: () -> Unit` like any
+    // other non-null reference parameter).
+    if matches!(t, Ty::Fun(_)) || t.is_array() {
+        return true;
+    }
     // `kotlin_class_internal` (not `obj_internal`): a bare `Ty::String` variant is a REFERENCE but has no
     // `obj_internal()` — treating it as a non-reference makes `nullable_is_boxed` think a `String`-backed
     // value class is primitive-like (`Str?` wrongly boxed instead of unboxed to `String?`).

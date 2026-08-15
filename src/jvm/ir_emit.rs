@@ -7676,6 +7676,13 @@ impl<'a> JvmSignatureFormatter<'a> {
         if matches!(ty, Ty::TyParam(..)) {
             return Some(true);
         }
+        // Core's COMPACT variants for final Kotlin classifiers (`Unit`, `String`, the scalars and
+        // unsigned types) have no `kotlin_class_internal`, and the permissive fallback below would
+        // hand them a spurious `? extends` (`Function1<…, +Lkotlin/Unit;>` where kotlinc writes the
+        // invariant spelling) — they are final, so answer directly.
+        if matches!(ty, Ty::Unit | Ty::String) || ty.is_jvm_scalar() || ty.is_unsigned() {
+            return Some(false);
+        }
         // Core has compact variants for common Kotlin classifiers, but that storage choice does not
         // change the JVM wildcard rule. Ask for their semantic classifier identity exactly as for an
         // `Obj`; otherwise final `String`/numeric arguments would incorrectly gain `? extends`.
