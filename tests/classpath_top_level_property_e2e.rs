@@ -2,8 +2,8 @@
 //! "unresolved reference" at every use site: the classpath namespace record carried a package's
 //! top-level FUNCTIONS and its EXTENSION properties, but never its receiver-less top-level properties,
 //! so an explicit import, a star import, and a same-package reference all found nothing. The record now
-//! carries them, and a read lowers to the facade's static getter. Verified end-to-end on a real JVM
-//! against a kotlinc-compiled dependency.
+//! carries them, and a read lowers to the facade's static getter. Runtime tests consume the
+//! Krusty-built dependency; kotlinc is used only as an emission oracle where explicitly stated.
 use super::common;
 
 const LIB: &str = "package lib\n\
@@ -11,6 +11,28 @@ const LIB: &str = "package lib\n\
      val plugin: Plugin = Plugin(\"installed\")\n\
      val counter: Int = 7\n\
      val absent: String? = null\n";
+
+/// Enforce the producer contract directly. Every property is emitted by Krusty; kotlinc only supplies
+/// the expected bytes. Runtime and mutable initializers must omit `HAS_CONSTANT`; literal and signed-
+/// literal `val`s must carry it. Any difference in the resulting facade is a hard parity failure.
+#[test]
+fn facade_property_constant_emission_is_byte_identical_to_kotlinc() {
+    const SOURCE: &str = "package parity\n\
+        class Token\n\
+        val runtime = Token()\n\
+        val literal = 7\n\
+        val negative = -9\n\
+        var mutable = 11\n";
+    match common::byte_diff_against_kotlinc(
+        "FacadePropertyMetadata",
+        SOURCE,
+        "parity/FacadePropertyMetadataKt",
+    ) {
+        None => panic!("facade property metadata: reference toolchain unavailable"),
+        Some(Ok(())) => {}
+        Some(Err(error)) => panic!("{error}"),
+    }
+}
 
 #[test]
 fn an_imported_classpath_top_level_property_reads() {

@@ -2078,6 +2078,9 @@ pub struct SourcePropertySig {
     pub ty: Ty,
     pub is_var: bool,
     pub is_const: bool,
+    /// The checked initializer's non-null compile-time value. Lowering and metadata emission consume
+    /// this semantic fact instead of independently re-reading initializer syntax.
+    pub compile_time_constant: Option<crate::libraries::LibraryConst>,
     pub implicit_integer_coercion: bool,
     pub context_params: Vec<Ty>,
     pub package: String,
@@ -7639,6 +7642,12 @@ fn collect_signatures_with_cp_impl(
                             ty,
                             is_var: p.is_var,
                             is_const: p.is_const,
+                            compile_time_constant: if p.is_var {
+                                None
+                            } else {
+                                p.init
+                                    .and_then(|init| source_literal_constant(file, init, ty))
+                            },
                             implicit_integer_coercion: has_implicit_integer_coercion_annotation(
                                 &p.annotations,
                                 &class_names,
@@ -9264,6 +9273,28 @@ fn source_literal_constant(
         Expr::BoolLit(value) => LibConst::Int(i32::from(*value)),
         Expr::CharLit(value) => LibConst::Int(i32::from(*value)),
         Expr::StringLit(value) => LibConst::Str(value.clone()),
+        // A sign belongs to the literal's checked compile-time value even though it has a separate
+        // parser node. Do not use the broader call-argument arithmetic folder here: kotlinc does not
+        // set `HAS_CONSTANT` on a plain `val arithmetic = 1 + 2`, despite folding its JVM code.
+        Expr::Unary {
+            op: UnOp::Plus,
+            operand,
+        } if ty.non_null().is_numeric() => {
+            return source_literal_constant(file, *operand, ty);
+        }
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+        } => {
+            let constant = source_literal_constant(file, *operand, ty)?;
+            match constant.value {
+                LibConst::Int(value) => LibConst::Int(value.checked_neg()?),
+                LibConst::Long(value) => LibConst::Long(value.checked_neg()?),
+                LibConst::Float(value) => LibConst::Float(-value),
+                LibConst::Double(value) => LibConst::Double(-value),
+                LibConst::Str(_) => return None,
+            }
+        }
         _ => return None,
     };
     Some(LibraryConst { ty, value })

@@ -781,33 +781,38 @@ fn facade_package_metadata_inner(
         let Decl::Property(p) = file.decl(d) else {
             continue;
         };
-        let (ty, is_var, type_params, receiver, mut accessor_params) = if p.receiver.is_some() {
-            // Match by declaration, not name: extension properties may share a spelling on
-            // different receivers and still denote different declarations.
-            let Some(property) = syms.source_extension_property((file_index, d.0)) else {
-                continue;
+        let (ty, is_var, is_const, has_constant, type_params, receiver, mut accessor_params) =
+            if p.receiver.is_some() {
+                // Match by declaration, not name: extension properties may share a spelling on
+                // different receivers and still denote different declarations.
+                let Some(property) = syms.source_extension_property((file_index, d.0)) else {
+                    continue;
+                };
+                (
+                    property.ty,
+                    property.is_var,
+                    false,
+                    false,
+                    property.formals.clone(),
+                    Some(property.receiver),
+                    std::iter::once(property.receiver)
+                        .chain(property.context_params.iter().copied())
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                let Some(property) = syms.source_props.get(&(file_index, d.0)) else {
+                    continue;
+                };
+                (
+                    property.ty,
+                    property.is_var,
+                    property.is_const,
+                    property.compile_time_constant.is_some(),
+                    Vec::new(),
+                    None,
+                    property.context_params.clone(),
+                )
             };
-            (
-                property.ty,
-                property.is_var,
-                property.formals.clone(),
-                Some(property.receiver),
-                std::iter::once(property.receiver)
-                    .chain(property.context_params.iter().copied())
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            let Some(property) = syms.source_props.get(&(file_index, d.0)) else {
-                continue;
-            };
-            (
-                property.ty,
-                property.is_var,
-                Vec::new(),
-                None,
-                property.context_params.clone(),
-            )
-        };
         let descriptor_params = accessor_params
             .iter()
             .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
@@ -839,7 +844,8 @@ fn facade_package_metadata_inner(
             receiver,
             getter,
             setter,
-            is_const: p.is_const,
+            is_const,
+            has_constant,
             decl_order,
             visibility: p.visibility,
         });

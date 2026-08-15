@@ -4518,7 +4518,23 @@ fn lower_file_at_reporting_impl(
                     // Property-initializer lambdas use the property name as their synthetic owner.
                     lo.cur_fn = crate::ir::IrFunctionScope::synthetic(p.name.clone());
                     let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
-                    let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
+                    let constant_init = syms
+                        .source_props
+                        .get(&(file_index, d.0))
+                        .and_then(|property| property.compile_time_constant.as_ref())
+                        .map(library_const_ir)
+                        // A nullable numeric/value-class property stores a BOXED reference. Its
+                        // semantic constant is still authoritative for metadata, but emitting the
+                        // raw scalar here would bypass `lower_arg`'s checked boxing coercion.
+                        .filter(|constant| {
+                            !ir_type_is_reference(&ir_ty)
+                                || matches!(constant, crate::ir::IrConst::String(_))
+                        });
+                    let init = if let Some(constant) = constant_init {
+                        lo.emit_const(constant)
+                    } else {
+                        lo.lower_arg(p.init.unwrap(), &ir_ty)?
+                    };
                     lo.ir.statics.push(crate::ir::IrStatic {
                         visibility: p.visibility,
                         name: p.name.clone(),
