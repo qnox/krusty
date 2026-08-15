@@ -1826,6 +1826,13 @@ fn seed_plain_class_pool(
             fields: if c.is_data { &[] } else { &field_sigs },
         },
         ctor_default_seed.as_ref(),
+        &c.super_args
+            .iter()
+            .filter_map(|&arg| match ir.expr(init_operand(ir, arg)) {
+                IrExpr::Const(crate::ir::IrConst::String(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
     );
     // A companion OUTER continues with its hoisted-property entries: the `access$…$cp` bridges,
     // `<clinit>`'s Companion construction, and the hoisted initializers' string constants — all in
@@ -3851,9 +3858,11 @@ fn emit_declared_property_accessors(
         let field_desc = type_descriptor(field_jt);
         let accessor_jt = declared_property_accessor_jvm(ir, property, field);
         let accessor_desc = type_descriptor(accessor_jt);
-        // An accessor on a class a subclass can extend must stay non-final, like any other member: the
-        // subclass overriding the property may live in another file.
-        let overridable = property.is_open || c.is_open || c.is_abstract || c.is_interface;
+        // Only an `open`/`override` PROPERTY's accessor is overridable — a plain `val` on an open
+        // class keeps its FINAL accessor (kotlinc: `open class Engine(val name: String)` emits
+        // `public final getName()`); Kotlin rejects overriding a non-open property, so the flag is
+        // safe. Interface accessors stay non-final (their default bodies dispatch virtually).
+        let overridable = property.is_open || c.is_interface;
         let getter = property
             .getter_jvm_name
             .clone()
@@ -4080,6 +4089,12 @@ fn emit_class(
         opts.class_major.unwrap_or(MAJOR_JAVA8) >= 61,
     );
     register_inner_classes(&mut cw, ir);
+    // The class HEADER's interface refs intern BEFORE any member entry (kotlinc visits the header
+    // first — `object Fast : Factory` pool: this, super, `lib/Factory`, then `<init>`), so add them
+    // ahead of the pool seeding below.
+    for itf in c.interfaces.iter_rendered() {
+        cw.add_interface(&itf);
+    }
     // Seed the constant pool in kotlinc's interning order for a plain property class that will carry a
     // computed `@Metadata` + debug tables — so the emitted class is byte-identical, not just
     // structurally equal. Gated exactly like the debug tables (opt-in, non-data, qualifying shape).
@@ -4157,9 +4172,7 @@ fn emit_class(
     if let Some(s) = &jvm_sig {
         cw.set_signature(s);
     }
-    for itf in c.interfaces.iter_rendered() {
-        cw.add_interface(&itf);
-    }
+    // (Interface refs were added with the header, before the pool seeding.)
     // A class with a `companion object`: its `public static final Companion` field LEADS the field
     // table (kotlinc's order), before the instance fields and any hoisted statics.
     add_companion_field(&mut cw, c);
@@ -7499,17 +7512,28 @@ fn emit_method_inner(
         code.ret_void();
     }
     // The `$i$f$<name>` marker's LocalVariableTable entry covers the body from the post-store pc —
-    // kotlinc writes it even when no other local is recorded.
+    // kotlinc writes it even when no other local is recorded. LVT strings intern EAGERLY, right
+    // after this method's body (kotlinc's per-method visit order) — deferring them to the write
+    // phase batches every method's table entries at the end, a pool-order divergence on any
+    // multi-method facade.
     if let Some((slot, start)) = inline_marker {
-        code.add_local_entry(start, None, slot, &format!("$i$f${}", f.name), "I");
+        let marker_name = format!("$i$f${}", f.name);
+        e.cw.seed_utf8(&marker_name);
+        e.cw.seed_utf8("I");
+        code.add_local_entry(start, None, slot, &marker_name, "I");
     }
     // Method locals precede `this` and parameters in kotlinc's table order.
     if e.record_locals {
         for (_, slot, start, name, desc) in std::mem::take(&mut e.open_locals) {
+            e.cw.seed_utf8(&name);
+            e.cw.seed_utf8(&desc);
             code.add_local_entry(start, None, slot, &name, &desc);
         }
         if instance {
-            code.add_local_entry(0, None, 0, "this", &format!("L{owner};"));
+            let this_desc = format!("L{owner};");
+            e.cw.seed_utf8("this");
+            e.cw.seed_utf8(&this_desc);
+            code.add_local_entry(0, None, 0, "this", &this_desc);
         }
         let mut slot = u16::from(instance);
         for (i, t) in param_tys.iter().enumerate() {
@@ -7518,7 +7542,10 @@ fn emit_method_inner(
                 .and_then(|ns| ns.get(i).cloned())
                 .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
                 .unwrap_or_else(|| format!("p{i}"));
-            code.add_local_entry(0, None, slot, &pname, &local_variable_desc(*t));
+            let pdesc = local_variable_desc(*t);
+            e.cw.seed_utf8(&pname);
+            e.cw.seed_utf8(&pdesc);
+            code.add_local_entry(0, None, slot, &pname, &pdesc);
             slot += slot_words(*t);
         }
     }
@@ -8208,6 +8235,10 @@ fn emit_default_stub(
         &desc,
         &code,
     );
+    // kotlinc gives the synthetic a one-entry LineNumberTable at the function's declaration line.
+    if let Some(&line) = ir.fn_decl_lines.get(&fid) {
+        e.cw.set_method_lines(&format!("{method_name}$default"), &desc, &[(0, line)]);
+    }
 }
 
 /// The access flags of a member's `$default` synthetic: kotlinc mirrors the origin's visibility —
@@ -8359,6 +8390,22 @@ fn emit_facade_default_stub(
         .len()
         .checked_sub(recv_offset)
         .expect("an extension receiver is a leading physical parameter");
+    // kotlinc interns the synthetic's NAME + DESCRIPTOR at its method header, before any constant
+    // its body (the delegating call, the default fills) introduces.
+    {
+        let mask_words = default_mask_count(logical_param_count);
+        let stub_desc = method_descriptor(
+            &real_params
+                .iter()
+                .copied()
+                .chain(std::iter::repeat_n(Ty::Int, mask_words))
+                .chain(std::iter::once(marker))
+                .collect::<Vec<_>>(),
+            ret,
+        );
+        cw.seed_utf8(&format!("{method_name}$default"));
+        cw.seed_utf8(&stub_desc);
+    }
 
     let mut e = Emitter::new(
         ir,
@@ -8438,6 +8485,10 @@ fn emit_facade_default_stub(
         &desc,
         &code,
     );
+    // kotlinc gives the synthetic a one-entry LineNumberTable at the function's declaration line.
+    if let Some(&line) = ir.fn_decl_lines.get(&fid) {
+        e.cw.set_method_lines(&format!("{method_name}$default"), &desc, &[(0, line)]);
+    }
 }
 
 /// Emit the synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload for a class whose
@@ -12230,6 +12281,37 @@ impl<'a> Emitter<'a> {
     }
 
     fn append(&mut self, e: u32, code: &mut CodeBuilder) {
+        // A part boxed only to satisfy `String.plus(Any?)` (`"…" + port` wraps the `Int` through a
+        // reference coercion) appends via the PRIMITIVE overload — kotlinc's StringBuilder
+        // specialization (`append(I)`), never `valueOf` + `append(Object)`. The box is
+        // concat-invisible, so see through it.
+        let e = match self.ir.expr(e) {
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => {
+                let inner = *arg;
+                let inner_ty = self.value_ty(inner);
+                // An UNSIGNED value's box is NOT concat-invisible: its carrier prints in signed
+                // decimal, the box's own `toString` in unsigned — keep the box.
+                let unsigned_inner = self
+                    .ir
+                    .logical_types
+                    .get(&inner)
+                    .is_some_and(|t| t.is_unsigned())
+                    || inner_ty.is_unsigned();
+                if !unsigned_inner
+                    && !ir_ty_to_jvm(&inner_ty).is_reference()
+                    && ir_ty_to_jvm(&self.value_ty(e)).is_reference()
+                {
+                    inner
+                } else {
+                    e
+                }
+            }
+            _ => e,
+        };
         let ty = self.value_ty(e);
         self.emit_value(e, code);
         self.append_top(ty, code);

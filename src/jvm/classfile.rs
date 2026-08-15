@@ -1023,6 +1023,10 @@ impl ClassWriter {
         // The primary ctor's `$default` overload entries (marker desc, default string constants,
         // delegating `<init>` ref) — interned between the ctor and the accessors, kotlinc's order.
         ctor_defaults: Option<&SeedCtorDefaults>,
+        // String constants the `super(…)` call's arguments push — code order puts their `ldc`
+        // BEFORE the `invokespecial`, so they intern before the super `<init>` Methodref
+        // (`class Basic : Engine("basic")`).
+        super_arg_strings: &[KtString],
     ) {
         let (ctor_desc, super_ctor_desc) = ctor_descs;
         // Primary constructor: name + descriptor are interned at method entry, before its body.
@@ -1064,6 +1068,9 @@ impl ClassWriter {
                     seeded_intrinsics = true;
                 }
             }
+        }
+        for s in super_arg_strings {
+            self.cp.string_kt(s);
         }
         self.cp.methodref(super_internal, "<init>", super_ctor_desc);
         // One `putfield` per property-backed parameter: field name, descriptor, NameAndType, Fieldref.
