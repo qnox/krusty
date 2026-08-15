@@ -23531,9 +23531,35 @@ impl<'a> Checker<'a> {
                     MemberExtensionSelection::Operators,
                 ) {
                     // A member EXTENSION `operator fun Recv.invoke(...)` on an implicit receiver
-                    // (`"case" { … }` inside a receiver-DSL lambda): the selected callable is
-                    // recorded, and the lowerer emits it as a member-extension call.
-                    return InvokeResolution::Selected(ret);
+                    // (`"case" { … }` inside a receiver-DSL lambda). Keep the selected member-
+                    // extension target and publish the same invoke handoff every other invoke
+                    // convention uses; lowering must not rediscover this call from its name shape.
+                    let target = self
+                        .resolved_calls
+                        .get(&call)
+                        .cloned()
+                        .expect("selected member-extension invoke target was recorded");
+                    let params = match &target {
+                        ResolvedCall::MemberExtension {
+                            params,
+                            context_args,
+                            ..
+                        } => params
+                            .get(context_args.len()..)
+                            .unwrap_or_default()
+                            .to_vec(),
+                        _ => unreachable!("member-extension invoke recorded a different target"),
+                    };
+                    (
+                        params,
+                        ret,
+                        InvokeKind::Operator {
+                            receiver_ty,
+                            target: Box::new(target),
+                            param_default_values: Vec::new(),
+                        },
+                        true,
+                    )
                 } else {
                     let extensions = invoke_candidates
                         .into_iter()
@@ -24177,6 +24203,30 @@ impl<'a> Checker<'a> {
     }
     fn lexical_value_declares(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
         self.lookup(scope, name).is_some()
+            || self
+                .lookup_lexical_callable_overloads(scope, name)
+                .is_some_and(|overloads| !overloads.is_empty())
+    }
+    /// Whether one selected value type claims call syntax through Kotlin's invoke convention.
+    /// Callable shape comes from semantic types and declarations, including a member-extension
+    /// `operator fun T.invoke`; it is never inferred from a classifier spelling.
+    fn value_type_claims_call(&self, scope: &CheckerScope<'_>, ty: Ty) -> bool {
+        matches!(ty.non_null(), Ty::Fun(_))
+            || !self.invoke_operator_candidates(ty).is_empty()
+            || self
+                .member_extension_function_shapes(scope, ty, CALLABLE_INVOKE_OPERATOR)
+                .into_iter()
+                .any(|shape| shape.is_operator)
+    }
+
+    /// Whether a lexical binding of `name` claims CALL syntax. A value (local, parameter, or
+    /// receiver property) competes for `name(…)` only when its semantic type supports the invoke
+    /// convention; Kotlin never lets a non-invokable value shadow a member FUNCTION of an implicit
+    /// receiver in call position (`var schema` + `fun schema(builder)` on a builder: `schema { … }`
+    /// binds the function). Local `fun`s always claim.
+    fn lexical_value_claims_call(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
+        self.lookup(scope, name)
+            .is_some_and(|local| self.value_type_claims_call(scope, local.ty))
             || self
                 .lookup_lexical_callable_overloads(scope, name)
                 .is_some_and(|overloads| !overloads.is_empty())
@@ -44006,7 +44056,29 @@ impl<'a> Checker<'a> {
                     .lookup(scope, &fname)
                     .map(|local| (local.ty, local.origin));
                 let local_value_ty = local_value.map(|(ty, _)| ty);
-                if let Some((mut receiver_ty, origin)) = local_value {
+                // For a call carrying a LAMBDA argument, a value binding claims call syntax only
+                // when it can actually be invoked — it is function-typed or its type declares an
+                // `invoke` operator. Kotlin resolves call candidates among callables; a
+                // non-invokable value (a builder's `var schema` seen through the implicit receiver,
+                // an enclosing `fmt: String?` parameter) never shadows a member FUNCTION of the
+                // same name. Deciding this BEFORE typing the arguments matters as much as the
+                // outcome: the invoke attempt types the lambda against the value's type, and those
+                // bindings and diagnostics (an "unresolved reference" inside the mis-typed body)
+                // survive even after a later rung resolves the call correctly.
+                //
+                // Lambda-argument calls ONLY: for plain arguments the attempt is harmless (their
+                // types are receiver-independent, `record_invoke` falls through on Absent), and a
+                // callable-reference local (`val av = a::v; av()` — `KProperty0`, whose `invoke`
+                // arrives via the reflect/`FunctionN` supertypes rather than an operator-flagged
+                // member) must keep reaching the invoke rung.
+                let lambda_argument = args
+                    .iter()
+                    .any(|&argument| matches!(self.file.expr(argument), Expr::Lambda { .. }));
+                let local_value_invokable = !lambda_argument
+                    || local_value.is_some_and(|(ty, _)| self.value_type_claims_call(scope, ty));
+                if let Some((mut receiver_ty, origin)) =
+                    local_value.filter(|_| local_value_invokable)
+                {
                     if matches!(
                         origin,
                         ReceiverFnValueOrigin::DispatchProperty { .. }
@@ -45050,7 +45122,7 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let implicit_member_lambda_enabled = !self.lexical_value_declares(scope, &fname)
+                let implicit_member_lambda_enabled = !self.lexical_value_claims_call(scope, &fname)
                     && known_sig.is_none()
                     && args
                         .iter()
