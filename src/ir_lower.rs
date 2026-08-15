@@ -25087,8 +25087,8 @@ impl<'a> Lower<'a> {
             // member (a non-invokable value never claims call syntax), so the shadowing parameter
             // in `lookup` must not divert lowering onto the (nonexistent) top-level route.
             let checker_selected_receiver = self.info.implicit_receiver_selections.contains_key(&e);
-            if (self.lookup(&fname).is_none() || checker_selected_receiver)
-                && (self.cur_class.is_none() || checker_selected_receiver)
+            if checker_selected_receiver
+                || (self.lookup(&fname).is_none() && self.cur_class.is_none())
             {
                 if let Some(r) = self.lower_implicit_receiver_call(&fname, &args, e) {
                     return Some(r);
