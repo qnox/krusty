@@ -18554,6 +18554,14 @@ impl<'a> Checker<'a> {
                     bindings.entry(formal.clone()).or_insert(Ty::Nothing);
                 }
             }
+            // Join bottom bindings against `where`-clause subtype constraints IN the real
+            // bindings — the return type substitutes from them (`ifBlank { null }` must select
+            // with `R = String?`, not pass a check-local copy and return `Nothing?`).
+            crate::symbol_resolver::complete_bottom_constraint_bindings(
+                &signature,
+                &mut bindings,
+                type_args.len(),
+            );
             if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                 &signature,
                 &bindings,
@@ -18561,7 +18569,7 @@ impl<'a> Checker<'a> {
             ) {
                 crate::trace_compiler!(
                     "resolve",
-                    "candidate {} rejected: inferred type arguments violate declared bounds",
+                    "candidate {} rejected: inferred type arguments violate declared bounds bindings={bindings:?}",
                     candidate.callable.name,
                 );
                 continue;
