@@ -301,15 +301,25 @@ impl ConstPool {
             })
             .collect()
     }
-    /// Whether any pool Utf8 mentions `internal` as an object descriptor (`L<internal>;`) — how a
-    /// nested class referenced ONLY through a field/method descriptor still earns its
-    /// `InnerClasses` entry (kotlinc/ASM derive the nest from descriptors too, not just Class
-    /// constants).
-    fn descriptor_mentions(&self, internal: &str) -> bool {
+    fn utf8_value(&self, index: u16) -> Option<&str> {
+        match self.entry_at(index) {
+            Some(Const::Utf8(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Whether a typed constant-pool descriptor mentions `internal`. Arbitrary `Utf8` entries are
+    /// deliberately excluded: a source string literal can itself spell `Lowner/Nested;`.
+    fn typed_descriptor_mentions(&self, internal: &str) -> bool {
         let needle = format!("L{internal};");
-        self.entries
-            .iter()
-            .any(|entry| matches!(entry, Const::Utf8(s) if s.contains(&needle)))
+        self.entries.iter().any(|entry| {
+            let descriptor = match entry {
+                Const::NameAndType(_, descriptor) | Const::MethodType(descriptor) => *descriptor,
+                _ => return false,
+            };
+            self.utf8_value(descriptor)
+                .is_some_and(|value| value.contains(&needle))
+        })
     }
 
     fn integer(&mut self, v: i32) -> u16 {
@@ -550,6 +560,21 @@ pub struct InnerClassDetails {
 pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 impl ClassWriter {
+    /// Whether a declared member or typed constant-pool descriptor references `internal`.
+    fn descriptor_mentions(&self, internal: &str) -> bool {
+        let needle = format!("L{internal};");
+        self.fields
+            .iter()
+            .map(|field| field.desc)
+            .chain(self.methods.iter().map(|method| method.desc))
+            .any(|descriptor| {
+                self.cp
+                    .utf8_value(descriptor)
+                    .is_some_and(|value| value.contains(&needle))
+            })
+            || self.cp.typed_descriptor_mentions(internal)
+    }
+
     pub fn new(internal_name: &str, super_internal: &str) -> ClassWriter {
         ClassWriter::new_generic(internal_name, None, super_internal)
     }
@@ -2022,7 +2047,7 @@ impl ClassWriter {
             .filter(|candidate| {
                 candidate.outer.as_deref() == Some(self.internal_name.as_str())
                     || referenced.contains(&candidate.inner)
-                    || self.cp.descriptor_mentions(&candidate.inner)
+                    || self.descriptor_mentions(&candidate.inner)
             })
             .map(|candidate| {
                 (
@@ -2180,7 +2205,7 @@ impl ClassWriter {
                 .filter(|s| {
                     own_member(s)
                         || self.cp.has_class(&s.inner)
-                        || self.cp.descriptor_mentions(&s.inner)
+                        || self.descriptor_mentions(&s.inner)
                 })
                 .cloned()
                 .collect();
@@ -3581,6 +3606,30 @@ mod tests {
         assert!(has(b"InnerClasses"));
         assert!(has(b"C$Companion"));
         assert!(has(b"Companion"));
+    }
+
+    #[test]
+    fn inner_class_descriptor_references_are_typed() {
+        let candidate = InnerClassSpec {
+            inner: "dep/Outer$Nested".to_string(),
+            outer: Some("dep/Outer".to_string()),
+            name: Some("Nested".to_string()),
+            access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+        };
+
+        let mut field_ref = ClassWriter::new("Use", "java/lang/Object");
+        field_ref.add_inner_class(candidate.clone());
+        field_ref.add_field(ACC_PUBLIC, "nested", "Ldep/Outer$Nested;");
+        let info = crate::jvm::classreader::parse_class(&field_ref.finish()).expect("parse class");
+        assert_eq!(info.inner_classes.len(), 1);
+
+        // The same bytes as an ordinary string constant are not a descriptor reference.
+        let mut string_literal = ClassWriter::new("Use", "java/lang/Object");
+        string_literal.add_inner_class(candidate);
+        string_literal.const_string("Ldep/Outer$Nested;");
+        let info =
+            crate::jvm::classreader::parse_class(&string_literal.finish()).expect("parse class");
+        assert!(info.inner_classes.is_empty());
     }
 
     /// kotlinc emits an `InnerClasses` entry for a class's OWN member classes whether or not its code

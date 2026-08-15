@@ -15,6 +15,10 @@ use std::path::PathBuf;
 /// panics with the front-end diagnostics instead of reporting a declined source as a pass.
 fn krusty_bytes(src: &str, class_internal: &str, cp: &[PathBuf]) -> Vec<u8> {
     let stem = class_internal.rsplit('/').next().unwrap();
+    krusty_bytes_with_stem(src, stem, class_internal, cp)
+}
+
+fn krusty_bytes_with_stem(src: &str, stem: &str, class_internal: &str, cp: &[PathBuf]) -> Vec<u8> {
     let classes = common::compile_in_process_metadata_cp(src, stem, cp).unwrap_or_else(|| {
         let diagnostics = common::front_end_diagnostics(src, cp, None);
         panic!("{class_internal}: krusty declined the source; diagnostics: {diagnostics:?}")
@@ -55,11 +59,15 @@ fn kotlinc_bytes(src: &str, stem: &str, class_internal: &str, cp: &[PathBuf]) ->
 /// Skips only when the reference kotlinc toolchain is unavailable; a source krusty declines FAILS.
 fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
     let stem = class_internal.rsplit('/').next().unwrap();
+    assert_byte_identical_with_stem(src, stem, class_internal, cp);
+}
+
+fn assert_byte_identical_with_stem(src: &str, stem: &str, class_internal: &str, cp: &[PathBuf]) {
     let Some(ko) = kotlinc_bytes(src, stem, class_internal, cp) else {
         eprintln!("skip ({class_internal}: provisioned kotlinc unavailable)");
         return;
     };
-    let kr = krusty_bytes(src, class_internal, cp);
+    let kr = krusty_bytes_with_stem(src, stem, class_internal, cp);
     assert_eq!(
         kr,
         ko,
@@ -505,6 +513,19 @@ fn boolean_default_body_property_is_byte_identical() {
     assert_byte_identical(
         "package demo\nclass Builder {\n    var pretty: Boolean = false\n}\n",
         "demo/Builder",
+        &[],
+    );
+}
+
+/// A receiver-lambda default produces a synthetic facade implementation and an `invokedynamic`
+/// call site. Pins its guard/debug tables, bootstrap argument order, and descriptor-only nested-class
+/// entry together against kotlinc.
+#[test]
+fn receiver_lambda_facade_is_byte_identical() {
+    assert_byte_identical_with_stem(
+        "package demo\nclass Cfg(val pretty: Boolean)\nclass Builder { var pretty: Boolean = false }\nclass Engine(val name: String)\nclass Client(val engine: Engine, val configuration: Cfg)\nfun Client(engine: Engine, action: Builder.() -> Unit = {}): Client {\n    val builder = Builder()\n    builder.action()\n    return Client(engine, Cfg(builder.pretty))\n}\n",
+        "Lib",
+        "demo/LibKt",
         &[],
     );
 }
