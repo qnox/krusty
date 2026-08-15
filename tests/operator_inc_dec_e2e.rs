@@ -84,6 +84,169 @@ fn member_dec_local() {
     assert_eq!(run(SRC).expect("member dec"), "OK");
 }
 
+#[test]
+fn smart_casted_nullable_primitive_incdec_uses_the_proven_read_type() {
+    const SRC: &str = r#"
+fun box(): String {
+    var value: Int?
+    value = 10
+
+    val old: Int = value++
+    if (old != 10 || value != 11) return "fail postfix: $old/$value"
+
+    val updated: Int = ++value
+    if (updated != 12 || value != 12) return "fail prefix: $updated/$value"
+
+    return "OK"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("SmartCastedNullablePrimitiveIncDec", SRC);
+    assert_eq!(code, 0, "kotlinc rejected smart-cast inc/dec: {stderr}");
+    assert_eq!(
+        run(SRC).expect("smart-cast nullable primitive inc/dec"),
+        "OK"
+    );
+}
+
+#[test]
+fn smart_casted_postfix_inference_uses_the_proven_read_type() {
+    const SRC: &str = r#"
+fun box(): String {
+    var value: Int?
+    value = 10
+
+    var old = value++
+    old = null
+    return "unreachable: $old/$value"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("SmartCastedPostfixInference", SRC);
+    assert_ne!(code, 0, "kotlinc unexpectedly accepted null assignment");
+    assert!(
+        stderr.contains("null cannot be a value of a non-null type 'Int'"),
+        "unexpected kotlinc diagnostic: {stderr}"
+    );
+    let diags = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.contains("null cannot be a value of a non-null type 'Int'")),
+        "expected inferred Int diagnostic, got: {diags:?}"
+    );
+}
+
+#[test]
+fn smart_casted_reference_incdec_selects_the_subtype_operator() {
+    const SRC: &str = r#"
+open class Base(val value: Int)
+class Derived(value: Int) : Base(value)
+
+operator fun Derived.inc(): Derived = Derived(value + 1)
+
+fun box(): String {
+    var current: Base
+    current = Derived(20)
+
+    val old: Derived = current++
+    if (old.value != 20 || current.value != 21) return "fail postfix"
+
+    val updated: Derived = ++current
+    if (updated.value != 22 || current.value != 22) return "fail prefix"
+
+    return "OK"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("SmartCastedReferenceIncDec", SRC);
+    assert_eq!(code, 0, "kotlinc rejected smart-cast inc/dec: {stderr}");
+    assert_eq!(run(SRC).expect("smart-cast reference inc/dec"), "OK");
+}
+
+#[test]
+fn smart_casted_incdec_statements_use_the_proven_read_type() {
+    const SRC: &str = r#"
+open class Base(val value: Int)
+class Derived(value: Int) : Base(value)
+
+operator fun Derived.inc(): Derived = Derived(value + 1)
+
+fun box(): String {
+    var number: Int?
+    number = 4
+    number++
+    ++number
+
+    var current: Base
+    current = Derived(30)
+    current++
+    ++current
+
+    return if (number == 6 && current.value == 32) "OK" else "fail: $number/${current.value}"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("SmartCastedIncDecStatements", SRC);
+    assert_eq!(code, 0, "kotlinc rejected smart-cast statements: {stderr}");
+    assert_eq!(run(SRC).expect("smart-cast inc/dec statements"), "OK");
+}
+
+#[test]
+fn prefix_incdec_expression_keeps_the_selected_receiver_type() {
+    const SRC: &str = r#"
+open class Base(val value: Int)
+class Derived(value: Int) : Base(value)
+
+operator fun Base.inc(): Derived = Derived(value + 1)
+
+var top: Base = Base(10)
+
+class Holder(var current: Base) {
+    fun update(): Derived = ++current
+}
+
+fun box(): String {
+    val topResult: Derived = ++top
+    val holder = Holder(Base(20))
+    val memberResult: Derived = holder.update()
+    return "unreachable: ${topResult.value}/${memberResult.value}/${holder.current.value}"
+}
+"#;
+    let (code, stderr) = common::kotlinc_source_result("PrefixIncDecSubtypeResult", SRC);
+    assert_ne!(
+        code, 0,
+        "kotlinc unexpectedly exposed the inc return subtype"
+    );
+    assert!(
+        stderr.contains("expected 'Derived', actual 'Base'"),
+        "unexpected kotlinc diagnostic: {stderr}"
+    );
+    let diags = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.contains("expected 'Derived', actual 'Base'")),
+        "expected receiver-typed prefix diagnostic, got: {diags:?}"
+    );
+}
+
+#[test]
+fn local_prefix_incdec_result_type_matches_kotlinc_after_writeback() {
+    const SRC: &str = r#"
+open class Base(val value: Int)
+class Derived(value: Int) : Base(value)
+
+operator fun Base.inc(): Derived = Derived(value + 1)
+
+fun update(): Derived {
+    var current: Base = Base(30)
+    return ++current
+}
+
+fun box(): String = if (update().value == 31) "OK" else "fail"
+"#;
+    let (code, stderr) = common::kotlinc_source_result("LocalPrefixIncDecResult", SRC);
+    assert_eq!(code, 0, "kotlinc rejected local prefix result: {stderr}");
+    assert_eq!(run(SRC).expect("local prefix inc/dec result"), "OK");
+}
+
 /// An inc/dec as a lambda block's TRAILING value (`{ -> p.fst++ }` is `() -> Int`, not `() -> Unit`):
 /// the parser keeps it as the block's trailing expression — a `Name` target lowers directly, a
 /// member/index target desugars to a temp block that captures the old (postfix) or new (prefix)

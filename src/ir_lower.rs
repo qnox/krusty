@@ -18,12 +18,12 @@ use crate::frontend::{
     AnonymousObjectCaptureSource, CallableReferenceBinding, CallableReferenceTarget,
     CompoundAssignmentTarget, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget,
     ExprLowering, FrontendClassModel, FrontendSymbols, FrontendTypeInfo, FunctionImportScope,
-    ImplicitPropertyWriteTarget, ImplicitReceiverSelection, InlineCall, InvokeKind,
+    ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InlineCall, InvokeKind,
     IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ResolvedCall,
     ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
-    ResolvedExtensionCall, ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess,
-    ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags,
-    Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
+    ResolvedExtensionCall, ResolvedIncDec, ResolvedLocalFunctionCall, ResolvedMember,
+    ResolvedPropertyAccess, ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef,
+    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -5329,12 +5329,6 @@ struct ForeachOpts<'a> {
     hof_splice: bool,
 }
 
-#[derive(Clone, Copy)]
-enum IncDecSite {
-    Statement(ast::StmtId),
-    Expression(AstExprId),
-}
-
 /// How the common checker-slot consumer fills a parameter that has no source argument. Keeping the
 /// policy explicit lets module/source/classpath call sites share argument evaluation and vararg
 /// packing without confusing three different ABI meanings of an empty slot: unsupported, a
@@ -7292,31 +7286,118 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Produce the updated value for a built-in or checked `inc`/`dec` call.
+    fn resolved_incdec(&self, site: IncDecSite) -> Option<ResolvedIncDec> {
+        let resolution = self.info.resolved_inc_dec.get(&site).copied();
+        if resolution.is_none() {
+            crate::trace_compiler!(
+                "lower",
+                "missing resolved inc/dec handoff site={site:?} scope={:?}",
+                self.scope
+            );
+        }
+        resolution
+    }
+
+    /// Emit only the selected `inc`/`dec` operation. Assignment conversion belongs to the storage
+    /// consumer: a smart-cast receiver and the mutable slot need not have the same type.
+    fn lower_incdec_operation_value(
+        &mut self,
+        site: IncDecSite,
+        current: u32,
+        receiver_ty: Ty,
+        decrement: bool,
+    ) -> Option<(u32, Ty)> {
+        if receiver_ty.is_numeric_or_char() {
+            let step = self.incdec_step_const(receiver_ty, decrement)?;
+            let updated = self.scalar_update_value(current, receiver_ty, IrBinOp::Add, step);
+            return Some((updated, receiver_ty));
+        }
+        if self.value_class_underlying(receiver_ty).is_some() {
+            return None;
+        }
+        let name = if decrement { "dec" } else { "inc" };
+        match site {
+            IncDecSite::Statement(statement) => {
+                self.lower_stmt_op_call(statement, current, receiver_ty, name, &[])
+            }
+            IncDecSite::Expression(expression) => {
+                self.lower_op_call(current, receiver_ty, name, &[], expression)
+            }
+        }
+    }
+
+    /// Produce an updated value converted for a same-typed storage consumer.
     fn lower_incdec_updated_value(
         &mut self,
         site: IncDecSite,
         current: u32,
-        ty: Ty,
+        storage_ty: Ty,
         decrement: bool,
     ) -> Option<u32> {
-        if ty.is_numeric_or_char() {
-            let step = self.incdec_step_const(ty, decrement)?;
-            return Some(self.scalar_update_value(current, ty, IrBinOp::Add, step));
+        let resolution = self.resolved_incdec(site)?;
+        let receiver = self.implicit_coercion(current, resolution.receiver_ty);
+        let (updated, actual) =
+            self.lower_incdec_operation_value(site, receiver, resolution.receiver_ty, decrement)?;
+        Some(self.coerce_operator_result_to_storage(updated, actual, storage_ty))
+    }
+
+    /// Lower an inc/dec of a lexical slot from the exact frontend selection. The slot keeps its
+    /// physical storage representation; receiver and result temporaries use the semantic types that
+    /// selected the convention.
+    fn lower_resolved_local_incdec(
+        &mut self,
+        site: IncDecSite,
+        slot: u32,
+        physical_storage_ty: Ty,
+        resolution: ResolvedIncDec,
+        as_value: bool,
+    ) -> Option<u32> {
+        let current = self.emit_get_value(slot);
+        let receiver = self.implicit_coercion(current, resolution.receiver_ty);
+
+        if resolution.prefix {
+            let (updated, actual) = self.lower_incdec_operation_value(
+                site,
+                receiver,
+                resolution.receiver_ty,
+                resolution.decrement,
+            )?;
+            let updated_slot = self.fresh_value();
+            let updated_declaration =
+                self.emit_variable(updated_slot, ty_to_ir(actual), Some(updated));
+            let store_input = self.emit_get_value(updated_slot);
+            let store_input =
+                self.coerce_operator_result_to_storage(store_input, actual, physical_storage_ty);
+            let store = self.emit_set_value(slot, store_input);
+            let result = if as_value {
+                let result = self.emit_get_value(updated_slot);
+                Some(self.implicit_coercion(result, resolution.result_ty))
+            } else {
+                None
+            };
+            return Some(self.emit_block(vec![updated_declaration, store], result));
         }
-        if self.value_class_underlying(ty).is_some() {
-            return None;
-        }
-        let name = if decrement { "dec" } else { "inc" };
-        let (call, ret) = match site {
-            IncDecSite::Statement(statement) => {
-                self.lower_stmt_op_call(statement, current, ty, name, &[])?
-            }
-            IncDecSite::Expression(expression) => {
-                self.lower_op_call(current, ty, name, &[], expression)?
-            }
+
+        let old_slot = self.fresh_value();
+        let old_declaration =
+            self.emit_variable(old_slot, ty_to_ir(resolution.receiver_ty), Some(receiver));
+        let operation_input = self.emit_get_value(old_slot);
+        let (updated, actual) = self.lower_incdec_operation_value(
+            site,
+            operation_input,
+            resolution.receiver_ty,
+            resolution.decrement,
+        )?;
+        let store_input =
+            self.coerce_operator_result_to_storage(updated, actual, physical_storage_ty);
+        let store = self.emit_set_value(slot, store_input);
+        let result = if as_value {
+            let result = self.emit_get_value(old_slot);
+            Some(self.implicit_coercion(result, resolution.result_ty))
+        } else {
+            None
         };
-        Some(self.coerce_operator_result_to_storage(call, ret, ty))
+        Some(self.emit_block(vec![old_declaration, store], result))
     }
 
     fn selected_backing_field_ty(&self) -> Option<Ty> {
@@ -18737,16 +18818,15 @@ impl<'a> Lower<'a> {
             }
             // `name++` / `name--` in statement position.
             Stmt::IncDec { name, dec, prefix } => {
+                let site = IncDecSite::Statement(s);
+                let Some(resolution) = self.resolved_incdec(site) else {
+                    return self.bail("missing resolved statement inc/dec handoff");
+                };
                 if matches!(
                     self.info.stmt_lowers.get(&s),
                     Some(StmtLowering::BackingFieldWrite)
                 ) {
-                    return self.lower_selected_backing_field_incdec(
-                        IncDecSite::Statement(s),
-                        dec,
-                        prefix,
-                        false,
-                    );
+                    return self.lower_selected_backing_field_incdec(site, dec, prefix, false);
                 }
                 // A boxed mutable-capture local: `x++`/`x--` reads/writes through its `Ref` holder.
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
@@ -18756,8 +18836,7 @@ impl<'a> Lower<'a> {
                         holder: hv,
                         elem: ty_to_ir(elem),
                     });
-                    let nv =
-                        self.lower_incdec_updated_value(IncDecSite::Statement(s), cur, elem, dec)?;
+                    let nv = self.lower_incdec_updated_value(site, cur, elem, dec)?;
                     let hv2 = self.emit_get_value(holder);
                     return Some(self.ir.add_expr(IrExpr::RefSet {
                         holder: hv2,
@@ -18775,24 +18854,29 @@ impl<'a> Lower<'a> {
                 // checker already walked the scope tower and committed that binding. Lowering only
                 // chooses the physical storage/accessor for the selected top-level declaration.
                 if self.lookup(&name).is_none() {
-                    return self.lower_toplevel_incdec(
-                        IncDecSite::Statement(s),
-                        &name,
-                        dec,
-                        prefix,
-                        false,
-                    );
+                    return self.lower_toplevel_incdec(site, &name, dec, prefix, false);
                 }
                 let (v, ty) = self.lookup(&name)?;
+                if resolution.receiver_ty != resolution.storage_ty
+                    || resolution.updated_ty != resolution.storage_ty
+                {
+                    return self.lower_resolved_local_incdec(site, v, ty, resolution, false);
+                }
                 // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()`.
-                if !ty.is_numeric_or_char() {
+                if !resolution.receiver_ty.is_numeric_or_char() {
                     if self.value_class_underlying(ty).is_some() {
                         return None;
                     }
                     let operator_name = if dec { "dec" } else { "inc" };
                     let receiver = self.emit_get_value(v);
-                    let (call, ret) =
-                        self.lower_stmt_op_call(s, receiver, ty, operator_name, &[])?;
+                    let receiver = self.implicit_coercion(receiver, resolution.receiver_ty);
+                    let (call, ret) = self.lower_stmt_op_call(
+                        s,
+                        receiver,
+                        resolution.receiver_ty,
+                        operator_name,
+                        &[],
+                    )?;
                     let call = self.coerce_operator_result_to_storage(call, ret, ty);
                     return Some(self.emit_set_value(v, call));
                 }
@@ -23677,27 +23761,21 @@ impl<'a> Lower<'a> {
             let Expr::Name(name) = self.afile.expr(target).clone() else {
                 return None;
             };
+            let site = IncDecSite::Expression(e);
+            let Some(resolution) = self.resolved_incdec(site) else {
+                return self.bail("missing resolved expression inc/dec handoff");
+            };
             if matches!(
                 self.info.expr_lowers.get(&target),
                 Some(ExprLowering::BackingFieldRead)
             ) {
-                return self.lower_selected_backing_field_incdec(
-                    IncDecSite::Expression(e),
-                    dec,
-                    prefix,
-                    true,
-                );
+                return self.lower_selected_backing_field_incdec(site, dec, prefix, true);
             }
             if let Some(ExprLowering::ImplicitPropertyIncDec(target)) =
                 self.info.expr_lowers.get(&e).cloned()
             {
                 return self.lower_selected_implicit_property_incdec(
-                    IncDecSite::Expression(e),
-                    &name,
-                    *target,
-                    dec,
-                    prefix,
-                    true,
+                    site, &name, *target, dec, prefix, true,
                 );
             }
             // A boxed mutable-capture local: `var++`/`++var` as a value, through its `Ref` holder.
@@ -23711,12 +23789,7 @@ impl<'a> Lower<'a> {
                         elem: elem_ir,
                     });
                     if prefix {
-                        let updated = self.lower_incdec_updated_value(
-                            IncDecSite::Expression(e),
-                            current,
-                            elem,
-                            dec,
-                        )?;
+                        let updated = self.lower_incdec_updated_value(site, current, elem, dec)?;
                         let holder_value = self.emit_get_value(holder);
                         let set = self.ir.add_expr(IrExpr::RefSet {
                             holder: holder_value,
@@ -23733,12 +23806,7 @@ impl<'a> Lower<'a> {
                     let old_value = self.fresh_value();
                     let old = self.emit_variable(old_value, elem_ir, Some(current));
                     let receiver = self.emit_get_value(old_value);
-                    let updated = self.lower_incdec_updated_value(
-                        IncDecSite::Expression(e),
-                        receiver,
-                        elem,
-                        dec,
-                    )?;
+                    let updated = self.lower_incdec_updated_value(site, receiver, elem, dec)?;
                     let holder_value = self.emit_get_value(holder);
                     let set = self.ir.add_expr(IrExpr::RefSet {
                         holder: holder_value,
@@ -23780,25 +23848,31 @@ impl<'a> Lower<'a> {
             // With no lexical slot or recorded implicit-receiver property, the checker selected a
             // top-level variable. The lowerer realizes that target without another scope query.
             if self.lookup(&name).is_none() {
-                return self.lower_toplevel_incdec(
-                    IncDecSite::Expression(e),
-                    &name,
-                    dec,
-                    prefix,
-                    true,
-                );
+                return self.lower_toplevel_incdec(site, &name, dec, prefix, true);
             }
             let (v, ty) = self.lookup(&name)?;
+            if resolution.receiver_ty != resolution.storage_ty
+                || resolution.updated_ty != resolution.storage_ty
+            {
+                return self.lower_resolved_local_incdec(site, v, ty, resolution, true);
+            }
             // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()` yielding the
             // new value (prefix) or the captured old value (postfix).
-            if !ty.is_numeric_or_char() {
+            if !resolution.receiver_ty.is_numeric_or_char() {
                 if self.value_class_underlying(ty).is_some() {
                     return None;
                 }
                 let operator_name = if dec { "dec" } else { "inc" };
                 if prefix {
                     let receiver = self.emit_get_value(v);
-                    let (call, ret) = self.lower_op_call(receiver, ty, operator_name, &[], e)?;
+                    let receiver = self.implicit_coercion(receiver, resolution.receiver_ty);
+                    let (call, ret) = self.lower_op_call(
+                        receiver,
+                        resolution.receiver_ty,
+                        operator_name,
+                        &[],
+                        e,
+                    )?;
                     let call = self.coerce_operator_result_to_storage(call, ret, ty);
                     let set = self.emit_set_value(v, call);
                     let value = self.emit_get_value(v);
@@ -23809,7 +23883,9 @@ impl<'a> Lower<'a> {
                 let old = self.emit_get_value(v);
                 let var_decl = self.emit_variable(tmp, ty_to_ir(ty), Some(old));
                 let receiver = self.emit_get_value(v);
-                let (call, ret) = self.lower_op_call(receiver, ty, operator_name, &[], e)?;
+                let receiver = self.implicit_coercion(receiver, resolution.receiver_ty);
+                let (call, ret) =
+                    self.lower_op_call(receiver, resolution.receiver_ty, operator_name, &[], e)?;
                 let call = self.coerce_operator_result_to_storage(call, ret, ty);
                 let set = self.emit_set_value(v, call);
                 let value = self.emit_get_value(tmp);
