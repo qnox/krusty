@@ -1824,20 +1824,21 @@ impl MetaValueParam {
 
 /// Bit-packed boolean flags for a [`MetaFn`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MfnFlags(u8);
+pub struct MfnFlags(u16);
 
 impl MfnFlags {
-    const IS_INLINE: u8 = 1 << 0;
-    const IS_SUSPEND: u8 = 1 << 1;
-    const IS_EXTENSION: u8 = 1 << 2;
-    const RET_NULLABLE: u8 = 1 << 3;
-    const IS_OPERATOR: u8 = 1 << 4;
-    const LOW_PRIORITY: u8 = 1 << 5;
-    const IS_INFIX: u8 = 1 << 6;
-    const HAS_REIFIED_TYPE_PARAMS: u8 = 1 << 7;
+    const IS_INLINE: u16 = 1 << 0;
+    const IS_SUSPEND: u16 = 1 << 1;
+    const IS_EXTENSION: u16 = 1 << 2;
+    const RET_NULLABLE: u16 = 1 << 3;
+    const IS_OPERATOR: u16 = 1 << 4;
+    const LOW_PRIORITY: u16 = 1 << 5;
+    const IS_INFIX: u16 = 1 << 6;
+    const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 7;
+    const DEPRECATED_HIDDEN: u16 = 1 << 8;
 
     #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
+    const fn with(mut self, mask: u16, on: bool) -> Self {
         if on {
             self.0 |= mask;
         } else {
@@ -1846,7 +1847,7 @@ impl MfnFlags {
         self
     }
     #[inline]
-    const fn has(self, mask: u8) -> bool {
+    const fn has(self, mask: u16) -> bool {
         self.0 & mask != 0
     }
 
@@ -1881,6 +1882,10 @@ impl MfnFlags {
     #[inline]
     pub const fn with_has_reified_type_params(self, on: bool) -> Self {
         self.with(Self::HAS_REIFIED_TYPE_PARAMS, on)
+    }
+    #[inline]
+    pub const fn with_deprecated_hidden(self, on: bool) -> Self {
+        self.with(Self::DEPRECATED_HIDDEN, on)
     }
 }
 
@@ -1964,6 +1969,13 @@ impl MetaFn {
     pub fn low_priority(&self) -> bool {
         self.flags.has(MfnFlags::LOW_PRIORITY)
     }
+    /// `@Deprecated(level = HIDDEN)`: the declaration exists for binary compatibility only and
+    /// kotlinc removes it from overload resolution entirely. Stamped from the realization
+    /// method's `kotlin.Deprecated` annotation after metadata decode.
+    #[inline]
+    pub fn deprecated_hidden(&self) -> bool {
+        self.flags.has(MfnFlags::DEPRECATED_HIDDEN)
+    }
 
     pub fn context_count(&self) -> usize {
         self.context_params.len()
@@ -2026,6 +2038,9 @@ pub struct MetaJvmMethodSig {
 pub struct MetaConstructor {
     pub params: ParamList,
     pub jvm_desc: Option<&'static str>,
+    /// `@Deprecated(level = HIDDEN)`: binary-compatibility-only, never a resolution candidate.
+    /// Stamped from the realization method's `kotlin.Deprecated` annotation after decode.
+    pub deprecated_hidden: bool,
 }
 
 /// One `Property` decoded from a class's `@Metadata`: its source name, logical (Kotlin) return-type
@@ -2162,7 +2177,7 @@ pub fn decode_metadata(
     d2: &[String],
     k: Option<i32>,
     this_class: &str,
-    _methods: &[super::classreader::MethodSig],
+    methods: &[super::classreader::MethodSig],
 ) -> KotlinMeta {
     if k == Some(4) {
         return KotlinMeta {
@@ -2218,8 +2233,39 @@ pub fn decode_metadata(
         Vec::new()
     };
     let class_flags = (k == Some(1)).then(|| class_flags(&ctx));
-    let class_functions =
-        decode_functions(&ctx, 9, &class_tparams, &class_type_param_bounds).into();
+    // `@Deprecated(level = HIDDEN)` lives on the JVM realization (a `kotlin.Deprecated` runtime
+    // annotation), not in the protobuf. A declaration whose realization method carries it exists
+    // for binary compatibility only — kotlinc drops it from resolution — so stamp the fact here,
+    // at the one point where declarations and classfile methods are both in hand. Matching is by
+    // exact (name, descriptor); a declaration without a descriptor stays visible.
+    let realization_hidden = |jvm_name: &str, jvm_desc: Option<&str>| -> bool {
+        jvm_desc.is_some_and(|descriptor| {
+            methods.iter().any(|method| {
+                method.deprecated_hidden
+                    && method.name == jvm_name
+                    && method.descriptor == descriptor
+            })
+        })
+    };
+    let stamp_functions = |mut functions: Vec<MetaFn>| -> Vec<MetaFn> {
+        for function in &mut functions {
+            if realization_hidden(&function.jvm_name, function.jvm_desc) {
+                function.flags = function.flags.with_deprecated_hidden(true);
+            }
+        }
+        functions
+    };
+    let class_functions = stamp_functions(decode_functions(
+        &ctx,
+        9,
+        &class_tparams,
+        &class_type_param_bounds,
+    ))
+    .into();
+    let mut constructors = ctor_params(&ctx);
+    for constructor in &mut constructors {
+        constructor.deprecated_hidden = realization_hidden("<init>", constructor.jvm_desc);
+    }
     let class_properties =
         decode_properties(&ctx, 10, &class_tparams, &class_type_param_bounds).into();
     KotlinMeta {
@@ -2235,11 +2281,11 @@ pub fn decode_metadata(
         ),
         class_supertypes,
         class_functions,
-        package_functions: decode_functions(&ctx, 3, &[], &[]).into(),
+        package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[])).into(),
         class_properties,
         package_properties: decode_properties(&ctx, 4, &[], &[]).into(),
         type_aliases: type_aliases(&ctx, this_class),
-        constructors: ctor_params(&ctx).into(),
+        constructors: constructors.into(),
         companion_name: companion_name(&ctx),
         sealed_subclasses: sealed_subclasses(&ctx),
         inline: inline_class(&ctx),
@@ -2807,9 +2853,14 @@ pub fn package_type_aliases(ci: &ClassInfo) -> &[(String, String)] {
 
 /// Named-parameter lists of the class's constructors, from its `@Metadata`.
 pub fn class_constructor_params(ci: &ClassInfo) -> Vec<ParamList> {
+    // A HIDDEN-deprecated constructor is not a resolution candidate in ANY channel; leaving its
+    // param list here would let the named/default slot channel map a call against a declaration
+    // no selection can ever produce (kotlinpoet's hidden 3-name `ClassName` ctor swallowing the
+    // 3-arg call that belongs to the visible vararg secondary).
     ci.meta
         .constructors
         .iter()
+        .filter(|constructor| !constructor.deprecated_hidden)
         .map(|constructor| constructor.params.clone())
         .collect()
 }
@@ -3043,6 +3094,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
                 out.push(MetaConstructor {
                     params,
                     jvm_desc: jvm_desc.map(|descriptor| intern(&descriptor)),
+                    deprecated_hidden: false,
                 });
             }
             (_, w) => {
