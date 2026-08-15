@@ -224,10 +224,23 @@ fn superclass_method_bridges(
         if base.params == own_shape.params && base.ret == own_shape.ret {
             continue;
         }
-        // A suspend override needing an erasure bridge can't be modeled (the coroutine pass rewrites the
-        // concrete method to CPS afterwards but never fixes up the bridge) — skip the file rather than
-        // emit a broken bridge.
+        // A suspend override: the CPS rewrite gives BOTH the base declaration and the override the
+        // same trailing `Continuation` parameter and an `Object` return, so a RETURN-only erasure
+        // difference vanishes — no bridge exists to build (probed: kotlinc emits a single
+        // `byId(int, Continuation)` for `Repo<T>.byId(Int): T?`). A VALUE-parameter difference
+        // still needs one, which the coroutine pass can't fix up — skip the file for that shape.
         if ir.suspend_funs.contains(&own_fid) {
+            // …EXCEPT a VALUE-CLASS return: it MANGLES the concrete method's name
+            // (`bar-JEFnHOQ(Continuation)`), so kotlinc emits a delegating bridge under the plain
+            // name — a shape the coroutine pass can't fix up here yet.
+            let vc_ret = own_shape
+                .ret
+                .non_null()
+                .obj_internal()
+                .is_some_and(|n| ir.is_value_class_name(n));
+            if base.params == own_shape.params && !vc_ret {
+                continue;
+            }
             return Err(SkipReason::Bridges);
         }
         ir.classes[cid].bridges.push(Bridge {
@@ -968,6 +981,22 @@ fn interface_bridges(
                 continue;
             }
             if impl_fid.is_some_and(|fid| ir.suspend_funs.contains(&fid)) {
+                // The CPS rewrite makes BOTH sides `(…, Continuation) -> Object`, so a RETURN-only
+                // erasure difference vanishes; only value-parameter differences — or a VALUE-CLASS
+                // return, which MANGLES the concrete method's name and forces a delegating bridge —
+                // still need the (unmodeled) bridge.
+                let concrete_erased = concrete_params
+                    .iter()
+                    .copied()
+                    .map(bridge_erasure)
+                    .collect::<Vec<_>>();
+                let vc_ret = concrete_ret
+                    .non_null()
+                    .obj_internal()
+                    .is_some_and(|n| ir.is_value_class_name(n));
+                if erased_params == concrete_erased && !vc_ret {
+                    continue;
+                }
                 return Err(SkipReason::Bridges);
             }
             if seen.insert((name.clone(), erased_params.clone(), erased_ret)) {

@@ -24,10 +24,11 @@ fn run_source(src: &str) -> Option<String> {
 }
 
 fn assert_source_ok(src: &str) {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()));
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    common::expect_true_e2e(
+        "computed_property_keeps_classpath_generic_return_arg",
+        src,
+        &[],
+    );
     assert_eq!(run_source(src), Some("OK".to_string()));
 }
 

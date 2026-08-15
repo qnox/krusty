@@ -17,12 +17,10 @@ fn nested_generic_constructor_infers_argument_type() {
         }
     "#;
 
-    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
-        return;
-    };
-    assert!(
-        diagnostics.is_empty(),
-        "expected no diagnostics, got: {diagnostics:?}"
+    common::expect_true_e2e(
+        "nested_generic_constructor_infers_argument_type",
+        SOURCE,
+        &[],
     );
 }
 

@@ -1589,6 +1589,16 @@ pub(crate) fn type_parameter_source_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// Semantic type of one declared value-parameter slot. A `vararg element: T` is callable as an
+/// `Array<T>` slot even though the source annotation itself denotes the element type.
+pub(crate) fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
+    if is_vararg {
+        Ty::array(declared)
+    } else {
+        declared
+    }
+}
+
 #[cfg(test)]
 mod declaration_type_parameter_tests {
     use super::{declaration_type_parameter, type_parameter_source_name};
@@ -1625,6 +1635,30 @@ pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
     }
 }
 
+/// Whether `ty` mentions ANY type parameter, whatever its identity. Semantic type-parameter names
+/// are checker-generated (`\0tp:…`), so a source-name list cannot match them — use this where the
+/// only question is "does a type variable appear at all".
+pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
+    match ty {
+        Ty::TyParam(..) => true,
+        Ty::Obj(_, arguments) => arguments
+            .iter()
+            .any(|argument| ty_mentions_any_param(*argument)),
+        Ty::Fun(signature) => {
+            signature
+                .params
+                .iter()
+                .any(|parameter| ty_mentions_any_param(*parameter))
+                || ty_mentions_any_param(signature.ret)
+        }
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner) => ty_mentions_any_param(*inner),
+        _ => false,
+    }
+}
+
 /// Kotlin declaration visibility — the modifier on a `fun`/`val`/`class` (from source) or the
 /// `@Metadata`/bytecode flags of a library declaration. `PRIVATE_TO_THIS` folds into `Private`;
 /// `LOCAL` is not represented (locals are never surfaced as declarations). This records what a
@@ -1637,6 +1671,17 @@ pub enum Visibility {
     Internal,
     Protected,
     Private,
+}
+
+/// Kotlin annotation retention after frontend resolution. `Default` is runtime retention without
+/// an explicit `@Retention` declaration; keeping it distinct lets metadata emission omit the Kotlin
+/// meta-annotation while still stamping the JVM runtime policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnotationRetention {
+    Default,
+    Runtime,
+    Binary,
+    Source,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

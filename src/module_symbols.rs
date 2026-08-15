@@ -373,6 +373,7 @@ impl<'a> ModuleSymbols<'a> {
                 has_no_arg_constructor: !c.is_sealed() && c.has_no_arg_constructor(),
                 supports_external_subclassing: !c.is_sealed()
                     && (!c.is_abstract() || (!c.has_abstract_members() && c.interfaces.is_empty())),
+                supports_external_abstract_overrides: false,
             },
             supertypes: supertypes.into(),
             supertype_templates,
@@ -821,6 +822,18 @@ impl<'a> ModuleSymbols<'a> {
                                 bound
                             },
                         ))
+                    })
+                    .or_else(|| {
+                        class.nullable_tparam_props.get(name).and_then(|&index| {
+                            let parameter = class.type_params.get(index)?;
+                            let bound = class
+                                .type_param_bounds
+                                .get(index)
+                                .copied()
+                                .filter(|bound| *bound != Ty::Error)
+                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                            Some(Ty::nullable(Ty::ty_param(parameter, bound)))
+                        })
                     })
                     .or_else(|| class.generic_property_shapes.get(name).copied())
                     .unwrap_or(property.ty);
@@ -1491,6 +1504,7 @@ mod tests {
             captured_type_parameters: crate::types::TypeParameters::default(),
             metadata_captured_type_parameters: Vec::new(),
             generic_props: HashMap::new(),
+            nullable_tparam_props: HashMap::new(),
             generic_property_shapes: HashMap::new(),
             value_field: None,
             generic_methods: HashMap::new(),

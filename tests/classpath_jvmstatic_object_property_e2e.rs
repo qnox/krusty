@@ -26,7 +26,7 @@ fn jvmstatic_object_property_read() {
         \x20 if (Cfg.instance != \"I\") return \"fail instance: ${Cfg.instance}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    common::expect_box_ok_against_ref("jvmstatic_obj_prop", LIB, main);
+    common::expect_box_ok_against("jvmstatic_obj_prop", LIB, main);
 }
 
 /// The reported shape, against the real coroutines runtime: every `Dispatchers` member is an
@@ -59,7 +59,7 @@ fn jvmstatic_object_property_write_then_read() {
         \x20 Cfg.mutable = \"Z\"\n\
         \x20 return if (Cfg.mutable == \"Z\") \"OK\" else \"fail: ${Cfg.mutable}\"\n\
         }\n";
-    common::expect_box_ok_against_ref("jvmstatic_obj_prop_write", LIB, main);
+    common::expect_box_ok_against("jvmstatic_obj_prop_write", LIB, main);
 }
 
 /// The receiver carries no value for a static accessor, but it is still an expression: a bare
@@ -79,5 +79,5 @@ fn jvmstatic_object_property_receiver_effect_is_preserved() {
         \x20 if (Cfg.mutable != \"Z\") return \"fail effect-write: ${Cfg.mutable}\"\n\
         \x20 return if (trace == \"!!\") \"OK\" else \"fail trace: $trace\"\n\
         }\n";
-    common::expect_box_ok_against_ref("jvmstatic_obj_prop_receiver", LIB, main);
+    common::expect_box_ok_against("jvmstatic_obj_prop_receiver", LIB, main);
 }

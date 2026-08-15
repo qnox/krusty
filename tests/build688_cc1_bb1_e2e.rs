@@ -26,15 +26,6 @@ fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     ))
 }
 
-/// Reference-compiled dependency variant: these cases consume kotlinc-emitted metadata
-/// shapes krusty does not produce yet (see `common::compile_lib_ref`).
-fn run_ref(tag: &str, lib: &str, main: &str) -> Option<String> {
-    let jdk = common::jdk_modules();
-    let sl = common::stdlib_jar();
-    let libout = common::compile_lib_ref(tag, lib)?;
-    common::compile_and_run_box(main, "Main", &[libout, sl], Some(jdk.as_path()))
-}
-
 #[test]
 fn cc1_is_check_on_same_package_classpath_value() {
     // Both `lib` and the use site are `package q` — `V`/`V.Ok` are referenced unqualified.
@@ -64,7 +55,7 @@ fn bb1_value_class_default_with_subtype_ctor_args() {
         \x20 return if (o.id.v == \"d\" && ax.s == \"1\") \"OK\" else \"fail\"\n\
         }\n";
     assert_eq!(
-        run_ref("bb1", LIB, MAIN).expect("value-class default + subtype ctor args"),
+        run("bb1", LIB, MAIN).expect("value-class default + subtype ctor args"),
         "OK"
     );
 }
@@ -83,7 +74,7 @@ fn bb1_positional_and_provided_value_class() {
         \x20 return if (o.id.v == \"z\") \"OK\" else \"fail\"\n\
         }\n";
     assert_eq!(
-        run_ref("bb1p", LIB, MAIN).expect("provided vc + subtype args"),
+        run("bb1p", LIB, MAIN).expect("provided vc + subtype args"),
         "OK"
     );
 }

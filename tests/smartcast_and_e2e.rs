@@ -44,8 +44,7 @@ fn nested_or_rhs_sees_every_false_lhs_fact() {
     return x.length + y.length\n\
 }\n\
 fun box(): String = if (length(\"ab\", \"cde\") == 5 && length(null, \"x\") == 0) \"OK\" else \"FAIL\"\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    common::expect_true_e2e("nested_or_rhs_sees_every_false_lhs_fact", SRC, &[]);
     assert_eq!(run(SRC), Some("OK".to_string()));
 }
 
@@ -70,8 +69,11 @@ fun box(): String =\n\
     if (use(Adapter()) == 42 && use(null) == 0 &&\n\
         guardedLength(\"abc\") == 3 && guardedLength(null) == 0 &&\n\
         elseLength(\"abcd\") == 4 && elseLength(1) == 0) \"OK\" else \"FAIL\"\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    common::expect_true_e2e(
+        "or_guard_and_else_narrowings_survive_lambda_capture",
+        SRC,
+        &[],
+    );
     assert_eq!(
         run(SRC).expect("guarded local val smartcast survives lambda capture"),
         "OK"

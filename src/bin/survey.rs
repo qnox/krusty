@@ -808,8 +808,8 @@ mod tests {
     #[test]
     fn backend_categories_are_not_rebucketed_by_incidental_words() {
         assert_eq!(
-            categorize("lower: gate:suspend-erasure-bridge"),
-            "lower: gate:suspend-erasure-bridge"
+            categorize("lower: gate:suspend-try-catch"),
+            "lower: gate:suspend-try-catch"
         );
         assert_eq!(
             categorize("emit: inline splice failed"),

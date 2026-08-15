@@ -39,7 +39,7 @@ fn classpath_extension_lambda_binds_member_call() {
         \x20 val b = Client().cfg { member(\"OK\") }\n\
         \x20 return b.token\n\
         }\n";
-    if let Some(out) = common::expect_box_run_against_ref("cp_ext_lambda_member", LIB, MAIN) {
+    if let Some(out) = common::expect_box_run_against("cp_ext_lambda_member", LIB, MAIN) {
         assert_eq!(out, "OK", "member call in receiver lambda");
     }
 }
@@ -53,7 +53,7 @@ fn classpath_extension_lambda_binds_extension_call() {
         \x20 val b = Client().cfg { ext(\"OK\") }\n\
         \x20 return b.token\n\
         }\n";
-    if let Some(out) = common::expect_box_run_against_ref("cp_ext_lambda_ext", LIB, MAIN) {
+    if let Some(out) = common::expect_box_run_against("cp_ext_lambda_ext", LIB, MAIN) {
         assert_eq!(out, "OK", "extension call in receiver lambda");
     }
 }
@@ -66,7 +66,7 @@ fn classpath_inline_extension_lambda_binds_member_call() {
         \x20 val b = Client().icfg { member(\"OK\") }\n\
         \x20 return b.token\n\
         }\n";
-    if let Some(out) = common::expect_box_run_against_ref("cp_ext_lambda_inline", LIB, MAIN) {
+    if let Some(out) = common::expect_box_run_against("cp_ext_lambda_inline", LIB, MAIN) {
         assert_eq!(out, "OK", "member call in inline receiver lambda");
     }
 }
@@ -108,7 +108,7 @@ fn classpath_suspend_extension_lambda_binds_calls() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
     let coroutines = common::coroutines_jar();
-    let Some(libout) = common::compile_lib_ref("cp_ext_lambda_suspend", LIB) else {
+    let Some(libout) = common::compile_lib("cp_ext_lambda_suspend", LIB) else {
         return;
     };
     let out = common::expect_box_run(

@@ -1168,6 +1168,11 @@ pub struct ClassSig {
     /// that parameter's index (`class Box<T>(val x: T)` → `{"x": 0}`). A read of such a property on
     /// `Box<Int>` substitutes the argument at that index (`Int`) for the erased `Object`.
     pub generic_props: HashMap<String, (usize, bool)>,
+    /// Properties whose DECLARED type is a direct nullable type parameter (`val value: T?`), by
+    /// class-type-parameter index. This is separate from `generic_props`, which represents a bare
+    /// `T`, and from the recursive shapes in `generic_property_shapes`; all three are semantic
+    /// declaration templates consumed uniformly by property selection.
+    pub nullable_tparam_props: HashMap<String, usize>,
     /// Function-property signatures that require class type-parameter substitution.
     /// Declared property types that mention class parameters anywhere in their shape (`Cell<T>`,
     /// `(T) -> R`, and similar). Read-site substitution consumes this uniformly; callable-specific
@@ -2271,6 +2276,9 @@ pub struct SymbolTable {
     /// Qualified classifier selected for each annotation occurrence during frontend name resolution.
     /// Consumers use this identity directly; source spelling is never retried after this point.
     resolved_annotations: HashMap<(u32, u32, u32), TypeName>,
+    /// Retention normalized at the declaration/provider boundary by resolved annotation identity.
+    /// Lowering and backends consume this fact without reopening a source declaration or classpath.
+    annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
     /// Top-level function name → the facade class it lives on (`helper` → `pkg/AKt`), for the WHOLE
     /// multi-file compilation. Populated only by the multi-file driver (which knows each file's
     /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
@@ -2339,6 +2347,7 @@ impl Default for SymbolTable {
             ext_props: HashMap::new(),
             class_names: ClassNames::default(),
             resolved_annotations: HashMap::new(),
+            annotation_retentions: HashMap::new(),
             fn_facades: HashMap::new(),
             fn_facades_by_decl: HashMap::new(),
             unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
@@ -2497,6 +2506,13 @@ impl SymbolTable {
         self.resolved_annotations
             .get(&(file, annotation.span.lo, annotation.span.hi))
             .copied()
+    }
+
+    pub fn annotation_retention(
+        &self,
+        annotation: TypeName,
+    ) -> Option<crate::types::AnnotationRetention> {
+        self.annotation_retentions.get(&annotation).copied()
     }
 
     /// Insert under the class's own internal name (the map's key scheme).
@@ -2763,6 +2779,15 @@ impl SymbolTable {
                     .find_map(|(o, applied, _)| (o == owner).then_some(applied))
             }
         };
+        // A direct `val value: T?` declaration is nullable of the receiver's semantic binding.
+        // Whether that binding needs a boxed physical slot is a backend representation decision.
+        if let Some(&i) = owner_class.nullable_tparam_props.get(name) {
+            if let Some(&arg) = applied().and_then(|applied| applied.type_args().get(i)) {
+                if arg != Ty::Error {
+                    return Ty::nullable(arg.non_null());
+                }
+            }
+        }
         if let Some(&(i, definitely_non_null)) = owner_class.generic_props.get(name) {
             // A `val p: T`-shaped property: the type is the receiver's i-th type argument.
             if let Some(&arg) = applied().and_then(|applied| applied.type_args().get(i)) {
@@ -2921,15 +2946,71 @@ fn function_bound_names(file: &File, function: &FunDecl) -> std::collections::Ha
 /// to the bound). A lambda passed directly to a call is screened by its body because it can be
 /// emitted as an ordinary closure; a semantically resolved contract-declaration block is erased,
 /// not a closure. Conservative: the file just skips.
+/// `true` when every use of a `reified` type parameter inside `f`'s body is a class literal
+/// (`T::class`), the sole reified realization the EMITTED-method path models. Explicit call type
+/// arguments naming a reified parameter (a nested reified splice would need `is`/`as` markers) and
+/// any other expression-position use reject the function.
+fn reified_uses_are_class_literals(file: &File, f: &FunDecl) -> bool {
+    fn scan(file: &File, e: ExprId, reified: &std::collections::HashSet<String>) -> bool {
+        if let Some(type_args) = file.call_type_args.get(&e.0) {
+            if type_args
+                .iter()
+                .any(|argument| reified.contains(&argument.name))
+            {
+                return false;
+            }
+        }
+        match file.expr(e) {
+            Expr::CallableRef {
+                receiver: Some(receiver),
+                name,
+                ..
+            } if name == "class" => {
+                // The receiver NAME is the sanctioned use; nothing beneath it to scan.
+                if matches!(file.expr(*receiver), Expr::Name(_)) {
+                    return true;
+                }
+                scan(file, *receiver, reified)
+            }
+            Expr::Name(n) if reified.contains(n) => false,
+            // Non-safe `is T`/`as T` emit INSTANCEOF/CHECKCAST markers; `as? T` and a nullable
+            // `is T?` target stay splice-only (their branchy realization is not marker-modeled).
+            Expr::Is { ty, operand, .. } if reified.contains(&ty.name) => {
+                !ty.nullable() && scan(file, *operand, reified)
+            }
+            Expr::As {
+                ty,
+                operand,
+                nullable,
+            } if reified.contains(&ty.name) => {
+                !*nullable && !ty.nullable() && scan(file, *operand, reified)
+            }
+            _ => {
+                // `any_child_*` short-circuits on `true`, so "any child is BAD" composes directly.
+                !file.any_child_expr(e, &mut |child| !scan(file, child, reified), &mut |stmt| {
+                    file.any_child_stmt(stmt, &mut |child| !scan(file, child, reified))
+                })
+            }
+        }
+    }
+    let reified = &f.reified_type_params;
+    match &f.body {
+        FunBody::Expr(body) | FunBody::Block(body) => scan(file, *body, reified),
+        FunBody::None => false,
+    }
+}
+
 fn inline_body_has_splice_only_shape(
     file: &File,
     f: &FunDecl,
     is_erased_contract: &impl Fn(ExprId) -> bool,
 ) -> bool {
+    let reified = &f.reified_type_params;
     fn bad_expr(
         file: &File,
         e: ExprId,
         tparams: &[String],
+        reified: &std::collections::HashSet<String>,
         is_erased_contract: &impl Fn(ExprId) -> bool,
     ) -> bool {
         if file.anonymous_object_classes.contains_key(&e) {
@@ -2951,6 +3032,7 @@ fn inline_body_has_splice_only_shape(
                         file,
                         lambda_body.unwrap_or(arg),
                         tparams,
+                        reified,
                         is_erased_contract,
                     );
                 }
@@ -2958,30 +3040,45 @@ fn inline_body_has_splice_only_shape(
             }
         }
         match file.expr(e) {
+            // A REIFIED fn is emitted as a real method (kotlinc always does), and a standalone
+            // `try` lowers there exactly as in any ordinary function — only the splice-time
+            // re-lowering concern applies, which the reified path never takes for the emitted
+            // body. Non-local returns inside its lambdas stay rejected by the arms below.
+            Expr::Try { .. } if !reified.is_empty() => file.any_child_expr(
+                e,
+                &mut |child| bad_expr(file, child, tparams, reified, is_erased_contract),
+                &mut |stmt| bad_stmt(file, stmt, tparams, reified, is_erased_contract),
+            ),
             Expr::Lambda { .. }
             | Expr::Try { .. }
             | Expr::Break { .. }
             | Expr::Continue { .. }
             | Expr::Return { .. } => true,
-            Expr::Is { ty, .. } | Expr::As { ty, .. } if tparams.contains(&ty.name) => true,
+            // A REIFIED parameter's is/as emits reification markers (screened separately by
+            // `reified_uses_are_class_literals`); a plain erased parameter's cannot stand alone.
+            Expr::Is { ty, .. } | Expr::As { ty, .. }
+                if tparams.contains(&ty.name) && !reified.contains(&ty.name) =>
+            {
+                true
+            }
             // A lambda in DIRECT call-argument position is safe standalone: it splices with an
             // inline callee or closes over like any fn body. Its BODY is screened (a stored or
             // returned lambda stays rejected above), and a `return` inside it — a non-local
             // return through the inline frame — keeps the fn splice-only.
             Expr::Call { callee, args } => {
-                bad_expr(file, *callee, tparams, is_erased_contract)
+                bad_expr(file, *callee, tparams, reified, is_erased_contract)
                     || args.iter().any(|&arg| match file.expr(arg) {
                         Expr::Lambda { body, .. } => {
                             lambda_body_has_return(file, *body)
-                                || bad_expr(file, *body, tparams, is_erased_contract)
+                                || bad_expr(file, *body, tparams, reified, is_erased_contract)
                         }
-                        _ => bad_expr(file, arg, tparams, is_erased_contract),
+                        _ => bad_expr(file, arg, tparams, reified, is_erased_contract),
                     })
             }
             _ => file.any_child_expr(
                 e,
-                &mut |child| bad_expr(file, child, tparams, is_erased_contract),
-                &mut |stmt| bad_stmt(file, stmt, tparams, is_erased_contract),
+                &mut |child| bad_expr(file, child, tparams, reified, is_erased_contract),
+                &mut |stmt| bad_stmt(file, stmt, tparams, reified, is_erased_contract),
             ),
         }
     }
@@ -2989,6 +3086,7 @@ fn inline_body_has_splice_only_shape(
         file: &File,
         s: StmtId,
         tparams: &[String],
+        reified: &std::collections::HashSet<String>,
         is_erased_contract: &impl Fn(ExprId) -> bool,
     ) -> bool {
         if matches!(
@@ -2998,7 +3096,7 @@ fn inline_body_has_splice_only_shape(
             return true;
         }
         file.any_child_stmt(s, &mut |child| {
-            bad_expr(file, child, tparams, is_erased_contract)
+            bad_expr(file, child, tparams, reified, is_erased_contract)
         })
     }
     /// Any `return` inside a lambda argument's body (non-local through the inline frame — its
@@ -3014,7 +3112,7 @@ fn inline_body_has_splice_only_shape(
     }
     match &f.body {
         FunBody::Expr(body) | FunBody::Block(body) => {
-            bad_expr(file, *body, &f.type_params, is_erased_contract)
+            bad_expr(file, *body, &f.type_params, reified, is_erased_contract)
         }
         FunBody::None => true,
     }
@@ -3027,7 +3125,15 @@ impl SymbolTable {
     /// representation is deliberately absent here: value-class mangling/erasure belongs to the
     /// emission pass, which rewrites the declaration and exact selected call together.
     pub fn inline_fn_facade_emittable(&self, file: &File, file_index: u32, f: &FunDecl) -> bool {
-        if !f.is_inline() || !f.reified_type_params.is_empty() {
+        if !f.is_inline() {
+            return false;
+        }
+        // A REIFIED inline fn emits a real erased method (kotlinc's shape) whose reified-parameter
+        // uses become `reifiedOperationMarker` placeholders — but only the CLASS-LITERAL use
+        // (`T::class`/`T::class.java`) is realized so far. Any other reified use (an `is T`/`as T`
+        // marker, or a reified name flowing into a nested reified call's explicit type argument)
+        // keeps the fn splice-only.
+        if !f.reified_type_params.is_empty() && !reified_uses_are_class_literals(file, f) {
             return false;
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self, file_index);
@@ -5099,6 +5205,68 @@ fn collect_signatures_with_cp_impl(
             }
         }
     }
+    // Normalize source annotation retention once identities are bound. The explicit retention
+    // argument is interpreted only under the resolved `kotlin.annotation.Retention` declaration;
+    // later phases receive the enum fact and never inspect its source spelling.
+    for (file_index, file) in files.iter().enumerate() {
+        for &declaration in &file.decls {
+            let Decl::Class(class) = file.decl(declaration) else {
+                continue;
+            };
+            if class.kind != crate::ast::ClassKind::Annotation {
+                continue;
+            }
+            let retention = class
+                .annotations
+                .iter()
+                .zip(&class.annotation_args)
+                .find_map(|(annotation, arguments)| {
+                    table
+                        .resolved_annotation(file_index as u32, annotation)
+                        .filter(|name| name.matches("kotlin/annotation/Retention"))?;
+                    let &argument = arguments.first()?;
+                    let Expr::Member { name, .. } = file.expr(argument) else {
+                        return None;
+                    };
+                    match name.as_str() {
+                        "RUNTIME" => Some(crate::types::AnnotationRetention::Runtime),
+                        "BINARY" => Some(crate::types::AnnotationRetention::Binary),
+                        "SOURCE" => Some(crate::types::AnnotationRetention::Source),
+                        _ => None,
+                    }
+                })
+                .unwrap_or(crate::types::AnnotationRetention::Default);
+            let Some(annotation_identity) = file_class_names[file_index].get_class(&class.name)
+            else {
+                continue;
+            };
+            table
+                .annotation_retentions
+                .insert(annotation_identity, retention);
+        }
+    }
+    // Providers normalize compiled declarations into `LibraryType`; retain only the semantic policy
+    // for annotation identities actually referenced by this source set.
+    let referenced_annotations: std::collections::HashSet<TypeName> =
+        table.resolved_annotations.values().copied().collect();
+    for annotation in referenced_annotations {
+        if table.annotation_retentions.contains_key(&annotation) {
+            continue;
+        }
+        let Some(library) = libraries.classifier(annotation) else {
+            continue;
+        };
+        if !library.is_annotation() {
+            continue;
+        }
+        let retention = match library.retention.as_deref() {
+            Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,
+            Some("CLASS") => crate::types::AnnotationRetention::Binary,
+            Some("SOURCE") => crate::types::AnnotationRetention::Source,
+            _ => continue,
+        };
+        table.annotation_retentions.insert(annotation, retention);
+    }
     for file in files {
         let Some(package) = file.package.as_deref() else {
             continue;
@@ -7030,15 +7198,26 @@ fn collect_signatures_with_cp_impl(
                             && c.type_params.iter().any(|parameter| parameter == &r.name)
                     };
                     let mut generic_props: HashMap<String, (usize, bool)> = HashMap::new();
+                    let mut nullable_tparam_props: HashMap<String, usize> = HashMap::new();
                     for p in c.props.iter().filter(|p| p.is_property && !p.is_vararg) {
                         if let Some(i) = tparam_index(&p.ty) {
                             generic_props.insert(p.name.clone(), i);
+                        }
+                        if is_direct_nullable_tparam(&p.ty) {
+                            if let Some(i) = c.type_params.iter().position(|t| *t == p.ty.name) {
+                                nullable_tparam_props.insert(p.name.clone(), i);
+                            }
                         }
                     }
                     for bp in &c.body_props {
                         if let Some(r) = &bp.ty {
                             if let Some(i) = tparam_index(r) {
                                 generic_props.insert(bp.name.clone(), i);
+                            }
+                            if is_direct_nullable_tparam(r) {
+                                if let Some(i) = c.type_params.iter().position(|t| *t == r.name) {
+                                    nullable_tparam_props.insert(bp.name.clone(), i);
+                                }
                             }
                         }
                     }
@@ -7169,6 +7348,7 @@ fn collect_signatures_with_cp_impl(
                             captured_type_parameters,
                             metadata_captured_type_parameters,
                             generic_props,
+                            nullable_tparam_props,
                             generic_property_shapes,
                             value_field,
                             generic_methods,
@@ -7222,6 +7402,7 @@ fn collect_signatures_with_cp_impl(
                                     ),
                                     metadata_captured_type_parameters: Vec::new(),
                                     generic_props: HashMap::new(),
+                                    nullable_tparam_props: HashMap::new(),
                                     generic_property_shapes: HashMap::new(),
                                     value_field: None,
                                     generic_methods: HashMap::new(),
@@ -9995,11 +10176,7 @@ fn write_source_params(out: &mut BoundedSourceDisplay, params: &[Param]) -> fmt:
 /// corresponding primitive array). Applying this once while collecting a signature keeps parser,
 /// checker, and lowering from carrying different representations of the same declaration.
 fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
-    if is_vararg {
-        Ty::array(declared)
-    } else {
-        declared
-    }
+    crate::types::semantic_value_parameter_ty(declared, is_vararg)
 }
 
 /// Build a member method's [`Signature`] from its declaration, given an already-resolved return type
@@ -12868,10 +13045,11 @@ impl CheckerScope<'_> {
             .unwrap_or(Ty::obj("java/lang/Object"))
     }
 
-    /// Whether `name` is a `reified` type parameter in scope.
-    fn is_reified(&self, name: &str) -> bool {
+    /// Declaration-owned semantic type of the reified parameter spelled `name`, if this scope
+    /// binds one. Source spelling is lookup input only; consumers receive the bound identity.
+    fn reified_tparam(&self, name: &str) -> Option<Ty> {
         self.tparam_binding(name)
-            .is_some_and(|(_, _, reified)| reified)
+            .and_then(|(parameter, _, reified)| reified.then_some(parameter))
     }
 
     /// Bounds beyond the first for whichever in-scope parameter has `bound` as its first. A type
@@ -13354,16 +13532,39 @@ fn expression_writes_name(file: &File, expression: ExprId, name: &str) -> bool {
         })
 }
 
-fn anonymous_body_writes_name(file: &File, declaration: DeclId, name: &str) -> bool {
+/// Every expression an anonymous class BODY evaluates: method bodies, property initializers AND
+/// custom accessor bodies (`override val context get() = outer` reads its capture only there),
+/// and superclass constructor arguments. The capture use/write scans must agree on this list —
+/// a body form missing here records no capture, so its lowering finds no storage for the name.
+fn anonymous_body_expressions(file: &File, declaration: DeclId) -> Vec<ExprId> {
     let Decl::Class(class) = file.decl(declaration) else {
-        return false;
+        return Vec::new();
     };
     class
         .methods
         .iter()
         .filter_map(|method| fun_body_expr(&method.body))
         .chain(class.body_props.iter().filter_map(|property| property.init))
+        .chain(
+            class
+                .body_props
+                .iter()
+                .filter_map(|property| property.getter.as_ref().and_then(fun_body_expr)),
+        )
+        .chain(class.body_props.iter().filter_map(|property| {
+            property
+                .setter
+                .as_ref()
+                .and_then(|setter| setter.body.as_ref())
+                .and_then(fun_body_expr)
+        }))
         .chain(class.base_args.iter().copied())
+        .collect()
+}
+
+fn anonymous_body_writes_name(file: &File, declaration: DeclId, name: &str) -> bool {
+    anonymous_body_expressions(file, declaration)
+        .into_iter()
         .any(|expression| expression_writes_name(file, expression, name))
 }
 
@@ -13410,16 +13611,7 @@ fn expression_has_member_call_named(file: &File, expression: ExprId, name: &str)
 }
 
 fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty) -> bool {
-    let Decl::Class(class) = file.decl(declaration) else {
-        return false;
-    };
-    let expressions = class
-        .methods
-        .iter()
-        .filter_map(|method| fun_body_expr(&method.body))
-        .chain(class.body_props.iter().filter_map(|property| property.init))
-        .chain(class.base_args.iter().copied())
-        .collect::<Vec<_>>();
+    let expressions = anonymous_body_expressions(file, declaration);
     expressions
         .iter()
         .any(|expression| file.expr_uses_name(*expression, name))
@@ -15665,6 +15857,8 @@ struct SourceConstructorBindings<'a> {
     bindings: &'a mut [Ty],
     lower: &'a mut [Vec<(Ty, ExprId)>],
     upper: &'a mut [Vec<(Ty, ExprId)>],
+    seeded: &'a HashMap<String, Ty>,
+    argument_fits_seed: &'a dyn Fn(Ty, Ty) -> bool,
 }
 
 fn merge_source_constructor_shape_bindings(
@@ -15692,6 +15886,14 @@ fn merge_source_constructor_shape_bindings(
                 inference.lower[index].push((actual, argument_expr));
                 let current =
                     (inference.bindings[index] != Ty::Error).then_some(inference.bindings[index]);
+                // The expected result is already a constraint on this invariant constructor
+                // result. Preserve its seed while each lower argument constraint fits it. Once
+                // one argument falls outside the seed, ordinary joining takes over permanently.
+                if inference.seeded.get(name).is_some_and(|&seed| {
+                    current == Some(seed) && (inference.argument_fits_seed)(actual, seed)
+                }) {
+                    return;
+                }
                 inference.bindings[index] =
                     crate::symbol_resolver::merge_inferred_ty(current, actual);
             } else {
@@ -25302,28 +25504,25 @@ impl<'a> Checker<'a> {
             scope
                 .visible_tparams()
                 .extended_with(&f.type_params, &f.type_param_bounds, &resolve);
-        let key = |name: &str| -> ErasedTypeKey {
-            if tparams.contains(name) {
-                erased_type_key(tparams.bound(name))
+        // Resolve the complete TypeRef in a declaration-owned rung. Looking only at `TypeRef::name`
+        // collapses every function type to the parser marker `<fun>` and falsely reports
+        // `Box.() -> Unit` (Function1) as colliding with `() -> Unit` (Function0). This is the same
+        // semantic type resolution used by ordinary checking; erasure below merely discards the
+        // distinctions the target ABI cannot retain.
+        let declaration_scope = scope.child(ScopeKind::Function { receiver: None });
+        declaration_scope.declare_tparams(&f.type_params, &tparams, |_| false);
+        let key = |reference: &TypeRef| {
+            let ty = self.type_ref_ty_silent(&declaration_scope, reference);
+            if ty == Ty::Error {
+                ErasedTypeKey::Unresolved(reference.name.clone())
             } else {
-                let internal = self.select_classifier(scope, name);
-                if internal == InheritedNestedClassifier::Ambiguous {
-                    ErasedTypeKey::Unresolved(name.to_string())
-                } else if let Some(internal) = classifier_over_default(name, internal.found()) {
-                    erased_type_key(Ty::obj_name(internal))
-                } else if let Some(t) = Ty::from_name(name) {
-                    erased_type_key(t)
-                } else if let Some(internal) = internal.found() {
-                    erased_type_key(Ty::obj_name(internal))
-                } else {
-                    ErasedTypeKey::Unresolved(name.to_string())
-                }
+                erased_type_key(ty)
             }
         };
         ErasedSigKey {
             name: f.name.clone(),
-            receiver: f.receiver.as_ref().map(|r| key(&r.name)),
-            params: f.params.iter().map(|p| key(&p.ty.name)).collect(),
+            receiver: f.receiver.as_ref().map(&key),
+            params: f.params.iter().map(|p| key(&p.ty)).collect(),
         }
     }
 
@@ -26829,6 +27028,60 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether the nearest declaration of every callable in `owner`'s normalized hierarchy is
+    /// concrete. Providers expose only direct declarations and direct supertypes; core performs this
+    /// one breadth-first walk so a source override can discharge an abstract obligation inherited
+    /// from a dependency (`class N : Number() { override fun toInt() = ... }`).
+    fn has_no_unimplemented_abstract_members(&self, owner: TypeName) -> bool {
+        type MemberKey = (String, Vec<ErasedTypeKey>);
+
+        let resolver = self.resolver();
+        let mut declarations: HashMap<MemberKey, (usize, bool)> = HashMap::new();
+        let mut pending = std::collections::VecDeque::from([(owner, 0usize)]);
+        let mut visited = std::collections::HashSet::new();
+        while let Some((current, depth)) = pending.pop_front() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(classifier) = resolver.classifier(current) else {
+                return false;
+            };
+            for member in &classifier.members {
+                let key = (
+                    member.name.clone(),
+                    member.params.iter().copied().map(erased_type_key).collect(),
+                );
+                declarations
+                    .entry(key)
+                    .and_modify(|(nearest_depth, is_abstract)| {
+                        if *nearest_depth == depth {
+                            // Two declarations at the same hierarchy depth may be an abstract
+                            // interface declaration and a concrete inherited implementation. The
+                            // concrete declaration satisfies that shared semantic signature.
+                            *is_abstract &= member.is_abstract();
+                        }
+                    })
+                    .or_insert((depth, member.is_abstract()));
+            }
+            pending.extend(
+                classifier
+                    .supertypes
+                    .iter_ids()
+                    .map(|supertype| (supertype, depth + 1)),
+            );
+        }
+        let unresolved = declarations
+            .iter()
+            .filter_map(|(key, (_, is_abstract))| is_abstract.then_some(key))
+            .collect::<Vec<_>>();
+        crate::trace_compiler!(
+            "resolve",
+            "abstract obligations owner={} unresolved={unresolved:?}",
+            owner.render(),
+        );
+        unresolved.is_empty()
+    }
+
     /// Fix the virtual `hashCode` dispatch owner of every generated data-class property while
     /// classifier metadata is available. Lowering receives this closed decision; it does not inspect
     /// source or dependency symbols while building the synthetic method body.
@@ -27025,18 +27278,20 @@ impl<'a> Checker<'a> {
         if let Some(owner) = current_owner {
             self.lexical_class_context.insert(0, owner);
         }
-        if let Some((superclass, separate_emission)) = current_owner
-            .and_then(|owner| self.syms.class_by_type_name(owner))
-            .and_then(|class| class.super_internal_name())
-            .map(|superclass| {
-                (
-                    superclass,
-                    self.syms
-                        .class_by_type_name(superclass)
-                        .is_none_or(|class| class.source_file != self.file_index),
-                )
-            })
-        {
+        if let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
+            self.syms
+                .class_by_type_name(owner)
+                .and_then(|class| class.super_internal_name())
+                .map(|superclass| {
+                    (
+                        owner,
+                        superclass,
+                        self.syms
+                            .class_by_type_name(superclass)
+                            .is_none_or(|class| class.source_file != self.file_index),
+                    )
+                })
+        }) {
             let inheritance = self
                 .resolver()
                 .classifier(superclass)
@@ -27064,7 +27319,11 @@ impl<'a> Checker<'a> {
             }
             let unsupported = match inheritance {
                 _ if cl.is_enum() || !separate_emission => None,
-                Some(shape) if !shape.supports_external_subclassing => {
+                Some(shape)
+                    if !(shape.supports_external_subclassing
+                        || shape.supports_external_abstract_overrides
+                            && self.has_no_unimplemented_abstract_members(owner)) =>
+                {
                     Some("gate:nonlocal-superclass-abstract-obligations")
                 }
                 Some(shape)
@@ -29308,10 +29567,13 @@ impl<'a> Checker<'a> {
         let mut inferred_constraints = vec![Vec::new(); bindings.len()];
         let mut inferred_upper_constraints = vec![Vec::new(); bindings.len()];
         {
+            let argument_fits_seed = |actual, seed| self.receiver_is_assignable(actual, seed);
             let mut inference = SourceConstructorBindings {
                 bindings: &mut bindings,
                 lower: &mut inferred_constraints,
                 upper: &mut inferred_upper_constraints,
+                seeded: &seeded,
+                argument_fits_seed: &argument_fits_seed,
             };
             for (slot, &(shape, _)) in class.ctor_param_shapes.iter().enumerate() {
                 if let Some((argument, actual)) =
@@ -32312,6 +32574,29 @@ impl<'a> Checker<'a> {
             let checkpoint = self.diags.diags.len();
             let mut checked_arg_tys = Vec::new();
             let result = match &args {
+                // A function value's explicit `invoke` spelling is the invoke-operator convention,
+                // not a failed ordinary member lookup. Select that semantic path up front so the
+                // checker never emits and then discards diagnostics from another scope-tower level.
+                Some(a) if name == "invoke" && matches!(rt.non_null(), Ty::Fun(_)) => {
+                    let recv = rt.non_null();
+                    checked_arg_tys = self.invoke_operator_arg_tys(scope, recv, a);
+                    match self.record_invoke(
+                        scope,
+                        CallArgs {
+                            call: e,
+                            args: a,
+                            arg_tys: &checked_arg_tys,
+                        },
+                        receiver,
+                        recv,
+                        self.span(e),
+                    ) {
+                        InvokeResolution::Selected(ty) => ty,
+                        InvokeResolution::Ambiguous(_)
+                        | InvokeResolution::Inapplicable(_)
+                        | InvokeResolution::Absent => Ty::Error,
+                    }
+                }
                 // After `?.` the receiver is non-null, so resolve the member against the NON-NULL
                 // receiver type — mirroring the args (extension) branch below. A genuinely nullable
                 // receiver that ISN'T smart-cast (a call result: `xs.firstOrNull()?.field`) reached
@@ -34360,11 +34645,11 @@ impl<'a> Checker<'a> {
                 // skipped, not mis-read.
                 let unbound = if let Expr::Name(n) = self.file.expr(recv).clone() {
                     // `T::class` on a REIFIED type parameter is an unbound literal: the lowerer
-                    // substitutes `T` to the call-site type (`reified_subst`) when it expands the inline
-                    // body. Recorded as `Obj(T)`, a marker the lowerer resolves by name. Only a REIFIED
-                    // `T` is accepted — kotlinc rejects a class literal on a non-reified type parameter.
+                    // substitutes its declaration-owned identity to the call-site type
+                    // (`reified_subst`) when it expands the inline body. Only a REIFIED `T` is
+                    // accepted — kotlinc rejects a class literal on a non-reified type parameter.
                     self.class_literal_unbound_ty(scope, &n)
-                        .or_else(|| scope.is_reified(&n).then(|| Ty::obj(&n)))
+                        .or_else(|| scope.reified_tparam(&n))
                 } else {
                     // A QUALIFIED type name (`pkg.Cls::class`, `java.util.ArrayList::class`,
                     // `Outer.Nested::class`) is an unbound literal exactly like the simple name an
@@ -35342,6 +35627,14 @@ impl<'a> Checker<'a> {
             let ret = callable.ret;
             let mut resolved = ResolvedExtensionCall::library(callable.clone());
             resolved.context_args = context_args;
+            // EXPLICIT type arguments survive into the call record — a `<reified T>` classpath
+            // extension's splice binds its formals from exactly this (`r.getFor<Prov>(id)`);
+            // without it the splicer has no substitution and the emit falls back to the compiled
+            // body, which for a reified callee exists only to throw.
+            if !type_args.is_empty() {
+                self.resolved_call_type_args
+                    .insert(e, type_args.iter().copied().map(Some).collect());
+            }
             self.resolved_calls
                 .insert(e, ResolvedCall::Extension(Box::new(resolved)));
             self.record_resolved_extension_sam_arguments(e, args);
@@ -48609,6 +48902,114 @@ val result = object { fun value(): String = captured }
     }
 
     #[test]
+    fn reified_class_literal_handoff_keeps_the_declaration_parameter_identity() {
+        // A same-named classifier makes source spelling especially unsafe here: `T::class` in the
+        // function body denotes the function's declaration-owned type parameter, not class `T`.
+        // Lowering must receive that semantic identity directly instead of an `Obj("T")` marker it
+        // would have to reinterpret by spelling.
+        let source = "class T\ninline fun <reified T : Any> literal() = T::class";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let literal = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::CallableRef { name, .. } if name == "class")
+                    .then_some(ExprId(index as u32))
+            })
+            .expect("class-literal expression");
+        let declaration_start = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Fun(function) if function.name == "literal" => {
+                    Some(function.signature_span.lo)
+                }
+                _ => None,
+            })
+            .expect("generic function declaration");
+        let files = vec![file];
+        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(Vec::new()),
+        ));
+        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
+            panic!("one declaration-owned type-parameter identity expected");
+        };
+        let Some(ExprLowering::ClassLiteral {
+            unbound: Some(Ty::TyParam(actual, _)),
+        }) = info.expr_lowers.get(&literal)
+        else {
+            panic!(
+                "class literal must carry a semantic TyParam, got {:?}",
+                info.expr_lowers.get(&literal)
+            );
+        };
+        assert_eq!(*actual, semantic.as_str());
+        assert_ne!(
+            *actual, "T",
+            "semantic identity must not be source spelling"
+        );
+    }
+
+    #[test]
+    fn generic_member_result_keeps_the_enclosing_parameter_identity() {
+        // The member's `T` is inferred from `KClass<T>` using the extension's declaration-owned T.
+        // If that result degrades to Obj("T"), common lowering can only avoid a bogus `checkcast T`
+        // by recovering semantics from source spelling.
+        let source = "import kotlin.reflect.KClass\n\
+            interface Core { fun <T : Any> getFor(id: String, type: KClass<T>): T }\n\
+            inline fun <reified T : Any> Core.getFor(id: String): T = getFor(id, T::class)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let call = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| match expression {
+                Expr::Call { callee, .. }
+                    if matches!(file.expr(*callee), Expr::Name(name) if name == "getFor") =>
+                {
+                    Some(ExprId(index as u32))
+                }
+                _ => None,
+            })
+            .expect("member getFor call");
+        let declaration_start = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Fun(function) if function.receiver.is_some() => {
+                    Some(function.signature_span.lo)
+                }
+                _ => None,
+            })
+            .expect("generic extension declaration");
+        let files = vec![file];
+        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::toolchain::stdlib_classpath(),
+        ));
+        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
+            panic!("one declaration-owned type-parameter identity expected");
+        };
+        let Ty::TyParam(actual, _) = info.semantic_ty(call) else {
+            panic!(
+                "member result must stay a type parameter, got {:?}",
+                info.semantic_ty(call)
+            );
+        };
+        assert_eq!(actual, semantic.as_str());
+    }
+
+    #[test]
     fn nested_class_outer_label_uses_the_simple_declaration_name() {
         let (errors, _) = check(
             "inline fun <T> T.apply(block: T.() -> Unit): T { block(); return this }\n\
@@ -51070,6 +51471,20 @@ fun box(): String {
             "expected fun conflict, got {errs:?}"
         );
     }
+
+    #[test]
+    fn function_type_arity_distinguishes_erased_overloads() {
+        // Extension-function types include their receiver in FunctionN's arity. The signature-clash
+        // check must retain that semantic shape instead of reducing both syntactic refs to `<fun>`.
+        ok("class Box\n\
+            interface Ui {\n\
+              fun <T> choose(seed: Any, init: T.() -> Unit): T\n\
+              fun choose(seed: Any, init: () -> Unit): Box\n\
+              fun mixed(init: Box.() -> Unit): Box\n\
+              fun mixed(init: () -> Unit): Box\n\
+            }");
+    }
+
     #[test]
     fn subclass_resolves_generic_base_property_type() {
         // A base class declares a member in terms of its OWN type parameter (`val some: T`); a

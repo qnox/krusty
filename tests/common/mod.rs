@@ -232,14 +232,30 @@ fn parse_source_set(
     sources: &[&str],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<Vec<krusty::ast::File>> {
+    parse_source_set_named(
+        &sources.iter().map(|s| ("Main", *s)).collect::<Vec<_>>(),
+        diags,
+    )
+}
+
+/// [`parse_source_set`] with per-source stems, so anonymous classes take their kotlinc names
+/// (`<Stem>Kt$fn$1` for a top-level enclosing) instead of the parse-time placeholder.
+fn parse_source_set_named(
+    sources: &[(&str, &str)],
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<Vec<krusty::ast::File>> {
     let mut files = sources
         .iter()
-        .map(|source| {
+        .map(|(stem, source)| {
             let features = krusty::features::LangFeatures::from_source(source);
             let tokens = krusty::lexer::lex(source, diags);
-            krusty::parser::parse_with_features(source, &tokens, diags, &features)
+            let mut file = krusty::parser::parse_with_features(source, &tokens, diags, &features);
+            krusty::frontend::name_anonymous_classes(&mut file, &format!("{stem}Kt"));
+            file
         })
         .collect::<Vec<_>>();
+    let sources = sources.iter().map(|(_, s)| *s).collect::<Vec<_>>();
+    let sources: &[&str] = &sources;
     if diags.has_errors() {
         return None;
     }
@@ -288,7 +304,7 @@ pub fn compile_in_process(
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let files = parse_source_set(&[src], &mut diags)?;
+    let files = parse_source_set_named(&[(stem, src)], &mut diags)?;
     let cp = cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
@@ -341,11 +357,11 @@ pub fn compile_in_process_files(
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let source_texts = sources
+    let named = sources
         .iter()
-        .map(|(_, source)| *source)
+        .map(|(name, source)| (name.trim_end_matches(".kt"), *source))
         .collect::<Vec<_>>();
-    let files = parse_source_set(&source_texts, &mut diags)?;
+    let files = parse_source_set_named(&named, &mut diags)?;
     let cp = cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let mut symbols = collect_signatures_with_cp(&files, platform, &mut diags);
@@ -466,6 +482,14 @@ pub fn compile_to_dir(
     out_dir: &Path,
 ) -> Option<()> {
     let classes = compile_in_process(src, stem, cp_jars, jdk_modules)?;
+    // The facade's internal name gives the package → facade mapping for the module index below.
+    // (`emit_all` outputs only classes; the `META-INF/<module>.kotlin_module` is a whole-module
+    // artifact `compiler::compile` writes, so this dir-shaped helper reconstructs it — the real
+    // kotlinc DISCOVERS a package's top-level declarations exclusively through that index, so a
+    // classpath dir without one makes every facade `@Metadata` record invisible to it.)
+    let facade =
+        krusty::jvm::names::file_class_name(stem, parse_package_of_first_file(src).as_deref());
+    let facade_emitted = classes.iter().any(|(name, _)| *name == facade);
     for (name, bytes) in classes {
         let path = out_dir.join(format!("{name}.class"));
         if let Some(parent) = path.parent() {
@@ -473,7 +497,29 @@ pub fn compile_to_dir(
         }
         std::fs::write(path, bytes).ok()?;
     }
+    // kotlinc writes the module file even for a class-only compilation — with an EMPTY parts list
+    // (a facade that was never emitted must not be listed).
+    let packages: Vec<(String, Vec<String>)> = if facade_emitted {
+        let (pkg, short) = match facade.rsplit_once('/') {
+            Some((p, s)) => (p.replace('/', "."), s.to_string()),
+            None => (String::new(), facade),
+        };
+        vec![(pkg, vec![short])]
+    } else {
+        Vec::new()
+    };
+    let module_bytes = krusty::metadata::module::build_kotlin_module(&packages);
+    let meta_inf = out_dir.join("META-INF");
+    std::fs::create_dir_all(&meta_inf).ok()?;
+    std::fs::write(meta_inf.join("main.kotlin_module"), module_bytes).ok()?;
     Some(())
+}
+
+/// The `package` declaration of a single-file source, via the real parser (no textual scraping).
+fn parse_package_of_first_file(src: &str) -> Option<String> {
+    let mut diags = krusty::diag::DiagSink::new();
+    let files = parse_source_set(&[src], &mut diags)?;
+    files.first().and_then(|f| f.package.clone())
 }
 
 /// Run the same checked-file → JVM-backend pipeline as the CLI, but report whether the already
@@ -1776,14 +1822,14 @@ impl LibBuild {
             collect_rel_files(reference, reference, &mut rmap);
             for (name, bytes) in &kmap {
                 match rmap.get(name) {
-                    Some(rb) if rb == bytes => eprintln!("LIBDIFF\tidentical\t{name}"),
-                    Some(_) => eprintln!("LIBDIFF\tdivergent\t{name}"),
-                    None => eprintln!("LIBDIFF\tkrusty-only\t{name}"),
+                    Some(rb) if rb == bytes => eprintln!("LIBDIFF\tidentical\t{name}\t{tag}"),
+                    Some(_) => eprintln!("LIBDIFF\tdivergent\t{name}\t{tag}"),
+                    None => eprintln!("LIBDIFF\tkrusty-only\t{name}\t{tag}"),
                 }
             }
             for name in rmap.keys() {
                 if !kmap.contains_key(name) {
-                    eprintln!("LIBDIFF\tkotlinc-only\t{name}");
+                    eprintln!("LIBDIFF\tkotlinc-only\t{name}\t{tag}");
                 }
             }
         }
@@ -1962,6 +2008,13 @@ pub fn compile_lib_ref(tag: &str, lib_src: &str) -> Option<PathBuf> {
 /// Multi-file form of [`compile_lib_ref`].
 #[allow(dead_code)]
 pub fn compile_libs_ref(_tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
+    // KRUSTY-BUILT IS THE DEFAULT: every `_ref` site reached full self-consumption (the whole
+    // e2e suite passes with krusty-compiled dependency libs), so the reference-compiler routing
+    // below is now the DIAGNOSTIC escape hatch (KRUSTY_REF_KOTLINC=1) for bisecting a regression
+    // back to a reference-compiled baseline — the inverse of the old KRUSTY_REF_SELF probe.
+    if std::env::var("KRUSTY_REF_KOTLINC").as_deref() != Ok("1") {
+        return compile_libs(_tag, sources);
+    }
     type RefMemo = Mutex<HashMap<u64, Arc<OnceLock<Option<PathBuf>>>>>;
     static MEMO: OnceLock<RefMemo> = OnceLock::new();
 
@@ -2522,8 +2575,11 @@ pub fn kotlin_compiler_jar() -> Option<PathBuf> {
 /// Compile the pure-JDK `KotlincServer.java` driver once (via `javac`) into a stable cache dir; return it.
 /// The driver uses only reflection + `URLClassLoader`, so it needs no compiler jar to compile OR to run.
 fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf> {
+    // The JDK is part of the cache key: a class compiled by a NEWER javac (another session's
+    // JAVA_HOME) is unloadable by an older runtime, and the server-spawn failure then reads as
+    // "kotlinc unavailable" — silently disabling every reference compile and cross-check.
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in KOTLINC_SERVER_SRC.bytes() {
+    for b in KOTLINC_SERVER_SRC.bytes().chain(java_home.bytes()) {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
     let dir =
@@ -2803,8 +2859,10 @@ public class JavaRunner {
 "#;
 
 fn setup_java_runner(java_home: &str) -> Option<PathBuf> {
+    // JDK in the cache key for the same reason as `setup_kotlinc_server`: a newer-javac class
+    // under an older runtime dies at load and the failure masquerades as "toolchain unavailable".
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in JAVA_RUNNER_SRC.bytes() {
+    for b in JAVA_RUNNER_SRC.bytes().chain(java_home.bytes()) {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/java_runner_{hash:016x}"));

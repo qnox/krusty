@@ -30,16 +30,20 @@ pub enum SkipReason {
 /// Runs, in order:
 /// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
 ///    declarations from the file's annotations; no-op without a trigger annotation.
-/// 2. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
+/// 2. `lower_companion_properties` — realize supported companion backing fields as JVM outer statics.
+///    Common IR keeps the ordinary declaration and semantic initializer for other targets.
+/// 3. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
+///    initialization. Common IR retains them for targets without zero-initialized fields.
+/// 4. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
 ///    declaration, so lowering records only the declarations and this pass derives the bridges.
-/// 3. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
-/// 4. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
+/// 5. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
+/// 6. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
-/// 5. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
-/// 6. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+/// 7. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+/// 8. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
 ///    (`require`/`check`) message lambda; it is spliced at the call site.
-/// 7. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+/// 9. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
 ///    its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
 ///    be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
 ///    ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
@@ -74,6 +78,12 @@ pub fn run_backend_passes_with_metadata(
         &resolve_class_name,
         jvm_plugin_type_descriptor,
     );
+    // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
+    // property declaration and semantic initializer; this pass selects the outer-static realization.
+    crate::jvm::companion::lower_companion_properties(ir);
+    // The JVM supplies default field values before any constructor runs. Elide only source
+    // declaration stores recorded by exact ExprId; common IR and other targets keep them.
+    crate::jvm::property_storage::elide_default_property_stores(ir);
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
@@ -462,7 +472,7 @@ impl Backend for JvmBackend {
             );
             return outputs;
         }
-        let metadata = facade_package_metadata(file, checked.file_index, syms);
+        let metadata = facade_package_metadata_with_ir(file, checked.file_index, syms, Some(&ir));
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct. Inline splice failures
         // are reported separately (via `run.inline_bail`): selected inline calls are required to splice,
         // so those are backend errors to fix rather than silent skips.
@@ -501,11 +511,13 @@ impl Backend for JvmBackend {
         }
 
         // Record the file facade (`<File>Kt`) for the `.kotlin_module` mapping when the file has
-        // top-level functions/props.
+        // top-level functions/props — or TYPEALIASES: an alias-only facade is still emitted (its
+        // `Package.typeAlias` records live there) and kotlinc lists it.
         let has_facade_members = file
             .decls
             .iter()
-            .any(|&d| matches!(file.decl(d), Decl::Fun(_) | Decl::Property(_)));
+            .any(|&d| matches!(file.decl(d), Decl::Fun(_) | Decl::Property(_)))
+            || !file.type_aliases.is_empty();
         if has_facade_members {
             let facade = facade_name
                 .rsplit('/')
@@ -524,9 +536,9 @@ impl Backend for JvmBackend {
     fn finalize(&self, state: JvmState, module_name: &str) -> Vec<Artifact> {
         // META-INF/<module>.kotlin_module — maps packages to their file-facade classes so Kotlin
         // consumers can resolve top-level declarations from the compiled module.
-        if state.module_packages.is_empty() {
-            return Vec::new();
-        }
+        // kotlinc writes the module file even for a CLASS-ONLY module (empty parts list), so emit
+        // it unconditionally — omitting it byte-diverges the artifact set from the reference
+        // compiler.
         let packages: Vec<(String, Vec<String>)> = state.module_packages.into_iter().collect();
         let module_bytes = crate::metadata::module::build_kotlin_module(&packages);
         vec![(
@@ -534,6 +546,19 @@ impl Backend for JvmBackend {
             module_bytes,
         )]
     }
+}
+
+/// Whether a resolved annotation belongs in Kotlin metadata. Retention is normalized by the
+/// frontend; the backend never reopens a source declaration or queries the classpath.
+fn metadata_recorded_annotation(syms: &FrontendSymbols, internal: crate::types::TypeName) -> bool {
+    matches!(
+        syms.annotation_retention(internal),
+        Some(
+            crate::types::AnnotationRetention::Default
+                | crate::types::AnnotationRetention::Runtime
+                | crate::types::AnnotationRetention::Binary
+        )
+    )
 }
 
 /// The facade's `@kotlin.Metadata` (`k = 2`, file facade), recording every top-level function —
@@ -550,8 +575,31 @@ pub fn facade_package_metadata(
     file_index: u32,
     syms: &FrontendSymbols,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
+    facade_package_metadata_with_ir(file, file_index, syms, None)
+}
+
+/// [`facade_package_metadata`] with the POST-PASS IR available: a top-level function with a
+/// value-class parameter/return realizes as a MANGLED method (`taggedOnly-rnqsQGE`) with the erased
+/// descriptor — neither derivable from the declared record — so its `JvmMethodSignature` (name +
+/// desc) is recovered from the value-class pass's declared-sig table. Without it a consumer cannot
+/// map the record to any bytecode method and reports `unresolved function`.
+pub fn facade_package_metadata_with_ir(
+    file: &File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+    ir: Option<&crate::ir::IrFile>,
+) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
+    facade_package_metadata_inner(file, file_index, syms, ir)
+}
+
+fn facade_package_metadata_inner(
+    file: &File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+    ir: Option<&crate::ir::IrFile>,
+) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let mut metas: Vec<crate::metadata::builder::FnMeta> = Vec::new();
-    for &d in &file.decls {
+    for (decl_order, &d) in file.decls.iter().enumerate() {
         let Decl::Fun(f) = file.decl(d) else { continue };
         // The decl's collected signature: a plain fn under `funs[name]`, an extension under
         // `ext_funs[name][semantic receiver]` — matched by source decl id so overloads can't mix.
@@ -609,7 +657,11 @@ pub fn facade_package_metadata(
             || declared_params
                 .iter()
                 .any(|parameter| matches!(parameter, Ty::TyParam(..)));
-        let jvm_desc = (f.is_suspend() || f.is_inline() || mentions_type_parameter).then(|| {
+        // kotlinc records NO JvmMethodSignature for a plain inline fn (reified included) — its
+        // splicers work from the metadata-derived descriptor, and the spurious handle steered
+        // krusty's own consumer away from the `$default` splice route. Suspend fns (the CPS form
+        // is not derivable) and type-parameter-mentioning signatures keep the handle.
+        let jvm_desc = (f.is_suspend() || mentions_type_parameter).then(|| {
             let mut p = String::new();
             if let Some(r) = receiver {
                 p.push_str(&crate::jvm::names::type_descriptor(r));
@@ -637,9 +689,43 @@ pub fn facade_package_metadata(
             sig.context_count,
             sig.contract.is_some(),
         );
+        // Argument-less non-SOURCE annotations survive into `Function.annotation` records — the
+        // channel a separate compilation reads resolution markers (`@LowPriorityInOverloadResolution`)
+        // from. Annotations WITH arguments are not modeled yet: recording one without its arguments
+        // would corrupt the record, so they are omitted (as before).
+        let annotations: Vec<crate::types::TypeName> = f
+            .annotations
+            .iter()
+            .zip(f.annotation_args.iter())
+            .filter(|(_, args)| args.is_empty())
+            .filter_map(|(annotation, _)| syms.resolved_annotation(file_index, annotation))
+            .filter(|&internal| metadata_recorded_annotation(syms, internal))
+            .collect();
+        // A value-class-rewritten realization (mangled name + erased descriptor) overrides the
+        // derived handle — nothing in the declared record spells either.
+        let vc_realization = ir
+            .and_then(|ir| ir.top_level_function_fids.get(&d.0).map(|&fid| (ir, fid)))
+            .and_then(|(ir, fid)| {
+                ir.vc_declared_sigs.get(&fid)?;
+                let function = ir.functions.get(fid as usize)?;
+                Some((
+                    function.name.clone(),
+                    crate::jvm::names::method_descriptor(&function.params, function.ret),
+                ))
+            });
+        let (jvm_desc, jvm_name) = match vc_realization {
+            Some((physical_name, physical_desc)) => (
+                Some(physical_desc),
+                (physical_name != f.name).then_some(physical_name),
+            ),
+            None => (jvm_desc, None),
+        };
         metas.push(crate::metadata::builder::FnMeta {
             name: f.name.clone(),
             params,
+            decl_order,
+            annotations,
+            jvm_name,
             ret: declared_ret,
             receiver,
             param_defaults: sig.param_defaults.clone(),
@@ -661,6 +747,8 @@ pub fn facade_package_metadata(
             // parameter stays a `Type.type_parameter` reference; a class becomes its internal
             // name. Unresolvable references stay `Source` (the emitter degrades them to `Any`).
             context_count: sig.context_count,
+            vararg_index: sig.vararg_index,
+            visibility: sig.visibility,
             contract: sig.contract.as_ref().map(|c| {
                 // Source-level class name → JVM internal name — the SAME lookup the checker uses
                 // (`class_internal_resolver`, shared via `frontend`), so contract types resolve
@@ -689,15 +777,9 @@ pub fn facade_package_metadata(
     // property has no receiver but still needs a declaration record for Kotlin consumers (`::value`,
     // imports, mutability, and its Kotlin type). Accessor descriptors are realization data only.
     let mut prop_metas: Vec<crate::metadata::builder::PropMeta> = Vec::new();
-    for &d in &file.decls {
+    for (decl_order, &d) in file.decls.iter().enumerate() {
         let Decl::Property(p) = file.decl(d) else {
             continue;
-        };
-        let cap = {
-            let mut c = p.name.chars();
-            c.next()
-                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
-                .unwrap_or_default()
         };
         let (ty, is_var, type_params, receiver, mut accessor_params) = if p.receiver.is_some() {
             // Match by declaration, not name: extension properties may share a spelling on
@@ -731,8 +813,11 @@ pub fn facade_package_metadata(
             .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
             .collect::<String>();
         let ty_desc = crate::jvm::names::type_descriptor(ty);
+        // Kotlin's accessor-name rules (`isTagged` keeps its getter name, `setTagged` for the
+        // setter) — the SAME helper the bytecode emitter uses, so the recorded JvmPropertySignature
+        // always names a method that exists.
         let getter = (
-            format!("get{cap}"),
+            crate::jvm::names::property_getter_name(&p.name),
             format!("({descriptor_params}){ty_desc}"),
         );
         let setter = is_var.then(|| {
@@ -741,7 +826,10 @@ pub fn facade_package_metadata(
                 .iter()
                 .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
                 .collect::<String>();
-            (format!("set{cap}"), format!("({params})V"))
+            (
+                crate::jvm::names::property_setter_name(&p.name),
+                format!("({params})V"),
+            )
         });
         prop_metas.push(crate::metadata::builder::PropMeta {
             name: p.name.clone(),
@@ -751,6 +839,9 @@ pub fn facade_package_metadata(
             receiver,
             getter,
             setter,
+            is_const: p.is_const,
+            decl_order,
+            visibility: p.visibility,
         });
     }
     let package = file
@@ -774,6 +865,11 @@ pub fn facade_package_metadata(
             Some(crate::metadata::builder::TypeAliasMeta {
                 name: alias.clone(),
                 target: Ty::obj_name(target),
+                visibility: file
+                    .type_alias_visibility
+                    .get(alias)
+                    .copied()
+                    .unwrap_or(crate::types::Visibility::Public),
             })
         })
         .collect::<Vec<_>>();
@@ -841,7 +937,7 @@ mod tests {
             parse_source_with_detected_features(
                 "package p\nfun helper(): String = \"OK\"\n\
                  inline operator fun String.unaryMinus(): String = this\n\
-                 inline fun <reified T> spliceOnly(): String = \"x\"\n\
+                 inline fun <reified T> spliceOnly(value: Any): T? = value as? T\n\
                  val answer: Int = 42",
                 &mut diags,
             ),
@@ -945,6 +1041,14 @@ mod tests {
         // internal/recursive uses, and the shared pipeline in this file).
         let rules: &[(&str, &[&str])] = &[
             (
+                "lower_companion_properties(",
+                &["src/jvm/companion.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "elide_default_property_stores(",
+                &["src/jvm/property_storage.rs", "src/jvm/backend.rs"],
+            ),
+            (
                 "lower_value_classes(",
                 &["src/jvm/value_classes.rs", "src/jvm/backend.rs"],
             ),
@@ -992,6 +1096,15 @@ mod tests {
              in every pipeline by construction), but:\n  {}",
             offenders.join("\n  ")
         );
+    }
+
+    #[test]
+    fn common_lowering_leaves_jvm_storage_choices_to_backend() {
+        let lowering = include_str!("../ir_lower.rs");
+        assert!(!lowering.contains("lower_companion_properties"));
+        assert!(!lowering.contains("mark_jvm_companion_hoisted_static"));
+        assert!(!lowering.contains("jvm_default"));
+        assert!(!lowering.contains("fieldInitializerOptimization"));
     }
 
     #[test]

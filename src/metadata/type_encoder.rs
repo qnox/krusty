@@ -64,6 +64,9 @@ pub(crate) struct StringTable {
     strings: Vec<String>,
     records: Vec<Pb>,
     dedup: HashMap<(String, Vec<u8>), u32>,
+    /// Indices of LOCAL class-name strings (`StringTableTypes.localName`, packed field 5): the
+    /// string is the RAW internal name of a local/anonymous class, used as a class id verbatim.
+    local_names: Vec<u32>,
 }
 
 impl StringTable {
@@ -105,7 +108,17 @@ impl StringTable {
     }
 
     pub(crate) fn serialize_types(&self) -> Pb {
-        serialize_string_table_types(&self.records)
+        serialize_string_table_types(&self.records, &self.local_names)
+    }
+
+    /// Intern a LOCAL/ANONYMOUS class's RAW internal name as a class id: an EMPTY record plus a
+    /// `StringTableTypes.localName` entry marking the index (kotlinc's local-class encoding).
+    pub(crate) fn local_class_id(&mut self, internal: &str) -> u32 {
+        let index = self.intern(internal.to_string(), Pb::new());
+        if !self.local_names.contains(&index) {
+            self.local_names.push(index);
+        }
+        index
     }
 
     pub(crate) fn into_strings(self) -> Vec<String> {
@@ -150,6 +163,12 @@ impl fmt::Display for TypeEncodeError {
 }
 
 pub(crate) type TypeParameters = HashMap<String, u64>;
+
+/// Marker bit on a [`TypeParameters`] id: the parameter is CAPTURED from an enclosing class. Its
+/// `Type` reference then also records `type_parameter_name` (f9) — the isolated reader has no
+/// enclosing-chain context to resolve a bare joint index. In-scope parameters emit f7 alone,
+/// matching kotlinc's bytes (kotlinc never writes both for them).
+pub(crate) const CAPTURED_TYPE_PARAMETER: u64 = 1 << 32;
 
 #[derive(Clone, Debug, Default)]
 pub struct MetadataTypeParameter {
@@ -235,12 +254,18 @@ fn encode_type_with_parameter(
                 .get(name)
                 .copied()
                 .ok_or_else(|| TypeEncodeError::MissingTypeParameter(name.to_owned()))?;
-            let source_name = crate::types::type_parameter_source_name(name);
             if nullable {
                 message.field_varint(3, 1);
             }
-            message.field_varint(7, index);
-            message.field_varint(9, strings.local(source_name) as u64);
+            // `type_parameter` (f7) ALONE for an in-scope parameter — kotlinc writes either the
+            // table index or a `type_parameter_name` (f9), never both. A CAPTURED enclosing-class
+            // parameter also records f9: the reader has no enclosing-chain context for its bare
+            // joint index.
+            message.field_varint(7, index & !CAPTURED_TYPE_PARAMETER);
+            if index & CAPTURED_TYPE_PARAMETER != 0 {
+                let source_name = crate::types::type_parameter_source_name(name);
+                message.field_varint(9, strings.local(source_name) as u64);
+            }
         }
         Ty::Obj(classifier, arguments) => {
             // kotlinc interns the enclosing classifier before recursively interning its arguments,

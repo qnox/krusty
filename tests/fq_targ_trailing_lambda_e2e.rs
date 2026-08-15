@@ -64,8 +64,7 @@ fn fq_targ_trailing_lambda_reified_checker_clean() {
         \x20 val e = pkg.failsWith<IllegalStateException> { throw IllegalStateException(\"boom\") }\n\
         \x20 return if (e.message == \"boom\") \"OK\" else \"fail: ${e.message}\"\n\
         }\n";
-    let Some(diags) = common::checker_diags_against_ref("fq_targ_trailing_lambda", LIB, MAIN)
-    else {
+    let Some(diags) = common::checker_diags_against("fq_targ_trailing_lambda", LIB, MAIN) else {
         return;
     };
     assert!(diags.is_empty(), "expected clean check, got: {diags:?}");

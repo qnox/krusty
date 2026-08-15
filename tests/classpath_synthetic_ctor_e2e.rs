@@ -13,7 +13,7 @@ fn classpath_synthetic_ctor_and_nested_type_resolution() {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
     // A classpath library exercising each synthetic/nested shape.
-    let Some(libout) = common::compile_libs_ref(
+    let Some(libout) = common::compile_libs(
         "synctor",
         &[
             (

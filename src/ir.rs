@@ -385,6 +385,24 @@ pub enum IrExpr {
         class: ClassId,
         arg: ExprId,
     },
+    /// A reified-type-parameter CLASS placeholder inside an EMITTED `inline fun <reified T>` body:
+    /// `Intrinsics.reifiedOperationMarker(4, name)` followed by the ERASED class constant — the
+    /// pattern every splicer (kotlinc's and krusty's) patches with the call-site class at inline
+    /// time. Value type: `java.lang.Class`.
+    ReifiedClassMarker {
+        name: String,
+        erased: TypeName,
+    },
+    /// A reified `is`/`as` inside an EMITTED `inline fun <reified T>` body:
+    /// `reifiedOperationMarker(3|1, name)` then `instanceof`/`checkcast` against the erasure —
+    /// kotlinc's placeholder pair, patched at inline time. `negated` inverts the instanceof result.
+    ReifiedTypeOp {
+        cast: bool,
+        negated: bool,
+        arg: ExprId,
+        name: String,
+        erased: TypeName,
+    },
     /// A lambda literal — emitted as `invokedynamic` + `LambdaMetafactory`. `impl_fn` is the
     /// synthesized static method holding the body; `captures` are the free-variable values bound into
     /// the call site (empty = non-capturing). `sam` is `None` for a plain Kotlin lambda (target
@@ -716,6 +734,9 @@ pub struct IrCtorArg {
     /// available as a local in `<init>` for property initializers / `init` blocks.
     pub is_field: bool,
     pub has_default: bool,
+    /// A `vararg` primary-ctor parameter — class `@Metadata` emits `ValueParameter.vararg_element_type`
+    /// (f4) so a consumer admits element-form/omitted arguments instead of demanding a literal array.
+    pub is_vararg: bool,
     pub type_param: Option<u32>,
     /// `Some(name)` when the backend should guard this parameter with a non-null assertion
     /// (`Intrinsics.checkNotNullParameter`) at `<init>` entry — a non-null reference param. `None` for a
@@ -727,11 +748,43 @@ pub struct IrCtorArg {
 /// thing, and the `getA()` a target may emit for it is a realization of it. The front end lowers only
 /// what is genuinely Kotlin — a source-written accessor's BODY — and leaves naming, descriptors and
 /// dispatch to the backend.
+/// One member EXTENSION property declaration ([`IrFile::member_ext_props`]): the SEMANTIC types
+/// (checker-resolved, pre-erasure) plus the accessor realization, everything a class `Property`
+/// metadata record needs.
+#[derive(Clone, Debug)]
+pub struct MemberExtProp {
+    pub name: String,
+    /// Declared extension receiver (`Int` in `val Int.doubled`).
+    pub receiver: crate::types::Ty,
+    /// Declared property type.
+    pub ty: crate::types::Ty,
+    pub is_var: bool,
+    /// Getter function id (always present — only `get()`-bodied shapes are lowered).
+    pub getter: u32,
+    /// Setter function id, for a `var`.
+    pub setter: Option<u32>,
+    pub visibility: crate::types::Visibility,
+}
+
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
+    /// Source byte offset and 1-based declaration line. These remain attached to the declaration so
+    /// a backend can order/debug synthesized accessors without rebinding the property by spelling.
+    pub source_order: u32,
+    pub decl_line: u32,
     /// The property's language-level type. This is also the type exposed by its accessors.
     pub ty: Ty,
+    /// Kotlin declaration visibility. Backends consume this semantic fact when choosing the
+    /// visibility of an accessor or a target-specific storage realization; they must not recover it
+    /// from a rendered owner/property-name key.
+    pub visibility: crate::types::Visibility,
+    /// The declaration initializer after common lowering, before any backend chooses storage.
+    /// `None` means the declaration has no initializer (or its source shape is not represented),
+    /// which is distinct from an explicit nullable initializer lowered to `IrConst::Null`.
+    /// Keeping this on the declaration lets a backend relocate storage without re-reading the AST
+    /// or mistaking a later assignment in an `init` block for the declaration initializer.
+    pub initializer: Option<ExprId>,
     /// The declared type of an explicit backing field when it differs from the property's public type.
     /// The JVM value-class pass may erase the physical [`IrField`] to its carrier, so retaining this
     /// semantic storage boundary lets the backend box/unbox at the accessor without resolving anything.
@@ -770,6 +823,14 @@ pub struct IrProperty {
 #[derive(Clone, Debug)]
 pub struct IrClass {
     pub fq_name: TypeName,
+    /// `true` when this classifier comes from a source declaration. Synthesized implementation
+    /// classes must not be published as declared nested classifiers in language metadata, even when
+    /// their backend name happens to look nested.
+    pub is_source_declared: bool,
+    /// A source anonymous-object declaration. Its lexical function is recorded separately as an
+    /// exact [`FunId`], so a backend can realize enclosure metadata without parsing generated names.
+    pub is_anonymous_object: bool,
+    pub enclosing_function: Option<FunId>,
     /// A language-level non-static nested class. Backends consume this declaration property directly;
     /// a synthetic receiver field or its physical name does not imply inner-class semantics.
     pub is_inner_class: bool,
@@ -914,11 +975,16 @@ pub struct IrClass {
     /// fields), by field name — emitted into each field's `Runtime[In]VisibleAnnotations`. Empty for a
     /// class whose fields carry none.
     pub field_annotations: Vec<FieldAnnotations>,
-    /// For an `annotation class`: `true` when its Kotlin retention is RUNTIME (the default) — the emitter
-    /// then writes a `@java.lang.annotation.Retention(RUNTIME)` meta-annotation on the annotation interface
-    /// so the JVM keeps the annotation's uses visible to reflection.
-    pub runtime_retained: bool,
+    /// For an `annotation class`: its declared Kotlin retention. `None` for every other class. Drives the
+    /// meta-annotations the emitter stamps on the annotation interface — kotlinc writes
+    /// `@kotlin.annotation.Retention(<declared>)` for an EXPLICIT `@Retention(…)` plus
+    /// `@java.lang.annotation.Retention(RUNTIME|CLASS|SOURCE)` always (RUNTIME when defaulted) — so
+    /// consumers can read the retention back from the compiled class.
+    pub annotation_retention: Option<AnnoRetention>,
 }
+
+/// Backend-agnostic retention fact resolved by the frontend.
+pub type AnnoRetention = crate::types::AnnotationRetention;
 
 /// A resolved JVM annotation value (`element_value`, JVMS §4.7.16.1) — an annotation argument folded to
 /// the constant the class file encodes.
@@ -1158,6 +1224,10 @@ impl IrClass {
 #[derive(Clone, Debug)]
 pub struct IrSecondaryCtor {
     pub params: Vec<Ty>,
+    /// SOURCE parameter names paired with SEMANTIC (checker-resolved) types — what the class
+    /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
+    /// which loses fun-type shapes and generic arguments). Empty for a synthesized constructor.
+    pub named_params: Vec<(String, Ty)>,
     pub defaults: Vec<Option<ExprId>>,
     /// Source-ordered temp declarations for delegation arguments.
     pub delegate_prelude: Vec<ExprId>,
@@ -1167,6 +1237,10 @@ pub struct IrSecondaryCtor {
     pub delegate: CtorDelegateTarget,
     /// kotlinc marks this ctor `ACC_SYNTHETIC` (0x1000) — e.g. a `@Serializable` deserialization ctor.
     pub synthetic: bool,
+    /// A DECLARED parameter was value-class-typed (recorded by the value-class pass before erasure):
+    /// the ctor gets kotlinc's PRIVATE + public synthetic `(…, DefaultConstructorMarker)` ABI, and
+    /// its metadata record names the marker form.
+    pub vc_params: bool,
 }
 
 /// The delegation target of a secondary constructor.
@@ -1237,6 +1311,12 @@ pub struct IrStatic {
     /// auto-generated here — the custom `getX`/`setX` are emitted as ordinary facade methods (their
     /// bodies lowered with `field` bound to this static). Prevents a duplicate-accessor collision.
     pub custom_accessor: bool,
+    /// 1-based source line of the property declaration (0 = unknown). kotlinc maps the accessors'
+    /// LineNumberTables and the `<clinit>` initializer store to this line.
+    pub line: u32,
+    /// Source byte offset of the declaration (`u32::MAX` for a target/plugin synthetic). This is the
+    /// exact ordering key when class metadata interleaves static and instance properties.
+    pub source_order: u32,
 }
 
 impl IrStatic {
@@ -1282,7 +1362,18 @@ pub struct IrFile {
     pub classes: Vec<IrClass>,
     /// Top-level properties — static fields on the facade, initialized in `<clinit>` in order.
     pub statics: Vec<IrStatic>,
+    /// Static indices whose storage was moved from a companion declaration to its outer class by the
+    /// JVM companion-storage pass. Common lowering never populates this physical realization table.
+    jvm_companion_hoisted_statics: std::collections::HashSet<u32>,
+    /// Exact companion property declaration → its JVM outer-class static realization. The property
+    /// index is stable within its declaring class; backend consumers must not recover this edge by
+    /// matching the property's spelling against a static field name.
+    jvm_companion_property_statics: std::collections::HashMap<(TypeName, u32), u32>,
     pub exprs: Vec<IrExpr>,
+    /// Exact `SetField` expression identities that realize a source property declaration's
+    /// initializer. A later assignment can target the same field with the same value, so backend
+    /// storage passes must consume this linkage instead of recognizing stores by shape or spelling.
+    pub(crate) property_initializer_stores: std::collections::HashSet<ExprId>,
     /// Sparse `ExprId` → 1-based source line for the `LineNumberTable`: statement roots, loop
     /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
     /// Absent = no line mark starts at that expression.
@@ -1314,6 +1405,21 @@ pub struct IrFile {
     /// the `@NotNull`/`@Nullable` parameter annotations, which DO need the declared nullability, consult
     /// this side-table instead. Empty ⇒ treat every parameter as non-null (the prior behavior).
     pub fn_param_declared_nullable: std::collections::HashMap<u32, Vec<bool>>,
+    /// Function ids whose physical `params[0]` realizes an extension receiver. Metadata and JVM
+    /// default-argument masks consume this semantic fact directly; neither may infer receiver-ness
+    /// from the synthetic `$receiver` parameter spelling.
+    pub extension_receiver_fns: std::collections::HashSet<u32>,
+    /// Member EXTENSION properties per class (`object Tools { val Int.doubled get() = … }`), keyed by
+    /// the declaring class's fq name. Lowering realizes each as accessor METHODS (`getDoubled(I)I`),
+    /// which erases property-ness from the IR — class `@Metadata` needs the declaration back: a
+    /// `Property` record with `Property.receiver_type` (f5) and the accessor `JvmPropertySignature`,
+    /// NOT a `Function` record for the accessor (kotlinc emits none), or a consumer cannot resolve
+    /// `import Tools.doubled` / `5.doubled` from the classpath.
+    pub member_ext_props: std::collections::HashMap<TypeName, Vec<MemberExtProp>>,
+    /// Function ids declared `operator` — `@Metadata` marks `Function.flags` bit 8 (`isOperator`)
+    /// so a consumer admits the conventional call form (`recv(args)` for `invoke`, `a[i]` for
+    /// `get`, …); the JVM method itself carries no such bit.
+    pub operator_fns: std::collections::HashSet<u32>,
     /// Value-class internal name → the lowered default expression of its single primary-constructor
     /// property, when it has one (`value class ItemId(val value: String = IdGen.next())`).
     /// Lowered in the STATIC `constructor-impl` frame (the sole param is value-index 0, no `this`); the
@@ -1368,12 +1474,21 @@ pub struct IrFile {
     /// for a constructor mentioning an inline class. Recorded by the value-class pass BEFORE it erases the
     /// parameter types (which lose the value-class identity).
     value_param_ctors: std::collections::HashSet<TypeName>,
+    /// For a class in `value_param_ctors`: its primary-ctor parameter types AS DECLARED (recorded
+    /// before the value-class pass erased them), positionally parallel to `IrClass::ctor_args`. The
+    /// class `@Metadata` constructor record names these (`id: ItemId`), while the physical
+    /// descriptor spells the erased marker form.
+    vc_ctor_declared_params: std::collections::HashMap<TypeName, Vec<Ty>>,
     /// Lambda impl functions that are INLINE-ONLY — their body has a non-local `return` (returning from
     /// the enclosing function), which is valid only when the lambda is spliced at the call site, never as
     /// a standalone closure method (a non-local return can't compile to a separate method — its `areturn`
     /// would carry the enclosing fn's return type, mismatching the lambda's). The splice reads the
     /// lambda's `inline_body`, not this method, so the backend must NOT emit a `FunId` in this set.
     pub inline_only_fns: std::collections::HashSet<u32>,
+    /// Top-level functions declared `inline`. This is a source-semantic fact; each backend decides
+    /// how an inline declaration is represented (the JVM emitter, for example, adds kotlinc's
+    /// `$i$f$<name>` local marker to emitted non-suspend bodies).
+    pub top_level_inline_functions: std::collections::HashSet<u32>,
     /// `FunId`s of `suspend fun`s, tagged by ir_lower. The coroutine pass (`jvm::suspend`) owns the
     /// whole transform: it rewrites each to the continuation-passing-style ABI (an extra
     /// `kotlin.coroutines.Continuation` parameter, return type erased to `Object`) and, for a function
@@ -1398,6 +1513,14 @@ pub struct IrFile {
     /// before the CPS rewrite, so a function that is both `suspend` and value-class-typed reports the
     /// fully declared signature here rather than the half-lowered one.
     pub vc_declared_sigs: std::collections::HashMap<u32, (String, Vec<Ty>, Ty)>,
+    /// Top-level source declaration id → its exact IR function id. Metadata emission uses this
+    /// checked declaration handoff to find a value-class-rewritten physical realization; it must
+    /// never reconstruct an overload by matching source names and arity.
+    pub top_level_function_fids: std::collections::HashMap<u32, u32>,
+    /// Exact IR function ids of public inline declarations. A synthesized class referenced from one
+    /// of these bodies must be public because the body can be spliced into another package/module.
+    /// Lowering carries the current [`IrFunctionScope`] rather than recovering this fact from a name.
+    pub public_inline_functions: std::collections::HashSet<u32>,
     /// Each `suspend fun` whose LOGICAL return is a NON-NULL `@JvmInline value class` → that class's
     /// internal name, recorded by the value-class pass as it boxes the function's tail. A CPS return
     /// is `Object`, so the value crosses the resume boundary in its BOXED form (`X.box-impl`) — the
@@ -1433,20 +1556,57 @@ pub struct IrFile {
     /// `FunId` → the backend-agnostic generic-signature SHAPE of a type-parameterized function. The JVM
     /// backend formats this into a `Signature` attribute; the IR itself holds no target descriptors.
     pub signatures: std::collections::HashMap<u32, IrGenericSig>,
+    /// Class MEMBERS whose semantic parameter/return types mention an ENCLOSING-CLASS type parameter
+    /// (`open class Base<T> { open fun choose(value: T): T }`): fid → (semantic params, semantic ret).
+    /// The erased [`IrFunction`] carries `Any`, and `signatures` only describes function-OWNED type
+    /// parameters — without this record the class `@Metadata` publishes `choose(Any): Any` and a
+    /// consumer rejects a `Base<String>` override with "return type mismatch".
+    pub member_semantic_sigs: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
     /// Kotlin declaration visibility by `(class internal name, property name)`. This is distinct from
     /// the backing field's JVM visibility.
     pub prop_visibilities: std::collections::HashMap<(String, String), crate::types::Visibility>,
+    /// Kotlin declaration visibility per CLASS — `@Metadata` `Class.flags` must carry it
+    /// (`internal class Hidden` writes explicit visibility 0) so a consumer enforces the module
+    /// boundary; absent = public (the historical assumption).
+    pub class_visibilities: std::collections::HashMap<TypeName, crate::types::Visibility>,
+    /// 1-based source line of a class's primary-ctor closing `)` — kotlinc maps the ctor
+    /// `$default` overload's `return` to it. Absent = single-line/unknown (the one-entry table).
+    pub ctor_close_lines: std::collections::HashMap<TypeName, u32>,
+    /// Function ids of `internal` members — `@Metadata` `Function.flags` visibility 0 (the JVM
+    /// method stays public; only metadata carries the module boundary). `private_methods` keeps
+    /// its own set because privacy ALSO changes dispatch (`invokespecial`).
+    pub internal_methods: std::collections::HashSet<u32>,
+    /// Declared PRIMARY-constructor visibility per class (`class C protected constructor(…)`);
+    /// absent = public. `@Metadata` `Constructor.flags` carries it so a consumer rejects a
+    /// construction the declaration forbids.
+    pub ctor_visibilities: std::collections::HashMap<TypeName, crate::types::Visibility>,
+    /// SOURCE index of a member function's `vararg` parameter (receiver excluded) — class
+    /// `@Metadata` must emit `ValueParameter.vararg_element_type` (f4) or a consumer demands one
+    /// literal array (`too many arguments`).
+    pub fn_vararg_index: std::collections::HashMap<u32, usize>,
+    /// Synthesized classes (function-reference/suspend-conversion adapters) that must be PUBLIC:
+    /// they are referenced from a PUBLIC INLINE function's body, whose splice copies the reference
+    /// into arbitrary other packages/modules (kotlinc marks such synthetics public for the same
+    /// reason). Package-private would be an IllegalAccessError at every cross-package splice site.
+    pub public_synthetics: std::collections::HashSet<TypeName>,
     /// Declaring class to indices in `statics` for class properties whose JVM field is static.
     pub declared_class_statics: std::collections::HashMap<TypeName, Vec<u32>>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
     /// kotlinc attributes both the property's getter and its constructor-side initializer to this line.
-    pub prop_decl_lines: std::collections::HashMap<(String, String), u32>,
+    pub prop_decl_lines: std::collections::HashMap<(TypeName, String), u32>,
     /// FunId → 1-based source line of its `fun` declaration, for the method's `LineNumberTable`.
     /// A side map (not a field on `IrFunction`) so the 40-odd construction sites stay untouched.
     pub fn_decl_lines: std::collections::HashMap<u32, u32>,
     /// FunId → 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` fn's
     /// implicit `return` there in the `LineNumberTable`. Same side-map rationale as `fn_decl_lines`.
     pub fn_close_lines: std::collections::HashMap<u32, u32>,
+    /// FunId → the SOURCE BYTE OFFSET of the declaration a class member realizes (a property's
+    /// accessors carry the property's offset). kotlinc emits class members in DECLARATION order,
+    /// interleaving property accessors among functions; lowering groups them by kind, so the JVM
+    /// emitter re-sorts its emission (only) by this key. A method with no entry (a data-class
+    /// synthetic, an appended lambda impl, an access bridge) keeps its position after the declared
+    /// members. Resolution-facing indexes never see the sorted order.
+    pub fn_source_order: std::collections::HashMap<u32, u32>,
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: std::collections::HashMap<TypeName, IrGenericSig>,
@@ -1529,6 +1689,46 @@ pub struct IrFile {
     /// underlying — so the lambda's impl method must match whichever the interface actually declares.
     /// The lowerer records the declaration; deciding what erases is the backend pass's job.
     pub lambda_sam_signature: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
+}
+
+/// Exact function body currently owned by lowering. `source_name` is only the naming stem for
+/// generated methods/classes; semantic properties are keyed by `function`, never reconstructed from
+/// that spelling. `None` represents a constructor, property initializer, or class initializer.
+#[derive(Clone, Debug, Default)]
+pub struct IrFunctionScope {
+    pub function: Option<u32>,
+    pub source_name: String,
+    /// Declaration-owned type-parameter identities whose class-literal operations may remain as
+    /// reified placeholders in this emitted method. Kept on the lexical function scope so nested
+    /// inline expansion saves/restores the fact with its owner instead of a parallel current-state
+    /// field recovering parameters from source spelling.
+    pub emitted_reified_parameters: std::collections::HashSet<String>,
+}
+
+impl IrFunctionScope {
+    pub fn declared(function: u32, source_name: String) -> Self {
+        Self {
+            function: Some(function),
+            source_name,
+            emitted_reified_parameters: Default::default(),
+        }
+    }
+
+    pub fn synthetic(source_name: String) -> Self {
+        Self {
+            function: None,
+            source_name,
+            emitted_reified_parameters: Default::default(),
+        }
+    }
+
+    pub fn with_emitted_reified_parameters(
+        mut self,
+        parameters: std::collections::HashSet<String>,
+    ) -> Self {
+        self.emitted_reified_parameters = parameters;
+        self
+    }
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
@@ -1696,6 +1896,16 @@ impl IrFile {
             .contains(&crate::types::type_name(internal))
     }
 
+    pub fn record_vc_ctor_declared_params(&mut self, internal: TypeName, declared: Vec<Ty>) {
+        self.vc_ctor_declared_params.insert(internal, declared);
+    }
+
+    pub fn vc_ctor_declared_params(&self, internal: TypeName) -> Option<&[Ty]> {
+        self.vc_ctor_declared_params
+            .get(&internal)
+            .map(Vec::as_slice)
+    }
+
     pub fn insert_value_ctor_default(&mut self, internal: &str, expr: u32) {
         self.value_ctor_defaults
             .insert(crate::types::type_name(internal), expr);
@@ -1808,6 +2018,37 @@ impl IrFile {
             || self.has_external_value_class_name(internal)
     }
 
+    /// Record/query the JVM-only companion backing-storage realization selected after common
+    /// lowering. Keeping this in a backend-populated side table prevents a physical JVM layout bit
+    /// from becoming part of an ordinary common-IR static declaration.
+    pub(crate) fn mark_jvm_companion_hoisted_static(&mut self, index: u32) {
+        self.jvm_companion_hoisted_statics.insert(index);
+    }
+
+    pub(crate) fn mark_jvm_companion_property_static(
+        &mut self,
+        companion: TypeName,
+        property: u32,
+        index: u32,
+    ) {
+        self.jvm_companion_property_statics
+            .insert((companion, property), index);
+    }
+
+    pub(crate) fn jvm_companion_property_static(
+        &self,
+        companion: TypeName,
+        property: u32,
+    ) -> Option<u32> {
+        self.jvm_companion_property_statics
+            .get(&(companion, property))
+            .copied()
+    }
+
+    pub(crate) fn is_jvm_companion_hoisted_static(&self, index: u32) -> bool {
+        self.jvm_companion_hoisted_statics.contains(&index)
+    }
+
     pub fn param_defaults(&self, fid: u32) -> Option<&Vec<Option<ExprId>>> {
         self.fn_params.get(&fid)?.defaults.as_ref()
     }
@@ -1865,6 +2106,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
+        | IrExpr::ReifiedTypeOp { arg, .. }
         | IrExpr::RefNew { init: arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
         | IrExpr::NewArray { size: arg, .. }
@@ -1951,6 +2193,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::ExternalStaticInstance { .. }
         | IrExpr::StaticInstance { .. }
         | IrExpr::EnumValues { .. }
+        | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation => {}
     }
@@ -1994,11 +2237,11 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
     };
     let vc_params: Vec<TypeName> = f.params.iter().filter_map(vc_of).collect();
     if f.name.contains('-') || !vc_params.is_empty() {
-        // A `suspend` function's CPS rewrite appends a `Continuation` parameter the stub shape
-        // doesn't model — reject a suspend function whose name/params show value-class mangling.
-        if ir.suspend_funs.contains(&fid) {
-            return false;
-        }
+        // A `suspend` function's CPS rewrite appends a trailing `Continuation` — for the stub it is
+        // just another loaded parameter (kotlinc: `pick-<hash>$default(int, String, Continuation,
+        // int, Object)` delegating to the CPS method). The mask covers only the DECLARED defaulted
+        // parameters, and the stub-safe gate already restricts defaults to simple constants, which
+        // cannot suspend — so the shape is modeled.
         // A NULLABLE-underlying value-class param stays BOXED in kotlinc's stub signature; the plain
         // facade stub emits fully erased params — not modeled. Post-pass evidence: the value-class
         // pass recorded the boxed stub params (`vc_underlying_nullable`, which also recurses through
@@ -2063,6 +2306,29 @@ fn default_root_slot_ok(ir: &IrFile, e: ExprId, param: Option<&Ty>) -> bool {
         // NON-nullable value class (erased representations match).
         IrExpr::New { internal, .. } if ir.is_value_class_name(*internal) => {
             param.is_some_and(|p| !p.is_nullable() && p.obj_internal() == Some(*internal))
+        }
+        // A MANGLED classpath call returns the ERASED underlying (that is what the mangling
+        // means), so it can only fill a slot erased the same way — the same non-nullable value
+        // class pre-pass, or its erased underlying post-pass (the value-class pass has already
+        // rewritten the parameter). A boxed (`Duration?`) or widened slot would need a `box-impl`
+        // the erased stub doesn't model.
+        IrExpr::Call {
+            callee: Callee::Static { name, .. },
+            ..
+        } if name.contains('-') && !ir.erased_value_constructions.contains_key(&e) => {
+            let root_vc = ir
+                .logical_types
+                .get(&e)
+                .and_then(|t| t.non_null().obj_internal())
+                .filter(|&n| ir.is_value_class_name(n));
+            root_vc.is_some_and(|n| {
+                param.is_some_and(|p| {
+                    (!p.is_nullable() && p.obj_internal() == Some(n))
+                        || ir
+                            .value_class_underlying_name(n)
+                            .is_some_and(|underlying| *p == underlying)
+                })
+            })
         }
         root => {
             // A param whose erased slot is PRIMITIVE (pre-pass: a non-nullable value-class param
@@ -2147,7 +2413,20 @@ fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
             // bypass the conservative mangled-call gate.
             && !ir.erased_value_constructions.contains_key(&e) =>
         {
-            return false;
+            // EXCEPT a mangled call whose checked RESULT is a stub-modelable value class
+            // (`timeout: Duration = 60.seconds` — a classpath companion-extension getter): the
+            // mangling means the physical return already IS the erased underlying, which is
+            // exactly the representation the erased stub passes along. Whether the SLOT agrees is
+            // [`default_root_slot_ok`]'s question. Both gate runs see the same evidence — a
+            // classpath callee carries its mangled JVM name before and after the value-class pass.
+            let vc_result = ir
+                .logical_types
+                .get(&e)
+                .and_then(|t| t.non_null().obj_internal())
+                .filter(|&n| ir.is_value_class_name(n));
+            if !vc_result.is_some_and(|n| vc_stub_shape_ok(ir, n)) {
+                return false;
+            }
         }
         _ => {}
     }
@@ -2402,6 +2681,9 @@ mod tests {
     fn blank_class(fq: &str) -> IrClass {
         IrClass {
             fq_name: fq.into(),
+            is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -2443,7 +2725,7 @@ mod tests {
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: Vec::new(),
-            runtime_retained: false,
+            annotation_retention: None,
         }
     }
 
@@ -2470,7 +2752,7 @@ mod tests {
     }
 
     #[test]
-    fn toplevel_default_stub_safe_accepts_mangled_and_rejects_missing_defaults() {
+    fn toplevel_default_stub_safe_accepts_mangled_suspend_and_rejects_missing_defaults() {
         // A value-class-MANGLED name (the post-pass view of a VC-param function) emits the mangled
         // `foo-<hash>$default` stub, kotlinc's shape — accepted since the erased params carry no
         // extra carve-out evidence.
@@ -2481,9 +2763,11 @@ mod tests {
             .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
         assert!(toplevel_default_stub_safe(&f, fid));
 
-        // A mangled SUSPEND function's CPS-appended Continuation param is not modeled — rejected.
+        // A mangled SUSPEND function stays accepted: the CPS-appended Continuation is just another
+        // loaded stub parameter (kotlinc's pick-<hash>$default shape), and the constant-only
+        // default restriction already excludes anything that could suspend.
         f.suspend_funs.push(fid);
-        assert!(!toplevel_default_stub_safe(&f, fid));
+        assert!(toplevel_default_stub_safe(&f, fid));
 
         let mut g = IrFile::default();
         let gid = add_toplevel_fn(&mut g, "hello", Ty::Int);

@@ -15,6 +15,10 @@ use std::path::PathBuf;
 /// panics with the front-end diagnostics instead of reporting a declined source as a pass.
 fn krusty_bytes(src: &str, class_internal: &str, cp: &[PathBuf]) -> Vec<u8> {
     let stem = class_internal.rsplit('/').next().unwrap();
+    krusty_bytes_with_stem(src, stem, class_internal, cp)
+}
+
+fn krusty_bytes_with_stem(src: &str, stem: &str, class_internal: &str, cp: &[PathBuf]) -> Vec<u8> {
     let classes = common::compile_in_process_metadata_cp(src, stem, cp).unwrap_or_else(|| {
         let diagnostics = common::front_end_diagnostics(src, cp, None);
         panic!("{class_internal}: krusty declined the source; diagnostics: {diagnostics:?}")
@@ -55,11 +59,15 @@ fn kotlinc_bytes(src: &str, stem: &str, class_internal: &str, cp: &[PathBuf]) ->
 /// Skips only when the reference kotlinc toolchain is unavailable; a source krusty declines FAILS.
 fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
     let stem = class_internal.rsplit('/').next().unwrap();
+    assert_byte_identical_with_stem(src, stem, class_internal, cp);
+}
+
+fn assert_byte_identical_with_stem(src: &str, stem: &str, class_internal: &str, cp: &[PathBuf]) {
     let Some(ko) = kotlinc_bytes(src, stem, class_internal, cp) else {
         eprintln!("skip ({class_internal}: provisioned kotlinc unavailable)");
         return;
     };
-    let kr = krusty_bytes(src, class_internal, cp);
+    let kr = krusty_bytes_with_stem(src, stem, class_internal, cp);
     assert_eq!(
         kr,
         ko,
@@ -91,6 +99,18 @@ fn class_with_method_parameter_is_byte_identical() {
 fn class_with_property_and_method_is_byte_identical() {
     assert_byte_identical(
         "package demo\nclass C(val x: Int) { fun f(): Int = x }\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A body property is emitted where it is declared, not in a property-only group. This also covers
+/// the backend-synthesized getter, which has no `FunId` of its own and therefore must be scheduled by
+/// the exact `IrProperty` declaration identity.
+#[test]
+fn class_methods_and_plain_property_interleave_byte_identically() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    fun before(): Int = 1\n    var value: String = \"x\"\n    fun after(): Int = value.length\n}\n",
         "demo/C",
         &[],
     );
@@ -472,6 +492,52 @@ fn var_reference_class_is_byte_identical() {
     assert_byte_identical(
         "package demo\nclass C(val x: Int, var y: String)\n",
         "demo/C",
+        &[],
+    );
+}
+
+/// A multi-line primary constructor with defaults gives the synthetic marker overload distinct
+/// line entries for each filled parameter and for the closing `)`, rather than one class-line entry.
+#[test]
+fn multiline_default_constructor_debug_table_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(\n    val required: Int,\n    val count: Int = 1,\n    val text: String = \"x\"\n)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A named companion evaluates a nested construction and string before invoking its superclass
+/// constructor. Their class/string/constructor pool entries must follow bytecode evaluation order.
+#[test]
+fn named_companion_constructed_super_args_are_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass Cfg(val pretty: Boolean)\nopen class Fmt(val configuration: Cfg, val tag: String) {\n    companion object Default : Fmt(Cfg(false), \"default\")\n}\n",
+        "demo/Fmt$Default",
+        &[],
+    );
+}
+
+/// JVM fields already contain primitive zero values, so kotlinc omits this declaration store. The
+/// common IR still retains it for non-JVM targets; the JVM storage pass performs the elision.
+#[test]
+fn boolean_default_body_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass Builder {\n    var pretty: Boolean = false\n}\n",
+        "demo/Builder",
+        &[],
+    );
+}
+
+/// A receiver-lambda default produces a synthetic facade implementation and an `invokedynamic`
+/// call site. Pins its guard/debug tables, bootstrap argument order, and descriptor-only nested-class
+/// entry together against kotlinc.
+#[test]
+fn receiver_lambda_facade_is_byte_identical() {
+    assert_byte_identical_with_stem(
+        "package demo\nclass Cfg(val pretty: Boolean)\nclass Builder { var pretty: Boolean = false }\nclass Engine(val name: String)\nclass Client(val engine: Engine, val configuration: Cfg)\nfun Client(engine: Engine, action: Builder.() -> Unit = {}): Client {\n    val builder = Builder()\n    builder.action()\n    return Client(engine, Cfg(builder.pretty))\n}\n",
+        "Lib",
+        "demo/LibKt",
         &[],
     );
 }

@@ -36,7 +36,7 @@ fn core_inherits_mapped_string_length_property() {
 #[test]
 fn member_property_getter_and_setter_from_metadata() {
     let stdlib = common::stdlib_jar();
-    let Some(dir) = common::compile_lib_ref(
+    let Some(dir) = common::compile_lib(
         "propquery",
         "class Holder(val label: String) { var count: Int = 0 }\n\
          val Holder.tag: String get() = \"t\"\n\

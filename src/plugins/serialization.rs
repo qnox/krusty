@@ -1077,6 +1077,8 @@ impl SerializationPlugin {
             owner: Some(type_name(class_fq)),
             visibility: crate::types::Visibility::Private,
             custom_accessor: true,
+            line: 0,
+            source_order: u32::MAX,
         });
         // `public static final Lazy access$get$cachedSerializer$delegate$cp()` — reads the private field.
         let read =
@@ -1523,6 +1525,7 @@ impl IrPlugin for SerializationPlugin {
                     ty: kserializer_of(class_ty("kotlin/Any")),
                     is_field: false,
                     has_default: false,
+                    is_vararg: false,
                     type_param: None,
                     check: None,
                 };
@@ -1864,6 +1867,7 @@ impl IrPlugin for SerializationPlugin {
                     .secondary_ctors
                     .push(crate::ir::IrSecondaryCtor {
                         params: deser_params,
+                        named_params: Vec::new(),
                         defaults: vec![],
                         delegate_prelude: vec![],
                         delegate_args: vec![],
@@ -1874,6 +1878,7 @@ impl IrPlugin for SerializationPlugin {
                             default_masks: vec![],
                         },
                         synthetic: true,
+                        vc_params: false,
                     });
             }
 
@@ -1930,6 +1935,8 @@ impl IrPlugin for SerializationPlugin {
                     owner: Some(type_name(&class_fq)),
                     visibility: crate::types::Visibility::Private,
                     custom_accessor: true,
+                    line: 0,
+                    source_order: u32::MAX,
                 });
                 let read =
                     ir.external_static_field(&class_fq, "$childSerializers", "[Lkotlin/Lazy;");
