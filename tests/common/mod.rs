@@ -1992,9 +1992,11 @@ pub fn compile_lib_ref(tag: &str, lib_src: &str) -> Option<PathBuf> {
 /// Multi-file form of [`compile_lib_ref`].
 #[allow(dead_code)]
 pub fn compile_libs_ref(_tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
-    // Diagnostic mode (KRUSTY_REF_SELF=1): route the reference-compiled dependency through the
-    // krusty build instead, to measure which `_ref` sites can already flip back to the default.
-    if std::env::var("KRUSTY_REF_SELF").as_deref() == Ok("1") {
+    // KRUSTY-BUILT IS THE DEFAULT: every `_ref` site reached full self-consumption (the whole
+    // e2e suite passes with krusty-compiled dependency libs), so the reference-compiler routing
+    // below is now the DIAGNOSTIC escape hatch (KRUSTY_REF_KOTLINC=1) for bisecting a regression
+    // back to a reference-compiled baseline — the inverse of the old KRUSTY_REF_SELF probe.
+    if std::env::var("KRUSTY_REF_KOTLINC").as_deref() != Ok("1") {
         return compile_libs(_tag, sources);
     }
     type RefMemo = Mutex<HashMap<u64, Arc<OnceLock<Option<PathBuf>>>>>;
