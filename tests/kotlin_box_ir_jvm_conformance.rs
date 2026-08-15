@@ -906,6 +906,162 @@ fn conformance_report_has_stable_machine_format() {
     assert_eq!(conformance_report(0, 0), "0.0 0 0\n");
 }
 
+/// Base frame of a folded stack: the sampled thread's name, or its id when it has none.
+fn profile_thread_label(name: &str, id: u64) -> String {
+    if name.is_empty() {
+        id.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// One inferno-folded line: `thread;root;…;leaf count`. `leaf_first` is the sampled stack in
+/// backtrace order (innermost frame first), which the line reverses into root-first order.
+fn profile_folded_line(thread_label: &str, leaf_first: &[&str], count: isize) -> String {
+    let mut line = String::from(thread_label);
+    for name in leaf_first.iter().rev() {
+        line.push(';');
+        line.push_str(name);
+    }
+    line.push(' ');
+    line.push_str(&count.to_string());
+    line
+}
+
+#[test]
+fn profile_folds_stacks_root_first() {
+    assert_eq!(
+        profile_folded_line("worker", &["leaf", "middle", "root"], 12),
+        "worker;root;middle;leaf 12"
+    );
+    // A stack sampled with no resolvable frame still carries its thread and count.
+    assert_eq!(profile_folded_line("7", &[], 3), "7 3");
+    assert_eq!(profile_thread_label("", 42), "42");
+    assert_eq!(profile_thread_label("worker", 42), "worker");
+}
+
+/// Symbolize the sampled profile, write `target/flamegraph.svg`, and print the hotspot table.
+///
+/// pprof's own `report().build()` resolves and demangles every frame of every distinct stack. A
+/// full-corpus profile holds ~10^5 distinct stacks over only a few thousand distinct instruction
+/// pointers, so that is ~10^7 single-threaded symbol lookups — many minutes, well past the harness
+/// deadline, which kills the run and leaves a 0-byte SVG behind. Resolve each instruction pointer
+/// once into a memo and fold the stacks out of that instead.
+fn write_flamegraph(guard: &pprof::ProfilerGuard<'_>) {
+    /// One instruction pointer's symbols: several when the compiler inlined into it.
+    struct Resolved {
+        /// Demangled names, innermost inlined frame first.
+        names: Vec<String>,
+        /// pprof's own sampling handler; it and the frame below it are not part of the workload.
+        signal_handler: bool,
+    }
+
+    let report = match guard.report().build_unresolved() {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("profiler: could not read the sampled profile: {e}");
+            return;
+        }
+    };
+
+    let t0 = Instant::now();
+    let mut memo: std::collections::HashMap<usize, Resolved> = std::collections::HashMap::new();
+    for frames in report.data.keys() {
+        for frame in &frames.frames {
+            let ip = frame.ip() as usize;
+            if memo.contains_key(&ip) {
+                continue;
+            }
+            let mut names: Vec<String> = Vec::new();
+            backtrace::resolve_frame(frame, |symbol| {
+                // `{:#}` demangles and drops the trailing `::h<hash>`, so one function reached from
+                // different stacks folds into a single flamegraph frame.
+                names.push(match symbol.name() {
+                    Some(name) => format!("{name:#}"),
+                    None => "unknown".to_string(),
+                });
+            });
+            let signal_handler = names
+                .iter()
+                // macOS prepends an underscore even to `#[no_mangle]` symbols.
+                .any(|n| n == "perf_signal_handler" || n == "_perf_signal_handler");
+            memo.insert(
+                ip,
+                Resolved {
+                    names,
+                    signal_handler,
+                },
+            );
+        }
+    }
+    let symbolize_ms = t0.elapsed().as_millis();
+
+    let mut folded: Vec<String> = Vec::with_capacity(report.data.len());
+    let mut leaf: std::collections::HashMap<&str, isize> = std::collections::HashMap::new();
+    let mut total: isize = 0;
+    for (frames, count) in &report.data {
+        total += *count;
+        let mut stack: Vec<&str> = Vec::new();
+        let mut frame_iter = frames.frames.iter();
+        while let Some(frame) = frame_iter.next() {
+            let Some(resolved) = memo.get(&(frame.ip() as usize)) else {
+                continue;
+            };
+            if resolved.signal_handler {
+                frame_iter.next();
+                continue;
+            }
+            stack.extend(resolved.names.iter().map(String::as_str));
+        }
+        // Terminal-readable hotspots: aggregate samples by the innermost krusty frame. The raw leaf
+        // is usually the sampling/backtrace/thread trampoline; the SVG keeps the full stack.
+        if let Some(name) = stack
+            .iter()
+            .find(|n| n.starts_with("krusty::") || n.starts_with("<krusty::"))
+        {
+            *leaf.entry(name).or_default() += *count;
+        }
+        let thread = String::from_utf8_lossy(&frames.thread_name[..frames.thread_name_length]);
+        folded.push(profile_folded_line(
+            &profile_thread_label(&thread, frames.thread_id),
+            &stack,
+            *count,
+        ));
+    }
+
+    if folded.is_empty() {
+        eprintln!("profiler: no samples collected, no flamegraph written");
+        return;
+    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/flamegraph.svg");
+    match std::fs::File::create(&path) {
+        Ok(f) => {
+            let mut options = pprof::flamegraph::Options::default();
+            match pprof::flamegraph::from_lines(
+                &mut options,
+                folded.iter().map(|s| s.as_str()),
+                f,
+            ) {
+                Ok(()) => eprintln!(
+                    "flamegraph written to {} ({} stacks over {} addresses, symbolized in {symbolize_ms}ms)",
+                    path.display(),
+                    folded.len(),
+                    memo.len()
+                ),
+                Err(e) => eprintln!("profiler: flamegraph write failed: {e}"),
+            }
+        }
+        Err(e) => eprintln!("profiler: cannot create {}: {e}", path.display()),
+    }
+
+    let mut v: Vec<_> = leaf.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    eprintln!("--- profiler: top krusty frames ({total} samples) ---");
+    for (name, c) in v.into_iter().take(25) {
+        eprintln!("  {:>5.1}%  {name}", 100.0 * c as f64 / total.max(1) as f64);
+    }
+}
+
 #[test]
 fn scratch_directory_classpaths_are_not_retained() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1230,37 +1386,7 @@ fn kotlin_codegen_box_conformance() {
 
     // Emit the flamegraph (if profiling was on) before computing summaries.
     if let Some(g) = flame_guard {
-        if let Ok(report) = g.report().build() {
-            let path =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/flamegraph.svg");
-            if let Ok(f) = std::fs::File::create(&path) {
-                let _ = report.flamegraph(f);
-                eprintln!("flamegraph written to {}", path.display());
-            }
-            // Terminal-readable hotspots: aggregate samples by the innermost krusty frame. The raw
-            // leaf is usually the sampling/backtrace/thread trampoline; the SVG keeps the full stack.
-            let mut leaf: std::collections::HashMap<String, isize> =
-                std::collections::HashMap::new();
-            let mut total: isize = 0;
-            for (frames, count) in &report.data {
-                total += *count;
-                let krusty_frame = frames
-                    .frames
-                    .iter()
-                    .flat_map(|frame| frame.iter())
-                    .map(|f| f.name())
-                    .find(|name| name.starts_with("krusty::") || name.starts_with("<krusty::"));
-                if let Some(name) = krusty_frame {
-                    *leaf.entry(name).or_default() += *count;
-                }
-            }
-            let mut v: Vec<_> = leaf.into_iter().collect();
-            v.sort_by(|a, b| b.1.cmp(&a.1));
-            eprintln!("--- profiler: top krusty frames ({total} samples) ---");
-            for (name, c) in v.into_iter().take(25) {
-                eprintln!("  {:>5.1}%  {name}", 100.0 * c as f64 / total.max(1) as f64);
-            }
-        }
+        write_flamegraph(&g);
     }
 
     let total_ms = t_total_start.elapsed().as_millis();

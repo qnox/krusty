@@ -137,7 +137,12 @@ KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test conformance kotlin_cod
 ```
 
 This skips JVM execution in the conformance test, prints phase timing, and writes
-`target/flamegraph.svg`.
+`target/flamegraph.svg` plus a `top krusty frames` table on stderr. The whole run fits inside the
+harness deadline (`KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`, 295s): the harness symbolizes each sampled
+instruction pointer once rather than once per stack, so turning ~80k samples into an SVG costs a
+couple of seconds instead of the ~8 minutes `pprof`'s own `Report::build` takes on a full-corpus
+profile. The SVG covers every sampled stack and runs to tens of megabytes — it is meant to be opened
+in a browser, not read as text.
 
 The e2e suite has its own built-in phase profiler: `KRUSTY_PROF=1` makes every harness helper print
 `PROF\t<phase>\t<ms>` lines (`krusty` in-process compile, `kotlinc` reference compile incl. queue
