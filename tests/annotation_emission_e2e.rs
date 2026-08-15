@@ -152,16 +152,15 @@ fn compile_both(
     Some((krusty_dir, kotlinc_dir))
 }
 
-/// Compare the annotation facts of every declaration whose javap line contains one of `decls`.
-/// Selecting declarations keeps the assertion independent of the order krusty emits methods in,
-/// which is a separate parity concern.
-fn assert_same_annotations(name: &str, file: &str, class: &str, decls: &[&str], src: &str) {
-    let Some((krusty_dir, kotlinc_dir)) = compile_both(name, file, src) else {
-        eprintln!("skip ({name}: provisioned kotlinc/JAVA_HOME unavailable)");
-        return;
-    };
-    let krusty = annotation_shapes(&krusty_dir, class);
-    let kotlinc = annotation_shapes(&kotlinc_dir, class);
+fn assert_compiled_annotations(
+    name: &str,
+    class: &str,
+    decls: &[&str],
+    krusty_dir: &std::path::Path,
+    kotlinc_dir: &std::path::Path,
+) {
+    let krusty = annotation_shapes(krusty_dir, class);
+    let kotlinc = annotation_shapes(kotlinc_dir, class);
     for wanted in decls {
         let pick = |shapes: &std::collections::HashMap<String, Vec<String>>| {
             let mut hits: Vec<_> = shapes
@@ -182,6 +181,24 @@ fn assert_same_annotations(name: &str, file: &str, class: &str, decls: &[&str], 
             "{name}: '{wanted}' annotations must match kotlinc's"
         );
     }
+}
+
+/// Compare the annotation facts of every declaration whose javap line contains one of `decls`.
+/// Selecting declarations keeps the assertion independent of the order krusty emits methods in,
+/// which is a separate parity concern.
+fn assert_same_annotations(name: &str, file: &str, class: &str, decls: &[&str], src: &str) {
+    let Some((krusty_dir, kotlinc_dir)) = compile_both(name, file, src) else {
+        eprintln!("skip ({name}: provisioned kotlinc/JAVA_HOME unavailable)");
+        return;
+    };
+    assert_compiled_annotations(name, class, decls, &krusty_dir, &kotlinc_dir);
+}
+
+/// A regression whose only oracle is kotlinc must not turn green without running that oracle.
+fn require_same_annotations(name: &str, file: &str, class: &str, decls: &[&str], src: &str) {
+    let (krusty_dir, kotlinc_dir) = compile_both(name, file, src)
+        .unwrap_or_else(|| panic!("{name}: provisioned kotlinc/JAVA_HOME unavailable"));
+    assert_compiled_annotations(name, class, decls, &krusty_dir, &kotlinc_dir);
 }
 
 #[test]
@@ -385,5 +402,48 @@ fn missing_required_annotation_argument_is_a_frontend_error() {
             .iter()
             .any(|message| message.contains("no value passed for parameter 'value'")),
         "missing required annotation element must not reach lowering: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn nested_annotation_named_arguments_bind_by_label() {
+    // A NESTED annotation is parsed as an ordinary call, so its labels live in the call's own
+    // argument names rather than the annotation's. Reading only the latter bound every nested
+    // argument positionally, which silently SWAPPED the values whenever the labels were written
+    // out of declaration order — and, when the elements had different types, reported two
+    // spurious argument-type mismatches instead.
+    require_same_annotations(
+        "nested-named",
+        "Nested.kt",
+        "q/Holder3",
+        &["tagged()", "mixed()", "deep()", "typed()"],
+        "package q\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         annotation class Innermost(val x: Int, val y: Int)\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         annotation class Typed(val n: Int, val a: String)\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         annotation class Deep(val m: Innermost, val a: String)\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         annotation class Inner(val a: String, val b: String)\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         @Target(AnnotationTarget.FUNCTION)\n\
+         annotation class Outer(val i: Inner)\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         @Target(AnnotationTarget.FUNCTION)\n\
+         annotation class OuterDeep(val d: Deep)\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         @Target(AnnotationTarget.FUNCTION)\n\
+         annotation class OuterTyped(val t: Typed)\n\
+         class Holder3 {\n\
+         \x20   @Outer(Inner(b = \"BB\", a = \"AA\"))\n\
+         \x20   fun tagged() {}\n\
+         \x20   @Outer(Inner(\"AA\", b = \"BB\"))\n\
+         \x20   fun mixed() {}\n\
+         \x20   @OuterDeep(Deep(m = Innermost(y = 1, x = 2), a = \"AA\"))\n\
+         \x20   fun deep() {}\n\
+         \x20   @OuterTyped(Typed(a = \"AA\", n = 7))\n\
+         \x20   fun typed() {}\n\
+         }\n",
     );
 }

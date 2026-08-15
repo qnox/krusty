@@ -5775,3 +5775,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lack the bridge synthesis). Tests: `tests/companion_member_read_e2e.rs`
   (`kotlinc_member_companion_property_field_shape` pins the kotlinc shape; krusty-built by
   default).
+
+- **A NESTED annotation is a call, so its argument labels are the CALL's.** `@Outer(Inner(b = "BB",
+  a = "AA"))` spells its inner value as an ordinary constructor call, and the parser records those
+  labels positionally against the call rather than per argument the way it does for a direct
+  `@Ann(...)`. Binding a nested annotation's arguments through the annotation map alone ignored the
+  labels and bound positionally: with same-typed elements it SILENTLY swapped the emitted values
+  (`a="BB", b="AA"` where kotlinc writes `a="AA", b="BB"`), and with differently-typed ones it
+  reported spurious argument-type mismatches. The label source therefore follows the shape: a
+  nested application reads the call's names by position, a direct one reads the annotation's names
+  per argument. Holds at any depth and for a mix of positional and named arguments. Test:
+  `tests/annotation_emission_e2e.rs::nested_annotation_named_arguments_bind_by_label`.
