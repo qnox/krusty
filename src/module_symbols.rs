@@ -373,6 +373,7 @@ impl<'a> ModuleSymbols<'a> {
                 has_no_arg_constructor: !c.is_sealed() && c.has_no_arg_constructor(),
                 supports_external_subclassing: !c.is_sealed()
                     && (!c.is_abstract() || (!c.has_abstract_members() && c.interfaces.is_empty())),
+                supports_external_abstract_overrides: false,
             },
             supertypes: supertypes.into(),
             supertype_templates,

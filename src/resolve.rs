@@ -27071,7 +27071,7 @@ impl<'a> Checker<'a> {
             .filter_map(|(key, (_, is_abstract))| is_abstract.then_some(key))
             .collect::<Vec<_>>();
         crate::trace_compiler!(
-            "lower",
+            "resolve",
             "abstract obligations owner={} unresolved={unresolved:?}",
             owner.render(),
         );
@@ -27316,8 +27316,9 @@ impl<'a> Checker<'a> {
             let unsupported = match inheritance {
                 _ if cl.is_enum() || !separate_emission => None,
                 Some(shape)
-                    if !shape.supports_external_subclassing
-                        && !self.has_no_unimplemented_abstract_members(owner) =>
+                    if !(shape.supports_external_subclassing
+                        || shape.supports_external_abstract_overrides
+                            && self.has_no_unimplemented_abstract_members(owner)) =>
                 {
                     Some("gate:nonlocal-superclass-abstract-obligations")
                 }

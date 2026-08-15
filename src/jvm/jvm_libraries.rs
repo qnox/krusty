@@ -2543,6 +2543,15 @@ impl JvmLibraries {
                         )
                 }),
                 supports_external_subclassing: !ci.is_abstract() || !has_abstract_obligations,
+                supports_external_abstract_overrides: {
+                    let mut abstract_members = members
+                        .iter()
+                        .chain(&builtin_members)
+                        .filter(|member| member.is_abstract())
+                        .peekable();
+                    abstract_members.peek().is_some()
+                        && abstract_members.all(|member| member.physical_name.is_some())
+                },
             };
             let members = members
                 .into_iter()
@@ -5975,6 +5984,10 @@ mod tests {
             .iter()
             .any(|member| member.name == "toInt"
                 && member.physical_name.as_deref() == Some("intValue")));
+        assert!(
+            classifier.inheritance.supports_external_abstract_overrides,
+            "normalized Number obligations have explicit physical override realizations"
+        );
         assert!(
             classifier
                 .members
