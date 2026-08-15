@@ -732,6 +732,7 @@ fn facade_package_metadata_inner(
             suspend: f.is_suspend(),
             jvm_desc,
             inline: f.is_inline(),
+            operator: f.is_operator(),
             type_params: f
                 .type_params
                 .iter()

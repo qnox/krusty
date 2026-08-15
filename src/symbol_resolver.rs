@@ -3658,7 +3658,166 @@ impl<'a> SymbolResolver<'a> {
                 source: &self.src,
             },
             callables.functions(),
+            IndexedConvention::Ordinary,
         )
+    }
+
+    pub(crate) fn select_receiver_indexed_get_function_with_params(
+        &self,
+        receiver: Ty,
+        name: &str,
+        args: &[CallArgKind],
+        type_args: &[Ty],
+        callables: &Callables,
+    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
+        let selected = match select_receiver_overload_from_functions_tracking(
+            self.lib,
+            receiver,
+            name,
+            args,
+            type_args,
+            ExtCtx {
+                fn_scope: self.fn_scope,
+                source: &self.src,
+            },
+            callables.functions(),
+            IndexedConvention::Get,
+        ) {
+            CandidateSelection::Selected(selected) => selected,
+            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+            CandidateSelection::None => return CandidateSelection::None,
+        };
+        let binding_receiver = selected
+            .semantic_receiver()
+            .and_then(|declared| {
+                ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
+            })
+            .unwrap_or(receiver);
+        if selected.call_sig.vararg_index.is_none() {
+            let params =
+                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
+            let resolved = if selected.is_extension() {
+                let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
+                selected.generic_sig.as_ref().map_or(
+                    selected.ret.apply(selected.callable.ret),
+                    |signature| {
+                        specialized_extension_return(
+                            self.lib,
+                            &selected,
+                            bind_ext_ret(signature, binding_receiver, &arg_tys, type_args),
+                        )
+                    },
+                )
+            } else {
+                resolved_member_from_info(
+                    self.lib,
+                    &self.src,
+                    receiver,
+                    args,
+                    type_args,
+                    selected.clone(),
+                )
+                .ret
+            };
+            return CandidateSelection::Selected((selected, params, resolved));
+        }
+        let Some((params, ret)) = indexed_call_shape(
+            self.lib,
+            &self.src,
+            &selected,
+            binding_receiver,
+            args,
+            type_args,
+            false,
+        ) else {
+            return CandidateSelection::None;
+        };
+        CandidateSelection::Selected((selected, params, ret))
+    }
+
+    /// Select the `set` convention used by indexed assignment. The assignment RHS binds the final
+    /// value parameter even when the preceding index parameter is a vararg; ordinary positional
+    /// calls deliberately do not permit that mapping.
+    pub(crate) fn select_receiver_indexed_set_function(
+        &self,
+        receiver: Ty,
+        name: &str,
+        args: &[CallArgKind],
+        type_args: &[Ty],
+        callables: &Callables,
+    ) -> CandidateSelection<FunctionInfo> {
+        select_receiver_overload_from_functions_tracking(
+            self.lib,
+            receiver,
+            name,
+            args,
+            type_args,
+            ExtCtx {
+                fn_scope: self.fn_scope,
+                source: &self.src,
+            },
+            callables.functions(),
+            IndexedConvention::Set,
+        )
+    }
+
+    pub(crate) fn select_receiver_indexed_set_function_with_params(
+        &self,
+        receiver: Ty,
+        name: &str,
+        args: &[CallArgKind],
+        type_args: &[Ty],
+        callables: &Callables,
+    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
+        let selected = match self
+            .select_receiver_indexed_set_function(receiver, name, args, type_args, callables)
+        {
+            CandidateSelection::Selected(selected) => selected,
+            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+            CandidateSelection::None => return CandidateSelection::None,
+        };
+        let binding_receiver = selected
+            .semantic_receiver()
+            .and_then(|declared| {
+                ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
+            })
+            .unwrap_or(receiver);
+        if selected.call_sig.vararg_index.is_none() {
+            let params =
+                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
+            let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
+            let inferred_ret = selected
+                .generic_sig
+                .as_ref()
+                .map_or(selected.callable.ret, |sig| {
+                    if selected.is_extension() {
+                        bind_ext_ret(sig, binding_receiver, &arg_tys, type_args)
+                    } else {
+                        bind_member_return(
+                            &self.src,
+                            sig,
+                            binding_receiver,
+                            &arg_tys,
+                            type_args,
+                            selected.callable.ret,
+                        )
+                    }
+                });
+            let ret = selected.ret.apply(inferred_ret);
+            return CandidateSelection::Selected((selected, params, ret));
+        }
+        let Some((params, ret)) = indexed_call_shape(
+            self.lib,
+            &self.src,
+            &selected,
+            binding_receiver,
+            args,
+            type_args,
+            true,
+        ) else {
+            return CandidateSelection::None;
+        };
+        CandidateSelection::Selected((selected, params, ret))
     }
 
     /// Select one receiver callable and return the value parameters specialized by the receiver and
@@ -4050,6 +4209,7 @@ impl<'a> SymbolResolver<'a> {
                 source: &self.src,
             },
             &candidates,
+            IndexedConvention::Ordinary,
         )?;
         let resolved = self.materialize_member_function(receiver, args, type_args, selected);
         let mut member = resolved.member;
@@ -4115,6 +4275,7 @@ impl<'a> SymbolResolver<'a> {
                     },
                     Some(callables.functions()),
                     &mut call_ambiguous,
+                    IndexedConvention::Ordinary,
                 );
                 let call = selected_call
                     .as_ref()
@@ -6230,6 +6391,14 @@ enum SelectionMode {
     Receiver,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexedConvention {
+    Ordinary,
+    Get,
+    Set,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn select_receiver_overload_from_functions(
     lib: &dyn SemanticPlatform,
     recv: Ty,
@@ -6238,9 +6407,29 @@ fn select_receiver_overload_from_functions(
     type_args: &[Ty],
     ext: ExtCtx<'_>,
     functions: &[FunctionInfo],
+    indexed: IndexedConvention,
 ) -> Option<FunctionInfo> {
+    match select_receiver_overload_from_functions_tracking(
+        lib, recv, name, args, type_args, ext, functions, indexed,
+    ) {
+        CandidateSelection::Selected(selected) => Some(selected),
+        CandidateSelection::None | CandidateSelection::Ambiguous => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_receiver_overload_from_functions_tracking(
+    lib: &dyn SemanticPlatform,
+    recv: Ty,
+    name: &str,
+    args: &[CallArgKind],
+    type_args: &[Ty],
+    ext: ExtCtx<'_>,
+    functions: &[FunctionInfo],
+    indexed: IndexedConvention,
+) -> CandidateSelection<FunctionInfo> {
     let mut ambiguous = false;
-    select_overload_tracking_with_functions(
+    let selected = select_overload_tracking_with_functions(
         lib,
         recv,
         name,
@@ -6250,7 +6439,15 @@ fn select_receiver_overload_from_functions(
         ext,
         Some(functions),
         &mut ambiguous,
-    )
+        indexed,
+    );
+    if ambiguous {
+        CandidateSelection::Ambiguous
+    } else if let Some(selected) = selected {
+        CandidateSelection::Selected(selected)
+    } else {
+        CandidateSelection::None
+    }
 }
 
 fn select_overload_tracking(
@@ -6273,9 +6470,11 @@ fn select_overload_tracking(
         ext,
         None,
         ambiguous,
+        IndexedConvention::Ordinary,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn select_overload_tracking_with_functions(
     lib: &dyn SemanticPlatform,
     recv: Ty,
@@ -6286,6 +6485,7 @@ fn select_overload_tracking_with_functions(
     ext: ExtCtx<'_>,
     provided_functions: Option<&[FunctionInfo]>,
     ambiguous: &mut bool,
+    indexed: IndexedConvention,
 ) -> Option<FunctionInfo> {
     let src = ext.source;
     // Argument assignability and candidate enumeration consume the same federated source. Access
@@ -6395,20 +6595,39 @@ fn select_overload_tracking_with_functions(
     }
     ranked.sort_by_key(|(priority, rank, _, _)| (*priority, *rank));
     for (priority, rank, binding_receiver, o) in ranked {
-        if !generic_bounds_admit(
-            src,
-            o.generic_sig.as_ref(),
-            binding_receiver,
-            &arg_tys,
-            type_args,
-        ) {
-            crate::trace_compiler!(
-                "resolve",
-                "  drop {name} because inferred type arguments violate declared bounds"
-            );
-            continue;
-        }
-        let lp = logical_call_params(src, o, binding_receiver, args, type_args);
+        let lp = if indexed != IndexedConvention::Ordinary && o.call_sig.vararg_index.is_some() {
+            let Some((params, _)) = indexed_call_shape(
+                lib,
+                src,
+                o,
+                binding_receiver,
+                args,
+                type_args,
+                indexed == IndexedConvention::Set,
+            ) else {
+                crate::trace_compiler!(
+                    "resolve",
+                    "  drop {name} because indexed operands do not map to the declaration"
+                );
+                continue;
+            };
+            params
+        } else {
+            if !generic_bounds_admit(
+                src,
+                o.generic_sig.as_ref(),
+                binding_receiver,
+                &arg_tys,
+                type_args,
+            ) {
+                crate::trace_compiler!(
+                    "resolve",
+                    "  drop {name} because inferred type arguments violate declared bounds"
+                );
+                continue;
+            }
+            logical_call_params(src, o, binding_receiver, args, type_args)
+        };
         let lp = apply_platform_call_parameter_nullability(
             lp,
             &o.call_sig.platform_nullable_params,
@@ -6421,6 +6640,53 @@ fn select_overload_tracking_with_functions(
             o.callable.owner.render()
         );
         by_rank.entry((priority, rank)).or_default().push((o, lp));
+    }
+    if indexed != IndexedConvention::Ordinary {
+        for cands in by_rank.values() {
+            let fixed = cands
+                .iter()
+                .filter(|(candidate, _)| candidate.call_sig.vararg_index.is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            match best_by_args(lib, assign_src, &fixed, args) {
+                CandidateSelection::Selected(overload) => return Some(overload.clone()),
+                CandidateSelection::Ambiguous => {
+                    *ambiguous = true;
+                    return None;
+                }
+                CandidateSelection::None => {}
+            }
+            let indexed_candidates = cands
+                .iter()
+                .filter_map(|(o, lp)| {
+                    let vararg = o.call_sig.vararg_index?.checked_sub(o.context_count)?;
+                    let element = lp.get(vararg)?.array_elem()?;
+                    let trailing = usize::from(indexed == IndexedConvention::Set);
+                    if vararg + 1 + trailing != lp.len() {
+                        return None;
+                    }
+                    let index_count = args.len().checked_sub(trailing)?;
+                    let mut expanded = lp[..vararg].to_vec();
+                    expanded.extend(std::iter::repeat_n(
+                        element,
+                        index_count.checked_sub(vararg)?,
+                    ));
+                    if indexed == IndexedConvention::Set {
+                        expanded.push(*lp.last()?);
+                    }
+                    Some((*o, expanded))
+                })
+                .collect::<Vec<_>>();
+            match best_by_args(lib, assign_src, &indexed_candidates, args) {
+                CandidateSelection::Selected(overload) => return Some(overload.clone()),
+                CandidateSelection::Ambiguous => {
+                    *ambiguous = true;
+                    return None;
+                }
+                CandidateSelection::None => {}
+            }
+        }
+        return None;
     }
     for cands in by_rank.values() {
         match best_by_args(lib, assign_src, cands, args) {
@@ -6623,6 +6889,95 @@ fn logical_call_params(
         .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
         .collect::<Vec<_>>();
     parameters[overload.context_count.min(parameters.len())..].to_vec()
+}
+
+/// Specialize a declaration for Kotlin's indexed-set operand convention. The final written operand
+/// binds the final value parameter after all loose index operands bind the preceding vararg element.
+fn indexed_call_shape(
+    lib: &dyn SemanticPlatform,
+    source: &dyn SymbolSource,
+    overload: &FunctionInfo,
+    receiver: Ty,
+    arguments: &[CallArgKind],
+    type_arguments: &[Ty],
+    set: bool,
+) -> Option<(Vec<Ty>, Ty)> {
+    let signature = overload.semantic_signature();
+    let value_start = overload.context_count.min(signature.params.len());
+    let vararg = overload.call_sig.vararg_index?;
+    let logical_vararg = vararg.checked_sub(value_start)?;
+    // Defaults between the vararg and value are valid Kotlin, but synthetic operator-call lowering
+    // cannot realize omitted default slots yet. Keep selection aligned with that handoff.
+    let trailing = usize::from(set);
+    if vararg + 1 + trailing != signature.params.len() {
+        return None;
+    }
+    let index_arguments = if set {
+        arguments.split_last()?.1
+    } else {
+        arguments
+    };
+    if index_arguments.len() < logical_vararg {
+        return None;
+    }
+
+    let mut bindings = seeded_gsig_binds(&signature, type_arguments);
+    if let Some(declared_receiver) = signature.receiver {
+        unify_ty(declared_receiver, receiver, &mut bindings);
+    }
+    let receiver_bindings = bindings.clone();
+    let value_parameter = signature.params.len() - 1;
+    let actuals = arguments
+        .iter()
+        .enumerate()
+        .filter_map(|(source_index, argument)| {
+            if argument.is_expected_type_callable() || argument.is_lambda_literal() {
+                return None;
+            }
+            let parameter = if source_index < logical_vararg {
+                value_start + source_index
+            } else if set && source_index + 1 == arguments.len() {
+                value_parameter
+            } else {
+                vararg
+            };
+            let declared = *signature.params.get(parameter)?;
+            let whole_array = argument.is_spread();
+            let expected = if parameter == vararg && !whole_array {
+                declared.array_elem().unwrap_or(declared)
+            } else {
+                declared
+            };
+            Some((parameter, argument.type_for(expected), whole_array))
+        });
+    let inferred =
+        infer_generic_call_bindings_from_symbols(source, &signature, actuals, Some(vararg));
+    merge_call_argument_bindings(
+        source,
+        &signature,
+        type_arguments.len(),
+        &receiver_bindings,
+        &mut bindings,
+        inferred,
+    );
+    if !generic_bindings_satisfy_bounds(&signature, &bindings, |actual, bound| {
+        resolution_subtype(source, actual, bound)
+    }) {
+        return None;
+    }
+    let params = signature.params[value_start..]
+        .iter()
+        .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
+        .collect::<Vec<_>>();
+    let inferred_ret = ty_subst_keep_unbound(signature.ret, &bindings);
+    let ret = if overload.is_extension() {
+        specialized_extension_return(lib, overload, inferred_ret)
+    } else {
+        overload
+            .ret
+            .apply(signature.apply_return_policy(lib, inferred_ret))
+    };
+    Some((params, ret))
 }
 
 /// Assignability through the SOURCE symbol federation (module classes first): a module-declared
