@@ -11,10 +11,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}" # 128 MiB
 
 # Bound every test-binary process, not just the corpus pass. A resolver/checker loop must terminate
-# with the binary name, exact filter, and captured diagnostics instead of wedging the gate. Healthy
-# local binaries finish well inside two minutes; slow systems can raise the explicit override.
-export KRUSTY_TEST_TIMEOUT_SECONDS="${KRUSTY_TEST_TIMEOUT_SECONDS:-120}"
-export KRUSTY_CONFORMANCE_TIMEOUT_SECONDS="${KRUSTY_CONFORMANCE_TIMEOUT_SECONDS:-180}"
+# with the binary name, exact filter, and captured diagnostics instead of wedging the gate.
+source "$(dirname "$0")/scripts/test-timeout-defaults.sh"
 
 cd "$(dirname "$0")"
 
@@ -88,7 +86,7 @@ if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
     esac
   done
   if [ "$test_target" = "e2e" ]; then
-    focused_timeout="${KRUSTY_E2E_TIMEOUT_SECONDS:-295}"
+    focused_timeout="$KRUSTY_E2E_TIMEOUT_SECONDS"
   elif [ "$test_target" = "conformance" ]; then
     focused_timeout="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS"
   fi
@@ -345,7 +343,7 @@ if [ -n "$e2e_bin" ]; then
   libtest_require_positive_shard_count "$e2e_shards" "run-tests.sh: KRUSTY_E2E_SHARDS"
   e2e_listing="$logdir/e2e-tests.list"
   e2e_plan="$logdir/e2e-shards.plan"
-  e2e_timeout="${KRUSTY_E2E_TIMEOUT_SECONDS:-295}"
+  e2e_timeout="$KRUSTY_E2E_TIMEOUT_SECONDS"
   libtest_write_shard_plan \
     "$e2e_bin" "$e2e_shards" "$e2e_listing" "$e2e_plan" "$e2e_timeout"
   for ((shard = 0; shard < e2e_shards; shard++)); do

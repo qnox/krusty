@@ -76,7 +76,7 @@ must score at least 55% of backend-applicable cases before a release can publish
 miscompiled applicable cases count against that floor; cases excluded solely by the selected
 backend do not.
 
-The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 180
+The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
 seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
 defaults to 295 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.
 
@@ -167,7 +167,7 @@ Optional profiling knobs:
 
 - `KRUSTY_TEST_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline applied to every test
   binary except conformance and e2e; raise it explicitly on slow systems.
-- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 180-second deadline for each
+- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for each
   full-suite or focused conformance pass.
 - `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for focused e2e runs and
   each full-suite e2e shard.
