@@ -256,6 +256,7 @@ fn package_value_param_defaults_round_trip() {
         jvm_desc: None,
         contract: None,
         inline: false,
+        operator: false,
         type_params: Vec::new(),
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
@@ -299,6 +300,7 @@ fn package_function_type_parameter_bound_round_trips() {
         jvm_desc: Some("(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;".to_string()),
         contract: None,
         inline: false,
+        operator: false,
         type_params: vec![("T".to_string(), false)],
         semantic_type_params: vec!["T".to_string()],
         type_param_bounds: vec![vec![Ty::obj("kotlin/CharSequence")]],
@@ -344,6 +346,7 @@ fn package_extension_receiver_round_trips() {
         jvm_desc: None,
         contract: None,
         inline: false,
+        operator: true,
         type_params: Vec::new(),
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
@@ -361,6 +364,10 @@ fn package_extension_receiver_round_trips() {
     assert!(
         f.is_extension(),
         "the receiver_type must mark it an extension"
+    );
+    assert!(
+        f.is_operator(),
+        "the function flags must preserve the operator convention"
     );
     assert_eq!(
         f.receiver_class,
@@ -403,6 +410,7 @@ fn package_receiver_function_type_param_round_trips() {
         jvm_desc: None,
         contract: None,
         inline: false,
+        operator: false,
         type_params: Vec::new(),
         semantic_type_params: Vec::new(),
         type_param_bounds: Vec::new(),
