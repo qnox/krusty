@@ -8599,13 +8599,16 @@ mod tests {
         );
         let tokens = decoded_tokens(&index);
 
+        // The source aliases are the selected declarations. A same-named classifier in a lower
+        // default-import level must not lend them the `defaultLibrary` modifier while the cycle is
+        // unresolved; doing so would recreate the spelling-based fallback this regression forbids.
         for expected in [
-            (1, 10, 4, 1, 513),
-            (1, 17, 5, 1, 512),
-            (2, 10, 5, 1, 513),
-            (2, 18, 4, 1, 512),
-            (3, 15, 5, 1, 512),
-            (3, 23, 5, 1, 512),
+            (1, 10, 4, 1, 1),
+            (1, 17, 5, 1, 0),
+            (2, 10, 5, 1, 1),
+            (2, 18, 4, 1, 0),
+            (3, 15, 5, 1, 0),
+            (3, 23, 5, 1, 0),
         ] {
             assert!(tokens.contains(&expected), "{tokens:?}");
         }

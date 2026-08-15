@@ -2106,7 +2106,7 @@ pub struct KotlinMeta {
     /// `Package.property` (field 4).
     pub package_properties: std::sync::Arc<[MetaProp]>,
     /// `Package.typeAlias` (field 5): `(full alias internal name, expanded class internal name)`.
-    pub type_aliases: Vec<(String, String)>,
+    pub type_aliases: Vec<MetaTypeAlias>,
     /// `Class.constructor` (field 8): named-parameter lists in declaration order.
     pub constructors: std::sync::Arc<[MetaConstructor]>,
     /// `Class.companionObjectName` (field 4).
@@ -2847,7 +2847,7 @@ pub fn package_functions(ci: &ClassInfo) -> &[MetaFn] {
 }
 
 /// Public type aliases declared in a file facade's `Package` `@Metadata`.
-pub fn package_type_aliases(ci: &ClassInfo) -> &[(String, String)] {
+pub fn package_type_aliases(ci: &ClassInfo) -> &[MetaTypeAlias] {
     &ci.meta.type_aliases
 }
 
@@ -2899,7 +2899,7 @@ pub fn class_inline(ci: &ClassInfo) -> Option<&InlineClass> {
 /// underlying type, field 4). This is robust where the older `d2` `$annotations` heuristic was not — a
 /// file facade also carries annotated top-level properties whose `$annotations` markers that heuristic
 /// would misread as aliases.
-fn type_aliases(ctx: &MetaCtx, this_class: &str) -> Vec<(String, String)> {
+fn type_aliases(ctx: &MetaCtx, this_class: &str) -> Vec<MetaTypeAlias> {
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
@@ -2913,17 +2913,20 @@ fn type_aliases(ctx: &MetaCtx, this_class: &str) -> Vec<(String, String)> {
                 let Some(body) = pb.bytes(len as usize) else {
                     break;
                 };
-                if let Some((name, internal)) = parse_type_alias(body, records, d2) {
+                if let Some(alias) = parse_type_alias(body, records, d2) {
                     // Key the alias by its FULL internal name — its declaring package (the facade's) plus
                     // the alias's simple name — so `kotlin/collections/ArrayList` is distinct from any other
                     // package's `ArrayList`. `resolve_type` looks it up by that full name.
                     let pkg = this_class.rsplit_once('/').map_or("", |(p, _)| p);
                     let full = if pkg.is_empty() {
-                        name
+                        alias.name.clone()
                     } else {
-                        format!("{pkg}/{name}")
+                        format!("{pkg}/{}", alias.name)
                     };
-                    out.push((full, internal));
+                    out.push(MetaTypeAlias {
+                        name: full,
+                        ..alias
+                    });
                 }
             }
             (_, w) => {
@@ -2936,13 +2939,33 @@ fn type_aliases(ctx: &MetaCtx, this_class: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Decode a public `TypeAlias` message → `(alias name, expanded/underlying class internal name)`.
-fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(String, String)> {
+/// One public `typealias` from a file facade's `Package` metadata.
+#[derive(Clone, Debug)]
+pub struct MetaTypeAlias {
+    /// The alias's simple name; the classpath index keys it by declaring package.
+    pub name: String,
+    /// The expanded target's class internal name.
+    pub target: String,
+    /// The alias's own type-parameter names, in declaration order — the substitution domain.
+    pub formals: Vec<String>,
+    /// The target applied to its own arguments, with the alias's parameters as `Ty::TyParam`.
+    /// Metadata decoding is authoritative: an alias is not published when this type cannot decode.
+    pub expansion: Ty,
+}
+
+/// Decode a public `TypeAlias` message → its name, the expanded/underlying class internal name, and
+/// the EXPANSION TEMPLATE: the target applied to its own arguments, with the alias's parameters left
+/// as `Ty::TyParam`. `typealias Lens<S, A> = PLens<S, S, A, A>` declares two parameters for a
+/// four-parameter target, so a use site's arguments must be substituted into the template rather
+/// than pasted onto the target — the template is the only place that mapping exists.
+fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<MetaTypeAlias> {
     let mut pb = Pb { b: body, i: 0 };
     let mut flags = 6u64;
     let mut name_id: Option<u64> = None;
     let mut expanded_class: Option<u64> = None;
     let mut underlying_class: Option<u64> = None;
+    let mut expanded_body: Option<&[u8]> = None;
+    let mut underlying_body: Option<&[u8]> = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -2952,11 +2975,13 @@ fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(Stri
                 let len = pb.varint()? as usize;
                 let tb = pb.bytes(len)?;
                 underlying_class = parse_type_class_name(tb);
+                underlying_body = Some(tb);
             }
             (6, 2) => {
                 let len = pb.varint()? as usize;
                 let tb = pb.bytes(len)?;
                 expanded_class = parse_type_class_name(tb);
+                expanded_body = Some(tb);
             }
             (_, w) => pb.skip(w)?,
         }
@@ -2967,7 +2992,37 @@ fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(Stri
     let name = d2.get(name_id? as usize).cloned()?;
     let class_id = expanded_class.or(underlying_class)?;
     let internal = resolve_class_name(records, d2, class_id as usize)?;
-    Some((name, internal))
+    // The alias's OWN type parameters, by metadata id, so the expansion decodes their uses as
+    // `TyParam` rather than as unknown classifiers.
+    let mut parameters: HashMap<u64, String> = HashMap::new();
+    let mut formals = Vec::new();
+    for parameter in type_param_bodies(body, TYPE_ALIAS_TYPE_PARAMETER_FIELD)
+        .into_iter()
+        .filter_map(parse_type_param)
+    {
+        if let Some(parameter_name) = resolve_string(records, d2, parameter.name_id as usize) {
+            parameters.insert(parameter.id, parameter_name.clone());
+            formals.push(parameter_name);
+        }
+    }
+    let expansion = expanded_body.or(underlying_body).and_then(|type_body| {
+        decode_metadata_type(
+            type_body,
+            None,
+            records,
+            d2,
+            &parameters,
+            &HashMap::new(),
+            false,
+            0,
+        )
+    })?;
+    Some(MetaTypeAlias {
+        name,
+        target: internal,
+        formals,
+        expansion,
+    })
 }
 
 /// Constructor source parameter names/default flags from `Class` `@Metadata`, in declaration order.
@@ -4067,6 +4122,8 @@ impl BuiltinTables<'_> {
 /// `Class.type_parameter`. Field 5 on a `Class` — where a `Function`/`Property` instead carries its
 /// `receiver_type`, hence the two distinct constants.
 const CLASS_TYPE_PARAMETER_FIELD: u64 = 5;
+/// `TypeAlias.typeParameter` — the alias's OWN parameters, which its expansion refers to.
+const TYPE_ALIAS_TYPE_PARAMETER_FIELD: u64 = 3;
 /// `Function.type_parameter` / `Property.type_parameter`. Both are field 4 (matching the decoders in
 /// [`class_functions`] and [`class_properties`]); field 5 on those messages is `receiver_type`.
 const MEMBER_TYPE_PARAMETER_FIELD: u64 = 4;
@@ -5279,11 +5336,13 @@ mod module_reader_tests {
         let omitted_flags = [0x10, 0x00, 0x32, 0x02, 0x30, 0x01];
         let internal_flags = [0x08, 0x00, 0x10, 0x00, 0x32, 0x02, 0x30, 0x01];
 
-        assert_eq!(
-            parse_type_alias(&omitted_flags, &[], &d2),
-            Some(("Alias".to_string(), "sample/Real".to_string()))
-        );
-        assert_eq!(parse_type_alias(&internal_flags, &[], &d2), None);
+        let public = parse_type_alias(&omitted_flags, &[], &d2).expect("public alias decodes");
+        assert_eq!(public.name, "Alias");
+        assert_eq!(public.target, "sample/Real");
+        // A bare target remains an explicit expansion rather than becoming a consumer fallback.
+        assert!(public.formals.is_empty());
+        assert_eq!(public.expansion, Ty::obj("sample/Real"));
+        assert!(parse_type_alias(&internal_flags, &[], &d2).is_none());
     }
 
     #[test]

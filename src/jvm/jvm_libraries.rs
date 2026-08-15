@@ -5270,6 +5270,22 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         super::jvm_class_map::to_jvm_type_name(internal)
     }
 
+    fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
+        self.cp
+            .type_alias_expansion(internal)
+            .map(
+                |(target, formals, expansion)| crate::libraries::AliasExpansion {
+                    identity: internal,
+                    target: self.canonical_source_type_name(target),
+                    formals,
+                    // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
+                    // the complete template at the provider boundary so core resolution only sees
+                    // source identities, including inside projections, function types, and nullability.
+                    expansion: canonicalize_jvm_collections(expansion),
+                },
+            )
+    }
+
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {
         // The frontend always reasons in the canonical Kotlin declaration space. A classpath lookup
         // may find the JVM realization (`java/lang/String`, `java/util/List`), but its source identity

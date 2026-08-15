@@ -949,6 +949,9 @@ pub struct TypeIndex {
     /// Kotlin type alias name → target JVM internal name
     /// (e.g. `"StringBuilder"` → `"java/lang/StringBuilder"`).
     type_aliases: HashMap<TypeName, TypeName>,
+    /// Alias name → its EXPANSION: the target applied to its own arguments, with the alias's own
+    /// parameters left as `Ty::TyParam`. A use site substitutes its arguments into this template.
+    alias_expansions: HashMap<TypeName, (TypeName, Vec<String>, Ty)>,
 }
 
 impl TypeIndex {
@@ -960,6 +963,12 @@ impl TypeIndex {
 fn merge_alias_part(aliases: &mut TypeIndex, part: &TypeIndex) {
     for (&alias, &target) in &part.type_aliases {
         aliases.type_aliases.entry(alias).or_insert(target);
+    }
+    for (&alias, expansion) in &part.alias_expansions {
+        aliases
+            .alias_expansions
+            .entry(alias)
+            .or_insert_with(|| expansion.clone());
     }
 }
 
@@ -2993,6 +3002,22 @@ impl Classpath {
         target
     }
 
+    /// The alias's EXPANSION template — its formal names plus the target applied to its own
+    /// arguments — for a use site that must substitute its own arguments. `None` only when this
+    /// identity is not a published alias declaration.
+    pub fn type_alias_expansion(&self, internal: TypeName) -> Option<(TypeName, Vec<String>, Ty)> {
+        let tree = self.package_tree();
+        if !tree.incomplete_entries.is_empty() {
+            return self.scan_types().alias_expansions.get(&internal).cloned();
+        }
+        let package = internal.parent().unwrap_or_else(|| type_name(""));
+        // Reuse the per-package index the target lookup already builds and caches.
+        self.type_alias_target_name(internal)?;
+        let mut aliases = self.aliases.borrow_mut();
+        let index = aliases.get(&package)?;
+        index.alias_expansions.get(&internal).cloned()
+    }
+
     /// Textual alias lookup for the unified `symbols(&str)` namespace query. Only a proven package is
     /// internalized; the leaf spelling is compared against actual alias declarations, so querying a
     /// unique property/function name cannot pollute the global type-name tree.
@@ -3050,6 +3075,12 @@ impl Classpath {
                     .filter_map(|(&alias, &target)| {
                         (alias.namespace() == package).then_some((alias, target))
                     })
+                    .collect(),
+                alias_expansions: all
+                    .alias_expansions
+                    .iter()
+                    .filter(|(alias, _)| alias.namespace() == package)
+                    .map(|(&alias, expansion)| (alias, expansion.clone()))
                     .collect(),
             })
         } else {
@@ -5426,9 +5457,17 @@ fn type_alias_scan_wanted(internal: &str, packages: &JarPackages) -> bool {
 /// property would have tripped).
 fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
     let Ok(ci) = parse_class(bytes) else { return };
-    for (alias, internal) in super::metadata::package_type_aliases(&ci) {
-        idx.type_aliases
-            .insert(type_name(alias), type_name(internal));
+    for alias in super::metadata::package_type_aliases(&ci) {
+        let name = type_name(&alias.name);
+        idx.type_aliases.insert(name, type_name(&alias.target));
+        idx.alias_expansions.insert(
+            name,
+            (
+                type_name(&alias.target),
+                alias.formals.clone(),
+                alias.expansion,
+            ),
+        );
     }
 }
 

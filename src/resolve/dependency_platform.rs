@@ -391,6 +391,10 @@ impl SemanticPlatform for DependencyPlatform {
         self.platform.canonical_source_type_name(internal)
     }
 
+    fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
+        self.platform.type_alias_expansion(internal)
+    }
+
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
         self.platform.is_default_library_owner(internal)
     }
