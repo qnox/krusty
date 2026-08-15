@@ -881,6 +881,48 @@ impl<'a> Parser<'a> {
     fn text(&self) -> &'a str {
         self.t[self.i].text(self.src)
     }
+    /// Whether the current token was written BACKTICK-QUOTED. The lexer reports such a token as an
+    /// `Ident` whose span is the content between the backticks, so its text alone cannot be told
+    /// apart from a bare name — and Kotlin's rule is that an escaped name is ALWAYS an identifier.
+    /// A construct selected by token TEXT (`break`, `continue`, and the soft keywords) must
+    /// therefore ask this before reading the spelling as a keyword: `` `continue` `` is the
+    /// Kubernetes pagination parameter, not a jump.
+    fn token_is_escaped_ident(&self, token: Token) -> bool {
+        if token.kind != TokenKind::Ident || token.span.lo == 0 {
+            return false;
+        }
+        // BOTH backticks, as `syntactic_ident_span` requires: in `` `a`b ``, the bare `b` is
+        // byte-preceded by the PREVIOUS name's closing backtick, and treating it as escaped would
+        // stop a real keyword from being read as one.
+        let bytes = self.src.as_bytes();
+        bytes.get(token.span.lo as usize - 1) == Some(&b'`')
+            && bytes.get(token.span.hi as usize) == Some(&b'`')
+    }
+    fn escaped_ident(&self) -> bool {
+        self.token_is_escaped_ident(self.t[self.i])
+    }
+    fn token_keyword_text(&self, token: Token, keyword: &str) -> bool {
+        token.kind == TokenKind::Ident
+            && token.text(self.src) == keyword
+            && !self.token_is_escaped_ident(token)
+    }
+    fn token_is_modifier(&self, token: Token) -> bool {
+        token.kind == TokenKind::Ident
+            && is_modifier(token.text(self.src))
+            && !self.token_is_escaped_ident(token)
+    }
+    fn at_modifier(&self) -> bool {
+        self.token_is_modifier(self.t[self.i])
+    }
+    /// The current token spells one of `keywords` AS A KEYWORD — the multi-word form of
+    /// [`Self::keyword_text`], for a dispatch that gates on several spellings at once.
+    fn keyword_text_any(&self, keywords: &[&str]) -> bool {
+        keywords.iter().any(|keyword| self.text() == *keyword) && !self.escaped_ident()
+    }
+    /// The current token spells `keyword` AS A KEYWORD — see [`Self::escaped_ident`].
+    fn keyword_text(&self, keyword: &str) -> bool {
+        self.text() == keyword && !self.escaped_ident()
+    }
     fn at(&self, k: TokenKind) -> bool {
         self.kind() == k
     }
@@ -1054,7 +1096,7 @@ impl<'a> Parser<'a> {
             }
             let script_file_item =
                 matches!(self.kind(), TokenKind::KwPackage | TokenKind::KwImport)
-                    || (self.at(TokenKind::Ident) && self.text() == "typealias");
+                    || (self.at(TokenKind::Ident) && self.keyword_text("typealias"));
             if self.is_script && script_file_item && !self.script_stmts.is_empty() {
                 self.diags.error(
                     self.tok().span,
@@ -1068,9 +1110,7 @@ impl<'a> Parser<'a> {
             }
             // Consume leading annotations + declaration modifiers. `open`/`abstract` are applied to
             // the following class; the rest are ignored (krusty treats everything as public).
-            let mut mods = if self.at(TokenKind::At)
-                || (self.at(TokenKind::Ident) && is_modifier(self.text()))
-            {
+            let mut mods = if self.at(TokenKind::At) || self.at_modifier() {
                 let m = self.skip_decl_prefix();
                 self.skip_newlines();
                 m
@@ -1108,7 +1148,7 @@ impl<'a> Parser<'a> {
                         fq.push_str(".*");
                     }
                     let mut alias = None;
-                    if self.at(TokenKind::Ident) && self.text() == "as" {
+                    if self.at(TokenKind::Ident) && self.keyword_text("as") {
                         self.bump(); // 'as'
                         if self.at(TokenKind::Ident) {
                             alias = Some(self.text().to_string());
@@ -1133,9 +1173,10 @@ impl<'a> Parser<'a> {
                 }
                 // `fun interface F { fun m(…): R }` — a SAM interface (parsed as an interface).
                 TokenKind::KwFun
-                    if self.t.get(self.i + 1).map_or(false, |t| {
-                        t.kind == TokenKind::Ident && t.text(self.src) == "interface"
-                    }) =>
+                    if self
+                        .t
+                        .get(self.i + 1)
+                        .map_or(false, |t| self.token_keyword_text(*t, "interface")) =>
                 {
                     self.bump(); // 'fun'
                     let mut d = self.parse_interface();
@@ -1174,14 +1215,13 @@ impl<'a> Parser<'a> {
                 }
                 // `data class` / `data object` — `data` is a soft keyword (a plain identifier elsewhere).
                 TokenKind::Ident
-                    if self.text() == "data"
+                    if self.keyword_text("data")
                         && self.t.get(self.i + 1).map_or(false, |t| {
-                            t.kind == TokenKind::KwClass
-                                || (t.kind == TokenKind::Ident && t.text(self.src) == "object")
+                            t.kind == TokenKind::KwClass || self.token_keyword_text(*t, "object")
                         }) =>
                 {
                     self.bump(); // 'data'
-                    let is_obj = self.at(TokenKind::Ident) && self.text() == "object";
+                    let is_obj = self.at(TokenKind::Ident) && self.keyword_text("object");
                     let mut d = if is_obj {
                         self.parse_object()
                     } else {
@@ -1193,7 +1233,7 @@ impl<'a> Parser<'a> {
                 }
                 // `object Name { … }` — a singleton (soft keyword `object` + a name).
                 TokenKind::Ident
-                    if self.text() == "object"
+                    if self.keyword_text("object")
                         && self
                             .t
                             .get(self.i + 1)
@@ -1207,7 +1247,7 @@ impl<'a> Parser<'a> {
                 // `java/lang/annotation/Annotation` with an accessor per primary-ctor property;
                 // instantiation synthesizes an impl class (see emit).
                 TokenKind::Ident
-                    if self.text() == "annotation"
+                    if self.keyword_text("annotation")
                         && self
                             .t
                             .get(self.i + 1)
@@ -1221,7 +1261,7 @@ impl<'a> Parser<'a> {
                 }
                 // `enum class Name { A, B, C }` (soft keyword `enum` + `class`).
                 TokenKind::Ident
-                    if self.text() == "enum"
+                    if self.keyword_text("enum")
                         && self
                             .t
                             .get(self.i + 1)
@@ -1235,7 +1275,7 @@ impl<'a> Parser<'a> {
                 // `is_sealed` so it serializes as a `SealedClassSerializer` (closed polymorphism), like a
                 // `sealed class` — not the open `PolymorphicSerializer` a plain interface gets.
                 TokenKind::Ident
-                    if self.text() == "interface"
+                    if self.keyword_text("interface")
                         && self
                             .t
                             .get(self.i + 1)
@@ -1249,7 +1289,7 @@ impl<'a> Parser<'a> {
                     self.file.decls.insert(decls_before, id);
                 }
                 // `typealias Name[<T,...>] = Type`
-                TokenKind::Ident if self.text() == "typealias" => {
+                TokenKind::Ident if self.keyword_text("typealias") => {
                     self.bump(); // `typealias`
                     let alias = if self.at(TokenKind::Ident) {
                         self.bump().text(self.src).to_string()
@@ -1382,17 +1422,16 @@ impl<'a> Parser<'a> {
         match self.kind() {
             KwFun | KwClass | KwVal | KwVar | KwImport | KwPackage | At => true,
             Ident => {
-                is_modifier(self.text())
-                    || matches!(
-                        self.text(),
-                        "object"
-                            | "interface"
-                            | "enum"
-                            | "annotation"
-                            | "typealias"
-                            | "data"
-                            | "companion"
-                    )
+                self.at_modifier()
+                    || self.keyword_text_any(&[
+                        "object",
+                        "interface",
+                        "enum",
+                        "annotation",
+                        "typealias",
+                        "data",
+                        "companion",
+                    ])
             }
             _ => false,
         }
@@ -1400,9 +1439,10 @@ impl<'a> Parser<'a> {
 
     fn at_file_annotation(&self) -> bool {
         self.at(TokenKind::At)
-            && self.t.get(self.i + 1).is_some_and(|token| {
-                token.kind == TokenKind::Ident && token.text(self.src) == "file"
-            })
+            && self
+                .t
+                .get(self.i + 1)
+                .is_some_and(|token| self.token_keyword_text(*token, "file"))
             && self
                 .t
                 .get(self.i + 2)
@@ -1435,8 +1475,7 @@ impl<'a> Parser<'a> {
                     j = self.annotation_end_at(j)?;
                     continue;
                 }
-                if token.kind == TokenKind::Ident
-                    && is_modifier(token.text(self.src))
+                if self.token_is_modifier(*token)
                     && self.t.get(j + 1).map(|next| next.kind) != Some(TokenKind::Colon)
                 {
                     j += 1;
@@ -1535,8 +1574,7 @@ impl<'a> Parser<'a> {
                     self.pending_annotations.push(name);
                     self.pending_annotation_args.push(args);
                 }
-            } else if self.at(TokenKind::Ident)
-                && is_modifier(self.text())
+            } else if self.at_modifier()
                 && self.t.get(self.i + 1).map(|t| t.kind) != Some(TokenKind::Colon)
             {
                 // A modifier soft keyword immediately followed by `:` is a NAME, not a modifier
@@ -1583,21 +1621,24 @@ impl<'a> Parser<'a> {
             if tk.kind != TokenKind::Ident {
                 return false;
             }
-            let s = tk.text(self.src);
             // `interface Name` — a named local interface (the next token is the name).
-            if s == "interface" {
+            if self.token_keyword_text(*tk, "interface") {
                 return matches!(self.t.get(j + 1), Some(n) if n.kind == TokenKind::Ident);
             }
             // `object Name` — a named local object DECLARATION. A bare `object :`/`object {` is an
             // anonymous-object EXPRESSION (no name), which stays on the expression path.
-            if s == "object" {
+            if self.token_keyword_text(*tk, "object") {
                 return matches!(self.t.get(j + 1), Some(n) if n.kind == TokenKind::Ident);
             }
             // A class-introducing soft keyword or a declaration modifier (`open`/`abstract`/`private`/
             // `inner`/…) — keep scanning toward `class`/`interface`. The scan only returns `true` if it
             // actually reaches a type keyword, so a soft-keyword used as a value (`data.x`, `value.foo()`)
             // doesn't misfire.
-            if matches!(s, "data" | "enum" | "sealed" | "annotation" | "value") || is_modifier(s) {
+            if ["data", "enum", "sealed", "annotation", "value"]
+                .iter()
+                .any(|keyword| self.token_keyword_text(*tk, keyword))
+                || self.token_is_modifier(*tk)
+            {
                 j += 1;
                 continue;
             }
@@ -1619,12 +1660,12 @@ impl<'a> Parser<'a> {
     fn parse_nested_type_decl(&mut self) -> ClassDecl {
         match self.kind() {
             TokenKind::KwClass => self.parse_class(),
-            TokenKind::Ident if self.text() == "object" => self.parse_object(),
-            TokenKind::Ident if self.text() == "interface" => self.parse_interface(),
-            TokenKind::Ident if self.text() == "enum" => self.parse_enum(),
-            TokenKind::Ident if self.text() == "data" => {
+            TokenKind::Ident if self.keyword_text("object") => self.parse_object(),
+            TokenKind::Ident if self.keyword_text("interface") => self.parse_interface(),
+            TokenKind::Ident if self.keyword_text("enum") => self.parse_enum(),
+            TokenKind::Ident if self.keyword_text("data") => {
                 self.bump();
-                let mut d = if self.at(TokenKind::Ident) && self.text() == "object" {
+                let mut d = if self.at(TokenKind::Ident) && self.keyword_text("object") {
                     self.parse_object()
                 } else {
                     self.parse_class()
@@ -1632,11 +1673,11 @@ impl<'a> Parser<'a> {
                 d.is_data = true;
                 d
             }
-            TokenKind::Ident if self.text() == "annotation" => {
+            TokenKind::Ident if self.keyword_text("annotation") => {
                 self.bump();
                 self.parse_class()
             }
-            TokenKind::Ident if self.text() == "sealed" => {
+            TokenKind::Ident if self.keyword_text("sealed") => {
                 self.bump();
                 self.parse_nested_type_decl()
             }
@@ -1826,7 +1867,7 @@ impl<'a> Parser<'a> {
         }
         // `val x: T by <expr>` — a delegated property (in place of `= init`). Reads/writes route through
         // the delegate's `getValue`/`setValue` operators.
-        let delegate = if init.is_none() && self.at(TokenKind::Ident) && self.text() == "by" {
+        let delegate = if init.is_none() && self.at(TokenKind::Ident) && self.keyword_text("by") {
             self.bump(); // 'by'
             self.skip_newlines();
             Some(self.parse_expr())
@@ -1858,12 +1899,15 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 if self.at(TokenKind::Ident)
-                    && matches!(
-                        self.text(),
-                        "private" | "protected" | "internal" | "public" | "inline"
-                    )
+                    && self.keyword_text_any(&[
+                        "private",
+                        "protected",
+                        "internal",
+                        "public",
+                        "inline",
+                    ])
                 {
-                    is_private |= self.text() == "private";
+                    is_private |= self.keyword_text("private");
                     self.bump();
                     continue;
                 }
@@ -1873,7 +1917,7 @@ impl<'a> Parser<'a> {
                 && !is_private
                 && explicit_backing_field.is_none()
                 && self.at(TokenKind::Ident)
-                && self.text() == "field"
+                && self.keyword_text("field")
                 && self
                     .t
                     .get(self.i + 1)
@@ -1908,11 +1952,11 @@ impl<'a> Parser<'a> {
                 explicit_backing_field = Some(ExplicitBackingField { ty: field_ty });
                 continue;
             }
-            if !self.at(TokenKind::Ident) || !matches!(self.text(), "get" | "set") {
+            if !self.at(TokenKind::Ident) || !self.keyword_text_any(&["get", "set"]) {
                 self.i = save; // not an accessor — restore (incl. any consumed newlines/modifier)
                 break;
             }
-            let is_get = self.text() == "get";
+            let is_get = self.keyword_text("get");
             self.bump(); // 'get' / 'set'
             if is_get {
                 // A custom getter is `get() = expr` / `get() { … }`. A bare `get` or a `get()` with
@@ -2101,7 +2145,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if token.kind == TokenKind::Ident
-                && is_modifier(token.text(self.src))
+                && self.token_is_modifier(*token)
                 && self
                     .t
                     .get(i + 1)
@@ -2110,7 +2154,7 @@ impl<'a> Parser<'a> {
                 i += 1;
                 continue;
             }
-            return token.kind == TokenKind::Ident && token.text(self.src) == "constructor";
+            return self.token_keyword_text(*token, "constructor");
         }
     }
 
@@ -2248,7 +2292,7 @@ impl<'a> Parser<'a> {
                         props.push(property);
                     }
                     TokenKind::Ident
-                        if self.text() == "init"
+                        if self.keyword_text("init")
                             && self
                                 .t
                                 .get(self.i + 1)
@@ -2479,7 +2523,7 @@ impl<'a> Parser<'a> {
                                 init_order.push(ClassInit::PropInit(bprops.len()));
                                 bprops.push(property);
                             } else if self.at(TokenKind::Ident)
-                                && self.text() == "init"
+                                && self.keyword_text("init")
                                 && self
                                     .t
                                     .get(self.i + 1)
@@ -2548,7 +2592,7 @@ impl<'a> Parser<'a> {
                         body_props.push(p);
                     }
                     TokenKind::Ident
-                        if self.text() == "init"
+                        if self.keyword_text("init")
                             && self
                                 .t
                                 .get(self.i + 1)
@@ -2557,7 +2601,7 @@ impl<'a> Parser<'a> {
                         self.bump();
                         init_order.push(ClassInit::Block(self.parse_block_expr(false)));
                     }
-                    TokenKind::Ident if self.text() == "constructor" => {
+                    TokenKind::Ident if self.keyword_text("constructor") => {
                         let annotations = self.take_pending_annotations();
                         let annotation_args = self.take_pending_annotation_args();
                         let ctor_span = self.tok().span;
@@ -2605,10 +2649,11 @@ impl<'a> Parser<'a> {
                         });
                     }
                     TokenKind::Ident
-                        if self.text() == "companion"
-                            && self.t.get(self.i + 1).is_some_and(|t| {
-                                t.kind == TokenKind::Ident && t.text(self.src) == "object"
-                            }) =>
+                        if self.keyword_text("companion")
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .is_some_and(|t| self.token_keyword_text(*t, "object")) =>
                     {
                         // `companion object { … }` in the enum body — parse it like a regular class's
                         // companion (anonymous name allowed) and attach its members to the enum.
@@ -2687,7 +2732,7 @@ impl<'a> Parser<'a> {
         let mut bounds: Vec<(String, TypeRef)> = Vec::new();
         let save = self.i;
         self.skip_newlines();
-        if !(self.at(TokenKind::Ident) && self.text() == "where") {
+        if !(self.at(TokenKind::Ident) && self.keyword_text("where")) {
             self.i = save;
             return bounds;
         }
@@ -2763,7 +2808,7 @@ impl<'a> Parser<'a> {
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
                      // Skip the entire interface body with a clean unsupported-feature message.
-        if self.at(TokenKind::Ident) && self.text() == "interface" {
+        if self.at(TokenKind::Ident) && self.keyword_text("interface") {
             self.diags.error(
                 start,
                 "krusty: 'fun interface' (SAM interfaces) are not supported",
@@ -2874,14 +2919,13 @@ impl<'a> Parser<'a> {
 
     fn parse_member_decl_prefix(&mut self) -> Vec<String> {
         self.pending_context_params.clear();
-        let mut modifiers =
-            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                let modifiers = self.skip_decl_prefix();
-                self.skip_newlines();
-                modifiers
-            } else {
-                Vec::new()
-            };
+        let mut modifiers = if self.at(TokenKind::At) || self.at_modifier() {
+            let modifiers = self.skip_decl_prefix();
+            self.skip_newlines();
+            modifiers
+        } else {
+            Vec::new()
+        };
         modifiers.extend(self.maybe_parse_context_receivers());
         modifiers
     }
@@ -2896,8 +2940,7 @@ impl<'a> Parser<'a> {
                 i = self.annotation_end_at(i)?;
                 continue;
             }
-            if token.kind == TokenKind::Ident
-                && is_modifier(token.text(self.src))
+            if self.token_is_modifier(*token)
                 && self
                     .t
                     .get(i + 1)
@@ -2907,8 +2950,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if !saw_context
-                && token.kind == TokenKind::Ident
-                && token.text(self.src) == "context"
+                && self.token_keyword_text(*token, "context")
                 && self
                     .t
                     .get(i + 1)
@@ -2936,7 +2978,7 @@ impl<'a> Parser<'a> {
     /// Buffer a `context(...)` clause for the following function or property.
     fn maybe_parse_context_receivers(&mut self) -> Vec<String> {
         if !(self.at(TokenKind::Ident)
-            && self.text() == "context"
+            && self.keyword_text("context")
             && self
                 .t
                 .get(self.i + 1)
@@ -2956,7 +2998,7 @@ impl<'a> Parser<'a> {
         // Modifiers/annotations may follow the context prefix (`context(a: A) private fun …`);
         // consume them so the declaration keyword is next, and RETURN them so the caller keeps the
         // visibility/modality (annotations buffer as pending, read by the declaration parser).
-        if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+        if self.at(TokenKind::At) || self.at_modifier() {
             let m = self.skip_decl_prefix();
             self.skip_newlines();
             m
@@ -2976,9 +3018,7 @@ impl<'a> Parser<'a> {
             // `value` is a valid parameter name in Kotlin; only collect real parameter modifiers. A modifier
             // soft keyword used as a NAME (`fun f(open: Int)`) is left for the name parse below —
             // `skip_decl_prefix` stops before a modifier-ident that is immediately followed by `:`.
-            if self.at(TokenKind::At)
-                || (self.at(TokenKind::Ident) && is_modifier(self.text()) && self.text() != "value")
-            {
+            if self.at(TokenKind::At) || (self.at_modifier() && self.text() != "value") {
                 pmods = self.skip_decl_prefix(); // `@Anno`, `vararg`, `noinline`, … on a parameter
                 pannos = self.take_pending_annotations();
                 pannos_args = self.take_pending_annotation_args();
@@ -3134,15 +3174,15 @@ impl<'a> Parser<'a> {
                 (nested, true)
             }
             TokenKind::Ident
-                if self.text() == "data"
+                if self.keyword_text("data")
                     && self.t.get(self.i + 1).is_some_and(|token| {
                         token.kind == TokenKind::KwClass
-                            || (token.kind == TokenKind::Ident && token.text(self.src) == "object")
+                            || self.token_keyword_text(*token, "object")
                     }) =>
             {
                 self.bump(); // `data`
                 let (mut nested, supports_inner) =
-                    if self.at(TokenKind::Ident) && self.text() == "object" {
+                    if self.at(TokenKind::Ident) && self.keyword_text("object") {
                         (self.parse_object(), false)
                     } else {
                         (self.parse_class(), true)
@@ -3150,9 +3190,9 @@ impl<'a> Parser<'a> {
                 nested.is_data = true;
                 (nested, supports_inner)
             }
-            TokenKind::Ident if self.text() == "interface" => (self.parse_interface(), false),
+            TokenKind::Ident if self.keyword_text("interface") => (self.parse_interface(), false),
             TokenKind::Ident
-                if self.text() == "enum"
+                if self.keyword_text("enum")
                     && self
                         .t
                         .get(self.i + 1)
@@ -3160,7 +3200,7 @@ impl<'a> Parser<'a> {
             {
                 (self.parse_enum(), false)
             }
-            TokenKind::Ident if self.text() == "object" => (self.parse_object(), false),
+            TokenKind::Ident if self.keyword_text("object") => (self.parse_object(), false),
             _ => return false,
         };
 
@@ -3254,7 +3294,7 @@ impl<'a> Parser<'a> {
         let mut primary_ctor_visibility = Visibility::Public;
         if self.primary_constructor_header_follows() {
             self.skip_newlines();
-            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+            if self.at(TokenKind::At) || self.at_modifier() {
                 let ctor_mods = self.skip_decl_prefix();
                 // The declared constructor visibility survives into `@Metadata` (and, for
                 // `protected`, the JVM `<init>` access flags).
@@ -3263,7 +3303,7 @@ impl<'a> Parser<'a> {
                 let _ = self.take_pending_annotation_args();
             }
         }
-        let header_ctor_kw = self.at(TokenKind::Ident) && self.text() == "constructor";
+        let header_ctor_kw = self.at(TokenKind::Ident) && self.keyword_text("constructor");
         if header_ctor_kw {
             self.bump();
         }
@@ -3278,9 +3318,7 @@ impl<'a> Parser<'a> {
                 let mut pannos_args = Vec::new();
                 let mut cpmods = Vec::new();
                 if self.at(TokenKind::At)
-                    || (self.at(TokenKind::Ident)
-                        && is_modifier(self.text())
-                        && self.text() != "value")
+                    || (self.at(TokenKind::Ident) && self.at_modifier() && self.text() != "value")
                 {
                     cpmods = self.skip_decl_prefix(); // `private val x`, `@Anno val y`, `vararg xs`
                     pannos = self.take_pending_annotations();
@@ -3389,7 +3427,7 @@ impl<'a> Parser<'a> {
                         body_props.push(p);
                     }
                     TokenKind::Ident
-                        if self.text() == "init"
+                        if self.keyword_text("init")
                             && self
                                 .t
                                 .get(self.i + 1)
@@ -3401,15 +3439,16 @@ impl<'a> Parser<'a> {
                     }
                     // A companion is a nested singleton declaration linked from this class.
                     TokenKind::Ident
-                        if self.text() == "companion"
-                            && self.t.get(self.i + 1).is_some_and(|t| {
-                                t.kind == TokenKind::Ident && t.text(self.src) == "object"
-                            }) =>
+                        if self.keyword_text("companion")
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .is_some_and(|t| self.token_keyword_text(*t, "object")) =>
                     {
                         companion = Some(self.parse_companion(&name, &mods));
                     }
                     TokenKind::Ident
-                        if self.text() == "annotation"
+                        if self.keyword_text("annotation")
                             && self
                                 .t
                                 .get(self.i + 1)
@@ -3417,7 +3456,7 @@ impl<'a> Parser<'a> {
                     {
                         let _ = self.parse_nested_type_decl();
                     }
-                    TokenKind::Ident if self.text() == "constructor" => {
+                    TokenKind::Ident if self.keyword_text("constructor") => {
                         let annotations = self.take_pending_annotations();
                         let annotation_args = self.take_pending_annotation_args();
                         let ctor_span = self.tok().span;
@@ -3466,7 +3505,7 @@ impl<'a> Parser<'a> {
                             span: ctor_span,
                         });
                     }
-                    TokenKind::Ident if self.text() == "typealias" => {
+                    TokenKind::Ident if self.keyword_text("typealias") => {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
                         }
@@ -3682,7 +3721,7 @@ impl<'a> Parser<'a> {
                 // Class delegation: `: Iface by delegate`. A simple-name delegate (a `val` ctor-param
                 // field) is supported — record `(iface, delegate)`; any other delegate expression is
                 // skipped (parsed but marked unsupported).
-                if self.at(TokenKind::Ident) && self.text() == "by" {
+                if self.at(TokenKind::Ident) && self.keyword_text("by") {
                     self.bump(); // 'by'
                     if self.at(TokenKind::Ident) {
                         let delegate = self.text().to_string();
@@ -3787,29 +3826,32 @@ impl<'a> Parser<'a> {
                         self.register_interface_nested(&name, &imods);
                     }
                     TokenKind::Ident
-                        if matches!(self.text(), "object" | "interface")
-                            || (matches!(
-                                self.text(),
-                                "data" | "enum" | "annotation" | "value"
-                            ) && self.t.get(self.i + 1).map_or(false, |t| {
+                        if self.keyword_text_any(&["object", "interface"])
+                            || (self.keyword_text_any(&[
+                                "data",
+                                "enum",
+                                "annotation",
+                                "value",
+                            ]) && self.t.get(self.i + 1).map_or(false, |t| {
                                 // `data class` / `enum class` / … and also `data object` (Kotlin 1.9).
                                 t.kind == TokenKind::KwClass
-                                    || (t.kind == TokenKind::Ident && t.text(self.src) == "object")
+                                    || self.token_keyword_text(*t, "object")
                             })) =>
                     {
                         self.register_interface_nested(&name, &imods);
                     }
-                    TokenKind::Ident if self.text() == "typealias" => {
+                    TokenKind::Ident if self.keyword_text("typealias") => {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
                         }
                     }
                     // `interface I { companion object { … } }` — same as a class companion.
                     TokenKind::Ident
-                        if self.text() == "companion"
-                            && self.t.get(self.i + 1).is_some_and(|t| {
-                                t.kind == TokenKind::Ident && t.text(self.src) == "object"
-                            }) =>
+                        if self.keyword_text("companion")
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .is_some_and(|t| self.token_keyword_text(*t, "object")) =>
                     {
                         companion = Some(self.parse_companion(&name, &imods));
                     }
@@ -3894,7 +3936,7 @@ impl<'a> Parser<'a> {
                         body_props.push(p);
                     }
                     TokenKind::Ident
-                        if self.text() == "init"
+                        if self.keyword_text("init")
                             && self
                                 .t
                                 .get(self.i + 1)
@@ -3908,19 +3950,21 @@ impl<'a> Parser<'a> {
                         let _ = self.parse_nested_type_decl();
                     }
                     TokenKind::Ident
-                        if matches!(self.text(), "object" | "interface")
-                            || (matches!(
-                                self.text(),
-                                "data" | "enum" | "annotation" | "value"
-                            ) && self.t.get(self.i + 1).map_or(false, |t| {
+                        if self.keyword_text_any(&["object", "interface"])
+                            || (self.keyword_text_any(&[
+                                "data",
+                                "enum",
+                                "annotation",
+                                "value",
+                            ]) && self.t.get(self.i + 1).map_or(false, |t| {
                                 // `data class` / `enum class` / … and also `data object` (Kotlin 1.9).
                                 t.kind == TokenKind::KwClass
-                                    || (t.kind == TokenKind::Ident && t.text(self.src) == "object")
+                                    || self.token_keyword_text(*t, "object")
                             })) =>
                     {
                         let _ = self.parse_nested_type_decl();
                     }
-                    TokenKind::Ident if self.text() == "typealias" => {
+                    TokenKind::Ident if self.keyword_text("typealias") => {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
                         }
@@ -4043,7 +4087,7 @@ impl<'a> Parser<'a> {
                         body_props.push(p);
                     }
                     TokenKind::Ident
-                        if self.text() == "init"
+                        if self.keyword_text("init")
                             && self
                                 .t
                                 .get(self.i + 1)
@@ -4054,7 +4098,7 @@ impl<'a> Parser<'a> {
                         init_order.push(ClassInit::Block(block));
                     }
                     TokenKind::Ident
-                        if self.text() == "annotation"
+                        if self.keyword_text("annotation")
                             && self
                                 .t
                                 .get(self.i + 1)
@@ -4062,7 +4106,7 @@ impl<'a> Parser<'a> {
                     {
                         let _ = self.parse_nested_type_decl();
                     }
-                    TokenKind::Ident if self.text() == "typealias" => {
+                    TokenKind::Ident if self.keyword_text("typealias") => {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
                         }
@@ -4231,7 +4275,7 @@ impl<'a> Parser<'a> {
         }
         // `suspend` modifier on a function type: `suspend (A) -> B` — consume and parse as function type.
         let mut fun_suspend = false;
-        if self.at(TokenKind::Ident) && self.text() == "suspend" {
+        if self.at(TokenKind::Ident) && self.keyword_text("suspend") {
             self.bump(); // 'suspend'
             fun_suspend = true;
         }
@@ -4241,7 +4285,7 @@ impl<'a> Parser<'a> {
         // Only recognized before a `(`-started function type; `context` stays a valid ordinary type name.
         let mut context_types: Vec<TypeRef> = Vec::new();
         if self.at(TokenKind::Ident)
-            && self.text() == "context"
+            && self.keyword_text("context")
             && self
                 .t
                 .get(self.i + 1)
@@ -4480,7 +4524,7 @@ impl<'a> Parser<'a> {
             self.bump();
             return (true, false);
         }
-        if self.at(TokenKind::Ident) && self.text() == "out" {
+        if self.at(TokenKind::Ident) && self.keyword_text("out") {
             self.bump();
             return (false, true);
         }
@@ -4631,12 +4675,12 @@ impl<'a> Parser<'a> {
             // Skip variance/reified modifiers. `in` is a keyword; `out`/`reified` are idents.
             let mut is_reified = false;
             let mut variance = crate::types::TypeVariance::Invariant;
-            while (self.at(TokenKind::Ident) && matches!(self.text(), "reified" | "out"))
+            while (self.at(TokenKind::Ident) && self.keyword_text_any(&["reified", "out"]))
                 || self.at(TokenKind::KwIn)
             {
-                if self.at(TokenKind::Ident) && self.text() == "reified" {
+                if self.at(TokenKind::Ident) && self.keyword_text("reified") {
                     is_reified = true;
-                } else if self.at(TokenKind::Ident) && self.text() == "out" {
+                } else if self.at(TokenKind::Ident) && self.keyword_text("out") {
                     variance = crate::types::TypeVariance::Out;
                 } else if self.at(TokenKind::KwIn) {
                     variance = crate::types::TypeVariance::In;
@@ -5336,7 +5380,7 @@ impl<'a> Parser<'a> {
             return self.parse_stmt();
         }
         if self.at(TokenKind::Ident)
-            && self.text() == "lateinit"
+            && self.keyword_text("lateinit")
             && self
                 .t
                 .get(self.i + 1)
@@ -5351,7 +5395,7 @@ impl<'a> Parser<'a> {
             return self.finish_stmt(Stmt::LocalLateinit { name, ty }, start);
         }
         if self.at(TokenKind::Ident)
-            && self.text() == "context"
+            && self.keyword_text("context")
             && self.local_declaration_after_prefix() == Some(TokenKind::KwFun)
         {
             let start = self.tok().span;
@@ -5436,7 +5480,7 @@ impl<'a> Parser<'a> {
                     None
                 };
                 // `val/var x (: T)? by <delegate>` — a local delegated property.
-                if self.at(TokenKind::Ident) && self.text() == "by" {
+                if self.at(TokenKind::Ident) && self.keyword_text("by") {
                     self.bump(); // 'by'
                     self.skip_newlines();
                     let delegate = self.parse_expr();
@@ -5510,12 +5554,12 @@ impl<'a> Parser<'a> {
                 };
                 self.finish_stmt(Stmt::Return(e, label), start)
             }
-            TokenKind::Ident if self.text() == "break" => {
+            TokenKind::Ident if self.keyword_text("break") => {
                 self.bump();
                 let label = self.parse_loop_label_ref();
                 self.finish_stmt(Stmt::Break(label), start)
             }
-            TokenKind::Ident if self.text() == "continue" => {
+            TokenKind::Ident if self.keyword_text("continue") => {
                 self.bump();
                 let label = self.parse_loop_label_ref();
                 self.finish_stmt(Stmt::Continue(label), start)
@@ -6049,7 +6093,7 @@ impl<'a> Parser<'a> {
         // the loop lowering. A bare range (no trailing infix) keeps the optimized counted `Stmt::For`.
         if self.at(TokenKind::Ident) && {
             let next = self.infix_operand_follows();
-            !matches!(self.text(), "is" | "as" | "in") && next
+            !self.keyword_text_any(&["is", "as", "in"]) && next
         } {
             let lspan = self.file.expr_spans[rstart.0 as usize];
             let rspan = self.file.expr_spans[rend.0 as usize];
@@ -6475,7 +6519,7 @@ impl<'a> Parser<'a> {
             // the operator below (or the enclosing elvis loop, for `?:`) sees it on this logical line.
             self.skip_newlines_before_continuation_op();
             // Prefix operators bind more tightly than casts.
-            if min_bp <= BP_CAST && self.at(TokenKind::Ident) && self.text() == "as" {
+            if min_bp <= BP_CAST && self.at(TokenKind::Ident) && self.keyword_text("as") {
                 let lspan = self.file.expr_spans[lhs.0 as usize];
                 self.bump(); // 'as'
                 let nullable = self.eat_type_nullable();
@@ -6493,12 +6537,13 @@ impl<'a> Parser<'a> {
             }
             // `is` / `!is` type test — a "named check" at comparison precedence (binding power 7).
             if min_bp <= 7 {
-                let negated = if self.at(TokenKind::Ident) && self.text() == "is" {
+                let negated = if self.at(TokenKind::Ident) && self.keyword_text("is") {
                     Some(false)
                 } else if self.at(TokenKind::Not)
-                    && self.t.get(self.i + 1).map_or(false, |t| {
-                        t.kind == TokenKind::Ident && t.text(self.src) == "is"
-                    })
+                    && self
+                        .t
+                        .get(self.i + 1)
+                        .map_or(false, |t| self.token_keyword_text(*t, "is"))
                 {
                     Some(true)
                 } else {
@@ -6702,7 +6747,7 @@ impl<'a> Parser<'a> {
         // `context(x: C) fun () = …`. `context(...)` remains an ordinary call unless the balanced
         // parameter list is followed by `fun`.
         if self.at(TokenKind::Ident)
-            && self.text() == "context"
+            && self.keyword_text("context")
             && self
                 .t
                 .get(self.i + 1)
@@ -6740,7 +6785,7 @@ impl<'a> Parser<'a> {
             return self.parse_prefix();
         }
         // `throw <expr>` — a soft keyword; raises an exception (bottom type `Nothing`).
-        if self.at(TokenKind::Ident) && self.text() == "throw" {
+        if self.at(TokenKind::Ident) && self.keyword_text("throw") {
             self.bump(); // 'throw'
             let operand = self.parse_bp(0);
             let end = self.file.expr_spans[operand.0 as usize];
@@ -6751,8 +6796,10 @@ impl<'a> Parser<'a> {
         // `break`/`continue` (with an optional `@label`) in EXPRESSION position (`m[k] ?: continue`, a
         // `when` arm). Soft keywords (Ident), like `throw`; bottom type `Nothing`. A statement-position
         // `break`/`continue` is handled earlier in `parse_stmt` (→ `Stmt::Break`/`Continue`).
-        if self.at(TokenKind::Ident) && (self.text() == "break" || self.text() == "continue") {
-            let is_break = self.text() == "break";
+        if self.at(TokenKind::Ident)
+            && (self.keyword_text("break") || self.keyword_text("continue"))
+        {
+            let is_break = self.keyword_text("break");
             let mut end = self.tok().span; // the `break`/`continue` token
             self.bump(); // 'break' / 'continue'
             let label = if self.at(TokenKind::At) {
@@ -6821,7 +6868,7 @@ impl<'a> Parser<'a> {
         // `this`/`super` are also `Ident`s but `this@Outer`/`super@Base` is a labeled RECEIVER, not a
         // labeled expression — leave those for `parse_primary` to bind the `@label` to the receiver.
         if self.at(TokenKind::Ident)
-            && !matches!(self.text(), "this" | "super")
+            && !self.keyword_text_any(&["this", "super"])
             && self
                 .t
                 .get(self.i + 1)
@@ -6833,7 +6880,7 @@ impl<'a> Parser<'a> {
             // this loop the re-entry cannot reach this branch again (the next token is no label).
             let mut labels = Vec::new();
             while self.at(TokenKind::Ident)
-                && !matches!(self.text(), "this" | "super")
+                && !self.keyword_text_any(&["this", "super"])
                 && self
                     .t
                     .get(self.i + 1)
@@ -7343,7 +7390,7 @@ impl<'a> Parser<'a> {
         let span = self.tok().span;
         // `try { … } catch (e: T) { … }` — a soft keyword followed by a block.
         if self.at(TokenKind::Ident)
-            && self.text() == "try"
+            && self.keyword_text("try")
             && self
                 .t
                 .get(self.i + 1)
@@ -7450,7 +7497,7 @@ impl<'a> Parser<'a> {
             }
             // An anonymous object expression `object : Super(args)? { … }` (in value position).
             TokenKind::Ident
-                if self.text() == "object"
+                if self.keyword_text("object")
                     && self.t.get(self.i + 1).map_or(false, |t| {
                         matches!(t.kind, TokenKind::Colon | TokenKind::LBrace)
                     }) =>
@@ -7462,7 +7509,7 @@ impl<'a> Parser<'a> {
             // it as a `suspend (…) -> …` function type and the lowerer builds a SuspendLambda
             // state machine for it (otherwise it misparses as a call to a fn named `suspend`).
             TokenKind::Ident
-                if self.text() == "suspend"
+                if self.keyword_text("suspend")
                     && self
                         .t
                         .get(self.i + 1)
@@ -7663,7 +7710,7 @@ impl<'a> Parser<'a> {
         loop {
             let save = self.i;
             self.skip_newlines();
-            if self.at(TokenKind::Ident) && self.text() == "catch" {
+            if self.at(TokenKind::Ident) && self.keyword_text("catch") {
                 self.bump(); // 'catch'
                 self.expect(TokenKind::LParen, "'('");
                 // The parameter may sit on its own line(s) inside the parens (`catch (\n e: E\n)`),
@@ -7693,7 +7740,7 @@ impl<'a> Parser<'a> {
                     ty,
                     body: cbody,
                 });
-            } else if self.at(TokenKind::Ident) && self.text() == "finally" {
+            } else if self.at(TokenKind::Ident) && self.keyword_text("finally") {
                 self.bump(); // 'finally'
                 self.skip_newlines();
                 finally = Some(self.parse_block_expr(false));
@@ -7875,12 +7922,13 @@ impl<'a> Parser<'a> {
     /// against the subject (`Expr::Is` whose operand is the subject expression); otherwise a value
     /// matched by `==`.
     fn parse_when_condition(&mut self, subject: Option<ExprId>) -> ExprId {
-        let negated = if self.at(TokenKind::Ident) && self.text() == "is" {
+        let negated = if self.at(TokenKind::Ident) && self.keyword_text("is") {
             Some(false)
         } else if self.at(TokenKind::Not)
-            && self.t.get(self.i + 1).map_or(false, |t| {
-                t.kind == TokenKind::Ident && t.text(self.src) == "is"
-            })
+            && self
+                .t
+                .get(self.i + 1)
+                .map_or(false, |t| self.token_keyword_text(*t, "is"))
         {
             Some(true)
         } else {
