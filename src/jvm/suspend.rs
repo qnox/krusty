@@ -1615,9 +1615,9 @@ fn hoisted_value_ty(
         // of the new temp. The caller supplies the current function's parameter/local environment.
         IrExpr::GetValue(index) => value_types.get(index).copied(),
         IrExpr::Call { callee, .. } => match callee {
-            Callee::Local(function) | Callee::LocalDefault(function) => {
-                orig_rets.get(*function as usize).copied()
-            }
+            Callee::Local(function)
+            | Callee::LocalDefault(function)
+            | Callee::ClassStatic { function, .. } => orig_rets.get(*function as usize).copied(),
             Callee::CrossFile { ret, .. } => Some(*ret),
             Callee::Static { descriptor, .. } | Callee::Special { descriptor, .. } => {
                 crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
@@ -1774,6 +1774,10 @@ fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Optio
             callee: Callee::Local(fid),
             ..
         } if suspend_set.contains(fid) => Some(*fid),
+        IrExpr::Call {
+            callee: Callee::ClassStatic { function, .. },
+            ..
+        } if suspend_set.contains(function) => Some(*function),
         IrExpr::MethodCall { class, index, .. } => {
             let fid = *ir.classes[*class as usize].methods.get(*index as usize)?;
             suspend_set.contains(&fid).then_some(fid)
@@ -6268,6 +6272,10 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                 Callee::Local(fid) => {
                     dispatch_receiver.is_none().then_some(())?;
                     ir.functions[*fid as usize].params.clone()
+                }
+                Callee::ClassStatic { function, .. } => {
+                    dispatch_receiver.is_none().then_some(())?;
+                    ir.functions[*function as usize].params.clone()
                 }
                 Callee::CrossFile { params, .. } => {
                     dispatch_receiver.is_none().then_some(())?;
