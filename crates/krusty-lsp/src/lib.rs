@@ -6,6 +6,7 @@ mod dependency_symbols;
 pub mod deps_cache;
 pub mod dump_cache;
 mod options;
+pub mod parity;
 pub mod project;
 mod server;
 pub mod uri;
@@ -20,7 +21,7 @@ pub use dependency_symbols::{
 };
 pub use options::*;
 pub use project::{
-    detect, resolve_jdk, JdkRequest, LoadedProjectSources, ProcessRunner, ProjectModel,
+    detect, model_json, resolve_jdk, JdkRequest, LoadedProjectSources, ProcessRunner, ProjectModel,
     ProjectSources, ProjectSync, ProviderKind, RefreshOutcome, SystemEnvironment,
 };
 pub use server::*;

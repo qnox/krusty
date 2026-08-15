@@ -108,6 +108,574 @@ fn parse_cache_command(args: &[String]) -> Result<(bool, Option<PathBuf>), Strin
     Ok((all, root))
 }
 
+/// What `krusty-lsp model` was asked to dump.
+#[derive(Debug, PartialEq, Eq)]
+struct ModelCommand {
+    root: PathBuf,
+    out: Option<PathBuf>,
+    pretty: bool,
+}
+
+/// `model [<root>] [--out <file>] [--pretty]` — resolve the project model for `root` (the current
+/// directory by default) and write it as JSON.
+///
+/// Deliberately a *separate* entry point from the language server: the parity harness wants the
+/// resolved source roots and classpaths of a whole worktree once, with no LSP session, no analysis
+/// worker, and no stdio protocol to speak.
+fn parse_model_command(args: &[String]) -> Result<ModelCommand, String> {
+    let mut root: Option<PathBuf> = None;
+    let mut out = None;
+    let mut pretty = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pretty" => {
+                pretty = true;
+                index += 1;
+            }
+            "--out" => {
+                let path = args
+                    .get(index + 1)
+                    .ok_or_else(|| "--out requires a value".to_string())?;
+                out = Some(PathBuf::from(path));
+                index += 2;
+            }
+            option if option.starts_with('-') => {
+                return Err(format!("unknown model option '{option}'"));
+            }
+            path => {
+                if root.is_some() {
+                    return Err("model takes at most one project root".to_string());
+                }
+                root = Some(PathBuf::from(path));
+                index += 1;
+            }
+        }
+    }
+    Ok(ModelCommand {
+        root: root.unwrap_or_else(|| PathBuf::from(".")),
+        out,
+        pretty,
+    })
+}
+
+fn run_model_command(args: &[String]) {
+    let command = parse_model_command(args).unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: {error}");
+        eprintln!("usage: model [<project-root>] [--out <file>] [--pretty]");
+        std::process::exit(2);
+    });
+    let root = std::fs::canonicalize(&command.root).unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: {}: {error}", command.root.display());
+        std::process::exit(1);
+    });
+    let provider = detect(&root, &[]);
+    let model = match provider.probe(&ProcessRunner) {
+        Ok(model) => model,
+        Err(error) => {
+            eprintln!("krusty-lsp: cannot resolve project model: {error}");
+            std::process::exit(1);
+        }
+    };
+    let value = krusty_lsp::model_json(&model);
+    let text = if command.pretty {
+        serde_json::to_string_pretty(&value)
+    } else {
+        serde_json::to_string(&value)
+    }
+    .expect("render project model");
+    match &command.out {
+        Some(path) => {
+            if let Err(error) = std::fs::write(path, format!("{text}\n")) {
+                eprintln!("krusty-lsp: {}: {error}", path.display());
+                std::process::exit(1);
+            }
+        }
+        None => println!("{text}"),
+    }
+}
+
+/// What `krusty-lsp parity` was asked to scan.
+#[derive(Debug, PartialEq, Eq)]
+struct ParityCommand {
+    root: PathBuf,
+    out: Option<PathBuf>,
+    jobs: usize,
+    timeout: Duration,
+    depth: krusty_lsp::parity::DependencyDepth,
+    include_tests: bool,
+    /// Substring filter on the module id; empty means every module.
+    filter: String,
+    limit: Option<usize>,
+}
+
+/// ONE worker unless the caller asks for more.
+///
+/// Every worker is a full compiler process holding a decoded classpath, and this binary is also the
+/// editor's language server: a scan that quietly fans out to every core competes with the editor,
+/// with sibling builds, and with itself. Widening the scan is therefore an explicit `--jobs N`
+/// decision, never a default.
+const DEFAULT_PARITY_JOBS: usize = 1;
+
+fn parse_parity_command(args: &[String]) -> Result<ParityCommand, String> {
+    let mut root: Option<PathBuf> = None;
+    let mut out = None;
+    let mut jobs = DEFAULT_PARITY_JOBS;
+    let mut timeout = Duration::from_secs(120);
+    let mut depth = krusty_lsp::parity::DependencyDepth::default();
+    let mut include_tests = false;
+    let mut filter = String::new();
+    let mut limit = None;
+    let mut index = 0;
+    let value = |index: usize, name: &str| -> Result<&String, String> {
+        args.get(index + 1)
+            .ok_or_else(|| format!("{name} requires a value"))
+    };
+    while index < args.len() {
+        match args[index].as_str() {
+            "--tests" => {
+                include_tests = true;
+                index += 1;
+            }
+            "--out" => {
+                out = Some(PathBuf::from(value(index, "--out")?));
+                index += 2;
+            }
+            "--jobs" | "-j" => {
+                jobs = value(index, "--jobs")?
+                    .parse()
+                    .map_err(|_| "--jobs takes a number".to_string())?;
+                if jobs == 0 {
+                    return Err("--jobs must be at least 1".to_string());
+                }
+                index += 2;
+            }
+            "--timeout" => {
+                let seconds: u64 = value(index, "--timeout")?
+                    .parse()
+                    .map_err(|_| "--timeout takes seconds".to_string())?;
+                timeout = Duration::from_secs(seconds);
+                index += 2;
+            }
+            "--depth" => {
+                depth = krusty_lsp::parity::DependencyDepth::parse(value(index, "--depth")?)
+                    .ok_or_else(|| "--depth takes none|direct|all".to_string())?;
+                index += 2;
+            }
+            "--filter" => {
+                filter = value(index, "--filter")?.clone();
+                index += 2;
+            }
+            "--limit" => {
+                limit = Some(
+                    value(index, "--limit")?
+                        .parse()
+                        .map_err(|_| "--limit takes a number".to_string())?,
+                );
+                index += 2;
+            }
+            option if option.starts_with('-') => {
+                return Err(format!("unknown parity option '{option}'"))
+            }
+            path => {
+                if root.is_some() {
+                    return Err("parity takes at most one project root".to_string());
+                }
+                root = Some(PathBuf::from(path));
+                index += 1;
+            }
+        }
+    }
+    Ok(ParityCommand {
+        root: root.unwrap_or_else(|| PathBuf::from(".")),
+        out,
+        jobs,
+        timeout,
+        depth,
+        include_tests,
+        filter,
+        limit,
+    })
+}
+
+/// Directory names that never hold a module's own compilable sources, even when they sit under a
+/// declared source root. `testData` is the important one: IntelliJ keeps thousands of deliberately
+/// malformed Kotlin files there, and counting their diagnostics as parity failures would drown the
+/// signal.
+const PARITY_SKIP_DIRECTORIES: &[&str] = &[
+    ".git",
+    "testData",
+    "test-data",
+    "testdata",
+    "out",
+    "build",
+    "target",
+    "node_modules",
+];
+
+fn list_sources(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if PARITY_SKIP_DIRECTORIES.contains(&name.as_ref()) {
+                continue;
+            }
+            list_sources(&path, out);
+        } else if matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("kt") | Some("java")
+        ) {
+            out.push(path);
+        }
+    }
+}
+
+/// The workers a scan currently has running, killed on every unwinding or ordinary return path.
+///
+/// A driver that returns early — a write error or a panic — must not leave compiler processes
+/// behind: they would keep a core busy each, against a scratch directory that is already being
+/// deleted. `Child` has no killing `Drop` of its own, so this supplies one. On Unix, the worker's
+/// parent monitor covers abrupt process termination, where destructors cannot run.
+struct RunningWorkers {
+    children: Vec<(usize, String, Instant, std::process::Child)>,
+}
+
+/// A collision-resistant scan directory removed on every ordinary return and unwinding path.
+/// `create_dir` refuses to reuse an existing path, so a stale directory or symlink can never become
+/// the target of the driver's cleanup.
+struct ParityScratch(PathBuf);
+
+impl ParityScratch {
+    fn create() -> io::Result<Self> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("krusty-parity-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl std::ops::Deref for ParityScratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for ParityScratch {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            if error.kind() != io::ErrorKind::NotFound {
+                eprintln!(
+                    "krusty-lsp parity: cannot remove scratch directory {}: {error}",
+                    self.0.display()
+                );
+            }
+        }
+    }
+}
+
+impl RunningWorkers {
+    fn new() -> Self {
+        Self {
+            children: Vec::new(),
+        }
+    }
+}
+
+impl Drop for RunningWorkers {
+    fn drop(&mut self) {
+        for (_, _, _, child) in &mut self.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Apply `--filter` and `--limit`, then order the survivors for scheduling.
+///
+/// `--limit` is a smoke-test knob, so it selects in the project's own module order — BEFORE the
+/// largest-first sort, which would otherwise hand a "quick look at 5 modules" the five most
+/// expensive modules in the repository. The sort then puts the long poles first among the modules
+/// that remain, so they start while there are still short ones to fill the tail.
+fn select_plans(
+    mut plans: Vec<krusty_lsp::parity::ModulePlan>,
+    filter: &str,
+    limit: Option<usize>,
+) -> Vec<krusty_lsp::parity::ModulePlan> {
+    if !filter.is_empty() {
+        plans.retain(|plan| plan.module.contains(filter));
+    }
+    if let Some(limit) = limit {
+        plans.truncate(limit);
+    }
+    plans.sort_by_key(|plan| std::cmp::Reverse(plan.checked.len() + plan.inferred.len()));
+    plans
+}
+
+fn write_parity_line(sink: &mut dyn std::io::Write, line: &str) -> io::Result<()> {
+    writeln!(sink, "{line}")?;
+    sink.flush()
+}
+
+fn run_parity_command(args: &[String]) -> bool {
+    let command = parse_parity_command(args).unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: {error}");
+        eprintln!(
+            "usage: parity [<project-root>] [--out <file.jsonl>] [--jobs N] [--timeout SECONDS] \
+             [--depth none|direct|all] [--tests] [--filter <substring>] [--limit N]"
+        );
+        std::process::exit(2);
+    });
+    let root = std::fs::canonicalize(&command.root).unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: {}: {error}", command.root.display());
+        std::process::exit(1);
+    });
+    let started = Instant::now();
+    let provider = detect(&root, &[]);
+    let model = provider.probe(&ProcessRunner).unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: cannot resolve project model: {error}");
+        std::process::exit(1);
+    });
+    // A scan without a JDK measures the `.kotlin_builtins` fallback, not the project: every `java.*`
+    // reference and several mapped collection members report as unresolved. Say so loudly rather
+    // than publishing numbers that look like krusty gaps.
+    if krusty::jvm::classpath::platform_jdk_modules(model.jdk_home.as_deref()).is_none() {
+        eprintln!(
+            "krusty-lsp parity: WARNING no JDK found (project SDK unresolved and JAVA_HOME unset); \
+             results will contain unresolved java.* references that a JDK would resolve"
+        );
+    }
+    let lister = |root: &Path| {
+        let mut found = Vec::new();
+        list_sources(root, &mut found);
+        found
+    };
+    let plans = krusty_lsp::parity::plan_modules(
+        &model,
+        &lister,
+        krusty_lsp::parity::PlanOptions {
+            include_tests: command.include_tests,
+            depth: command.depth,
+            ..krusty_lsp::parity::PlanOptions::default()
+        },
+    );
+    let plans = select_plans(plans, &command.filter, command.limit);
+    eprintln!(
+        "krusty-lsp parity: {} module(s) planned in {:?}",
+        plans.len(),
+        started.elapsed()
+    );
+    let scratch = ParityScratch::create().unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: cannot create parity scratch directory: {error}");
+        std::process::exit(1);
+    });
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("krusty-lsp: cannot locate current executable: {error}");
+            return false;
+        }
+    };
+    let mut sink: Box<dyn std::io::Write> = match &command.out {
+        Some(path) => match std::fs::File::create(path) {
+            Ok(file) => Box::new(std::io::BufWriter::new(file)),
+            Err(error) => {
+                eprintln!("krusty-lsp: {}: {error}", path.display());
+                return false;
+            }
+        },
+        None => Box::new(std::io::stdout()),
+    };
+
+    let mut queued = plans.into_iter().enumerate().collect::<Vec<_>>();
+    queued.reverse(); // pop() yields the largest module first
+    let mut running = RunningWorkers::new();
+    let mut done = 0usize;
+    let total = queued.len();
+    while !queued.is_empty() || !running.children.is_empty() {
+        while running.children.len() < command.jobs {
+            let Some((index, plan)) = queued.pop() else {
+                break;
+            };
+            let path = scratch.join(format!("plan-{index}.json"));
+            // A module that cannot be planned or started is a RECORDED failure, never a silent
+            // omission: the report's denominator is the number of records, so dropping a module
+            // would make a broken scan look like a better one.
+            if let Err(error) =
+                std::fs::write(&path, serde_json::to_vec(&plan).expect("render plan"))
+            {
+                eprintln!("krusty-lsp: {}: {error}", path.display());
+                done += 1;
+                let line = parity_failure_line(&plan.module, "plan-write-failed", Duration::ZERO);
+                if let Err(error) = write_parity_line(&mut sink, &line) {
+                    eprintln!("krusty-lsp parity: cannot write report: {error}");
+                    return false;
+                }
+                continue;
+            }
+            match std::process::Command::new(&executable)
+                .arg("parity-run")
+                .arg(std::process::id().to_string())
+                .arg(&path)
+                .arg(scratch.join(format!("report-{index}.json")))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(child) => {
+                    running
+                        .children
+                        .push((index, plan.module.clone(), Instant::now(), child))
+                }
+                Err(error) => {
+                    eprintln!("krusty-lsp: cannot start parity worker: {error}");
+                    done += 1;
+                    let line = parity_failure_line(&plan.module, "spawn-failed", Duration::ZERO);
+                    if let Err(error) = write_parity_line(&mut sink, &line) {
+                        eprintln!("krusty-lsp parity: cannot write report: {error}");
+                        return false;
+                    }
+                    // Spawn failures are usually resource exhaustion (EAGAIN/EMFILE), which the
+                    // running children will relieve as they exit. Stop filling slots this pass
+                    // instead of draining the whole queue into failure records.
+                    break;
+                }
+            }
+        }
+        let mut still_running = Vec::new();
+        for (index, module, start, mut child) in running.children.drain(..) {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    done += 1;
+                    let report = scratch.join(format!("report-{index}.json"));
+                    let text = std::fs::read_to_string(&report).unwrap_or_default();
+                    let line = if status.success() && !text.trim().is_empty() {
+                        text.trim().to_string()
+                    } else {
+                        parity_failure_line(&module, &format!("crash ({status})"), start.elapsed())
+                    };
+                    if let Err(error) = write_parity_line(&mut sink, &line) {
+                        eprintln!("krusty-lsp parity: cannot write report: {error}");
+                        return false;
+                    }
+                    let _ = std::fs::remove_file(scratch.join(format!("plan-{index}.json")));
+                    let _ = std::fs::remove_file(&report);
+                    eprint!("\rkrusty-lsp parity: {done}/{total}    ");
+                }
+                Ok(None) if start.elapsed() > command.timeout => {
+                    done += 1;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let line = parity_failure_line(&module, "timeout", start.elapsed());
+                    if let Err(error) = write_parity_line(&mut sink, &line) {
+                        eprintln!("krusty-lsp parity: cannot write report: {error}");
+                        return false;
+                    }
+                    let _ = std::fs::remove_file(scratch.join(format!("plan-{index}.json")));
+                    let _ = std::fs::remove_file(scratch.join(format!("report-{index}.json")));
+                    eprint!("\rkrusty-lsp parity: {done}/{total}    ");
+                }
+                Ok(None) => still_running.push((index, module, start, child)),
+                Err(error) => {
+                    // `Child` has no killing `Drop`: letting it fall out of scope here would leave
+                    // a worker running against a scratch directory this driver is about to delete.
+                    done += 1;
+                    eprintln!("krusty-lsp: {module}: {error}");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let line = parity_failure_line(&module, "wait-failed", start.elapsed());
+                    if let Err(write_error) = write_parity_line(&mut sink, &line) {
+                        eprintln!("krusty-lsp parity: cannot write report: {write_error}");
+                        return false;
+                    }
+                    let _ = std::fs::remove_file(scratch.join(format!("plan-{index}.json")));
+                    let _ = std::fs::remove_file(scratch.join(format!("report-{index}.json")));
+                }
+            }
+        }
+        running.children = still_running;
+        if !running.children.is_empty() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    eprintln!(
+        "\nkrusty-lsp parity: {total} module(s) in {:?}",
+        started.elapsed()
+    );
+    true
+}
+
+/// The record written for a module whose worker never produced one.
+fn parity_failure_line(module: &str, status: &str, elapsed: Duration) -> String {
+    serde_json::json!({
+        "module": module,
+        "status": status,
+        "elapsed_ms": elapsed.as_millis() as u64,
+        "checked_files": 0,
+        "inferred_files": 0,
+        "java_files": 0,
+        "classpath_entries": 0,
+        "truncated": false,
+        "unreadable_files": 0,
+        "unreadable_checked_files": 0,
+        "visible_declarations": [],
+        "java_stub_failed": false,
+        "error_count": 0,
+        "warning_count": 0,
+        "diagnostics": [],
+    })
+    .to_string()
+}
+
+/// `parity-run <parent-pid> <plan.json> [<report.json>]` — analyze exactly one module plan and write
+/// its report.
+///
+/// The report goes to a FILE when the driver names one. A module can produce tens of thousands of
+/// diagnostics; writing those through an inherited pipe deadlocks as soon as the pipe buffer fills,
+/// because the driver only drains a child's output once that child has exited.
+fn run_parity_worker(args: &[String]) {
+    let Some(parent) = args.first().and_then(|value| value.parse::<u32>().ok()) else {
+        eprintln!("usage: parity-run <parent-pid> <plan.json> [<report.json>]");
+        std::process::exit(2);
+    };
+    exit_when_orphaned(parent);
+    let Some(path) = args.get(1) else {
+        eprintln!("usage: parity-run <parent-pid> <plan.json> [<report.json>]");
+        std::process::exit(2);
+    };
+    let text = std::fs::read(path).unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: {path}: {error}");
+        std::process::exit(1);
+    });
+    let plan: krusty_lsp::parity::ModulePlan =
+        serde_json::from_slice(&text).unwrap_or_else(|error| {
+            eprintln!("krusty-lsp: {path}: {error}");
+            std::process::exit(1);
+        });
+    let report = krusty_lsp::parity::run_plan(&plan);
+    let line = serde_json::to_string(&report).expect("render parity report");
+    match args.get(2) {
+        Some(out) => std::fs::write(out, line).unwrap_or_else(|error| {
+            eprintln!("krusty-lsp: {out}: {error}");
+            std::process::exit(1);
+        }),
+        None => println!("{line}"),
+    }
+}
+
 /// Remove the private worker-mode marker and the spawning server's PID from an argument vector.
 ///
 /// The PID is positional and mandatory because this is an internal exec protocol, not a user-facing
@@ -167,6 +735,20 @@ fn main() {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("cache") {
         run_cache_command(&arguments[1..]);
+        return;
+    }
+    if arguments.first().map(String::as_str) == Some("model") {
+        run_model_command(&arguments[1..]);
+        return;
+    }
+    if arguments.first().map(String::as_str) == Some("parity") {
+        if run_parity_command(&arguments[1..]) {
+            return;
+        }
+        std::process::exit(1);
+    }
+    if arguments.first().map(String::as_str) == Some("parity-run") {
+        run_parity_worker(&arguments[1..]);
         return;
     }
     let worker_parent = take_worker_parent(&mut arguments).unwrap_or_else(|error| {
@@ -1730,6 +2312,215 @@ fn fail_project_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parity_scratch_is_unique_and_removed_on_drop() {
+        let first = ParityScratch::create().unwrap();
+        let second = ParityScratch::create().unwrap();
+        let first_path = first.0.clone();
+        let second_path = second.0.clone();
+        assert_ne!(first_path, second_path);
+        assert!(first_path.is_dir());
+        assert!(second_path.is_dir());
+        drop(first);
+        drop(second);
+        assert!(!first_path.exists());
+        assert!(!second_path.exists());
+    }
+
+    #[test]
+    fn model_command_defaults_to_the_current_directory() {
+        let parsed = parse_model_command(&[]).unwrap();
+        assert_eq!(
+            parsed,
+            ModelCommand {
+                root: PathBuf::from("."),
+                out: None,
+                pretty: false,
+            }
+        );
+    }
+
+    #[test]
+    fn model_command_reads_a_root_an_output_file_and_pretty() {
+        let args = ["/repo", "--out", "/tmp/model.json", "--pretty"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parse_model_command(&args).unwrap(),
+            ModelCommand {
+                root: PathBuf::from("/repo"),
+                out: Some(PathBuf::from("/tmp/model.json")),
+                pretty: true,
+            }
+        );
+    }
+
+    #[test]
+    fn model_command_rejects_missing_values_extra_roots_and_unknown_options() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(parse_model_command(&args(&["--out"])).is_err());
+        assert!(parse_model_command(&args(&["/a", "/b"])).is_err());
+        assert!(parse_model_command(&args(&["--unknown"])).is_err());
+    }
+
+    /// A scan must not fan out on its own: this binary is also the editor's language server, so
+    /// extra workers are an explicit request, never a default.
+    #[test]
+    fn a_scan_runs_one_worker_unless_asked_for_more() {
+        assert_eq!(parse_parity_command(&[]).unwrap().jobs, 1);
+        assert_eq!(
+            parse_parity_command(&["--jobs".to_string(), "6".to_string()])
+                .unwrap()
+                .jobs,
+            6
+        );
+    }
+
+    #[test]
+    fn parity_command_reads_every_knob() {
+        let args = [
+            "/repo",
+            "--out",
+            "/tmp/p.jsonl",
+            "--jobs",
+            "3",
+            "--timeout",
+            "45",
+            "--depth",
+            "all",
+            "--tests",
+            "--filter",
+            "platform",
+            "--limit",
+            "7",
+        ]
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+        let parsed = parse_parity_command(&args).unwrap();
+        assert_eq!(parsed.root, PathBuf::from("/repo"));
+        assert_eq!(parsed.out, Some(PathBuf::from("/tmp/p.jsonl")));
+        assert_eq!(parsed.jobs, 3);
+        assert_eq!(parsed.timeout, Duration::from_secs(45));
+        assert_eq!(parsed.depth, krusty_lsp::parity::DependencyDepth::All);
+        assert!(parsed.include_tests);
+        assert_eq!(parsed.filter, "platform");
+        assert_eq!(parsed.limit, Some(7));
+    }
+
+    #[test]
+    fn parity_command_rejects_nonsense() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(parse_parity_command(&args(&["--jobs", "0"])).is_err());
+        assert!(parse_parity_command(&args(&["--jobs", "many"])).is_err());
+        assert!(parse_parity_command(&args(&["--depth", "deep"])).is_err());
+        assert!(parse_parity_command(&args(&["--timeout"])).is_err());
+        assert!(parse_parity_command(&args(&["/a", "/b"])).is_err());
+        assert!(parse_parity_command(&args(&["--nope"])).is_err());
+    }
+
+    /// Every module a scan starts must produce a record, including the ones whose worker never ran:
+    /// the report's denominator is the number of records, so a silently dropped module would make a
+    /// broken scan read as a better one.
+    /// `--limit` must sample the project, not seek out its worst case: it selects before the
+    /// scheduling sort, so a five-module smoke test is five ordinary modules rather than the five
+    /// most expensive ones in the repository.
+    #[test]
+    fn limit_samples_in_project_order_then_schedules_largest_first() {
+        let plan = |module: &str, files: usize| krusty_lsp::parity::ModulePlan {
+            module: module.to_string(),
+            checked: (0..files)
+                .map(|n| PathBuf::from(format!("{module}{n}.kt")))
+                .collect(),
+            ..krusty_lsp::parity::ModulePlan::default()
+        };
+        let plans = vec![
+            plan("small", 1),
+            plan("medium", 5),
+            plan("huge", 900),
+            plan("other", 2),
+        ];
+        let selected = select_plans(plans.clone(), "", Some(2));
+        assert_eq!(
+            selected
+                .iter()
+                .map(|p| p.module.as_str())
+                .collect::<Vec<_>>(),
+            vec!["medium", "small"],
+            "the first two modules in project order, largest of those first"
+        );
+        let filtered = select_plans(plans, "m", None);
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|p| p.module.as_str())
+                .collect::<Vec<_>>(),
+            vec!["medium", "small"],
+            "--filter keeps the modules whose id contains the substring"
+        );
+    }
+
+    #[test]
+    fn a_failure_line_is_a_complete_record() {
+        let line = parity_failure_line("app:main", "spawn-failed", Duration::from_millis(5));
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["module"], "app:main");
+        assert_eq!(value["status"], "spawn-failed");
+        assert_eq!(value["elapsed_ms"], 5);
+        for key in [
+            "checked_files",
+            "inferred_files",
+            "java_files",
+            "classpath_entries",
+            "unreadable_files",
+            "unreadable_checked_files",
+            "error_count",
+            "warning_count",
+        ] {
+            assert_eq!(value[key], 0, "{key} must be present");
+        }
+        assert_eq!(value["truncated"], false);
+        assert_eq!(value["java_stub_failed"], false);
+        assert!(value["visible_declarations"].as_array().unwrap().is_empty());
+        assert!(value["diagnostics"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_scan_walk_skips_directories_that_hold_no_module_sources() {
+        let root = std::env::temp_dir().join(format!("krusty-parity-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for relative in [
+            "src/Keep.kt",
+            "src/Keep.java",
+            "src/notes.txt",
+            "src/testData/Broken.kt",
+            "src/out/Generated.kt",
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "").unwrap();
+        }
+        let mut found = Vec::new();
+        list_sources(&root.join("src"), &mut found);
+        found.sort();
+        assert_eq!(
+            found,
+            vec![root.join("src/Keep.java"), root.join("src/Keep.kt")]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn cache_command_rejects_missing_values_and_unknown_options() {
