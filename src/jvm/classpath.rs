@@ -1008,6 +1008,9 @@ pub struct MetadataCallFacts {
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
     /// Leading context parameters (supplied implicitly by the caller, not positionally).
     pub context_count: usize,
+    /// `@Deprecated(level = HIDDEN)` on the selected declaration: binary-compatibility-only,
+    /// never an overload-resolution candidate (kotlinc removes it from the candidate set).
+    pub deprecated_hidden: bool,
     /// Per DESCRIPTOR parameter position, the VALUE CLASS `@Metadata` declares there when the JVM
     /// descriptor carries its erased underlying (`timeout: kotlin.time.Duration` ↔ `J`).
     ///
@@ -1044,6 +1047,7 @@ impl MetadataCallFacts {
             low_priority: false,
             contract: None,
             context_count: 0,
+            deprecated_hidden: false,
             value_class_params: Vec::new(),
             value_class_ret: None,
         }
@@ -2312,6 +2316,7 @@ impl Classpath {
             low_priority: c.low_priority(),
             contract: c.contract.clone(),
             context_count: c.context_count(),
+            deprecated_hidden: c.deprecated_hidden(),
             value_class_params: value_class_param_types(
                 c,
                 desc_params,

@@ -527,6 +527,11 @@ impl JvmLibraries {
                         .and_then(|t| t.value_underlying)
                 },
             );
+            if meta.deprecated_hidden {
+                // `@Deprecated(level = HIDDEN)`: binary-compatibility-only, kotlinc removes it
+                // from the candidate set entirely.
+                continue;
+            }
             let suspend = meta.suspend;
             // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
             // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
@@ -849,7 +854,8 @@ impl JvmLibraries {
                 .map(|method| InlineKind::from_flags(!method.is_public(), !method.is_public()))
         };
         for function in super::metadata::class_functions(&class) {
-            if function.kotlin_name != name || !function.is_public() {
+            if function.kotlin_name != name || !function.is_public() || function.deprecated_hidden()
+            {
                 continue;
             }
             // A `suspend` member extension appends a `Continuation` parameter and erases its return,
@@ -1509,7 +1515,7 @@ impl JvmLibraries {
         };
         metadata::class_functions(&comp_ci)
             .iter()
-            .filter(|m| m.is_public())
+            .filter(|m| m.is_public() && !m.deprecated_hidden())
             .filter_map(|m| {
                 let descriptor = m.jvm_desc?;
                 let (physical_params, _) = parse_method_desc(descriptor)?;
@@ -1680,6 +1686,7 @@ impl JvmLibraries {
             let declared_methods: Vec<_> = if has_kotlin_metadata {
                 meta_fns
                     .iter()
+                    .filter(|declaration| !declaration.deprecated_hidden())
                     .filter_map(|declaration| {
                         let descriptor = declaration.jvm_desc?;
                         ci.methods
@@ -1691,6 +1698,9 @@ impl JvmLibraries {
                             .map(|method| (method, Some(declaration), None))
                     })
                     .chain(meta_constructors.iter().filter_map(|declaration| {
+                        if declaration.deprecated_hidden {
+                            return None;
+                        }
                         let descriptor = declaration.jvm_desc?;
                         ci.methods
                             .iter()
@@ -2264,8 +2274,13 @@ impl JvmLibraries {
             // marker overloads remain public. Publish every missing declaration here. Its empty opaque
             // emit token says only "the provider has no direct physical method for this declaration";
             // the selected application is paired with the matching physical marker below resolution.
-            for signature in &ctor_param_lists {
-                if signature.types.len() != signature.names.len()
+            for declaration in meta_constructors {
+                // A HIDDEN-deprecated declaration was dropped above; never resurrect it here.
+                // Iterating the declarations directly (rather than the filtered param-list
+                // projection) keeps this loop and the hidden filter from ever disagreeing.
+                let signature = &declaration.params;
+                if declaration.deprecated_hidden
+                    || signature.types.len() != signature.names.len()
                     || signature.types.contains(&Ty::Error)
                     || constructors.iter().any(|constructor| {
                         constructor.params.len() == signature.types.len()
@@ -3980,7 +3995,7 @@ impl JvmLibraries {
                 .lambda_return_overloads(&facade_rendered)
                 .contains(name);
             for mf in self.cp.meta_functions_name(facade).iter() {
-                if mf.kotlin_name != name || !mf.is_extension() {
+                if mf.kotlin_name != name || !mf.is_extension() || mf.deprecated_hidden() {
                     continue;
                 }
                 let raw_receiver = mf.generic_sig.as_ref().and_then(|g| g.receiver);
