@@ -51,13 +51,9 @@ fn companion_of_interface(ir: &IrFile, c: &IrClass) -> bool {
     if !c.is_companion {
         return false;
     }
-    let fq = c.fq_name();
-    let Some((outer, _)) = fq.rsplit_once('$') else {
-        return false;
-    };
     ir.classes
         .iter()
-        .any(|candidate| candidate.is_interface && candidate.fq_name() == outer)
+        .any(|candidate| candidate.is_interface && candidate.companion_class == Some(c.fq_name))
 }
 
 /// [`object_static_storage`] plus the interface-companion case — the storage rule emission keys on.
@@ -2613,6 +2609,15 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
         if fq.ends_with("$$serializer") {
             continue; // handled above (special inner name `$serializer`)
         }
+        if c.is_anonymous_object {
+            cw.add_inner_class(InnerClassSpec {
+                inner: fq,
+                outer: None,
+                name: None,
+                access: 0x0019,
+            });
+            continue;
+        }
         // Where the OUTER class ends is not the last `$`: a backticked declaration may carry `$` in
         // its own simple name (`class \`Nested$With$Dollars\``), and splitting there named an outer
         // class that does not exist — the loader then failed with `NoClassDefFoundError` on the
@@ -2638,8 +2643,7 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
         if c.is_companion {
             continue; // handled above
         }
-        let anonymous_object = c.is_anonymous_object;
-        let anonymous = is_coroutine_state_machine(c) || anonymous_object;
+        let anonymous = is_coroutine_state_machine(c);
         // A LOCAL class is not a member of anything: its name is qualified by the DECLARATION it
         // was written in, so the text before the last `$` names no class. The JVM spells that with
         // `outer_class_info_index = 0` and a non-zero `inner_name_index` — which is also what
@@ -2651,9 +2655,7 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
             inner: fq.clone(),
             outer: member.then(|| fq[..pos].to_string()),
             name: (!anonymous).then(|| name.to_string()),
-            access: if anonymous_object {
-                0x0019
-            } else if anonymous {
+            access: if anonymous {
                 0x0008 | 0x0010
             } else {
                 inner_class_access(ir, c)
@@ -4811,7 +4813,7 @@ fn emit_class(
         let value_param_ctor = ir.has_value_param_ctor(&fq_name);
         let ctor_access = if c.is_singleton() || c.is_value || value_param_ctor || c.is_sealed {
             0x0002
-        } else if is_continuation || anonymous_scope(c).is_some() {
+        } else if is_continuation || c.is_anonymous_object {
             0x0000
         } else {
             match ir.ctor_visibilities.get(&c.fq_name_id()) {
@@ -13989,7 +13991,7 @@ impl<'a> Emitter<'a> {
             // emit a `pop` against an empty stack (`VerifyError: Operand stack underflow`).
             IrExpr::SetExternalStaticField { .. } => Ty::Unit,
             IrExpr::GetStatic(i) => ir_ty_to_jvm(&self.ir.statics[*i as usize].ty),
-            IrExpr::New { internal, .. } => Ty::obj(&internal.render()),
+            IrExpr::New { internal, .. } => Ty::obj_name(*internal),
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.ir.classes[*class as usize].methods[*index as usize];
                 call_ret_ty(&self.ir.functions[fid as usize].ret)
@@ -14050,7 +14052,7 @@ impl<'a> Emitter<'a> {
                 Ty::obj(&self.ir.classes[*class as usize].fq_name())
             }
             IrExpr::StaticInstance { ty, .. } => Ty::obj(&self.ir.classes[*ty as usize].fq_name()),
-            IrExpr::ExternalStaticInstance { ty, .. } => Ty::obj(&ty.render()),
+            IrExpr::ExternalStaticInstance { ty, .. } => Ty::obj_name(*ty),
             IrExpr::ExternalStaticField { descriptor, .. } => {
                 // The static field's JVM type, from its descriptor (an object `L…;` for an `object`'s
                 // INSTANCE; primitives for the rare const-field case).
