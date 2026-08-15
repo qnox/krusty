@@ -492,6 +492,7 @@ struct LateField {
     access: u16,
     name: String,
     desc: String,
+    signature: Option<String>,
     /// The `ConstantValue` payload, interned at realization (`None` for a `<clinit>`-initialized field).
     const_value: Option<crate::ir::IrConst>,
     /// BINARY-retention nullability annotation type descriptor (`Lorg/jetbrains/annotations/NotNull;`).
@@ -784,10 +785,24 @@ impl ClassWriter {
         const_value: Option<crate::ir::IrConst>,
         ann: Option<&str>,
     ) {
+        self.add_field_late_sig(access, name, desc, None, const_value, ann);
+    }
+
+    /// Deferred field declaration with an optional generic `Signature` value.
+    pub fn add_field_late_sig(
+        &mut self,
+        access: u16,
+        name: &str,
+        desc: &str,
+        signature: Option<&str>,
+        const_value: Option<crate::ir::IrConst>,
+        ann: Option<&str>,
+    ) {
         self.late_fields.push(LateField {
             access,
             name: name.to_string(),
             desc: desc.to_string(),
+            signature: signature.map(str::to_string),
             const_value,
             ann: ann.map(str::to_string),
             lead: false,
@@ -801,6 +816,7 @@ impl ClassWriter {
             access,
             name: name.to_string(),
             desc: desc.to_string(),
+            signature: None,
             const_value: None,
             // The `Companion` field is a non-null reference — kotlinc annotates it.
             ann: Some("Lorg/jetbrains/annotations/NotNull;".to_string()),
@@ -816,6 +832,7 @@ impl ClassWriter {
         for lf in std::mem::take(&mut self.late_fields) {
             let n = self.cp.utf8(&lf.name);
             let d = self.cp.utf8(&lf.desc);
+            let signature = lf.signature.as_ref().map(|value| self.cp.utf8(value));
             let cv = lf.const_value.as_ref().and_then(|c| {
                 use crate::ir::IrConst;
                 Some(match c {
@@ -843,7 +860,7 @@ impl ClassWriter {
                 access: lf.access,
                 name: n,
                 desc: d,
-                signature: None,
+                signature,
                 const_value: cv,
                 visible_anns: Vec::new(),
                 invisible_anns,

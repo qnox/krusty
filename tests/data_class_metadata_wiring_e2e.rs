@@ -110,7 +110,7 @@ fn class_with_property_and_method_is_byte_identical() {
 #[test]
 fn class_methods_and_plain_property_interleave_byte_identically() {
     assert_byte_identical(
-        "package demo\nclass C {\n    fun before(): Int = 1\n    val value: Int = 2\n    fun after(): Int = value\n}\n",
+        "package demo\nclass C {\n    fun before(): Int = 1\n    var value: String = \"x\"\n    fun after(): Int = value.length\n}\n",
         "demo/C",
         &[],
     );

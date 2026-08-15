@@ -3816,6 +3816,8 @@ fn emit_declared_property_accessor(
                 "access${}$p",
                 crate::names::property_getter_name(&property.name)
             );
+            let bridge_getter_desc = format!("(L{fq_name};){accessor_desc}");
+            cw.reserve_method_pool(&name, &bridge_getter_desc, None, &[]);
             let mut g = CodeBuilder::new(1);
             g.aload(0);
             // A property that declares its own getter must be read THROUGH it — the bridge exists to
@@ -3846,10 +3848,16 @@ fn emit_declared_property_accessor(
             cw.add_method(
                 0x1009, /* PUBLIC | STATIC | SYNTHETIC */
                 &name,
-                &format!("(L{fq_name};){accessor_desc}"),
+                &bridge_getter_desc,
                 &g,
             );
             if property.is_var {
+                let setter_name = format!(
+                    "access${}$p",
+                    crate::names::property_setter_name(&property.name)
+                );
+                let bridge_setter_desc = format!("(L{fq_name};{accessor_desc})V");
+                cw.reserve_method_pool(&setter_name, &bridge_setter_desc, None, &[]);
                 let words = slot_words(accessor_jt);
                 let mut st = CodeBuilder::new(1 + words);
                 st.aload(0);
@@ -3878,15 +3886,7 @@ fn emit_declared_property_accessor(
                 st.ret_void();
                 st.ensure_locals(1 + words);
                 st.link();
-                cw.add_method(
-                    0x1009,
-                    &format!(
-                        "access${}$p",
-                        crate::names::property_setter_name(&property.name)
-                    ),
-                    &format!("(L{fq_name};{accessor_desc})V"),
-                    &st,
-                );
+                cw.add_method(0x1009, &setter_name, &bridge_setter_desc, &st);
             }
         }
     }
@@ -3919,7 +3919,29 @@ fn emit_declared_property_accessor(
                 && method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)) == descriptor
         })
     };
-    if !occupied(&getter, &format!("(){accessor_desc}")) {
+    let getter_desc = format!("(){accessor_desc}");
+    if !occupied(&getter, &getter_desc) {
+        // Visit the method header before constructing its code. This is especially observable for a
+        // setter guard (`<set-?>`) and for a generic accessor Signature.
+        let sig = ir
+            .field_signatures(fq_name)
+            .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
+            .map(|(_, tp)| format!("()T{tp};"))
+            .or_else(|| field.type_param.as_ref().map(|tp| format!("()T{tp};")))
+            .or_else(|| method_parameterized_sig(formatter, &[], &field.ty));
+        let getter_ann = (accessor_jt.is_reference() && field.type_param.is_none()).then(|| {
+            if property.ty.is_nullable() {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
+        cw.reserve_method_pool(
+            &getter,
+            &getter_desc,
+            sig.as_deref(),
+            &getter_ann.into_iter().collect::<Vec<_>>(),
+        );
         let mut g = CodeBuilder::new(1);
         let physical_name = instance_field_jvm_name(ir, c, field);
         let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
@@ -3956,30 +3978,37 @@ fn emit_declared_property_accessor(
         g.ensure_locals(1);
         g.link();
         let access = if overridable { 0x0001 } else { 0x0011 };
-        // The accessor keeps the property's generic `Signature`, which the erased descriptor drops:
-        // a bare type parameter (`val a: A` → `()TA;`) or a parameterized concrete type
-        // (`val xs: List<String>` → `()Ljava/util/List<Ljava/lang/String;>;`). Same two sources the
-        // backing field's own signature uses, so the two agree.
-        let sig = ir
-            .field_signatures(fq_name)
-            .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
-            .map(|(_, tp)| format!("()T{tp};"))
-            .or_else(|| field.type_param.as_ref().map(|tp| format!("()T{tp};")))
-            .or_else(|| method_parameterized_sig(formatter, &[], &field.ty));
-        cw.add_method_sig(
-            access,
-            &getter,
-            &format!("(){accessor_desc}"),
-            &g,
-            sig.as_deref(),
-        );
+        cw.add_method_sig(access, &getter, &getter_desc, &g, sig.as_deref());
     }
     if property.is_var {
         let setter = property
             .setter_jvm_name
             .clone()
             .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
-        if !occupied(&setter, &format!("({accessor_desc})V")) {
+        let setter_desc = format!("({accessor_desc})V");
+        if !occupied(&setter, &setter_desc) {
+            let sig = ir
+                .field_signatures(fq_name)
+                .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
+                .map(|(_, tp)| format!("(T{tp};)V"))
+                .or_else(|| field.type_param.as_ref().map(|tp| format!("(T{tp};)V")))
+                .or_else(|| {
+                    method_parameterized_sig(formatter, std::slice::from_ref(&field.ty), &Ty::Unit)
+                });
+            let setter_ann =
+                (accessor_jt.is_reference() && field.type_param.is_none()).then(|| {
+                    if property.ty.is_nullable() {
+                        "Lorg/jetbrains/annotations/Nullable;"
+                    } else {
+                        "Lorg/jetbrains/annotations/NotNull;"
+                    }
+                });
+            cw.reserve_method_pool(
+                &setter,
+                &setter_desc,
+                sig.as_deref(),
+                &setter_ann.into_iter().collect::<Vec<_>>(),
+            );
             let words = slot_words(accessor_jt);
             let mut st = CodeBuilder::new(1 + words);
             // kotlinc guards a non-null REFERENCE setter parameter, naming it `<set-?>`. A primitive
@@ -4022,21 +4051,7 @@ fn emit_declared_property_accessor(
             } else {
                 0x0011 // PUBLIC | FINAL
             };
-            let sig = ir
-                .field_signatures(fq_name)
-                .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
-                .map(|(_, tp)| format!("(T{tp};)V"))
-                .or_else(|| field.type_param.as_ref().map(|tp| format!("(T{tp};)V")))
-                .or_else(|| {
-                    method_parameterized_sig(formatter, std::slice::from_ref(&field.ty), &Ty::Unit)
-                });
-            cw.add_method_sig(
-                access,
-                &setter,
-                &format!("({accessor_desc})V"),
-                &st,
-                sig.as_deref(),
-            );
+            cw.add_method_sig(access, &setter, &setter_desc, &st, sig.as_deref());
         }
     }
 }
@@ -4303,7 +4318,24 @@ fn emit_class(
             .map(|(_, tp)| format!("T{tp};"))
             .or_else(|| parameterized_sig(&signature_formatter, ty));
         let physical_name = instance_field_jvm_name(ir, c, field);
-        cw.add_field_sig(acc, &physical_name, &ir_type_desc(ty), field_sig.as_deref());
+        let field_desc = ir_type_desc(ty);
+        let field_ann = ((field_desc.starts_with('L') || field_desc.starts_with('['))
+            && field.type_param.is_none())
+        .then(|| {
+            if ty.is_nullable() {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
+        cw.add_field_late_sig(
+            acc,
+            &physical_name,
+            &field_desc,
+            field_sig.as_deref(),
+            None,
+            field_ann,
+        );
     }
     // A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
     // `ConstantValue` fields (kotlinc's layout); they have no `<clinit>` store (the JVM initializes them).
