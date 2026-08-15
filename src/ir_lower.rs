@@ -15467,6 +15467,13 @@ impl<'a> Lower<'a> {
                 self.info.resolved_sam_conversions.contains_key(&arg)
             );
         }
+        // The frontend has already established that this `null` is assignable to the nullable target.
+        // Preserve it before function/SAM adaptation: a nullable suspend-function type becomes a
+        // non-null `Ty::Fun(suspend)` for shape inspection below, but `null` is not a function value
+        // that needs a suspend adapter.
+        if matches!(self.afile.expr(arg), Expr::NullLit) {
+            return self.expr(arg);
+        }
         // A lambda flowing into a CLASSPATH suspend-lambda parameter (`runBlocking { … }` and the other
         // coroutine builders). The JVM descriptor erases the parameter to a bare `FunctionN`, so neither the
         // target nor the checked argument type carries `suspend = true`; the STRUCTURAL marker is a trailing
