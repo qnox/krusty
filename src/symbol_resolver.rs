@@ -4891,7 +4891,7 @@ impl<'a> SymbolResolver<'a> {
     /// fact — an `inline` function has no `$default` synthetic (kotlinc materializes defaults by inlining),
     /// so it becomes a MUST-INLINE splice; a non-`inline` one binds the `name$default` synthetic (the
     /// backend appends placeholders + a bit-mask).
-    fn build_extension_callable(
+    pub(crate) fn build_extension_callable(
         &self,
         name: &str,
         receiver: Ty,

@@ -364,7 +364,8 @@ fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
         0
     };
     // `isOperator` (bit 8) — only `@Metadata` carries it; without it a consumer rejects the
-    // conventional call form (`recv(args)`, `a[i]`) with "expression is not callable".
+    // conventional call form (`recv(args)`, `a[i]`) with "expression is not callable", and
+    // convention resolution (`getValue`/`provideDelegate`/`invoke`) cannot filter on it.
     let operator: u64 = if ir.operator_fns.contains(&fid) {
         1 << 8
     } else {
@@ -584,7 +585,14 @@ fn build_class_metadata(
     };
     // The only methods allowed in this bounded shape are the properties' own accessors (`getX`/`setX`)
     // plus a data class's synthesized set; any other real method is a shape not computed yet.
-    let accessor_names: std::collections::HashSet<String> = c
+    // Accessor spellings are matched by name AND shape below, so the getter and setter names stay
+    // in separate sets: a declared `operator fun getValue(thisRef, prop)` shares the JVM getter
+    // name of a property called `value` but takes parameters no getter has — swallowing it by name
+    // alone dropped its Function record from `@Metadata`, and a consumer could then not resolve
+    // the delegate operator.
+    let mut getter_names = std::collections::HashSet::new();
+    let mut setter_names = std::collections::HashSet::new();
+    for name in c
         .fields
         .iter()
         .map(|f| f.name.as_str())
@@ -599,11 +607,11 @@ fn build_class_metadata(
                 })
                 .map(|(_, p)| p.name.as_str()),
         )
-        .flat_map(|name| {
-            let (getter, setter) = accessor_jvm_names(c, name);
-            [getter, setter]
-        })
-        .collect();
+    {
+        let (getter, setter) = accessor_jvm_names(c, name);
+        getter_names.insert(getter);
+        setter_names.insert(setter);
+    }
     // Member-extension-PROPERTY accessors are described as `Property` records (below), never as
     // functions — kotlinc emits no `Function` record for `getDoubled` of `val Int.doubled`.
     let ext_prop_accessor_fids: std::collections::HashSet<u32> = ir
@@ -626,10 +634,11 @@ fn build_class_metadata(
             if ext_prop_accessor_fids.contains(&fid) {
                 return false;
             }
-            let n = &ir.functions[fid as usize].name;
-            !accessor_names.contains(n)
-                && !data_method_names.contains(n)
-                && !value_method_names.contains(n)
+            let function = &ir.functions[fid as usize];
+            let n = &function.name;
+            let accessor_shaped = (getter_names.contains(n) && function.params.is_empty())
+                || (setter_names.contains(n) && function.params.len() == 1);
+            !accessor_shaped && !data_method_names.contains(n) && !value_method_names.contains(n)
         })
         .collect();
     declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));

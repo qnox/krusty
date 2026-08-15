@@ -113,8 +113,8 @@ impl<'a> ModuleSymbols<'a> {
             // inference, so this temporary header cannot outlive the immutable table snapshot.
             .or_else(|| {
                 self.syms
-                    .has_source_class_header(internal)
-                    .then(|| std::sync::Arc::new(LibraryType::declaration_header()))
+                    .source_class_header_shape(internal)
+                    .map(std::sync::Arc::new)
             });
         if self.syms.module_cache_enabled() {
             self.syms
