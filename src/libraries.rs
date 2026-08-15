@@ -55,12 +55,6 @@ pub struct ClassifierInheritance {
     pub is_abstract: bool,
     pub is_extensible: bool,
     pub has_no_arg_constructor: bool,
-    pub supports_external_subclassing: bool,
-    /// The provider can realize a source override for each normalized abstract obligation even
-    /// though the classifier is not directly subclassable without such overrides. This is a
-    /// declaration capability, not an origin check: providers derive it from their normalized
-    /// callable records and exact physical realizations.
-    pub supports_external_abstract_overrides: bool,
 }
 
 impl Default for ClassifierInheritance {
@@ -69,8 +63,6 @@ impl Default for ClassifierInheritance {
             is_abstract: false,
             is_extensible: false,
             has_no_arg_constructor: true,
-            supports_external_subclassing: false,
-            supports_external_abstract_overrides: false,
         }
     }
 }
@@ -630,13 +622,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// The reified type-parameter formal NAMES a compiled generic signature declares, in order. The
     /// source parses its own metadata/signature format; consumers bind names without parsing backend text.
     fn signature_formal_names(&self, _signature: &str) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// The still-unimplemented abstract instance methods a subclass of `internal` must override,
-    /// as `(name, descriptor)` — nearest declaration in the super chain wins, so a mid-hierarchy
-    /// implementation discharges the obligation. Empty when the classifier is unknown or concrete.
-    fn abstract_obligations(&self, _internal: TypeName) -> Vec<(String, String)> {
         Vec::new()
     }
 

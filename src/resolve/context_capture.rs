@@ -10,6 +10,7 @@ use crate::types::Ty;
 /// owns `body`. Direct implicit receivers stay separate because their receiver coordinates still
 /// include that callable's own receiver rungs; sources used through nested callables have those
 /// nested bindings and receiver rungs removed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn selected_context_values(
     file: &File,
     expr_types: &[Ty],

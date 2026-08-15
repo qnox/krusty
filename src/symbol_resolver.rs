@@ -2280,23 +2280,7 @@ pub(crate) fn specialized_member_params(
     args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    // A `suspend` member's generic signature carries the trailing `Continuation` that its LOGICAL
-    // parameter list drops. Trim it so the two align — otherwise specialization bails on the length
-    // check and every lambda argument of a suspend member loses its expected shape.
-    let trimmed;
-    let generic_sig = match member.generic_sig.as_ref() {
-        Some(signature)
-            if member.suspend() && signature.params.len() == member.params.len() + 1 =>
-        {
-            trimmed = GenericSig {
-                params: signature.params[..member.params.len()].to_vec(),
-                ..signature.clone()
-            };
-            Some(&trimmed)
-        }
-        signature => signature,
-    };
-    specialized_params(&member.params, generic_sig, args, type_args)
+    specialized_params(&member.params, member.generic_sig.as_ref(), args, type_args)
 }
 
 fn specialized_params(
