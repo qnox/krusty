@@ -518,6 +518,8 @@ mod for_iterable_elvis_e2e;
 mod for_typed_loop_var_e2e;
 #[path = "fq_ctor_call_e2e.rs"]
 mod fq_ctor_call_e2e;
+#[path = "fq_generic_ctor_property_inference_e2e.rs"]
+mod fq_generic_ctor_property_inference_e2e;
 #[path = "fq_source_typeref_e2e.rs"]
 mod fq_source_typeref_e2e;
 #[path = "fq_static_call_e2e.rs"]
