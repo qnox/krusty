@@ -254,6 +254,7 @@ pub struct JvmBackend {
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
     /// Class-file major version to emit (`-jvm-target`), or `None` for krusty's default (v52).
     class_major: Option<u16>,
+    jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 }
 
 impl JvmBackend {
@@ -261,10 +262,17 @@ impl JvmBackend {
         JvmBackend {
             cp,
             class_major: None,
+            jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
         }
     }
 
     /// Set the class-file version subsequent emits target (from the CLI's `-jvm-target`).
+    /// `-jvm-default`: which JVM shape an interface's members with bodies are compiled into.
+    pub fn with_jvm_default(mut self, mode: crate::jvm::ir_emit::JvmDefaultMode) -> JvmBackend {
+        self.jvm_default = mode;
+        self
+    }
+
     pub fn with_class_major(mut self, major: Option<u16>) -> JvmBackend {
         self.class_major = major;
         self
@@ -306,6 +314,7 @@ pub fn shipping_emit_options(
         // kotlinc declines individually and emits nothing, so this cannot write an unverified
         // payload. `KRUSTY_NO_CLASS_METADATA` restores the facade-only output for bisecting.
         emit_class_metadata: std::env::var_os("KRUSTY_NO_CLASS_METADATA").is_none(),
+        jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
         inner_class_resolver: Some(classpath_inner_class_resolver(cp)),
     }
 }
@@ -428,7 +437,8 @@ impl Backend for JvmBackend {
         let syms = checked.symbols;
         let module_name = checked.module_name;
 
-        let emit_opts = shipping_emit_options(stem, module_name, self.class_major, self.cp.clone());
+        let emit_opts = shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
+            .with_jvm_default(self.jvm_default);
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)

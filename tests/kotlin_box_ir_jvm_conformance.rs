@@ -309,7 +309,10 @@ fn compile_source(
     let metadata = krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir);
     // Consume the same complete option set as the CLI. Keeping a local partial literal here once
     // allowed the conformance artifact to diverge whenever the shipping defaults gained a field.
-    let opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone());
+    // Compile under the `-jvm-default` mode the test pins. Emitting krusty's default shape for a
+    // test that asked for another one grades the wrong artifact: the class set itself differs.
+    let opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone())
+        .with_jvm_default(krusty::conformance::jvm_default_mode(src));
     let run = ir_emit::EmitRun::default();
     progress("emit");
     let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all_with_opts(
@@ -616,7 +619,8 @@ fn compile_blocks(
         // filename fields; the shared constructor also reduces a logical nested source path to the
         // simple `SourceFile` name required by the class-file attribute.
         let opts =
-            krusty::jvm::backend::shipping_emit_options(&blocks[i].0, "main", None, cp.clone());
+            krusty::jvm::backend::shipping_emit_options(&blocks[i].0, "main", None, cp.clone())
+                .with_jvm_default(krusty::conformance::jvm_default_mode(&blocks[i].1));
         let run = ir_emit::EmitRun::default();
         report("module emit");
         let out =

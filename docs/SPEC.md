@@ -1228,6 +1228,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   subtract the member-extension receiver from the bit index the same way. Not yet modeled (such
   files are skipped, never miscompiled): interface defaults (kotlinc routes them through
   `$DefaultImpls`) and >31 parameters (kotlinc's multi-`int` mask).
+- `-jvm-default` (interface members with bodies): kotlinc offers three JVM realizations of the same
+  Kotlin source, and the flag changes the CLASS SET, not just method bodies. Measured against
+  kotlinc 2.4.10 on an interface with a default getter, a default method, a defaulted parameter and
+  an abstract method:
+  * `enable` (kotlinc's own default since 2.2; legacy `-Xjvm-default=all-compatibility`) — default
+    methods on the interface plus synthetic `access$<name>$jd` bridges; an `<Iface>$DefaultImpls`
+    holder whose statics forward to those bridges; forwarder overrides on every implementing class;
+    `@Metadata` `jvmClassFlags` (`Class` extension field 104) = 3.
+  * `no-compatibility` (legacy `-Xjvm-default=all`, what intellij-community builds with) — default
+    methods only. NO `$DefaultImpls` class anywhere, no class forwarders, `jvmClassFlags` = 1, and a
+    compiler-version requirement for 1.4.0 in the class metadata.
+  * `disable` — every interface member abstract, the real bodies on `$DefaultImpls` as statics taking
+    the receiver as parameter 0, implementing classes forwarding with `invokestatic`, and no
+    `jvmClassFlags` field at all.
+
+  krusty emits `no-compatibility` faithfully and refuses `disable` at the CLI: emitting the `enable`
+  shape while stamping `disable` into `@Metadata` would make a consumer route every call through a
+  `$DefaultImpls` method that was never emitted (`NoSuchMethodError` at run time), which is strictly
+  worse than declining the option. `enable` remains krusty's default but is not yet byte-parity — it
+  emits the holder only for a member with default parameter values, and none of the `access$…$jd`
+  bridges or class forwarders. The box corpus compiles each test under the mode its
+  `// JVM_DEFAULT_MODE:` directive pins; only `disable` is still skipped
+  (`conformance::needs_unmodeled_jvm_default_mode`). Tests: `tests/jvm_default_mode_e2e.rs`
+  (differential class sets and public method realization vs kotlinc, emitted `jvmClassFlags`, the
+  1.4.0 requirement, behavior parity, and refusal without output) and the `-jvm-default` parsing
+  tests in `crates/krusty-cli/src/cli.rs`.
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

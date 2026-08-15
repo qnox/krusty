@@ -180,6 +180,87 @@ fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
         || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedSuspendLambda")
 }
 
+/// kotlinc's `-jvm-default` strategy for interface members with bodies — which of the three JVM
+/// shapes an interface is compiled into.
+///
+/// Measured against kotlinc 2.4.10 on an interface with a default method, a default property getter,
+/// and a method with a default parameter value:
+///
+/// | | interface members | `$DefaultImpls` | implementing class | `jvmClassFlags` |
+/// |---|---|---|---|---|
+/// | `Enable` | default methods + `access$…$jd` bridges | forwarders to those bridges | forwarder overrides (`invokespecial`) | 3 |
+/// | `NoCompatibility` | default methods | absent | nothing | 1 |
+/// | `Disable` | all abstract | the real bodies, receiver as parameter 0 | forwarders (`invokestatic`) | absent |
+///
+/// What krusty EMITS today is narrower than that table, which describes kotlinc:
+///   * `NoCompatibility` matches — default methods on the interface, no holder, no class forwarders.
+///   * `Enable` emits the holder ONLY for a member with default parameter values (its `$default`
+///     stub). kotlinc also puts a forwarder there for every other member with a body, emits the
+///     `access$…$jd` bridges, and gives implementing classes forwarder overrides. That gap predates
+///     `-jvm-default` support and is why `Enable` is not yet claimed as byte-parity.
+///   * `Disable` has no emitter at all, so the CLI refuses the value rather than compiling a
+///     different shape than the build asked for (see [`JvmDefaultMode::is_modelled`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JvmDefaultMode {
+    /// kotlinc's own default since 2.2 (legacy spelling `-Xjvm-default=all-compatibility`): default
+    /// methods on the interface AND a `$DefaultImpls` compatibility copy.
+    #[default]
+    Enable,
+    /// Legacy spelling `-Xjvm-default=all`. Default methods only — no `$DefaultImpls` anywhere, and
+    /// no forwarders on implementing classes. What intellij-community builds with.
+    NoCompatibility,
+    /// Legacy spelling `-Xjvm-default=disable`. No default methods at all: the interface is fully
+    /// abstract and every body lives on `$DefaultImpls` as a static taking the receiver.
+    Disable,
+}
+
+impl JvmDefaultMode {
+    /// Parse a `-jvm-default` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "enable" => Some(Self::Enable),
+            "no-compatibility" => Some(Self::NoCompatibility),
+            "disable" => Some(Self::Disable),
+            _ => None,
+        }
+    }
+
+    /// Parse a legacy `-Xjvm-default` value, whose names denote the SAME three shapes under
+    /// different spellings. Getting this mapping backwards is silent: `all` reads as a plausible
+    /// "enable" and then emits a `$DefaultImpls` class the build deliberately does not have.
+    pub fn parse_legacy(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::NoCompatibility),
+            "all-compatibility" => Some(Self::Enable),
+            "disable" => Some(Self::Disable),
+            _ => None,
+        }
+    }
+
+    /// Whether krusty EMITS this mode, as opposed to merely naming it.
+    ///
+    /// `Disable` is named here because the conformance corpus pins it and the metadata flags are
+    /// known, but no emitter produces its shape. A caller that accepted `-jvm-default=disable` and
+    /// compiled anyway would publish `enable` bytecode carrying `disable` metadata: a consumer reads
+    /// the metadata, emits `invokestatic I$DefaultImpls.f(I)` at every call site, and fails at run
+    /// time with `NoSuchMethodError` against a holder that has no such method. Refusing the value is
+    /// the only honest option until the shape is implemented.
+    pub fn is_modelled(self) -> bool {
+        matches!(self, Self::Enable | Self::NoCompatibility)
+    }
+
+    /// The `jvmClassFlags` (`Class` JvmProtoBuf extension field 104) an interface carries under this
+    /// mode: bit 0 `hasMethodBodiesInInterface`, bit 1 `isCompiledInCompatibilityMode`. `Disable`
+    /// sets neither, and kotlinc then omits the field entirely.
+    pub fn interface_jvm_class_flags(self) -> Option<u64> {
+        match self {
+            Self::Enable => Some(3),
+            Self::NoCompatibility => Some(1),
+            Self::Disable => None,
+        }
+    }
+}
+
 /// Per-file emission configuration passed explicitly down the emit callgraph and stamped onto every
 /// `ClassWriter` (via [`new_writer`]) so synthetic serializer/companion/DefaultImpls classes inherit
 /// it too. The `Default` is v52 with no `SourceFile`; every path that claims to emit the bytes krusty
@@ -207,7 +288,20 @@ pub struct EmitOptions {
     /// shipping constructor consults, for bisecting) or constructs `EmitOptions` explicitly with this
     /// field `false`.
     pub emit_class_metadata: bool,
+    /// `-jvm-default`: the JVM shape of interface members with bodies. Not part of
+    /// [`crate::jvm::backend::shipping_emit_options`]'s parameters because it is a per-INVOCATION
+    /// compiler option rather than per-file configuration; the backend applies it with
+    /// [`EmitOptions::with_jvm_default`].
+    pub jvm_default: JvmDefaultMode,
     pub inner_class_resolver: Option<InnerClassResolver>,
+}
+
+impl EmitOptions {
+    /// Select the `-jvm-default` mode, keeping every other field as configured.
+    pub fn with_jvm_default(mut self, mode: JvmDefaultMode) -> Self {
+        self.jvm_default = mode;
+        self
+    }
 }
 
 impl Default for EmitOptions {
@@ -217,6 +311,7 @@ impl Default for EmitOptions {
             source_file: None,
             module_name: None,
             emit_class_metadata: true,
+            jvm_default: JvmDefaultMode::Enable,
             inner_class_resolver: None,
         }
     }
@@ -1530,7 +1625,19 @@ fn build_class_metadata(
             // without a declared constructor still records the implicit private `(String, I)` one.
             emit_primary_ctor: !c.is_interface
                 && (c.has_primary_ctor || c.secondary_ctors.is_empty()),
-            jvm_class_flags: c.is_interface.then_some(3),
+            // `jvmClassFlags` describes the interface SHAPE this compilation produced, so it tracks
+            // `-jvm-default` exactly: a consumer reads it to know whether method bodies live on the
+            // interface and whether a `$DefaultImpls` compatibility copy exists.
+            jvm_class_flags: c
+                .is_interface
+                .then(|| opts.jvm_default.interface_jvm_class_flags())
+                .flatten(),
+            // Kotlin 1.4 introduced JVM default methods without compatibility holders. Older
+            // consumers must reject this metadata instead of assuming the legacy `$DefaultImpls`
+            // realization, so kotlinc attaches a compiler-version requirement to every interface.
+            compiler_version_requirement: (c.is_interface
+                && opts.jvm_default == JvmDefaultMode::NoCompatibility)
+                .then_some((1, 4, 0)),
             // A class with a companion records its simple name (`Class.companionObjectName`, f4) —
             // the consumer resolves `C.member` through it.
             companion: c
@@ -7061,6 +7168,8 @@ fn emit_interface_class(
     );
     register_inner_classes(&mut cw, ir);
     let mut default_impls: Option<ClassWriter> = None;
+    // Whether this compilation publishes the `<Iface>$DefaultImpls` compatibility holder at all.
+    let emits_default_impls = opts.jvm_default != JvmDefaultMode::NoCompatibility;
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
@@ -7115,16 +7224,22 @@ fn emit_interface_class(
         // An interface method with default parameters gets a STATIC `<name>$default(iface, params…, mask,
         // marker)` (the JVM realization of interface default args) — it applies the defaults then dispatches
         // to the abstract method via `invokeinterface`. kotlinc emits it ON THE INTERFACE (call sites use
-        // it) AND a compatibility copy on the `<Iface>$DefaultImpls` holder class (`public final`).
+        // it) AND, under a mode that keeps the compatibility holder, a copy on the
+        // `<Iface>$DefaultImpls` class (`public final`).
         if let Some(defaults) = ir.param_defaults(fid) {
             emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, true);
-            let di = default_impls.get_or_insert_with(|| {
-                let mut w =
-                    new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                w
-            });
-            emit_default_stub(ir, fid, &fq_name, facade, di, defaults, env, true);
+            // `-jvm-default=no-compatibility` emits NO `$DefaultImpls` at all. Emitting one anyway
+            // would publish a holder class the build says does not exist — a downstream compilation
+            // resolving against it links to a class kotlinc would never have produced.
+            if emits_default_impls {
+                let di = default_impls.get_or_insert_with(|| {
+                    let mut w =
+                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
+                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
+                    w
+                });
+                emit_default_stub(ir, fid, &fq_name, facade, di, defaults, env, true);
+            }
         }
     }
     if let Some(di) = default_impls {
