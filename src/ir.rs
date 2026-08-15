@@ -1011,6 +1011,44 @@ pub struct FieldAnnotations {
     pub invisible: Vec<AppliedAnnotation>,
 }
 
+/// User annotations on one function, split by JVM retention (see [`FieldAnnotations`], the
+/// property-field analogue). A HIDDEN-deprecated declaration is identified from these records
+/// rather than a separate flag: the annotation IS the fact.
+#[derive(Clone, Debug, Default)]
+pub struct FnAnnotations {
+    pub visible: Vec<AppliedAnnotation>,
+    pub invisible: Vec<AppliedAnnotation>,
+}
+
+impl FnAnnotations {
+    /// Whether these annotations include `@kotlin.Deprecated` at any level. kotlinc additionally
+    /// stamps the classic `Deprecated` class-file attribute on such a declaration, beside the
+    /// annotation itself.
+    pub fn deprecated(&self) -> bool {
+        self.visible
+            .iter()
+            .chain(&self.invisible)
+            .any(|annotation| annotation.internal.matches("kotlin/Deprecated"))
+    }
+
+    /// Whether these annotations include `@kotlin.Deprecated(level = DeprecationLevel.HIDDEN)`.
+    /// kotlinc removes such a declaration from resolution and emits its realization
+    /// `ACC_SYNTHETIC`; both facts follow from this one annotation.
+    pub fn deprecated_hidden(&self) -> bool {
+        self.visible
+            .iter()
+            .chain(&self.invisible)
+            .any(|annotation| {
+                annotation.internal.matches("kotlin/Deprecated")
+                    && annotation.values.iter().any(|(name, value)| {
+                        name == "level"
+                            && matches!(value, AnnoValue::Enum(ty, constant)
+                            if ty.matches("kotlin/DeprecationLevel") && constant == "HIDDEN")
+                    })
+            })
+    }
+}
+
 /// An applied annotation (`@Anno(...)`) to encode into a `RuntimeVisibleAnnotations` attribute.
 #[derive(Clone, Debug)]
 pub struct AppliedAnnotation {
@@ -1369,6 +1407,12 @@ pub struct IrFile {
     /// index is stable within its declaring class; backend consumers must not recover this edge by
     /// matching the property's spelling against a static field name.
     jvm_companion_property_statics: std::collections::HashMap<(TypeName, u32), u32>,
+    /// User annotations applied to FUNCTIONS (top-level and members share the `functions` arena),
+    /// by function id, split by JVM retention: RUNTIME → `RuntimeVisibleAnnotations`, BINARY →
+    /// `RuntimeInvisibleAnnotations`. A side table rather than a field on [`IrFunction`], for the
+    /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
+    /// carry none, and every synthesized function stays constructible without naming them.
+    pub function_annotations: std::collections::HashMap<u32, FnAnnotations>,
     pub exprs: Vec<IrExpr>,
     /// Exact `SetField` expression identities that realize a source property declaration's
     /// initializer. A later assignment can target the same field with the same value, so backend

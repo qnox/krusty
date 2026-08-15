@@ -1495,6 +1495,10 @@ fn lower_file_at_reporting_impl(
                     Ok(None) => {}
                     Err(reason) => return lo.bail(reason),
                 }
+                let annotations = fn_applied_annotations(file, file_index, syms, m, &lo.ir);
+                if !annotations.visible.is_empty() || !annotations.invisible.is_empty() {
+                    lo.ir.function_annotations.insert(fid, annotations);
+                }
                 methods
                     .entry(m.name.clone())
                     .or_default()
@@ -2314,6 +2318,10 @@ fn lower_file_at_reporting_impl(
                     dispatch_receiver: None,
                     param_checks,
                 });
+                let annotations = fn_applied_annotations(file, file_index, syms, f, &lo.ir);
+                if !annotations.visible.is_empty() || !annotations.invisible.is_empty() {
+                    lo.ir.function_annotations.insert(id, annotations);
+                }
                 lo.ext_fun_id_by_sig
                     .insert((recv_key, f.name.clone(), sig.params.clone()), id);
                 lo.ext_fun_ids
@@ -2396,6 +2404,10 @@ fn lower_file_at_reporting_impl(
                     dispatch_receiver: None,
                     param_checks,
                 });
+                let annotations = fn_applied_annotations(file, file_index, syms, f, &lo.ir);
+                if !annotations.visible.is_empty() || !annotations.invisible.is_empty() {
+                    lo.ir.function_annotations.insert(id, annotations);
+                }
                 lo.fun_ids.insert((f.name.clone(), sig.params.clone()), id);
                 lo.fun_ids_by_decl.insert(d, id);
                 lo.ir.top_level_function_fids.insert(d.0, id);
@@ -27459,12 +27471,18 @@ fn runtime_annotation_decl<'a>(
 
 /// Fold an annotation argument expression to an encodable `AnnoValue` (JVMS §4.7.16.1), or `None` for a
 /// shape not modeled — in which case the whole annotation is dropped (never emitted with a wrong value).
+/// Fold one annotation argument to its class-file `element_value`. `element_ty` is the DECLARED
+/// type of the element this value binds to, when known: an enum constant's own type. A classpath
+/// enum (`DeprecationLevel.HIDDEN`) has no declaration in this file to look up, and its receiver
+/// spelling may be an import alias — the element type names the enum directly, so no name
+/// resolution is needed or attempted.
 fn eval_anno_value(
     file: &ast::File,
     _file_index: u32,
     _syms: &FrontendSymbols,
     _ir: &crate::ir::IrFile,
     e: AstExprId,
+    element_ty: Option<Ty>,
 ) -> Option<crate::ir::AnnoValue> {
     use crate::ir::{AnnoValue, IrConst};
     Some(match file.expr(e) {
@@ -27480,9 +27498,21 @@ fn eval_anno_value(
             let Expr::Name(enum_name) = file.expr(*receiver) else {
                 return None;
             };
-            file_class_decl(file, enum_name).filter(|c| c.kind == ast::ClassKind::Enum)?;
-            let internal = class_internal(file, enum_name);
-            AnnoValue::Enum(type_name(&internal), name.clone())
+            if file_class_decl(file, enum_name).is_some_and(|c| c.kind == ast::ClassKind::Enum) {
+                let internal = class_internal(file, enum_name);
+                AnnoValue::Enum(type_name(&internal), name.clone())
+            } else {
+                // Not declared here: bind the constant to the ELEMENT's declared enum type.
+                let internal = element_ty?.kotlin_class_internal()?;
+                if !_syms
+                    .libraries
+                    .classifier(internal)
+                    .is_some_and(|classifier| classifier.is_enum())
+                {
+                    return None;
+                }
+                AnnoValue::Enum(internal, name.clone())
+            }
         }
         // `A::class` — a class literal.
         Expr::CallableRef {
@@ -27505,7 +27535,7 @@ fn eval_anno_value(
                 | "booleanArrayOf" | "charArrayOf" | "byteArrayOf" | "shortArrayOf" => {
                     let items: Option<Vec<_>> = args
                         .iter()
-                        .map(|&a| eval_anno_value(file, _file_index, _syms, _ir, a))
+                        .map(|&a| eval_anno_value(file, _file_index, _syms, _ir, a, element_ty))
                         .collect();
                     AnnoValue::Array(items?)
                 }
@@ -27533,7 +27563,10 @@ fn build_applied_annotation(
     let mut values = Vec::new();
     for (i, &arg) in args.iter().enumerate() {
         let pname = cd.props.get(i)?.name.clone();
-        values.push((pname, eval_anno_value(file, file_index, syms, ir, arg)?));
+        values.push((
+            pname,
+            eval_anno_value(file, file_index, syms, ir, arg, None)?,
+        ));
     }
     Some(crate::ir::AppliedAnnotation { internal, values })
 }
@@ -27642,9 +27675,26 @@ fn library_field_annotation(
     };
     let elements = lt.annotation_members()?;
     let mut values = Vec::new();
-    for (i, &arg) in args.iter().enumerate() {
-        let ename = elements.get(i)?.0.clone();
-        values.push((ename, eval_anno_value(file, file_index, syms, ir, arg)?));
+    // Kotlin requires positional arguments before named ones, so a positional argument binds to the
+    // element at its own index while a NAMED one binds by label — `@Deprecated("x", level = …)`
+    // targets `level`, not the second element (`replaceWith`).
+    let mut positional = 0usize;
+    for &arg in args {
+        let (ename, element_ty) = match file.annotation_arg_names.get(&arg.0) {
+            Some(label) => {
+                let (element, ty) = elements.iter().find(|(element, _)| element == label)?;
+                (element.clone(), Some(*ty))
+            }
+            None => {
+                let (element, ty) = elements.get(positional)?;
+                positional += 1;
+                (element.clone(), Some(*ty))
+            }
+        };
+        values.push((
+            ename,
+            eval_anno_value(file, file_index, syms, ir, arg, element_ty)?,
+        ));
     }
     Some((
         crate::ir::AppliedAnnotation {
@@ -27653,6 +27703,37 @@ fn library_field_annotation(
         },
         retention,
     ))
+}
+
+/// The user annotations applied to a FUNCTION declaration, split by JVM retention. Reuses the same
+/// per-annotation fold as fields: a function's `@Anno(...)` is the same applied-annotation shape,
+/// and SOURCE-retained annotations drop out of both.
+fn fn_applied_annotations(
+    file: &ast::File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+    f: &ast::FunDecl,
+    ir: &crate::ir::IrFile,
+) -> crate::ir::FnAnnotations {
+    let mut out = crate::ir::FnAnnotations::default();
+    for (annotation, arguments) in f.annotations.iter().zip(f.annotation_args.iter()) {
+        let Some(internal) = syms.resolved_annotation(file_index, annotation) else {
+            continue;
+        };
+        match library_field_annotation(file, file_index, syms, internal, arguments, ir) {
+            Some((anno, Retention::Runtime)) => out.visible.push(anno),
+            Some((anno, Retention::Binary)) => out.invisible.push(anno),
+            None => {}
+        }
+    }
+    crate::trace_compiler!(
+        "annotations",
+        "fn {} annotations visible={} invisible={}",
+        f.name,
+        out.visible.len(),
+        out.invisible.len(),
+    );
+    out
 }
 
 /// The RUNTIME-retained applied annotations on a class declaration, folded for `RuntimeVisibleAnnotations`.

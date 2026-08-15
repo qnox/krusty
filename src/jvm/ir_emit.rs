@@ -7899,6 +7899,18 @@ fn emit_method_inner(
     if ir.deprecated_methods.contains(&fid) {
         e.cw.mark_method_deprecated(&f.name, &desc);
     }
+    // User annotations declared on the function. A HIDDEN-deprecated declaration additionally gets
+    // `ACC_SYNTHETIC`: kotlinc keeps it only for binary compatibility, and a consumer reads both
+    // facts (the annotation for resolution, the flag for the JVM) off this realization.
+    if let Some(annotations) = ir.function_annotations.get(&fid) {
+        e.cw.set_method_annotations(&f.name, &desc, &annotations.visible, &annotations.invisible);
+        if annotations.deprecated() {
+            e.cw.mark_method_deprecated(&f.name, &desc);
+        }
+        if annotations.deprecated_hidden() {
+            e.cw.set_method_synthetic(&f.name, &desc);
+        }
+    }
 }
 
 /// Format backend-agnostic semantic types into JVM generic-signature elements. The ordinary JVM
