@@ -48644,23 +48644,6 @@ impl<'a> Checker<'a> {
                 captured_locals.sort_by(|a, b| a.0.cmp(&b.0));
             }
         }
-        let captures: Vec<LocalCapture> = captured_locals
-            .into_iter()
-            .map(|(name, ty)| {
-                let shared_cell = match &f.body {
-                    FunBody::Expr(e) | FunBody::Block(e) => {
-                        self.local_capture_needs_shared_cell(scope, *e, &name)
-                    }
-                    FunBody::None => false,
-                };
-                LocalCapture {
-                    name,
-                    ty,
-                    shared_cell,
-                }
-            })
-            .collect();
-
         // Resolve the lifted method's erased parameter types; `generic_sig` below retains the same
         // declaration with symbolic formals for call-site inference.
         let params: Vec<Ty> = f
@@ -48793,16 +48776,6 @@ impl<'a> Checker<'a> {
 
         // Register in current local-funs frame and in the TypeInfo maps.
         self.register_local_fun(scope, &f.name, stmt_id, sig.clone());
-        self.stmt_lowers.insert(
-            stmt_id,
-            StmtLowering::LocalFunction(Box::new(LocalFunInfo {
-                mangled,
-                sig: sig.clone(),
-                captures,
-                receiver,
-            })),
-        );
-
         // Check the body (for a block body or when return type was already inferred above for expr).
         self.with_ret(ret_ty, |c| {
             let previous_extension_receiver = c.this_extension_receiver;
@@ -48842,6 +48815,74 @@ impl<'a> Checker<'a> {
             }
             c.this_extension_receiver = previous_extension_receiver;
         });
+
+        // A lifted local function can consume an implicit context binding without spelling its source
+        // name. Add those checker-selected bindings to the same capture ABI as explicit name reads;
+        // lowering must never rediscover a context source from the surrounding scope.
+        if let FunBody::Expr(body) | FunBody::Block(body) = &f.body {
+            let (selected_contexts, direct_receivers) = selected_context_values(
+                self.file,
+                &self.expr_types,
+                &self.implicit_receiver_selections,
+                &self.context_args,
+                &self.resolved_calls,
+                &self.stmt_lowers,
+                *body,
+                true,
+            );
+            let selected_names = selected_contexts
+                .into_iter()
+                .filter_map(|source| match source {
+                    ResolvedContextArgument::Binding { name, .. } => Some(name),
+                    ResolvedContextArgument::ImplicitReceiver(selection) => {
+                        selection.context_binding.map(|(name, _)| name)
+                    }
+                })
+                .chain(
+                    direct_receivers
+                        .into_iter()
+                        .filter_map(|selection| selection.context_binding.map(|(name, _)| name)),
+                );
+            for name in selected_names {
+                if outer_names.contains(&name)
+                    && !captured_locals
+                        .iter()
+                        .any(|(captured, _)| captured == &name)
+                {
+                    let ty = self
+                        .lookup(scope, &name)
+                        .map(|local| local.ty)
+                        .unwrap_or(Ty::Error);
+                    captured_locals.push((name, ty));
+                }
+            }
+        }
+        captured_locals.sort_by(|left, right| left.0.cmp(&right.0));
+        let captures = captured_locals
+            .into_iter()
+            .map(|(name, ty)| {
+                let shared_cell = match &f.body {
+                    FunBody::Expr(e) | FunBody::Block(e) => {
+                        self.local_capture_needs_shared_cell(scope, *e, &name)
+                    }
+                    FunBody::None => false,
+                };
+                LocalCapture {
+                    name,
+                    ty,
+                    shared_cell,
+                }
+            })
+            .collect();
+        self.stmt_lowers.insert(
+            stmt_id,
+            StmtLowering::LocalFunction(Box::new(LocalFunInfo {
+                mangled,
+                sig,
+                captures,
+                receiver,
+            })),
+        );
     }
 }
 

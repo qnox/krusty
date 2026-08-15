@@ -309,6 +309,31 @@ fn lambda_in_named_context_member_preserves_dispatch_receiver_depth() {
 }
 
 #[test]
+fn local_function_inside_lambda_captures_implicit_context_receiver() {
+    const SOURCE: &str = r#"
+        // LANGUAGE: +ContextParameters
+        class Registry(val value: String)
+
+        context(registry: Registry)
+        fun contextualValue(): String = registry.value
+
+        context(registry: Registry)
+        fun render(): String = listOf(1).map {
+            fun local(): String = contextualValue()
+            local()
+        }.single()
+
+        fun box(): String = with(Registry("OK")) { render() }
+    "#;
+
+    common::expect_true_e2e(
+        "local_function_inside_lambda_captures_implicit_context_receiver",
+        SOURCE,
+        &[],
+    );
+}
+
+#[test]
 fn generic_extension_property_keeps_receiver_element_type() {
     const SOURCE: &str = r#"
         class Record(val enabled: Boolean)

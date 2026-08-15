@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
-use crate::ast::{Expr, ExprId, File, Stmt};
-use crate::resolve::{ImplicitReceiverSelection, ResolvedCall, ResolvedContextArgument};
+use crate::ast::{Expr, ExprId, File, Stmt, StmtId};
+use crate::resolve::{
+    ImplicitReceiverSelection, ResolvedCall, ResolvedContextArgument, StmtLowering,
+};
 use crate::types::Ty;
 
 /// Every checker-selected context source used by `body`, normalized to the callable boundary that
@@ -14,6 +16,7 @@ pub(crate) fn selected_context_values(
     implicit_receiver_selections: &HashMap<ExprId, ImplicitReceiverSelection>,
     context_args: &HashMap<ExprId, Vec<ResolvedContextArgument>>,
     resolved_calls: &HashMap<ExprId, ResolvedCall>,
+    stmt_lowers: &HashMap<StmtId, StmtLowering>,
     body: ExprId,
     deep: bool,
 ) -> (Vec<ResolvedContextArgument>, Vec<ImplicitReceiverSelection>) {
@@ -106,6 +109,7 @@ pub(crate) fn selected_context_values(
         implicit_receiver_selections: &HashMap<ExprId, ImplicitReceiverSelection>,
         context_args: &HashMap<ExprId, Vec<ResolvedContextArgument>>,
         resolved_calls: &HashMap<ExprId, ResolvedCall>,
+        stmt_lowers: &HashMap<StmtId, StmtLowering>,
         e: ExprId,
         deep: bool,
         nested_callable: bool,
@@ -187,6 +191,23 @@ pub(crate) fn selected_context_values(
                     }
                 }
                 ResolvedCall::LocalFunction(target) => {
+                    if let Some(StmtLowering::LocalFunction(function)) =
+                        stmt_lowers.get(&target.stmt_id)
+                    {
+                        for capture in &function.captures {
+                            record_source(
+                                out,
+                                direct_implicit_receivers,
+                                &ResolvedContextArgument::Binding {
+                                    name: capture.name.clone(),
+                                    shadow_depth: 0,
+                                },
+                                nested_callable,
+                                nested_bound_names,
+                                nested_receiver_count,
+                            );
+                        }
+                    }
                     for source in &target.context_args {
                         record_source(
                             out,
@@ -214,6 +235,7 @@ pub(crate) fn selected_context_values(
                             implicit_receiver_selections,
                             context_args,
                             resolved_calls,
+                            stmt_lowers,
                             range.start,
                             deep,
                             nested_callable,
@@ -228,6 +250,7 @@ pub(crate) fn selected_context_values(
                             implicit_receiver_selections,
                             context_args,
                             resolved_calls,
+                            stmt_lowers,
                             range.end,
                             deep,
                             nested_callable,
@@ -243,6 +266,7 @@ pub(crate) fn selected_context_values(
                             implicit_receiver_selections,
                             context_args,
                             resolved_calls,
+                            stmt_lowers,
                             *body,
                             deep,
                             nested_callable,
@@ -265,6 +289,7 @@ pub(crate) fn selected_context_values(
                             implicit_receiver_selections,
                             context_args,
                             resolved_calls,
+                            stmt_lowers,
                             *iterable,
                             deep,
                             nested_callable,
@@ -280,6 +305,7 @@ pub(crate) fn selected_context_values(
                             implicit_receiver_selections,
                             context_args,
                             resolved_calls,
+                            stmt_lowers,
                             *body,
                             deep,
                             nested_callable,
@@ -301,6 +327,7 @@ pub(crate) fn selected_context_values(
                                 implicit_receiver_selections,
                                 context_args,
                                 resolved_calls,
+                                stmt_lowers,
                                 child,
                                 deep,
                                 nested_callable,
@@ -333,6 +360,7 @@ pub(crate) fn selected_context_values(
                     implicit_receiver_selections,
                     context_args,
                     resolved_calls,
+                    stmt_lowers,
                     *trailing,
                     deep,
                     nested_callable,
@@ -357,6 +385,7 @@ pub(crate) fn selected_context_values(
                 implicit_receiver_selections,
                 context_args,
                 resolved_calls,
+                stmt_lowers,
                 *body,
                 deep,
                 nested_callable,
@@ -373,6 +402,7 @@ pub(crate) fn selected_context_values(
                     implicit_receiver_selections,
                     context_args,
                     resolved_calls,
+                    stmt_lowers,
                     catch.body,
                     deep,
                     nested_callable,
@@ -390,6 +420,7 @@ pub(crate) fn selected_context_values(
                     implicit_receiver_selections,
                     context_args,
                     resolved_calls,
+                    stmt_lowers,
                     *finally,
                     deep,
                     nested_callable,
@@ -469,6 +500,7 @@ pub(crate) fn selected_context_values(
                 implicit_receiver_selections,
                 context_args,
                 resolved_calls,
+                stmt_lowers,
                 child,
                 deep,
                 nested_callable || expression_is_lambda,
@@ -494,6 +526,7 @@ pub(crate) fn selected_context_values(
         implicit_receiver_selections,
         context_args,
         resolved_calls,
+        stmt_lowers,
         body,
         deep,
         false,

@@ -10466,6 +10466,7 @@ impl<'a> Lower<'a> {
             &self.info.implicit_receiver_selections,
             &self.info.context_args,
             &self.info.resolved_calls,
+            &self.info.stmt_lowers,
             body,
             deep,
         )
