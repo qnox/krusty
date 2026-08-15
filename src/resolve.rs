@@ -25504,28 +25504,25 @@ impl<'a> Checker<'a> {
             scope
                 .visible_tparams()
                 .extended_with(&f.type_params, &f.type_param_bounds, &resolve);
-        let key = |name: &str| -> ErasedTypeKey {
-            if tparams.contains(name) {
-                erased_type_key(tparams.bound(name))
+        // Resolve the complete TypeRef in a declaration-owned rung. Looking only at `TypeRef::name`
+        // collapses every function type to the parser marker `<fun>` and falsely reports
+        // `Box.() -> Unit` (Function1) as colliding with `() -> Unit` (Function0). This is the same
+        // semantic type resolution used by ordinary checking; erasure below merely discards the
+        // distinctions the target ABI cannot retain.
+        let declaration_scope = scope.child(ScopeKind::Function { receiver: None });
+        declaration_scope.declare_tparams(&f.type_params, &tparams, |_| false);
+        let key = |reference: &TypeRef| {
+            let ty = self.type_ref_ty_silent(&declaration_scope, reference);
+            if ty == Ty::Error {
+                ErasedTypeKey::Unresolved(reference.name.clone())
             } else {
-                let internal = self.select_classifier(scope, name);
-                if internal == InheritedNestedClassifier::Ambiguous {
-                    ErasedTypeKey::Unresolved(name.to_string())
-                } else if let Some(internal) = classifier_over_default(name, internal.found()) {
-                    erased_type_key(Ty::obj_name(internal))
-                } else if let Some(t) = Ty::from_name(name) {
-                    erased_type_key(t)
-                } else if let Some(internal) = internal.found() {
-                    erased_type_key(Ty::obj_name(internal))
-                } else {
-                    ErasedTypeKey::Unresolved(name.to_string())
-                }
+                erased_type_key(ty)
             }
         };
         ErasedSigKey {
             name: f.name.clone(),
-            receiver: f.receiver.as_ref().map(|r| key(&r.name)),
-            params: f.params.iter().map(|p| key(&p.ty.name)).collect(),
+            receiver: f.receiver.as_ref().map(&key),
+            params: f.params.iter().map(|p| key(&p.ty)).collect(),
         }
     }
 
@@ -48884,6 +48881,59 @@ val result = object { fun value(): String = captured }
     }
 
     #[test]
+    fn generic_member_result_keeps_the_enclosing_parameter_identity() {
+        // The member's `T` is inferred from `KClass<T>` using the extension's declaration-owned T.
+        // If that result degrades to Obj("T"), common lowering can only avoid a bogus `checkcast T`
+        // by recovering semantics from source spelling.
+        let source = "import kotlin.reflect.KClass\n\
+            interface Core { fun <T : Any> getFor(id: String, type: KClass<T>): T }\n\
+            inline fun <reified T : Any> Core.getFor(id: String): T = getFor(id, T::class)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let call = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| match expression {
+                Expr::Call { callee, .. }
+                    if matches!(file.expr(*callee), Expr::Name(name) if name == "getFor") =>
+                {
+                    Some(ExprId(index as u32))
+                }
+                _ => None,
+            })
+            .expect("member getFor call");
+        let declaration_start = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Fun(function) if function.receiver.is_some() => {
+                    Some(function.signature_span.lo)
+                }
+                _ => None,
+            })
+            .expect("generic extension declaration");
+        let files = vec![file];
+        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(Vec::new()),
+        ));
+        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
+            panic!("one declaration-owned type-parameter identity expected");
+        };
+        let Ty::TyParam(actual, _) = info.semantic_ty(call) else {
+            panic!(
+                "member result must stay a type parameter, got {:?}",
+                info.semantic_ty(call)
+            );
+        };
+        assert_eq!(actual, semantic.as_str());
+    }
+
+    #[test]
     fn nested_class_outer_label_uses_the_simple_declaration_name() {
         let (errors, _) = check(
             "inline fun <T> T.apply(block: T.() -> Unit): T { block(); return this }\n\
@@ -51345,6 +51395,20 @@ fun box(): String {
             "expected fun conflict, got {errs:?}"
         );
     }
+
+    #[test]
+    fn function_type_arity_distinguishes_erased_overloads() {
+        // Extension-function types include their receiver in FunctionN's arity. The signature-clash
+        // check must retain that semantic shape instead of reducing both syntactic refs to `<fun>`.
+        ok("class Box\n\
+            class Ui {\n\
+              fun <T> choose(seed: Any, init: T.() -> Unit): T = TODO()\n\
+              fun choose(seed: Any, init: () -> Unit): Box = TODO()\n\
+              fun mixed(init: Box.() -> Unit): Box = TODO()\n\
+              fun mixed(init: () -> Unit): Box = TODO()\n\
+            }");
+    }
+
     #[test]
     fn subclass_resolves_generic_base_property_type() {
         // A base class declares a member in terms of its OWN type parameter (`val some: T`); a
