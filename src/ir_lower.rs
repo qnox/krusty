@@ -27438,7 +27438,7 @@ fn fn_generic_sig(
         .map(|parameter| {
             info.resolved_declaration_type(&parameter.ty)
                 .map(|declared| {
-                    crate::resolve::semantic_value_parameter_ty(declared, parameter.is_vararg)
+                    crate::types::semantic_value_parameter_ty(declared, parameter.is_vararg)
                 })
         })
         .collect::<Option<Vec<_>>>()

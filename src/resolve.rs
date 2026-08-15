@@ -10175,12 +10175,8 @@ fn write_source_params(out: &mut BoundedSourceDisplay, params: &[Param]) -> fmt:
 /// after `:`; for `vararg element: T`, the binding and callable signature expose `Array<T>` (or the
 /// corresponding primitive array). Applying this once while collecting a signature keeps parser,
 /// checker, and lowering from carrying different representations of the same declaration.
-pub(crate) fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
-    if is_vararg {
-        Ty::array(declared)
-    } else {
-        declared
-    }
+fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
+    crate::types::semantic_value_parameter_ty(declared, is_vararg)
 }
 
 /// Build a member method's [`Signature`] from its declaration, given an already-resolved return type

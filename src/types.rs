@@ -1589,6 +1589,16 @@ pub(crate) fn type_parameter_source_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// Semantic type of one declared value-parameter slot. A `vararg element: T` is callable as an
+/// `Array<T>` slot even though the source annotation itself denotes the element type.
+pub(crate) fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
+    if is_vararg {
+        Ty::array(declared)
+    } else {
+        declared
+    }
+}
+
 #[cfg(test)]
 mod declaration_type_parameter_tests {
     use super::{declaration_type_parameter, type_parameter_source_name};
