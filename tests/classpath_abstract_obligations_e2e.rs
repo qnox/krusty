@@ -54,3 +54,66 @@ fn mid_hierarchy_implementation_discharges_the_obligation() {
         "OK"
     );
 }
+
+#[test]
+fn one_same_arity_override_does_not_discharge_a_distinct_overload() {
+    const LIB: &str = "package lib\n\
+        abstract class Base {\n\
+            abstract fun choose(value: Int): String\n\
+            abstract fun choose(value: String): String\n\
+        }\n";
+    const MAIN: &str = "import lib.Base\n\
+        class Impl : Base() {\n\
+            override fun choose(value: Int): String = value.toString()\n\
+        }\n\
+        fun box(): String = \"OK\"\n";
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let dependency = common::compile_lib("ao-overloads", LIB).expect("dependency");
+    assert!(
+        common::compile_in_process(MAIN, "Main", &[dependency, stdlib], Some(jdk.as_path()))
+            .is_none(),
+        "one semantic override must not clear a different same-name/same-arity obligation",
+    );
+}
+
+#[test]
+fn suspend_override_uses_the_semantic_parameter_shape() {
+    const LIB: &str = "package lib\n\
+        abstract class Base { abstract suspend fun runIt(): String }\n";
+    const MAIN: &str = "import lib.Base\n\
+        class Impl : Base() {\n\
+            override suspend fun runIt(): String = \"implemented\"\n\
+        }\n\
+        fun box(): String = \"OK\"\n";
+    assert_eq!(
+        run("ao-suspend", LIB, MAIN).expect("semantic suspend obligation"),
+        "OK",
+    );
+}
+
+#[test]
+fn mapped_number_has_one_semantic_superclass_path() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    const MAIN: &str = "class Num(val raw: Int) : Number() {\n\
+        override fun toByte(): Byte = raw.toByte()\n\
+        override fun toDouble(): Double = raw.toDouble()\n\
+        override fun toFloat(): Float = raw.toFloat()\n\
+        override fun toInt(): Int = raw\n\
+        override fun toLong(): Long = raw.toLong()\n\
+        override fun toShort(): Short = raw.toShort()\n\
+    }\n\
+    fun box(): String = if (Num(7).toInt() == 7) \"OK\" else \"fail\"\n";
+    let classes = common::compile_in_process(
+        MAIN,
+        "Main",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    )
+    .expect("mapped Number obligations must follow one normalized superclass path");
+    assert_eq!(
+        common::run_box(&classes, "MainKt", &[stdlib]).expect("box runner"),
+        "OK",
+    );
+}

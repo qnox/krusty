@@ -1813,14 +1813,6 @@ impl JvmLibraries {
                         };
                         logical_params.insert(0, receiver);
                     }
-                    // Existing member consumers retain the physical Continuation tail while
-                    // selecting against the metadata signature, which is source-semantic.
-                    if declaration.is_suspend() {
-                        let Some(continuation) = physical_params.last().copied() else {
-                            continue;
-                        };
-                        logical_params.push(continuation);
-                    }
                     member.params = logical_params;
                     member.ret = signature.ret;
                     member.generic_sig = Some(signature);
@@ -1956,15 +1948,11 @@ impl JvmLibraries {
                         signature.ret = java_type_nullability(signature.ret, m.return_nullability);
                     }
                 }
-                let value_arity = member
-                    .params
-                    .len()
-                    .saturating_sub(usize::from(member.suspend()));
+                let value_arity = member.params.len();
                 if member.suspend() {
                     // The EMIT descriptor is the LOGICAL (continuation-stripped) form — the coroutine pass
-                    // re-threads the CPS `Continuation` at the call. `params` stay RAW (they carry the
-                    // continuation), which the member consumers that count physical params rely on; only the
-                    // Argument matching drops the trailing continuation value parameter.
+                    // re-threads the CPS `Continuation` at the call. `physical_params` retains the classfile
+                    // shape while `params` is the normalized source-semantic shape used by resolution.
                     member.descriptor = strip_continuation_param(&member.descriptor);
                 }
                 if is_map && member.name == "put" {
@@ -2155,7 +2143,11 @@ impl JvmLibraries {
             }
             if !kotlin_supertypes_are_authoritative {
                 for s in builtin_supertypes.iter_ids() {
-                    if !supertypes.contains_name(s) {
+                    let duplicate_class_face = self.cp.builtin_is_interface_name(s) == Some(false)
+                        && supertypes.iter_ids().any(|existing| {
+                            super::jvm_class_map::type_names_map_to_same_jvm_internal(existing, s)
+                        });
+                    if !supertypes.contains_name(s) && !duplicate_class_face {
                         supertypes.push_name(s);
                     }
                 }
@@ -2186,7 +2178,15 @@ impl JvmLibraries {
                 }
             }
             for k in mapped {
-                if !supertypes.contains_name(k) {
+                // A mapped CLASS face is the same superclass edge under its Kotlin identity; adding
+                // both (`java/lang/Object` and `kotlin/Any`) would publish two class parents. Mapped
+                // INTERFACE faces stay explicit: source assignability needs the Kotlin collection /
+                // CharSequence identity in addition to the physical Java interface realization.
+                let duplicate_class_face = self.cp.builtin_is_interface_name(k) == Some(false)
+                    && supertypes.iter_ids().any(|existing| {
+                        super::jvm_class_map::type_names_map_to_same_jvm_internal(existing, k)
+                    });
+                if !supertypes.contains_name(k) && !duplicate_class_face {
                     supertypes.push_name(k);
                 }
             }
@@ -2529,27 +2529,6 @@ impl JvmLibraries {
                     }
                 })
                 .collect();
-            let mut pending = vec![internal_name];
-            let mut seen = std::collections::HashSet::new();
-            let mut has_abstract_obligations = false;
-            while let Some(current) = pending.pop() {
-                if !seen.insert(current) {
-                    continue;
-                }
-                let Some(current_class) = self.cp.find_name(current) else {
-                    continue;
-                };
-                if current_class
-                    .methods
-                    .iter()
-                    .any(|method| !method.is_static() && method.is_abstract())
-                {
-                    has_abstract_obligations = true;
-                    break;
-                }
-                pending.extend(current_class.interfaces.iter_ids());
-                pending.extend(current_class.super_class);
-            }
             let inheritance = crate::libraries::ClassifierInheritance {
                 is_abstract: ci.is_abstract() || ci.is_interface(),
                 is_extensible: !ci.is_final() && !ci.is_interface(),
@@ -2560,16 +2539,6 @@ impl JvmLibraries {
                             crate::types::Visibility::Public | crate::types::Visibility::Protected
                         )
                 }),
-                supports_external_subclassing: !ci.is_abstract() || !has_abstract_obligations,
-                supports_external_abstract_overrides: {
-                    let mut abstract_members = members
-                        .iter()
-                        .chain(&builtin_members)
-                        .filter(|member| member.is_abstract())
-                        .peekable();
-                    abstract_members.peek().is_some()
-                        && abstract_members.all(|member| member.physical_name.is_some())
-                },
             };
             let members = members
                 .into_iter()
@@ -4787,15 +4756,7 @@ impl JvmLibraries {
                 .is_some_and(|name| name.matches("kotlin/coroutines/Continuation"))
         };
         let suspend = member.suspend();
-        let real_params = if suspend {
-            let (continuation, real) = member.params.split_last()?;
-            if !is_continuation(*continuation) {
-                return None;
-            }
-            real.to_vec()
-        } else {
-            member.params.clone()
-        };
+        let real_params = member.params.clone();
         class.methods.iter().find_map(|method| {
             if !method.is_static() || method.name != bridge_name {
                 return None;
@@ -4922,19 +4883,11 @@ impl JvmLibraries {
                             }
                         });
                         // A `suspend fun` member's physical method appends a `Continuation` parameter
-                        // and erases its return to `Object`; present the LOGICAL signature (drop the
-                        // continuation, recover the real return from the `Continuation<T>` type
-                        // argument in the generic signature) so a normal call resolves. The coroutine
-                        // pass re-derives the CPS form for the emit.
+                        // and erases its return to `Object`; the provider-normalized member already
+                        // exposes the logical parameter list. The coroutine pass re-derives the CPS
+                        // form for emission.
                         let suspend = m.suspend();
-                        let params: Vec<Ty> = if suspend {
-                            m.params
-                                .split_last()
-                                .map(|(_, rest)| rest.to_vec())
-                                .unwrap_or_default()
-                        } else {
-                            m.params.clone()
-                        };
+                        let params = m.params.clone();
                         let descriptor = if suspend {
                             strip_continuation_param(&m.descriptor)
                         } else {
@@ -5477,56 +5430,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
 
     fn signature_formal_names(&self, signature: &str) -> Vec<String> {
         signature_formals(signature)
-    }
-
-    fn abstract_obligations(&self, internal: TypeName) -> Vec<(String, String)> {
-        // The ENTIRE superclass chain decides first: a class-side declaration of a
-        // `(name, descriptor)` — abstract or concrete — pre-empts any interface declaration at ANY
-        // depth (JLS: a class-chain abstract kills an interface default). Within the chain the
-        // nearest declaration wins, so a mid-hierarchy implementation discharges an ancestor's
-        // abstract and a re-abstracted member re-imposes it. Interfaces then fill the rest
-        // breadth-first.
-        let mut decided: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
-        let mut obligations = Vec::new();
-        let mut interfaces = std::collections::VecDeque::new();
-        let mut seen = std::collections::HashSet::new();
-        let decide = |class: &crate::jvm::classreader::ClassInfo,
-                      decided: &mut std::collections::HashSet<(String, String)>,
-                      obligations: &mut Vec<(String, String)>| {
-            for method in &class.methods {
-                if method.is_static() || method.name == "<init>" {
-                    continue;
-                }
-                let key = (method.name.clone(), method.descriptor.clone());
-                if decided.insert(key.clone()) && method.is_abstract() {
-                    obligations.push(key);
-                }
-            }
-        };
-        let mut current = Some(internal);
-        while let Some(name) = current.take() {
-            if !seen.insert(name) {
-                break;
-            }
-            let Some(class) = self.cp.find_name(name) else {
-                break;
-            };
-            decide(&class, &mut decided, &mut obligations);
-            interfaces.extend(class.interfaces.iter_ids());
-            current = class.super_class;
-        }
-        while let Some(name) = interfaces.pop_front() {
-            if !seen.insert(name) {
-                continue;
-            }
-            let Some(interface) = self.cp.find_name(name) else {
-                continue;
-            };
-            decide(&interface, &mut decided, &mut obligations);
-            interfaces.extend(interface.interfaces.iter_ids());
-        }
-        obligations
     }
 
     fn iterable_element_type(&self, internal: &str) -> Option<Ty> {
@@ -6133,10 +6036,6 @@ mod tests {
             .any(|member| member.name == "toInt"
                 && member.physical_name.as_deref() == Some("intValue")));
         assert!(
-            classifier.inheritance.supports_external_abstract_overrides,
-            "normalized Number obligations have explicit physical override realizations"
-        );
-        assert!(
             classifier
                 .members
                 .iter()
@@ -6164,6 +6063,29 @@ mod tests {
             actual,
             Ty::obj_args("kotlin/collections/List", &[Ty::String]),
         ));
+    }
+
+    #[test]
+    fn concrete_java_collection_keeps_its_kotlin_interface_faces() {
+        let (Some(stdlib), Some(jdk)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::jdk_modules(),
+        ) else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
+        ));
+        let classifier = libraries
+            .classifier_record(type_name("java/util/ArrayList"))
+            .expect("ArrayList classifier");
+        assert!(
+            classifier
+                .supertypes
+                .contains("kotlin/collections/MutableList"),
+            "ArrayList supertypes: {:?}",
+            classifier.supertypes
+        );
     }
 
     #[test]
