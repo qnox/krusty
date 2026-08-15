@@ -590,10 +590,10 @@ fn lower_file_at_reporting_impl(
                 let Expr::Call { callee, .. } = file.expr(e) else {
                     continue;
                 };
-                let Expr::Member { receiver, name } = file.expr(*callee) else {
+                let Expr::Member { name, .. } = file.expr(*callee) else {
                     continue;
                 };
-                if matches!(file.expr(*receiver), Expr::Name(n) if n.starts_with("super"))
+                if lo.info.resolved_super_call(e).is_some()
                     && (top_suspend.iter().any(|s| s == name)
                         || member_suspend.iter().any(|s| s == name))
                 {
@@ -10365,13 +10365,22 @@ impl<'a> Lower<'a> {
                 .is_assignable_across_sources(Ty::obj_name(cur), Ty::obj_name(owner))
         }
         fn scan(lo: &Lower, cur: TypeName, bound: &[String], e: AstExprId, deep: bool) -> bool {
+            // A super target carries the checker-selected lexical receiver coordinate. Any
+            // non-singleton selection needs the enclosing dispatch instance, including typed forms
+            // (`super<T>` / `super<T>@Label`) whose source spelling is not a plain `super` name.
+            if lo
+                .info
+                .resolved_super_call(e)
+                .is_some_and(|target| target.receiver.singleton.is_none())
+            {
+                return true;
+            }
             if let Expr::Name(n) = lo.afile.expr(e) {
                 // `this`/`super` (incl. labeled `this@Outer`) are bare names here, not a dedicated
                 // variant. A constructor-header `this` is different: the checker has already
                 // selected and recorded a companion singleton, so it must not capture the
                 // uninitialized dispatch instance merely because the source spelling is `this`.
-                if n == "this" || n == "super" || n.starts_with("this@") || n.starts_with("super@")
-                {
+                if n == "this" || n.starts_with("this@") {
                     if matches!(
                         lo.info.expr_lowers.get(&e),
                         Some(ExprLowering::SingletonValue(_))
@@ -10419,6 +10428,13 @@ impl<'a> Lower<'a> {
             }
             lo.afile
                 .any_child_expr(e, &mut |c| scan(lo, cur, bound, c, deep), &mut |s| {
+                    if matches!(
+                        lo.info.stmt_lowers.get(&s),
+                        Some(StmtLowering::SuperPropertyWrite { target })
+                            if target.receiver.singleton.is_none()
+                    ) {
+                        return true;
+                    }
                     // A bare-name field WRITE (`res = v`, `res++`) is an implicit-`this` member
                     // access too — its target is a plain `String` on the stmt, never an
                     // `Expr::Name` the scan above would see, so a write-only lambda must still
@@ -10470,11 +10486,14 @@ impl<'a> Lower<'a> {
     ) -> (Vec<ResolvedContextArgument>, Vec<ImplicitReceiverSelection>) {
         crate::frontend::selected_context_values(
             self.afile,
-            &self.info.expr_types,
-            &self.info.implicit_receiver_selections,
-            &self.info.context_args,
-            &self.info.resolved_calls,
-            &self.info.stmt_lowers,
+            crate::frontend::SelectedContextSources {
+                expr_types: &self.info.expr_types,
+                implicit_receiver_selections: &self.info.implicit_receiver_selections,
+                context_args: &self.info.context_args,
+                resolved_calls: &self.info.resolved_calls,
+                resolved_super_calls: &self.info.resolved_super_calls,
+                stmt_lowers: &self.info.stmt_lowers,
+            },
             body,
             deep,
         )
@@ -16685,19 +16704,91 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Emit one checker-selected non-virtual super call. Property accessors and ordinary methods use
-    /// the same JVM operation; their source syntax differs only in where the argument list lives.
+    /// Materialize a class-owned helper when a labeled `super` selects an enclosing class. The helper
+    /// lives on the selected receiver and contains the exact checker-selected non-virtual call. Its
+    /// explicit receiver parameter preserves that dispatch semantics across backends without deriving
+    /// a helper identity from the rendered classifier name.
+    fn ensure_labeled_super_accessor(&mut self, target: &ResolvedSuperCall) -> Option<u32> {
+        let dispatch_owner = target.receiver.ty.obj_internal()?;
+        let class = self.class_info_name(dispatch_owner)?.id;
+        let base = "access$super";
+        let mut accessor = base.to_string();
+        let mut suffix = 0u32;
+        while self
+            .class_info_name(dispatch_owner)
+            .is_some_and(|info| info.methods.contains_key(&accessor))
+            || self.ir.classes[class as usize]
+                .methods
+                .iter()
+                .any(|&function| self.ir.functions[function as usize].name == accessor)
+        {
+            suffix += 1;
+            accessor = format!("{base}${suffix}");
+        }
+
+        let descriptor = if target.descriptor.is_empty() {
+            self.runtime
+                .method_descriptor(&target.params, target.physical_ret)?
+        } else {
+            target.descriptor.clone()
+        };
+        let receiver = self.emit_get_value(0);
+        let arguments = (0..target.params.len())
+            .map(|index| self.emit_get_value((index + 1) as u32))
+            .collect::<Vec<_>>();
+        let call = self.emit_call(
+            Callee::Special {
+                owner: target.owner,
+                name: target.name.clone(),
+                descriptor,
+                interface: target.interface,
+            },
+            Some(receiver),
+            arguments,
+        );
+        let call = if target.physical_ret != target.ret {
+            self.coerce_to_static(call, target.ret, target.physical_ret)
+        } else {
+            call
+        };
+        let body = if target.ret == Ty::Unit {
+            let ret = self.emit_return(None);
+            self.emit_block(vec![call, ret], None)
+        } else {
+            let ret = self.emit_return(Some(call));
+            self.emit_block(vec![ret], None)
+        };
+        let mut params = Vec::with_capacity(target.params.len() + 1);
+        params.push(Ty::obj_name(dispatch_owner));
+        params.extend(target.params.iter().copied());
+        let function = self.ir.add_fun(IrFunction {
+            name: accessor.clone(),
+            params: tys_to_ir(&params),
+            ret: ty_to_ir(target.ret),
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        self.ir.classes[class as usize].methods.push(function);
+        self.ir.synthetic_methods.insert(function);
+        Some(function)
+    }
+
+    /// Emit one checker-selected super call. Property accessors and ordinary methods use the same
+    /// operation; their source syntax differs only in where the argument list lives. The checker also
+    /// supplies the exact dispatch receiver, so lowering neither parses a label nor searches outward.
     fn lower_resolved_super_call(
         &mut self,
         target: ResolvedSuperCall,
         args: &[AstExprId],
     ) -> Option<u32> {
-        let current = self.cur_class?;
-        let current_id = self.class_info_name(current)?.id as usize;
+        let dispatch_owner = target.receiver.ty.obj_internal()?;
+        let dispatch_id = self.class_info_name(dispatch_owner)?.id as usize;
         if self
             .ir
             .classes
-            .get(current_id)
+            .get(dispatch_id)
             .is_some_and(|class| class.is_value)
         {
             return None;
@@ -16705,17 +16796,33 @@ impl<'a> Lower<'a> {
         if target.params.len() != args.len() {
             return None;
         }
-        let receiver = self.emit_get_value(0);
+        let receiver = self
+            .materialize_implicit_receiver(target.receiver.clone())?
+            .0;
+        let mut lowered = Vec::with_capacity(args.len());
+        for (argument, parameter) in args.iter().zip(&target.params) {
+            lowered.push(self.lower_arg(*argument, &ty_to_ir(*parameter))?);
+        }
+        if !target.receiver.current {
+            let function = self.ensure_labeled_super_accessor(&target)?;
+            let mut arguments = Vec::with_capacity(lowered.len() + 1);
+            arguments.push(receiver);
+            arguments.extend(lowered);
+            return Some(self.emit_call(
+                Callee::ClassStatic {
+                    owner: dispatch_owner,
+                    function,
+                },
+                None,
+                arguments,
+            ));
+        }
         let descriptor = if target.descriptor.is_empty() {
             self.runtime
                 .method_descriptor(&target.params, target.physical_ret)?
         } else {
             target.descriptor.clone()
         };
-        let mut lowered = Vec::with_capacity(args.len());
-        for (argument, parameter) in args.iter().zip(&target.params) {
-            lowered.push(self.lower_arg(*argument, &ty_to_ir(*parameter))?);
-        }
         let call = self.emit_call(
             Callee::Special {
                 owner: target.owner,
@@ -19317,7 +19424,15 @@ impl<'a> Lower<'a> {
                 // mirroring the compound index-assign caching. A local/`this` receiver is pure (left to
                 // re-load, keeping bytecode parity with kotlinc for the common case).
                 let mut prelude = Vec::new();
+                // A super-property write does not evaluate the parser's receiver spelling as a value;
+                // `lower_assign_member` consumes the checker-selected receiver from `StmtLowering`.
+                // Keep that semantic operation out of the ordinary compound-receiver spill path.
+                let selected_super_write = matches!(
+                    self.info.stmt_lowers.get(&s),
+                    Some(StmtLowering::SuperPropertyWrite { .. })
+                );
                 let spill = self.is_compound_member_assign(receiver, &name, value)
+                    && !selected_super_write
                     && !self.index_subst.contains_key(&receiver)
                     && !self.is_pure_index_operand(receiver);
                 if spill {
@@ -20409,10 +20524,9 @@ impl<'a> Lower<'a> {
         *a2 == array && matches!(indices.as_slice(), [only] if *only == index)
     }
 
-    /// Whether an index-assign receiver/index operand is side-effect-free, so re-evaluating it (rather
+    /// Whether an index/member-assign receiver operand is side-effect-free, so re-evaluating it (rather
     /// than spilling to a temp) is sound and keeps bytecode parity with kotlinc. A bare `Name` qualifies
-    /// ONLY when it is a local variable: a property `Name` may be a getter call with side effects (kotlinc
-    /// evaluates the index once), so it is spilled.
+    /// only when it is a local variable: a property `Name` may be a getter call with side effects.
     fn is_pure_index_operand(&self, e: AstExprId) -> bool {
         match self.afile.expr(e) {
             Expr::Name(n) => self.lookup(n).is_some(),
@@ -23338,8 +23452,7 @@ impl<'a> Lower<'a> {
             self.info.expr_lowers.get(&e).map_or("none", |_| "recorded")
         );
         let t = {
-            if matches!(self.afile.expr(receiver), Expr::Name(name) if name.starts_with("super")) {
-                let target = self.info.resolved_super_call(e).cloned()?;
+            if let Some(target) = self.info.resolved_super_call(e).cloned() {
                 return self.lower_resolved_super_call(target, &[]);
             }
             // `::prop.isInitialized` — a null check on the `lateinit` backing field, the shape kotlinc
@@ -25603,23 +25716,9 @@ impl<'a> Lower<'a> {
                     _ => {}
                 }
             }
-            // `super.method(args)` → a non-virtual `invokespecial` on `this` (value 0). The
-            // checker records the concrete superclass/interface target; lowering only emits it.
-            let super_qual: Option<Option<String>> = match self.afile.expr(receiver) {
-                Expr::Name(rn) if rn.starts_with("super") => Some(
-                    rn.strip_prefix("super<")
-                        .and_then(|s| s.split('>').next())
-                        .map(|s| s.to_string()),
-                ),
-                _ => None,
-            };
-            if super_qual.is_some() {
-                // A LABELED super (`super@A.f()`, `super<K>@A.f()`) selects an ENCLOSING class's
-                // supertype (inner classes) — the enclosing-scope dispatch isn't modeled, so skip.
-                if matches!(self.afile.expr(receiver), Expr::Name(rn) if rn.contains('@')) {
-                    return None;
-                }
-                let target = self.info.resolved_super_call(e).cloned()?;
+            // The checker records the exact non-virtual super target and lexical dispatch receiver;
+            // lowering consumes that identity directly without inspecting the qualifier spelling.
+            if let Some(target) = self.info.resolved_super_call(e).cloned() {
                 return self.lower_resolved_super_call(target, &args);
             }
             // Reified kotlinx.serialization round-trip: `fmt.encodeToString(x)` /
@@ -27982,7 +28081,9 @@ fn lowered_reference_class(
             ir.functions.get(function as usize)?.ret.obj_internal()
         }
         IrExpr::Call { callee, .. } => match callee {
-            Callee::Local(function) | Callee::LocalDefault(function) => {
+            Callee::Local(function)
+            | Callee::LocalDefault(function)
+            | Callee::ClassStatic { function, .. } => {
                 ir.functions.get(*function as usize)?.ret.obj_internal()
             }
             Callee::CrossFile { ret, .. } => ret.obj_internal(),

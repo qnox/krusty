@@ -696,6 +696,8 @@ mod ksp_provision_e2e;
 mod labeled_expression_e2e;
 #[path = "labeled_lambda_return_e2e.rs"]
 mod labeled_lambda_return_e2e;
+#[path = "labeled_super_e2e.rs"]
+mod labeled_super_e2e;
 #[path = "labeled_this_e2e.rs"]
 mod labeled_this_e2e;
 #[path = "lambda_e2e.rs"]
