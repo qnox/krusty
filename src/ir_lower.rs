@@ -4022,6 +4022,7 @@ fn lower_file_at_reporting_impl(
                         };
                         secs.push(crate::ir::IrSecondaryCtor {
                             annotations: ctor_annotations(file, file_index, syms, sc, &lo.ir),
+                            vararg_index: sc.params.iter().position(|p| p.is_vararg),
                             params: param_irs,
                             named_params: sc
                                 .params

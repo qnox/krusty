@@ -271,6 +271,10 @@ fn jvm_method_sig(st: &mut StringTable, name: Option<&str>, desc: &str) -> Pb {
 pub struct CtorMeta<'a> {
     pub params: &'a [(String, Ty)],
     pub desc: &'a str,
+    /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type`
+    /// (f4), the record a consumer needs to admit `C(a, b, c)` against `vararg` (without it the
+    /// parameter reads as a plain array and the call resolves to nothing).
+    pub vararg_index: Option<usize>,
     /// `Constructor.flags` (f8's f1) — e.g. 22 for a plain secondary ctor. 0 ⇒ omitted (the primary).
     pub flags: u64,
 }
@@ -483,7 +487,7 @@ pub fn build_class(
                 param_defaults: &[],
                 param_tparams: &[],
                 sig_name: None,
-                vararg_index: None,
+                vararg_index: sc.vararg_index,
             },
             &class_type_parameters,
         ));
@@ -1300,6 +1304,7 @@ mod tests {
                 secondary_ctors: &[CtorMeta {
                     params: &[],
                     desc: "()V",
+                    vararg_index: None,
                     flags: 22,
                 }],
                 ..Default::default()

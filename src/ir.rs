@@ -1270,6 +1270,8 @@ pub struct IrSecondaryCtor {
     /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
     /// which loses fun-type shapes and generic arguments). Empty for a synthesized constructor.
     pub named_params: Vec<(String, Ty)>,
+    /// Index into `named_params` of a `vararg` parameter, for the `Constructor` metadata record.
+    pub vararg_index: Option<usize>,
     pub defaults: Vec<Option<ExprId>>,
     /// Source-ordered temp declarations for delegation arguments.
     pub delegate_prelude: Vec<ExprId>,
