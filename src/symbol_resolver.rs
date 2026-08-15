@@ -11,7 +11,7 @@
 
 use crate::libraries::{
     Callables, FnKind, FunctionInfo, FunctionSet, GenericSig, LibraryCallable, LibraryMember,
-    Origin, ParamList, PropKind, PropertyInfo, PropertySet, SemanticPlatform, SourceMember,
+    Origin, PropKind, PropertyInfo, PropertySet, SemanticPlatform, SourceMember,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName, Visibility};
@@ -5535,84 +5535,6 @@ pub(crate) fn select_constructor_declaration_from_type(
         .collect::<Vec<_>>();
     let selected = best_callable_member_overload(lib, src, candidates.iter(), "<init>", args, &[])?;
     Some(selected.clone())
-}
-
-/// Select a constructor declaration after syntax has mapped arguments to source parameter slots.
-/// Missing slots participate through the declaration's default/vararg metadata; supplied slots alone
-/// participate in type inference and applicability. The result is still a semantic declaration — its
-/// physical realization is deliberately a later operation.
-pub(crate) fn select_constructor_declaration_from_slots(
-    lib: &dyn SemanticPlatform,
-    src: &dyn SymbolSource,
-    classifier: &crate::libraries::LibraryType,
-    signature: &ParamList,
-    slots: &[Option<CallArgKind>],
-) -> Option<LibraryMember> {
-    if signature.names.len() != slots.len()
-        || signature.types.len() != slots.len()
-        || signature.defaults.len() != slots.len()
-    {
-        return None;
-    }
-
-    let candidates = classifier.constructors.iter().filter_map(|constructor| {
-        if constructor.params.len() != slots.len()
-            || slots.iter().enumerate().any(|(position, argument)| {
-                argument.is_none()
-                    && !signature.defaults[position]
-                    && signature.vararg != Some(position)
-            })
-        {
-            return None;
-        }
-
-        let mut declaration = constructor.clone();
-        if let Some(generic) = constructor
-            .generic_sig
-            .as_ref()
-            .filter(|generic| generic.params.len() == slots.len())
-        {
-            let bindings = infer_generic_bindings(
-                generic,
-                slots.iter().enumerate().filter_map(|(position, argument)| {
-                    argument.as_ref().map(|argument| (position, argument.ty()))
-                }),
-            );
-            declaration.params = generic
-                .params
-                .iter()
-                .map(|parameter| ty_subst(*parameter, &bindings))
-                .collect();
-        }
-        if slots
-            .iter()
-            .zip(&declaration.params)
-            .any(|(argument, parameter)| {
-                argument.as_ref().is_some_and(|argument| {
-                    if argument.is_lambda_literal() {
-                        if parameter.fun_arity().is_some() {
-                            !arg_fits_source(lib, src, parameter, &argument.ty())
-                        } else {
-                            !sam_arg_matches(lib, src, *parameter, argument.ty())
-                        }
-                    } else {
-                        !arg_fits_source(lib, src, parameter, &argument.ty())
-                            && !argument.adapts_integer_literal_to(*parameter)
-                    }
-                })
-            })
-        {
-            return None;
-        }
-        Some((declaration.params.clone(), declaration))
-    });
-
-    match unique_most_specific(candidates, |_, left, right| {
-        resolution_subtype(src, left, right)
-    }) {
-        CandidateSelection::Selected(declaration) => Some(declaration),
-        CandidateSelection::None | CandidateSelection::Ambiguous => None,
-    }
 }
 
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
