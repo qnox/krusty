@@ -26,8 +26,10 @@ use crate::types::{
 };
 use scope::{ContextValue, NarrowPath, Ns, ScopeKind};
 
+mod context_capture;
 mod dependency_platform;
 mod scope;
+pub(crate) use context_capture::selected_context_values;
 pub(crate) use dependency_platform::DependencyPlatform;
 
 const MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES: usize = 64;
@@ -6998,7 +7000,7 @@ fn collect_signatures_with_cp_impl(
                                     flags: SigFlags::default()
                                         .with_vararg(false)
                                         .with_is_inline(false)
-                                        .with_is_operator(false)
+                                        .with_is_operator(true)
                                         .with_is_override(false)
                                         .with_is_final(true)
                                         .with_is_suspend(false),
@@ -10878,6 +10880,10 @@ pub enum ResolvedCall {
     /// change overload selection, capability checks, or the lowering contract.
     MemberExtension {
         owner: TypeName,
+        /// Exact implicit dispatch receiver selected by the checker. The extension receiver is the
+        /// explicit call-site value; this binding identifies the class/object instance that owns the
+        /// member extension and must never be rediscovered by lowering.
+        dispatch_receiver: ImplicitReceiverSelection,
         extension_receiver: Ty,
         physical_receiver: Ty,
         name: String,
@@ -10970,6 +10976,17 @@ impl ResolvedCall {
             Self::Extension(extension) => extension.callable.ret,
             Self::MemberExtension { ret, .. } => *ret,
             Self::LocalFunction(callable) => callable.sig.ret,
+        }
+    }
+
+    /// Provider-owned spelling of this already-selected receiver call. Synthetic convention lowering
+    /// uses it only as an emit handle; semantic lookup and overload selection are complete.
+    pub(crate) fn emit_name(&self) -> Option<&str> {
+        match self {
+            Self::Member(resolved) => Some(&resolved.member.name),
+            Self::Extension(extension) => Some(&extension.callable.name),
+            Self::MemberExtension { name, .. } => Some(name),
+            Self::TopLevel(_) | Self::Companion(_) | Self::LocalFunction(_) => None,
         }
     }
 
@@ -11270,28 +11287,10 @@ pub enum DestructureComponentTarget {
 }
 
 #[derive(Clone, Debug)]
-pub enum IteratorDispatchTarget {
-    Member {
-        owner_fallback: TypeName,
-        resolved: Box<crate::symbol_resolver::ResolvedMember>,
-    },
-    Extension(Box<crate::libraries::LibraryCallable>),
-}
-
-impl IteratorDispatchTarget {
-    pub fn ret(&self) -> Ty {
-        match self {
-            Self::Member { resolved, .. } => resolved.ret,
-            Self::Extension(callable) => callable.ret,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct IteratorProtocolTarget {
-    pub iterator: IteratorDispatchTarget,
-    pub has_next: crate::libraries::LibraryMember,
-    pub next: crate::libraries::LibraryMember,
+    pub iterator: Box<ResolvedCall>,
+    pub has_next: Box<ResolvedCall>,
+    pub next: Box<ResolvedCall>,
     pub iter_ty: Ty,
     pub elem_ty: Ty,
 }
@@ -15642,9 +15641,15 @@ struct MemberExtensionFunctionCandidate {
 }
 
 impl MemberExtensionFunctionCandidate {
-    fn resolved_call(&self, extension_receiver: Ty, interface: bool) -> ResolvedCall {
+    fn resolved_call(
+        &self,
+        dispatch_receiver: ImplicitReceiverSelection,
+        extension_receiver: Ty,
+        interface: bool,
+    ) -> ResolvedCall {
         ResolvedCall::MemberExtension {
             owner: self.owner,
+            dispatch_receiver,
             extension_receiver,
             physical_receiver: self.physical_receiver,
             // Selection and diagnostics used the Kotlin source name. Only the finalized emit target
@@ -20701,18 +20706,6 @@ impl<'a> Checker<'a> {
             },
         );
         Some(ty)
-    }
-
-    fn select_instance_name(
-        &self,
-        internal: TypeName,
-        name: &str,
-        args: &[Ty],
-    ) -> Option<crate::libraries::LibraryMember> {
-        use crate::symbol_resolver::{SymRecv, Symbol};
-        self.resolver()
-            .resolve_symbol(SymRecv::TypeName(internal), name, args, &[])
-            .and_then(Symbol::instance)
     }
 
     fn select_super_instance(
@@ -35937,6 +35930,17 @@ impl<'a> Checker<'a> {
             },
             _ => None,
         };
+        let intrinsic_iterator_receiver = (!selected.iterator_protocol_scope.is_empty()
+            && args
+                .iter()
+                .any(|argument| matches!(self.file.expr(*argument), Expr::Lambda { .. })))
+        .then(|| {
+            (
+                receiver_expression,
+                selected_receiver,
+                selected.iterator_protocol_scope.clone(),
+            )
+        });
         if let Some(receiver_expression) = receiver_expression {
             if selected_receiver != rt
                 && self
@@ -36056,6 +36060,25 @@ impl<'a> Checker<'a> {
             self.resolved_calls
                 .insert(e, ResolvedCall::Extension(Box::new(resolved)));
             self.record_resolved_extension_sam_arguments(e, args);
+            if let Some((Some(receiver), declared_receiver, declaration_scope)) =
+                intrinsic_iterator_receiver
+            {
+                if self
+                    .record_declaration_iterator_protocol(
+                        receiver,
+                        declared_receiver,
+                        &declaration_scope,
+                    )
+                    .is_none()
+                {
+                    self.diags.error(
+                        self.span(receiver),
+                        "krusty: selected inline iteration body has no declaration-scoped iterator protocol"
+                            .to_string(),
+                    );
+                    return Some(Ty::Error);
+                }
+            }
             return Some(ret);
         }
 
@@ -36524,32 +36547,6 @@ impl<'a> Checker<'a> {
         None
     }
 
-    /// Resolve inherited members after direct lookup has failed.
-    fn inherited_member(
-        &self,
-        sub_ty: Ty,
-        name: &str,
-        arg_tys: &[Ty],
-        include_interfaces: bool,
-    ) -> Option<crate::symbol_resolver::ResolvedMember> {
-        self.syms
-            .applied_type_hierarchy(sub_ty)
-            .into_iter()
-            .filter(|(_, _, depth)| *depth > 0)
-            .filter(|(owner, _, _)| {
-                include_interfaces
-                    || self
-                        .resolved_type_name(*owner)
-                        .is_some_and(|ty| !ty.is_interface())
-            })
-            .filter_map(|(_, applied, depth)| {
-                self.select_instance_member(applied, name, arg_tys)
-                    .map(|member| (depth, member))
-            })
-            .min_by_key(|(depth, _)| *depth)
-            .map(|(_, member)| member)
-    }
-
     /// Commit one already-selected member call. Overload selection owns the declaration choice;
     /// this step only records context arguments, SAM conversions, and the source argument slots an
     /// omitted-default call needs. Keeping those jobs separate avoids querying and ranking the same
@@ -36795,108 +36792,327 @@ impl<'a> Checker<'a> {
         Some(Ty::Error)
     }
 
-    fn iterator_protocol_target(&self, iterable_ty: Ty) -> Option<IteratorProtocolTarget> {
-        let internal = iterable_ty.obj_internal()?;
-        let iterator = if let Some(member) = self
-            .select_instance_member(iterable_ty, "iterator", &[])
-            .or_else(|| self.inherited_member(iterable_ty, "iterator", &[], true))
-        {
-            IteratorDispatchTarget::Member {
-                owner_fallback: internal,
-                resolved: Box::new(member),
-            }
-        } else {
-            IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
-                "iterator",
-                iterable_ty,
-                &[],
-                &[],
-            )?))
+    fn selected_zero_arg_operator_from_callables(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        recv: Ty,
+        name: &str,
+        kind: crate::libraries::FnKind,
+        diagnostic_span: Option<Span>,
+        callables: &crate::libraries::Callables,
+    ) -> Result<Option<ResolvedCall>, ()> {
+        let selected = {
+            let resolver = self.resolver();
+            let (mut functions, _) = callables.clone().into_parts();
+            functions.overloads.retain(|candidate| {
+                candidate.kind == kind && self.source_callable_visible(candidate)
+            });
+            let callables = crate::libraries::Callables::Functions(functions);
+            resolver.select_receiver_function_with_params_tracking(recv, name, &[], &[], &callables)
         };
-        let iter_ty = iterator.ret();
-        let iter_internal = iter_ty.obj_internal()?;
-        let has_next = self.select_instance_name(iter_internal, "hasNext", &[])?;
-        let next = self.select_instance_name(iter_internal, "next", &[])?;
-        let elem_ty = iterable_ty
-            .obj_internal()
-            .and_then(|i| self.syms.libraries.iterable_element_type_name(i))
-            .or_else(|| iter_ty.type_args().first().copied())
-            .or_else(|| iterable_ty.type_args().first().copied())
-            .map(|element| element.projection_inner().unwrap_or(element))
-            .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-        Some(IteratorProtocolTarget {
-            iterator,
-            has_next,
-            next,
-            iter_ty,
-            elem_ty,
-        })
+        let (selected, params, ret) = match selected {
+            crate::symbol_resolver::CandidateSelection::Selected(selected) => selected,
+            crate::symbol_resolver::CandidateSelection::None => return Ok(None),
+            crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                if let Some(span) = diagnostic_span {
+                    self.diags.error(
+                        span,
+                        format!("overload resolution ambiguity for operator '{name}'"),
+                    );
+                }
+                return Err(());
+            }
+        };
+        if !params.is_empty() {
+            return Ok(None);
+        }
+        if !selected.flags.operator {
+            if let Some(span) = diagnostic_span {
+                self.diags.error(
+                    span,
+                    format!("'operator' modifier is required on '{name}'."),
+                );
+            }
+            return Err(());
+        }
+        let semantic = selected.semantic_signature();
+        let context_count = selected.context_count.min(semantic.params.len());
+        let context_args = if context_count == 0 {
+            Vec::new()
+        } else if let Some(context) =
+            self.select_context_arguments(scope, &semantic.params[..context_count])
+        {
+            context
+        } else {
+            if let Some(span) = diagnostic_span {
+                self.diags.error(
+                    span,
+                    "no implicit value is available for the context parameters".to_string(),
+                );
+            }
+            return Err(());
+        };
+        if selected.kind == crate::libraries::FnKind::Member {
+            if context_count != 0 {
+                if let Some(span) = diagnostic_span {
+                    self.diags.error(
+                        span,
+                        format!(
+                            "krusty: context-parameter operator convention '{name}' is not supported"
+                        ),
+                    );
+                }
+                return Err(());
+            }
+            let mut member = selected.member_with_return(ret);
+            member.params = params;
+            let resolved = crate::symbol_resolver::ResolvedMember {
+                receiver: recv,
+                physical_params: selected.callable.physical_params.clone(),
+                context_args: Vec::new(),
+                ret,
+                member,
+                projected_return_hazard: selected.projected_return_hazard,
+                suspend: selected.flags.suspend,
+                origin: selected.callable.origin.clone(),
+            };
+            let owner = resolved
+                .member
+                .owner
+                .expect("a selected convention member has a declaring classifier");
+            if !self.selected_member_accessible(&resolved, owner) {
+                if let Some(span) = diagnostic_span {
+                    let visibility = match selected.visibility {
+                        Visibility::Private => "private",
+                        Visibility::Protected => "protected",
+                        Visibility::Internal => "internal",
+                        Visibility::Public => "public",
+                    };
+                    self.diags.error(
+                        span,
+                        format!(
+                            "cannot access '{name}': it is {visibility} in '{}'",
+                            owner.render()
+                        ),
+                    );
+                }
+                return Err(());
+            }
+            return Ok(Some(ResolvedCall::Member(resolved)));
+        }
+        let mut callable = selected.callable.clone();
+        if let Some(facade) = selected
+            .source_key
+            .and_then(|key| self.syms.fn_facades_by_decl.get(&key).copied())
+        {
+            callable.owner = facade;
+            callable.origin = Origin::Module { facade };
+        }
+        callable.ret = ret;
+        Ok(Some(ResolvedCall::source_extension(
+            callable,
+            recv,
+            params,
+            context_args,
+            ret,
+            selected.source_key,
+            false,
+            None,
+            Vec::new(),
+        )))
     }
 
-    fn record_iterator_protocol(&mut self, iterable: ExprId, iterable_ty: Ty) -> Option<Ty> {
-        let target = self.iterator_protocol_target(iterable_ty)?;
-        let elem = target.elem_ty;
-        if matches!(target.iterator, IteratorDispatchTarget::Extension(_)) {
-            if let IteratorDispatchTarget::Extension(c) = &target.iterator {
-                self.synthetic_ext_calls
-                    .insert((iterable, "iterator".to_string()), (**c).clone());
+    fn zero_arg_operator_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        statement: Option<StmtId>,
+        recv: Ty,
+        name: &str,
+        span: Span,
+        diagnose: bool,
+    ) -> Result<Option<ResolvedCall>, ()> {
+        // Collect the semantic family once. Member and extension overload selection are distinct
+        // precedence rungs around member extensions, but neither may repeat hierarchy/import walks.
+        let callables = self.resolver().receiver_callables(recv, name);
+        let diagnostic_span = diagnose.then_some(span);
+        if let Some(target) = self.selected_zero_arg_operator_from_callables(
+            scope,
+            recv,
+            name,
+            crate::libraries::FnKind::Member,
+            diagnostic_span,
+            &callables,
+        )? {
+            return Ok(Some(target));
+        }
+        if let Some(statement) = statement {
+            if let Some(target) =
+                self.member_extension_zero_arg_operator(scope, statement, recv, name, span)?
+            {
+                return Ok(Some(target));
             }
         }
+        self.selected_zero_arg_operator_from_callables(
+            scope,
+            recv,
+            name,
+            crate::libraries::FnKind::Extension,
+            diagnostic_span,
+            &callables,
+        )
+    }
+
+    fn iterator_protocol_target(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        statement: Option<StmtId>,
+        iterable_ty: Ty,
+        span: Span,
+        diagnose: bool,
+    ) -> Result<Option<IteratorProtocolTarget>, ()> {
+        let Some(iterator) =
+            self.zero_arg_operator_call(scope, statement, iterable_ty, "iterator", span, diagnose)?
+        else {
+            return Ok(None);
+        };
+        let iter_ty = iterator.ret();
+        let Some(has_next) =
+            self.zero_arg_operator_call(scope, statement, iter_ty, "hasNext", span, diagnose)?
+        else {
+            return Ok(None);
+        };
+        if has_next.ret() != Ty::Boolean {
+            if diagnose {
+                self.diags.error(
+                    span,
+                    format!(
+                        "'hasNext()' must return Boolean, but returns '{}'",
+                        has_next.ret().source_name()
+                    ),
+                );
+            }
+            return Err(());
+        }
+        let Some(next) =
+            self.zero_arg_operator_call(scope, statement, iter_ty, "next", span, diagnose)?
+        else {
+            return Ok(None);
+        };
+        let elem_ty = next.ret();
+        Ok(Some(IteratorProtocolTarget {
+            iterator: Box::new(iterator),
+            has_next: Box::new(has_next),
+            next: Box::new(next),
+            iter_ty,
+            elem_ty,
+        }))
+    }
+
+    /// Resolve one operator convention in the declaration-owned scope attached to a selected inline
+    /// body. The provider capability supplies the package scope; the checker performs the ordinary
+    /// member-then-extension precedence once and records the exact call for lowering.
+    fn declaration_zero_arg_operator(
+        &self,
+        recv: Ty,
+        name: &str,
+        declaration_scope: &[TypeName],
+    ) -> Option<ResolvedCall> {
+        let resolver = crate::symbol_resolver::SymbolResolver::new_scoped(
+            &*self.syms.libraries,
+            declaration_scope,
+        );
+        let callables = resolver.receiver_callables(recv, name);
+        for kind in [
+            crate::libraries::FnKind::Member,
+            crate::libraries::FnKind::Extension,
+        ] {
+            let (mut functions, _) = callables.clone().into_parts();
+            functions
+                .overloads
+                .retain(|candidate| candidate.kind == kind);
+            let candidates = crate::libraries::Callables::Functions(functions);
+            let (selected, params, ret) = match resolver
+                .select_receiver_function_with_params_tracking(recv, name, &[], &[], &candidates)
+            {
+                crate::symbol_resolver::CandidateSelection::Selected(selected) => selected,
+                crate::symbol_resolver::CandidateSelection::None => continue,
+                crate::symbol_resolver::CandidateSelection::Ambiguous => return None,
+            };
+            if !params.is_empty() || selected.context_count != 0 || !selected.flags.operator {
+                return None;
+            }
+            if kind == crate::libraries::FnKind::Extension {
+                let mut callable = selected.callable;
+                callable.ret = ret;
+                return Some(ResolvedCall::library_extension(callable));
+            }
+            let mut member = selected.member_with_return(ret);
+            member.params = params;
+            return Some(ResolvedCall::Member(
+                crate::symbol_resolver::ResolvedMember {
+                    receiver: recv,
+                    physical_params: selected.callable.physical_params.clone(),
+                    context_args: Vec::new(),
+                    ret,
+                    member,
+                    projected_return_hazard: selected.projected_return_hazard,
+                    suspend: selected.flags.suspend,
+                    origin: selected.callable.origin,
+                },
+            ));
+        }
+        None
+    }
+
+    fn record_declaration_iterator_protocol(
+        &mut self,
+        iterable: ExprId,
+        iterable_ty: Ty,
+        declaration_scope: &[TypeName],
+    ) -> Option<Ty> {
+        let iterator =
+            self.declaration_zero_arg_operator(iterable_ty, "iterator", declaration_scope)?;
+        let iter_ty = iterator.ret();
+        let has_next = self.declaration_zero_arg_operator(iter_ty, "hasNext", declaration_scope)?;
+        if has_next.ret() != Ty::Boolean {
+            return None;
+        }
+        let next = self.declaration_zero_arg_operator(iter_ty, "next", declaration_scope)?;
+        let elem_ty = next.ret();
+        self.iterator_protocols.insert(
+            iterable,
+            IteratorProtocolTarget {
+                iterator: Box::new(iterator),
+                has_next: Box::new(has_next),
+                next: Box::new(next),
+                iter_ty,
+                elem_ty,
+            },
+        );
+        Some(elem_ty)
+    }
+
+    fn record_iterator_protocol(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        statement: Option<StmtId>,
+        iterable: ExprId,
+        iterable_ty: Ty,
+    ) -> Result<Option<Ty>, ()> {
+        let diagnose = statement.is_some();
+        let Some(target) = self.iterator_protocol_target(
+            scope,
+            statement,
+            iterable_ty,
+            self.span(iterable),
+            diagnose,
+        )?
+        else {
+            return Ok(None);
+        };
+        let elem = target.elem_ty;
         self.iterator_protocols.insert(iterable, target);
-        Some(elem)
-    }
-
-    fn module_member_target(
-        &self,
-        recv: Ty,
-        name: &str,
-        params: &[Ty],
-    ) -> Option<DestructureComponentTarget> {
-        let owner = recv.obj_internal()?;
-        let class = self.syms.class_by_type_name(owner)?;
-        let sig = class
-            .methods_named(name)
-            .iter()
-            .find(|s| s.params.as_slice() == params)?;
-        Some(DestructureComponentTarget::Call(Box::new(
-            ResolvedCall::Member(crate::symbol_resolver::ResolvedMember::from_member(
-                recv,
-                crate::module_symbols::member_from_signature(
-                    name,
-                    sig,
-                    owner,
-                    class.is_interface(),
-                ),
-                sig.ret,
-                sig.projected_return_hazard,
-                Origin::Module { facade: owner },
-            )),
-        )))
-    }
-
-    fn module_extension_target(
-        &self,
-        recv: Ty,
-        name: &str,
-        params: &[Ty],
-    ) -> Option<DestructureComponentTarget> {
-        let arg_kinds: Vec<CallArgKind> = params.iter().map(|&ty| CallArgKind::Typed(ty)).collect();
-        let (selected, sig) = self
-            .selected_source_extension(recv, name, &arg_kinds)
-            .filter(|(_, signature)| {
-                signature.context_count == 0
-                    && !signature.vararg()
-                    && signature.params.as_slice() == params
-            })?;
-        Some(DestructureComponentTarget::Call(Box::new(
-            self.resolved_source_extension_call(
-                &selected,
-                recv,
-                sig.ret,
-                Vec::new(),
-                sig.param_default_values.clone(),
-            ),
-        )))
+        Ok(Some(elem))
     }
 
     fn destructure_component_target(
@@ -36908,35 +37124,23 @@ impl<'a> Checker<'a> {
         params: &[Ty],
         span: Span,
     ) -> Result<Option<DestructureComponentTarget>, ()> {
-        if let Some(target) = self.module_member_target(recv, name, params).or_else(|| {
-            self.select_instance_member(recv, name, params)
-                .map(ResolvedCall::Member)
-                .map(Box::new)
-                .map(DestructureComponentTarget::Call)
-        }) {
-            return Ok(Some(target));
-        }
-        if let Some(target) =
-            self.member_extension_component_target(scope, statement, recv, name, span)?
-        {
-            return Ok(Some(target));
+        if !params.is_empty() {
+            return Ok(None);
         }
         Ok(self
-            .library_extension_callable(name, recv, params, &[])
-            .map(ResolvedCall::library_extension)
+            .zero_arg_operator_call(scope, Some(statement), recv, name, span, true)?
             .map(Box::new)
-            .map(DestructureComponentTarget::Call)
-            .or_else(|| self.module_extension_target(recv, name, params)))
+            .map(DestructureComponentTarget::Call))
     }
 
-    fn member_extension_component_target(
+    fn member_extension_zero_arg_operator(
         &mut self,
         scope: &CheckerScope<'_>,
         statement: StmtId,
         recv: Ty,
         name: &str,
         span: Span,
-    ) -> Result<Option<DestructureComponentTarget>, ()> {
+    ) -> Result<Option<ResolvedCall>, ()> {
         let candidate = match self.member_extension_function(
             scope,
             MemberExtensionFunctionCall {
@@ -36960,8 +37164,15 @@ impl<'a> Checker<'a> {
                 return Err(());
             }
         };
-        if !candidate.params.is_empty() {
+        if !candidate.visible_params.is_empty() {
             return Ok(None);
+        }
+        if !candidate.params.is_empty() {
+            self.diags.error(
+                span,
+                format!("krusty: context-parameter operator convention '{name}' is not supported"),
+            );
+            return Err(());
         }
         if !candidate.is_operator {
             self.diags.error(
@@ -36979,9 +37190,12 @@ impl<'a> Checker<'a> {
             .classifier(candidate.owner)
             .is_some_and(|shape| shape.is_interface());
         self.mark_extension_receiver_stmt_used(statement, candidate.dispatch_receiver);
-        Ok(Some(DestructureComponentTarget::Call(Box::new(
-            candidate.resolved_call(recv, interface),
-        ))))
+        let dispatch_receiver = self.implicit_receiver_selection(candidate.dispatch_receiver);
+        Ok(Some(candidate.resolved_call(
+            dispatch_receiver,
+            recv,
+            interface,
+        )))
     }
 
     fn destructure_indexed_get_target(&self, recv: Ty) -> Option<DestructureComponentTarget> {
@@ -39732,8 +39946,12 @@ impl<'a> Checker<'a> {
                     .resolver()
                     .classifier(candidate.owner)
                     .is_some_and(|shape| shape.is_interface());
-                self.resolved_calls
-                    .insert(call, candidate.resolved_call(extension_receiver, interface));
+                let dispatch_receiver =
+                    self.implicit_receiver_selection(candidate.dispatch_receiver);
+                self.resolved_calls.insert(
+                    call,
+                    candidate.resolved_call(dispatch_receiver, extension_receiver, interface),
+                );
                 self.mark_extension_receiver_used(call, candidate.dispatch_receiver);
                 Some(candidate.ret)
             }
@@ -43761,13 +43979,6 @@ impl<'a> Checker<'a> {
                     "resolve",
                     "EXT-SECTION name={name} rt={rt:?} call_targs={call_targs:?}"
                 );
-                // A lambda-bearing call (`x.forEach { … }`, `x.map { … }`, …) may be lowered by inlining
-                // an iteration over the receiver; record the full iterator protocol keyed by the receiver
-                // expr so the lowerer reads the capability instead of re-resolving. Gated structurally on
-                // a function argument — no method-name list.
-                if arg_tys.iter().any(|t| matches!(t, Ty::Fun(_))) {
-                    self.record_iterator_protocol(receiver, rt);
-                }
                 // Stash the RESOLVED explicit type arguments so the lowerer can specialize a `<reified T>`
                 // classpath extension's spliced body (imports/classpath types resolve here, not there).
                 if !call_targs.is_empty() {
@@ -47124,7 +47335,7 @@ impl<'a> Checker<'a> {
                 iterable,
                 body,
                 label,
-            } => self.stmt_for_each(scope, name, iterable, body, label),
+            } => self.stmt_for_each(scope, s, name, iterable, body, label),
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
                 // executed and produces no bytecode (kotlinc drops it). Its lambda body uses the
@@ -48335,6 +48546,7 @@ impl<'a> Checker<'a> {
     fn stmt_for_each(
         &mut self,
         scope: &CheckerScope<'_>,
+        statement: StmtId,
         name: String,
         iterable: ExprId,
         body: ExprId,
@@ -48350,19 +48562,19 @@ impl<'a> Checker<'a> {
         let elem = if let Some(e) = iteration_ty.array_elem() {
             e
         } else {
-            match iteration_ty {
-                Ty::String => Ty::Char, // iterating a String yields its chars
-                Ty::Error => Ty::Error,
-                Ty::Obj(_, _) => match self.record_iterator_protocol(iterable, iteration_ty) {
-                    Some(elem) => elem,
-                    None => {
+            if iteration_ty == Ty::String {
+                Ty::Char // iterating a String yields its chars
+            } else if iteration_ty == Ty::Error {
+                Ty::Error
+            } else {
+                match self.record_iterator_protocol(scope, Some(statement), iterable, iteration_ty)
+                {
+                    Ok(Some(elem)) => elem,
+                    Ok(None) => {
                         self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.source_name()));
                         Ty::Error
                     }
-                },
-                _ => {
-                    self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.source_name()));
-                    Ty::Error
+                    Err(()) => Ty::Error,
                 }
             }
         };
@@ -48432,23 +48644,6 @@ impl<'a> Checker<'a> {
                 captured_locals.sort_by(|a, b| a.0.cmp(&b.0));
             }
         }
-        let captures: Vec<LocalCapture> = captured_locals
-            .into_iter()
-            .map(|(name, ty)| {
-                let shared_cell = match &f.body {
-                    FunBody::Expr(e) | FunBody::Block(e) => {
-                        self.local_capture_needs_shared_cell(scope, *e, &name)
-                    }
-                    FunBody::None => false,
-                };
-                LocalCapture {
-                    name,
-                    ty,
-                    shared_cell,
-                }
-            })
-            .collect();
-
         // Resolve the lifted method's erased parameter types; `generic_sig` below retains the same
         // declaration with symbolic formals for call-site inference.
         let params: Vec<Ty> = f
@@ -48581,16 +48776,6 @@ impl<'a> Checker<'a> {
 
         // Register in current local-funs frame and in the TypeInfo maps.
         self.register_local_fun(scope, &f.name, stmt_id, sig.clone());
-        self.stmt_lowers.insert(
-            stmt_id,
-            StmtLowering::LocalFunction(Box::new(LocalFunInfo {
-                mangled,
-                sig: sig.clone(),
-                captures,
-                receiver,
-            })),
-        );
-
         // Check the body (for a block body or when return type was already inferred above for expr).
         self.with_ret(ret_ty, |c| {
             let previous_extension_receiver = c.this_extension_receiver;
@@ -48630,6 +48815,74 @@ impl<'a> Checker<'a> {
             }
             c.this_extension_receiver = previous_extension_receiver;
         });
+
+        // A lifted local function can consume an implicit context binding without spelling its source
+        // name. Add those checker-selected bindings to the same capture ABI as explicit name reads;
+        // lowering must never rediscover a context source from the surrounding scope.
+        if let FunBody::Expr(body) | FunBody::Block(body) = &f.body {
+            let (selected_contexts, direct_receivers) = selected_context_values(
+                self.file,
+                &self.expr_types,
+                &self.implicit_receiver_selections,
+                &self.context_args,
+                &self.resolved_calls,
+                &self.stmt_lowers,
+                *body,
+                true,
+            );
+            let selected_names = selected_contexts
+                .into_iter()
+                .filter_map(|source| match source {
+                    ResolvedContextArgument::Binding { name, .. } => Some(name),
+                    ResolvedContextArgument::ImplicitReceiver(selection) => {
+                        selection.context_binding.map(|(name, _)| name)
+                    }
+                })
+                .chain(
+                    direct_receivers
+                        .into_iter()
+                        .filter_map(|selection| selection.context_binding.map(|(name, _)| name)),
+                );
+            for name in selected_names {
+                if outer_names.contains(&name)
+                    && !captured_locals
+                        .iter()
+                        .any(|(captured, _)| captured == &name)
+                {
+                    let ty = self
+                        .lookup(scope, &name)
+                        .map(|local| local.ty)
+                        .unwrap_or(Ty::Error);
+                    captured_locals.push((name, ty));
+                }
+            }
+        }
+        captured_locals.sort_by(|left, right| left.0.cmp(&right.0));
+        let captures = captured_locals
+            .into_iter()
+            .map(|(name, ty)| {
+                let shared_cell = match &f.body {
+                    FunBody::Expr(e) | FunBody::Block(e) => {
+                        self.local_capture_needs_shared_cell(scope, *e, &name)
+                    }
+                    FunBody::None => false,
+                };
+                LocalCapture {
+                    name,
+                    ty,
+                    shared_cell,
+                }
+            })
+            .collect();
+        self.stmt_lowers.insert(
+            stmt_id,
+            StmtLowering::LocalFunction(Box::new(LocalFunInfo {
+                mangled,
+                sig,
+                captures,
+                receiver,
+            })),
+        );
     }
 }
 
@@ -51557,12 +51810,14 @@ fun box(): String {
                         iter_ty,
                         "()LBoxedIterator;",
                     );
+                    let mut info = crate::libraries::FunctionInfo::plain(
+                        crate::libraries::FnKind::Member,
+                        Some(Ty::obj("BoxedIterable")),
+                        callable,
+                    );
+                    info.flags.operator = true;
                     return crate::libraries::FunctionSet {
-                        overloads: vec![crate::libraries::FunctionInfo::plain(
-                            crate::libraries::FnKind::Member,
-                            Some(Ty::obj("BoxedIterable")),
-                            callable,
-                        )],
+                        overloads: vec![info],
                     };
                 }
                 if recv
@@ -51578,12 +51833,14 @@ fun box(): String {
                         Ty::Boolean,
                         "()Z",
                     );
+                    let mut info = crate::libraries::FunctionInfo::plain(
+                        crate::libraries::FnKind::Member,
+                        Some(recv),
+                        callable,
+                    );
+                    info.flags.operator = true;
                     return crate::libraries::FunctionSet {
-                        overloads: vec![crate::libraries::FunctionInfo::plain(
-                            crate::libraries::FnKind::Member,
-                            Some(recv),
-                            callable,
-                        )],
+                        overloads: vec![info],
                     };
                 }
                 if recv
@@ -51599,12 +51856,14 @@ fun box(): String {
                         Ty::String,
                         "()Ljava/lang/String;",
                     );
+                    let mut info = crate::libraries::FunctionInfo::plain(
+                        crate::libraries::FnKind::Member,
+                        Some(recv),
+                        callable,
+                    );
+                    info.flags.operator = true;
                     return crate::libraries::FunctionSet {
-                        overloads: vec![crate::libraries::FunctionInfo::plain(
-                            crate::libraries::FnKind::Member,
-                            Some(recv),
-                            callable,
-                        )],
+                        overloads: vec![info],
                     };
                 }
                 if recv == Ty::String && name == "get" {
@@ -53026,13 +53285,13 @@ fun box(): String {
             protocol.iter_ty,
             Ty::obj_args("BoxedIterator", &[Ty::String])
         );
-        assert_eq!(protocol.has_next.name, "hasNext");
-        assert_eq!(protocol.next.name, "next");
+        assert_eq!(protocol.has_next.emit_name(), Some("hasNext"));
+        assert_eq!(protocol.next.emit_name(), Some("next"));
         assert!(
             matches!(
-                &protocol.iterator,
-                IteratorDispatchTarget::Member { owner_fallback, resolved }
-                    if owner_fallback.matches("BoxedIterable")
+                protocol.iterator.as_ref(),
+                ResolvedCall::Member(resolved)
+                    if resolved.member.owner.is_some_and(|owner| owner.matches("BoxedIterable"))
                         && resolved.member.name == "iterator"
             ),
             "checker must record the member iterator dispatch selected for foreach lowering"

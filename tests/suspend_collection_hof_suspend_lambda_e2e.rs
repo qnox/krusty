@@ -51,3 +51,26 @@ fn suspend_lambda_in_collection_hof_runs() {
         "suspend lambda in collection HOF"
     );
 }
+
+#[test]
+fn suspend_map_hof_uses_declaration_iterator_scope() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let coroutines = common::coroutines_jar();
+    const SOURCE: &str = "import kotlinx.coroutines.runBlocking\n\
+        operator fun <K, V> Map<K, V>.iterator(): Iterator<Map.Entry<K, V>> =\n\
+            emptyList<Map.Entry<K, V>>().iterator()\n\
+        suspend fun render(entry: Map.Entry<String, Int>): String = entry.key\n\
+        suspend fun collect(values: Map<String, Int>): List<String> =\n\
+            values.map { render(it) }\n\
+        fun box(): String = runBlocking {\n\
+            collect(mapOf(\"O\" to 1, \"K\" to 2)).joinToString(\"\")\n\
+        }\n";
+    let output = common::compile_and_run_box(
+        SOURCE,
+        "Main",
+        &[stdlib, coroutines, jdk.clone()],
+        Some(jdk.as_path()),
+    );
+    assert_eq!(output.as_deref(), Some("OK"));
+}

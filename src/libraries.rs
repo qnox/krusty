@@ -1554,6 +1554,11 @@ pub struct FunctionInfo {
     /// value. It travels on the same candidate structure so the checker can combine both facets and
     /// run overload selection once.
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
+    /// Declaration-owned function packages used to resolve the iterator protocol inside this exact
+    /// callable's compiler-provided inline body. Empty means that the callable has no synthesized
+    /// iteration body. Providers attach this semantic capability to the ordinary candidate; callers'
+    /// imports never participate in the body's convention lookup.
+    pub iterator_protocol_scope: Vec<TypeName>,
 }
 
 impl FunctionInfo {
@@ -1632,6 +1637,7 @@ impl FunctionInfo {
             source_key: None,
             source_member: None,
             implicit_classifier_callable: None,
+            iterator_protocol_scope: Vec::new(),
         }
     }
 

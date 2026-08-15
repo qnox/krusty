@@ -1978,6 +1978,20 @@ impl JvmLibraries {
                             .and_then(|arity| arity.checked_sub(1));
                         CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), vararg_index)
                     };
+                    // Java declarations cannot carry Kotlin's `operator` modifier, but Kotlin still
+                    // admits the zero-argument iteration/destructuring conventions by their Java
+                    // method names. Normalize that language fact at the provider boundary so common
+                    // convention selection can keep requiring authoritative operator capability.
+                    if uses_java_type_semantics
+                        && member.params.is_empty()
+                        && (matches!(member.name.as_str(), "iterator" | "hasNext" | "next")
+                            || member.name.strip_prefix("component").is_some_and(|suffix| {
+                                !suffix.is_empty()
+                                    && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                            }))
+                    {
+                        member.set_is_operator(true);
+                    }
                 }
                 if let Some(java_nullable) = platform_nullable_params {
                     member.call_sig.platform_nullable_params = java_nullable;
@@ -4393,6 +4407,10 @@ impl JvmLibraries {
             _ => None,
         };
         if let Some(intrinsic) = compiler_intrinsic {
+            let declaration_package = match namespace {
+                SymbolNamespace::Package(package) => Some(package),
+                SymbolNamespace::Classifier(_) => None,
+            };
             for overload in &mut overloads {
                 let selected_declaration_kind = match intrinsic {
                     crate::libraries::CompilerIntrinsic::Print
@@ -4422,6 +4440,16 @@ impl JvmLibraries {
                 };
                 if overload.kind == selected_declaration_kind {
                     overload.callable.compiler_intrinsic = Some(intrinsic);
+                    if matches!(
+                        intrinsic,
+                        crate::libraries::CompilerIntrinsic::ForEach
+                            | crate::libraries::CompilerIntrinsic::ForEachIndexed
+                            | crate::libraries::CompilerIntrinsic::Map
+                            | crate::libraries::CompilerIntrinsic::FlatMap
+                    ) {
+                        overload.iterator_protocol_scope =
+                            declaration_package.into_iter().collect();
+                    }
                 }
             }
         }
