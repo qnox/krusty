@@ -27516,7 +27516,10 @@ fn eval_anno_value(
                 AnnoValue::Enum(internal, name.clone())
             }
         }
-        // `A::class` — a class literal.
+        // `A::class` — a class literal. Only a class DECLARED in this file has an internal name
+        // lowering can name on its own: `class_internal` prefixes the current package, which for an
+        // imported classifier (`String::class` → `p/String`) fabricates a class that does not
+        // exist. Drop rather than emit a wrong value, exactly as the enum branch above does.
         Expr::CallableRef {
             receiver: Some(r),
             name,
@@ -27524,6 +27527,7 @@ fn eval_anno_value(
             let Expr::Name(cn) = file.expr(*r) else {
                 return None;
             };
+            file_class_decl(file, cn)?;
             let internal = class_internal(file, cn);
             AnnoValue::Class(type_name(&internal))
         }
@@ -27550,6 +27554,30 @@ fn eval_anno_value(
     })
 }
 
+/// The same-file fold plus the declared JVM retention, for callers that can emit either
+/// `RuntimeVisibleAnnotations` or `RuntimeInvisibleAnnotations`. `None` when `Name` is not a
+/// file-declared annotation class, is SOURCE-retained, or an argument does not fold.
+fn file_applied_annotation(
+    file: &ast::File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+    internal: TypeName,
+    args: &[AstExprId],
+    ir: &crate::ir::IrFile,
+) -> Option<(crate::ir::AppliedAnnotation, Retention)> {
+    file_class_decl_by_internal(file, internal)
+        .filter(|class| class.kind == ast::ClassKind::Annotation)?;
+    let retention = match syms.annotation_retention(internal)? {
+        crate::types::AnnotationRetention::Default | crate::types::AnnotationRetention::Runtime => {
+            Retention::Runtime
+        }
+        crate::types::AnnotationRetention::Binary => Retention::Binary,
+        crate::types::AnnotationRetention::Source => return None,
+    };
+    let annotation = fold_file_annotation(file, file_index, syms, internal, args, ir)?;
+    Some((annotation, retention))
+}
+
 /// Fold `@Name(args…)` to an `AppliedAnnotation`, pairing each argument with the annotation's
 /// constructor-parameter name — by LABEL for a named argument, by position otherwise (the same rule
 /// the classpath fold uses; an annotation's elements have defaults and may be written in any
@@ -27563,7 +27591,22 @@ fn build_applied_annotation(
     args: &[AstExprId],
     ir: &crate::ir::IrFile,
 ) -> Option<crate::ir::AppliedAnnotation> {
-    let cd = runtime_annotation_decl(file, syms, internal)?;
+    runtime_annotation_decl(file, syms, internal)?;
+    fold_file_annotation(file, file_index, syms, internal, args, ir)
+}
+
+/// Pair each argument of a FILE-declared annotation with its element name — by label for a named
+/// argument, by position otherwise — and fold the values. Retention is the caller's concern.
+fn fold_file_annotation(
+    file: &ast::File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+    internal: TypeName,
+    args: &[AstExprId],
+    ir: &crate::ir::IrFile,
+) -> Option<crate::ir::AppliedAnnotation> {
+    let cd = file_class_decl_by_internal(file, internal)
+        .filter(|class| class.kind == ast::ClassKind::Annotation)?;
     let mut values = Vec::new();
     let mut positional = 0usize;
     for &arg in args {
@@ -27760,10 +27803,14 @@ fn ctor_annotations(
             Some((anno, Retention::Runtime)) => out.visible.push(anno),
             Some((anno, Retention::Binary)) => out.invisible.push(anno),
             // An annotation class declared in THIS module has no classpath record yet; it folds
-            // through its same-file declaration, which is RUNTIME-retained by construction.
-            None => out.visible.extend(build_applied_annotation(
-                file, file_index, syms, internal, arguments, ir,
-            )),
+            // through its same-file declaration, which carries its own declared retention.
+            None => {
+                match file_applied_annotation(file, file_index, syms, internal, arguments, ir) {
+                    Some((anno, Retention::Runtime)) => out.visible.push(anno),
+                    Some((anno, Retention::Binary)) => out.invisible.push(anno),
+                    None => {}
+                }
+            }
         }
     }
     out
@@ -27788,10 +27835,14 @@ fn fn_applied_annotations(
             Some((anno, Retention::Runtime)) => out.visible.push(anno),
             Some((anno, Retention::Binary)) => out.invisible.push(anno),
             // An annotation class declared in THIS module has no classpath record yet; it folds
-            // through its same-file declaration, which is RUNTIME-retained by construction.
-            None => out.visible.extend(build_applied_annotation(
-                file, file_index, syms, internal, arguments, ir,
-            )),
+            // through its same-file declaration, which carries its own declared retention.
+            None => {
+                match file_applied_annotation(file, file_index, syms, internal, arguments, ir) {
+                    Some((anno, Retention::Runtime)) => out.visible.push(anno),
+                    Some((anno, Retention::Binary)) => out.invisible.push(anno),
+                    None => {}
+                }
+            }
         }
     }
     crate::trace_compiler!(

@@ -68,6 +68,52 @@ fn annotation_shapes(
     out
 }
 
+/// The class's `Constant pool:` listing, one entry per line with the index dropped. Excludes the
+/// `@Metadata` payload (a `Utf8` whose text starts with a NUL) — kotlinc records annotations in the
+/// metadata protobuf and krusty does not yet, a tracked gap that would otherwise mask everything
+/// else. Pool ORDER is what the annotation-reservation and attribute-name interning fixes are
+/// about, so this compares the sequence, not a set.
+fn constant_pool(dir: &std::path::Path, class: &str) -> Vec<String> {
+    let path = dir.join(format!("{class}.class"));
+    let raw = common::javap(&["-v", "-p", &path.to_string_lossy()]).expect("pooled javap");
+    let mut out = Vec::new();
+    let mut in_pool = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed == "Constant pool:" {
+            in_pool = true;
+            continue;
+        }
+        if !in_pool {
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('{') {
+            break;
+        }
+        let Some((_, entry)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let entry = entry.trim();
+        if entry.starts_with("Utf8") && entry.contains("\\u0000") {
+            continue;
+        }
+        // Entries reference other entries by index; drop those too, so the comparison is about the
+        // sequence of KINDS and literal text.
+        let mut normalized = String::new();
+        let mut chars = entry.chars().peekable();
+        while let Some(c) = chars.next() {
+            normalized.push(c);
+            if c == '#' {
+                while chars.peek().is_some_and(char::is_ascii_digit) {
+                    chars.next();
+                }
+            }
+        }
+        out.push(normalized);
+    }
+    out
+}
+
 /// Compile `src` with BOTH compilers into fresh directories, returning `(krusty_dir, kotlinc_dir)`.
 /// `None` when the provisioned toolchain is unavailable (the test then skips).
 fn compile_both(
@@ -225,5 +271,87 @@ fn vararg_secondary_constructor_is_callable_through_its_own_metadata() {
         common::compile_and_run_box(MAIN, "Main", &[libout, stdlib], Some(jdk.as_path()))
             .expect("vararg secondary ctor must be callable through krusty-built metadata"),
         "OK"
+    );
+}
+
+#[test]
+fn annotated_facade_constant_pool_matches_kotlinc() {
+    // kotlinc's writer visits a method's header — name, descriptor, its own annotations, then the
+    // nullability types — before the body. Interning a declared annotation's payload when the
+    // annotation is ATTACHED (after code generation) puts every constant it introduces behind the
+    // body's, so the pool diverges on every annotated method even though the attributes read the
+    // same. `Deprecated` likewise interns with the method that carries it.
+    let Some((krusty_dir, kotlinc_dir)) = compile_both(
+        "pool",
+        "Pool.kt",
+        "package q\n\
+         @Deprecated(\"gone\", level = DeprecationLevel.HIDDEN)\n\
+         fun hidden(x: String): String = x\n\
+         @Deprecated(\"old\")\n\
+         fun old(y: String): String = y\n",
+    ) else {
+        eprintln!("skip (pool: provisioned kotlinc/JAVA_HOME unavailable)");
+        return;
+    };
+    assert_eq!(
+        constant_pool(&krusty_dir, "q/PoolKt"),
+        constant_pool(&kotlinc_dir, "q/PoolKt"),
+        "pool: krusty's constant pool must match kotlinc's for an annotated facade"
+    );
+}
+
+#[test]
+fn binary_retained_annotation_precedes_the_nullability_one() {
+    // A BINARY-retained declared annotation shares `RuntimeInvisibleAnnotations` with the
+    // compiler's own `@NotNull` on the return. kotlinc writes the DECLARED one first, whichever
+    // order the emitter's two setters ran in.
+    assert_same_annotations(
+        "binret",
+        "Bin.kt",
+        "q/BinKt",
+        &["marked(java.lang.String)"],
+        "package q\n\
+         @Retention(AnnotationRetention.BINARY)\n\
+         @Target(AnnotationTarget.FUNCTION)\n\
+         annotation class Keep(val why: String)\n\
+         @Keep(\"reason\")\n\
+         fun marked(v: String): String = v\n",
+    );
+}
+
+#[test]
+fn nested_annotation_argument_is_dropped_whole() {
+    // KNOWN GAP, pinned so it stays visible: a nested annotation value (`ReplaceWith`) does not
+    // fold, and because the deprecation facts are derived from the folded records, the annotation,
+    // the `Deprecated` attribute and ACC_SYNTHETIC all go with it. kotlinc emits all three. The
+    // fold's contract is preserved — nothing WRONG is emitted — but this spelling is the common
+    // one, so the divergence is asserted rather than left to be discovered.
+    let Some((krusty_dir, kotlinc_dir)) = compile_both(
+        "nested",
+        "Nest.kt",
+        "package q\n\
+         @Deprecated(\"gone\", ReplaceWith(\"newer(x)\"), DeprecationLevel.HIDDEN)\n\
+         fun older(x: String): String = x\n\
+         fun newer(x: String): String = x\n",
+    ) else {
+        eprintln!("skip (nested: provisioned kotlinc/JAVA_HOME unavailable)");
+        return;
+    };
+    let krusty = annotation_shapes(&krusty_dir, "q/NestKt");
+    let kotlinc = annotation_shapes(&kotlinc_dir, "q/NestKt");
+    let older = |shapes: &std::collections::HashMap<String, Vec<String>>| {
+        shapes
+            .iter()
+            .find(|(declaration, _)| declaration.contains("older(java.lang.String)"))
+            .map(|(_, lines)| lines.join("\n"))
+            .expect("older() present")
+    };
+    assert!(
+        older(&kotlinc).contains("ACC_SYNTHETIC") && older(&kotlinc).contains("Deprecated:"),
+        "fixture must exercise kotlinc's hidden-deprecation shape"
+    );
+    assert!(
+        !older(&krusty).contains("ACC_SYNTHETIC"),
+        "nested-value gap closed — fold the nested annotation and drop this test's inversion"
     );
 }
