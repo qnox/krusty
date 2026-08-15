@@ -25,11 +25,11 @@ pub(crate) use crate::resolve::{
     CallableReferenceBinding, CallableReferenceTarget, ConstructorReferenceOuter, CtorDefaultValue,
     DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FunctionImportScope,
     ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InlineCall, InvokeKind,
-    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ResolvedCall,
-    ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
-    ResolvedExtensionCall, ResolvedIncDec, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedPropertyAccess, ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef,
-    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
+    LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
+    ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
+    ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
+    ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
+    SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.

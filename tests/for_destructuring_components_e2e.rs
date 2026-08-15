@@ -79,6 +79,38 @@ class M {\n\
 }
 
 #[test]
+fn ordinary_component_member_requires_operator() {
+    const SRC: &str = "class C { fun component1() = 1 }\n\
+fun test() { val (value) = C() }\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("'operator' modifier is required")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn internal_component_extension_is_visible_across_module_files() {
+    let sources = [
+        (
+            "Components",
+            "class Box(val value: String)\n\
+internal operator fun Box.component1(): String = value\n",
+        ),
+        (
+            "Main",
+            "fun box(): String { val (value) = Box(\"OK\"); return value }\n",
+        ),
+    ];
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources).as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
 fn bracket_destructuring_over_with_index() {
     const SRC: &str =
         "// LANGUAGE: +NameBasedDestructuring +EnableNameBasedDestructuringShortForm\n\

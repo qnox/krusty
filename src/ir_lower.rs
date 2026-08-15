@@ -19,11 +19,11 @@ use crate::frontend::{
     CompoundAssignmentTarget, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget,
     ExprLowering, FrontendClassModel, FrontendSymbols, FrontendTypeInfo, FunctionImportScope,
     ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InlineCall, InvokeKind,
-    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ResolvedCall,
-    ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
-    ResolvedExtensionCall, ResolvedIncDec, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedPropertyAccess, ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef,
-    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
+    LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
+    ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
+    ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
+    ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
+    SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -8010,6 +8010,7 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let ResolvedCall::MemberExtension {
             owner,
+            dispatch_receiver,
             physical_receiver,
             name,
             params,
@@ -8030,7 +8031,9 @@ impl<'a> Lower<'a> {
         if inline.must_inline() {
             return None;
         }
-        let dispatch = self.member_extension_dispatch_value(*owner)?;
+        let dispatch = self
+            .materialize_implicit_receiver(dispatch_receiver.clone())?
+            .0;
         let extension_value = self.emit_type_op(
             IrTypeOp::ImplicitCoercion,
             extension_value,
@@ -15198,11 +15201,10 @@ impl<'a> Lower<'a> {
             hof_splice,
         } = opts;
         let protocol = self.info.iterator_protocol(iterable).cloned()?;
-        let iter_dispatch = protocol.iterator;
+        let iter_dispatch = *protocol.iterator;
         let iter_ty = protocol.iter_ty;
-        let iter_internal = iter_ty.obj_internal()?;
-        let hasnext_m = protocol.has_next;
-        let next_m = protocol.next;
+        let hasnext = *protocol.has_next;
+        let next = *protocol.next;
         let elem = protocol.elem_ty;
         let depth = self.scope.len();
         // `forEachIndexed`: an `Int` index counter, declared before the loop and bound to the lambda's
@@ -15231,35 +15233,17 @@ impl<'a> Lower<'a> {
         } else {
             (recv, None)
         };
-        let iter_call = self.lower_iterator_call(recv, iter_dispatch)?;
+        let iter_call = self.lower_iterator_protocol_call(recv, it_ty, iter_dispatch)?;
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
         // cond: it.hasNext()
         let it_g = self.emit_get_value(it_v);
-        let hasnext_ret = hasnext_m.ret;
-        let hasnext_suspend = hasnext_m.suspend();
-        let cond = self.emit_library_member_call(
-            it_g,
-            iter_internal,
-            hasnext_m,
-            hasnext_ret,
-            hasnext_suspend,
-            vec![],
-        )?;
+        let cond = self.lower_iterator_protocol_call(it_g, iter_ty, hasnext)?;
 
         // x = (elem) it.next()  — unbox a primitive element, checkcast a specific reference.
         let it_g2 = self.emit_get_value(it_v);
-        let next_ret = next_m.ret;
-        let next_suspend = next_m.suspend();
-        let next_call = self.emit_library_member_call(
-            it_g2,
-            iter_internal,
-            next_m,
-            next_ret,
-            next_suspend,
-            vec![],
-        )?;
+        let next_call = self.lower_iterator_protocol_call(it_g2, iter_ty, next)?;
         let x_init = if self.has_scalar_value_repr(elem) {
             self.emit_type_op(IrTypeOp::ImplicitCoercion, next_call, ty_to_ir(elem))
         } else if !elem.is_erased_top() {
@@ -15322,35 +15306,15 @@ impl<'a> Lower<'a> {
         Some(self.emit_block(stmts, None))
     }
 
-    fn lower_iterator_call(
+    fn lower_iterator_protocol_call(
         &mut self,
         receiver: u32,
-        target: IteratorDispatchTarget,
+        receiver_ty: Ty,
+        target: ResolvedCall,
     ) -> Option<u32> {
-        match target {
-            IteratorDispatchTarget::Member {
-                owner_fallback,
-                resolved,
-            } => {
-                let crate::symbol_resolver::ResolvedMember {
-                    member,
-                    ret,
-                    suspend,
-                    ..
-                } = *resolved;
-                self.emit_library_member_call(
-                    receiver,
-                    owner_fallback,
-                    member,
-                    ret,
-                    suspend,
-                    vec![],
-                )
-            }
-            IteratorDispatchTarget::Extension(callable) => {
-                self.emit_library_static_call(*callable, vec![receiver], false)
-            }
-        }
+        let name = target.emit_name()?.to_string();
+        self.lower_selected_op_call(receiver, receiver_ty, &name, &[], target, None, &[], None)
+            .map(|(value, _)| value)
     }
 
     /// Lower a positional argument list against parallel parameter types, coercing each argument to its
@@ -19716,11 +19680,10 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let it_ty = self.info.ty(receiver);
         let protocol = self.info.iterator_protocol(receiver).cloned()?;
-        let iter_dispatch = protocol.iterator;
+        let iter_dispatch = *protocol.iterator;
         let iter_ty = protocol.iter_ty;
-        let iter_internal = iter_ty.obj_internal()?;
-        let hasnext_m = protocol.has_next;
-        let next_m = protocol.next;
+        let hasnext = *protocol.has_next;
+        let next = *protocol.next;
         let elem = protocol.elem_ty;
 
         // acc = new ArrayList()
@@ -19740,35 +19703,17 @@ impl<'a> Lower<'a> {
         let recv_to_v = self.fresh_value();
         let var_recv_to = self.emit_named_variable(recv_to_v, ty_to_ir(it_ty), Some(recv_g0));
         let recv_g = self.emit_get_value(recv_to_v);
-        let iter_call = self.lower_iterator_call(recv_g, iter_dispatch)?;
+        let iter_call = self.lower_iterator_protocol_call(recv_g, it_ty, iter_dispatch)?;
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
         // cond: it.hasNext()
         let it_g = self.emit_get_value(it_v);
-        let hasnext_ret = hasnext_m.ret;
-        let hasnext_suspend = hasnext_m.suspend();
-        let cond = self.emit_library_member_call(
-            it_g,
-            iter_internal,
-            hasnext_m,
-            hasnext_ret,
-            hasnext_suspend,
-            vec![],
-        )?;
+        let cond = self.lower_iterator_protocol_call(it_g, iter_ty, hasnext)?;
 
         // body: e = (elem) it.next(); acc.add/addAll(<inlined lambda body>)
         let it_g2 = self.emit_get_value(it_v);
-        let next_ret = next_m.ret;
-        let next_suspend = next_m.suspend();
-        let next_call = self.emit_library_member_call(
-            it_g2,
-            iter_internal,
-            next_m,
-            next_ret,
-            next_suspend,
-            vec![],
-        )?;
+        let next_call = self.lower_iterator_protocol_call(it_g2, iter_ty, next)?;
         // Coerce the `Object` iterator result to the element type through the same semantic scalar
         // boundary as an ordinary generic read; the backend owns its physical wrapper adapter.
         let elem_val = if self.has_scalar_value_repr(elem) {
