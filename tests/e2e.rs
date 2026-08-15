@@ -1168,6 +1168,8 @@ mod try_catch_expr_nullable_merge_e2e;
 mod type_annotation_newline_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
 mod type_param_vararg_check_e2e;
+#[path = "typealias_emission_e2e.rs"]
+mod typealias_emission_e2e;
 #[path = "typealias_function_type_e2e.rs"]
 mod typealias_function_type_e2e;
 #[path = "typealias_generic_target_e2e.rs"]

@@ -527,125 +527,130 @@ fn fixup_parenless_base_classes(file: &mut File) {
     file.detached_type_refs.extend(detached);
 }
 
-/// Expand the file's FUNCTION-type aliases (`typealias L = (A) -> R`) structurally: every `TypeRef`
-/// naming such an alias is rewritten to the target function type, so all downstream consumers (the
-/// checker's raw-`TypeRef` function-type tests, the lowerer, metadata) see the ordinary arrow form.
+type TypeAliasShapes = std::collections::HashMap<String, (Vec<String>, TypeRef)>;
+
+/// Replace every leaf reference to one of `params` in `ty` with the corresponding use-site type
+/// argument. The use site's nullability and source span remain attached to the substituted node.
+fn substitute_type_alias_parameters(ty: &mut TypeRef, params: &[String], args: &[TypeRef]) {
+    if ty.fun_params.is_empty() && ty.name != "<fun>" && ty.targs.is_empty() {
+        if let Some(index) = params.iter().position(|param| *param == ty.name) {
+            let nullable = ty.nullable();
+            let span = ty.span;
+            *ty = args[index].clone();
+            ty.set_nullable(ty.nullable() || nullable);
+            ty.span = span;
+            return;
+        }
+    }
+    if let Some(argument) = &mut ty.arg {
+        substitute_type_alias_parameters(argument, params, args);
+    }
+    for argument in &mut ty.targs {
+        substitute_type_alias_parameters(argument, params, args);
+    }
+    for parameter in &mut ty.fun_params {
+        substitute_type_alias_parameters(parameter, params, args);
+    }
+}
+
+fn expand_type_alias_ref(ty: &mut TypeRef, aliases: &TypeAliasShapes, depth: u32) {
+    if depth > 8 {
+        return;
+    }
+    if ty.fun_params.is_empty() && ty.name != "<fun>" {
+        if let Some((params, target)) = aliases.get(&ty.name) {
+            if ty.targs.len() == params.len() {
+                for argument in &mut ty.targs {
+                    expand_type_alias_ref(argument, aliases, depth + 1);
+                }
+                let nullable = ty.nullable();
+                let span = ty.span;
+                let mut expanded = target.clone();
+                if !params.is_empty() {
+                    substitute_type_alias_parameters(&mut expanded, params, &ty.targs);
+                }
+                *ty = expanded;
+                ty.set_nullable(ty.nullable() || nullable);
+                ty.span = span;
+                expand_type_alias_ref(ty, aliases, depth + 1);
+                return;
+            }
+        }
+    }
+    if let Some(argument) = &mut ty.arg {
+        expand_type_alias_ref(argument, aliases, depth + 1);
+    }
+    for argument in &mut ty.targs {
+        expand_type_alias_ref(argument, aliases, depth + 1);
+    }
+    for parameter in &mut ty.fun_params {
+        expand_type_alias_ref(parameter, aliases, depth + 1);
+    }
+}
+
+/// Fully expand aliases declared in `file` inside one declaration target. Resolution later binds the
+/// remaining classifier spellings through that declaration file's imports and scope.
+pub(crate) fn expanded_type_alias_target(
+    declarations: &[(String, Vec<String>, TypeRef)],
+    target: &TypeRef,
+) -> TypeRef {
+    let aliases: TypeAliasShapes = declarations
+        .iter()
+        .map(|(name, params, target)| (name.clone(), (params.clone(), target.clone())))
+        .collect();
+    let mut expanded = target.clone();
+    expand_type_alias_ref(&mut expanded, &aliases, 0);
+    expanded
+}
+
+/// Expand the file's structurally recorded type aliases: every `TypeRef` naming one is rewritten to
+/// its target shape, so downstream consumers see the ordinary semantic type.
 /// Runs per file at the parse seam — an alias declared in a SIBLING file is not expanded (unresolved
 /// → the test skips, as before). Nested alias references inside a substituted target expand through
 /// the recursion; the depth cap only guards a (kotlinc-rejected) recursive alias from looping.
 fn expand_fun_type_aliases(file: &mut File) {
-    use std::collections::HashMap;
     if file.type_alias_fun.is_empty() {
         return;
     }
-    let aliases: HashMap<String, (Vec<String>, TypeRef)> = file
+    let aliases: TypeAliasShapes = file
         .type_alias_fun
         .iter()
         .map(|(n, ps, t)| (n.clone(), (ps.clone(), t.clone())))
         .collect();
-
-    /// Replace every leaf reference to one of `params` in `tr` with the corresponding use-site type
-    /// argument (the use site's `?` on the reference survives onto the substituted argument).
-    fn substitute(tr: &mut TypeRef, params: &[String], args: &[TypeRef]) {
-        if tr.fun_params.is_empty() && tr.name != "<fun>" && tr.targs.is_empty() {
-            if let Some(k) = params.iter().position(|p| *p == tr.name) {
-                let nullable = tr.nullable();
-                let span = tr.span;
-                *tr = args[k].clone();
-                tr.set_nullable(tr.nullable() || nullable);
-                tr.span = span;
-                return; // a use-site type argument carries no alias type parameters of its own
-            }
-        }
-        if let Some(a) = &mut tr.arg {
-            substitute(a, params, args);
-        }
-        for t in &mut tr.targs {
-            substitute(t, params, args);
-        }
-        for t in &mut tr.fun_params {
-            substitute(t, params, args);
-        }
-    }
-
-    fn expand(tr: &mut TypeRef, aliases: &HashMap<String, (Vec<String>, TypeRef)>, depth: u32) {
-        if depth > 8 {
-            return;
-        }
-        if tr.fun_params.is_empty() && tr.name != "<fun>" {
-            if let Some((tparams, target)) = aliases.get(&tr.name) {
-                if tr.targs.len() == tparams.len() {
-                    // Expand any alias reference INSIDE the use-site type arguments first — the
-                    // substitution clones them into the target, after which the originals are gone.
-                    for a in &mut tr.targs {
-                        expand(a, aliases, depth + 1);
-                    }
-                    let nullable = tr.nullable();
-                    let span = tr.span;
-                    let mut expanded = target.clone();
-                    if !tparams.is_empty() {
-                        substitute(&mut expanded, tparams, &tr.targs);
-                    }
-                    *tr = expanded;
-                    // The use site's `?` survives (`Listener?` = nullable function type); the span
-                    // stays the USE site so diagnostics point at the source that wrote it.
-                    tr.set_nullable(tr.nullable() || nullable);
-                    tr.span = span;
-                    // The expansion (or a substitution result) may itself be an alias reference
-                    // (`typealias A<T> = B<T>` with `B` a fn-type alias) — re-expand the whole node;
-                    // the depth cap bounds a (kotlinc-rejected) recursive chain.
-                    expand(tr, aliases, depth + 1);
-                    return;
-                }
-            }
-        }
-        if let Some(a) = &mut tr.arg {
-            expand(a, aliases, depth + 1);
-        }
-        for t in &mut tr.targs {
-            expand(t, aliases, depth + 1);
-        }
-        for t in &mut tr.fun_params {
-            expand(t, aliases, depth + 1);
-        }
-    }
-    fn expand_opt(tr: &mut Option<TypeRef>, aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
+    fn expand_opt(tr: &mut Option<TypeRef>, aliases: &TypeAliasShapes) {
         if let Some(t) = tr {
-            expand(t, aliases, 0);
+            expand_type_alias_ref(t, aliases, 0);
         }
     }
-    fn expand_params(params: &mut [Param], aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
+    fn expand_params(params: &mut [Param], aliases: &TypeAliasShapes) {
         for p in params {
-            expand(&mut p.ty, aliases, 0);
+            expand_type_alias_ref(&mut p.ty, aliases, 0);
         }
     }
-    fn expand_bounds(
-        bounds: &mut [(String, TypeRef)],
-        aliases: &HashMap<String, (Vec<String>, TypeRef)>,
-    ) {
+    fn expand_bounds(bounds: &mut [(String, TypeRef)], aliases: &TypeAliasShapes) {
         for (_, t) in bounds {
-            expand(t, aliases, 0);
+            expand_type_alias_ref(t, aliases, 0);
         }
     }
-    fn expand_fun(f: &mut FunDecl, aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
+    fn expand_fun(f: &mut FunDecl, aliases: &TypeAliasShapes) {
         expand_opt(&mut f.receiver, aliases);
         expand_params(&mut f.params, aliases);
         expand_opt(&mut f.ret, aliases);
         expand_bounds(&mut f.type_param_bounds, aliases);
     }
-    fn expand_prop(p: &mut PropDecl, aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
+    fn expand_prop(p: &mut PropDecl, aliases: &TypeAliasShapes) {
         expand_opt(&mut p.receiver, aliases);
         expand_opt(&mut p.ty, aliases);
         expand_bounds(&mut p.type_param_bounds, aliases);
     }
-    fn expand_class(c: &mut ClassDecl, aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
+    fn expand_class(c: &mut ClassDecl, aliases: &TypeAliasShapes) {
         c.type_parameters
             .map_bounds(|bounds| expand_bounds(bounds, aliases));
         for p in &mut c.props {
-            expand(&mut p.ty, aliases, 0);
+            expand_type_alias_ref(&mut p.ty, aliases, 0);
         }
         for t in &mut c.supertypes {
-            expand(t, aliases, 0);
+            expand_type_alias_ref(t, aliases, 0);
         }
         for m in &mut c.methods {
             expand_fun(m, aliases);
@@ -676,10 +681,10 @@ fn expand_fun_type_aliases(file: &mut File) {
     }
     for expr in &mut file.expr_arena {
         match expr {
-            Expr::Is { ty, .. } | Expr::As { ty, .. } => expand(ty, aliases, 0),
+            Expr::Is { ty, .. } | Expr::As { ty, .. } => expand_type_alias_ref(ty, aliases, 0),
             Expr::Try { catches, .. } => {
                 for c in catches {
-                    expand(&mut c.ty, aliases, 0);
+                    expand_type_alias_ref(&mut c.ty, aliases, 0);
                 }
             }
             _ => {}
@@ -688,7 +693,7 @@ fn expand_fun_type_aliases(file: &mut File) {
     for stmt in &mut file.stmt_arena {
         match stmt {
             Stmt::Local { ty, .. } | Stmt::LocalDelegate { ty, .. } => expand_opt(ty, aliases),
-            Stmt::LocalLateinit { ty, .. } => expand(ty, aliases, 0),
+            Stmt::LocalLateinit { ty, .. } => expand_type_alias_ref(ty, aliases, 0),
             Stmt::LocalFun(f) => expand_fun(f, aliases),
             Stmt::LocalClass(c) => expand_class(c, aliases),
             _ => {}
@@ -696,19 +701,19 @@ fn expand_fun_type_aliases(file: &mut File) {
     }
     for trs in file.call_type_args.values_mut() {
         for t in trs {
-            expand(t, aliases, 0);
+            expand_type_alias_ref(t, aliases, 0);
         }
     }
     for trs in file.lambda_param_types.values_mut() {
         for t in trs.iter_mut().flatten() {
-            expand(t, aliases, 0);
+            expand_type_alias_ref(t, aliases, 0);
         }
     }
     for t in file.anon_fun_ret.values_mut() {
-        expand(t, aliases, 0);
+        expand_type_alias_ref(t, aliases, 0);
     }
     for t in file.anon_fun_receivers.values_mut() {
-        expand(t, aliases, 0);
+        expand_type_alias_ref(t, aliases, 0);
     }
 }
 
@@ -1298,12 +1303,9 @@ impl<'a> Parser<'a> {
                     };
                     let alias_targs = self.parse_type_args(); // `<T, R>` if present
                     self.eat(TokenKind::Eq);
-                    // A function-type target (`(A) -> R`, `suspend (A) -> R`, `context(C) (A) -> R`,
-                    // a receiver form `R.() -> T`): parse the full type and record it in
-                    // `type_alias_fun`. Every function-type spelling — and no class-name target —
-                    // carries an `->` before the end of the line, so detect by scanning ahead. A
-                    // GENERIC alias records its declared type-parameter NAMES (each `<T, R>` entry
-                    // parses as a simple type) so the expansion pass substitutes use-site arguments.
+                    // Parse and retain every alias's complete target shape. The simple target edge
+                    // below supports legacy constructor/name lookup; metadata emission and structural
+                    // substitution consume this declaration record instead of reconstructing it.
                     let fn_target = self.t[self.i..]
                         .iter()
                         .take_while(|t| t.kind != TokenKind::Newline && t.kind != TokenKind::Eof)
@@ -1331,7 +1333,7 @@ impl<'a> Parser<'a> {
                             // structural expansion so those arguments survive (`Handlers` must mean
                             // `Map<String, (Int) -> Int>`, not raw `Map`); the presence of the nested
                             // arrow must not classify the alias itself as a function type.
-                            if !alias.is_empty() && (is_fun || !t.targs.is_empty()) {
+                            if !alias.is_empty() {
                                 self.file.type_alias_fun.push((
                                     alias.clone(),
                                     tparam_names,
@@ -1366,12 +1368,10 @@ impl<'a> Parser<'a> {
                                     .then(|| a.name.clone())
                             })
                             .collect();
-                        // An alias whose target carries type arguments expands STRUCTURALLY, through
-                        // the same pass and substitution the function-type aliases use. A bare
-                        // `typealias A = Foo` keeps the name map, which the constructor-alias
-                        // registration and the classifier lookups are keyed by.
+                        // Every alias keeps its structural declaration, including a generic alias over
+                        // a non-generic target and a parameterless bare target.
                         if let Some(tparam_names) = tparam_names {
-                            if !alias.is_empty() && !t.targs.is_empty() {
+                            if !alias.is_empty() {
                                 self.file.type_alias_fun.push((
                                     alias.clone(),
                                     tparam_names,
@@ -1392,12 +1392,12 @@ impl<'a> Parser<'a> {
                     };
                     if !alias.is_empty() && !target.is_empty() {
                         self.file.type_aliases.push((alias.clone(), target));
-                        // The alias's declared visibility survives into `@Metadata`
-                        // (`internal typealias` must stay module-bound for consumers).
-                        let vis = visibility_of(&mods);
-                        if vis != Visibility::Public {
-                            self.file.type_alias_visibility.insert(alias, vis);
-                        }
+                    }
+                    // The alias's declared visibility survives into `@Metadata`, including aliases
+                    // whose target is a function type and therefore has no legacy classifier edge.
+                    let vis = visibility_of(&mods);
+                    if !alias.is_empty() && vis != Visibility::Public {
+                        self.file.type_alias_visibility.insert(alias, vis);
                     }
                 }
                 _ => {
