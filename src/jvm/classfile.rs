@@ -503,6 +503,23 @@ struct FieldInfo {
     invisible_anns: Vec<Vec<u8>>,
 }
 
+/// A field whose constant-pool interning is DEFERRED to the field-table visit: kotlinc's writer
+/// visits methods first and fields last, so a field entry the method bodies never introduced (a
+/// `const val`'s name + `ConstantValue`, a facade backing field) interns AFTER every method window.
+/// Realized into a [`FieldInfo`] (appended after the eagerly-added fields) by `intern_late_fields`.
+struct LateField {
+    access: u16,
+    name: String,
+    desc: String,
+    /// The `ConstantValue` payload, interned at realization (`None` for a `<clinit>`-initialized field).
+    const_value: Option<crate::ir::IrConst>,
+    /// BINARY-retention nullability annotation type descriptor (`Lorg/jetbrains/annotations/NotNull;`).
+    ann: Option<String>,
+    /// `true` ⇒ the realized field LEADS the field table (before the eagerly-added fields) — the
+    /// `Companion` field's position — while its pool entries still intern late.
+    lead: bool,
+}
+
 pub struct ClassWriter {
     cp: ConstPool,
     access: u16,
@@ -510,6 +527,7 @@ pub struct ClassWriter {
     super_class: u16,
     interfaces: Vec<u16>,
     fields: Vec<FieldInfo>,
+    late_fields: Vec<LateField>,
     methods: Vec<MethodInfo>,
     class_attributes: Vec<(u16, Vec<u8>)>, // (name_index, raw bytes)
     /// Constant-pool index of the class's generic `Signature` VALUE, when it has one.
@@ -600,6 +618,7 @@ impl ClassWriter {
             super_class,
             interfaces: Vec::new(),
             fields: Vec::new(),
+            late_fields: Vec::new(),
             methods: Vec::new(),
             class_attributes: Vec::new(),
             class_signature: None,
@@ -773,6 +792,90 @@ impl ClassWriter {
         });
     }
 
+    /// Declare a field whose pool entries intern at the FIELD-TABLE visit (after every method) —
+    /// kotlinc's writer order. Use for a field the method bodies don't introduce; a field whose
+    /// name/descriptor the bodies DO intern can use either form (the table interning dedups).
+    pub fn add_field_late(
+        &mut self,
+        access: u16,
+        name: &str,
+        desc: &str,
+        const_value: Option<crate::ir::IrConst>,
+        ann: Option<&str>,
+    ) {
+        self.late_fields.push(LateField {
+            access,
+            name: name.to_string(),
+            desc: desc.to_string(),
+            const_value,
+            ann: ann.map(str::to_string),
+            lead: false,
+        });
+    }
+
+    /// [`add_field_late`], but the realized field LEADS the field table (kotlinc puts a class's
+    /// `Companion` field before the instance fields, while interning it with the field visit).
+    pub fn add_field_late_leading(&mut self, access: u16, name: &str, desc: &str) {
+        self.late_fields.push(LateField {
+            access,
+            name: name.to_string(),
+            desc: desc.to_string(),
+            const_value: None,
+            // The `Companion` field is a non-null reference — kotlinc annotates it.
+            ann: Some("Lorg/jetbrains/annotations/NotNull;".to_string()),
+            lead: true,
+        });
+    }
+
+    /// Realize every [`LateField`] into the field table, interning name/descriptor/`ConstantValue`/
+    /// annotation NOW — called at the earliest class-attribute interning point (`set_kotlin_metadata`
+    /// or `finish`), so the entries land after the method windows like kotlinc's field visit.
+    fn intern_late_fields(&mut self) {
+        let mut lead_at = 0usize;
+        for lf in std::mem::take(&mut self.late_fields) {
+            let n = self.cp.utf8(&lf.name);
+            let d = self.cp.utf8(&lf.desc);
+            let cv = lf.const_value.as_ref().and_then(|c| {
+                use crate::ir::IrConst;
+                Some(match c {
+                    IrConst::Boolean(b) => self.const_int(*b as i32),
+                    IrConst::Byte(v) => self.const_int(*v as i32),
+                    IrConst::Short(v) => self.const_int(*v as i32),
+                    IrConst::Int(v) => self.const_int(*v),
+                    IrConst::Char(ch) => self.const_int(*ch as i32),
+                    IrConst::Long(v) => self.const_long(*v),
+                    IrConst::Float(v) => self.const_float(*v),
+                    IrConst::Double(v) => self.const_double(*v),
+                    IrConst::String(s) => self.const_string_kt(s),
+                    IrConst::Null => return None,
+                })
+            });
+            let invisible_anns = lf
+                .ann
+                .as_ref()
+                .map(|a| {
+                    let ti = self.cp.utf8(a);
+                    vec![vec![(ti >> 8) as u8, ti as u8, 0, 0]]
+                })
+                .unwrap_or_default();
+            let info = FieldInfo {
+                access: lf.access,
+                name: n,
+                desc: d,
+                signature: None,
+                const_value: cv,
+                visible_anns: Vec::new(),
+                invisible_anns,
+            };
+            if lf.lead {
+                self.fields.insert(lead_at, info);
+                lead_at += 1;
+            } else {
+                self.fields.push(info);
+            }
+        }
+    }
+
     /// Add a field carrying a `ConstantValue` attribute (`const_idx` = a constant-pool index from
     /// `const_string`/`const_int`/… ). kotlinc emits this on a `const val`; the JVM initializes the
     /// field, so its `<clinit>` store is omitted.
@@ -825,6 +928,8 @@ impl ClassWriter {
         d1: &[String],
         d2: &[String],
     ) {
+        // The field-table visit precedes the class annotations in kotlinc's writer.
+        self.intern_late_fields();
         // kotlinc interns each element's KEY immediately before that element's VALUE constants (mv key
         // then the mv integers, then k key then its integer, …) rather than all keys up front — so the
         // constant pool interleaves keys and values. Match that by interning each key inline.
@@ -1176,6 +1281,19 @@ impl ClassWriter {
                         }
                         _ => {}
                     }
+                }
+                // A GUARDED delegating setter's body runs `checkNotNullParameter(value, "<set-?>")`
+                // BEFORE the bridge call, so its `<set-?>` constant and the `Intrinsics` machinery
+                // intern first (kotlinc's first-use order); the unguarded shapes reach the bridge
+                // call directly.
+                if *setter_kind == 2 {
+                    self.cp.utf8("<set-?>");
+                    self.cp.string("<set-?>");
+                    self.cp.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "checkNotNullParameter",
+                        "(Ljava/lang/Object;Ljava/lang/String;)V",
+                    );
                 }
                 self.cp.methodref(&b.owner, &b.name, desc);
             }
@@ -1992,37 +2110,43 @@ impl ClassWriter {
     }
 
     fn resolve_inner_classes(&mut self) {
-        let Some(resolve) = self.inner_class_resolver.clone() else {
-            return;
-        };
-        let referenced = self.cp.class_names();
-        for inner in referenced {
-            if self
-                .inner_class_candidates
-                .iter()
-                .any(|candidate| candidate.inner == inner)
-            {
-                continue;
+        if let Some(resolve) = self.inner_class_resolver.clone() {
+            let referenced = self.cp.class_names();
+            for inner in referenced {
+                if self
+                    .inner_class_candidates
+                    .iter()
+                    .any(|candidate| candidate.inner == inner)
+                {
+                    continue;
+                }
+                let Some(details) = resolve(&inner) else {
+                    continue;
+                };
+                if let Some(outer) = &details.outer {
+                    self.cp.class(outer);
+                }
+                if let Some(name) = &details.name {
+                    self.cp.utf8(name);
+                }
+                self.add_inner_class(InnerClassSpec {
+                    inner,
+                    outer: details.outer,
+                    name: details.name,
+                    access: details.access,
+                });
             }
-            let Some(details) = resolve(&inner) else {
-                continue;
-            };
-            if let Some(outer) = &details.outer {
-                self.cp.class(outer);
-            }
-            if let Some(name) = &details.name {
-                self.cp.utf8(name);
-            }
-            self.add_inner_class(InnerClassSpec {
-                inner,
-                outer: details.outer,
-                name: details.name,
-                access: details.access,
-            });
         }
+        // kotlinc writes the complete table sorted by inner internal name (`C$Companion`,
+        // `C$NestObj`, `C$Nested` — case-sensitive), including classpath-discovered entries.
+        self.inner_class_candidates
+            .sort_by(|a, b| a.inner.cmp(&b.inner));
     }
 
     pub fn finish(mut self) -> Vec<u8> {
+        // A class that never attached `@Metadata` still realizes its deferred fields first —
+        // kotlinc's field visit precedes every class-attribute window.
+        self.intern_late_fields();
         self.resolve_inner_classes();
         // The `EnclosingMethod` refs (owner Class, method NameAndType) intern BEFORE the
         // `InnerClasses` entries' refs — kotlinc's attribute visit order on an anonymous class.
@@ -2096,22 +2220,24 @@ impl ClassWriter {
         // `Code` — kotlinc visits fields first, and a field's `Signature` attribute precedes its
         // annotations (`class C(val xs: List<String>)` pool: `Signature`, `RuntimeInvisibleAnnotations`,
         // `Code`). The later `signature_attr_name` intern dedups onto this index.
-        let field_sig_name = self
-            .fields
-            .iter()
-            .any(|f| f.signature.is_some())
-            .then(|| self.cp.utf8("Signature"));
-        // `ConstantValue` interns in the field-first window too — a field's attribute list puts it
-        // BEFORE its annotations (`const val MARK`: pool `ConstantValue`,
-        // `RuntimeInvisibleAnnotations`, `Code`).
-        let constval_attr_name = self
-            .fields
-            .iter()
-            .any(|f| f.const_value.is_some())
-            .then(|| self.cp.utf8("ConstantValue"));
-        let field_has_invis = self.fields.iter().any(|f| !f.invisible_anns.is_empty());
-        // Field-level RIA, if any field is annotated: interns before `Code` (fields precede methods).
-        let field_ria = field_has_invis.then(|| self.cp.utf8("RuntimeInvisibleAnnotations"));
+        // `ConstantValue` and field-level `RuntimeInvisibleAnnotations` intern in the field-first
+        // window too — in PER-FIELD first-use order over the field table (a leading `const val`
+        // interns `ConstantValue` before any annotation name; a facade whose consts come LAST
+        // interns the annotation name first).
+        let mut field_sig_name: Option<u16> = None;
+        let mut constval_attr_name: Option<u16> = None;
+        let mut field_ria: Option<u16> = None;
+        for i in 0..self.fields.len() {
+            if self.fields[i].signature.is_some() && field_sig_name.is_none() {
+                field_sig_name = Some(self.cp.utf8("Signature"));
+            }
+            if self.fields[i].const_value.is_some() && constval_attr_name.is_none() {
+                constval_attr_name = Some(self.cp.utf8("ConstantValue"));
+            }
+            if !self.fields[i].invisible_anns.is_empty() && field_ria.is_none() {
+                field_ria = Some(self.cp.utf8("RuntimeInvisibleAnnotations"));
+            }
+        }
         // kotlinc interns `Code` only when a method actually has one — an `interface` with no bodies
         // has none, and an unused attribute name would diverge.
         let code_attr_name = if self.methods.iter().any(|m| m.code.is_some()) {

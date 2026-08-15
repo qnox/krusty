@@ -1491,6 +1491,7 @@ fn lower_file_at_reporting_impl(
                     .or_default()
                     .push((mi as u32, fid, ret));
                 method_fids.push(fid);
+                lo.ir.fn_source_order.insert(fid, m.span.lo);
             }
             // Computed body properties → `getX()` instance methods (no backing field).
             for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
@@ -1523,6 +1524,8 @@ fn lower_file_at_reporting_impl(
                     .properties
                     .push(crate::ir::IrProperty {
                         name: p.name.clone(),
+                        source_order: p.span.lo,
+                        decl_line: p.decl_line,
                         ty,
                         visibility: p.visibility,
                         initializer: None,
@@ -1626,6 +1629,7 @@ fn lower_file_at_reporting_impl(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks: vec![None; getter_params.len()],
                 });
+                lo.ir.fn_source_order.insert(gfid, p.span.lo);
                 if p.visibility.is_private() {
                     lo.ir.private_methods.insert(gfid);
                 }
@@ -1660,6 +1664,7 @@ fn lower_file_at_reporting_impl(
                         dispatch_receiver: Some(type_name(&internal)),
                         param_checks: vec![None; setter_params.len()],
                     });
+                    lo.ir.fn_source_order.insert(sfid, p.span.lo);
                     if setter.is_private {
                         lo.ir.private_methods.insert(sfid);
                     }
@@ -1715,6 +1720,8 @@ fn lower_file_at_reporting_impl(
                     .properties
                     .push(crate::ir::IrProperty {
                         name: p.name.clone(),
+                        source_order: p.span.lo,
+                        decl_line: p.decl_line,
                         ty: prop_ty,
                         visibility: p.visibility,
                         initializer: None,
@@ -1800,6 +1807,8 @@ fn lower_file_at_reporting_impl(
                         .properties
                         .push(crate::ir::IrProperty {
                             name: p.name.clone(),
+                            source_order: p.span.lo,
+                            decl_line: p.decl_line,
                             ty,
                             visibility: p.visibility,
                             initializer: None,
@@ -1830,6 +1839,7 @@ fn lower_file_at_reporting_impl(
                             dispatch_receiver: Some(type_name(&internal)),
                             param_checks: vec![],
                         });
+                        lo.ir.fn_source_order.insert(fid, p.span.lo);
                         methods.entry(gname).or_default().push((mi, fid, ty));
                         method_fids.push(fid);
                     }
@@ -1846,6 +1856,7 @@ fn lower_file_at_reporting_impl(
                                 dispatch_receiver: Some(type_name(&internal)),
                                 param_checks: vec![],
                             });
+                            lo.ir.fn_source_order.insert(fid, p.span.lo);
                             methods.entry(sname).or_default().push((mi, fid, Ty::Unit));
                             method_fids.push(fid);
                         }
@@ -1857,7 +1868,7 @@ fn lower_file_at_reporting_impl(
             // Interfaces have no backing fields. An enum's ctor properties get getters here too (kotlinc
             // emits `private` fields + `getX()`); `emit_enum_class` emits those fields private to match.
             if !c.is_interface() {
-                let field_props: Vec<(String, bool, crate::types::Visibility, Ty)> = c
+                let field_props: Vec<(String, bool, crate::types::Visibility, Ty, u32, u32)> = c
                     .props
                     .iter()
                     .filter(|p| p.is_property)
@@ -1867,6 +1878,8 @@ fn lower_file_at_reporting_impl(
                             p.is_var,
                             p.visibility,
                             declared_prop_ty(&p.name),
+                            p.span.lo,
+                            p.decl_line,
                         )
                     })
                     .chain(
@@ -1879,6 +1892,8 @@ fn lower_file_at_reporting_impl(
                                     p.is_var,
                                     p.visibility,
                                     declared_prop_ty(&p.name),
+                                    p.span.lo,
+                                    p.decl_line,
                                 )
                             }),
                     )
@@ -1895,7 +1910,8 @@ fn lower_file_at_reporting_impl(
                 // another class — the companion, a nested class, an inlined body — goes through the
                 // synthetic `access$…$p` bridge instead (`mark_private_access_bridge_if_outside`).
                 // A value class keeps its getter: its unboxed-support synthesis expects one.
-                for (pi, (pname, is_var, visibility, property_ty)) in field_props.iter().enumerate()
+                for (pi, (pname, is_var, visibility, property_ty, source_order, decl_line)) in
+                    field_props.iter().enumerate()
                 {
                     let fidx = pi + field_offset;
                     let fty = fields[fidx].1;
@@ -1935,6 +1951,8 @@ fn lower_file_at_reporting_impl(
                         .properties
                         .push(crate::ir::IrProperty {
                             name: pname.clone(),
+                            source_order: *source_order,
+                            decl_line: *decl_line,
                             ty: *property_ty,
                             visibility: *visibility,
                             initializer: None,
@@ -2077,6 +2095,15 @@ fn lower_file_at_reporting_impl(
                     }
                 }
             }
+            // Source-written property accessor ids stay attached to their declaration. Consume that
+            // exact linkage instead of recovering a property from the accessor/property spelling.
+            for property in &lo.ir.classes[id as usize].properties {
+                for function in [property.getter, property.setter].into_iter().flatten() {
+                    lo.ir
+                        .fn_source_order
+                        .insert(function, property.source_order);
+                }
+            }
             lo.ir.classes[id as usize].methods = method_fids;
             let _ = class_ty;
             lo.insert_class_info(
@@ -2109,8 +2136,12 @@ fn lower_file_at_reporting_impl(
                                 init,
                                 is_var: false,
                                 is_const: true,
+                                // Common IR keeps the declaration on its semantic object owner.
+                                // A target may choose different physical storage later.
                                 owner: Some(type_name(&internal)),
                                 custom_accessor: false,
+                                line: bp.decl_line,
+                                source_order: bp.span.lo,
                             });
                             lo.ir
                                 .declared_class_statics
@@ -4416,6 +4447,8 @@ fn lower_file_at_reporting_impl(
                         is_const: p.is_const,
                         owner: None,
                         custom_accessor: true,
+                        line: p.decl_line,
+                        source_order: p.span.lo,
                     });
                     if let Some(&(gfid, _)) = lo.computed_props.get(&p.name) {
                         lo.scope.clear();
@@ -4480,6 +4513,8 @@ fn lower_file_at_reporting_impl(
                         is_const: p.is_const,
                         owner: None,
                         custom_accessor: false,
+                        line: p.decl_line,
+                        source_order: p.span.lo,
                     });
                 }
             }
@@ -8336,6 +8371,8 @@ impl<'a> Lower<'a> {
         self.ir.statics.push(crate::ir::IrStatic {
             visibility: crate::types::Visibility::Public,
             name: format!("{}$delegate", p.name),
+            line: p.decl_line,
+            source_order: p.span.lo,
             owner: None,
             ty: delegate_ir,
             init: init_d,
@@ -8362,6 +8399,8 @@ impl<'a> Lower<'a> {
         self.ir.statics.push(crate::ir::IrStatic {
             visibility: crate::types::Visibility::Public,
             name: format!("{}$kprop", p.name),
+            line: p.decl_line,
+            source_order: p.span.lo,
             owner: None,
             ty: kprop_ty,
             init: propref,

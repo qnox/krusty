@@ -104,6 +104,18 @@ fn class_with_property_and_method_is_byte_identical() {
     );
 }
 
+/// A body property is emitted where it is declared, not in a property-only group. This also covers
+/// the backend-synthesized getter, which has no `FunId` of its own and therefore must be scheduled by
+/// the exact `IrProperty` declaration identity.
+#[test]
+fn class_methods_and_plain_property_interleave_byte_identically() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    fun before(): Int = 1\n    val value: Int = 2\n    fun after(): Int = value\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// An interface's `suspend` member. Everything about it is stated in Kotlin terms even though the JVM
 /// method is the CPS form: `@Metadata` records the declared parameters and return with the suspend
 /// flag (plus a `JvmMethodSignature` for the descriptor, which those types no longer imply), and the

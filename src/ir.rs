@@ -769,6 +769,10 @@ pub struct MemberExtProp {
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
+    /// Source byte offset and 1-based declaration line. These remain attached to the declaration so
+    /// a backend can order/debug synthesized accessors without rebinding the property by spelling.
+    pub source_order: u32,
+    pub decl_line: u32,
     /// The property's language-level type. This is also the type exposed by its accessors.
     pub ty: Ty,
     /// Kotlin declaration visibility. Backends consume this semantic fact when choosing the
@@ -1307,6 +1311,12 @@ pub struct IrStatic {
     /// auto-generated here — the custom `getX`/`setX` are emitted as ordinary facade methods (their
     /// bodies lowered with `field` bound to this static). Prevents a duplicate-accessor collision.
     pub custom_accessor: bool,
+    /// 1-based source line of the property declaration (0 = unknown). kotlinc maps the accessors'
+    /// LineNumberTables and the `<clinit>` initializer store to this line.
+    pub line: u32,
+    /// Source byte offset of the declaration (`u32::MAX` for a target/plugin synthetic). This is the
+    /// exact ordering key when class metadata interleaves static and instance properties.
+    pub source_order: u32,
 }
 
 impl IrStatic {
@@ -1355,6 +1365,10 @@ pub struct IrFile {
     /// Static indices whose storage was moved from a companion declaration to its outer class by the
     /// JVM companion-storage pass. Common lowering never populates this physical realization table.
     jvm_companion_hoisted_statics: std::collections::HashSet<u32>,
+    /// Exact companion property declaration → its JVM outer-class static realization. The property
+    /// index is stable within its declaring class; backend consumers must not recover this edge by
+    /// matching the property's spelling against a static field name.
+    jvm_companion_property_statics: std::collections::HashMap<(TypeName, u32), u32>,
     pub exprs: Vec<IrExpr>,
     /// Exact `SetField` expression identities that realize a source property declaration's
     /// initializer. A later assignment can target the same field with the same value, so backend
@@ -1586,6 +1600,13 @@ pub struct IrFile {
     /// FunId → 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` fn's
     /// implicit `return` there in the `LineNumberTable`. Same side-map rationale as `fn_decl_lines`.
     pub fn_close_lines: std::collections::HashMap<u32, u32>,
+    /// FunId → the SOURCE BYTE OFFSET of the declaration a class member realizes (a property's
+    /// accessors carry the property's offset). kotlinc emits class members in DECLARATION order,
+    /// interleaving property accessors among functions; lowering groups them by kind, so the JVM
+    /// emitter re-sorts its emission (only) by this key. A method with no entry (a data-class
+    /// synthetic, an appended lambda impl, an access bridge) keeps its position after the declared
+    /// members. Resolution-facing indexes never see the sorted order.
+    pub fn_source_order: std::collections::HashMap<u32, u32>,
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: std::collections::HashMap<TypeName, IrGenericSig>,
@@ -2002,6 +2023,26 @@ impl IrFile {
     /// from becoming part of an ordinary common-IR static declaration.
     pub(crate) fn mark_jvm_companion_hoisted_static(&mut self, index: u32) {
         self.jvm_companion_hoisted_statics.insert(index);
+    }
+
+    pub(crate) fn mark_jvm_companion_property_static(
+        &mut self,
+        companion: TypeName,
+        property: u32,
+        index: u32,
+    ) {
+        self.jvm_companion_property_statics
+            .insert((companion, property), index);
+    }
+
+    pub(crate) fn jvm_companion_property_static(
+        &self,
+        companion: TypeName,
+        property: u32,
+    ) -> Option<u32> {
+        self.jvm_companion_property_statics
+            .get(&(companion, property))
+            .copied()
     }
 
     pub(crate) fn is_jvm_companion_hoisted_static(&self, index: u32) -> bool {

@@ -275,10 +275,20 @@ pub struct CtorMeta<'a> {
     pub flags: u64,
 }
 
+/// Source declaration order across the protobuf's separately stored function/property lists. The
+/// message fields remain grouped by field number, but kotlinc interns their shared string table in
+/// source order.
+#[derive(Clone, Copy)]
+pub enum ClassMemberOrder {
+    Property(usize),
+    Function(usize),
+}
+
 pub struct ClassTail<'a> {
     pub flags: u64,
     pub companion: Option<&'a str>,
     pub nested: &'a [&'a str],
+    pub member_order: &'a [ClassMemberOrder],
     /// The `-module-name` value → `Class.classModuleName` (f101, a JvmProtoBuf extension). kotlinc
     /// omits it for the default module `main`; downstream builds always set `-module-name`.
     pub module_name: Option<&'a str>,
@@ -332,6 +342,7 @@ impl Default for ClassTail<'_> {
             flags: DEFAULT_CLASS_FLAGS,
             companion: None,
             nested: &[],
+            member_order: &[],
             module_name: None,
             secondary_ctors: &[],
             ctor_param_defaults: &[],
@@ -478,160 +489,152 @@ pub fn build_class(
         ));
     }
 
-    // Properties BEFORE functions (kotlinc interns property JVM signatures before function names).
-    let prop_msgs: Vec<Pb> = props
-        .iter()
-        .map(|p| {
-            let mut prop = Pb::new();
-            prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
-            let ty = type_pb_tp(
-                &mut st,
-                p.ty,
-                p.tparam.map(|index| index + captured_count as u32),
-                &class_type_parameters,
-            );
-            prop.field_message(3, &ty); // Property.return_type = 3
-            if let Some(recv) = p.receiver {
-                // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
-                // its presence is what makes the record an extension.
-                let rt = type_pb(&mut st, recv, &class_type_parameters);
-                prop.field_message(5, &rt);
+    let build_prop = |st: &mut StringTable, p: &PropMeta| {
+        let mut prop = Pb::new();
+        prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
+        let ty = type_pb_tp(
+            st,
+            p.ty,
+            p.tparam.map(|index| index + captured_count as u32),
+            &class_type_parameters,
+        );
+        prop.field_message(3, &ty); // Property.return_type = 3
+        if let Some(recv) = p.receiver {
+            // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
+            // its presence is what makes the record an extension.
+            let rt = type_pb(st, recv, &class_type_parameters);
+            prop.field_message(5, &rt);
+        }
+        let pflags = property_flags(p);
+        if pflags != property_flags::DEFAULT {
+            prop.field_varint(11, pflags); // Property.flags = 11
+        }
+        let mut jvm = Pb::new();
+        // A nullable PRIMITIVE property (`Int?`, `Double?`, …) has a BOXED backing field
+        // (`Ljava/lang/Integer;`, `Ljava/lang/Double;`), which the reader can't derive from the
+        // nullable-primitive return type — so kotlinc records an explicit `JvmFieldSignature.desc`
+        // (the boxed descriptor = the getter's return type). Every other property leaves the field
+        // empty (the reader derives it). kotlinc interns the getter/setter strings BEFORE the field
+        // descriptor (even though the proto writes `field` (f1) first), so build them in that order.
+        let getter = p
+            .getter
+            .as_ref()
+            .map(|(gn, gd)| jvm_method_sig(st, Some(gn), gd));
+        let setter = p
+            .setter
+            .as_ref()
+            .map(|(sn, sd)| jvm_method_sig(st, Some(sn), sd));
+        let boxed_field_desc = p.field_desc.clone().or(match p.ty {
+            Ty::Nullable(inner)
+                if matches!(
+                    *inner,
+                    Ty::Int
+                        | Ty::Long
+                        | Ty::Double
+                        | Ty::Float
+                        | Ty::Byte
+                        | Ty::Short
+                        | Ty::Char
+                        | Ty::Boolean
+                ) =>
+            {
+                p.getter
+                    .as_ref()
+                    .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string))
             }
-            let pflags = property_flags(p);
-            if pflags != property_flags::DEFAULT {
-                prop.field_varint(11, pflags); // Property.flags = 11
-            }
-            let mut jvm = Pb::new();
-            // A nullable PRIMITIVE property (`Int?`, `Double?`, …) has a BOXED backing field
-            // (`Ljava/lang/Integer;`, `Ljava/lang/Double;`), which the reader can't derive from the
-            // nullable-primitive return type — so kotlinc records an explicit `JvmFieldSignature.desc`
-            // (the boxed descriptor = the getter's return type). Every other property leaves the field
-            // empty (the reader derives it). kotlinc interns the getter/setter strings BEFORE the field
-            // descriptor (even though the proto writes `field` (f1) first), so build them in that order.
-            let getter = p
+            // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
+            // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
+            // same way it does for a boxed nullable primitive.
+            _ if p.tparam.is_some() => p
                 .getter
                 .as_ref()
-                .map(|(gn, gd)| jvm_method_sig(&mut st, Some(gn), gd));
-            let setter = p
-                .setter
-                .as_ref()
-                .map(|(sn, sd)| jvm_method_sig(&mut st, Some(sn), sd));
-            let boxed_field_desc = p.field_desc.clone().or(match p.ty {
-                Ty::Nullable(inner)
-                    if matches!(
-                        *inner,
-                        Ty::Int
-                            | Ty::Long
-                            | Ty::Double
-                            | Ty::Float
-                            | Ty::Byte
-                            | Ty::Short
-                            | Ty::Char
-                            | Ty::Boolean
-                    ) =>
-                {
-                    p.getter
-                        .as_ref()
-                        .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string))
-                }
-                // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
-                // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
-                // same way it does for a boxed nullable primitive.
-                _ if p.tparam.is_some() => p
-                    .getter
-                    .as_ref()
-                    .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
-                _ => None,
-            });
-            let mut field = Pb::new();
-            if let Some(n) = &p.field_name {
-                field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
-            }
-            if let Some(d) = &boxed_field_desc {
-                field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
-            }
-            // An abstract property has no backing field at all — kotlinc omits the entry rather than
-            // writing an empty one (which is what a concrete property's derived field looks like).
-            if p.has_backing_field {
-                jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
-            }
-            if let Some(getter) = &getter {
-                jvm.field_message(3, getter); // JvmPropertySignature.getter = 3
-            }
-            if let Some(setter) = &setter {
-                jvm.field_message(4, setter); // JvmPropertySignature.setter = 4
-            }
-            prop.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
-            prop
-        })
-        .collect();
+                .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
+            _ => None,
+        });
+        let mut field = Pb::new();
+        if let Some(n) = &p.field_name {
+            field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
+        }
+        if let Some(d) = &boxed_field_desc {
+            field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
+        }
+        // An abstract property has no backing field at all — kotlinc omits the entry rather than
+        // writing an empty one (which is what a concrete property's derived field looks like).
+        if p.has_backing_field {
+            jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
+        }
+        if let Some(getter) = &getter {
+            jvm.field_message(3, getter); // JvmPropertySignature.getter = 3
+        }
+        if let Some(setter) = &setter {
+            jvm.field_message(4, setter); // JvmPropertySignature.setter = 4
+        }
+        prop.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
+        prop
+    };
 
     // Member functions (name f2, return_type f3, value_parameter f6, flags f9; JVM sig derivable).
-    let func_msgs: Vec<Pb> = methods
-        .iter()
-        .map(|m| {
-            let mut func = Pb::new();
-            func.field_varint(2, st.local(&m.name) as u64);
-            let mut function_type_parameters = class_type_parameters.clone();
-            assert_eq!(
-                m.semantic_type_params.len(),
-                m.type_params.len(),
-                "metadata member type parameters require semantic identities"
-            );
-            let semantic_names = &m.semantic_type_params;
-            let own_type_parameters = semantic_type_parameters(
-                m.type_params.iter().map(String::as_str),
-                semantic_names.iter().map(String::as_str),
-            );
-            for (index, name) in m.type_params.iter().enumerate() {
-                let id = captured_count + tail.type_params.len() + index;
-                for key in own_type_parameters
-                    .iter()
-                    .filter_map(|(key, own)| (*own == index as u64).then_some(key))
-                {
-                    function_type_parameters.insert(key.clone(), id as u64);
-                }
-                let parameter = encode_metadata_type_parameter(
-                    &mut st,
-                    id,
-                    &MetadataTypeParameter {
-                        name: name.clone(),
-                        reified: false,
-                        variance: crate::types::TypeVariance::Invariant,
-                        upper_bounds: m.type_param_bounds.get(index).cloned().unwrap_or_default(),
-                    },
-                    &function_type_parameters,
-                )
-                .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"));
-                func.repeated_message(4, &parameter);
+    let build_func = |st: &mut StringTable, m: &FnMeta| {
+        let mut func = Pb::new();
+        func.field_varint(2, st.local(&m.name) as u64);
+        let mut function_type_parameters = class_type_parameters.clone();
+        assert_eq!(
+            m.semantic_type_params.len(),
+            m.type_params.len(),
+            "metadata member type parameters require semantic identities"
+        );
+        let semantic_names = &m.semantic_type_params;
+        let own_type_parameters = semantic_type_parameters(
+            m.type_params.iter().map(String::as_str),
+            semantic_names.iter().map(String::as_str),
+        );
+        for (index, name) in m.type_params.iter().enumerate() {
+            let id = captured_count + tail.type_params.len() + index;
+            for key in own_type_parameters
+                .iter()
+                .filter_map(|(key, own)| (*own == index as u64).then_some(key))
+            {
+                function_type_parameters.insert(key.clone(), id as u64);
             }
-            let ret = encode_type(&mut st, m.ret, &function_type_parameters).unwrap_or_else(|error| {
+            let parameter = encode_metadata_type_parameter(
+                st,
+                id,
+                &MetadataTypeParameter {
+                    name: name.clone(),
+                    reified: false,
+                    variance: crate::types::TypeVariance::Invariant,
+                    upper_bounds: m.type_param_bounds.get(index).cloned().unwrap_or_default(),
+                },
+                &function_type_parameters,
+            )
+            .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"));
+            func.repeated_message(4, &parameter);
+        }
+        let ret = encode_type(st, m.ret, &function_type_parameters).unwrap_or_else(|error| {
+            panic!(
+                "invalid emitted metadata return type for '{class_internal}.{}': {error}",
+                m.name
+            )
+        });
+        func.field_message(3, &ret);
+        if let Some(recv) = m.receiver {
+            // Function.receiver_type = 5 — a MEMBER EXTENSION's receiver, restored from the
+            // physical `params[0]` realization so consumers see the LOGICAL shape.
+            let rt = encode_type(st, recv, &function_type_parameters).unwrap_or_else(|error| {
                 panic!(
-                    "invalid emitted metadata return type for '{class_internal}.{}': {error}",
+                    "invalid emitted metadata receiver for '{class_internal}.{}': {error}",
                     m.name
                 )
             });
-            func.field_message(3, &ret);
-            if let Some(recv) = m.receiver {
-                // Function.receiver_type = 5 — a MEMBER EXTENSION's receiver, restored from the
-                // physical `params[0]` realization so consumers see the LOGICAL shape.
-                let rt = encode_type(&mut st, recv, &function_type_parameters).unwrap_or_else(
-                    |error| {
-                        panic!(
-                            "invalid emitted metadata receiver for '{class_internal}.{}': {error}",
-                            m.name
-                        )
-                    },
-                );
-                func.field_message(5, &rt);
+            func.field_message(5, &rt);
+        }
+        for (i, (pname, pty)) in m.params.iter().enumerate() {
+            let mut vp = Pb::new();
+            if m.params_have_defaults || m.param_defaults.get(i).copied().unwrap_or(false) {
+                vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
             }
-            for (i, (pname, pty)) in m.params.iter().enumerate() {
-                let mut vp = Pb::new();
-                if m.params_have_defaults || m.param_defaults.get(i).copied().unwrap_or(false) {
-                    vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
-                }
-                vp.field_varint(2, st.local(pname) as u64);
-                let ty = encode_type(&mut st, *pty, &function_type_parameters).unwrap_or_else(
+            vp.field_varint(2, st.local(pname) as u64);
+            let ty = encode_type(st, *pty, &function_type_parameters).unwrap_or_else(
                     |error| {
                         panic!(
                             "invalid emitted metadata parameter '{pname}' for '{class_internal}.{}': {error}",
@@ -639,40 +642,74 @@ pub fn build_class(
                         )
                     },
                 );
-                vp.field_message(3, &ty);
-                if m.vararg_index == Some(i) {
-                    // ValueParameter.vararg_element_type = 4 — the ELEMENT next to the array type.
-                    let elem = pty
-                        .array_elem()
-                        .or_else(|| pty.type_args().first().copied());
-                    if let Some(elem) = elem {
-                        let et = encode_type(&mut st, elem, &function_type_parameters)
-                            .unwrap_or_else(|error| {
-                                panic!(
-                                    "invalid emitted metadata vararg element for \
+            vp.field_message(3, &ty);
+            if m.vararg_index == Some(i) {
+                // ValueParameter.vararg_element_type = 4 — the ELEMENT next to the array type.
+                let elem = pty
+                    .array_elem()
+                    .or_else(|| pty.type_args().first().copied());
+                if let Some(elem) = elem {
+                    let et =
+                        encode_type(st, elem, &function_type_parameters).unwrap_or_else(|error| {
+                            panic!(
+                                "invalid emitted metadata vararg element for \
                                      '{class_internal}.{}': {error}",
-                                    m.name
-                                )
-                            });
-                        vp.field_message(4, &et);
-                    }
+                                m.name
+                            )
+                        });
+                    vp.field_message(4, &et);
                 }
-                func.repeated_message(6, &vp); // Function.value_parameter = 6
             }
-            // Omitted at the public-final-declaration default, exactly like `Class.flags`.
-            if m.flags != DEFAULT_FUNCTION_FLAGS {
-                func.field_varint(9, m.flags); // Function.flags = 9
+            func.repeated_message(6, &vp); // Function.value_parameter = 6
+        }
+        // Omitted at the public-final-declaration default, exactly like `Class.flags`.
+        if m.flags != DEFAULT_FUNCTION_FLAGS {
+            func.field_varint(9, m.flags); // Function.flags = 9
+        }
+        if let Some(sig) = &m.jvm_sig {
+            // `JvmMethodSignature` (f100), desc only (name derivable) — a boxed nullable-primitive
+            // signature kotlinc records because the proto types alone don't pin the JVM descriptor.
+            func.field_message(100, &jvm_method_sig(st, m.jvm_sig_name.as_deref(), sig));
+        }
+        func
+    };
+
+    let mut prop_msgs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
+    let mut func_msgs: Vec<Option<Pb>> = (0..methods.len()).map(|_| None).collect();
+    for member in tail.member_order {
+        match *member {
+            ClassMemberOrder::Property(index)
+                if index < props.len() && prop_msgs[index].is_none() =>
+            {
+                prop_msgs[index] = Some(build_prop(&mut st, &props[index]));
             }
-            if let Some(sig) = &m.jvm_sig {
-                // `JvmMethodSignature` (f100), desc only (name derivable) — a boxed nullable-primitive
-                // signature kotlinc records because the proto types alone don't pin the JVM descriptor.
-                func.field_message(
-                    100,
-                    &jvm_method_sig(&mut st, m.jvm_sig_name.as_deref(), sig),
-                );
+            ClassMemberOrder::Function(index)
+                if index < methods.len() && func_msgs[index].is_none() =>
+            {
+                func_msgs[index] = Some(build_func(&mut st, &methods[index]));
             }
-            func
-        })
+            _ => {}
+        }
+    }
+    // Unscheduled records are compiler/plugin synthetics or callers using the legacy/default shape.
+    // Preserve their established property-then-function order after all explicitly ordered members.
+    for (index, prop) in props.iter().enumerate() {
+        if prop_msgs[index].is_none() {
+            prop_msgs[index] = Some(build_prop(&mut st, prop));
+        }
+    }
+    for (index, function) in methods.iter().enumerate() {
+        if func_msgs[index].is_none() {
+            func_msgs[index] = Some(build_func(&mut st, function));
+        }
+    }
+    let prop_msgs: Vec<Pb> = prop_msgs
+        .into_iter()
+        .map(|message| message.expect("every property metadata record is built"))
+        .collect();
+    let func_msgs: Vec<Pb> = func_msgs
+        .into_iter()
+        .map(|message| message.expect("every function metadata record is built"))
         .collect();
 
     // f13 = enum entries (`EnumEntry { name = f1 }`).
@@ -691,9 +728,11 @@ pub fn build_class(
         .inline_underlying
         .map(|(name, ty)| (st.local(name), type_pb(&mut st, ty, &class_type_parameters)));
 
-    // Companion + nested class names intern LAST (kotlinc's d2 places them after all members).
-    let companion_idx = companion_name.map(|c| st.local(c));
+    // Nested + companion class names intern LAST (kotlinc's d2 places them after all members) —
+    // NESTED names first, then the companion's, even though the companionObjectName FIELD serializes
+    // before the nested list (kotlinc registers the strings in that order).
     let nested_idxs: Vec<u32> = nested_class_names.iter().map(|n| st.local(n)).collect();
+    let companion_idx = companion_name.map(|c| st.local(c));
     // Sealed subclass IDs precede the module name in kotlinc's string table.
     let sealed_idxs: Vec<u32> = tail
         .sealed_subclasses

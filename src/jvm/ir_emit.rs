@@ -18,20 +18,13 @@ use crate::jvm::names::{
 };
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::symbol_source::{CompositeSource, SymbolSource};
-use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance, Visibility};
+use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
 struct InlineStaticTarget<'a> {
     owner: &'a str,
     name: &'a str,
     descriptor: &'a str,
     splice_desc: &'a str,
-}
-
-fn property_visibility(ir: &IrFile, owner: &str, name: &str) -> Visibility {
-    ir.prop_visibilities
-        .get(&(owner.to_string(), name.to_string()))
-        .copied()
-        .unwrap_or_default()
 }
 
 /// kotlinc realizes a NAMED `object` declaration's property backing fields as STATIC fields on the
@@ -528,9 +521,9 @@ fn build_class_metadata(
     opts: &EmitOptions,
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
-        build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, COPY_FN_FLAGS,
-        EQUALS_FN_FLAGS, FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS,
-        SEALED_CTOR_FLAGS,
+        build_class, ClassMemberOrder, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS,
+        COPY_FN_FLAGS, EQUALS_FN_FLAGS, FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS,
+        OBJECT_CTOR_FLAGS, SEALED_CTOR_FLAGS,
     };
     if is_coroutine_state_machine(c) {
         return Some(KotlinMetadata {
@@ -600,10 +593,11 @@ fn build_class_metadata(
         .chain(
             c.properties
                 .iter()
-                .filter(|p| {
-                    p.backing_field.is_none() && hoisted_static_for(ir, c, &p.name).is_some()
+                .enumerate()
+                .filter(|(property, p)| {
+                    p.backing_field.is_none() && hoisted_static_for(ir, c, *property).is_some()
                 })
-                .map(|p| p.name.as_str()),
+                .map(|(_, p)| p.name.as_str()),
         )
         .flat_map(|name| {
             let (getter, setter) = accessor_jvm_names(c, name);
@@ -621,7 +615,7 @@ fn build_class_metadata(
         .collect();
     // Any member that is NOT an accessor and NOT part of a data/value class's synthesized set is a REAL
     // declared function — emit it (with derived flags) rather than declining the whole class.
-    let declared_fids: Vec<u32> = c
+    let mut declared_fids: Vec<u32> = c
         .methods
         .iter()
         .copied()
@@ -638,6 +632,7 @@ fn build_class_metadata(
                 && !value_method_names.contains(n)
         })
         .collect();
+    declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
     // A VALUE-CLASS-INVOLVED MEMBER is now DESCRIBED. The writer could always produce kotlinc's exact
     // payload for one (the byte-identity tests proved it); what was missing was the READ half, and the
     // classpath value-class RETURN model supplies it — `MetadataCallFacts::value_class_ret` reports
@@ -782,11 +777,12 @@ fn build_class_metadata(
     // as `x$delegate`, `this$0`, and interface-delegation fields has no source declaration and must not
     // leak into the metadata name/type namespace. A property's optional backing field supplies only
     // its JVM realization (descriptor, constant, and accessor descriptor).
-    let mut props: Vec<PropMeta> = c
+    let mut declared_props: Vec<(u32, PropMeta)> = c
         .properties
         .iter()
-        .map(|property| {
-            let visibility = property_visibility(ir, &c.fq_name(), &property.name);
+        .enumerate()
+        .map(|(property_index, property)| {
+            let visibility = property.visibility;
             let backing = property
                 .backing_field
                 .and_then(|index| c.fields.get(index as usize).map(|field| (index, field)));
@@ -845,47 +841,88 @@ fn build_class_metadata(
                             .then(|| (default_setter, format!("({})V", desc(field.ty))))
                     })
                 });
-            PropMeta {
-                name: property.name.clone(),
-                ty: property.ty,
-                is_var: property.is_var,
-                visibility,
-                // A HOISTED companion property still records a (derived) backing field — the field
-                // exists, on the outer class — and a literal-initialized `val` keeps kotlinc's
-                // HAS_CONSTANT flag exactly like an instance-field one.
-                has_constant: backing.is_some_and(|(index, field)| {
-                    field.is_final() && index >= c.ctor_param_count && const_fields.contains(&index)
-                }) || hoisted_static_for(ir, c, &property.name)
-                    .is_some_and(|s| !s.is_var && const_value_idx_peek(ir, s.init)),
-                is_const: false,
-                is_abstract: c.is_interface && property.getter.is_none(),
-                has_backing_field: (backing.is_some()
-                    || hoisted_static_for(ir, c, &property.name).is_some())
-                    && !c.is_interface,
-                tparam: ir.field_signatures(&c.fq_name()).and_then(|signatures| {
-                    signatures
-                        .iter()
-                        .find(|(field, _)| field == &property.name)
-                        .and_then(|(_, parameter)| {
-                            c.type_params
-                                .iter()
-                                .position(|candidate| candidate == parameter)
-                        })
-                        .map(|index| index as u32)
-                }),
-                receiver: None,
-                getter,
-                setter,
-                field_desc: backing
-                    .filter(|(_, field)| property.ty != field.ty)
-                    .map(|(_, field)| desc(field.ty)),
-                // The PHYSICAL field name when the JVM realization mangles it — an instance
-                // property beside a same-named hoisted companion static (`result` → `result$1`).
-                field_name: backing
-                    .map(|(_, field)| instance_field_jvm_name(ir, c, field))
-                    .filter(|physical| *physical != property.name),
-            }
+            (
+                property.source_order,
+                PropMeta {
+                    name: property.name.clone(),
+                    ty: property.ty,
+                    is_var: property.is_var,
+                    visibility,
+                    // A HOISTED companion property still records a (derived) backing field — the field
+                    // exists, on the outer class — and a literal-initialized `val` keeps kotlinc's
+                    // HAS_CONSTANT flag exactly like an instance-field one.
+                    has_constant: backing.is_some_and(|(index, field)| {
+                        field.is_final()
+                            && index >= c.ctor_param_count
+                            && const_fields.contains(&index)
+                    }) || hoisted_static_for(ir, c, property_index)
+                        .is_some_and(|s| !s.is_var && const_value_idx_peek(ir, s.init)),
+                    is_const: false,
+                    is_abstract: c.is_interface && property.getter.is_none(),
+                    has_backing_field: (backing.is_some()
+                        || hoisted_static_for(ir, c, property_index).is_some())
+                        && !c.is_interface,
+                    tparam: ir.field_signatures(&c.fq_name()).and_then(|signatures| {
+                        signatures
+                            .iter()
+                            .find(|(field, _)| field == &property.name)
+                            .and_then(|(_, parameter)| {
+                                c.type_params
+                                    .iter()
+                                    .position(|candidate| candidate == parameter)
+                            })
+                            .map(|index| index as u32)
+                    }),
+                    receiver: None,
+                    getter,
+                    setter,
+                    field_desc: backing
+                        .filter(|(_, field)| property.ty != field.ty)
+                        .map(|(_, field)| desc(field.ty)),
+                    // The PHYSICAL field name when the JVM realization mangles it — an instance
+                    // property beside a same-named hoisted companion static (`result` → `result$1`).
+                    field_name: backing
+                        .map(|(_, field)| instance_field_jvm_name(ir, c, field))
+                        .filter(|physical| *physical != property.name),
+                },
+            )
         })
+        .collect();
+    // A class's own `const val`s (`declared_class_statics`) enter here — BEFORE the extension
+    // properties — and the whole set then sorts by each declaration's exact source offset (kotlinc's
+    // metadata property order). The key stays attached to the declaration across JVM storage moves.
+    for &static_id in ir
+        .declared_class_statics
+        .get(&c.fq_name_id())
+        .into_iter()
+        .flatten()
+    {
+        let prop = &ir.statics[static_id as usize];
+        declared_props.push((
+            prop.source_order,
+            PropMeta {
+                name: prop.name.clone(),
+                ty: prop.ty,
+                is_var: prop.is_var,
+                visibility: prop.visibility,
+                has_constant: true,
+                is_const: true,
+                is_abstract: false,
+                has_backing_field: true,
+                tparam: None,
+                receiver: None,
+                getter: None,
+                setter: None,
+                field_desc: None,
+                field_name: None,
+            },
+        ));
+    }
+    declared_props.sort_by_key(|(line, _)| *line);
+    let mut prop_source_orders: Vec<u32> = declared_props.iter().map(|(order, _)| *order).collect();
+    let mut props: Vec<PropMeta> = declared_props
+        .into_iter()
+        .map(|(_, property)| property)
         .collect();
     // Member EXTENSION properties: a `Property` record with `receiver_type` and the accessor
     // signatures — the declaration the accessor methods (excluded from `declared_fids`) realize.
@@ -919,30 +956,12 @@ fn build_class_metadata(
             field_desc: None,
             field_name: None,
         });
-    }
-    for &static_id in ir
-        .declared_class_statics
-        .get(&c.fq_name_id())
-        .into_iter()
-        .flatten()
-    {
-        let prop = &ir.statics[static_id as usize];
-        props.push(PropMeta {
-            name: prop.name.clone(),
-            ty: prop.ty,
-            is_var: prop.is_var,
-            visibility: prop.visibility,
-            has_constant: true,
-            is_const: true,
-            is_abstract: false,
-            has_backing_field: true,
-            tparam: None,
-            receiver: None,
-            getter: None,
-            setter: None,
-            field_desc: None,
-            field_name: None,
-        });
+        prop_source_orders.push(
+            ir.fn_source_order
+                .get(&ext.getter)
+                .copied()
+                .unwrap_or(u32::MAX),
+        );
     }
     let named_ctor_args: Vec<(String, Ty, bool, Option<u32>)> = c
         .ctor_args
@@ -1351,6 +1370,32 @@ fn build_class_metadata(
     } else {
         declared_methods()
     };
+    let member_order = if c.is_data || c.is_value {
+        Vec::new()
+    } else {
+        let mut ordered = Vec::with_capacity(props.len() + methods.len());
+        ordered.extend(
+            prop_source_orders
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, order)| (order, ClassMemberOrder::Property(index))),
+        );
+        ordered.extend(
+            declared_fids
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, fid)| {
+                    (
+                        ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
+                        ClassMemberOrder::Function(index),
+                    )
+                }),
+        );
+        ordered.sort_by_key(|(order, _)| *order);
+        ordered.into_iter().map(|(_, member)| member).collect()
+    };
     // A value class's primary constructor is realized as the static `constructor-impl` returning the
     // erased underlying, not `<init>`; its `@Metadata` signature records that.
     let vc_ctor_desc = c
@@ -1487,6 +1532,7 @@ fn build_class_metadata(
             secondary_ctors: &secondary_ctor_metas,
             ctor_vararg_index,
             nested: &nested_refs,
+            member_order: &member_order,
             sealed_subclasses: &sealed_refs,
             supertypes: &supertypes,
         },
@@ -1680,7 +1726,6 @@ fn seed_plain_class_pool(
             1
         }
     };
-    let is_nonnull_ref = |name: &str, t: Ty| ann_kind(name, t) == 1;
     let ctor_desc = format!("({})V", ctor_field_descs(c));
     let body_consts = init_body_string_consts(ir, c);
     let body_value_class_ctors = init_body_value_class_ctors(ir, c);
@@ -1707,77 +1752,6 @@ fn seed_plain_class_pool(
             value_class_ctor: body_value_class_ctors.get(&(i as u32)).cloned(),
         })
         .collect();
-    // (name, descriptor, setter_kind, bridge): 0 getter, 1 primitive setter, 2 non-null reference
-    // setter; `bridge` set for hoisted companion accessors delegating to the outer.
-    let mut accessors: Vec<(
-        String,
-        String,
-        u8,
-        Option<crate::jvm::classfile::SeedAccessorBridge>,
-    )> = Vec::new();
-    // A property declared `private` has NO accessor methods — seeding their names would intern pool
-    // entries for methods that are never emitted.
-    for f in c
-        .fields
-        .iter()
-        .filter(|f| !property_visibility(ir, fq_name, &f.name).is_private())
-    {
-        let (getter, setter) = accessor_jvm_names(c, &f.name);
-        accessors.push((getter, format!("(){}", desc(f.ty)), 0, None));
-        if !f.is_final() {
-            let kind = if is_nonnull_ref(&f.name, f.ty) { 2 } else { 1 };
-            accessors.push((setter, format!("({})V", desc(f.ty)), kind, None));
-        }
-    }
-    // HOISTED companion properties: no companion field, but the delegating accessors intern in the
-    // same position kotlinc's accessors do — each with its outer `access$…$cp` bridge (and the
-    // getter's return annotation) interleaved, since the accessor BODY is the delegation.
-    for property in &c.properties {
-        if property.backing_field.is_some() || property.is_private {
-            continue;
-        }
-        let Some(hoisted) = hoisted_static_for(ir, c, &property.name) else {
-            continue;
-        };
-        let outer = fq_name.rsplit_once('$').map(|(o, _)| o).unwrap_or(fq_name);
-        let (getter, setter) = accessor_jvm_names(c, &property.name);
-        let pd = desc(hoisted.ty);
-        accessors.push((
-            getter,
-            format!("(){pd}"),
-            0,
-            Some(crate::jvm::classfile::SeedAccessorBridge {
-                owner: outer.to_string(),
-                name: format!(
-                    "access${}$cp",
-                    crate::names::property_getter_name(&property.name)
-                ),
-                ann_kind: ann_kind(&property.name, hoisted.ty),
-                lvt_desc: None,
-            }),
-        ));
-        if hoisted.is_var {
-            let kind = if is_nonnull_ref(&property.name, hoisted.ty) {
-                2
-            } else {
-                1
-            };
-            accessors.push((
-                setter,
-                format!("({pd})V"),
-                kind,
-                Some(crate::jvm::classfile::SeedAccessorBridge {
-                    owner: outer.to_string(),
-                    name: format!(
-                        "access${}$cp",
-                        crate::names::property_setter_name(&property.name)
-                    ),
-                    ann_kind: 0,
-                    lvt_desc: (!pd.starts_with('L') && !pd.starts_with('[')).then(|| pd.clone()),
-                }),
-            ));
-        }
-    }
     // Generic `Signature`s for PARAMETERIZED-type members (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`).
     // Only for a class with NO bare type-parameter fields — a generic class's bare-`T` members are handled by
     // the existing tparam path, left untouched. Seeded here so the natural emission (add_field_sig/
@@ -1795,14 +1769,6 @@ fn seed_plain_class_pool(
     };
     let ctor_sig = ctor_signature;
     let field_sigs: Vec<Option<String>> = c.fields.iter().map(field_sig_of).collect();
-    let mut accessor_sigs: Vec<Option<String>> = Vec::new();
-    for f in &c.fields {
-        let g = field_sig_of(f);
-        accessor_sigs.push(g.as_ref().map(|s| format!("(){s}"))); // getter → `()<sig>`
-        if !f.is_final() {
-            accessor_sigs.push(g.as_ref().map(|s| format!("({s})V"))); // setter → `(<sig>)V`
-        }
-    }
     // A `data class` interns its parameterized-field `Signature`s LATE (in `seed_data_class_pool`, before
     // `@Metadata`), not with the field/accessors — so hand the plain seeder an EMPTY field-sig list and
     // pass the real ones to the data seeder below.
@@ -1841,10 +1807,10 @@ fn seed_plain_class_pool(
         superclass,
         (&ctor_desc, &super_ctor_desc),
         &fields,
-        &accessors,
+        &[],
         &crate::jvm::classfile::MemberSignatures {
             ctor: ctor_sig,
-            accessors: &accessor_sigs,
+            accessors: &[],
             fields: if c.is_data { &[] } else { &field_sigs },
         },
         ctor_default_seed.as_ref(),
@@ -1892,44 +1858,10 @@ fn seed_plain_class_pool(
             entries
         },
     );
-    // A companion OUTER continues with its hoisted-property entries: the `access$…$cp` bridges,
-    // `<clinit>`'s Companion construction, and the hoisted initializers' string constants — all in
-    // kotlinc's first-use order (the field table's own interning then dedups against these).
-    if let Some(companion) = &c.companion_class {
-        let hoisted: Vec<(String, String, bool, u8, Option<crate::kt_string::KtString>)> = ir
-            .statics
-            .iter()
-            .enumerate()
-            .filter(|(index, s)| {
-                ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(fq_name)
-            })
-            .map(|(_, s)| {
-                let string_const = match ir.expr(init_operand(ir, s.init)) {
-                    IrExpr::Const(crate::ir::IrConst::String(t)) => Some(t.clone()),
-                    _ => None,
-                };
-                (
-                    s.name.clone(),
-                    desc(ir_ty_to_jvm(&s.ty)),
-                    s.is_var,
-                    ann_kind(&s.name, ir_ty_to_jvm(&s.ty)),
-                    string_const,
-                )
-            })
-            .collect();
-        // Runs for EVERY companion outer, hoisted statics or not — the `<clinit>` window (its name,
-        // the companion construction, the `Companion`/named field entries) precedes the field-table
-        // interning either way (a NAMED companion with no properties still needs it).
-        cw.seed_companion_outer_pool(
-            fq_name,
-            &hoisted,
-            &companion.render(),
-            (
-                companion.nested_segment_ref(),
-                &format!("L{};", companion.render()),
-            ),
-        );
-    }
+    // A companion OUTER's `access$…$cp` bridges, `<clinit>`, and hoisted-initializer constants are
+    // NOT seeded here: kotlinc interns them at their natural emission position — after the declared
+    // member methods (whose bodies intern their own constants in between) — so `emit_class` reserves
+    // each name at its emission site instead.
     if synthesizes_data_class_members(c) {
         let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
         // The synthesized members cover the PRIMARY-CONSTRUCTOR properties only; a body property has a
@@ -2028,19 +1960,13 @@ fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut Cl
 fn hoisted_static_for<'a>(
     ir: &'a IrFile,
     c: &crate::ir::IrClass,
-    name: &str,
+    property: usize,
 ) -> Option<&'a crate::ir::IrStatic> {
     if !c.is_companion {
         return None;
     }
-    let fq = c.fq_name();
-    let outer = fq.rsplit_once('$')?.0;
-    ir.statics.iter().enumerate().find_map(|(index, s)| {
-        (ir.is_jvm_companion_hoisted_static(index as u32)
-            && s.name == name
-            && s.owner_matches(outer))
-        .then_some(s)
-    })
+    let static_id = ir.jvm_companion_property_static(c.fq_name_id(), property as u32)?;
+    ir.statics.get(static_id as usize)
 }
 
 fn attach_synth_debug_tables(
@@ -2187,19 +2113,18 @@ fn attach_synth_debug_tables(
     // HOISTED companion properties: no companion field, but the delegating accessors get the same
     // debug shape kotlinc gives ordinary accessors (getter: `this` only; a `var` setter also has
     // its `<set-?>` value parameter, guarded when the property type is a non-null reference).
-    for property in &c.properties {
+    for (property_index, property) in c.properties.iter().enumerate() {
         if property.backing_field.is_some() {
             continue;
         }
-        let Some(hoisted) = hoisted_static_for(ir, c, &property.name) else {
+        let Some(hoisted) = hoisted_static_for(ir, c, property_index) else {
             continue;
         };
-        let pline = ir
-            .prop_decl_lines
-            .get(&(c.fq_name, property.name.clone()))
-            .copied()
-            .filter(|&l| l != 0)
-            .unwrap_or(line);
+        let pline = if property.decl_line != 0 {
+            property.decl_line
+        } else {
+            line
+        };
         let pd = crate::jvm::names::type_descriptor(ir_ty_to_jvm(&hoisted.ty));
         let (g, s) = accessor_jvm_names(c, &property.name);
         cw.set_method_debug(&g, &format!("(){pd}"), Some((0, pline)), &this_only);
@@ -2437,11 +2362,11 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     }
     // HOISTED companion properties: the delegating accessors annotate like ordinary accessors
     // (reference getter return; a `var` reference setter's parameter).
-    for property in &c.properties {
+    for (property_index, property) in c.properties.iter().enumerate() {
         if property.backing_field.is_some() {
             continue;
         }
-        let Some(hoisted) = hoisted_static_for(ir, c, &property.name) else {
+        let Some(hoisted) = hoisted_static_for(ir, c, property_index) else {
             continue;
         };
         let Some(a) = ann(&property.name, hoisted.ty) else {
@@ -3545,20 +3470,17 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
         });
         // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
         // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
-        let folded = s.is_const && const_value_idx_peek(ir, s.init);
-        if folded {
-            if let Some(cv) = const_value_idx(ir, s.init, cw) {
-                cw.add_field_const(acc, &s.name, &desc, cv);
-                if let Some(a) = field_ann {
-                    cw.set_field_nullability(&s.name, a);
+        // LATE adds: kotlinc visits the facade's fields AFTER its methods, so a backing field's name
+        // first interns at its accessor body and the const payload lands after the `<clinit>` window.
+        let cv = (s.is_const && const_value_idx_peek(ir, s.init))
+            .then(|| match ir.expr(s.init) {
+                crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null) => {
+                    Some(c.clone())
                 }
-                continue;
-            }
-        }
-        cw.add_field(acc, &s.name, &desc);
-        if let Some(a) = field_ann {
-            cw.set_field_nullability(&s.name, a);
-        }
+                _ => None,
+            })
+            .flatten();
+        cw.add_field_late(acc, &s.name, &desc, cv, field_ann);
     }
     // Which statics a CLASS body (a different JVM class than the facade) reads/writes — a PRIVATE
     // top-level property has no public accessors, so those references need kotlinc's `access$get<X>$p` /
@@ -3652,18 +3574,34 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
             }
             continue;
         }
+        // kotlinc visits the accessor's name, descriptor, and nullability annotation BEFORE its
+        // body's field cluster; the accessor maps to the property's declaration line.
+        let acc_ann = (jt.is_reference()).then(|| {
+            if ir_ty_nullable(&s.ty) {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
+        let gname = property_getter_name(&s.name);
+        cw.reserve_method_name(&gname);
+        cw.seed_utf8(&format!("(){desc}"));
+        if let Some(a) = acc_ann {
+            cw.seed_utf8(a);
+        }
         let mut g = CodeBuilder::new(0);
+        if s.line != 0 {
+            g.mark_line(s.line);
+        }
         let fref = cw.fieldref(facade, &s.name, &desc);
         g.getstatic(fref, slot_words(jt) as i32);
         emit_return(jt, &mut g);
-        finish_code::<0x0019>(
-            cw,
-            &property_getter_name(&s.name),
-            &format!("(){desc}"),
-            &mut g,
-            0,
-        );
+        finish_code::<0x0019>(cw, &gname, &format!("(){desc}"), &mut g, 0);
+        cw.set_method_nullability(&gname, &format!("(){desc}"), acc_ann, &[None]);
         if s.is_var {
+            let sname = property_setter_name(&s.name);
+            cw.reserve_method_name(&sname);
+            cw.seed_utf8(&format!("({desc})V"));
             let words = slot_words(jt);
             let mut st = CodeBuilder::new(words);
             // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
@@ -3677,19 +3615,36 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
                 );
                 st.invokestatic(m, 2, 0);
             }
+            // The store maps to the property line at the POST-GUARD pc (kotlinc's shape).
+            if s.line != 0 {
+                st.mark_line(s.line);
+            }
             load(jt, 0, &mut st);
             let fref = cw.fieldref(facade, &s.name, &desc);
             st.putstatic(fref, slot_words(jt) as i32);
             st.ret_void();
-            finish_code::<0x0019>(
-                cw,
-                &property_setter_name(&s.name),
+            finish_code::<0x0019>(cw, &sname, &format!("({desc})V"), &mut st, words);
+            cw.set_method_nullability(&sname, &format!("({desc})V"), None, &[acc_ann]);
+            // The setter's value parameter is kotlinc's synthetic `<set-?>`, live for the body.
+            cw.set_method_debug(
+                &sname,
                 &format!("({desc})V"),
-                &mut st,
-                words,
+                None,
+                &[("<set-?>".to_string(), desc.clone(), 0)],
             );
         }
     }
+    // kotlinc visits `<clinit>` (name + descriptor) before the initializer constants its body
+    // interns. When every static folds into a `ConstantValue` there is NO `<clinit>` at all, so
+    // reserve only when a store will be emitted.
+    let clinit_needed = facade_statics
+        .iter()
+        .any(|s| !(s.is_const && const_value_idx_peek(ir, s.init)));
+    if !clinit_needed {
+        return;
+    }
+    cw.reserve_method_name("<clinit>");
+    cw.seed_utf8("()V");
     let mut e = Emitter::new(
         ir,
         cw,
@@ -3700,26 +3655,28 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
         facade_statics.iter().map(|property| property.init),
     );
     let mut code = CodeBuilder::new(0);
-    let mut any_init = false;
+    // Each store maps to its property's declaration line (kotlinc's `<clinit>` LineNumberTable).
+    // `add_method` drops a `<clinit>`'s inline marks (they are curated), so collect + set after.
+    let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
     for s in &facade_statics {
         // A `const val` folded into a `ConstantValue` attribute (literal init) is initialized by the JVM
         // — kotlinc emits no `<clinit>` store for it, so skip it here too (byte-identical).
         if s.is_const && const_value_idx_peek(ir, s.init) {
             continue;
         }
-        any_init = true;
+        if s.line != 0 {
+            clinit_lines.push((code.bytes.len() as u16, s.line));
+        }
         e.emit_value(s.init, &mut code);
         let jt = ir_ty_to_jvm(&s.ty);
         let fref = e.cw.fieldref(facade, &s.name, &type_descriptor(jt));
         code.putstatic(fref, slot_words(jt) as i32);
     }
-    // When every static is a `ConstantValue`-folded `const val`, there is nothing to initialize —
-    // kotlinc emits NO `<clinit>` at all (not an empty one), so skip it.
-    if !any_init {
-        return;
-    }
     code.ret_void();
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.next_slot);
+    if !clinit_lines.is_empty() {
+        e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
+    }
 }
 
 /// The StackMapTable verification type of a JVM value type — the free-function twin of
@@ -3839,6 +3796,254 @@ fn emit_backing_field_write_adaptation(
 /// accessor (computed, delegated, `field`-using) already has a method with a body and is skipped, as is a
 /// private one (kotlinc emits no accessor for it) and any exact name+descriptor a real method already
 /// occupies. A same-named method with a different return descriptor does not hide the accessor.
+fn emit_declared_property_accessor(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    property: &crate::ir::IrProperty,
+    fq_name: &str,
+    cw: &mut ClassWriter,
+    formatter: &JvmSignatureFormatter<'_>,
+) {
+    // A private property reached from outside (an `inline` body spliced into its caller) needs the
+    // synthetic accessor kotlinc emits for exactly this: `access$get<X>$p(<owner>)<ty>`.
+    if property.needs_access_bridge {
+        if let Some(field) = property
+            .backing_field
+            .and_then(|i| c.fields.get(i as usize))
+        {
+            let field_jt = ir_ty_to_jvm(&field.ty);
+            let field_desc = type_descriptor(field_jt);
+            let accessor_jt = declared_property_accessor_jvm(ir, property, field);
+            let accessor_desc = type_descriptor(accessor_jt);
+            let name = format!(
+                "access${}$p",
+                crate::names::property_getter_name(&property.name)
+            );
+            let mut g = CodeBuilder::new(1);
+            g.aload(0);
+            // A property that declares its own getter must be read THROUGH it — the bridge exists to
+            // reach the property, not to bypass the user's accessor.
+            match property.getter.map(|fid| &ir.functions[fid as usize]) {
+                Some(f) => {
+                    let d = method_descriptor(&[], ir_ty_to_jvm(&f.ret));
+                    let m = cw.methodref(fq_name, &f.name, &d);
+                    g.invokevirtual(m, 0, slot_words(accessor_jt) as i32);
+                }
+                None => {
+                    let physical_name = instance_field_jvm_name(ir, c, field);
+                    let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
+                    g.getfield(fref, slot_words(field_jt) as i32);
+                    emit_backing_field_read_adaptation(
+                        ir,
+                        cw,
+                        &mut g,
+                        property,
+                        field_jt,
+                        accessor_jt,
+                    );
+                }
+            }
+            emit_return(accessor_jt, &mut g);
+            g.ensure_locals(1);
+            g.link();
+            cw.add_method(
+                0x1009, /* PUBLIC | STATIC | SYNTHETIC */
+                &name,
+                &format!("(L{fq_name};){accessor_desc}"),
+                &g,
+            );
+            if property.is_var {
+                let words = slot_words(accessor_jt);
+                let mut st = CodeBuilder::new(1 + words);
+                st.aload(0);
+                load(accessor_jt, 1, &mut st);
+                // Same rule for the write: a declared setter is user code and is never bypassed.
+                match property.setter.map(|fid| &ir.functions[fid as usize]) {
+                    Some(f) => {
+                        let d = method_descriptor(&[ir_ty_to_jvm(&f.params[0])], Ty::Unit);
+                        let m = cw.methodref(fq_name, &f.name, &d);
+                        st.invokevirtual(m, words as i32, 0);
+                    }
+                    None => {
+                        emit_backing_field_write_adaptation(
+                            ir,
+                            cw,
+                            &mut st,
+                            property,
+                            accessor_jt,
+                            field_jt,
+                        );
+                        let physical_name = instance_field_jvm_name(ir, c, field);
+                        let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
+                        st.putfield(fref, slot_words(field_jt) as i32);
+                    }
+                }
+                st.ret_void();
+                st.ensure_locals(1 + words);
+                st.link();
+                cw.add_method(
+                    0x1009,
+                    &format!(
+                        "access${}$p",
+                        crate::names::property_setter_name(&property.name)
+                    ),
+                    &format!("(L{fq_name};{accessor_desc})V"),
+                    &st,
+                );
+            }
+        }
+    }
+    if property.is_private || property.getter.is_some() {
+        return;
+    }
+    let Some(field_index) = property.backing_field else {
+        return;
+    };
+    let Some(field) = c.fields.get(field_index as usize) else {
+        return;
+    };
+    let field_jt = ir_ty_to_jvm(&field.ty);
+    let field_desc = type_descriptor(field_jt);
+    let accessor_jt = declared_property_accessor_jvm(ir, property, field);
+    let accessor_desc = type_descriptor(accessor_jt);
+    // Only an `open`/`override` PROPERTY's accessor is overridable — a plain `val` on an open
+    // class keeps its FINAL accessor (kotlinc: `open class Engine(val name: String)` emits
+    // `public final getName()`); Kotlin rejects overriding a non-open property, so the flag is
+    // safe. Interface accessors stay non-final (their default bodies dispatch virtually).
+    let overridable = property.is_open || c.is_interface;
+    let getter = property
+        .getter_jvm_name
+        .clone()
+        .unwrap_or_else(|| crate::names::property_getter_name(&property.name));
+    let occupied = |name: &str, descriptor: &str| {
+        c.methods.iter().any(|&fid| {
+            let function = &ir.functions[fid as usize];
+            function.name == name
+                && method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)) == descriptor
+        })
+    };
+    if !occupied(&getter, &format!("(){accessor_desc}")) {
+        let mut g = CodeBuilder::new(1);
+        let physical_name = instance_field_jvm_name(ir, c, field);
+        let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
+        if static_storage(ir, c) {
+            g.getstatic(fref, slot_words(field_jt) as i32);
+        } else {
+            g.aload(0);
+            g.getfield(fref, slot_words(field_jt) as i32);
+        }
+        // A `lateinit var` read throws while the field is still null — kotlinc inserts this at every
+        // access, and the accessor is an access like any other.
+        if field.is_lateinit() {
+            g.dup();
+            let lbl = g.new_label();
+            g.ifnonnull(lbl);
+            g.push_string(&field.name, cw);
+            let m = cw.methodref(
+                "kotlin/jvm/internal/Intrinsics",
+                "throwUninitializedPropertyAccessException",
+                "(Ljava/lang/String;)V",
+            );
+            g.invokestatic(m, 1, 0);
+            // The join needs a stackmap frame: `this` in local 0, the (non-null on the taken path)
+            // field value on the stack.
+            g.add_frame_if_new(
+                lbl,
+                vec![VerifType::ObjectName(fq_name.to_string())],
+                vec![verif_of(field_jt)],
+            );
+            g.bind(lbl);
+        }
+        emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, accessor_jt);
+        emit_return(accessor_jt, &mut g);
+        g.ensure_locals(1);
+        g.link();
+        let access = if overridable { 0x0001 } else { 0x0011 };
+        // The accessor keeps the property's generic `Signature`, which the erased descriptor drops:
+        // a bare type parameter (`val a: A` → `()TA;`) or a parameterized concrete type
+        // (`val xs: List<String>` → `()Ljava/util/List<Ljava/lang/String;>;`). Same two sources the
+        // backing field's own signature uses, so the two agree.
+        let sig = ir
+            .field_signatures(fq_name)
+            .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
+            .map(|(_, tp)| format!("()T{tp};"))
+            .or_else(|| field.type_param.as_ref().map(|tp| format!("()T{tp};")))
+            .or_else(|| method_parameterized_sig(formatter, &[], &field.ty));
+        cw.add_method_sig(
+            access,
+            &getter,
+            &format!("(){accessor_desc}"),
+            &g,
+            sig.as_deref(),
+        );
+    }
+    if property.is_var {
+        let setter = property
+            .setter_jvm_name
+            .clone()
+            .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
+        if !occupied(&setter, &format!("({accessor_desc})V")) {
+            let words = slot_words(accessor_jt);
+            let mut st = CodeBuilder::new(1 + words);
+            // kotlinc guards a non-null REFERENCE setter parameter, naming it `<set-?>`. A primitive
+            // cannot be null, and a bare type parameter's bound is `Any?`, so neither is guarded.
+            let guarded = accessor_jt.is_reference()
+                && !property.ty.is_nullable()
+                && !is_type_parameter_field(ir, fq_name, &field.name);
+            if guarded {
+                st.aload(1);
+                st.push_string("<set-?>", cw);
+                let m = cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "checkNotNullParameter",
+                    "(Ljava/lang/Object;Ljava/lang/String;)V",
+                );
+                st.invokestatic(m, 2, 0);
+            }
+            let statics_storage = static_storage(ir, c);
+            if !statics_storage {
+                st.aload(0);
+            }
+            load(accessor_jt, 1, &mut st);
+            emit_backing_field_write_adaptation(ir, cw, &mut st, property, accessor_jt, field_jt);
+            let physical_name = instance_field_jvm_name(ir, c, field);
+            let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
+            if statics_storage {
+                st.putstatic(fref, slot_words(field_jt) as i32);
+            } else {
+                st.putfield(fref, slot_words(field_jt) as i32);
+            }
+            st.ret_void();
+            st.ensure_locals(1 + words);
+            st.link();
+            // `private set` narrows only the setter. Accessor synthesis owns the method flags now,
+            // so it must preserve that declaration fact instead of widening the setter to public.
+            let access = if property.setter_is_private {
+                0x0012 // PRIVATE | FINAL
+            } else if overridable {
+                0x0001
+            } else {
+                0x0011 // PUBLIC | FINAL
+            };
+            let sig = ir
+                .field_signatures(fq_name)
+                .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
+                .map(|(_, tp)| format!("(T{tp};)V"))
+                .or_else(|| field.type_param.as_ref().map(|tp| format!("(T{tp};)V")))
+                .or_else(|| {
+                    method_parameterized_sig(formatter, std::slice::from_ref(&field.ty), &Ty::Unit)
+                });
+            cw.add_method_sig(
+                access,
+                &setter,
+                &format!("({accessor_desc})V"),
+                &st,
+                sig.as_deref(),
+            );
+        }
+    }
+}
+
 fn emit_declared_property_accessors(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -3847,256 +4052,7 @@ fn emit_declared_property_accessors(
     formatter: &JvmSignatureFormatter<'_>,
 ) {
     for property in &c.properties {
-        // A private property reached from outside (an `inline` body spliced into its caller) needs the
-        // synthetic accessor kotlinc emits for exactly this: `access$get<X>$p(<owner>)<ty>`.
-        if property.needs_access_bridge {
-            if let Some(field) = property
-                .backing_field
-                .and_then(|i| c.fields.get(i as usize))
-            {
-                let field_jt = ir_ty_to_jvm(&field.ty);
-                let field_desc = type_descriptor(field_jt);
-                let accessor_jt = declared_property_accessor_jvm(ir, property, field);
-                let accessor_desc = type_descriptor(accessor_jt);
-                let name = format!(
-                    "access${}$p",
-                    crate::names::property_getter_name(&property.name)
-                );
-                let mut g = CodeBuilder::new(1);
-                g.aload(0);
-                // A property that declares its own getter must be read THROUGH it — the bridge exists to
-                // reach the property, not to bypass the user's accessor.
-                match property.getter.map(|fid| &ir.functions[fid as usize]) {
-                    Some(f) => {
-                        let d = method_descriptor(&[], ir_ty_to_jvm(&f.ret));
-                        let m = cw.methodref(fq_name, &f.name, &d);
-                        g.invokevirtual(m, 0, slot_words(accessor_jt) as i32);
-                    }
-                    None => {
-                        let physical_name = instance_field_jvm_name(ir, c, field);
-                        let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
-                        g.getfield(fref, slot_words(field_jt) as i32);
-                        emit_backing_field_read_adaptation(
-                            ir,
-                            cw,
-                            &mut g,
-                            property,
-                            field_jt,
-                            accessor_jt,
-                        );
-                    }
-                }
-                emit_return(accessor_jt, &mut g);
-                g.ensure_locals(1);
-                g.link();
-                cw.add_method(
-                    0x1009, /* PUBLIC | STATIC | SYNTHETIC */
-                    &name,
-                    &format!("(L{fq_name};){accessor_desc}"),
-                    &g,
-                );
-                if property.is_var {
-                    let words = slot_words(accessor_jt);
-                    let mut st = CodeBuilder::new(1 + words);
-                    st.aload(0);
-                    load(accessor_jt, 1, &mut st);
-                    // Same rule for the write: a declared setter is user code and is never bypassed.
-                    match property.setter.map(|fid| &ir.functions[fid as usize]) {
-                        Some(f) => {
-                            let d = method_descriptor(&[ir_ty_to_jvm(&f.params[0])], Ty::Unit);
-                            let m = cw.methodref(fq_name, &f.name, &d);
-                            st.invokevirtual(m, words as i32, 0);
-                        }
-                        None => {
-                            emit_backing_field_write_adaptation(
-                                ir,
-                                cw,
-                                &mut st,
-                                property,
-                                accessor_jt,
-                                field_jt,
-                            );
-                            let physical_name = instance_field_jvm_name(ir, c, field);
-                            let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
-                            st.putfield(fref, slot_words(field_jt) as i32);
-                        }
-                    }
-                    st.ret_void();
-                    st.ensure_locals(1 + words);
-                    st.link();
-                    cw.add_method(
-                        0x1009,
-                        &format!(
-                            "access${}$p",
-                            crate::names::property_setter_name(&property.name)
-                        ),
-                        &format!("(L{fq_name};{accessor_desc})V"),
-                        &st,
-                    );
-                }
-            }
-        }
-        if property.is_private || property.getter.is_some() {
-            continue;
-        }
-        let Some(field_index) = property.backing_field else {
-            continue;
-        };
-        let Some(field) = c.fields.get(field_index as usize) else {
-            continue;
-        };
-        let field_jt = ir_ty_to_jvm(&field.ty);
-        let field_desc = type_descriptor(field_jt);
-        let accessor_jt = declared_property_accessor_jvm(ir, property, field);
-        let accessor_desc = type_descriptor(accessor_jt);
-        // Only an `open`/`override` PROPERTY's accessor is overridable — a plain `val` on an open
-        // class keeps its FINAL accessor (kotlinc: `open class Engine(val name: String)` emits
-        // `public final getName()`); Kotlin rejects overriding a non-open property, so the flag is
-        // safe. Interface accessors stay non-final (their default bodies dispatch virtually).
-        let overridable = property.is_open || c.is_interface;
-        let getter = property
-            .getter_jvm_name
-            .clone()
-            .unwrap_or_else(|| crate::names::property_getter_name(&property.name));
-        let occupied = |name: &str, descriptor: &str| {
-            c.methods.iter().any(|&fid| {
-                let function = &ir.functions[fid as usize];
-                function.name == name
-                    && method_descriptor(&function.params, ir_ty_to_jvm(&function.ret))
-                        == descriptor
-            })
-        };
-        if !occupied(&getter, &format!("(){accessor_desc}")) {
-            let mut g = CodeBuilder::new(1);
-            let physical_name = instance_field_jvm_name(ir, c, field);
-            let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
-            if static_storage(ir, c) {
-                g.getstatic(fref, slot_words(field_jt) as i32);
-            } else {
-                g.aload(0);
-                g.getfield(fref, slot_words(field_jt) as i32);
-            }
-            // A `lateinit var` read throws while the field is still null — kotlinc inserts this at every
-            // access, and the accessor is an access like any other.
-            if field.is_lateinit() {
-                g.dup();
-                let lbl = g.new_label();
-                g.ifnonnull(lbl);
-                g.push_string(&field.name, cw);
-                let m = cw.methodref(
-                    "kotlin/jvm/internal/Intrinsics",
-                    "throwUninitializedPropertyAccessException",
-                    "(Ljava/lang/String;)V",
-                );
-                g.invokestatic(m, 1, 0);
-                // The join needs a stackmap frame: `this` in local 0, the (non-null on the taken path)
-                // field value on the stack.
-                g.add_frame_if_new(
-                    lbl,
-                    vec![VerifType::ObjectName(fq_name.to_string())],
-                    vec![verif_of(field_jt)],
-                );
-                g.bind(lbl);
-            }
-            emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, accessor_jt);
-            emit_return(accessor_jt, &mut g);
-            g.ensure_locals(1);
-            g.link();
-            let access = if overridable { 0x0001 } else { 0x0011 };
-            // The accessor keeps the property's generic `Signature`, which the erased descriptor drops:
-            // a bare type parameter (`val a: A` → `()TA;`) or a parameterized concrete type
-            // (`val xs: List<String>` → `()Ljava/util/List<Ljava/lang/String;>;`). Same two sources the
-            // backing field's own signature uses, so the two agree.
-            let sig = ir
-                .field_signatures(fq_name)
-                .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
-                .map(|(_, tp)| format!("()T{tp};"))
-                .or_else(|| field.type_param.as_ref().map(|tp| format!("()T{tp};")))
-                .or_else(|| method_parameterized_sig(formatter, &[], &field.ty));
-            cw.add_method_sig(
-                access,
-                &getter,
-                &format!("(){accessor_desc}"),
-                &g,
-                sig.as_deref(),
-            );
-        }
-        if property.is_var {
-            let setter = property
-                .setter_jvm_name
-                .clone()
-                .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
-            if !occupied(&setter, &format!("({accessor_desc})V")) {
-                let words = slot_words(accessor_jt);
-                let mut st = CodeBuilder::new(1 + words);
-                // kotlinc guards a non-null REFERENCE setter parameter, naming it `<set-?>`. A primitive
-                // cannot be null, and a bare type parameter's bound is `Any?`, so neither is guarded.
-                let guarded = accessor_jt.is_reference()
-                    && !property.ty.is_nullable()
-                    && !is_type_parameter_field(ir, fq_name, &field.name);
-                if guarded {
-                    st.aload(1);
-                    st.push_string("<set-?>", cw);
-                    let m = cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "checkNotNullParameter",
-                        "(Ljava/lang/Object;Ljava/lang/String;)V",
-                    );
-                    st.invokestatic(m, 2, 0);
-                }
-                let statics_storage = static_storage(ir, c);
-                if !statics_storage {
-                    st.aload(0);
-                }
-                load(accessor_jt, 1, &mut st);
-                emit_backing_field_write_adaptation(
-                    ir,
-                    cw,
-                    &mut st,
-                    property,
-                    accessor_jt,
-                    field_jt,
-                );
-                let physical_name = instance_field_jvm_name(ir, c, field);
-                let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
-                if statics_storage {
-                    st.putstatic(fref, slot_words(field_jt) as i32);
-                } else {
-                    st.putfield(fref, slot_words(field_jt) as i32);
-                }
-                st.ret_void();
-                st.ensure_locals(1 + words);
-                st.link();
-                // `private set` narrows only the setter. Accessor synthesis owns the method flags now,
-                // so it must preserve that declaration fact instead of widening the setter to public.
-                let access = if property.setter_is_private {
-                    0x0012 // PRIVATE | FINAL
-                } else if overridable {
-                    0x0001
-                } else {
-                    0x0011 // PUBLIC | FINAL
-                };
-                let sig = ir
-                    .field_signatures(fq_name)
-                    .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
-                    .map(|(_, tp)| format!("(T{tp};)V"))
-                    .or_else(|| field.type_param.as_ref().map(|tp| format!("(T{tp};)V")))
-                    .or_else(|| {
-                        method_parameterized_sig(
-                            formatter,
-                            std::slice::from_ref(&field.ty),
-                            &Ty::Unit,
-                        )
-                    });
-                cw.add_method_sig(
-                    access,
-                    &setter,
-                    &format!("({accessor_desc})V"),
-                    &st,
-                    sig.as_deref(),
-                );
-            }
-        }
+        emit_declared_property_accessor(ir, c, property, fq_name, cw, formatter);
     }
 }
 
@@ -4292,8 +4248,15 @@ fn emit_class(
     }
     // (Interface refs were added with the header, before the pool seeding.)
     // A class with a `companion object`: its `public static final Companion` field LEADS the field
-    // table (kotlinc's order), before the instance fields and any hoisted statics.
-    add_companion_field(&mut cw, c);
+    // table (kotlinc's order), before the instance fields and any hoisted statics — but its pool
+    // entries intern LATE (the `<clinit>` body's `putstatic` introduces them; the field visit dedups).
+    if let Some(companion) = c.companion_class {
+        cw.add_field_late_leading(
+            0x0019,
+            companion.nested_segment_ref(),
+            &format!("L{};", companion.render()),
+        );
+    }
     // Public fields (the IR slice reads them cross-class directly; kotlinc uses private + getters —
     // an ABI refinement, not a runtime difference).
     // Backing fields are private; access goes through the synthesized `getX()`/`setX()` accessors
@@ -4347,12 +4310,17 @@ fn emit_class(
     }
     // A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
     // `ConstantValue` fields (kotlinc's layout); they have no `<clinit>` store (the JVM initializes them).
-    for (static_index, s) in ir
+    // DECLARATION order: common lowering groups declarations by shape, while kotlinc's field table
+    // follows the companion source order.
+    let mut owner_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
         .statics
         .iter()
         .enumerate()
         .filter(|(_, s)| s.owner_matches(&fq_name))
-    {
+        .map(|(index, property)| (index as u32, property))
+        .collect();
+    owner_statics.sort_by_key(|(_, property)| property.line);
+    for (static_index, s) in owner_statics {
         let desc = ir_type_desc(&s.ty);
         // A `private const val`/`private val` on an object/companion keeps its declared visibility
         // (kotlinc: PRIVATE static final; const reads are inlined so no cross-class getstatic needs it).
@@ -4361,7 +4329,7 @@ fn emit_class(
         let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
         // A HOISTED companion property's field is PRIVATE regardless of the property's declared
         // visibility (kotlinc: every access goes through the accessors/bridges, never the field).
-        let hoisted = ir.is_jvm_companion_hoisted_static(static_index as u32);
+        let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
         let acc = if s.visibility.is_private() || hoisted {
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
@@ -4370,13 +4338,28 @@ fn emit_class(
         // `ConstantValue` is only meaningful on a FINAL field (JVMS 4.7.2 ignores it otherwise), and a
         // `var` is initialized by the `<clinit>` store anyway. A HOISTED companion property never
         // folds either — kotlinc initializes it in `<clinit>` (only `const val` gets the attribute).
-        // The eligibility check runs FIRST: `const_value_idx` interns the constant as a side effect,
-        // and a pool entry for a value the class never `ldc`s diverges from kotlinc's pool.
-        let fold = !s.is_var && !hoisted;
-        match fold.then(|| const_value_idx(ir, s.init, &mut cw)).flatten() {
-            Some(cv) => cw.add_field_const(acc, &s.name, &desc, cv),
-            None => cw.add_field(acc, &s.name, &desc),
-        }
+        // LATE adds: kotlinc's field-table visit runs after the methods, so a hoisted static's name
+        // first interns at its `access$…$cp` bridge and a folded const's name + `ConstantValue`
+        // land after the `<clinit>` window.
+        let fold = s.is_const && !s.is_var && !hoisted;
+        let cv = fold
+            .then(|| match ir.expr(s.init) {
+                crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null) => {
+                    Some(c.clone())
+                }
+                _ => None,
+            })
+            .flatten();
+        // A reference-typed static carries kotlinc's nullability annotation (private hoisted
+        // fields included).
+        let ann = (desc.starts_with('L') || desc.starts_with('[')).then(|| {
+            if s.ty.is_nullable() {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
+        cw.add_field_late(acc, &s.name, &desc, cv, ann);
     }
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
     // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body
@@ -4768,36 +4751,35 @@ fn emit_class(
             emit_ctor_marker_accessor(&fq_name, &sc_param_tys, &mut cw);
         }
     }
-    // Instance methods (concrete emitted; abstract declared with `ACC_ABSTRACT`, no Code).
-    // kotlinc emits a property's ACCESSORS before the class's declared functions (source order: ctor
-    // properties precede the body). The IR appends synthesized accessors after the declared methods, so
-    // reorder here — accessors first (in field order), then everything else in IR order.
-    let accessor_order: Vec<String> = c
-        .fields
-        .iter()
-        .flat_map(|f| {
-            let (getter, setter) = accessor_jvm_names(c, &f.name);
-            [getter, setter]
-        })
-        .collect();
-    let mut ordered: Vec<u32> = Vec::with_capacity(c.methods.len());
-    for name in &accessor_order {
-        ordered.extend(
-            c.methods
-                .iter()
-                .copied()
-                .filter(|&fid| &ir.functions[fid as usize].name == name),
-        );
+    // JVM method order follows Kotlin declaration order. A plain property's accessors do not have
+    // `FunId`s, so interleave the declaration itself with source-written functions/accessors rather
+    // than grouping backend-synthesized accessors ahead of every function.
+    enum DeclaredMember<'a> {
+        Property(&'a crate::ir::IrProperty),
+        Function(u32),
     }
-    ordered.extend(
-        c.methods
-            .iter()
-            .copied()
-            .filter(|&fid| !accessor_order.contains(&ir.functions[fid as usize].name)),
-    );
-    // Accessors the IR does not carry — a plain property's are pure realization, synthesized here.
-    emit_declared_property_accessors(ir, c, &fq_name, &mut cw, &signature_formatter);
-    for &fid in &ordered {
+    let mut ordered = Vec::with_capacity(c.properties.len() + c.methods.len());
+    ordered.extend(c.properties.iter().map(DeclaredMember::Property));
+    ordered.extend(c.methods.iter().copied().map(DeclaredMember::Function));
+    ordered.sort_by_key(|member| match member {
+        DeclaredMember::Property(property) => property.source_order,
+        DeclaredMember::Function(fid) => ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX),
+    });
+    for member in ordered {
+        let fid = match member {
+            DeclaredMember::Property(property) => {
+                emit_declared_property_accessor(
+                    ir,
+                    c,
+                    property,
+                    &fq_name,
+                    &mut cw,
+                    &signature_formatter,
+                );
+                continue;
+            }
+            DeclaredMember::Function(fid) => fid,
+        };
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
             // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
@@ -4916,6 +4898,10 @@ fn emit_class(
     {
         let jt = ir_ty_to_jvm(&s.ty);
         let desc = type_descriptor(jt);
+        // kotlinc visits the bridge's name before its body's field cluster.
+        let getter_bridge = format!("access${}$cp", property_getter_name(&s.name));
+        cw.reserve_method_name(&getter_bridge);
+        cw.seed_utf8(&format!("(){desc}"));
         let mut g = CodeBuilder::new(0);
         let fref = cw.fieldref(&fq_name, &s.name, &desc);
         g.getstatic(fref, slot_words(jt) as i32);
@@ -4924,11 +4910,17 @@ fn emit_class(
         g.link();
         cw.add_method(
             0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
-            &format!("access${}$cp", property_getter_name(&s.name)),
+            &getter_bridge,
             &format!("(){desc}"),
             &g,
         );
         if s.is_var {
+            let setter_bridge = format!("access${}$cp", property_setter_name(&s.name));
+            cw.reserve_method_name(&setter_bridge);
+            cw.seed_utf8(&format!("({desc})V"));
+            // The setter bridge's `<set-?>` LocalVariableTable strings intern at its method visit.
+            cw.seed_utf8("<set-?>");
+            cw.seed_utf8(&desc);
             let words = slot_words(jt);
             let mut st = CodeBuilder::new(words);
             load(jt, 0, &mut st);
@@ -4937,12 +4929,7 @@ fn emit_class(
             st.ret_void();
             st.ensure_locals(words);
             st.link();
-            cw.add_method(
-                0x1019,
-                &format!("access${}$cp", property_setter_name(&s.name)),
-                &format!("({desc})V"),
-                &st,
-            );
+            cw.add_method(0x1019, &setter_bridge, &format!("({desc})V"), &st);
         }
     }
     // A class with a `companion object` gets its `<clinit>` LAST among the methods (kotlinc's
@@ -4960,6 +4947,10 @@ fn emit_class(
             .map(|(index, s)| (index as u32, s))
             .collect();
         if c.companion_class.is_some() || !clinit_statics.is_empty() {
+            // kotlinc visits `<clinit>` (name + descriptor) before its body's companion
+            // construction and hoisted-initializer constants.
+            cw.reserve_method_name("<clinit>");
+            cw.seed_utf8("()V");
             let mut e = Emitter::new(
                 ir,
                 &mut cw,

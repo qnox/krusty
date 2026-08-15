@@ -242,7 +242,10 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                 f.decl_line = body_line(&f.body, line_at(f.span.lo));
                 f.body_close_line = body_close(&f.body);
             }
-            _ => {}
+            // A top-level property's accessors and `<clinit>` store map to its declaration line.
+            Decl::Property(p) => {
+                p.decl_line = line_at(p.span.lo);
+            }
         }
     }
 }

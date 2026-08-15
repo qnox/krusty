@@ -23,6 +23,8 @@ struct Candidate {
     ty: Ty,
     is_var: bool,
     visibility: Visibility,
+    source_order: u32,
+    decl_line: u32,
 }
 
 fn initializer_store(
@@ -87,6 +89,32 @@ fn reads_value(ir: &IrFile, root: ExprId, value: u32) -> bool {
 
 /// Realize the JVM's companion-property storage layout from semantic common IR.
 pub fn lower_companion_properties(ir: &mut IrFile) {
+    // A companion `const val` remains declared by the companion in common IR and metadata, while
+    // the JVM stores its public static final field on the outer class. Select that physical owner by
+    // exact class/static identities here; no declaration is rebound from its spelling.
+    let companion_owners: Vec<_> = ir
+        .classes
+        .iter()
+        .filter_map(|outer| {
+            outer
+                .companion_class
+                .map(|companion| (outer.fq_name, companion))
+        })
+        .collect();
+    for (outer, companion) in companion_owners {
+        let statics = ir
+            .declared_class_statics
+            .get(&companion)
+            .cloned()
+            .unwrap_or_default();
+        for static_id in statics {
+            let declaration = &mut ir.statics[static_id as usize];
+            if declaration.is_const && declaration.owner == Some(companion) {
+                declaration.owner = Some(outer);
+            }
+        }
+    }
+
     let mut candidates = Vec::new();
     for outer in 0..ir.classes.len() as ClassId {
         let outer_class = &ir.classes[outer as usize];
@@ -143,6 +171,8 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 ty: declaration.ty,
                 is_var: declaration.is_var,
                 visibility,
+                source_order: declaration.source_order,
+                decl_line: declaration.decl_line,
             });
         }
     }
@@ -162,12 +192,19 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             owner: Some(ir.classes[candidate.outer as usize].fq_name),
             visibility: candidate.visibility,
             custom_accessor: false,
+            line: candidate.decl_line,
+            source_order: candidate.source_order,
         });
         ir.declared_class_statics
             .entry(ir.classes[candidate.outer as usize].fq_name)
             .or_default()
             .push(index);
         ir.mark_jvm_companion_hoisted_static(index);
+        ir.mark_jvm_companion_property_static(
+            ir.classes[candidate.companion as usize].fq_name,
+            candidate.property as u32,
+            index,
+        );
         static_for_field.insert((candidate.companion, candidate.field), index);
     }
 
@@ -277,6 +314,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             dispatch_receiver: Some(ir.classes[candidate.companion as usize].fq_name),
             param_checks: vec![],
         });
+        ir.fn_source_order.insert(getter, candidate.source_order);
         let setter = if candidate.is_var {
             let value = ir.add_expr(IrExpr::GetValue(1));
             let write = ir.add_expr(IrExpr::SetStatic {
@@ -288,7 +326,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 stmts: vec![write, returned],
                 value: None,
             });
-            Some(ir.add_fun(IrFunction {
+            let setter = ir.add_fun(IrFunction {
                 name: property_setter_name(&candidate.name),
                 params: vec![candidate.ty],
                 ret: Ty::Unit,
@@ -298,13 +336,13 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 // A synthesized setter is still a public Kotlin declaration: a non-null reference
                 // parameter gets the same entry guard as an ordinary backend-synthesized setter.
                 // The debug-table pass derives its first source PC from this exact prologue.
-                param_checks: vec![
-                    (candidate.ty.is_reference()
-                        && !candidate.ty.is_nullable()
-                        && !candidate.ty.is_ty_param())
-                    .then(|| "<set-?>".to_string()),
-                ],
-            }))
+                param_checks: vec![(candidate.ty.is_reference()
+                    && !candidate.ty.is_nullable()
+                    && !candidate.ty.is_ty_param())
+                .then(|| "<set-?>".to_string())],
+            });
+            ir.fn_source_order.insert(setter, candidate.source_order);
+            Some(setter)
         } else {
             None
         };

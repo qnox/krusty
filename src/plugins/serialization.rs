@@ -1077,6 +1077,8 @@ impl SerializationPlugin {
             owner: Some(type_name(class_fq)),
             visibility: crate::types::Visibility::Private,
             custom_accessor: true,
+            line: 0,
+            source_order: u32::MAX,
         });
         // `public static final Lazy access$get$cachedSerializer$delegate$cp()` — reads the private field.
         let read =
@@ -1933,6 +1935,8 @@ impl IrPlugin for SerializationPlugin {
                     owner: Some(type_name(&class_fq)),
                     visibility: crate::types::Visibility::Private,
                     custom_accessor: true,
+                    line: 0,
+                    source_order: u32::MAX,
                 });
                 let read =
                     ir.external_static_field(&class_fq, "$childSerializers", "[Lkotlin/Lazy;");
