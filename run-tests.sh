@@ -12,7 +12,7 @@ export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}" # 128 MiB
 
 # Bound every test-binary process, not just the corpus pass. A resolver/checker loop must terminate
 # with the binary name, exact filter, and captured diagnostics instead of wedging the gate.
-source "$(dirname "$0")/scripts/test-timeout-defaults.sh"
+source "$(dirname "$0")/scripts/test-gate-defaults.sh"
 
 cd "$(dirname "$0")"
 
@@ -339,7 +339,7 @@ done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
 pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
 if [ -n "$e2e_bin" ]; then
-  e2e_shards="${KRUSTY_E2E_SHARDS:-11}"
+  e2e_shards="$KRUSTY_E2E_SHARDS"
   libtest_require_positive_shard_count "$e2e_shards" "run-tests.sh: KRUSTY_E2E_SHARDS"
   e2e_listing="$logdir/e2e-tests.list"
   e2e_plan="$logdir/e2e-shards.plan"

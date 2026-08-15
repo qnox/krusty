@@ -138,31 +138,31 @@ fn shard_planner_rejects_noncanonical_or_nonpositive_counts() {
 }
 
 #[test]
-fn canonical_process_deadlines_are_explicit_and_below_five_minutes() {
+fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
     let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("scripts")
-        .join("test-timeout-defaults.sh");
+        .join("test-gate-defaults.sh");
     let output = Command::new("bash")
         .args([
             "-c",
-            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS; source \"$1\"; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\"",
-            "timeout-default-test",
+            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_E2E_SHARDS; source \"$1\"; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_SHARDS\"",
+            "gate-default-test",
         ])
         .arg(defaults)
         .output()
-        .expect("read canonical timeout defaults");
+        .expect("read canonical gate defaults");
     assert!(
         output.status.success(),
-        "timeout defaults failed: {}",
+        "gate defaults failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let values = String::from_utf8(output.stdout)
-        .expect("timeout defaults are UTF-8")
+        .expect("gate defaults are UTF-8")
         .lines()
-        .map(|value| value.parse::<u64>().expect("numeric timeout default"))
+        .map(|value| value.parse::<u64>().expect("numeric gate default"))
         .collect::<Vec<_>>();
-    assert_eq!(values, [120, 295, 295]);
-    assert!(values.into_iter().all(|seconds| seconds < 300));
+    assert_eq!(values, [120, 295, 295, 22]);
+    assert!(values[..3].iter().all(|seconds| *seconds < 300));
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn shard_listing_runs_through_the_deadline_helper() {
 
 #[test]
 fn real_e2e_libtest_filters_select_exactly_the_planned_shards() {
-    const SHARDS: usize = 11;
+    const SHARDS: usize = 22;
     let executable = std::env::current_exe().expect("current e2e test executable");
     let listing = Command::new(&executable)
         .args(["--list", "--format", "terse"])

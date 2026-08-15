@@ -54,9 +54,9 @@ argument, member, initializer, or assignment location is a test failure.
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
 binaries once with Cargo's `gate` profile, runs the conformance binary alone in two passes (box
-corpus, then everything else), then runs eleven balanced whole-module shards of the internally parallel
-e2e binary, then runs the remaining small test binaries in parallel. `KRUSTY_E2E_SHARDS` overrides
-the shard count.
+corpus, then everything else), then runs twenty-two balanced whole-module shards of the internally
+parallel e2e binary, then runs the remaining small test binaries in parallel. `KRUSTY_E2E_SHARDS`
+overrides the shard count.
 
 Each scheduled invocation owns its log. An unfiltered binary keeps the plain `<binary>.log` name; a
 filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the two conformance logs are
@@ -66,7 +66,7 @@ filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the t
 `run_one` adds `#2`, `#3`, and so on if a derived name is already present instead of overwriting an
 earlier run. The failure report reads the exact invocation's log, and the timing table lists each
 invocation separately because each is a separate process with its own wall time. E2e shard logs use
-the explicit labels `shard-1-of-11`, and so on; every shard's reported selected-test count must equal
+the explicit labels `shard-1-of-22`, and so on; every shard's reported selected-test count must equal
 the planner's count, so filtering cannot silently reduce coverage.
 
 CI builds the conformance test binary once and runs that artifact against every version in
@@ -171,7 +171,7 @@ Optional profiling knobs:
   full-suite or focused conformance pass.
 - `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for focused e2e runs and
   each full-suite e2e shard.
-- `KRUSTY_E2E_SHARDS=<count>` overrides the eleven whole-module shards used by the plain full-suite
+- `KRUSTY_E2E_SHARDS=<count>` overrides the twenty-two whole-module shards used by the plain full-suite
   run.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
