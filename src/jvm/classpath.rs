@@ -2346,7 +2346,7 @@ impl Classpath {
         }
         let path = Self::builtins_path_for_package(package);
         let mut indices = tree
-            .node_for(&package.render())
+            .node_for_name(package)
             .map_or_else(Vec::new, |node| node.builtins_jars.clone());
         indices.extend(tree.incomplete_entries.iter().copied());
         indices.sort_unstable();
@@ -2490,7 +2490,7 @@ impl Classpath {
         // A `.kotlin_builtins` fragment names a nested class with a DOTTED tail on the slashed package
         // (`kotlin/collections/Map.Entry`), so the package the fragment is looked up by stays the
         // enclosing class's package.
-        let nested = type_name(&format!("{}.{simple}", kotlin_outer.render()));
+        let nested = crate::types::type_name_nested_child(kotlin_outer, simple);
         let file = self.builtins_file_for_package(Self::builtins_package_for(kotlin_outer));
         let class = file.get_name(nested)?;
         Some((jvm_outer.to_string(), simple.to_string(), class.access))
@@ -2846,8 +2846,7 @@ impl Classpath {
         }
 
         let mut index = TypeIndex::default();
-        let rendered = package.render();
-        if let Some(node) = tree.node_for(&rendered) {
+        if let Some(node) = tree.node_for_name(package) {
             for &entry_id in &node.jars {
                 merge_alias_part(&mut index, &self.entry_package_types(entry_id, package));
             }
@@ -2875,8 +2874,7 @@ impl Classpath {
         })?;
         if self.aliases.borrow_mut().get(&package).is_none() {
             let mut aliases = TypeIndex::default();
-            let rendered = package.render();
-            if let Some(node) = self.package_tree().node_for(&rendered) {
+            if let Some(node) = self.package_tree().node_for_name(package) {
                 for &entry_id in &node.jars {
                     merge_alias_part(&mut aliases, &self.entry_package_types(entry_id, package));
                 }
@@ -3226,6 +3224,14 @@ impl Classpath {
         indices
     }
 
+    fn class_entry_indices_name(&self, tree: &PackageTree, internal: TypeName) -> Vec<usize> {
+        let mut indices = tree.jars_for_class_name(internal);
+        indices.extend(tree.incomplete_entries.iter().copied());
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+
     pub fn find_name(&self, internal: TypeName) -> Option<std::sync::Arc<ClassInfo>> {
         // The front end names built-in types in Kotlin terms (`kotlin/Any`); a classpath artifact is
         // a real JVM class, so map to the JVM name (`java/lang/Object`) before looking it up. The parsed
@@ -3251,7 +3257,7 @@ impl Classpath {
         let name = format!("{internal}.class");
         let mut found = None;
         let mut all_cached = true;
-        for i in self.class_entry_indices(&tree, &internal) {
+        for i in self.class_entry_indices_name(&tree, internal_id) {
             let (Some(e), Some(l2)) = (self.entries.get(i), self.entry_caches.get(i)) else {
                 continue;
             };
@@ -3352,7 +3358,7 @@ impl Classpath {
         let path = Self::builtins_path_for_package(package);
         let tree = self.package_tree();
         let mut indices = tree
-            .node_for(&package.render())
+            .node_for_name(package)
             .map_or_else(Vec::new, |node| node.builtins_jars.clone());
         indices.extend(tree.incomplete_entries.iter().copied());
         indices.sort_unstable();
@@ -3496,8 +3502,7 @@ impl Classpath {
         // Populate the per-entry L2 records for this class if nothing has looked it up yet.
         self.find_name(internal_id)?;
         let tree = self.package_tree();
-        let internal = internal_id.render();
-        for i in self.class_entry_indices(&tree, &internal) {
+        for i in self.class_entry_indices_name(&tree, internal_id) {
             let Some(l2) = self.entry_caches.get(i) else {
                 continue;
             };
@@ -3726,9 +3731,8 @@ impl Classpath {
                 return m.clone();
             }
         }
-        let pkg_rendered = pkg.render();
         let mut m = PkgMembers::default();
-        if let Some(pe) = jp.entry(&pkg_rendered) {
+        if let Some(pe) = jp.entry_name(pkg) {
             let mut seen_facade = std::collections::HashSet::new();
             let mut roots: Vec<String> = Vec::new();
             for &part_id in &pe.facades {
@@ -3759,7 +3763,8 @@ impl Classpath {
                     // inline `with`). Preserve the candidate's declaring/emit owner instead of
                     // replacing it with the traversal root, then publish that physical callable
                     // once. Resolution must never receive traversal artifacts as overloads.
-                    let candidate_owner = m.owner_names.insert(&cand.owner.render());
+                    let candidate_owner =
+                        crate::types::insert_type_name_in(&m.owner_names, cand.owner);
                     if m.candidates.iter().any(|existing| {
                         existing.owner == candidate_owner
                             && existing.name == cand.name
@@ -3817,8 +3822,7 @@ impl Classpath {
     pub fn package_facades_name(&self, pkg: TypeName) -> Vec<TypeName> {
         let tree = self.package_tree();
         let mut out = Vec::new();
-        let pkg_rendered = pkg.render();
-        let Some(node) = tree.node_for(&pkg_rendered) else {
+        let Some(node) = tree.node_for_name(pkg) else {
             return out;
         };
         for &jar_id in &node.jars {
@@ -3826,7 +3830,7 @@ impl Classpath {
                 continue;
             }
             let jp = self.entry_packages(jar_id);
-            if let Some(pe) = jp.entry(&pkg_rendered) {
+            if let Some(pe) = jp.entry_name(pkg) {
                 for &part_id in &pe.facades {
                     let part = jp.names.render(part_id);
                     let facade = part
@@ -3860,8 +3864,7 @@ impl Classpath {
             if !seen.insert(pkg) {
                 continue;
             }
-            let pkg_rendered = pkg.render();
-            let Some(node) = tree.node_for(&pkg_rendered) else {
+            let Some(node) = tree.node_for_name(pkg) else {
                 continue;
             };
             for &jar_id in &node.jars {
@@ -3904,8 +3907,7 @@ impl Classpath {
             if !seen.insert(pkg) {
                 continue;
             }
-            let pkg_rendered = pkg.render();
-            let Some(node) = tree.node_for(&pkg_rendered) else {
+            let Some(node) = tree.node_for_name(pkg) else {
                 continue;
             };
             for &jar_id in &node.jars {
@@ -3966,8 +3968,7 @@ impl Classpath {
             if !seen.insert(pkg) {
                 continue;
             }
-            let pkg_rendered = pkg.render();
-            let Some(node) = tree.node_for(&pkg_rendered) else {
+            let Some(node) = tree.node_for_name(pkg) else {
                 continue;
             };
             for &jar_id in &node.jars {
@@ -4393,8 +4394,17 @@ impl JarPackages {
         self.names.get(pkg).and_then(|id| self.packages.get(&id))
     }
 
+    fn entry_name(&self, pkg: TypeName) -> Option<&PkgEntry> {
+        crate::types::existing_type_name_in(&self.names, pkg).and_then(|id| self.packages.get(&id))
+    }
+
     fn entry_mut(&mut self, pkg: &str) -> &mut PkgEntry {
         let id = self.names.insert(pkg);
+        self.packages.entry(id).or_default()
+    }
+
+    fn entry_mut_name(&mut self, pkg: TypeName) -> &mut PkgEntry {
+        let id = crate::types::insert_type_name_in(&self.names, pkg);
         self.packages.entry(id).or_default()
     }
 
@@ -4449,6 +4459,10 @@ impl PackageTree {
         self.names.get(pkg).and_then(|id| self.packages.get(&id))
     }
 
+    fn node_for_name(&self, pkg: TypeName) -> Option<&PackageNode> {
+        crate::types::existing_type_name_in(&self.names, pkg).and_then(|id| self.packages.get(&id))
+    }
+
     /// Whether a slashed path names a PACKAGE on this classpath — the qualifier half of name
     /// resolution. A dotted reference is resolved segment by segment, and each prefix is either a
     /// package, a classifier, or nothing; only this table can answer the first case, so an intermediate
@@ -4466,6 +4480,17 @@ impl PackageTree {
         let Some(class) = self.names.get(internal) else {
             return Vec::new();
         };
+        self.jars_for_class_id(class)
+    }
+
+    fn jars_for_class_name(&self, internal: TypeName) -> Vec<JarId> {
+        let Some(class) = crate::types::existing_type_name_in(&self.names, internal) else {
+            return Vec::new();
+        };
+        self.jars_for_class_id(class)
+    }
+
+    fn jars_for_class_id(&self, class: NameId) -> Vec<JarId> {
         let start = self
             .classes
             .partition_point(|&(candidate, _)| candidate.0 < class.0);
@@ -4645,10 +4670,10 @@ fn build_jar_packages_dir_visited(
                         || !m.type_aliases.is_empty()
                         || !m.multifile_parts.is_empty()
                     {
-                        let internal = ci.this_class.render();
-                        let pkg = internal.rsplit_once('/').map_or("", |(p, _)| p);
-                        let facade_id = jp.names.insert(&internal);
-                        let entry = jp.entry_mut(pkg);
+                        let internal = ci.this_class;
+                        let package = internal.parent().unwrap_or_else(|| type_name(""));
+                        let facade_id = crate::types::insert_type_name_in(&jp.names, internal);
+                        let entry = jp.entry_mut_name(package);
                         if !entry.facades.contains(&facade_id) {
                             entry.facades.push(facade_id);
                         }
@@ -5193,10 +5218,9 @@ fn build_entry_package_types(
     package: TypeName,
 ) -> TypeIndex {
     let mut index = TypeIndex::default();
-    let package = package.render();
     match entry {
         Entry::Dir(directory) => {
-            if let Some(entry) = packages.entry(&package) {
+            if let Some(entry) = packages.entry_name(package) {
                 for &facade in &entry.facades {
                     let path = directory.join(format!("{}.class", packages.names.render(facade)));
                     if let Ok(bytes) = std::fs::read(path) {
@@ -5205,7 +5229,10 @@ fn build_entry_package_types(
                 }
             }
         }
-        Entry::Jar(jar) => scan_types_jar_package(jar, packages, &package, &mut index),
+        Entry::Jar(jar) => {
+            // Archive entry names are an external classfile format and therefore require text.
+            scan_types_jar_package(jar, packages, &package.render(), &mut index)
+        }
         Entry::Jimage(_) => {}
     }
     index
@@ -6587,6 +6614,12 @@ mod fq_tests {
             vec![0, 1]
         );
         assert_eq!(
+            tree.node_for_name(type_name("kotlin/collections"))
+                .unwrap()
+                .jars,
+            vec![0, 1]
+        );
+        assert_eq!(
             tree.node_for("kotlin/collections").unwrap().builtins_jars,
             vec![1]
         );
@@ -6604,6 +6637,9 @@ mod fq_tests {
         record_pkg_entry_name("Top.class", &mut jp); // default package
         let c = jp.entry("kotlin/collections").unwrap();
         assert!(c.has_classes && c.has_builtins);
+        assert!(jp
+            .entry_name(type_name("kotlin/collections"))
+            .is_some_and(|entry| entry.has_classes && entry.has_builtins));
         assert!(jp.entry("").unwrap().has_classes);
         assert_eq!(
             jp.classes
@@ -6629,6 +6665,13 @@ mod fq_tests {
         assert_eq!(tree.jars_for_class("shared/Two"), vec![1]);
         assert_eq!(tree.jars_for_class("shared/Duplicate"), vec![0, 1]);
         assert!(tree.jars_for_class("shared/Missing").is_empty());
+        assert_eq!(
+            tree.jars_for_class_name(type_name("shared/Duplicate")),
+            vec![0, 1]
+        );
+        assert!(tree
+            .jars_for_class_name(type_name("shared/Missing"))
+            .is_empty());
     }
 
     #[test]
