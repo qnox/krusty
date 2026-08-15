@@ -79,7 +79,8 @@ fn main() {
     // Absent, the backend keeps krusty's v52 default.
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_class_major(opts.jvm_target_major)
-        .with_jvm_default(opts.jvm_default);
+        .with_jvm_default(opts.jvm_default)
+        .with_param_assertions(!opts.no_param_assertions);
     let outputs = krusty::compiler::emit_checked(
         &analysis.files,
         &stems,

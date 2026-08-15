@@ -255,6 +255,9 @@ pub struct JvmBackend {
     /// Class-file major version to emit (`-jvm-target`), or `None` for krusty's default (v52).
     class_major: Option<u16>,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
+    /// Whether to emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions`
+    /// clears this).
+    param_assertions: bool,
 }
 
 impl JvmBackend {
@@ -263,16 +266,23 @@ impl JvmBackend {
             cp,
             class_major: None,
             jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
+            param_assertions: true,
         }
     }
 
-    /// Set the class-file version subsequent emits target (from the CLI's `-jvm-target`).
+    /// `-Xno-param-assertions` passes `false`: emit no `Intrinsics.checkNotNullParameter` guards.
+    pub fn with_param_assertions(mut self, enabled: bool) -> JvmBackend {
+        self.param_assertions = enabled;
+        self
+    }
+
     /// `-jvm-default`: which JVM shape an interface's members with bodies are compiled into.
     pub fn with_jvm_default(mut self, mode: crate::jvm::ir_emit::JvmDefaultMode) -> JvmBackend {
         self.jvm_default = mode;
         self
     }
 
+    /// Set the class-file version subsequent emits target (from the CLI's `-jvm-target`).
     pub fn with_class_major(mut self, major: Option<u16>) -> JvmBackend {
         self.class_major = major;
         self
@@ -315,6 +325,9 @@ pub fn shipping_emit_options(
         // payload. `KRUSTY_NO_CLASS_METADATA` restores the facade-only output for bisecting.
         emit_class_metadata: std::env::var_os("KRUSTY_NO_CLASS_METADATA").is_none(),
         jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
+        // `-Xno-param-assertions` is applied by the caller (`with_param_assertions`); the shipping
+        // default emits the guards, as kotlinc does.
+        param_assertions: true,
         inner_class_resolver: Some(classpath_inner_class_resolver(cp)),
     }
 }
@@ -482,6 +495,13 @@ impl Backend for JvmBackend {
             );
             return outputs;
         }
+        // `-Xno-param-assertions` is applied to the lowered IR, after the pass pipeline and before
+        // emission, so every consumer of the guards — the guards themselves and the debug tables
+        // whose start offsets are measured past them — sees the same thing.
+        if !self.param_assertions {
+            crate::jvm::ir_emit::strip_param_assertions(&mut ir);
+        }
+        let emit_opts = emit_opts.with_param_assertions(self.param_assertions);
         let metadata = facade_package_metadata_with_ir(file, checked.file_index, syms, &ir);
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct. Inline splice failures
         // are reported separately (via `run.inline_bail`): selected inline calls are required to splice,

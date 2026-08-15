@@ -41,6 +41,12 @@ pub struct Options {
     /// `-jvm-default <mode>` (or legacy `-Xjvm-default <mode>`): how an interface's members with
     /// bodies are realized on the JVM.
     pub jvm_default: JvmDefaultMode,
+    /// `-Xno-param-assertions`: omit the `Intrinsics.checkNotNullParameter` guards kotlinc emits at
+    /// the entry of every function reachable from Java.
+    pub no_param_assertions: bool,
+    /// `-Xno-call-assertions`: omit the not-null assertions on platform-typed values coming back
+    /// from Java. Recorded, but krusty emits no such assertions yet, so it changes no bytes today.
+    pub no_call_assertions: bool,
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
@@ -64,6 +70,8 @@ impl Default for Options {
             no_jdk: false,
             jvm_target_major: None,
             jvm_default: JvmDefaultMode::default(),
+            no_param_assertions: false,
+            no_call_assertions: false,
         }
     }
 }
@@ -190,6 +198,8 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     opts.jdk_home = Some(PathBuf::from(v));
                 }
             }
+            "-Xno-param-assertions" => opts.no_param_assertions = true,
+            "-Xno-call-assertions" => opts.no_call_assertions = true,
             "-no-stdlib" => opts.no_stdlib = true,
             "-no-reflect" => opts.no_reflect = true,
             "-no-jdk" => opts.no_jdk = true,
@@ -324,6 +334,8 @@ Common options (kotlinc-compatible):
   -version              print version and exit
   -jvm-default <mode>   interface default-method strategy: enable | no-compatibility
                         (legacy -Xjvm-default=all | all-compatibility)
+  -Xno-param-assertions omit JVM entry guards for non-null parameters
+  -Xno-call-assertions  omit JVM assertions on platform-typed call results
   -help                 print this help and exit
 
 Sources may be .kt files or directories (scanned recursively). Kotlin scripts are not yet compiled.
@@ -336,6 +348,28 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Options {
         parse(args.iter().map(|s| s.to_string()))
+    }
+
+    /// Both assertion flags must reach `Options`, not fall through to `ignored`: a missing match arm
+    /// is silent, and the build would keep emitting guards it asked to have removed.
+    #[test]
+    fn assertion_flags_are_read_not_ignored() {
+        let parsed = parse_args(&["-Xno-param-assertions", "-Xno-call-assertions", "x.kt"]);
+        assert!(parsed.no_param_assertions);
+        assert!(parsed.no_call_assertions);
+        assert!(
+            !parsed
+                .ignored
+                .iter()
+                .any(|entry| entry.contains("assertions")),
+            "neither flag may be reported as unsupported: {:?}",
+            parsed.ignored
+        );
+        assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+
+        let default = parse_args(&["x.kt"]);
+        assert!(!default.no_param_assertions);
+        assert!(!default.no_call_assertions);
     }
 
     #[test]

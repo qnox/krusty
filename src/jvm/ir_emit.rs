@@ -261,6 +261,26 @@ impl JvmDefaultMode {
     }
 }
 
+/// Drop every `Intrinsics.checkNotNullParameter` guard the lowering recorded.
+///
+/// `-Xno-param-assertions` removes the parameter null checks kotlinc emits at the entry of every
+/// function reachable from Java. Applied to the IR rather than at the emission site on purpose: the
+/// guards are also what the `LineNumberTable` and `LocalVariableTable` start offsets are computed
+/// from, so suppressing them at one site and not the other would emit debug tables pointing into the
+/// middle of the method.
+pub(crate) fn strip_param_assertions(ir: &mut IrFile) {
+    for function in &mut ir.functions {
+        for check in &mut function.param_checks {
+            *check = None;
+        }
+    }
+    for class in &mut ir.classes {
+        for parameter in &mut class.ctor_args {
+            parameter.check = None;
+        }
+    }
+}
+
 /// Per-file emission configuration passed explicitly down the emit callgraph and stamped onto every
 /// `ClassWriter` (via [`new_writer`]) so synthetic serializer/companion/DefaultImpls classes inherit
 /// it too. The `Default` is v52 with no `SourceFile`; every path that claims to emit the bytes krusty
@@ -293,6 +313,13 @@ pub struct EmitOptions {
     /// compiler option rather than per-file configuration; the backend applies it with
     /// [`EmitOptions::with_jvm_default`].
     pub jvm_default: JvmDefaultMode,
+    /// Emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions` clears this).
+    ///
+    /// Most guards are recorded by lowering and removed from the IR before emission
+    /// ([`strip_param_assertions`]), which keeps them consistent with the debug-table offsets
+    /// measured past them. A PROPERTY SETTER's `<set-?>` guard has no IR record — it is derived here
+    /// from the property's type — so those sites read this flag instead.
+    pub param_assertions: bool,
     pub inner_class_resolver: Option<InnerClassResolver>,
 }
 
@@ -312,8 +339,17 @@ impl Default for EmitOptions {
             module_name: None,
             emit_class_metadata: true,
             jvm_default: JvmDefaultMode::Enable,
+            param_assertions: true,
             inner_class_resolver: None,
         }
+    }
+}
+
+impl EmitOptions {
+    /// `-Xno-param-assertions` passes `false`.
+    pub fn with_param_assertions(mut self, enabled: bool) -> Self {
+        self.param_assertions = enabled;
+        self
     }
 }
 
@@ -2126,6 +2162,7 @@ fn attach_synth_debug_tables(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
+    param_assertions: bool,
     // Extra ctor LineNumberTable entries (body-property initializers + the trailing `return`), with
     // their real pcs captured during emission. Empty ⇒ the ctor gets kotlinc's single entry.
     ctor_lines: &[(u16, u32)],
@@ -2187,7 +2224,10 @@ fn attach_synth_debug_tables(
     // Only ctor PARAMETERS are constructor locals — a body property is a field, never an argument.
     for f in c.fields.iter().take(c.ctor_param_count as usize) {
         ctor_locals.push((f.name.clone(), desc(f.ty), slot));
-        if is_nonnull_ref(&f.name, f.ty) {
+        // `-Xno-param-assertions` removed the guards, so the constructor body starts at pc 0. Counting
+        // them anyway put the `LineNumberTable` entry past the end of the emitted code, which the JVM
+        // rejects outright: `ClassFormatError: Invalid pc in LineNumberTable`.
+        if param_assertions && is_nonnull_ref(&f.name, f.ty) {
             // guard = aload(slot) + ldc(param-name String) + invokestatic checkNotNullParameter(3).
             // The ldc width is read off the REAL pool (2, or 3 for `ldc_w` past index 255) — the
             // guard was already emitted, so the String constant exists.
@@ -2247,7 +2287,7 @@ fn attach_synth_debug_tables(
             let pd = desc(f.ty);
             // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
             // `<set-?>` String's real ldc width + invokestatic(3).
-            let set_pc = if is_nonnull_ref(&f.name, f.ty) {
+            let set_pc = if param_assertions && is_nonnull_ref(&f.name, f.ty) {
                 aload_len(1) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
             } else {
                 0
@@ -2282,7 +2322,7 @@ fn attach_synth_debug_tables(
         let (g, s) = accessor_jvm_names(c, &property.name);
         cw.set_method_debug(&g, &format!("(){pd}"), Some((0, pline)), &this_only);
         if hoisted.is_var {
-            let set_pc = if is_nonnull_ref(&property.name, hoisted.ty) {
+            let set_pc = if param_assertions && is_nonnull_ref(&property.name, hoisted.ty) {
                 aload_len(1) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
             } else {
                 0
@@ -2844,6 +2884,7 @@ fn new_writer_generic(
         cw.set_major(major);
     }
     cw.set_source_file(opts.source_file.clone());
+    cw.set_param_assertions(opts.param_assertions);
     cw.set_inner_class_resolver(opts.inner_class_resolver.clone());
     cw
 }
@@ -3383,7 +3424,7 @@ fn emit_pass(
             );
         }
     }
-    emit_statics(ir, facade, &mut cw, env);
+    emit_statics(ir, facade, &mut cw, env, opts.param_assertions);
     // kotlinc emits the `<File>Kt` facade class ONLY when the file has top-level callables/properties
     // (or a facade `@Metadata` payload). A file of only classes/objects gets no facade — emitting an
     // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
@@ -3595,7 +3636,13 @@ fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool {
     matches!(ir.expr(init), crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null))
 }
 
-fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) {
+fn emit_statics(
+    ir: &IrFile,
+    facade: &str,
+    cw: &mut ClassWriter,
+    env: &EmitEnv,
+    param_assertions: bool,
+) {
     // Statics OWNED by a specific class (a companion `const val`) are emitted on that class, not the
     // facade — see `emit_owned_consts`.
     let facade_statics: Vec<&crate::ir::IrStatic> =
@@ -3761,7 +3808,8 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
             let words = slot_words(jt);
             let mut st = CodeBuilder::new(words);
             // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
-            if jt.is_reference() && !ir_ty_nullable(&s.ty) {
+            // `-Xno-param-assertions` removes it, like every other parameter guard.
+            if param_assertions && jt.is_reference() && !ir_ty_nullable(&s.ty) {
                 st.aload(0);
                 st.push_string("<set-?>", cw);
                 let m = cw.methodref(
@@ -3962,6 +4010,7 @@ fn emit_declared_property_accessor(
     fq_name: &str,
     cw: &mut ClassWriter,
     formatter: &JvmSignatureFormatter<'_>,
+    param_assertions: bool,
 ) {
     // A private property reached from outside (an `inline` body spliced into its caller) needs the
     // synthetic accessor kotlinc emits for exactly this: `access$get<X>$p(<owner>)<ty>`.
@@ -4179,7 +4228,8 @@ fn emit_declared_property_accessor(
             let mut st = CodeBuilder::new(1 + words);
             // kotlinc guards a non-null REFERENCE setter parameter, naming it `<set-?>`. A primitive
             // cannot be null, and a bare type parameter's bound is `Any?`, so neither is guarded.
-            let guarded = accessor_jt.is_reference()
+            let guarded = param_assertions
+                && accessor_jt.is_reference()
                 && !property.ty.is_nullable()
                 && !is_type_parameter_field(ir, fq_name, &field.name);
             if guarded {
@@ -4228,9 +4278,10 @@ fn emit_declared_property_accessors(
     fq_name: &str,
     cw: &mut ClassWriter,
     formatter: &JvmSignatureFormatter<'_>,
+    param_assertions: bool,
 ) {
     for property in &c.properties {
-        emit_declared_property_accessor(ir, c, property, fq_name, cw, formatter);
+        emit_declared_property_accessor(ir, c, property, fq_name, cw, formatter, param_assertions);
     }
 }
 
@@ -5009,6 +5060,7 @@ fn emit_class(
                     &fq_name,
                     &mut cw,
                     &signature_formatter,
+                    opts.param_assertions,
                 );
                 continue;
             }
@@ -5375,7 +5427,7 @@ fn emit_class(
     // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
     // data class is not yet FULLY byte-identical (its pool order differs) — but the attributes match.
     if computed.is_some() && !is_coroutine_state_machine(c) {
-        attach_synth_debug_tables(ir, c, &mut cw, &ctor_lines);
+        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, &ctor_lines);
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
     }
@@ -5498,7 +5550,14 @@ fn emit_enum_entry_subclass(
     );
 
     // The overriding methods + synthesized property getters.
-    emit_declared_property_accessors(ir, c, &fq_name, &mut cw, &signature_formatter);
+    emit_declared_property_accessors(
+        ir,
+        c,
+        &fq_name,
+        &mut cw,
+        &signature_formatter,
+        opts.param_assertions,
+    );
     for &fid in &c.methods {
         emit_method(ir, fid, &fq_name, facade, &mut cw, true, env);
     }
@@ -7297,7 +7356,7 @@ fn emit_interface_class(
         .then(|| build_class_metadata(ir, c, opts))
         .flatten();
     if computed.is_some() {
-        attach_synth_debug_tables(ir, c, &mut cw, &[]);
+        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, &[]);
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
     }
@@ -7674,7 +7733,14 @@ fn emit_enum_class(
         Some(&format!("()Lkotlin/enums/EnumEntries<L{fq};>;")),
     );
 
-    emit_declared_property_accessors(ir, c, &fq, &mut cw, &signature_formatter);
+    emit_declared_property_accessors(
+        ir,
+        c,
+        &fq,
+        &mut cw,
+        &signature_formatter,
+        opts.param_assertions,
+    );
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
@@ -7731,7 +7797,7 @@ fn emit_enum_class(
         .then(|| build_class_metadata(ir, c, opts))
         .flatten()
     {
-        attach_synth_debug_tables(ir, c, &mut cw, &[]);
+        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, &[]);
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
         // kotlinc's synthesized enum members: `valueOf` names its parameter `value` in a
