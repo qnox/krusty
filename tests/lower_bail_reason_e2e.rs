@@ -46,16 +46,20 @@ fun box(): String {
 }
 
 #[test]
-fn member_delegate_with_provide_delegate_reports_gate() {
-    // A member property whose delegate declares `provideDelegate` isn't modeled by the inline
-    // accessor.
-    common::assert_inline_source_lower_bail(
-        r#"
+fn member_delegate_with_provide_delegate_runs() {
+    // A member property whose delegate declares `provideDelegate` now lowers: the ctor stores the
+    // `provideDelegate` result and the accessor calls `getValue` on it (previously
+    // `gate:member-delegate-shape`).
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    assert_eq!(
+        common::expect_box_run(
+            r#"
 import kotlin.reflect.KProperty
 
 class Delegate(val v: String) {
-    operator fun getValue(thisRef: Any?, property: KProperty<*>): String = v
-    operator fun provideDelegate(thisRef: Any?, property: KProperty<*>): Delegate = this
+    operator fun getValue(thisRef: Any?, property: KProperty<out Any?>): String = v
+    operator fun provideDelegate(thisRef: Any?, property: KProperty<out Any?>): Delegate = this
 }
 
 class C {
@@ -64,6 +68,10 @@ class C {
 
 fun box(): String = C().x
 "#,
-        "gate:member-delegate-shape",
+            "Main",
+            &[sl],
+            Some(jdk.as_path()),
+        ),
+        "OK"
     );
 }

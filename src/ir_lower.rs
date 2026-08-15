@@ -850,10 +850,8 @@ fn lower_file_at_reporting_impl(
                         .insert((type_name(&internal), p.name.clone()));
                 }
             }
-            // Guard each delegated member property: only the simple shape is modeled — a concrete
-            // (non-value-class, no `provideDelegate`) delegate whose `getValue` return type matches the
-            // property type exactly (generic erasure / value-class unboxing would need a cast the inline
-            // accessor doesn't emit). Anything else skips the file rather than miscompile.
+            // Guard each delegated member property: the stored delegate must be a concrete
+            // non-value-class whose `getValue` result can be bridged to the property representation.
             if c.body_props
                 .iter()
                 .any(|property| property.delegate.is_some())
@@ -863,13 +861,19 @@ fn lower_file_at_reporting_impl(
                 // instead of duplicating a reason at each exit and eventually missing a new one.
                 lo.set_bail("gate:member-delegate-shape");
                 for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
-                    let dt = info.ty(p.delegate.unwrap());
+                    // With a `provideDelegate` convention, the STORED delegate is that call's
+                    // result, so its return type — not the source expression's type — is what the
+                    // field holds and what `getValue` dispatches on.
+                    let dt = match info.delegate_provide(p.delegate.unwrap()) {
+                        Some(target) => target.ret(),
+                        None => info.ty(p.delegate.unwrap()),
+                    };
                     let di = dt.obj_internal()?;
                     let is_value_cls = |internal: TypeName| {
                         syms.class_by_type_name(internal)
                             .is_some_and(|cs| cs.value_field.is_some())
                     };
-                    if is_value_cls(di) || info.delegate_provide(p.delegate.unwrap()).is_some() {
+                    if is_value_cls(di) {
                         return None;
                     }
                     let (_, _, gv_ret, _, _, _, _) =
@@ -904,7 +908,14 @@ fn lower_file_at_reporting_impl(
                 .body_props
                 .iter()
                 .filter(|p| p.delegate.is_some())
-                .map(|p| (format!("{}$delegate", p.name), info.ty(p.delegate.unwrap())))
+                .map(|p| {
+                    // The field stores the `provideDelegate` result when the convention applies.
+                    let ty = match info.delegate_provide(p.delegate.unwrap()) {
+                        Some(target) => target.ret(),
+                        None => info.ty(p.delegate.unwrap()),
+                    };
+                    (format!("{}$delegate", p.name), ty)
+                })
                 .collect();
             // Interface delegation `: I by d` whose delegate `d` is a NON-`val` constructor parameter has
             // no backing field — kotlinc synthesizes a `private final $$delegate_<i>` (i = delegation index)
@@ -3225,14 +3236,20 @@ fn lower_file_at_reporting_impl(
                 // getValue/setValue, with the `KProperty` passed inline as a `PropertyReference1Impl`.
                 for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
                     let class_id = lo.class_info(&internal)?.id;
-                    let delegate_ty = lo.info.ty(p.delegate.unwrap());
-                    let delegate_internal = delegate_ty.obj_internal()?;
                     let fname = format!("{}$delegate", p.name);
                     let field_idx = lo.ir.classes[class_id as usize]
                         .fields
                         .iter()
                         .position(|f| f.name == fname)
                         .expect("delegate field") as u32;
+                    // The field's registered type is already the STORED delegate's type (the
+                    // `provideDelegate` result when that convention applies) — dispatch `getValue`
+                    // on it, not on the source expression's type.
+                    let delegate_ty = match lo.info.delegate_provide(p.delegate.unwrap()) {
+                        Some(target) => target.ret(),
+                        None => lo.info.ty(p.delegate.unwrap()),
+                    };
+                    let delegate_internal = delegate_ty.obj_internal()?;
                     // Build a fresh `PropertyReference1Impl(A::class, "x", "getX()<ret>", 0)`.
                     let gname = property_getter_name(&p.name);
                     let Some(&(_, get_fid, prop_ty)) = lo
@@ -3845,7 +3862,9 @@ fn lower_file_at_reporting_impl(
                             }
                         }
                     }
-                    // Initialize each delegated property's `x$delegate` field: `this.x$delegate = Del()`.
+                    // Initialize each delegated property's `x$delegate` field: `this.x$delegate =
+                    // Del()`, or — under the `provideDelegate` convention — `this.x$delegate =
+                    // Del().provideDelegate(this, <propref>)`, exactly kotlinc's ctor sequence.
                     for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
                         let fname = format!("{}$delegate", p.name);
                         let field_idx = lo.ir.classes[class_id as usize]
@@ -3857,7 +3876,63 @@ fn lower_file_at_reporting_impl(
                         let field_ty = lo.ir.classes[class_id as usize].fields[field_idx as usize]
                             .ty
                             .clone();
-                        let val = lo.lower_arg(p.delegate.unwrap(), &field_ty)?;
+                        let val = match lo.info.delegate_provide(p.delegate.unwrap()).cloned() {
+                            None => lo.lower_arg(p.delegate.unwrap(), &field_ty)?,
+                            Some(target) => {
+                                let (
+                                    pv_owner,
+                                    pv_desc,
+                                    pv_ret,
+                                    pv_inline,
+                                    pv_is_ext,
+                                    pv_name,
+                                    pv_interface,
+                                ) = lo.delegate_operator_info(&target)?;
+                                let source_ty = ty_to_ir(lo.info.ty(p.delegate.unwrap()));
+                                let dele = lo.lower_arg(p.delegate.unwrap(), &source_ty)?;
+                                // The same `PropertyReference1Impl` shape the accessors build.
+                                let gname = property_getter_name(&p.name);
+                                let prop_ty = lo
+                                    .class_info(&internal)?
+                                    .methods
+                                    .get(&gname)
+                                    .and_then(|o| o.first())
+                                    .map(|&(_, _, ty)| ty)?;
+                                let prop_sig = lo.property_reference_signature(&gname, prop_ty)?;
+                                let propref_impl = lo.property_reference_impl(1, false)?;
+                                let cls = lo.emit_class_const(internal.clone());
+                                let nm = lo.ir_const_str(p.name.clone());
+                                let sigc = lo.ir_const_str(prop_sig);
+                                let flag = lo.emit_const(IrConst::Int(0));
+                                let pref = lo.emit_new_external(
+                                    propref_impl.internal.clone(),
+                                    propref_impl.ctor_desc.clone(),
+                                    vec![cls, nm, sigc, flag],
+                                );
+                                let this_arg = lo.emit_get_value(this_v);
+                                let call = if pv_is_ext {
+                                    lo.emit_static_call(
+                                        pv_owner,
+                                        pv_name,
+                                        pv_desc,
+                                        pv_inline,
+                                        vec![dele, this_arg, pref],
+                                    )
+                                } else {
+                                    lo.emit_virtual_call(
+                                        pv_owner,
+                                        pv_name,
+                                        pv_desc,
+                                        pv_interface,
+                                        dele,
+                                        vec![this_arg, pref],
+                                    )
+                                };
+                                // The provide return may be erased (`<T> provideDelegate(): D<T>`);
+                                // bridge to the field's stored type as accessors do for `getValue`.
+                                lo.coerce_to_static(call, field_ty, pv_ret)
+                            }
+                        };
                         let recv = lo.emit_get_value(this_v);
                         stmts.push(lo.emit_set_field(recv, class_id, field_idx, val));
                     }
