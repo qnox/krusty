@@ -2247,6 +2247,29 @@ fn default_root_slot_ok(ir: &IrFile, e: ExprId, param: Option<&Ty>) -> bool {
         IrExpr::New { internal, .. } if ir.is_value_class_name(*internal) => {
             param.is_some_and(|p| !p.is_nullable() && p.obj_internal() == Some(*internal))
         }
+        // A MANGLED classpath call returns the ERASED underlying (that is what the mangling
+        // means), so it can only fill a slot erased the same way — the same non-nullable value
+        // class pre-pass, or its erased underlying post-pass (the value-class pass has already
+        // rewritten the parameter). A boxed (`Duration?`) or widened slot would need a `box-impl`
+        // the erased stub doesn't model.
+        IrExpr::Call {
+            callee: Callee::Static { name, .. },
+            ..
+        } if name.contains('-') && !ir.erased_value_constructions.contains_key(&e) => {
+            let root_vc = ir
+                .logical_types
+                .get(&e)
+                .and_then(|t| t.non_null().obj_internal())
+                .filter(|&n| ir.is_value_class_name(n));
+            root_vc.is_some_and(|n| {
+                param.is_some_and(|p| {
+                    (!p.is_nullable() && p.obj_internal() == Some(n))
+                        || ir
+                            .value_class_underlying_name(n)
+                            .is_some_and(|underlying| *p == underlying)
+                })
+            })
+        }
         root => {
             // A param whose erased slot is PRIMITIVE (pre-pass: a non-nullable value-class param
             // over a primitive underlying; post-pass: the already-erased param) can only be filled
@@ -2330,7 +2353,20 @@ fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
             // bypass the conservative mangled-call gate.
             && !ir.erased_value_constructions.contains_key(&e) =>
         {
-            return false;
+            // EXCEPT a mangled call whose checked RESULT is a stub-modelable value class
+            // (`timeout: Duration = 60.seconds` — a classpath companion-extension getter): the
+            // mangling means the physical return already IS the erased underlying, which is
+            // exactly the representation the erased stub passes along. Whether the SLOT agrees is
+            // [`default_root_slot_ok`]'s question. Both gate runs see the same evidence — a
+            // classpath callee carries its mangled JVM name before and after the value-class pass.
+            let vc_result = ir
+                .logical_types
+                .get(&e)
+                .and_then(|t| t.non_null().obj_internal())
+                .filter(|&n| ir.is_value_class_name(n));
+            if !vc_result.is_some_and(|n| vc_stub_shape_ok(ir, n)) {
+                return false;
+            }
         }
         _ => {}
     }

@@ -2267,6 +2267,19 @@ fn lower_file_at_reporting_impl(
                 if f.visibility.is_private() {
                     lo.ir.private_methods.insert(id);
                 }
+                // A generic EXTENSION gets a JVM `Signature` like a generic top-level function, with
+                // the receiver as the leading parameter (kotlinc: `<T:…>(Llib/Core;…)TT;`). A
+                // consumer's reified-inline SPLICE reads the formal names from exactly this attribute
+                // — without it a krusty-built `inline fun <reified T> Recv.f(…)` cannot bind `T` and
+                // the call falls back to the compiled body, which exists only to throw.
+                match fn_generic_sig(info, f) {
+                    Ok(Some(mut signature)) => {
+                        signature.params.insert(0, recv_ty);
+                        lo.ir.signatures.insert(id, signature);
+                    }
+                    Ok(None) => {}
+                    Err(reason) => return lo.bail(reason),
+                }
                 // Tag a `suspend` extension exactly like a plain top-level `suspend fun`: the receiver
                 // is already an ordinary leading static parameter, so the coroutine pass appends the
                 // CPS `Continuation` after it and threads call sites unchanged.
@@ -6590,6 +6603,15 @@ impl<'a> Lower<'a> {
     }
 
     fn emit_type_op(&mut self, op: IrTypeOp, arg: u32, type_operand: Ty) -> u32 {
+        #[cfg(feature = "trace")]
+        if std::env::var("KRUSTY_CAST_TRAP").is_ok() {
+            if let Some(internal) = type_operand.non_null().obj_internal() {
+                let name = internal.render();
+                if !name.contains('/') && name.len() <= 2 {
+                    panic!("cast trap: {op:?} to {name}; cur_fn={:?}", self.cur_fn);
+                }
+            }
+        }
         self.ir.add_expr(IrExpr::TypeOp {
             op,
             arg,

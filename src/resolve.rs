@@ -13532,16 +13532,39 @@ fn expression_writes_name(file: &File, expression: ExprId, name: &str) -> bool {
         })
 }
 
-fn anonymous_body_writes_name(file: &File, declaration: DeclId, name: &str) -> bool {
+/// Every expression an anonymous class BODY evaluates: method bodies, property initializers AND
+/// custom accessor bodies (`override val context get() = outer` reads its capture only there),
+/// and superclass constructor arguments. The capture use/write scans must agree on this list —
+/// a body form missing here records no capture, so its lowering finds no storage for the name.
+fn anonymous_body_expressions(file: &File, declaration: DeclId) -> Vec<ExprId> {
     let Decl::Class(class) = file.decl(declaration) else {
-        return false;
+        return Vec::new();
     };
     class
         .methods
         .iter()
         .filter_map(|method| fun_body_expr(&method.body))
         .chain(class.body_props.iter().filter_map(|property| property.init))
+        .chain(
+            class
+                .body_props
+                .iter()
+                .filter_map(|property| property.getter.as_ref().and_then(fun_body_expr)),
+        )
+        .chain(class.body_props.iter().filter_map(|property| {
+            property
+                .setter
+                .as_ref()
+                .and_then(|setter| setter.body.as_ref())
+                .and_then(fun_body_expr)
+        }))
         .chain(class.base_args.iter().copied())
+        .collect()
+}
+
+fn anonymous_body_writes_name(file: &File, declaration: DeclId, name: &str) -> bool {
+    anonymous_body_expressions(file, declaration)
+        .into_iter()
         .any(|expression| expression_writes_name(file, expression, name))
 }
 
@@ -13588,16 +13611,7 @@ fn expression_has_member_call_named(file: &File, expression: ExprId, name: &str)
 }
 
 fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty) -> bool {
-    let Decl::Class(class) = file.decl(declaration) else {
-        return false;
-    };
-    let expressions = class
-        .methods
-        .iter()
-        .filter_map(|method| fun_body_expr(&method.body))
-        .chain(class.body_props.iter().filter_map(|property| property.init))
-        .chain(class.base_args.iter().copied())
-        .collect::<Vec<_>>();
+    let expressions = anonymous_body_expressions(file, declaration);
     expressions
         .iter()
         .any(|expression| file.expr_uses_name(*expression, name))
@@ -35540,6 +35554,14 @@ impl<'a> Checker<'a> {
             let ret = callable.ret;
             let mut resolved = ResolvedExtensionCall::library(callable.clone());
             resolved.context_args = context_args;
+            // EXPLICIT type arguments survive into the call record — a `<reified T>` classpath
+            // extension's splice binds its formals from exactly this (`r.getFor<Prov>(id)`);
+            // without it the splicer has no substitution and the emit falls back to the compiled
+            // body, which for a reified callee exists only to throw.
+            if !type_args.is_empty() {
+                self.resolved_call_type_args
+                    .insert(e, type_args.iter().copied().map(Some).collect());
+            }
             self.resolved_calls
                 .insert(e, ResolvedCall::Extension(Box::new(resolved)));
             self.record_resolved_extension_sam_arguments(e, args);

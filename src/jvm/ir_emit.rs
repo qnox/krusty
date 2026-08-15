@@ -3161,6 +3161,20 @@ fn emit_pass(
                 env,
                 Ty::obj("java/lang/Object"),
             );
+        } else if ir.has_param_defaults(i as u32) {
+            crate::trace_compiler!(
+                "lower",
+                "no $default stub for {}: defaults {:?}",
+                f.name,
+                ir.param_defaults(i as u32).map(|ds| ds
+                    .iter()
+                    .map(|d| d.map(|d| format!(
+                        "{:?} logical={:?}",
+                        ir.exprs[d as usize],
+                        ir.logical_types.get(&d)
+                    )))
+                    .collect::<Vec<_>>())
+            );
         }
     }
     emit_statics(ir, facade, &mut cw, env);
