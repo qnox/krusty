@@ -608,6 +608,69 @@ pub fn analyze_source_standalone(
     analyze_source(src, Box::new(EmptySymbolSource), diags)
 }
 
+/// Rename anonymous-object classes from the parse-time placeholder (`Anon$anon$<offset>`) to
+/// kotlinc's enclosing-scoped spelling (`P2$Companion$build$1`): the innermost enclosing FUNCTION
+/// body (a member's or a top-level one) names the scope, with a per-scope 1-based ordinal in
+/// source order. Must run BEFORE checking — the checker records these internals in every type it
+/// hands the backend. A construction outside any function body (a property initializer, an `init`
+/// block) keeps the placeholder for now; a nested anonymous class picks up its enclosing anonymous
+/// class's fresh name because constructions rename in source order.
+pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) {
+    use crate::ast::{Decl, Expr};
+    let mut anons: Vec<(crate::ast::ExprId, crate::ast::DeclId)> = file
+        .anonymous_object_classes
+        .iter()
+        .map(|(&construction, &decl)| (construction, decl))
+        .collect();
+    anons.sort_by_key(|(construction, _)| file.expr_spans[construction.0 as usize].lo);
+    let mut counters: std::collections::HashMap<String, u32> = Default::default();
+    for (construction, decl) in anons {
+        let span = file.expr_spans[construction.0 as usize];
+        let mut best: Option<(u32, String)> = None; // (enclosing span size, scope)
+        for &candidate in &file.decls {
+            match file.decl(candidate) {
+                Decl::Fun(function) => {
+                    if function.span.lo <= span.lo && span.hi <= function.span.hi {
+                        let size = function.span.hi - function.span.lo;
+                        if best.as_ref().is_none_or(|(smallest, _)| size < *smallest) {
+                            best = Some((size, format!("{facade_simple}${}", function.name)));
+                        }
+                    }
+                }
+                Decl::Class(class) => {
+                    if candidate == decl {
+                        continue;
+                    }
+                    let chain = class.name.replace('.', "$");
+                    for method in &class.methods {
+                        if method.span.lo <= span.lo && span.hi <= method.span.hi {
+                            let size = method.span.hi - method.span.lo;
+                            if best.as_ref().is_none_or(|(smallest, _)| size < *smallest) {
+                                best = Some((size, format!("{chain}${}", method.name)));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some((_, scope)) = best else { continue };
+        let ordinal = counters.entry(scope.clone()).or_insert(0);
+        *ordinal += 1;
+        let fresh = format!("{scope}${ordinal}");
+        let Expr::Call { callee, .. } = file.expr(construction) else {
+            continue;
+        };
+        let callee = *callee;
+        if let Decl::Class(class) = file.decl_mut(decl) {
+            class.name = fresh.clone();
+        }
+        if let Expr::Name(name) = &mut file.expr_arena[callee.0 as usize] {
+            *name = fresh;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -232,14 +232,30 @@ fn parse_source_set(
     sources: &[&str],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<Vec<krusty::ast::File>> {
+    parse_source_set_named(
+        &sources.iter().map(|s| ("Main", *s)).collect::<Vec<_>>(),
+        diags,
+    )
+}
+
+/// [`parse_source_set`] with per-source stems, so anonymous classes take their kotlinc names
+/// (`<Stem>Kt$fn$1` for a top-level enclosing) instead of the parse-time placeholder.
+fn parse_source_set_named(
+    sources: &[(&str, &str)],
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<Vec<krusty::ast::File>> {
     let mut files = sources
         .iter()
-        .map(|source| {
+        .map(|(stem, source)| {
             let features = krusty::features::LangFeatures::from_source(source);
             let tokens = krusty::lexer::lex(source, diags);
-            krusty::parser::parse_with_features(source, &tokens, diags, &features)
+            let mut file = krusty::parser::parse_with_features(source, &tokens, diags, &features);
+            krusty::frontend::name_anonymous_classes(&mut file, &format!("{stem}Kt"));
+            file
         })
         .collect::<Vec<_>>();
+    let sources = sources.iter().map(|(_, s)| *s).collect::<Vec<_>>();
+    let sources: &[&str] = &sources;
     if diags.has_errors() {
         return None;
     }
@@ -288,7 +304,7 @@ pub fn compile_in_process(
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let files = parse_source_set(&[src], &mut diags)?;
+    let files = parse_source_set_named(&[(stem, src)], &mut diags)?;
     let cp = cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
@@ -341,11 +357,11 @@ pub fn compile_in_process_files(
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let source_texts = sources
+    let named = sources
         .iter()
-        .map(|(_, source)| *source)
+        .map(|(name, source)| (name.trim_end_matches(".kt"), *source))
         .collect::<Vec<_>>();
-    let files = parse_source_set(&source_texts, &mut diags)?;
+    let files = parse_source_set_named(&named, &mut diags)?;
     let cp = cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let mut symbols = collect_signatures_with_cp(&files, platform, &mut diags);
