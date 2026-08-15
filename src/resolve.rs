@@ -136,6 +136,7 @@ enum QualifierInput<'a> {
 
 struct BootstrapSymbolSource<'a> {
     declarations: &'a std::collections::HashSet<TypeName>,
+    aliases: &'a std::collections::HashSet<TypeName>,
     libraries: &'a dyn SymbolSource,
 }
 
@@ -154,7 +155,9 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
                 crate::types::existing_type_name_nested_child(owner, name)
             }
         };
-        if declaration.is_some_and(|declaration| self.declarations.contains(&declaration)) {
+        if declaration.is_some_and(|declaration| {
+            self.declarations.contains(&declaration) || self.aliases.contains(&declaration)
+        }) {
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 classifier_name: declaration,
                 classifier: Some(std::sync::Arc::new(
@@ -169,16 +172,19 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
 
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         crate::types::existing_type_name_child(parent, name).is_some_and(|package| {
-            self.declarations.iter().any(|declaration| {
-                let mut owner = declaration.parent();
-                while let Some(current) = owner {
-                    if current == package {
-                        return true;
+            self.declarations
+                .iter()
+                .chain(self.aliases.iter())
+                .any(|declaration| {
+                    let mut owner = declaration.parent();
+                    while let Some(current) = owner {
+                        if current == package {
+                            return true;
+                        }
+                        owner = current.parent();
                     }
-                    owner = current.parent();
-                }
-                false
-            })
+                    false
+                })
         }) || self.libraries.package_exists(parent, name)
     }
 }
@@ -1959,6 +1965,11 @@ pub struct ClassNames {
     base: std::rc::Rc<HashMap<String, TypeName>>,
     user: HashMap<String, TypeName>,
     ambiguous: std::collections::HashSet<String>,
+    /// Resolution binding from source lookup spelling to a qualified alias declaration identity.
+    alias_bindings: HashMap<String, TypeName>,
+    /// Expansion templates keyed by qualified alias declaration identity. A source spelling never
+    /// acts as semantic identity after its scope/import lookup has selected this key.
+    alias_expansions: HashMap<TypeName, crate::libraries::AliasExpansion>,
 }
 
 impl ClassNames {
@@ -1967,7 +1978,26 @@ impl ClassNames {
             base,
             user: HashMap::new(),
             ambiguous: std::collections::HashSet::new(),
+            alias_bindings: HashMap::new(),
+            alias_expansions: HashMap::new(),
         }
+    }
+
+    /// Record a classpath alias's expansion template under the spelling that names it.
+    pub fn insert_alias_expansion(
+        &mut self,
+        spelling: String,
+        expansion: crate::libraries::AliasExpansion,
+    ) {
+        self.alias_bindings.insert(spelling, expansion.identity);
+        self.alias_expansions.insert(expansion.identity, expansion);
+    }
+
+    /// The expansion template for a spelling, if it names a classpath alias.
+    pub fn alias_expansion(&self, name: &str) -> Option<&crate::libraries::AliasExpansion> {
+        self.alias_bindings
+            .get(name)
+            .and_then(|identity| self.alias_expansions.get(identity))
     }
     pub fn get(&self, k: &str) -> Option<TypeName> {
         if self.ambiguous.contains(k) {
@@ -2032,6 +2062,8 @@ impl ClassNames {
             base,
             user,
             ambiguous,
+            alias_bindings,
+            alias_expansions,
         } = self;
         let merged = if base.is_empty() {
             user
@@ -2044,6 +2076,8 @@ impl ClassNames {
             base: std::rc::Rc::new(merged),
             user: HashMap::new(),
             ambiguous,
+            alias_bindings,
+            alias_expansions,
         }
     }
 
@@ -4885,20 +4919,24 @@ fn expand_type_aliases(class_names: &mut ClassNames, aliases: &HashMap<String, S
     for _ in 0..8 {
         let mut changed = false;
         for (alias, target) in aliases {
-            if class_names.contains_key(alias) {
-                continue;
-            }
-            if let Some(internal) = class_names.get(target) {
-                class_names.insert_name(alias.clone(), internal);
-                changed = true;
+            let resolved = if let Some(internal) = class_names.get(target) {
+                Some(internal)
             } else if Ty::from_name(target).is_some() {
-                class_names.insert(alias.clone(), format!("__ty/{target}"));
-                changed = true;
+                Some(crate::types::type_name(&format!("__ty/{target}")))
             } else if target.contains('/') {
-                class_names.insert(alias.clone(), target);
-                changed = true;
+                Some(crate::types::type_name(target))
             } else if target.contains('.') {
-                class_names.insert(alias.clone(), target.replace('.', "/"));
+                Some(crate::types::type_name(&target.replace('.', "/")))
+            } else {
+                None
+            };
+            if let Some(internal) =
+                resolved.filter(|&internal| class_names.get(alias) != Some(internal))
+            {
+                // A source alias is a declaration in the winning source scope, not a fallback filled
+                // only when no imported spelling exists. Replace the bootstrap alias identity/import
+                // binding once its target is known; repeated passes still handle alias chains.
+                class_names.insert_name(alias.clone(), internal);
                 changed = true;
             }
         }
@@ -5070,6 +5108,7 @@ fn collect_signatures_with_cp_impl(
     // another-file source base and a classpath base must produce the same `super_internal` shape.
     let mut user_base_classes: std::collections::HashSet<TypeName> =
         std::collections::HashSet::new();
+    let mut user_aliases: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         for &d in &file.decls {
@@ -5084,6 +5123,15 @@ fn collect_signatures_with_cp_impl(
                 class_names.insert(c.name.clone(), internal.clone());
             }
         }
+        let package = file.package.as_deref().unwrap_or("").replace('.', "/");
+        for (alias, _) in &file.type_aliases {
+            let qualified = if package.is_empty() {
+                alias.clone()
+            } else {
+                format!("{package}/{alias}")
+            };
+            user_aliases.insert(type_name(&qualified));
+        }
     }
     // (The library set's `seed` already merged the intrinsic Kotlin built-in → target class mapping,
     // e.g. the ported `JavaToKotlinClassMap`, beneath any classpath/user declarations.)
@@ -5095,15 +5143,24 @@ fn collect_signatures_with_cp_impl(
     // alias expansion so a user `typealias A = Foo` (Foo a classpath type) finds `Foo` already resolved.
     let imports_by_file = {
         let mut consensus: HashMap<String, Option<TypeName>> = HashMap::new();
+        // A classpath `typealias` resolves to its TARGET classifier above. When the target takes a
+        // different argument list than the alias declares (`Lens<S, A>` = `PLens<S, S, A, A>`), a use
+        // site must substitute into the alias's expansion instead of pasting its arguments onto the
+        // target — so record the template under the spelling that named the alias.
+        let mut expansion_consensus: HashMap<String, Option<crate::libraries::AliasExpansion>> =
+            HashMap::new();
         let mut imports_by_file = Vec::with_capacity(files.len());
         for file in files {
             let imap = import_map(file);
             let levels = import_levels(file, platform_default_imports);
             let source = BootstrapSymbolSource {
                 declarations: &user_defined,
+                aliases: &user_aliases,
                 libraries: &*libraries,
             };
             let mut file_imports = HashMap::new();
+            let mut file_expansions: HashMap<String, crate::libraries::AliasExpansion> =
+                HashMap::new();
             // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
             // it) plus the explicit-import names themselves.
             let mut names = std::collections::HashSet::new();
@@ -5136,14 +5193,86 @@ fn collect_signatures_with_cp_impl(
                         consensus.insert(name.clone(), full);
                     }
                 }
+                // Probe the alias's OWN fully-qualified name the way the classifier itself was
+                // resolved: an explicit import is FINAL (a miss does not reopen star imports), a
+                // fully-qualified spelling names the alias directly, and star/default levels are
+                // consulted in precedence order rather than flattened. Whether the template APPLIES
+                // is decided at the use site, against the classifier that actually resolved.
+                let expansion = if let Some(path) = imap.get(&source_name) {
+                    crate::types::existing_type_name(&path.replace('.', "/"))
+                        .and_then(|identity| libraries.type_alias_expansion(identity))
+                } else if source_name.contains('.') {
+                    crate::types::existing_type_name(&source_name.replace('.', "/"))
+                        .and_then(|identity| libraries.type_alias_expansion(identity))
+                } else {
+                    // Alias metadata follows the SAME winning classifier level. A higher-precedence
+                    // class/source alias is final even when it has no classpath expansion; never skip
+                    // it and borrow a same-named alias template from a lower default import.
+                    levels
+                        .iter()
+                        .find_map(|level| {
+                            let candidates = level
+                                .iter()
+                                .filter_map(|&package| {
+                                    classifier_identity(
+                                        &source,
+                                        crate::symbol_source::SymbolNamespace::Package(package),
+                                        &source_name,
+                                    )
+                                    .map(|target| (package, target))
+                                })
+                                .collect::<Vec<_>>();
+                            if candidates.is_empty() {
+                                return None;
+                            }
+                            let mut selected: Option<crate::libraries::AliasExpansion> = None;
+                            for (package, target) in candidates {
+                                if full != Some(libraries.canonical_source_type_name(target)) {
+                                    return Some(None);
+                                }
+                                let expansion =
+                                    crate::types::existing_type_name_child(package, &source_name)
+                                        .and_then(|identity| {
+                                            libraries.type_alias_expansion(identity)
+                                        });
+                                match (&selected, expansion) {
+                                    (None, Some(expansion)) => selected = Some(expansion),
+                                    (Some(previous), Some(expansion)) if *previous == expansion => {
+                                    }
+                                    // A real classifier or a distinct alias declaration in the winning
+                                    // level means there is no single expansion identity to record.
+                                    _ => return Some(None),
+                                }
+                            }
+                            Some(selected)
+                        })
+                        .flatten()
+                }
+                .filter(|expansion| full == Some(expansion.target));
+                if let Some(expansion) = expansion {
+                    // Module-wide agreement mirrors the classifier `consensus` beside it: a
+                    // spelling two files bind to DIFFERENT aliases has no module-level answer, and
+                    // each file's own map below still expands it correctly.
+                    match expansion_consensus.get_mut(&name) {
+                        Some(previous) if previous.as_ref() != Some(&expansion) => *previous = None,
+                        Some(_) => {}
+                        None => {
+                            expansion_consensus.insert(name.clone(), Some(expansion.clone()));
+                        }
+                    }
+                    file_expansions.insert(name.clone(), expansion);
+                }
                 if let Some(full) = full {
                     file_imports.insert(name, full);
                 }
             }
-            imports_by_file.push(file_imports);
+            imports_by_file.push((file_imports, file_expansions));
         }
         for (simple, full) in consensus {
             if let Some(full) = full {
+                if let Some(expansion) = expansion_consensus.remove(&simple).flatten() {
+                    class_names.insert_alias_expansion(simple.clone(), expansion);
+                }
                 class_names.insert_name(simple, full);
             }
         }
@@ -5166,10 +5295,15 @@ fn collect_signatures_with_cp_impl(
     let class_names = class_names.into_shared();
     let file_class_names: Vec<ClassNames> = imports_by_file
         .into_iter()
-        .map(|imports| {
+        .map(|(imports, expansions)| {
             let mut names = class_names.clone();
             for (simple, full) in imports {
                 names.insert_name(simple, full);
+            }
+            // Alias templates are per FILE: two files may import different aliases under the same
+            // spelling, and each must expand through its own.
+            for (simple, expansion) in expansions {
+                names.insert_alias_expansion(simple, expansion);
             }
             expand_type_aliases(&mut names, &alias_map);
             names
@@ -10550,6 +10684,55 @@ pub(crate) fn projected_typeref_argument(
 
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, a declared class
 /// (→ `Ty::Obj`), or a generic type parameter (erased per `TParams`, normally `Any`).
+/// Place a use site's type arguments through a classpath `typealias`'s expansion, when the spelling
+/// names one. `typealias Lens<S, A> = PLens<S, S, A, A>` maps two arguments onto four positions, so
+/// attaching them to the target classifier directly would change its arity.
+fn apply_alias_expansion(
+    classes: &ClassNames,
+    name: &str,
+    resolved: TypeName,
+    args: &[Ty],
+    import_path: bool,
+    span: Span,
+    diags: &mut DiagSink,
+) -> Ty {
+    let base = Ty::obj_args_name(resolved, args);
+    // An import path resolves a declaration identity; it is not a use of the alias as a type and
+    // therefore supplies no type arguments to the expansion.
+    if import_path {
+        return base;
+    }
+    let Some(alias) = classes.alias_expansion(name) else {
+        return base;
+    };
+    // The template describes ONE classifier: the alias's target. A spelling that resolved to
+    // anything else — a nested or inherited class, a user `typealias`, a same-named class from
+    // another package — must keep its own shape. The check happens here, at the use site, because
+    // only here is the winning classifier known: name resolution has channels (enclosing/nested,
+    // inherited, same-package) that outrank imports and are not visible when the alias is indexed.
+    if alias.target != resolved {
+        return base;
+    }
+    if alias.formals.len() != args.len() {
+        diags.error(
+            span,
+            format!(
+                "wrong number of type arguments for type alias '{name}': expected {}, found {}.",
+                alias.formals.len(),
+                args.len()
+            ),
+        );
+        return Ty::Error;
+    }
+    let bindings = alias
+        .formals
+        .iter()
+        .cloned()
+        .zip(args.iter().copied())
+        .collect::<crate::symbol_resolver::GSigBinds>();
+    crate::symbol_resolver::ty_subst(alias.expansion, &bindings)
+}
+
 fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink) -> Ty {
     ty_of_ref_with(r, classes, tparams, diags)
 }
@@ -10582,14 +10765,32 @@ fn ty_of_ref_with(
     } else {
         typeref_classifier(r, classes.get_class(&r.name)).map(|internal| {
             if r.targs.is_empty() {
-                Ty::obj_name(internal)
+                // A PARAMETERLESS alias still expands: `typealias Plain = PBox<String, Int>` names
+                // a parameterized target whose arguments all come from its own right-hand side.
+                apply_alias_expansion(
+                    classes,
+                    &r.name,
+                    internal,
+                    &[],
+                    r.is_import(),
+                    r.span,
+                    diags,
+                )
             } else {
                 let args: Vec<Ty> = r
                     .targs
                     .iter()
                     .map(|argument| type_argument_of_ref(argument, classes, tparams, diags))
                     .collect::<Vec<_>>();
-                Ty::obj_args_name(internal, &args)
+                apply_alias_expansion(
+                    classes,
+                    &r.name,
+                    internal,
+                    &args,
+                    r.is_import(),
+                    r.span,
+                    diags,
+                )
             }
         })
     };
@@ -10610,7 +10811,15 @@ fn ty_of_ref_with(
         if let Some(prim) = internal.strip_prefix("__ty/") {
             Ty::from_name(&prim).unwrap_or(Ty::Error)
         } else if r.targs.is_empty() {
-            Ty::obj_name(internal)
+            apply_alias_expansion(
+                classes,
+                &r.name,
+                internal,
+                &[],
+                r.is_import(),
+                r.span,
+                diags,
+            )
         } else {
             // Generic instantiation `C<A, …>` — carry the resolved arguments (erased in descriptors).
             let args: Vec<Ty> = r
@@ -10618,7 +10827,18 @@ fn ty_of_ref_with(
                 .iter()
                 .map(|argument| type_argument_of_ref(argument, classes, tparams, diags))
                 .collect();
-            Ty::Obj(internal, Box::leak(args.into_boxed_slice()))
+            // A classpath type alias names a target that may take a DIFFERENT argument list than the
+            // alias declares (`Lens<S, A>` = `PLens<S, S, A, A>`). Substitute this use's arguments
+            // into the recorded expansion; pasting them onto the target would change its arity.
+            apply_alias_expansion(
+                classes,
+                &r.name,
+                internal,
+                &args,
+                r.is_import(),
+                r.span,
+                diags,
+            )
         }
     } else {
         diags.error(r.span, format!("unresolved reference '{}'.", r.name));
@@ -25667,6 +25887,53 @@ impl<'a> Checker<'a> {
         internal: TypeName,
         r: &TypeRef,
     ) -> Ty {
+        // A classpath `typealias` resolved to its TARGET classifier, which may declare a different
+        // argument list than the alias (`Lens<S, A>` = `PLens<S, S, A, A>`). Place this use's
+        // arguments through the alias's expansion; attaching them to the target directly would
+        // change its arity.
+        // Apply the alias template only when this spelling resolved to the alias's OWN target —
+        // see `alias_expanded_ty`; the checker's classifier channels (enclosing/nested, inherited,
+        // same-package) outrank imports, so the winner is only known here.
+        if let Some((formals, expansion)) = self
+            .syms
+            .class_names
+            .alias_expansion(&r.name)
+            .filter(|_| !r.is_import())
+            .filter(|alias| alias.target == internal)
+            .map(|alias| (alias.formals.clone(), alias.expansion))
+        {
+            if formals.len() != r.targs.len() {
+                self.diags.error(
+                    r.span,
+                    format!(
+                        "wrong number of type arguments for type alias '{}': expected {}, found {}.",
+                        r.name,
+                        formals.len(),
+                        r.targs.len()
+                    ),
+                );
+                return Ty::Error;
+            }
+            // Project each argument exactly as `classifier_type_with_arguments` does before it is
+            // substituted: `Lens<*, *>` is an existential out-projection, not invariant `Any?`.
+            let arguments = r
+                .targs
+                .iter()
+                .map(|argument| {
+                    let resolved = self.type_ref_ty(scope, argument);
+                    projected_typeref_argument(
+                        argument,
+                        resolved,
+                        Ty::nullable(Ty::obj("kotlin/Any")),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let bindings = formals
+                .into_iter()
+                .zip(arguments)
+                .collect::<crate::symbol_resolver::GSigBinds>();
+            return crate::symbol_resolver::ty_subst(expansion, &bindings);
+        }
         self.classifier_type_with_arguments(scope, internal, &r.targs)
     }
 

@@ -465,6 +465,22 @@ pub struct InstanceFieldRef {
 }
 
 /// Source-level services exposed by compiled libraries.
+/// A classpath `typealias`'s expansion, as a use site needs it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AliasExpansion {
+    /// Stable qualified identity of the alias declaration. Source spelling is resolved to this
+    /// identity before the template is selected.
+    pub identity: TypeName,
+    /// The alias's TARGET classifier. A template applies only when the spelling that named it
+    /// actually resolved to this classifier — otherwise a same-named class, a user alias, or a
+    /// different package's alias would inherit an expansion that does not describe it.
+    pub target: TypeName,
+    /// The alias's own type-parameter names, in declaration order — the substitution domain.
+    pub formals: Vec<String>,
+    /// The target applied to its own arguments, with the alias's parameters as `Ty::TyParam`.
+    pub expansion: Ty,
+}
+
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Semantic interface/class used by the platform libraries to model a function value of `arity`.
     fn function_type(&self, _arity: usize) -> Option<Ty> {
@@ -511,6 +527,13 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Convert a platform classifier name to the identity used by source resolution.
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {
         internal
+    }
+
+    /// A classpath `typealias`'s EXPANSION. `typealias Lens<S, A> = PLens<S, S, A, A>` maps two
+    /// arguments onto four positions, so a use site must substitute rather than paste its arguments
+    /// onto the target. `None` when the identity is not a published alias declaration.
+    fn type_alias_expansion(&self, _internal: TypeName) -> Option<AliasExpansion> {
+        None
     }
 
     /// Whether a library owner belongs to the platform's default Kotlin library surface.

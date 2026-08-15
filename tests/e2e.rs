@@ -264,6 +264,8 @@ mod classpath_synthetic_setter_e2e;
 mod classpath_top_level_property_e2e;
 #[path = "classpath_type_ref_e2e.rs"]
 mod classpath_type_ref_e2e;
+#[path = "classpath_typealias_arity_e2e.rs"]
+mod classpath_typealias_arity_e2e;
 #[path = "classpath_typealias_e2e.rs"]
 mod classpath_typealias_e2e;
 #[path = "classpath_unbound_callable_ref_e2e.rs"]
