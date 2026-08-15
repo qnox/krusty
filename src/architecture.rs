@@ -150,9 +150,14 @@ mod tests {
                 continue;
             }
             let mut allowed = vec!["analysis", "diag", "jvm", "source", "types"];
+            // `features` is the compiler's language-toggle surface. It is in budget exactly where a
+            // module turns a PROJECT's own configuration into compiler settings: option parsing, the
+            // project sync that reads them off the model, the analysis worker that applies them, and
+            // the parity scanner, which is a batch worker applying each module's own toggles.
             if path.ends_with("options.rs")
                 || path.ends_with("project/sync.rs")
                 || path.ends_with("worker.rs")
+                || path.ends_with("parity.rs")
             {
                 allowed.push("features");
             }

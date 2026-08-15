@@ -10,6 +10,7 @@ mod lock;
 pub mod maven;
 pub mod model;
 pub mod provider;
+pub mod report;
 pub mod runner;
 mod sources;
 pub mod sync;
@@ -28,6 +29,7 @@ pub use jdk::{
 };
 pub use model::{Module, ModuleId, ProjectModel, ProviderKind, SourceRoot, SourceRootKind};
 pub use provider::{ProbeError, ProjectProvider};
+pub use report::model_json;
 pub use runner::{Command, CommandOutput, CommandRunner, ProcessRunner};
 pub use sources::{workspace_sources, LoadedProjectSources, ProjectSources};
 pub use sync::{ProjectSync, RefreshOutcome};
