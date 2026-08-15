@@ -7687,7 +7687,11 @@ fn emit_method_inner(
     // A LAMBDA IMPL (`<fn>$lambda$N`) is a synthetic realization — kotlinc gives it debug tables
     // but NO nullability annotations.
     let lambda_impl = ir.lambda_own_params_from.contains_key(&fid);
+    let reified_body = f
+        .body
+        .is_some_and(|body| body_has_reified_markers(ir, body));
     let ret_ann = (!lambda_impl
+        && !reified_body
         && gsig.is_none_or(|g| !matches!(g.ret, Some(Ty::TyParam(..))))
         && member_sem.is_none_or(|(_, r)| !matches!(r, Ty::TyParam(..))))
     .then(|| ann_of(f.ret))
@@ -7702,7 +7706,7 @@ fn emit_method_inner(
         .map(|(i, t)| {
             let is_tparam = gsig.is_some_and(|g| matches!(g.params.get(i), Some(Ty::TyParam(..))))
                 || member_sem.is_some_and(|(ps, _)| matches!(ps.get(i), Some(Ty::TyParam(..))));
-            if lambda_impl || is_tparam {
+            if lambda_impl || reified_body || is_tparam {
                 None
             } else if declared_nullable
                 .and_then(|v| v.get(i))
@@ -7750,16 +7754,14 @@ fn emit_method_inner(
     // istore_<n>` into a synthetic `$i$f$<name>` int local covering the body — its inliner tracks
     // splice depth through these. Emitted after the parameter guards; the body's LineNumberTable
     // then naturally starts at the post-store pc.
-    let inline_marker: Option<(u16, u16)> = (!instance
-        && ir.top_level_inline_functions.contains(&fid)
-        && !ir.suspend_funs.contains(&fid))
-    .then(|| {
-        let slot = e.next_slot;
-        e.next_slot += 1;
-        code.push_int(0, e.cw);
-        store(Ty::Int, slot, &mut code);
-        (slot, code.bytes.len() as u16)
-    });
+    let inline_marker: Option<(u16, u16)> =
+        (!instance && ir.top_level_inline_functions.contains(&fid)).then(|| {
+            let slot = e.next_slot;
+            e.next_slot += 1;
+            code.push_int(0, e.cw);
+            store(Ty::Int, slot, &mut code);
+            (slot, code.bytes.len() as u16)
+        });
     e.emit(body, &mut code);
     // The implicit `return` for a `Unit` function is dead code when the body already diverges
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
@@ -7791,6 +7793,11 @@ fn emit_method_inner(
             e.cw.seed_utf8(&desc);
             code.add_local_entry(start, None, slot, &name, &desc);
         }
+    }
+    // Suspend rewriting invalidates source-local expression ids, but its physical parameters remain
+    // stable and reflection/debug tooling still expects `$completion` (plus the declared receiver and
+    // arguments) in the LocalVariableTable.
+    if e.record_locals || ir.suspend_funs.contains(&fid) {
         if instance {
             let this_desc = format!("L{owner};");
             e.cw.seed_utf8("this");
@@ -8208,6 +8215,12 @@ fn method_signature(
     // Signature attribute is needed and when the selected shape is invalid, so chaining formatters
     // with `or_else` would incorrectly treat an encoding error as permission to try a less complete
     // shape. `JvmSignatureFormatter` records a precise emit error for the latter case.
+    if let (Some(generic), Some((_, declared_ret))) =
+        (ir.signatures.get(&fid), ir.suspend_declared_sigs.get(&fid))
+    {
+        let ret = generic.ret.as_ref().unwrap_or(declared_ret);
+        return suspend_generic_method_sig(formatter, generic, ret);
+    }
     if let Some(generic) = ir.signatures.get(&fid) {
         return jvm_method_signature(formatter, generic, f);
     }
@@ -8231,6 +8244,16 @@ fn method_signature(
         return suspend_method_sig(formatter, params, ret);
     }
     method_parameterized_sig(formatter, &f.params, &f.ret)
+}
+
+fn suspend_generic_method_sig(
+    formatter: &JvmSignatureFormatter<'_>,
+    generic: &crate::ir::IrGenericSig,
+    ret: &Ty,
+) -> Option<String> {
+    let mut signature = jvm_type_params(formatter, generic)?;
+    signature.push_str(&suspend_method_sig(formatter, &generic.params, ret)?);
+    Some(signature)
 }
 
 /// The generic `Signature` of a `suspend fun`'s CPS method. The declared return type survives only in

@@ -170,6 +170,11 @@ pub(crate) type TypeParameters = HashMap<String, u64>;
 /// matching kotlinc's bytes (kotlinc never writes both for them).
 pub(crate) const CAPTURED_TYPE_PARAMETER: u64 = 1 << 32;
 
+/// Marker bit on a [`TypeParameters`] entry whose metadata reference is name-based. Package-level
+/// declarations use `Type.type_parameter_name` (f9), unlike class/member declarations whose
+/// in-scope parameter tables are addressed by `Type.type_parameter` (f7).
+pub(crate) const NAMED_TYPE_PARAMETER: u64 = 1 << 33;
+
 #[derive(Clone, Debug, Default)]
 pub struct MetadataTypeParameter {
     pub name: String,
@@ -197,6 +202,20 @@ pub(crate) fn semantic_type_parameters<'a>(
                 (name.to_owned(), index as u64),
                 (semantic.to_owned(), index as u64),
             ]
+        })
+        .collect()
+}
+
+pub(crate) fn semantic_named_type_parameters<'a>(
+    names: impl Iterator<Item = &'a str>,
+    semantic_names: impl Iterator<Item = &'a str>,
+) -> TypeParameters {
+    names
+        .zip(semantic_names)
+        .enumerate()
+        .flat_map(|(index, (name, semantic))| {
+            let value = index as u64 | NAMED_TYPE_PARAMETER;
+            [(name.to_owned(), value), (semantic.to_owned(), value)]
         })
         .collect()
 }
@@ -261,7 +280,12 @@ fn encode_type_with_parameter(
             // table index or a `type_parameter_name` (f9), never both. A CAPTURED enclosing-class
             // parameter also records f9: the reader has no enclosing-chain context for its bare
             // joint index.
-            message.field_varint(7, index & !CAPTURED_TYPE_PARAMETER);
+            if index & NAMED_TYPE_PARAMETER != 0 {
+                let source_name = crate::types::type_parameter_source_name(name);
+                message.field_varint(9, strings.local(source_name) as u64);
+            } else {
+                message.field_varint(7, index & !(CAPTURED_TYPE_PARAMETER | NAMED_TYPE_PARAMETER));
+            }
             if index & CAPTURED_TYPE_PARAMETER != 0 {
                 let source_name = crate::types::type_parameter_source_name(name);
                 message.field_varint(9, strings.local(source_name) as u64);

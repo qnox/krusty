@@ -11,27 +11,16 @@ fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
     let libout = common::compile_lib(tag, lib)?;
-    Some(common::expect_box_run(
-        main,
-        "Main",
-        &[libout, sl],
-        Some(jdk.as_path()),
-    ))
-}
-
-/// The REFERENCE-compiled variant: kotlinc's inline body carries reification MARKERS, so a direct
-/// call to it throws at runtime — only a real splice with the selected `T` survives. A krusty-built
-/// lib body has no marker and would mask a missing binding hand-off.
-fn run_ref(tag: &str, lib: &str, main: &str) -> Option<String> {
-    let jdk = common::jdk_modules();
-    let sl = common::stdlib_jar();
-    let libout = common::compile_lib_ref(tag, lib)?;
     common::compile_and_run_box(main, "Main", &[libout, sl], Some(jdk.as_path()))
 }
 
 const LIB: &str = "package lib\n\
     class Resp(val payload: Any)\n\
     inline fun <reified T> Resp.body(): T = payload as T\n";
+
+const SUSPEND_LIB: &str = "package lib\n\
+    class Resp(val payload: Any)\n\
+    suspend inline fun <reified T> Resp.body(): T = payload as T\n";
 
 #[test]
 fn declared_return_binds_classpath_reified_extension() {
@@ -47,16 +36,44 @@ fn declared_return_binds_classpath_reified_extension() {
 }
 
 #[test]
-fn declared_return_reifies_against_kotlinc_marker_body() {
-    // Same shape over the kotlinc-compiled lib: the marker body must be SPLICED with the selected
-    // `T`, never direct-called.
-    const MAIN: &str = "import lib.Resp\n\
+fn emitted_reified_extension_matches_kotlinc() {
+    assert_eq!(
+        common::byte_diff_against_kotlinc("Lib", LIB, "lib/LibKt")
+            .expect("kotlinc is required for byte comparison"),
+        Ok(())
+    );
+}
+
+#[test]
+fn emitted_suspend_reified_extension_matches_kotlinc() {
+    assert_eq!(
+        common::byte_diff_against_kotlinc("Lib", SUSPEND_LIB, "lib/LibKt")
+            .expect("kotlinc is required for byte comparison"),
+        Ok(())
+    );
+}
+
+#[test]
+fn suspend_declared_return_reifies_from_krusty_dependency() {
+    // The motivating HTTP-client declaration is suspend. Its CPS realization must preserve the
+    // expected-type binding through the same inline handoff instead of direct-calling the marker
+    // body after adding the continuation parameter.
+    const MAIN: &str = "import kotlin.coroutines.*\n\
+        import lib.Resp\n\
         import lib.body\n\
         class Plan(val name: String)\n\
-        fun readPlan(r: Resp): Plan = r.body()\n\
-        fun box(): String = if (readPlan(Resp(Plan(\"p\"))).name == \"p\") \"OK\" else \"fail\"\n";
+        fun <T> runBlocking(block: suspend () -> T): T {\n\
+        \x20   var result: Result<T>? = null\n\
+        \x20   block.startCoroutine(Continuation(EmptyCoroutineContext) { result = it })\n\
+        \x20   return result!!.getOrThrow()\n\
+        }\n\
+        suspend fun readPlan(r: Resp): Plan = r.body()\n\
+        fun box(): String = runBlocking {\n\
+        \x20   if (readPlan(Resp(Plan(\"s\"))).name == \"s\") \"OK\" else \"fail\"\n\
+        }\n";
     assert_eq!(
-        run_ref("cre3", LIB, MAIN).expect("reified splice against kotlinc marker body"),
+        run("cre5", SUSPEND_LIB, MAIN)
+            .expect("suspend reified splice from krusty-built dependency"),
         "OK"
     );
 }
