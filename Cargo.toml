@@ -45,6 +45,9 @@ libc = "0.2"
 syn = { version = "3", features = ["full", "visit"] }
 # Sampling profiler → flamegraph SVG (gated behind KRUSTY_FLAMEGRAPH in the conformance harness).
 pprof = { version = "0.15", features = ["flamegraph"] }
+# pprof's own backtrace backend, used directly so the harness can symbolize each sampled instruction
+# pointer once instead of once per stack (see `write_flamegraph`). Already in the tree via pprof.
+backtrace = "0.3"
 
 [lib]
 name = "krusty"
