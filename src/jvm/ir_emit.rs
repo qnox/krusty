@@ -1334,31 +1334,18 @@ fn build_class_metadata(
     // `Class.enumEntry` (f13) — the builder has always accepted these; only the caller withheld them.
     let enum_entry_names: Vec<String> = c.enum_entries.iter().map(|e| e.name.clone()).collect();
     // Metadata keeps nested declarations ordered and sealed subclasses sorted.
-    let self_fq = c.fq_name();
     // Every DECLARED direct nested classifier joins `Class.nestedClassName` (f7) — kotlinc records
-    // them all, not only sealed subtypes. Synthesized classes (anonymous objects, lambdas,
-    // continuations — their segments carry digits or are locals/refs) stay out.
+    // them all, not only sealed subtypes. Declaration origin and the exact identity-tree relation
+    // keep synthesized classes out without interpreting their backend spellings.
     let mut nested_names: Vec<String> = ir
         .classes
         .iter()
         .filter(|candidate| {
-            !candidate.is_local_class
-                && candidate.prop_ref.is_none()
-                && candidate.func_ref.is_none()
-                && candidate.enum_entry_of.is_none()
-                && !is_coroutine_state_machine(candidate)
+            candidate.is_source_declared
+                && !candidate.is_local_class
+                && candidate.fq_name.nested_owner() == Some(c.fq_name)
         })
-        .filter_map(|candidate| {
-            candidate
-                .fq_name()
-                .strip_prefix(&format!("{self_fq}$"))
-                .filter(|segment| {
-                    !segment.contains('$')
-                        && !segment.chars().any(|ch| ch.is_ascii_digit())
-                        && *segment != "WhenMappings"
-                })
-                .map(str::to_string)
-        })
+        .map(|candidate| candidate.fq_name.nested_segment_ref().to_string())
         .collect();
     // kotlinc lists the companion under `nestedClassName` (f7) TOO, alongside its own
     // `companionObjectName` (f4) record — both reference the same interned string.
@@ -14652,6 +14639,29 @@ mod fail_soft_tests {
         fn body(&self, _o: &str, _n: &str, _d: &str) -> Option<MethodCode> {
             None
         }
+    }
+
+    #[test]
+    fn nested_metadata_uses_declaration_identity_not_generated_name_shape() {
+        let mut ir = IrFile::default();
+        let mut outer = crate::plugins::synthetic_class("demo/Outer");
+        outer.is_source_declared = true;
+        let outer_id = ir.add_class(outer);
+
+        // A digit is valid in a source identifier; the former generated-name heuristic dropped it.
+        let mut declared = crate::plugins::synthetic_class("demo/Outer$Node2");
+        declared.is_source_declared = true;
+        ir.add_class(declared);
+
+        // Conversely, looking nested is not sufficient: backend-generated implementation classes
+        // are not declarations in Kotlin metadata.
+        ir.add_class(crate::plugins::synthetic_class("demo/Outer$Impl3"));
+
+        let metadata =
+            build_class_metadata(&ir, &ir.classes[outer_id as usize], &EmitOptions::default())
+                .expect("plain source class metadata");
+        assert!(metadata.d2.iter().any(|entry| entry == "Node2"));
+        assert!(!metadata.d2.iter().any(|entry| entry == "Impl3"));
     }
 
     #[test]

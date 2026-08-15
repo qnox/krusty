@@ -1042,6 +1042,7 @@ fn lower_file_at_reporting_impl(
             }
             let id = lo.ir.add_class(IrClass {
                 fq_name: type_name(&internal),
+                is_source_declared: true,
                 is_inner_class: inner_outer.is_some(),
                 is_local_class: file.is_local_declaration(d) || file.is_anonymous_object_class(d),
                 is_value: c.is_value,
@@ -4101,6 +4102,7 @@ fn lower_file_at_reporting_impl(
                         }
                         let sub_id = lo.ir.add_class(IrClass {
                             fq_name: type_name(&sub_fq),
+                            is_source_declared: false,
                             is_inner_class: false,
                             is_local_class: false,
                             is_value: false,
@@ -10647,6 +10649,7 @@ impl<'a> Lower<'a> {
             .collect();
         let class = IrClass {
             fq_name: type_name(&internal),
+            is_source_declared: false,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -12861,6 +12864,7 @@ impl<'a> Lower<'a> {
             .internal;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_source_declared: false,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -13005,6 +13009,7 @@ impl<'a> Lower<'a> {
         };
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_source_declared: false,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -13243,6 +13248,7 @@ impl<'a> Lower<'a> {
         );
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_source_declared: false,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -13947,6 +13953,7 @@ impl<'a> Lower<'a> {
             .obj_internal()?;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_source_declared: false,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
@@ -27860,14 +27867,6 @@ fn param_checks_for(
                     && !class_nonnull_type_params.contains(&p.ty.name));
             // A value-class parameter is erased to its underlying type; the null-check applies to that
             // (a primitive underlying gets none — the param is a primitive local, not a reference).
-            crate::trace_compiler!(
-                "lower",
-                "param check {}::{} ty={ty:?} nullable={} ntp={nullable_type_param} ref={}",
-                f.name,
-                p.name,
-                p.ty.nullable(),
-                ty.is_reference(),
-            );
             if !p.ty.nullable() && !nullable_type_param && ty.is_reference() {
                 Some(p.name.clone())
             } else {

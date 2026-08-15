@@ -5579,6 +5579,7 @@ fn build_continuation_class(
     let super_arg = ir.add_expr(IrExpr::GetValue(super_completion_idx));
     let class = IrClass {
         fq_name: crate::types::type_name(internal),
+        is_source_declared: false,
         is_inner_class: false,
         is_local_class: false,
         is_value: false,

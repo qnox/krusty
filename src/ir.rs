@@ -819,6 +819,10 @@ pub struct IrProperty {
 #[derive(Clone, Debug)]
 pub struct IrClass {
     pub fq_name: TypeName,
+    /// `true` when this classifier comes from a source declaration. Synthesized implementation
+    /// classes must not be published as declared nested classifiers in language metadata, even when
+    /// their backend name happens to look nested.
+    pub is_source_declared: bool,
     /// A language-level non-static nested class. Backends consume this declaration property directly;
     /// a synthetic receiver field or its physical name does not imply inner-class semantics.
     pub is_inner_class: bool,
@@ -2594,6 +2598,7 @@ mod tests {
     fn blank_class(fq: &str) -> IrClass {
         IrClass {
             fq_name: fq.into(),
+            is_source_declared: false,
             is_inner_class: false,
             is_local_class: false,
             is_value: false,
