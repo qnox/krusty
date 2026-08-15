@@ -78,11 +78,6 @@ pub struct FnMeta {
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
 const DECLARES_DEFAULT_VALUE_BIT: u64 = 1 << 1;
 
-fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
-    encode_type(st, t, &TypeParameters::new())
-        .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
-}
-
 /// A `Type` message for `t`, resolving type-parameter NAMES to their `Function.type_parameter`
 /// table ids via `tps`. Handles generic class arguments (`Type.argument` = 2), nullability
 /// (`Type.nullable` = 3), class types (`Type.class_name` = 6), and type parameters
@@ -459,7 +454,12 @@ pub struct PropMeta {
 /// A public top-level typealias declaration in package metadata.
 pub struct TypeAliasMeta {
     pub name: String,
-    pub target: Ty,
+    /// The alias's own type-parameter names, in declaration order — `TypeAlias.typeParameter`.
+    pub formals: Vec<String>,
+    /// The target applied to its own arguments, with [`Self::formals`] as `Ty::TyParam`
+    /// (`typealias Box<S, A> = PBox<S, S, A, A>`). Frontend resolution must supply this exact
+    /// semantic type; emission never retries with a bare classifier.
+    pub expansion: Ty,
     /// Declared visibility — `TypeAlias.flags` (f1) carries it; elided at the public default so an
     /// `internal typealias` writes an explicit 0 and stays module-bound for consumers.
     pub visibility: crate::types::Visibility,
@@ -477,7 +477,27 @@ fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
         p.field_varint(1, vis << 1); // TypeAlias.flags = 1 (elided at the public default 6)
     }
     p.field_varint(2, st.local(&alias.name) as u64); // TypeAlias.name = 2
-    let target = type_pb(st, alias.target);
+                                                     // The alias's own parameters, and the target applied to its arguments over them. Without both,
+                                                     // a consumer reading this record back sees only the target CLASSIFIER and cannot place a use
+                                                     // site's arguments — `Box<String, Int>` would become `PBox<String, Int>`, an arity that type
+                                                     // does not have. kotlinc references an alias's own parameters BY NAME, which is what
+                                                     // `NAMED_TYPE_PARAMETER` selects in the shared encoder.
+    let tps: TypeParameters = alias
+        .formals
+        .iter()
+        .enumerate()
+        .map(|(index, formal)| {
+            (
+                formal.clone(),
+                index as u64 | crate::metadata::type_encoder::NAMED_TYPE_PARAMETER,
+            )
+        })
+        .collect();
+    for (index, formal) in alias.formals.iter().enumerate() {
+        p.repeated_message(3, &encode_type_parameter(st, index, formal, false));
+        // TypeAlias.type_parameter = 3
+    }
+    let target = type_pb_generic(st, alias.expansion, &tps);
     p.field_message(4, &target); // TypeAlias.underlying_type = 4
     p.field_message(6, &target); // TypeAlias.expanded_type = 6
     p

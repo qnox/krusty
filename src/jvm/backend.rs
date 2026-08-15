@@ -517,7 +517,7 @@ impl Backend for JvmBackend {
             .decls
             .iter()
             .any(|&d| matches!(file.decl(d), Decl::Fun(_) | Decl::Property(_)))
-            || !file.type_aliases.is_empty();
+            || !file.type_alias_fun.is_empty();
         if has_facade_members {
             let facade = facade_name
                 .rsplit('/')
@@ -839,27 +839,28 @@ fn facade_package_metadata_inner(
         .unwrap_or_default()
         .replace('.', "/");
     let alias_metas = file
-        .type_aliases
+        .type_alias_fun
         .iter()
-        .filter_map(|(alias, _)| {
+        .map(|(alias, _, _)| {
             let qualified = if package.is_empty() {
                 alias.clone()
             } else {
                 format!("{package}/{alias}")
             };
-            let target = syms
-                .source_alias_fqns
+            let (formals, expansion) = syms
+                .source_alias_expansions
                 .get(&crate::types::type_name(&qualified))
-                .copied()?;
-            Some(crate::metadata::builder::TypeAliasMeta {
+                .unwrap_or_else(|| panic!("frontend did not resolve typealias '{qualified}'"));
+            crate::metadata::builder::TypeAliasMeta {
                 name: alias.clone(),
-                target: Ty::obj_name(target),
+                formals: formals.clone(),
+                expansion: *expansion,
                 visibility: file
                     .type_alias_visibility
                     .get(alias)
                     .copied()
                     .unwrap_or(crate::types::Visibility::Public),
-            })
+            }
         })
         .collect::<Vec<_>>();
     (!metas.is_empty() || !prop_metas.is_empty() || !alias_metas.is_empty()).then(|| {
