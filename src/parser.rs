@@ -1820,10 +1820,12 @@ impl<'a> Parser<'a> {
             None
         } else if self.at(TokenKind::Star) {
             // A spread argument in an annotation (`@A(*arrayOf("O"), "K")` — a `vararg` annotation
-            // parameter). Annotation values are metadata krusty ignores, so just consume the `*` and
-            // parse the spread expression to keep the argument list well-formed.
+            // parameter). Preserve the same spread fact as an ordinary call argument; checking uses
+            // it to type the whole array and constant folding flattens its elements into the vararg.
             self.bump(); // '*'
-            self.parse_annotation_value()
+            let argument = self.parse_annotation_value()?;
+            self.file.spread_arg_ids.insert(argument.0);
+            Some(argument)
         } else {
             Some(self.parse_expr())
         }

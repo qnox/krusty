@@ -55,6 +55,16 @@ fn unresolved_type_annotation() {
 }
 
 #[test]
+fn unresolved_declaration_annotation() {
+    let d = parse_diags("@NoSuchAnnotation class C");
+    assert_rejected(&d, "unresolved declaration annotation");
+    assert!(
+        d.iter().any(|message| message.contains("NoSuchAnnotation")),
+        "expected the annotation name in the diagnostic: {d:?}"
+    );
+}
+
+#[test]
 fn unresolved_member_access() {
     let d = diags("fun box(): Int { val s = \"hi\"; return s.noSuchMember }");
     assert_rejected(&d, "unresolved member access");

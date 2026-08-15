@@ -306,7 +306,7 @@ fn compile_source(
     // Emit with the CLI backend's full artifact shape (facade `@Metadata`, verified per-class
     // `@Metadata` shapes, `SourceFile` = `<stem>.kt`) so the byte-diff mode measures what ships —
     // and the box run exercises the shipping bytes too.
-    let metadata = krusty::jvm::backend::facade_package_metadata(file, 0, &syms);
+    let metadata = krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir);
     // Consume the same complete option set as the CLI. Keeping a local partial literal here once
     // allowed the conformance artifact to diverge whenever the shipping defaults gained a field.
     let opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone());
@@ -609,7 +609,8 @@ fn compile_blocks(
         // Facade `@Metadata` (top-level fn/extension records), as the CLI backend writes — a later
         // MODULE's compile reads this module's output from the classpath and needs it to resolve
         // cross-module extensions.
-        let metadata = krusty::jvm::backend::facade_package_metadata(file, i as u32, &syms);
+        let metadata =
+            krusty::jvm::backend::facade_package_metadata_with_ir(file, i as u32, &syms, &ir);
         // This is the only gate path where a downstream `// MODULE:` reads an upstream module's
         // classes. Use the complete shipping configuration rather than duplicating its metadata and
         // filename fields; the shared constructor also reduces a logical nested source path to the

@@ -1684,6 +1684,36 @@ pub enum AnnotationRetention {
     Source,
 }
 
+/// One frontend-checked annotation argument. Every classifier identity is resolved before this
+/// crosses into common lowering; backends only choose the physical encoding of the recorded value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AnnotationValue {
+    Int(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+    Boolean(bool),
+    Char(u16),
+    String(crate::kt_string::KtString),
+    Enum(TypeName, String),
+    Class(TypeName),
+    Annotation {
+        internal: TypeName,
+        values: Vec<(String, AnnotationValue)>,
+    },
+    Array(Vec<AnnotationValue>),
+}
+
+/// A resolved annotation application, including its declaration-ordered element values and
+/// semantic retention. This is a frontend decision; common lowering must not reopen source or a
+/// symbol provider to reconstruct it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppliedAnnotation {
+    pub internal: TypeName,
+    pub values: Vec<(String, AnnotationValue)>,
+    pub retention: AnnotationRetention,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TypeVariance {
     #[default]

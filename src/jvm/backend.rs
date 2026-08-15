@@ -472,7 +472,7 @@ impl Backend for JvmBackend {
             );
             return outputs;
         }
-        let metadata = facade_package_metadata_with_ir(file, checked.file_index, syms, Some(&ir));
+        let metadata = facade_package_metadata_with_ir(file, checked.file_index, syms, &ir);
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct. Inline splice failures
         // are reported separately (via `run.inline_bail`): selected inline calls are required to splice,
         // so those are backend errors to fix rather than silent skips.
@@ -548,19 +548,6 @@ impl Backend for JvmBackend {
     }
 }
 
-/// Whether a resolved annotation belongs in Kotlin metadata. Retention is normalized by the
-/// frontend; the backend never reopens a source declaration or queries the classpath.
-fn metadata_recorded_annotation(syms: &FrontendSymbols, internal: crate::types::TypeName) -> bool {
-    matches!(
-        syms.annotation_retention(internal),
-        Some(
-            crate::types::AnnotationRetention::Default
-                | crate::types::AnnotationRetention::Runtime
-                | crate::types::AnnotationRetention::Binary
-        )
-    )
-}
-
 /// The facade's `@kotlin.Metadata` (`k = 2`, file facade), recording every top-level function —
 /// plain and EXTENSION, suspend and INLINE included — with its LOGICAL source signature. The physical
 /// descriptor alone cannot express an extension's receiver (it is just the first JVM parameter), a
@@ -570,26 +557,18 @@ fn metadata_recorded_annotation(syms: &FrontendSymbols, internal: crate::types::
 /// `IS_INLINE` flag, its type-parameter table (with `reified`), its erased `JvmMethodSignature`,
 /// and its decoded contract (`Function.contract`, field 32). `None` when the file declares no
 /// recordable top-level function (the facade is emitted bare, as before).
-pub fn facade_package_metadata(
-    file: &File,
-    file_index: u32,
-    syms: &FrontendSymbols,
-) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
-    facade_package_metadata_with_ir(file, file_index, syms, None)
-}
-
-/// [`facade_package_metadata`] with the POST-PASS IR available: a top-level function with a
+/// Build facade metadata from the POST-PASS IR. A top-level function with a
 /// value-class parameter/return realizes as a MANGLED method (`taggedOnly-rnqsQGE`) with the erased
 /// descriptor — neither derivable from the declared record — so its `JvmMethodSignature` (name +
-/// desc) is recovered from the value-class pass's declared-sig table. Without it a consumer cannot
-/// map the record to any bytecode method and reports `unresolved function`.
+/// desc) is recovered from the value-class pass's declared-sig table. Annotation applications also
+/// require IR so metadata consumes complete frontend-checked values instead of source syntax.
 pub fn facade_package_metadata_with_ir(
     file: &File,
     file_index: u32,
     syms: &FrontendSymbols,
-    ir: Option<&crate::ir::IrFile>,
+    ir: &crate::ir::IrFile,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
-    facade_package_metadata_inner(file, file_index, syms, ir)
+    facade_package_metadata_inner(file, file_index, syms, Some(ir))
 }
 
 fn facade_package_metadata_inner(
@@ -689,18 +668,21 @@ fn facade_package_metadata_inner(
             sig.context_count,
             sig.contract.is_some(),
         );
-        // Argument-less non-SOURCE annotations survive into `Function.annotation` records — the
-        // channel a separate compilation reads resolution markers (`@LowPriorityInOverloadResolution`)
-        // from. Annotations WITH arguments are not modeled yet: recording one without its arguments
-        // would corrupt the record, so they are omitted (as before).
-        let annotations: Vec<crate::types::TypeName> = f
-            .annotations
-            .iter()
-            .zip(f.annotation_args.iter())
-            .filter(|(_, args)| args.is_empty())
-            .filter_map(|(annotation, _)| syms.resolved_annotation(file_index, annotation))
-            .filter(|&internal| metadata_recorded_annotation(syms, internal))
-            .collect();
+        // Shipping metadata consumes the exact checked applications already attached to the IR
+        // function. The private no-IR path exists only for metadata-builder unit inspection and emits
+        // no user annotations; production callers must never fabricate a partial application.
+        let annotations: Vec<crate::ir::AppliedAnnotation> = ir
+            .and_then(|ir| ir.top_level_function_fids.get(&d.0).map(|fid| (ir, fid)))
+            .and_then(|(ir, fid)| ir.function_annotations.get(fid))
+            .map(|annotations| {
+                annotations
+                    .visible
+                    .iter()
+                    .chain(&annotations.invisible)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
         // A value-class-rewritten realization (mangled name + erased descriptor) overrides the
         // derived handle — nothing in the declared record spells either.
         let vc_realization = ir
@@ -1016,7 +998,7 @@ mod tests {
         let mut symbols = collect_signatures(&files, &mut diagnostics);
         prepare_module_symbols(&files, &["A".to_string()], &mut symbols);
 
-        let metadata = facade_package_metadata(&files[0], 0, &symbols)
+        let metadata = facade_package_metadata_inner(&files[0], 0, &symbols, None)
             .expect("a package property requires facade metadata");
         let decoded = crate::jvm::metadata::decode_metadata(
             &metadata.d1,

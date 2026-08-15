@@ -746,7 +746,7 @@ fn data_class_collection_field_hashes_via_object_hashcode() {
 /// (never `Intrinsics.areEqual` on the underlyings).
 #[test]
 fn data_class_value_class_field_uses_impl_statics() {
-    let Some((dir, jh)) = krusty_compile(
+    let Some((dir, jh)) = krusty_compile_stdlib(
         "dcvcimpl",
         "@JvmInline\nvalue class Id(val v: String)\ndata class C(val id: Id, val n: Int)\nfun box() = \"OK\"\n",
     ) else {
