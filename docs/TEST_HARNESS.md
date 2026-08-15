@@ -53,9 +53,10 @@ argument, member, initializer, or assignment location is a test failure.
 
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
-binaries once with Cargo's `gate` profile, runs the conformance binary alone in two single-threaded
-passes (box corpus, then everything else), then the internally parallel e2e binary alone, then the
-remaining small test binaries in parallel.
+binaries once with Cargo's `gate` profile, runs the conformance binary alone in two passes (box
+corpus, then everything else), then runs eleven balanced whole-module shards of the internally parallel
+e2e binary, then runs the remaining small test binaries in parallel. `KRUSTY_E2E_SHARDS` overrides
+the shard count.
 
 Each scheduled invocation owns its log. An unfiltered binary keeps the plain `<binary>.log` name; a
 filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the two conformance logs are
@@ -64,7 +65,9 @@ filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the t
 `--test-threads=<count>` arguments do not change identity. Because slugging is deliberately lossy,
 `run_one` adds `#2`, `#3`, and so on if a derived name is already present instead of overwriting an
 earlier run. The failure report reads the exact invocation's log, and the timing table lists each
-invocation separately because each is a separate process with its own wall time.
+invocation separately because each is a separate process with its own wall time. E2e shard logs use
+the explicit labels `shard-1-of-11`, and so on; every shard's reported selected-test count must equal
+the planner's count, so filtering cannot silently reduce coverage.
 
 CI builds the conformance test binary once and runs that artifact against every version in
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
@@ -73,8 +76,9 @@ must score at least 55% of backend-applicable cases before a release can publish
 miscompiled applicable cases count against that floor; cases excluded solely by the selected
 backend do not.
 
-The general and corpus test-binary deadlines default to 120 seconds. The larger product e2e binary
-defaults to 300 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.
+The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 180
+seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
+defaults to 295 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.
 
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.
@@ -162,10 +166,13 @@ Performance-relevant harness state:
 Optional profiling knobs:
 
 - `KRUSTY_TEST_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline applied to every test
-  binary except e2e; raise it explicitly on slow systems.
-- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 300-second deadline for both focused and full
-  e2e runs.
-- `KRUSTY_CORPUS_TIMEOUT_SECONDS=<seconds>` overrides that deadline for the dedicated corpus pass.
+  binary except conformance and e2e; raise it explicitly on slow systems.
+- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 180-second deadline for each
+  full-suite or focused conformance pass.
+- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for focused e2e runs and
+  each full-suite e2e shard.
+- `KRUSTY_E2E_SHARDS=<count>` overrides the eleven whole-module shards used by the plain full-suite
+  run.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
