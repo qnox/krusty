@@ -77,6 +77,14 @@ fn verif_eq(a: &VerifType, b: &VerifType, cp: &ConstPool) -> bool {
         _ => a == b,
     }
 }
+/// A primary constructor with defaulted parameters: kotlinc emits the `$default` `<init>` overload
+/// right after the primary one, interning its marker descriptor, the default STRING constants and
+/// the delegating own-`<init>` Methodref BEFORE the accessors — the seeder mirrors that window.
+pub struct SeedCtorDefaults {
+    pub marker_desc: String,
+    pub string_consts: Vec<KtString>,
+}
+
 /// A HOISTED companion property's accessor delegates through an outer-class `access$…$cp` bridge;
 /// the seeder interns the bridge (and the getter's return annotation) right after the accessor's
 /// name/descriptor — kotlinc's per-method first-use order.
@@ -999,6 +1007,7 @@ impl ClassWriter {
     /// name/descriptor lazily at the `putfield` — an order krusty's field-then-method emission does not
     /// otherwise reproduce. Call BEFORE any `add_field`/`add_method` for the class. `accessors` are the
     /// getters (and, for a `var`, setters) in declaration order as `(name, descriptor)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn seed_plain_class_pool(
         &mut self,
         this_internal: &str,
@@ -1011,6 +1020,9 @@ impl ClassWriter {
         accessors: &[(String, String, u8, Option<SeedAccessorBridge>)],
         // Per-member generic `Signature`s (parameterized-type ctor/accessor/field members).
         sigs: &MemberSignatures,
+        // The primary ctor's `$default` overload entries (marker desc, default string constants,
+        // delegating `<init>` ref) — interned between the ctor and the accessors, kotlinc's order.
+        ctor_defaults: Option<&SeedCtorDefaults>,
     ) {
         let (ctor_desc, super_ctor_desc) = ctor_descs;
         // Primary constructor: name + descriptor are interned at method entry, before its body.
@@ -1071,6 +1083,16 @@ impl ClassWriter {
         // field name/descriptor entries interned just above.
         self.cp.utf8("this");
         self.cp.utf8(&format!("L{this_internal};"));
+        // The `$default` ctor overload follows the primary immediately: its marker descriptor, the
+        // default STRING constants its body `ldc`s (in parameter order), then the NameAndType +
+        // Methodref of the delegating `invokespecial` to the real `<init>`.
+        if let Some(d) = ctor_defaults {
+            self.cp.utf8(&d.marker_desc);
+            for s in &d.string_consts {
+                self.cp.string_kt(s);
+            }
+            self.cp.methodref(this_internal, "<init>", ctor_desc);
+        }
         // Each accessor: name + descriptor at entry (its body reuses the field Fieldref above). A setter
         // then interns `<set-?>` right after — its LocalVariableTable value-parameter name (kotlinc's
         // synthetic name), plus a `<set-?>` String constant for a non-null reference setter's

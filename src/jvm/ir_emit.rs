@@ -1792,6 +1792,28 @@ fn seed_plain_class_pool(
             .unwrap_or(Ty::obj("kotlin/Any"))
     });
     let super_ctor_desc = crate::jvm::names::method_descriptor(&super_param_tys, Ty::Unit);
+    // The primary ctor's `$default` overload interning window (marker desc, default STRING
+    // constants, delegating `<init>` ref) — kotlinc writes the synthetic right after the primary.
+    let ctor_default_seed = ir
+        .class_ctor_defaults(fq_name)
+        .filter(|defaults| defaults.iter().any(Option::is_some))
+        .map(|defaults| {
+            let masks = "I".repeat(defaults.len().div_ceil(32).max(1));
+            crate::jvm::classfile::SeedCtorDefaults {
+                marker_desc: format!(
+                    "({}{masks}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+                    ctor_field_descs(c)
+                ),
+                string_consts: defaults
+                    .iter()
+                    .flatten()
+                    .filter_map(|&d| match ir.expr(d) {
+                        IrExpr::Const(crate::ir::IrConst::String(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            }
+        });
     cw.seed_plain_class_pool(
         fq_name,
         superclass,
@@ -1803,6 +1825,7 @@ fn seed_plain_class_pool(
             accessors: &accessor_sigs,
             fields: if c.is_data { &[] } else { &field_sigs },
         },
+        ctor_default_seed.as_ref(),
     );
     // A companion OUTER continues with its hoisted-property entries: the `access$…$cp` bridges,
     // `<clinit>`'s Companion construction, and the hoisted initializers' string constants — all in
@@ -4447,6 +4470,16 @@ fn emit_class(
         // defaults, then `invokespecial` the real `<init>`).
         if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
             emit_ctor_default_stub(ir, &fq_name, facade, &param_tys, defaults, &mut cw, env);
+            // kotlinc gives the `$default` ctor overload a one-entry LineNumberTable at the class
+            // declaration line.
+            if byte_parity && c.decl_line != 0 {
+                let masks = "I".repeat(defaults.len().div_ceil(32).max(1));
+                let stub_desc = format!(
+                    "({}{masks}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+                    ctor_field_descs(c)
+                );
+                cw.set_method_lines("<init>", &stub_desc, &[(0, c.decl_line)]);
+            }
             // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
             // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a
             // full mask.
