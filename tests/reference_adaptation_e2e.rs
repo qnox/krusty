@@ -265,6 +265,7 @@ fn cross_file_adapted_value_class_parameter_materializes_simple_default() {
 
 #[test]
 fn cross_file_value_class_constructor_default_reports_materialization_error() {
+    let stdlib = common::stdlib_jar();
     let diagnostics = common::front_end_diagnostics_files(
         &[
             "package sample\n\
@@ -274,7 +275,7 @@ fn cross_file_value_class_constructor_default_reports_materialization_error() {
              fun call(f: (String) -> String): String = f(\"O\")\n\
              fun bad(): String = call(::foo)\n",
         ],
-        &[],
+        std::slice::from_ref(&stdlib),
         None,
     );
     assert_eq!(

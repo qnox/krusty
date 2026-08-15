@@ -17,12 +17,10 @@ pub struct FnMeta {
     pub ret: Ty,
     /// Position of the declaration in the FILE (see [`PropMeta::decl_order`]).
     pub decl_order: usize,
-    /// Argument-less BINARY/RUNTIME-retained annotations applied to the function, recorded as
-    /// `Function.annotation` (field 12) `Annotation { id }` entries — how a separate compilation reads
-    /// resolution-affecting markers like `@kotlin.internal.LowPriorityInOverloadResolution` back from
-    /// the classpath. Also sets `Function.flags` `HAS_ANNOTATIONS` (bit 0). SOURCE-retained annotations
-    /// never appear here (kotlinc drops them from metadata too).
-    pub annotations: Vec<crate::types::TypeName>,
+    /// BINARY/RUNTIME-retained annotations applied to the function, including their frontend-checked
+    /// element values. These become `Function.annotation` (field 12) records; SOURCE annotations never
+    /// enter this list.
+    pub annotations: Vec<crate::ir::AppliedAnnotation>,
     /// Extension-receiver type (`Function.receiver_type` = 5), `Some` for an extension function. Recorded
     /// SEPARATELY from `params` (the LOGICAL value params, receiver excluded), so a reader recovers the
     /// extension's true source arity — `fun T.f(a)` is one value param, not two. `None` for a plain fn.
@@ -230,6 +228,88 @@ fn flatten_condition<'a>(
     }
 }
 
+fn zigzag_i64(value: i64) -> u64 {
+    ((value as u64) << 1) ^ ((value >> 63) as u64)
+}
+
+fn annotation_value_pb(st: &mut StringTable, value: &crate::ir::AnnoValue) -> Pb {
+    use crate::ir::{AnnoValue, IrConst};
+    let mut out = Pb::new();
+    match value {
+        AnnoValue::Const(constant) => match constant {
+            IrConst::Byte(value) => {
+                out.field_varint(1, 0);
+                out.field_varint(2, zigzag_i64(i64::from(*value)));
+            }
+            IrConst::Char(value) => {
+                out.field_varint(1, 1);
+                out.field_varint(2, zigzag_i64(i64::from(*value)));
+            }
+            IrConst::Short(value) => {
+                out.field_varint(1, 2);
+                out.field_varint(2, zigzag_i64(i64::from(*value)));
+            }
+            IrConst::Int(value) => {
+                out.field_varint(1, 3);
+                out.field_varint(2, zigzag_i64(i64::from(*value)));
+            }
+            IrConst::Long(value) => {
+                out.field_varint(1, 4);
+                out.field_varint(2, zigzag_i64(*value));
+            }
+            IrConst::Float(value) => {
+                out.field_varint(1, 5);
+                out.field_fixed32(3, value.to_bits());
+            }
+            IrConst::Double(value) => {
+                out.field_varint(1, 6);
+                out.field_fixed64(4, value.to_bits());
+            }
+            IrConst::Boolean(value) => {
+                out.field_varint(1, 7);
+                out.field_varint(2, u64::from(*value));
+            }
+            IrConst::String(value) => {
+                out.field_varint(1, 8);
+                out.field_varint(5, u64::from(st.local(&value.to_lossy())));
+            }
+            IrConst::Null => panic!("null is not a valid metadata annotation value"),
+        },
+        AnnoValue::Class(internal) => {
+            out.field_varint(1, 9);
+            out.field_varint(6, u64::from(st.class_id(*internal)));
+        }
+        AnnoValue::Enum(internal, constant) => {
+            out.field_varint(1, 10);
+            out.field_varint(6, u64::from(st.class_id(*internal)));
+            out.field_varint(7, u64::from(st.local(constant)));
+        }
+        AnnoValue::Annotation(annotation) => {
+            out.field_varint(1, 11);
+            out.field_message(8, &annotation_pb(st, annotation));
+        }
+        AnnoValue::Array(values) => {
+            out.field_varint(1, 12);
+            for value in values {
+                out.repeated_message(9, &annotation_value_pb(st, value));
+            }
+        }
+    }
+    out
+}
+
+fn annotation_pb(st: &mut StringTable, annotation: &crate::ir::AppliedAnnotation) -> Pb {
+    let mut out = Pb::new();
+    out.field_varint(1, u64::from(st.class_id(annotation.internal)));
+    for (name, value) in &annotation.values {
+        let mut argument = Pb::new();
+        argument.field_varint(1, u64::from(st.local(name)));
+        argument.field_message(2, &annotation_value_pb(st, value));
+        out.repeated_message(2, &argument);
+    }
+    out
+}
+
 fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     let mut p = Pb::new();
     // Function.flags = 9 — emitted only when non-default (`6` = public final is the proto default).
@@ -325,10 +405,8 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     // Applied annotations (Function.annotation = 12): `Annotation.id` (field 1) referencing the class
     // through the string table's DESC_TO_CLASS_ID form, exactly as kotlinc records e.g.
     // `@LowPriorityInOverloadResolution`.
-    for &annotation in &f.annotations {
-        let mut ab = Pb::new();
-        ab.field_varint(1, u64::from(st.class_id(annotation)));
-        p.repeated_message(12, &ab);
+    for annotation in &f.annotations {
+        p.repeated_message(12, &annotation_pb(st, annotation));
     }
     // The declared contract (Function.contract = 32) — `returns(…) implies …` / `callsInPlace`
     // effects a separate compilation applies at call sites.
