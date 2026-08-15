@@ -956,6 +956,11 @@ fn write_flamegraph(guard: &pprof::ProfilerGuard<'_>) {
         signal_handler: bool,
     }
 
+    // Drop any SVG an earlier run left behind before doing anything that can bail out, so a run that
+    // writes no flamegraph cannot leave a stale one to be read as this run's profile.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/flamegraph.svg");
+    let _ = std::fs::remove_file(&path);
+
     let report = match guard.report().build_unresolved() {
         Ok(report) => report,
         Err(e) => {
@@ -1033,7 +1038,6 @@ fn write_flamegraph(guard: &pprof::ProfilerGuard<'_>) {
         eprintln!("profiler: no samples collected, no flamegraph written");
         return;
     }
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/flamegraph.svg");
     match std::fs::File::create(&path) {
         Ok(f) => {
             let mut options = pprof::flamegraph::Options::default();
