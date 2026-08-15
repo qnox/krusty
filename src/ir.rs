@@ -1356,6 +1356,10 @@ pub struct IrFile {
     /// JVM companion-storage pass. Common lowering never populates this physical realization table.
     jvm_companion_hoisted_statics: std::collections::HashSet<u32>,
     pub exprs: Vec<IrExpr>,
+    /// Exact `SetField` expression identities that realize a source property declaration's
+    /// initializer. A later assignment can target the same field with the same value, so backend
+    /// storage passes must consume this linkage instead of recognizing stores by shape or spelling.
+    pub(crate) property_initializer_stores: std::collections::HashSet<ExprId>,
     /// Sparse `ExprId` → 1-based source line for the `LineNumberTable`: statement roots, loop
     /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
     /// Absent = no line mark starts at that expression.

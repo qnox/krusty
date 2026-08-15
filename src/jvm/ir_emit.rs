@@ -8781,6 +8781,9 @@ fn emit_ctor_default_stub(
             e.emit_value(*def_expr, &mut code);
             store(pty, pslot, &mut code);
             code.bind(skip);
+            // The mask/branch machinery for the next slot maps back to the class declaration. The
+            // final fill lands at the delegation pc, where the same line is added below and collapsed.
+            lines.push((code.bytes.len() as u16, class_line));
         }
     }
     // `invokespecial <owner>.<init>(realparams)V` — delegate to the real primary constructor.

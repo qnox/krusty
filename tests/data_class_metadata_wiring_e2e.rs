@@ -476,6 +476,39 @@ fn var_reference_class_is_byte_identical() {
     );
 }
 
+/// A multi-line primary constructor with defaults gives the synthetic marker overload distinct
+/// line entries for each filled parameter and for the closing `)`, rather than one class-line entry.
+#[test]
+fn multiline_default_constructor_debug_table_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(\n    val required: Int,\n    val count: Int = 1,\n    val text: String = \"x\"\n)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A named companion evaluates a nested construction and string before invoking its superclass
+/// constructor. Their class/string/constructor pool entries must follow bytecode evaluation order.
+#[test]
+fn named_companion_constructed_super_args_are_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass Cfg(val pretty: Boolean)\nopen class Fmt(val configuration: Cfg, val tag: String) {\n    companion object Default : Fmt(Cfg(false), \"default\")\n}\n",
+        "demo/Fmt$Default",
+        &[],
+    );
+}
+
+/// JVM fields already contain primitive zero values, so kotlinc omits this declaration store. The
+/// common IR still retains it for non-JVM targets; the JVM storage pass performs the elision.
+#[test]
+fn boolean_default_body_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass Builder {\n    var pretty: Boolean = false\n}\n",
+        "demo/Builder",
+        &[],
+    );
+}
+
 /// A `var Long` + `val Int`: the wide (2-slot) `Long`/`Double` `slot_size` branch and a primitive
 /// `var` setter (no null-check guard, but its LVT still names the value `<set-?>`). Exercises the
 /// per-setter `<set-?>` interning that a non-last setter needs (`setA` precedes `getB`).

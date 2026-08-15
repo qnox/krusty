@@ -14,6 +14,7 @@ pub mod jvm_class_map;
 pub mod jvm_libraries;
 pub mod metadata;
 pub mod names;
+pub mod property_storage;
 pub mod suspend;
 pub mod value_classes;
 

@@ -3711,15 +3711,6 @@ fn lower_file_at_reporting_impl(
                                     .position(|property| property.backing_field == Some(field_idx))
                                     .expect("backing-field property registered in pass 1");
                                 let init_e = c.body_props[*i].init.unwrap();
-                                // Preserve the declaration initializer even when the JVM can elide
-                                // its physical default-value store; backend storage lowering consumes
-                                // this semantic value without re-reading the AST.
-                                if ast_init_is_jvm_default(lo.afile, init_e) {
-                                    let value = lo.lower_arg(init_e, &field_ty)?;
-                                    lo.ir.classes[class_id as usize].properties[property_index]
-                                        .initializer = Some(value);
-                                    continue;
-                                }
                                 // A branchy body-property initializer (`val k = when { … }`) emits
                                 // merge-point frames in the constructor's init context that the flat
                                 // emitter doesn't reconcile yet — bail rather than miscompile.
@@ -3745,7 +3736,9 @@ fn lower_file_at_reporting_impl(
                                     stmts.push(val);
                                 } else {
                                     let recv = lo.emit_get_value(this_v);
-                                    stmts.push(lo.emit_set_field(recv, class_id, field_idx, val));
+                                    let store = lo.emit_set_field(recv, class_id, field_idx, val);
+                                    lo.ir.property_initializer_stores.insert(store);
+                                    stmts.push(store);
                                 }
                             }
                             ast::ClassInit::Block(e) => {
@@ -5078,28 +5071,6 @@ fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
         // only difference is the setter's access flag (handled at emit). A setter with a BODY is not plain.
         && p.setter.as_ref().is_none_or(|s| s.body.is_none())
         && p.init.is_some()
-}
-
-/// Whether a body-property initializer *AST expression* is the field's JVM default value:
-/// `0`/`0L`/`0.0`/`0.0f`/`false`/`'\0'`/`null`, or such a zero literal under a primitive conversion
-/// (`0.toByte()`/`0.toChar()`). kotlinc elides a field initializer equal to the field's default — the
-/// JVM zero-initializes the field, so re-storing the default would clobber a value a base constructor's
-/// virtual call already wrote. Decided on the AST (a default-value literal has no side effect to lose).
-fn ast_init_is_jvm_default(file: &ast::File, e: AstExprId) -> bool {
-    match file.expr(e) {
-        Expr::IntLit(0) | Expr::LongLit(0) | Expr::NullLit | Expr::BoolLit(false) => true,
-        Expr::DoubleLit(d) => *d == 0.0,
-        Expr::FloatLit(f) => *f == 0.0,
-        Expr::CharLit(c) => *c as u32 == 0,
-        // `0.toByte()` / `0.toChar()` — a primitive conversion of a zero literal is still the default.
-        Expr::Call { callee, args } if args.is_empty() => match file.expr(*callee) {
-            Expr::Member { receiver, name } if is_conversion_call_name(name) => {
-                ast_init_is_jvm_default(file, *receiver)
-            }
-            _ => false,
-        },
-        _ => false,
-    }
 }
 
 /// A *deferred* body property: declared with an explicit type and NO initializer/getter/setter
@@ -8219,12 +8190,6 @@ impl<'a> Lower<'a> {
                         .ty
                         .clone();
                     let init_e = c.body_props[*i].init.unwrap();
-                    // kotlinc elides a field initializer that stores the field's JVM default value — a
-                    // base-class constructor's virtual call may have already written the field, and a
-                    // default-value store would clobber it (see `fieldInitializerOptimization`).
-                    if ast_init_is_jvm_default(self.afile, init_e) {
-                        continue;
-                    }
                     if matches!(
                         self.afile.expr(init_e),
                         Expr::When { .. }
@@ -8240,7 +8205,9 @@ impl<'a> Lower<'a> {
                         stmts.push(val);
                     } else {
                         let recv = self.emit_get_value(this_v);
-                        stmts.push(self.emit_set_field(recv, class_id, field_idx, val));
+                        let store = self.emit_set_field(recv, class_id, field_idx, val);
+                        self.ir.property_initializer_stores.insert(store);
+                        stmts.push(store);
                     }
                 }
                 ast::ClassInit::Block(e) => {
