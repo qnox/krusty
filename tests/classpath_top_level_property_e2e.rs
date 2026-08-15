@@ -22,7 +22,10 @@ fn facade_property_constant_emission_is_byte_identical_to_kotlinc() {
         val runtime = Token()\n\
         val literal = 7\n\
         val negative = -9\n\
-        var mutable = 11\n";
+        var mutable = 11\n\
+        val absent: String? = null\n\
+        var count: Int = 0\n\
+        val disabled: Boolean = false\n";
     match common::byte_diff_against_kotlinc(
         "FacadePropertyMetadata",
         SOURCE,

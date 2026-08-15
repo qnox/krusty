@@ -6,7 +6,9 @@
 
 use crate::ir::{ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 
-fn is_jvm_default(ir: &IrFile, expression: ExprId) -> bool {
+/// Whether `expression` is a constant the JVM already supplies as a field's initial value (`null`,
+/// zero of any width, `false`) — so a store of it is pure redundancy the emitter may drop.
+pub(crate) fn is_jvm_default(ir: &IrFile, expression: ExprId) -> bool {
     match ir.expr(expression) {
         IrExpr::Const(IrConst::Boolean(false))
         | IrExpr::Const(IrConst::Byte(0))
