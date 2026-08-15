@@ -4709,6 +4709,16 @@ fn emit_class(
     // has the class init steps prepended (the lowering does that). `this` is slot 0, parameters follow.
     for sc in &c.secondary_ctors {
         let sc_param_tys = jvm_tys(&sc.params);
+        // Reserve this constructor's header — its declared annotations included — before its body
+        // interns anything, matching the order kotlinc's writer produces.
+        cw.reserve_method_pool_with_annotations(
+            "<init>",
+            &method_descriptor(&sc_param_tys, Ty::Unit),
+            None,
+            &[],
+            &sc.annotations.visible,
+            &sc.annotations.invisible,
+        );
         let sc_words: u16 = sc_param_tys.iter().map(|t| slot_words(*t)).sum();
         let mut sctor = CodeBuilder::new(1 + sc_words);
         let sec_max;
@@ -7741,11 +7751,28 @@ fn emit_method_inner(
             }
         })
         .collect();
+    let declared_annotations = ir
+        .function_annotations
+        .get(&fid)
+        .cloned()
+        .unwrap_or_default();
+    // kotlinc annotates nullability only on declarations a source caller can reach. A
+    // HIDDEN-deprecated one is emitted ACC_SYNTHETIC for binary compatibility alone and carries
+    // neither `@NotNull` nor `@Nullable`.
+    let nullability_annotated = !declared_annotations.deprecated_hidden();
     let ann_types: Vec<&str> = ret_ann
         .into_iter()
         .chain(param_anns.iter().flatten().copied())
+        .filter(|_| nullability_annotated)
         .collect();
-    e.cw.reserve_method_pool(&f.name, &reserved_desc, reserved_sig.as_deref(), &ann_types);
+    e.cw.reserve_method_pool_with_annotations(
+        &f.name,
+        &reserved_desc,
+        reserved_sig.as_deref(),
+        &ann_types,
+        &declared_annotations.visible,
+        &declared_annotations.invisible,
+    );
     let mut code = CodeBuilder::new(e.next_slot);
     // kotlinc guards each non-null reference parameter of a visible function with
     // `Intrinsics.checkNotNullParameter(param, "name")` at method entry — emit the same.
@@ -7911,7 +7938,7 @@ fn emit_method_inner(
     let desc = reserved_desc;
     e.cw.add_method_sig(access, &f.name, &desc, &code, reserved_sig.as_deref());
     // kotlinc annotates a reference return and each reference parameter of a declared method.
-    if ret_ann.is_some() || param_anns.iter().any(Option::is_some) {
+    if nullability_annotated && (ret_ann.is_some() || param_anns.iter().any(Option::is_some)) {
         e.cw.set_method_nullability(&f.name, &desc, ret_ann, &param_anns);
     }
     if ir.deprecated_methods.contains(&fid) {
