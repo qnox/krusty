@@ -365,6 +365,9 @@ pub struct PropMeta {
     /// A `const val`: kotlinc sets the CONST flag bit and records a field-only
     /// `JvmPropertySignature` (no accessor exists — reads inline the `ConstantValue`).
     pub is_const: bool,
+    /// The initializer is a COMPILE-TIME CONSTANT (a non-null literal) — kotlinc's `hasConstant`
+    /// property flag. A constructor-call or `null` initializer does not qualify; `is_const` implies it.
+    pub has_constant: bool,
     /// Position of the declaration in the FILE (across kinds) — kotlinc interns package-member
     /// strings in SOURCE DECLARATION order even though the proto groups functions before
     /// properties, so the d2 indices only match when the string table is built in this order.
@@ -402,10 +405,10 @@ fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
     p
 }
 
-/// Package properties use the same schema word as class properties. A top-level `val` has a backing
-/// constant entry, while `var` adds mutability and a setter; spell those facts symbolically so this
-/// writer cannot silently diverge from the reader when the shared layout is corrected.
-const PKG_VAL_FLAGS: u64 = property_flags::DEFAULT | property_flags::HAS_CONSTANT;
+/// Package properties use the same schema word as class properties. A `var` adds mutability and a
+/// setter; a `val` gains `HAS_CONSTANT` only when its initializer is a compile-time constant
+/// (kotlinc: `val counter = 7` yes; a constructor call or the `null` literal no).
+const PKG_VAL_FLAGS: u64 = property_flags::DEFAULT;
 const PKG_VAR_FLAGS: u64 =
     property_flags::DEFAULT | property_flags::IS_VAR | property_flags::HAS_SETTER;
 
@@ -440,13 +443,20 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         PKG_VAR_FLAGS
     } else {
         PKG_VAL_FLAGS
+            | if m.has_constant || m.is_const {
+                property_flags::HAS_CONSTANT
+            } else {
+                0
+            }
     };
     // A `const val` sets the CONST flag bit (kotlinc: public const `10758` = `8710 | 2048`).
     let const_bit = if m.is_const { 1 << 11 } else { 0 };
-    p.field_varint(
-        11,
-        (base & !property_flags::VISIBILITY_MASK) | (vis << 1) | const_bit,
-    ); // flags
+    let pflags = (base & !property_flags::VISIBILITY_MASK) | (vis << 1) | const_bit;
+    // protobuf omits an optional field at its declared default — a plain `public val` with a
+    // non-constant initializer records NO flags word, exactly like a class property.
+    if pflags != property_flags::DEFAULT {
+        p.field_varint(11, pflags); // Property.flags = 11
+    }
     let mut jvm = Pb::new();
     jvm.field_message(1, &Pb::new()); // field (empty → derived)
                                       // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
@@ -563,6 +573,42 @@ mod tests {
         assert_eq!(d1, REF, "\n got: {:02x?}\n ref: {:02x?}", d1, REF);
     }
 
+    #[test]
+    fn package_property_constant_flag_follows_checked_initializer_fact() {
+        fn property(has_constant: bool) -> PropMeta {
+            PropMeta {
+                visibility: crate::types::Visibility::Public,
+                name: "answer".into(),
+                ty: Ty::Int,
+                is_var: false,
+                type_params: Vec::new(),
+                receiver: None,
+                getter: ("getAnswer".into(), "()I".into()),
+                setter: None,
+                is_const: false,
+                has_constant,
+                decl_order: 0,
+            }
+        }
+
+        let mut strings = StringTable::default();
+        let plain = property_pb(&mut strings, &property(false));
+        assert!(
+            !plain.as_bytes().contains(&0x58),
+            "a plain val must omit Property.flags at the protobuf default"
+        );
+
+        let mut strings = StringTable::default();
+        let constant = property_pb(&mut strings, &property(true));
+        assert!(
+            constant
+                .as_bytes()
+                .windows(3)
+                .any(|bytes| bytes == [0x58, 0x86, 0x44]),
+            "a literal-backed val must record kotlinc flags 8710"
+        );
+    }
+
     // An EXTENSION property's receiver must survive a write→read round trip through krusty's own
     // metadata reader (`Property.receiver_type = 5`): the accessor's JVM descriptor cannot mark
     // receiver-ness, so a separate compilation resolves `"s".doubled` from this record alone.
@@ -583,6 +629,7 @@ mod tests {
                 ),
                 setter: None,
                 is_const: false,
+                has_constant: false,
                 decl_order: 0,
             }],
             &[],
@@ -621,6 +668,7 @@ mod tests {
                 getter: ("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into()),
                 setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
                 is_const: false,
+                has_constant: false,
                 decl_order: 0,
             }],
             &[],
