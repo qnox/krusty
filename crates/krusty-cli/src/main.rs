@@ -51,12 +51,14 @@ fn main() {
         .sources
         .iter()
         .zip(&sources)
-        .map(|(path, source)| {
+        .zip(&stems)
+        .map(|((path, source), stem)| {
             krusty::source::SourceInput::new(
                 krusty::source::kind(Path::new(path))
                     .expect("CLI source collection must classify every source"),
                 source,
             )
+            .with_file_stem(stem)
         })
         .collect::<Vec<_>>();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(

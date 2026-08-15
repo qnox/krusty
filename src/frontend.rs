@@ -474,7 +474,12 @@ where
         features.apply_source_directives(source.text);
         multiplatform |= features.has("MultiPlatformProjects");
         let diagnostics_before = diags.diags.len();
-        let file = parse_source_kind(source.text, source.kind, &features, diags);
+        let mut file = parse_source_kind(source.text, source.kind, &features, diags);
+        if source.kind == SourceKind::Kotlin {
+            if let Some(stem) = source.file_stem {
+                name_anonymous_classes(&mut file, &format!("{stem}Kt"));
+            }
+        }
         parse_errors.push(
             source.kind == SourceKind::Java
                 || diags.diags[diagnostics_before..]
@@ -681,6 +686,30 @@ mod tests {
     };
     use crate::source::SourceInput;
     use crate::types::{Ty, TypeName, TypeNameList, Visibility};
+
+    #[test]
+    fn source_set_assigns_anonymous_identity_from_the_real_file_stem() {
+        let source = "fun build(): Any = object {}";
+        let inputs = [SourceInput::kotlin(source).with_file_stem("Widget")];
+        let mut diagnostics = DiagSink::new();
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+        let declaration = *analysis.files[0]
+            .anonymous_object_classes
+            .values()
+            .next()
+            .expect("anonymous declaration");
+        let crate::ast::Decl::Class(class) = analysis.files[0].decl(declaration) else {
+            panic!("anonymous declaration was not a class");
+        };
+        assert_eq!(class.name, "WidgetKt$build$1");
+    }
 
     struct ExistingLibrary;
 
