@@ -301,6 +301,17 @@ impl ConstPool {
             })
             .collect()
     }
+    /// Whether any pool Utf8 mentions `internal` as an object descriptor (`L<internal>;`) — how a
+    /// nested class referenced ONLY through a field/method descriptor still earns its
+    /// `InnerClasses` entry (kotlinc/ASM derive the nest from descriptors too, not just Class
+    /// constants).
+    fn descriptor_mentions(&self, internal: &str) -> bool {
+        let needle = format!("L{internal};");
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry, Const::Utf8(s) if s.contains(&needle)))
+    }
+
     fn integer(&mut self, v: i32) -> u16 {
         self.intern(Const::Integer(v))
     }
@@ -2011,6 +2022,7 @@ impl ClassWriter {
             .filter(|candidate| {
                 candidate.outer.as_deref() == Some(self.internal_name.as_str())
                     || referenced.contains(&candidate.inner)
+                    || self.cp.descriptor_mentions(&candidate.inner)
             })
             .map(|candidate| {
                 (
@@ -2165,7 +2177,11 @@ impl ClassWriter {
             let referenced: Vec<InnerClassSpec> = self
                 .inner_class_candidates
                 .iter()
-                .filter(|s| own_member(s) || self.cp.has_class(&s.inner))
+                .filter(|s| {
+                    own_member(s)
+                        || self.cp.has_class(&s.inner)
+                        || self.cp.descriptor_mentions(&s.inner)
+                })
                 .cloned()
                 .collect();
             (!referenced.is_empty()).then(|| {

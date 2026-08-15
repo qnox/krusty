@@ -10019,6 +10019,15 @@ impl<'a> Lower<'a> {
         let own_params_from = params_ir.len() as u32;
         params_ir.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
         let params_len = params_ir.len() as u32;
+        // kotlinc guards a RECEIVER lambda's non-null reference receiver in the static impl with
+        // `checkNotNullParameter(…, "<this>")`; captures are locals and get no guard.
+        let mut param_checks: Vec<Option<String>> = vec![None; captures.len()];
+        for (i, t) in sig.params.iter().enumerate() {
+            param_checks.push(
+                (sig.has_receiver && i == 0 && t.is_reference() && !t.is_nullable())
+                    .then(|| "<this>".to_string()),
+            );
+        }
         let fid = self.ir.add_fun(IrFunction {
             name: impl_name,
             params: params_ir,
@@ -10026,7 +10035,31 @@ impl<'a> Lower<'a> {
             body: Some(block),
             is_static: true,
             dispatch_receiver: None,
-            param_checks: Vec::new(),
+            param_checks,
+        });
+        // kotlinc gives the impl DEBUG tables: a LineNumberTable from the lambda body's line, and a
+        // LocalVariableTable naming the parameters (`<this>` for a receiver, source names else).
+        if let Some(&line) = self
+            .afile
+            .expr_source_lines
+            .get(body.0 as usize)
+            .filter(|&&line| line != 0)
+        {
+            self.ir.fn_decl_lines.insert(fid, line);
+        }
+        self.ir.fn_params.entry(fid).or_insert_with(|| {
+            let mut names: Vec<String> = captures.iter().map(|(name, _, _)| name.clone()).collect();
+            for (i, _) in sig.params.iter().enumerate() {
+                names.push(if sig.has_receiver && i == 0 {
+                    "<this>".to_string()
+                } else {
+                    params
+                        .get(i - usize::from(sig.has_receiver))
+                        .cloned()
+                        .unwrap_or_else(|| "it".to_string())
+                });
+            }
+            FnParamInfo::names(names)
         });
         crate::trace_compiler!(
             "lower",

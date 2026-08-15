@@ -7610,7 +7610,11 @@ fn emit_method_inner(
     // kotlinc annotates neither it nor a parameter in that position.
     let gsig = ir.signatures.get(&fid);
     let member_sem = ir.member_semantic_sigs.get(&fid);
-    let ret_ann = (gsig.is_none_or(|g| !matches!(g.ret, Some(Ty::TyParam(..))))
+    // A LAMBDA IMPL (`<fn>$lambda$N`) is a synthetic realization — kotlinc gives it debug tables
+    // but NO nullability annotations.
+    let lambda_impl = ir.lambda_own_params_from.contains_key(&fid);
+    let ret_ann = (!lambda_impl
+        && gsig.is_none_or(|g| !matches!(g.ret, Some(Ty::TyParam(..))))
         && member_sem.is_none_or(|(_, r)| !matches!(r, Ty::TyParam(..))))
     .then(|| ann_of(f.ret))
     .flatten();
@@ -7624,7 +7628,7 @@ fn emit_method_inner(
         .map(|(i, t)| {
             let is_tparam = gsig.is_some_and(|g| matches!(g.params.get(i), Some(Ty::TyParam(..))))
                 || member_sem.is_some_and(|(ps, _)| matches!(ps.get(i), Some(Ty::TyParam(..))));
-            if is_tparam {
+            if lambda_impl || is_tparam {
                 None
             } else if declared_nullable
                 .and_then(|v| v.get(i))
@@ -7659,6 +7663,13 @@ fn emit_method_inner(
                 );
                 code.invokestatic(m, 2, 0);
             }
+        }
+    }
+    // A LAMBDA IMPL's LineNumberTable starts at the post-guard pc, mapped to the body's line —
+    // kotlinc's shape even for an empty body (whose emission marks no line of its own).
+    if lambda_impl {
+        if let Some(&line) = ir.fn_decl_lines.get(&fid) {
+            code.mark_line(line);
         }
     }
     // kotlinc opens every EMITTED `inline fun` body with an inline-depth marker: `iconst_0;
@@ -12101,16 +12112,19 @@ impl<'a> Emitter<'a> {
                     .find(|c| c.methods.contains(impl_fn))
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
-                let meta = self.cw.method_handle_static(
-                    "java/lang/invoke/LambdaMetafactory",
-                    "metafactory",
-                    LMF_METAFACTORY_DESC,
-                );
+                // kotlinc interns the BOOTSTRAP ARGUMENTS first (erased SAM MethodType, the impl
+                // MethodHandle with its `$lambda$N` refs, the instantiated MethodType), and the
+                // LambdaMetafactory handle only after them — pool order follows that visit.
                 let sam_mt = self.cw.method_type(&sam_desc);
                 let impl_mh = self
                     .cw
                     .method_handle_static(&impl_owner, &impl_name, &impl_desc);
                 let inst_mt = self.cw.method_type(&inst_desc);
+                let meta = self.cw.method_handle_static(
+                    "java/lang/invoke/LambdaMetafactory",
+                    "metafactory",
+                    LMF_METAFACTORY_DESC,
+                );
                 let bsm = self.cw.add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt]);
                 // The `invokedynamic` takes the captured values and yields the interface instance.
                 let cap_descs: String = cap_tys.iter().map(|t| type_descriptor(*t)).collect();
