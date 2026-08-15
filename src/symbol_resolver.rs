@@ -2672,6 +2672,30 @@ fn arg_fits_source(
         || (*arg == Ty::Null && matches!(param.non_null(), Ty::TyParam(..)))
 }
 
+/// Whether a parameter can host a function value at all — the applicability test for an implicitly
+/// typed lambda literal argument. A bare `{ … }` is typed only against an expected type (its
+/// recorded type until then is `Ty::Error`), so overload pruning must go by the parameter's SHAPE:
+/// kotlinc counts such a lambda as applicable only to function-typed, `kotlin.Function*`, SAM,
+/// type-parameter, or `Any` parameters — the same doctrine as javac, where an implicitly typed
+/// lambda is not pertinent to applicability against non-functional parameters (JLS 15.12.2.2).
+/// Probed against kotlinc 2.4.10: `(f: () -> Unit)` vs `(name: String)` resolves to the function
+/// overload; vs `(x: Any)` the function overload wins on specificity. Without this test the
+/// lambda's placeholder `Ty::Error` is wildcard-assignable to EVERY parameter, and a resolvable
+/// overload pair reads as ambiguous.
+fn untyped_lambda_pertinent(lib: &dyn SemanticPlatform, src: &dyn SymbolSource, param: Ty) -> bool {
+    let shape = param.non_null();
+    shape.fun_arity().is_some()
+        || matches!(shape, Ty::TyParam(..))
+        || shape.is_erased_top()
+        // A bare lambda with no explicit parameters can be zero-arity or use implicit `it`.
+        // Recognize erased/marker function supertypes through the provider's declared hierarchy;
+        // a classifier merely named `Function...` carries no callable semantics.
+        || (0..=1)
+            .filter_map(|arity| lib.function_type(arity))
+            .any(|function| semantic_arg_assignable(src, &shape, &function))
+        || sam_arg_matches(lib, src, param, Ty::Error)
+}
+
 pub(crate) fn resolution_subtype(src: &dyn SymbolSource, sub: Ty, sup: Ty) -> bool {
     crate::assignable::is_subtype(
         &crate::assignable::TyCtx::new(),
@@ -4648,7 +4672,12 @@ impl<'a> SymbolResolver<'a> {
                 Some((o, value_params, o.callable.ret, bindings))
             })
             .collect();
-        let fits = |p: &Ty, a: &CallArgKind| self.arg_fits_or_subtype(p, &a.type_for(*p));
+        let fits = |p: &Ty, a: &CallArgKind| {
+            if a.is_lambda_literal() && a.ty() == Ty::Error {
+                return untyped_lambda_pertinent(self.lib, &self.src, *p);
+            }
+            self.arg_fits_or_subtype(p, &a.type_for(*p))
+        };
         let adapts = |p: &Ty, a: &CallArgKind, _i: usize| a.adapts_integer_literal_to(*p);
 
         // Kotlin removes low-priority declarations only when an ordinary declaration is actually
@@ -7152,6 +7181,9 @@ fn best_by_args_at_priority<'a>(
         let sam = p.non_null().fun_arity().is_none()
             && (arg.is_lambda_literal() || arg.function_type().is_some())
             && sam_arg_matches(lib, src, *p, arg.function_type().unwrap_or(arg.ty()));
+        if arg.is_lambda_literal() && arg.ty() == Ty::Error {
+            return untyped_lambda_pertinent(lib, src, *p);
+        }
         sam || fun_arg_matches(src, p, &arg.ty(), arg.is_lambda_literal())
             || semantic_arg_assignable(src, p, &arg.ty())
             || (arg.ty() == Ty::Null && matches!(p.non_null(), Ty::TyParam(..)))
@@ -7392,6 +7424,15 @@ mod tests {
     impl SymbolSource for EmptySource {}
     impl SemanticPlatform for EmptySource {}
     const EMPTY_SOURCE: EmptySource = EmptySource;
+
+    #[test]
+    fn untyped_lambda_applicability_does_not_infer_function_shape_from_a_name() {
+        assert!(!untyped_lambda_pertinent(
+            &EMPTY_SOURCE,
+            &EMPTY_SOURCE,
+            Ty::obj("kotlin/FunctionalButNotCallable"),
+        ));
+    }
 
     #[test]
     fn partial_and_final_substitution_share_the_recursive_type_walk() {
