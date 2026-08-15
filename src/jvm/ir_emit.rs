@@ -3672,13 +3672,18 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
             );
         }
     }
+    // A store the JVM already performs is pure redundancy: kotlinc emits no `<clinit>` store for a
+    // `const val` folded into a `ConstantValue`, nor for an initializer that IS the field's default
+    // (`val absent: String? = null`, `var count: Int = 0`) — the same elision instance fields get
+    // from `elide_default_property_stores`.
+    let should_store = |s: &crate::ir::IrStatic| {
+        !(crate::jvm::property_storage::is_jvm_default(ir, s.init)
+            || s.is_const && const_value_idx_peek(ir, s.init))
+    };
     // kotlinc visits `<clinit>` (name + descriptor) before the initializer constants its body
-    // interns. When every static folds into a `ConstantValue` there is NO `<clinit>` at all, so
-    // reserve only when a store will be emitted.
-    let clinit_needed = facade_statics
-        .iter()
-        .any(|s| !(s.is_const && const_value_idx_peek(ir, s.init)));
-    if !clinit_needed {
+    // interns. With nothing left to store there is NO `<clinit>` at all, so reserve only when a
+    // store will be emitted.
+    if !facade_statics.iter().any(|s| should_store(s)) {
         return;
     }
     cw.reserve_method_name("<clinit>");
@@ -3697,9 +3702,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
     // `add_method` drops a `<clinit>`'s inline marks (they are curated), so collect + set after.
     let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
     for s in &facade_statics {
-        // A `const val` folded into a `ConstantValue` attribute (literal init) is initialized by the JVM
-        // — kotlinc emits no `<clinit>` store for it, so skip it here too (byte-identical).
-        if s.is_const && const_value_idx_peek(ir, s.init) {
+        if !should_store(s) {
             continue;
         }
         if s.line != 0 {
