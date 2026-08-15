@@ -21,6 +21,12 @@ fn main() {
         println!("{}", cli::HELP);
         return;
     }
+    if !opts.errors.is_empty() {
+        for error in &opts.errors {
+            eprintln!("krusty: error: {error}");
+        }
+        std::process::exit(2);
+    }
     for ig in &opts.ignored {
         eprintln!("krusty: ignoring unsupported option '{ig}'");
     }
@@ -71,7 +77,9 @@ fn main() {
 
     // A `-jvm-target` sets the emitted class-file version (kotlinc's `jvmToolchain(25)` ⇒ v69).
     // Absent, the backend keeps krusty's v52 default.
-    let backend = krusty::jvm::JvmBackend::new(cp).with_class_major(opts.jvm_target_major);
+    let backend = krusty::jvm::JvmBackend::new(cp)
+        .with_class_major(opts.jvm_target_major)
+        .with_jvm_default(opts.jvm_default);
     let outputs = krusty::compiler::emit_checked(
         &analysis.files,
         &stems,
