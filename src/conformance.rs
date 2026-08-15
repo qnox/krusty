@@ -166,15 +166,31 @@ pub fn needs_unmodeled_compiler_flag(src: &str) -> bool {
         || needs_unmodeled_jvm_default_mode(src)
 }
 
-/// `// JVM_DEFAULT_MODE:` — kotlinc's `-jvm-default` interface-method strategy. krusty models ONE
-/// mode: `enable` (default methods on the interface PLUS the `$DefaultImpls` compatibility copy —
-/// kotlinc's own default since 2.2). A test pinning `disable` (DefaultImpls-only dispatch) or
-/// `no-compatibility` (no DefaultImpls at all) asserts a different class-file shape/dispatch, so
-/// judging it against krusty's `enable` output would mis-grade — skip.
+/// `// JVM_DEFAULT_MODE:` — the `-jvm-default` strategy a test pins, as the compiler models it.
+/// Absent, the test runs under kotlinc's own default (`enable`).
+pub fn jvm_default_mode(src: &str) -> crate::jvm::ir_emit::JvmDefaultMode {
+    src.lines()
+        .filter_map(|l| l.trim().strip_prefix("// JVM_DEFAULT_MODE:"))
+        .filter_map(|mode| {
+            crate::jvm::ir_emit::JvmDefaultMode::parse(mode.split_whitespace().next()?)
+        })
+        .next_back()
+        .unwrap_or_default()
+}
+
+/// `// JVM_DEFAULT_MODE:` values krusty does not model yet. `enable` and `no-compatibility` are
+/// modelled and are compiled under the mode the test asks for; `disable` asserts a different
+/// class-file shape AND dispatch (every body on `$DefaultImpls`, call sites routed there), so
+/// judging it against what krusty emits would mis-grade — skip.
 pub fn needs_unmodeled_jvm_default_mode(src: &str) -> bool {
     src.lines()
         .filter_map(|l| l.trim().strip_prefix("// JVM_DEFAULT_MODE:"))
-        .any(|mode| mode.split_whitespace().next() != Some("enable"))
+        .any(|mode| {
+            !matches!(
+                mode.split_whitespace().next(),
+                Some("enable") | Some("no-compatibility")
+            )
+        })
 }
 
 /// The EXTRA libraries (beyond kotlin-stdlib, which `kotlinc` always supplies) a test's classpath needs,
@@ -689,30 +705,46 @@ mod tests {
     }
 
     #[test]
-    fn jvm_default_mode_enable_is_modeled() {
-        // `enable` matches krusty's one strategy (interface default methods + $DefaultImpls copy).
-        assert!(!needs_unmodeled_compiler_flag(
-            "// JVM_DEFAULT_MODE: enable\nfun box() = \"OK\""
-        ));
+    fn modelled_jvm_default_modes_run_under_the_mode_they_pin() {
+        use crate::jvm::ir_emit::JvmDefaultMode;
+        for (directive, expected) in [
+            ("// JVM_DEFAULT_MODE: enable\n", JvmDefaultMode::Enable),
+            (
+                "// JVM_DEFAULT_MODE: no-compatibility\n",
+                JvmDefaultMode::NoCompatibility,
+            ),
+        ] {
+            let src = format!("{directive}fun box() = \"OK\"");
+            assert!(
+                !needs_unmodeled_compiler_flag(&src),
+                "{directive} is modelled and must run"
+            );
+            assert_eq!(jvm_default_mode(&src), expected);
+        }
     }
 
     #[test]
-    fn jvm_default_mode_other_modes_are_unmodeled() {
+    fn a_test_without_the_directive_runs_under_kotlincs_own_default() {
+        assert_eq!(
+            jvm_default_mode("fun box() = \"OK\""),
+            crate::jvm::ir_emit::JvmDefaultMode::Enable
+        );
+    }
+
+    #[test]
+    fn jvm_default_mode_disable_is_unmodeled() {
         assert!(needs_unmodeled_compiler_flag(
             "// JVM_DEFAULT_MODE: disable\nfun box() = \"OK\""
         ));
-        assert!(needs_unmodeled_compiler_flag(
-            "// JVM_DEFAULT_MODE: no-compatibility\nfun box() = \"OK\""
-        ));
-        // A missing value never silently counts as `enable`.
+        // A missing value never silently counts as a modelled mode.
         assert!(needs_unmodeled_compiler_flag(
             "// JVM_DEFAULT_MODE:\nfun box() = \"OK\""
         ));
     }
 
     #[test]
-    fn jvm_default_mode_any_non_enable_directive_wins() {
-        // Multiple directives: one unmodeled mode anywhere makes the test unsound to run.
+    fn one_unmodeled_directive_anywhere_skips_the_test() {
+        // A test whose modules pin different modes is only sound to run if EVERY mode is modelled.
         assert!(needs_unmodeled_compiler_flag(
             "// JVM_DEFAULT_MODE: enable\n// JVM_DEFAULT_MODE: disable\nfun box() = \"OK\""
         ));

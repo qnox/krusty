@@ -2,11 +2,14 @@
 //! same common flags (`-d`, `-classpath`/`-cp`, `-include-runtime`, `-module-name`, `-jvm-target`,
 //! `-version`, `-help`, …), source files **or directories**, `@argfile`s, and graceful handling of
 //! options krusty doesn't implement (ignored with a note, rather than treated as source files).
+//! An explicit option that selects an output shape krusty cannot emit is instead a fatal error: it
+//! must never compile successfully under a different shape.
 
 use std::path::PathBuf;
 
 use krusty::features::LangFeatures;
 use krusty::jvm::classpath::platform_jdk_modules;
+use krusty::jvm::ir_emit::JvmDefaultMode;
 
 pub struct Options {
     /// Output directory or `.jar` (kotlinc `-d`).
@@ -21,6 +24,9 @@ pub struct Options {
     pub features: LangFeatures,
     /// Options accepted for compatibility but not acted on (reported once).
     pub ignored: Vec<String>,
+    /// Invalid or explicitly requested-but-unemittable options. The driver reports these and exits
+    /// before compilation rather than silently producing a different artifact.
+    pub errors: Vec<String>,
     /// `-version` / `-help` requested (handled before compiling).
     pub print_version: bool,
     pub print_help: bool,
@@ -32,6 +38,9 @@ pub struct Options {
     pub no_reflect: bool,
     /// `-no-jdk`: do NOT add the platform JDK to the classpath (kotlinc semantics).
     pub no_jdk: bool,
+    /// `-jvm-default <mode>` (or legacy `-Xjvm-default <mode>`): how an interface's members with
+    /// bodies are realized on the JVM.
+    pub jvm_default: JvmDefaultMode,
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
@@ -46,6 +55,7 @@ impl Default for Options {
             module_name: "main".to_string(),
             features: LangFeatures::new(),
             ignored: Vec::new(),
+            errors: Vec::new(),
             print_version: false,
             print_help: false,
             jdk_home: None,
@@ -53,6 +63,7 @@ impl Default for Options {
             no_reflect: false,
             no_jdk: false,
             jvm_target_major: None,
+            jvm_default: JvmDefaultMode::default(),
         }
     }
 }
@@ -77,7 +88,6 @@ const IGNORED_WITH_VALUE: &[&str] = &[
     "-language-version",
     "-api-version",
     "-kotlin-home",
-    "-jvm-default",
     "-Xexplicit-api",
     "-opt-in",
     "-P",
@@ -94,9 +104,30 @@ const IGNORED_FLAGS: &[&str] = &[
     "-progressive",
     "-script",
     "-java-parameters",
-    "-Xjvm-default",
     "-Xuse-ir",
 ];
+
+/// Record a `-jvm-default`/`-Xjvm-default` value, reporting one krusty does not model instead of
+/// silently compiling under a different interface shape than the build asked for.
+fn apply_jvm_default(
+    opts: &mut Options,
+    flag: &str,
+    value: &str,
+    parse_value: fn(&str) -> Option<JvmDefaultMode>,
+) {
+    // An unknown value AND a known-but-unimplemented one are fatal. Merely recording either as an
+    // ignored option would let the driver continue with `Enable`, silently emitting a different
+    // interface shape than the invocation requested.
+    match parse_value(value) {
+        Some(mode) if mode.is_modelled() => opts.jvm_default = mode,
+        Some(_) => opts.errors.push(format!(
+            "unsupported {flag} mode '{value}': krusty does not emit that interface shape"
+        )),
+        None => opts
+            .errors
+            .push(format!("invalid value '{value}' for {flag}")),
+    }
+}
 
 /// Split a classpath string on the platform separator (`:` on Unix).
 fn split_classpath(v: &str) -> Vec<PathBuf> {
@@ -172,6 +203,35 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     },
                     None => opts.ignored.push("-jvm-target".to_string()),
                 }
+            }
+            // `-jvm-default` decides the JVM shape of an interface's members with bodies. It takes
+            // both the `flag value` and `flag=value` forms; the legacy `-Xjvm-default` spelling names
+            // the same three shapes differently and, like every kotlinc `-X…` flag, takes its value
+            // with `=` only — accepting a space form there would swallow the next source file.
+            "-jvm-default" => match it.next() {
+                Some(v) => apply_jvm_default(&mut opts, "-jvm-default", &v, JvmDefaultMode::parse),
+                None => opts
+                    .errors
+                    .push("missing value for -jvm-default".to_string()),
+            },
+            flag if flag.starts_with("-jvm-default=") => {
+                let value = flag
+                    .strip_prefix("-jvm-default=")
+                    .unwrap_or_default()
+                    .to_string();
+                apply_jvm_default(&mut opts, "-jvm-default", &value, JvmDefaultMode::parse);
+            }
+            flag if flag.starts_with("-Xjvm-default=") => {
+                let value = flag
+                    .strip_prefix("-Xjvm-default=")
+                    .unwrap_or_default()
+                    .to_string();
+                apply_jvm_default(
+                    &mut opts,
+                    "-Xjvm-default",
+                    &value,
+                    JvmDefaultMode::parse_legacy,
+                );
             }
             "-version" => opts.print_version = true,
             "-help" | "-h" | "-X" => opts.print_help = true,
@@ -262,10 +322,13 @@ Common options (kotlinc-compatible):
   -include-runtime      accepted (no-op: krusty does not bundle the stdlib)
   -jvm-target <v>        class-file version to emit (1.8→v52, 9→v53, …, 25→v69; default v52)
   -version              print version and exit
+  -jvm-default <mode>   interface default-method strategy: enable | no-compatibility
+                        (legacy -Xjvm-default=all | all-compatibility)
   -help                 print this help and exit
 
 Sources may be .kt files or directories (scanned recursively). Kotlin scripts are not yet compiled.
-Unsupported options are ignored with a note so existing build invocations keep working.";
+Unsupported compatibility options are ignored with a note. Invalid values and options that request
+an unemittable output shape are errors; krusty never substitutes a different artifact shape.";
 
 #[cfg(test)]
 mod tests {
@@ -273,6 +336,99 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Options {
         parse(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn jvm_default_mode_is_read_in_both_spellings() {
+        use krusty::jvm::ir_emit::JvmDefaultMode;
+        // The current spelling.
+        for (value, expected) in [
+            ("enable", JvmDefaultMode::Enable),
+            ("no-compatibility", JvmDefaultMode::NoCompatibility),
+        ] {
+            assert_eq!(
+                parse_args(&[&format!("-jvm-default={value}"), "x.kt"]).jvm_default,
+                expected,
+                "-jvm-default={value}"
+            );
+            assert_eq!(
+                parse_args(&["-jvm-default", value, "x.kt"]).jvm_default,
+                expected,
+                "-jvm-default {value}"
+            );
+        }
+        // The legacy `-Xjvm-default` spelling, with the mapping IntelliJ's own build applies
+        // (build/compiler-options.bzl): `all` is today's `no-compatibility`, and `all-compatibility`
+        // is today's `enable`. Reading `all` as "enable" would emit a `$DefaultImpls` class the
+        // project deliberately does not have.
+        for (value, expected) in [
+            ("all", JvmDefaultMode::NoCompatibility),
+            ("all-compatibility", JvmDefaultMode::Enable),
+        ] {
+            assert_eq!(
+                parse_args(&[&format!("-Xjvm-default={value}"), "x.kt"]).jvm_default,
+                expected,
+                "-Xjvm-default={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn jvm_default_defaults_to_kotlincs_own_default() {
+        use krusty::jvm::ir_emit::JvmDefaultMode;
+        assert_eq!(
+            parse_args(&["x.kt"]).jvm_default,
+            JvmDefaultMode::Enable,
+            "kotlinc 2.2+ defaults to `enable`"
+        );
+    }
+
+    /// `disable` is a real kotlinc mode krusty does not emit. Accepting it would be a silent
+    /// miscompile: the emitter would produce the `enable` class shape while `@Metadata` announced
+    /// `disable`, and a consumer trusting that metadata routes every call through a `$DefaultImpls`
+    /// method that was never emitted (`NoSuchMethodError` at run time).
+    #[test]
+    fn an_unimplemented_jvm_default_mode_is_refused_not_silently_accepted() {
+        use krusty::jvm::ir_emit::JvmDefaultMode;
+        for flag in ["-jvm-default=disable", "-Xjvm-default=disable"] {
+            let parsed = parse_args(&[flag, "x.kt"]);
+            assert_eq!(
+                parsed.jvm_default,
+                JvmDefaultMode::Enable,
+                "{flag} must not select an unemitted shape"
+            );
+            assert!(
+                parsed.errors.iter().any(|entry| entry.contains("disable")),
+                "{flag} must be reported: {:?}",
+                parsed.errors
+            );
+        }
+    }
+
+    /// kotlinc's `-X…` flags take their value with `=` only. Consuming a following argument would
+    /// eat the source file that comes after the flag.
+    #[test]
+    fn the_legacy_spelling_never_consumes_the_next_argument() {
+        let parsed = parse_args(&["-Xjvm-default", "x.kt"]);
+        assert_eq!(
+            parsed.sources,
+            vec!["x.kt".to_string()],
+            "the source file must survive: {parsed:?}",
+            parsed = parsed.ignored
+        );
+    }
+
+    #[test]
+    fn an_unknown_jvm_default_value_is_reported_and_changes_nothing() {
+        use krusty::jvm::ir_emit::JvmDefaultMode;
+        let parsed = parse_args(&["-jvm-default=sideways", "x.kt"]);
+        assert_eq!(parsed.jvm_default, JvmDefaultMode::Enable);
+        assert!(
+            parsed.errors.iter().any(|entry| entry.contains("sideways")),
+            "an invalid value must be rejected, not silently accepted: {:?}",
+            parsed.errors
+        );
+        assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 
     #[test]

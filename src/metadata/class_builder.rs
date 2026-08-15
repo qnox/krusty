@@ -313,6 +313,10 @@ pub struct ClassTail<'a> {
     /// `Class` JvmProtoBuf extension field 104 (`jvmClassFlags`) — kotlinc emits `3` for an interface.
     /// `None` for every other kind (field omitted).
     pub jvm_class_flags: Option<u64>,
+    /// A compiler-version requirement attached to the class. `-jvm-default=no-compatibility`
+    /// requires compiler 1.4.0 so older consumers do not interpret the interface under the legacy
+    /// `$DefaultImpls` rules. The tuple is `(major, minor, patch)`.
+    pub compiler_version_requirement: Option<(u8, u8, u8)>,
     /// Index of a `vararg` PRIMARY-ctor parameter (into `ctor_params`), for its
     /// `vararg_element_type` record. `None` ⇒ no vararg parameter.
     pub ctor_vararg_index: Option<usize>,
@@ -354,6 +358,7 @@ impl Default for ClassTail<'_> {
             inline_underlying: None,
             ctor_sig_name: None,
             jvm_class_flags: None,
+            compiler_version_requirement: None,
             ctor_vararg_index: None,
             emit_primary_ctor: true,
             primary_ctor_flags: 0,
@@ -794,6 +799,28 @@ pub fn build_class(
         class.field_varint(17, *name_id as u64); // Class.inlineClassUnderlyingPropertyName = 17
         class.field_message(18, ty_pb); // Class.inlineClassUnderlyingType = 18
     }
+    if let Some((major, minor, patch)) = tail.compiler_version_requirement {
+        // Class.versionRequirement (f31) indexes Class.versionRequirementTable (f32). The compact
+        // version word is `major:3 | minor:4 | patch:7`; larger components use versionFull instead.
+        // VersionKind.COMPILER_VERSION is enum value 1 (LANGUAGE_VERSION is the omitted default).
+        let mut requirement = Pb::new();
+        if major <= 7 && minor <= 15 && patch <= 127 {
+            requirement.field_varint(
+                1,
+                u64::from(major) | (u64::from(minor) << 3) | (u64::from(patch) << 7),
+            );
+        } else {
+            requirement.field_varint(
+                2,
+                u64::from(major) | (u64::from(minor) << 8) | (u64::from(patch) << 16),
+            );
+        }
+        requirement.field_varint(6, 1);
+        let mut table = Pb::new();
+        table.repeated_message(1, &requirement);
+        class.field_varint(31, 0);
+        class.field_message(32, &table);
+    }
     // Extensions are written in ASCENDING field number, like every other field: 101 before 104.
     if let Some(mi) = module_idx {
         class.field_varint(101, mi as u64); // JvmProtoBuf.classModuleName = 101
@@ -1219,6 +1246,39 @@ mod tests {
                 0x06, 0x04, 0x08, 0x02, 0x10, 0x03,
             ],
             "d1 protobuf",
+        );
+    }
+
+    // Ground truth from kotlinc 2.4.10's `FirJvmSerializerExtension`: an interface compiled with
+    // `-jvm-default=no-compatibility` references requirement-table slot 0 (Class f31), whose single
+    // entry requires compiler 1.4.0 and has VersionKind.COMPILER_VERSION (Class f32). The JVM class
+    // flags extension follows it in field order.
+    #[test]
+    fn no_compatibility_compiler_requirement_matches_kotlinc() {
+        let (d1, _) = build_class(
+            "demo/I",
+            &[],
+            "()V",
+            &[],
+            &[],
+            &[],
+            &ClassTail {
+                flags: 102,
+                emit_primary_ctor: false,
+                jvm_class_flags: Some(1),
+                compiler_version_requirement: Some((1, 4, 0)),
+                ..Default::default()
+            },
+        );
+        let requirement_and_flags = [
+            0xf8, 0x01, 0x00, // Class.versionRequirement = table index 0
+            0x82, 0x02, 0x06, 0x0a, 0x04, 0x08, 0x21, 0x30, 0x01, // table: compiler 1.4.0
+            0xc0, 0x06, 0x01, // JvmProtoBuf.jvmClassFlags = 1
+        ];
+        assert!(
+            d1.windows(requirement_and_flags.len())
+                .any(|window| window == requirement_and_flags),
+            "missing no-compatibility requirement: {d1:02x?}"
         );
     }
 
