@@ -4817,12 +4817,24 @@ fn emit_class(
         } else {
             0x0001
         }) | if sc.synthetic { 0x1000 } else { 0 };
-        cw.add_method(
-            sc_access,
-            "<init>",
-            &method_descriptor(&sc_param_tys, Ty::Unit),
-            &sctor,
-        );
+        let sc_desc = method_descriptor(&sc_param_tys, Ty::Unit);
+        cw.add_method(sc_access, "<init>", &sc_desc, &sctor);
+        // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
+        // a function's carry (see the method emitter).
+        if !sc.annotations.visible.is_empty() || !sc.annotations.invisible.is_empty() {
+            cw.set_method_annotations(
+                "<init>",
+                &sc_desc,
+                &sc.annotations.visible,
+                &sc.annotations.invisible,
+            );
+            if sc.annotations.deprecated() {
+                cw.mark_method_deprecated("<init>", &sc_desc);
+            }
+            if sc.annotations.deprecated_hidden() {
+                cw.set_method_synthetic("<init>", &sc_desc);
+            }
+        }
         if sc.defaults.iter().any(Option::is_some) {
             emit_ctor_default_stub(
                 ir,
