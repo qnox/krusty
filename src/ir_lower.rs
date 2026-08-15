@@ -2170,7 +2170,10 @@ fn lower_file_at_reporting_impl(
                             body: Some(sbody),
                             is_static: false,
                             dispatch_receiver: Some(type_name(&internal)),
-                            param_checks: vec![],
+                            // kotlinc guards a non-null reference setter value (`<set-?>`), the
+                            // same contract an ordinary synthesized setter carries.
+                            param_checks: vec![(ir_ty.is_reference() && !ir_ty.is_nullable())
+                                .then(|| "<set-?>".to_string())],
                         });
                         methods.entry(sname).or_default().push((smi, fid, Ty::Unit));
                         method_fids.push(fid);

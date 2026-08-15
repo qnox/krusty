@@ -77,6 +77,19 @@ fn verif_eq(a: &VerifType, b: &VerifType, cp: &ConstPool) -> bool {
         _ => a == b,
     }
 }
+/// A HOISTED companion property's accessor delegates through an outer-class `access$…$cp` bridge;
+/// the seeder interns the bridge (and the getter's return annotation) right after the accessor's
+/// name/descriptor — kotlinc's per-method first-use order.
+pub struct SeedAccessorBridge {
+    pub owner: String,
+    pub name: String,
+    /// Getter return-annotation kind (0 = none, 1 = `@NotNull`, 2 = `@Nullable`).
+    pub ann_kind: u8,
+    /// A setter's value-parameter `LocalVariableTable` descriptor, interned after `<set-?>` — only
+    /// needed for a primitive (a reference descriptor is already in the pool by then).
+    pub lvt_desc: Option<String>,
+}
+
 /// One backing field, as the plain-class pool seeder sees it.
 pub struct SeedField {
     pub name: String,
@@ -992,9 +1005,10 @@ impl ClassWriter {
         super_internal: &str,
         ctor_descs: (&str, &str),
         fields: &[SeedField],
-        // (name, descriptor, setter_kind): 0 = getter, 1 = primitive/other setter, 2 = non-null
+        // (name, descriptor, setter_kind, bridge): 0 = getter, 1 = primitive/other setter, 2 = non-null
         // reference setter (its `checkNotNullParameter` guard also interns a `<set-?>` String constant).
-        accessors: &[(String, String, u8)],
+        // `bridge` is a hoisted companion accessor's outer delegation target.
+        accessors: &[(String, String, u8, Option<SeedAccessorBridge>)],
         // Per-member generic `Signature`s (parameterized-type ctor/accessor/field members).
         sigs: &MemberSignatures,
     ) {
@@ -1062,9 +1076,26 @@ impl ClassWriter {
         // synthetic name), plus a `<set-?>` String constant for a non-null reference setter's
         // `checkNotNullParameter` guard. Interleaved per-setter (deduped) so it lands before the next
         // accessor, as kotlinc does — not batched at the end.
-        for (i, (name, desc, setter_kind)) in accessors.iter().enumerate() {
+        for (i, (name, desc, setter_kind, bridge)) in accessors.iter().enumerate() {
             self.cp.utf8(name);
             self.cp.utf8(desc);
+            // A hoisted companion accessor: the getter's return annotation, then the outer bridge's
+            // class/name/NameAndType/Methodref — interned here because the accessor BODY is the
+            // delegation (kotlinc's first-use order), before any `<set-?>` entries.
+            if let Some(b) = bridge {
+                if *setter_kind == 0 {
+                    match b.ann_kind {
+                        1 => {
+                            self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+                        }
+                        2 => {
+                            self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
+                        }
+                        _ => {}
+                    }
+                }
+                self.cp.methodref(&b.owner, &b.name, desc);
+            }
             // A getter/setter of a parameterized-type property carries a generic Signature, interned
             // right after its descriptor (kotlinc's order).
             if let Some(Some(s)) = sigs.accessors.get(i) {
@@ -1103,6 +1134,11 @@ impl ClassWriter {
             }
             if *setter_kind == 2 {
                 self.cp.string("<set-?>");
+            }
+            // The hoisted setter's value-parameter LVT descriptor (primitives only) lands right
+            // after `<set-?>` in kotlinc's pool.
+            if let Some(lvt) = bridge.as_ref().and_then(|b| b.lvt_desc.as_ref()) {
+                self.cp.utf8(lvt);
             }
         }
         // Each parameterized-type FIELD's `Signature` value, in field order — kotlinc interns these after

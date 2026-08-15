@@ -569,8 +569,19 @@ fn build_class_metadata(
     let accessor_names: std::collections::HashSet<String> = c
         .fields
         .iter()
-        .flat_map(|f| {
-            let (getter, setter) = accessor_jvm_names(c, &f.name);
+        .map(|f| f.name.as_str())
+        // A HOISTED companion property has no companion field, but its delegating accessors are
+        // ordinary IR methods — they realize the Property record, never a Function one.
+        .chain(
+            c.properties
+                .iter()
+                .filter(|p| {
+                    p.backing_field.is_none() && hoisted_static_for(ir, c, &p.name).is_some()
+                })
+                .map(|p| p.name.as_str()),
+        )
+        .flat_map(|name| {
+            let (getter, setter) = accessor_jvm_names(c, name);
             [getter, setter]
         })
         .collect();
@@ -814,12 +825,18 @@ fn build_class_metadata(
                 ty: property.ty,
                 is_var: property.is_var,
                 visibility,
+                // A HOISTED companion property still records a (derived) backing field — the field
+                // exists, on the outer class — and a literal-initialized `val` keeps kotlinc's
+                // HAS_CONSTANT flag exactly like an instance-field one.
                 has_constant: backing.is_some_and(|(index, field)| {
                     field.is_final() && index >= c.ctor_param_count && const_fields.contains(&index)
-                }),
+                }) || hoisted_static_for(ir, c, &property.name)
+                    .is_some_and(|s| !s.is_var && const_value_idx_peek(ir, s.init)),
                 is_const: false,
                 is_abstract: c.is_interface && property.getter.is_none(),
-                has_backing_field: backing.is_some() && !c.is_interface,
+                has_backing_field: (backing.is_some()
+                    || hoisted_static_for(ir, c, &property.name).is_some())
+                    && !c.is_interface,
                 tparam: ir.field_signatures(&c.fq_name()).and_then(|signatures| {
                     signatures
                         .iter()
@@ -1661,8 +1678,14 @@ fn seed_plain_class_pool(
             value_class_ctor: body_value_class_ctors.get(&(i as u32)).cloned(),
         })
         .collect();
-    // (name, descriptor, setter_kind): 0 getter, 1 primitive setter, 2 non-null reference setter.
-    let mut accessors: Vec<(String, String, u8)> = Vec::new();
+    // (name, descriptor, setter_kind, bridge): 0 getter, 1 primitive setter, 2 non-null reference
+    // setter; `bridge` set for hoisted companion accessors delegating to the outer.
+    let mut accessors: Vec<(
+        String,
+        String,
+        u8,
+        Option<crate::jvm::classfile::SeedAccessorBridge>,
+    )> = Vec::new();
     // A property declared `private` has NO accessor methods — seeding their names would intern pool
     // entries for methods that are never emitted.
     for f in c
@@ -1671,10 +1694,59 @@ fn seed_plain_class_pool(
         .filter(|f| !property_visibility(ir, fq_name, &f.name).is_private())
     {
         let (getter, setter) = accessor_jvm_names(c, &f.name);
-        accessors.push((getter, format!("(){}", desc(f.ty)), 0));
+        accessors.push((getter, format!("(){}", desc(f.ty)), 0, None));
         if !f.is_final() {
             let kind = if is_nonnull_ref(&f.name, f.ty) { 2 } else { 1 };
-            accessors.push((setter, format!("({})V", desc(f.ty)), kind));
+            accessors.push((setter, format!("({})V", desc(f.ty)), kind, None));
+        }
+    }
+    // HOISTED companion properties: no companion field, but the delegating accessors intern in the
+    // same position kotlinc's accessors do — each with its outer `access$…$cp` bridge (and the
+    // getter's return annotation) interleaved, since the accessor BODY is the delegation.
+    for property in &c.properties {
+        if property.backing_field.is_some() || property.is_private {
+            continue;
+        }
+        let Some(hoisted) = hoisted_static_for(ir, c, &property.name) else {
+            continue;
+        };
+        let outer = fq_name.rsplit_once('$').map(|(o, _)| o).unwrap_or(fq_name);
+        let (getter, setter) = accessor_jvm_names(c, &property.name);
+        let pd = desc(hoisted.ty);
+        accessors.push((
+            getter,
+            format!("(){pd}"),
+            0,
+            Some(crate::jvm::classfile::SeedAccessorBridge {
+                owner: outer.to_string(),
+                name: format!(
+                    "access${}$cp",
+                    crate::names::property_getter_name(&property.name)
+                ),
+                ann_kind: ann_kind(&property.name, hoisted.ty),
+                lvt_desc: None,
+            }),
+        ));
+        if hoisted.is_var {
+            let kind = if is_nonnull_ref(&property.name, hoisted.ty) {
+                2
+            } else {
+                1
+            };
+            accessors.push((
+                setter,
+                format!("({pd})V"),
+                kind,
+                Some(crate::jvm::classfile::SeedAccessorBridge {
+                    owner: outer.to_string(),
+                    name: format!(
+                        "access${}$cp",
+                        crate::names::property_setter_name(&property.name)
+                    ),
+                    ann_kind: 0,
+                    lvt_desc: (!pd.starts_with('L') && !pd.starts_with('[')).then(|| pd.clone()),
+                }),
+            ));
         }
     }
     // Generic `Signature`s for PARAMETERIZED-type members (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`).
@@ -1818,6 +1890,23 @@ fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut Cl
     }
 }
 
+/// The HOISTED outer-class static backing a companion property of `c` (a companion class), if any:
+/// the companion has no field for it, so field-driven attribute passes need this lookup instead.
+fn hoisted_static_for<'a>(
+    ir: &'a IrFile,
+    c: &crate::ir::IrClass,
+    name: &str,
+) -> Option<&'a crate::ir::IrStatic> {
+    if !c.is_companion {
+        return None;
+    }
+    let fq = c.fq_name();
+    let outer = fq.rsplit_once('$')?.0;
+    ir.statics
+        .iter()
+        .find(|s| s.companion_hoisted && s.name == name && s.owner_matches(outer))
+}
+
 fn attach_synth_debug_tables(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -1955,6 +2044,42 @@ fn attach_synth_debug_tables(
                 &[
                     ("this".to_string(), this_desc.clone(), 0),
                     ("<set-?>".to_string(), pd, 1),
+                ],
+            );
+        }
+    }
+    // HOISTED companion properties: no companion field, but the delegating accessors get the same
+    // debug shape kotlinc gives ordinary accessors (getter: `this` only; a `var` setter also has
+    // its `<set-?>` value parameter, guarded when the property type is a non-null reference).
+    for property in &c.properties {
+        if property.backing_field.is_some() {
+            continue;
+        }
+        let Some(hoisted) = hoisted_static_for(ir, c, &property.name) else {
+            continue;
+        };
+        let pline = ir
+            .prop_decl_lines
+            .get(&(c.fq_name(), property.name.clone()))
+            .copied()
+            .filter(|&l| l != 0)
+            .unwrap_or(line);
+        let pd = crate::jvm::names::type_descriptor(ir_ty_to_jvm(&hoisted.ty));
+        let (g, s) = accessor_jvm_names(c, &property.name);
+        cw.set_method_debug(&g, &format!("(){pd}"), Some((0, pline)), &this_only);
+        if hoisted.is_var {
+            let set_pc = if is_nonnull_ref(&property.name, hoisted.ty) {
+                aload_len(1) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
+            } else {
+                0
+            };
+            cw.set_method_debug(
+                &s,
+                &format!("({pd})V"),
+                Some((set_pc, pline)),
+                &[
+                    ("this".to_string(), this_desc.clone(), 0),
+                    ("<set-?>".to_string(), pd.clone(), 1),
                 ],
             );
         }
@@ -2125,6 +2250,25 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     if ctor_params.iter().any(|p| p.is_some()) {
         let ctor_desc = format!("({})V", ctor_field_descs(c));
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
+    }
+    // HOISTED companion properties: the delegating accessors annotate like ordinary accessors
+    // (reference getter return; a `var` reference setter's parameter).
+    for property in &c.properties {
+        if property.backing_field.is_some() {
+            continue;
+        }
+        let Some(hoisted) = hoisted_static_for(ir, c, &property.name) else {
+            continue;
+        };
+        let Some(a) = ann(&property.name, hoisted.ty) else {
+            continue;
+        };
+        let (getter, setter) = accessor_jvm_names(c, &property.name);
+        let pd = desc(hoisted.ty);
+        cw.set_method_nullability(&getter, &format!("(){pd}"), Some(a), &[]);
+        if hoisted.is_var {
+            cw.set_method_nullability(&setter, &format!("({pd})V"), None, &[Some(a)]);
+        }
     }
     // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
     for f in &c.fields {
@@ -4224,7 +4368,9 @@ fn emit_class(
                 cw.add_method(0x0001, "<init>", "()V", &z);
             }
         }
-        if has_ctor_marker_accessor(ir, c) {
+        // A COMPANION's synthetic marker ctor is emitted LAST, after the instance accessors
+        // (kotlinc's member order — see below); every other shape keeps it beside the primary.
+        if has_ctor_marker_accessor(ir, c) && !c.is_companion {
             emit_ctor_marker_accessor(&fq_name, &param_tys, &mut cw);
         }
     } // end `if c.has_primary_ctor`
@@ -4433,6 +4579,11 @@ fn emit_class(
                 emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, false);
             }
         }
+    }
+    // A companion's synthetic `(…, DefaultConstructorMarker)` ctor goes AFTER the accessors —
+    // kotlinc's companion member order (private <init>, accessors, marker <init>).
+    if c.has_primary_ctor && c.is_companion && has_ctor_marker_accessor(ir, c) {
+        emit_ctor_marker_accessor(&fq_name, &class_ctor_jvm_tys(c), &mut cw);
     }
     emit_bridges(c, &mut cw);
     // HOISTED companion properties: the private static field lives on THIS class, so the companion's
