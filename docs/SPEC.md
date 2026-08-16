@@ -6346,3 +6346,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   solution is always an application in the value's own hierarchy, and where that does not make the
   arguments fit, the call still fails. Explicit type arguments are never touched — a wrong one stays
   an error. Tests: `tests/bound_relation_type_variable_e2e.rs`.
+- **A NULLABLE PRIMITIVE parameter is its BOX in the descriptor and its own name in `@Metadata`.**
+  `Int?` compiles to `Ljava/lang/Integer;` while `@Metadata` keeps `kotlin/Int`, so metadata alignment
+  has to relate the two. Comparing them through the classifier ERASURE GROUPS does not: those relate
+  mapped builtins (`kotlin/List` ↔ `java/util/List`), and a box is not one — so the comparison failed,
+  `meta_callable_aligns` returned `None`, and the function lost its alignment outright. Parameter
+  NAMES go with it, which is why a call passing no primitive at all still reported "no parameter with
+  name 'x' found" for every named argument. This is the same failure shape as the value-class
+  erasure case above, one arm further along the same `else if` chain.
+
+  The pairing is the primitive→wrapper table (`kotlin_prim_to_wrapper`), which is also the single
+  source of truth for the emit-side boxing, keyed by `TypeName` so the hot alignment path stays a
+  pointer compare. An unsigned type's box is its own inline-class wrapper (`kotlin/UInt`), not a
+  `java/lang/*`, and the table already says so. Alignment is not only about names: it decides which
+  metadata function owns a JVM descriptor, so `h(x: Int?)` and `h(x: Any?)` — `(Integer,String)` and
+  `(Object,String)` — were resolved to each other's signatures, which compiles and then throws
+  `ClassCastException`, or silently calls the wrong overload.
+  Tests: `tests/nullable_primitive_parameter_name_e2e.rs`,
+  `jvm::classpath::fq_tests::metadata_param_matching_boxes_a_nullable_primitive`.
