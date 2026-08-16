@@ -5861,3 +5861,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   access '<this>' before the instance has been initialized.`, and `'{name}' overrides nothing.`
   Tests: `tests/diagnostics_match_kotlinc.rs::shared_diagnostic_wording_matches_kotlinc` and
   `tests/diagnostics_match_kotlinc.rs::prohibited_script_returns_match_kotlinc`.
+
+- **A Java `@interface` element of type `Class` is Kotlin-facing `KClass`, and non-null.** The
+  element's own type is `java.lang.Class`, but the use site spells it with a Kotlin class literal
+  (`@Replaces(Impl::class)`), whose type is `KClass`. Presenting the JVM type rejected every such
+  application with "actual type is 'reflect.KClass<..>', but 'java.lang.Class!' was expected". The
+  expectation is NON-NULL despite the platform Java type — kotlinc expects `KClass<*>` and rejects
+  `@One(null)` — so the mapping drops the platform flexibility rather than preserving it. An array
+  element maps elementwise (`Class[]` → `Array<KClass>`). The Java method's generic `Signature` is
+  authoritative for the type argument: `Class<? extends Runnable>` becomes bounded `KClass`, so
+  `String::class` remains invalid. Emission is unchanged: the value is a class constant either way.
+  Tests:
+  `tests/annotation_class_element_e2e.rs::a_java_class_element_accepts_a_class_literal`,
+  `…::the_emitted_class_constants_match_kotlinc`.
