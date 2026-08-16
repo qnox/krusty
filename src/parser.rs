@@ -1990,6 +1990,25 @@ impl<'a> Parser<'a> {
         self.parse_top_property_c(is_lateinit, abstract_ok, false, false)
     }
 
+    /// Consume an initializer's `=` when the next non-newline token is one.
+    ///
+    /// Kotlin's property grammar is `… (NL* '=' NL* expression)?`, so a declaration may put its
+    /// initializer on the following line:
+    ///
+    /// ```kotlin
+    /// val a: Map<String, Int>
+    ///     = mapOf("x" to 1)
+    /// ```
+    ///
+    /// Stopping the declaration at the newline instead leaves the `=` to be read as the start of the
+    /// next declaration or statement, which is not a recoverable position — nothing else in the
+    /// grammar begins with `=`, so looking past the newlines cannot swallow anything but this
+    /// property's own initializer.
+    fn eat_initializer_eq(&mut self) -> Option<Span> {
+        self.skip_plain_newlines_before(TokenKind::Eq);
+        self.eat_span(TokenKind::Eq)
+    }
+
     fn parse_top_property_c(
         &mut self,
         is_lateinit: bool,
@@ -2013,11 +2032,14 @@ impl<'a> Parser<'a> {
             };
         let (receiver, name) = self.parse_receiver_and_declaration_name("property name");
         let ty = if self.eat(TokenKind::Colon) {
+            // `… (':' NL* type)?` — the type may start on the next line, which is where a formatter
+            // puts a long generic one. An explicit `;` still ends the declaration.
+            self.skip_plain_newlines();
             Some(self.parse_type())
         } else {
             None
         };
-        let init_operator = self.eat_span(TokenKind::Eq);
+        let init_operator = self.eat_initializer_eq();
         let mut init = if init_operator.is_some() {
             self.skip_newlines();
             Some(self.parse_expr())
@@ -5734,6 +5756,7 @@ impl<'a> Parser<'a> {
                             "']'"
                         },
                     );
+                    self.skip_plain_newlines_before(TokenKind::Eq);
                     self.expect(TokenKind::Eq, "'='");
                     self.skip_newlines();
                     let init = self.parse_expr();
@@ -5747,6 +5770,7 @@ impl<'a> Parser<'a> {
                 }
                 let name = self.ident_or_error("variable name");
                 let ty = if self.eat(TokenKind::Colon) {
+                    self.skip_plain_newlines();
                     Some(self.parse_type())
                 } else {
                     None
@@ -5774,11 +5798,14 @@ impl<'a> Parser<'a> {
                 // the declared type does not enter into it: a deferred `val` is lowered exactly like
                 // the `var` spelling, which already handles a nullable declared type and the
                 // smart-cast-after-assignment that follows it.
-                let deferred = ty.is_some() && !self.at(TokenKind::Eq);
+                let initializer = self.eat_initializer_eq();
+                let deferred = ty.is_some() && initializer.is_none();
                 let init_operator = (!deferred).then(|| {
-                    let operator = self.tok().span;
-                    self.expect(TokenKind::Eq, "'='");
-                    operator
+                    initializer.unwrap_or_else(|| {
+                        let operator = self.tok().span;
+                        self.expect(TokenKind::Eq, "'='");
+                        operator
+                    })
                 });
                 let init = if deferred {
                     let sp = self.tok().span;
@@ -8100,10 +8127,12 @@ impl<'a> Parser<'a> {
                 self.bump(); // 'val' / 'var'
                 let name = self.ident_or_error("variable name");
                 let ty = if self.eat(TokenKind::Colon) {
+                    self.skip_plain_newlines();
                     Some(self.parse_type())
                 } else {
                     None
                 };
+                self.skip_plain_newlines_before(TokenKind::Eq);
                 self.expect(TokenKind::Eq, "'='");
                 // A `when` subject initializer may start on the next line.
                 self.skip_newlines();
