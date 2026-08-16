@@ -1068,6 +1068,8 @@ mod source_fallback_companion_props_e2e;
 mod spread_in_annotation_e2e;
 #[path = "spread_operator_e2e.rs"]
 mod spread_operator_e2e;
+#[path = "star_projection_member_read_e2e.rs"]
+mod star_projection_member_read_e2e;
 #[path = "static_member_import_e2e.rs"]
 mod static_member_import_e2e;
 #[path = "stdlib_call_resolution_e2e.rs"]

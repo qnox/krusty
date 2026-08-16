@@ -1299,6 +1299,32 @@ pub(crate) fn merge_generic_upper_bindings(
     }
 }
 
+/// Approximate a value type that a projected type argument produced. A value never HAS a projected
+/// type: `Map<*, *>` binds the `get` extension's `V` to `out Any?`, and Kotlin approximates that
+/// captured value to its bound, so `m["k"]` reads as `Any?`. `declared` is the type the substitution
+/// started from, so the approximation can use the FORMAL's own bound: reading a `C<in String>` whose
+/// parameter is declared `T : CharSequence` yields `CharSequence`, not `Any?` — the projection only
+/// says the caller may write a `String` there, never that the value read back is one. Only the
+/// value's own type is approximated: `List<out X>` is a legal type and stays exactly as declared.
+pub(crate) fn approximate_projected_value(declared: Ty, substituted: Ty) -> Ty {
+    match (declared, substituted) {
+        (_, Ty::OutProjection(inner)) => approximate_projected_value(declared, *inner),
+        (Ty::TyParam(_, bound), Ty::InProjection(_)) => approximate_projected_value(*bound, *bound),
+        (_, Ty::InProjection(_)) => Ty::nullable(Ty::obj("kotlin/Any")),
+        (Ty::Nullable(declared) | Ty::PlatformNullable(declared), Ty::Nullable(substituted)) => {
+            Ty::nullable(approximate_projected_value(*declared, *substituted))
+        }
+        (Ty::Nullable(declared) | Ty::PlatformNullable(declared), Ty::PlatformNullable(inner)) => {
+            Ty::platform_nullable(approximate_projected_value(*declared, *inner))
+        }
+        (_, Ty::Nullable(inner)) => Ty::nullable(approximate_projected_value(declared, *inner)),
+        (_, Ty::PlatformNullable(inner)) => {
+            Ty::platform_nullable(approximate_projected_value(declared, *inner))
+        }
+        _ => substituted,
+    }
+}
+
 /// Merge value-argument constraints with receiver evidence. A widened binding is retained only when
 /// the already-applied receiver remains assignable to the receiver shape under that binding. This
 /// preserves invariant receiver equality while allowing covariant receiver occurrences to contribute

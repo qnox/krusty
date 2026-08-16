@@ -15556,6 +15556,11 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // erases to `java/lang/Object` for an `Any` bound). This is the ONE place `T` becomes a
         // concrete JVM type.
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
+        // JVM erasure of a projected type argument that reached a value position: the projection is
+        // a use-site variance mark on a classifier argument, never a JVM type of its own, so it
+        // erases through its bound exactly like a type parameter (`out X` → `X`, `in X` → `Object`).
+        Ty::OutProjection(inner) => ir_ty_to_jvm(inner),
+        Ty::InProjection(_) => ir_ty_to_jvm(&Ty::obj("kotlin/Any")),
         _ => Ty::Error,
     }
 }

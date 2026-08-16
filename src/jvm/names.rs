@@ -270,10 +270,12 @@ pub fn type_descriptor(ty: Ty) -> String {
             Ty::ULong => obj_desc("kotlin/ULong"),
             other => type_descriptor(other.boxed_ref().unwrap_or(other)),
         },
-        Ty::TyParam(_, bound)
-        | Ty::PlatformNullable(bound)
-        | Ty::InProjection(bound)
-        | Ty::OutProjection(bound) => type_descriptor(*bound),
+        Ty::TyParam(_, bound) | Ty::PlatformNullable(bound) | Ty::OutProjection(bound) => {
+            type_descriptor(*bound)
+        }
+        // An `in X` occurrence says a caller may WRITE an `X` there; a value read back through it
+        // is only known to be `Any?`, so it erases to `Object` rather than to `X`.
+        Ty::InProjection(_) => obj_desc("java/lang/Object"),
     }
 }
 
