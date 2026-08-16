@@ -988,7 +988,16 @@ fn build_class_metadata(
                         .cloned()
                         .unwrap_or_default(),
                     name: property.name.clone(),
-                    ty: property.ty,
+                    // A `vararg val xs: E` property IS the constructor parameter, so it records the
+                    // parameter's `Array<out E>` — see `metadata::vararg_recorded_type`. The backing
+                    // field keeps the invariant type; only the recorded one carries the projection.
+                    ty: if c.ctor_args.iter().any(|arg| {
+                        arg.is_vararg && arg.name.as_deref() == Some(property.name.as_str())
+                    }) {
+                        crate::metadata::vararg_recorded_type(property.ty)
+                    } else {
+                        property.ty
+                    },
                     is_var: property.is_var,
                     visibility,
                     // A HOISTED companion property still records a (derived) backing field — the field
@@ -1345,9 +1354,23 @@ fn build_class_metadata(
                     .collect();
                 // Per-parameter DECLARES_DEFAULT_VALUE — recorded so a cross-module caller may
                 // OMIT a defaulted member argument (the `$default` synthetic realizes the call).
+                // A SYNTHESIZED trailing-vararg default is not one: it exists only so an adapted
+                // callable reference can mask the parameter, and advertising it would tell a caller
+                // it may omit an argument source never made optional.
+                let synthetic_vararg = ir
+                    .synthetic_vararg_defaults
+                    .contains(&fid)
+                    .then(|| ir.fn_vararg_index.get(&fid).copied())
+                    .flatten();
                 let param_defaults: Vec<bool> = ir
                     .param_defaults(fid)
-                    .map(|ds| ds.iter().skip(recv_offset).map(|d| d.is_some()).collect())
+                    .map(|ds| {
+                        ds.iter()
+                            .skip(recv_offset)
+                            .enumerate()
+                            .map(|(i, d)| d.is_some() && synthetic_vararg != Some(i))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 Some(FnMeta {
                     // How SOURCE spelled this member's declared types — carried on the IR because
@@ -1371,14 +1394,23 @@ fn build_class_metadata(
                     // The physical descriptor rides along whenever a reader could not derive it from
                     // the proto types: a VC/suspend-rewritten member (`declared`), a signature
                     // mentioning a TYPE PARAMETER (`vararg parts: T` erases to `[Ljava/lang/Object;`
-                    // — nothing in the record names that), or a vararg (kotlinc records it there
-                    // too). Derivable signatures omit it, kotlinc's usual shape.
+                    // — nothing in the record names that), or a `kotlin/Array` in any signature
+                    // position, whose descriptor depends on its type ARGUMENT and so cannot come out
+                    // of the reader's name-keyed table (`metadata::descriptor_needs_recording`). The
+                    // array rule — not vararg-ness — is what kotlinc keys on: a `vararg xs: String`
+                    // qualifies because it is RECORDED as an `Array`, and a `vararg xs: Int` (an
+                    // `IntArray`, which the table maps) records nothing. Derivable signatures omit
+                    // it, kotlinc's usual shape.
                     jvm_sig: (declared.is_some()
-                        || ir.fn_vararg_index.contains_key(&fid)
                         || matches!(metadata_ret, crate::types::Ty::TyParam(..))
                         || metadata_params
                             .iter()
-                            .any(|parameter| matches!(parameter, crate::types::Ty::TyParam(..))))
+                            .any(|parameter| matches!(parameter, crate::types::Ty::TyParam(..)))
+                        || metadata_params
+                            .iter()
+                            .copied()
+                            .chain(std::iter::once(metadata_ret))
+                            .any(crate::metadata::descriptor_needs_recording))
                     .then(|| crate::jvm::names::method_descriptor(&f.params, f.ret)),
                     jvm_sig_name: (name != f.name).then(|| f.name.clone()),
                 })
