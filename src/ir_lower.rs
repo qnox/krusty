@@ -1212,6 +1212,7 @@ fn lower_file_at_reporting_impl(
                 has_primary_ctor: c.primary_ctor_annotations.is_some() || c.is_annotation(),
                 applied_annotations: declaration_annotations(&c.annotations, info),
                 field_annotations: class_field_annotations(c, info),
+                property_annotations: class_property_annotations(c, info),
                 annotation_retention: (c.kind == ast::ClassKind::Annotation).then(|| {
                     syms.annotation_retention(class_identity)
                         .unwrap_or(crate::ir::AnnoRetention::Default)
@@ -4345,6 +4346,7 @@ fn lower_file_at_reporting_impl(
                             has_primary_ctor: true,
                             applied_annotations: crate::ir::DeclarationAnnotations::default(),
                             field_annotations: Vec::new(),
+                            property_annotations: Vec::new(),
                             annotation_retention: None,
                         });
                         // Register the subclass so an override body resolves a prop as `this.<field>` and
@@ -11083,6 +11085,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             annotation_retention: None,
         };
         let class_id = self.ir.add_class(class);
@@ -13315,6 +13318,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             annotation_retention: None,
         });
         if let Some(recv_e) = capture {
@@ -13461,6 +13465,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             annotation_retention: None,
         });
         match capture {
@@ -13705,6 +13710,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             annotation_retention: None,
         });
         Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE"))
@@ -14419,6 +14425,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             annotation_retention: None,
         });
         match capture {
@@ -27833,6 +27840,113 @@ fn class_field_annotations(
             out.push(crate::ir::FieldAnnotations {
                 field: e.name.clone(),
                 annotations,
+            });
+        }
+    }
+    // A property annotation whose `@Target` admits FIELD but not PROPERTY lands on the BACKING FIELD
+    // — the same annotation written on a property-targeting annotation class would instead reach the
+    // marker method (`class_property_annotations`).
+    let declarations = c
+        .props
+        .iter()
+        .filter(|parameter| parameter.is_property)
+        .map(|parameter| (&parameter.name, &parameter.annotations, true))
+        .chain(
+            c.body_props
+                .iter()
+                .map(|property| (&property.name, &property.annotations, false)),
+        );
+    for (name, declared, on_constructor_parameter) in declarations {
+        let mut visible = Vec::new();
+        let mut invisible = Vec::new();
+        for annotation in declared {
+            let Some(applied) = info.applied_annotation(annotation) else {
+                continue;
+            };
+            if applied
+                .targets
+                .property_declaration_site(on_constructor_parameter)
+                != Some(crate::types::PropertyAnnotationSite::Field)
+            {
+                continue;
+            }
+            match applied.retention {
+                crate::types::AnnotationRetention::Default
+                | crate::types::AnnotationRetention::Runtime => {
+                    visible.push(checked_annotation_to_ir(applied))
+                }
+                crate::types::AnnotationRetention::Binary => {
+                    invisible.push(checked_annotation_to_ir(applied))
+                }
+                crate::types::AnnotationRetention::Source => {}
+            }
+        }
+        if !visible.is_empty() || !invisible.is_empty() {
+            out.push(crate::ir::FieldAnnotations {
+                field: name.clone(),
+                visible,
+                invisible,
+            });
+        }
+    }
+    out
+}
+
+/// The user annotations applied to this class's PROPERTY declarations that Kotlin's use-site
+/// defaulting places on the property itself. A property application with no use-site prefix takes
+/// the first target the annotation declares among `param` → `property` → `field`, and only the
+/// middle one belongs here: a primary-constructor parameter's own annotation is a parameter
+/// annotation, and a FIELD-targeted one goes through [`class_field_annotations`]. SOURCE-retained
+/// annotations drop out of both, as everywhere else.
+fn class_property_annotations(
+    c: &ast::ClassDecl,
+    info: &FrontendTypeInfo,
+) -> Vec<crate::ir::PropertyAnnotations> {
+    let mut out = Vec::new();
+    // A primary-constructor `val`/`var` parameter is a property too. Its annotations default to the
+    // PARAMETER (which is why the ordinary `@Anno val x` in a constructor header is a parameter
+    // annotation, not a property one), so only an annotation that does NOT target a value parameter
+    // reaches the property here.
+    let declarations = c
+        .props
+        .iter()
+        .filter(|parameter| parameter.is_property)
+        .map(|parameter| (&parameter.name, &parameter.annotations, true))
+        .chain(
+            c.body_props
+                .iter()
+                .map(|property| (&property.name, &property.annotations, false)),
+        );
+    for (name, declared, on_constructor_parameter) in declarations {
+        let mut visible = Vec::new();
+        let mut invisible = Vec::new();
+        for annotation in declared {
+            let Some(applied) = info.applied_annotation(annotation) else {
+                continue;
+            };
+            if applied
+                .targets
+                .property_declaration_site(on_constructor_parameter)
+                != Some(crate::types::PropertyAnnotationSite::Property)
+            {
+                continue;
+            }
+            match applied.retention {
+                crate::types::AnnotationRetention::Default
+                | crate::types::AnnotationRetention::Runtime => {
+                    visible.push(checked_annotation_to_ir(applied))
+                }
+                crate::types::AnnotationRetention::Binary => {
+                    invisible.push(checked_annotation_to_ir(applied))
+                }
+                crate::types::AnnotationRetention::Source => {}
+            }
+        }
+        if !visible.is_empty() || !invisible.is_empty() {
+            out.push(crate::ir::PropertyAnnotations {
+                property: name.clone(),
+                visible,
+                invisible,
             });
         }
     }

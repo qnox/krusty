@@ -146,6 +146,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
+        annotations: Vec::new(),
     }];
     let own_names = vec!["U".to_string()];
     let captured = vec![outer];
@@ -205,6 +206,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
+        annotations: Vec::new(),
     }];
     let own_names = vec!["V".to_string()];
     let captured = vec![outer, middle];

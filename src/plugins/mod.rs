@@ -635,6 +635,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         has_primary_ctor: true,
         applied_annotations: crate::ir::DeclarationAnnotations::default(),
         field_annotations: Vec::new(),
+        property_annotations: Vec::new(),
         annotation_retention: None,
     }
 }

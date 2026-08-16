@@ -643,6 +643,7 @@ mod tests {
             properties: Vec::new(),
             fields: Vec::new(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             ctor_param_count: 0,
             ctor_args: Vec::new(),
             init_body: None,

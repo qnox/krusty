@@ -5627,6 +5627,7 @@ fn build_continuation_class(
         has_primary_ctor: true,
         applied_annotations: crate::ir::DeclarationAnnotations::default(),
         field_annotations: Vec::new(),
+        property_annotations: Vec::new(),
         annotation_retention: None,
     };
     ir.add_class(class)

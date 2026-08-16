@@ -1729,6 +1729,58 @@ pub struct AppliedAnnotation {
     pub internal: TypeName,
     pub values: Vec<(String, AnnotationValue)>,
     pub retention: AnnotationRetention,
+    /// The annotation's DECLARED `@Target` set, as far as it decides where an application written
+    /// without a use-site prefix lands (see [`AnnotationTargets`]).
+    pub targets: AnnotationTargets,
+}
+
+/// The subset of an annotation's declared `@Target` set that decides the USE-SITE of an application
+/// written on a property declaration. Kotlin picks the first applicable of
+/// `param` → `property` → `field`, and the three land in three different places in the class file,
+/// so this is a semantic fact, never a guess at emission time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnnotationTargets {
+    pub value_parameter: bool,
+    pub property: bool,
+    pub field: bool,
+}
+
+/// Where an annotation written on a property declaration with no use-site prefix belongs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyAnnotationSite {
+    /// A primary-constructor `val`/`var` parameter's own annotation — `RuntimeVisible…
+    /// ParameterAnnotations` on the constructor.
+    ValueParameter,
+    /// The Kotlin PROPERTY, which has no class-file declaration of its own: the annotation goes on a
+    /// synthetic `get<Name>$annotations()` marker method.
+    Property,
+    /// The backing field.
+    Field,
+}
+
+impl AnnotationTargets {
+    /// An annotation class that declares no `@Target` is applicable everywhere.
+    pub const DEFAULT: Self = Self {
+        value_parameter: true,
+        property: true,
+        field: true,
+    };
+
+    /// Kotlin's use-site default for an annotation written on a property declaration: the first
+    /// applicable of `param` (a primary-constructor property parameter only) → `property` → `field`.
+    /// `None` when the annotation targets none of the three (its application is a frontend error).
+    pub fn property_declaration_site(
+        self,
+        on_constructor_parameter: bool,
+    ) -> Option<PropertyAnnotationSite> {
+        if on_constructor_parameter && self.value_parameter {
+            return Some(PropertyAnnotationSite::ValueParameter);
+        }
+        if self.property {
+            return Some(PropertyAnnotationSite::Property);
+        }
+        self.field.then_some(PropertyAnnotationSite::Field)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
