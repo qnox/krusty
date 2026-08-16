@@ -6110,3 +6110,48 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   substitution applies to ordinary, local, sibling-source, and dependency classifiers, including
   value-class type arguments; their physical representation remains a backend decision.
   Tests: `tests/generic_ctor_lambda_targs_e2e.rs`.
+
+- **A property's constructed type is inferred from any declaration origin, but only where the
+  constructor certainly owns the call.** The signature pre-pass reads a constructor template for a
+  class declared in the file being collected, in another file of the module, or in a dependency —
+  the file first, because its own classifiers are not published to the module table while it is
+  being collected. Each origin answers with what it knows: the file's AST carries real defaults and
+  `vararg` marks, a module signature carries parameter types only, a dependency carries its call
+  signature. A lambda argument is contextual here exactly as in full checking — the concrete
+  arguments are typed first, their bindings substituted into the parameter template, and each lambda
+  body then inferred under that shape so its RESULT can bind what appears nowhere else.
+
+  The pass performs no overload resolution, so the template applies only where nothing else can own
+  the call, and that question is about the ARGUMENTS, never a parameter count: a default makes a
+  shorter call reachable, a vararg longer ones, and two candidates of the same arity are separated
+  only by their parameter types. "Could take this call" is ordinary SUBTYPING — a `Number` parameter
+  takes an `Int` argument — asked of the primary and of every secondary alike, and answered YES
+  wherever the pass cannot tell (a type variable, an erased top, a function type, an unresolved
+  type). A secondary withdraws the template when it could take the call; `Wrapper("hi")` cannot
+  reach `constructor(list: List<T>, index: Int = 0)`, so that one does not withdraw. Kotlin's
+  preference for a non-vararg candidate applies only among APPLICABLE ones, so a vararg secondary is
+  set aside only where the primary itself takes the call by type as well as arity — a module
+  signature cannot tell a `vararg` from an ordinary array parameter, and guessing the other way
+  commits a template the primary cannot honour.
+
+  A same-named top-level function withdraws the template only when it SELECTS for these arguments.
+  So does an explicit import of that simple name naming a non-classifier (`import other.makeCell as
+  Cell` reads exactly like a construction), and a companion object an `invoke` can apply to —
+  declared or inherited, by selection on the companion's own type, or an `invoke` EXTENSION whose
+  receiver is that companion, which selection cannot attribute during collection but the module's
+  receiver-keyed extension index can answer. A companion with no `invoke` of its own — constants, a
+  `serializer()`, a logger — keeps the template, as does an unrelated `fun invoke` elsewhere.
+
+  All of this reads the module table AS POPULATED SO FAR, so a class declared in a file collected
+  later is not yet visible and the property keeps the shape it had. That makes the INFERENCE, and
+  therefore acceptance, depend on collection order; it never makes it wrong, because every rule above
+  withdraws on what it cannot see. Removing the order dependence needs a second pass over the
+  properties that stayed open, which is separate work.
+
+  A VALUE CLASS is kept as an inferred type argument where the construction and the declaration are
+  collected together, and withheld otherwise — anywhere in the applied type, since `Box<List<Money>>`
+  reaches the same erased constructor parameter as `Box<Money>`. Its JVM representation is its
+  underlying value, and through a module or dependency declaration the argument arrives at that
+  parameter unboxed while a read through the applied type emits `checkcast`, which does not verify.
+  That lowering gap predates this inference and stays unreachable.
+  Tests: `tests/generic_ctor_template_prepass_e2e.rs`.
