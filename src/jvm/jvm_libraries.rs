@@ -3271,6 +3271,17 @@ fn field_desc_to_ty(d: &str) -> Ty {
 /// JVM descriptors and `AnnotationDefault` are still provider-owned facts. Core never reparses a
 /// descriptor or asks whether this classifier came from Java.
 fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) -> Option<ParamList> {
+    // Java exposes a class-valued annotation element as `Class<T>`, while Kotlin application syntax
+    // supplies a `KClass<T>`. Keep the generic argument decoded from the method's authoritative
+    // `Signature` attribute: dropping it would accept `String::class` for
+    // `Class<? extends Runnable>`. The physical descriptor remains provider-owned and unchanged.
+    let kotlin_class_element = |semantic: Ty| {
+        let arguments = match semantic.non_null() {
+            Ty::Obj(_, arguments) => arguments,
+            _ => &[],
+        };
+        Ty::obj_args_name(crate::types::type_name("kotlin/reflect/KClass"), arguments)
+    };
     let mut elements = class
         .methods
         .iter()
@@ -3280,7 +3291,22 @@ fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) ->
             if !parameters.is_empty() {
                 return None;
             }
-            let ty = field_desc_to_ty(ret);
+            let erased = field_desc_to_ty(ret);
+            let generic = method
+                .signature
+                .as_deref()
+                .and_then(parse_method_gsig)
+                .map(|signature| signature.ret);
+            let ty = match erased.array_elem() {
+                Some(erased_element) if erased_element.non_null() == Ty::obj("java/lang/Class") => {
+                    let element = generic.and_then(Ty::array_elem).unwrap_or(erased_element);
+                    Ty::array(kotlin_class_element(element))
+                }
+                None if erased.non_null() == Ty::obj("java/lang/Class") => {
+                    kotlin_class_element(generic.unwrap_or(erased))
+                }
+                Some(_) | None => erased,
+            };
             (ty != Ty::Error).then(|| (method.name.clone(), ty, method.has_annotation_default))
         })
         .collect::<Option<Vec<_>>>()?;
