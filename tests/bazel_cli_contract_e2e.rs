@@ -192,9 +192,9 @@ fn a_broken_source_fails_the_action() {
 /// The PERSISTENT WORKER, driven exactly as bazel drives it: line-delimited JSON work requests on
 /// stdin, one response per request on stdout, from a single reused process.
 ///
-/// This is the end-to-end proof for `use_worker = True` — the translation unit tests in
-/// `krusty_cli::worker` cover the argument surface, but only this exercises the real binary writing
-/// the real declared outputs.
+/// This is the binary-side end-to-end proof for `use_worker = True`: translation unit tests cover
+/// the argument surface, while this exercises the real long-lived binary and declared outputs. The
+/// Starlark action itself is covered by the real Bazel smoke described in `bazel/intellij.md`.
 #[test]
 fn the_persistent_worker_serves_intellijs_argument_surface() {
     let dir = workspace("worker");
@@ -205,11 +205,14 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     )
     .expect("write source");
     let jar = dir.join("demo.jar");
+    let forwarded_jar = dir.join("forwarded.jar");
     let abi = dir.join("demo.abi.jar");
     let cri = dir.join("demo.kotlinCriStorage");
 
-    // Request 1: the options intellij-community actually builds with. Request 2: a target carrying
-    // Java, which must be refused WITHOUT ending the worker — so a third request still gets served.
+    // Request 1: the options intellij-community actually builds with. Request 2 supplies the same
+    // codegen decisions through the rule's `kotlinc_opts` passthrough ONLY: worker defaults must not
+    // overwrite them. Request 3 carries Java and must be refused WITHOUT ending the worker, so a
+    // fourth request still gets served.
     let requests = format!(
         concat!(
             r#"{{"arguments":["--target_label","//demo:demo","--kotlin_module_name","intellij.demo","#,
@@ -218,13 +221,16 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
             r#""--srcs","{src}","--out","{jar}","--abi-out","{abi}","--kotlin-cri-out","{cri}","#,
             r#""--java-count","0"],"requestId":1}}"#,
             "\n",
-            r#"{{"arguments":["--srcs","{src}","--out","{jar}","--java-count","4"],"requestId":2}}"#,
+            r#"{{"arguments":["--kotlinc-arg","-Xjvm-default=all","--kotlinc-arg","-Xno-param-assertions","--srcs","{src}","--out","{forwarded_jar}"],"requestId":2}}"#,
             "\n",
-            r#"{{"arguments":["--srcs","{src}","--out","{jar}","--jvm_default","disable"],"requestId":3}}"#,
+            r#"{{"arguments":["--srcs","{src}","--out","{jar}","--java-count","4"],"requestId":3}}"#,
+            "\n",
+            r#"{{"arguments":["--srcs","{src}","--out","{jar}","--jvm_default","disable"],"requestId":4}}"#,
             "\n"
         ),
         src = source.display(),
         jar = jar.display(),
+        forwarded_jar = forwarded_jar.display(),
         abi = abi.display(),
         cri = cri.display()
     );
@@ -245,7 +251,7 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     let output = child.wait_with_output().expect("worker exit");
     let text = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
-    assert_eq!(lines.len(), 3, "one response per request: {text}");
+    assert_eq!(lines.len(), 4, "one response per request: {text}");
 
     assert!(
         lines[0].contains("\"exitCode\":0") && lines[0].contains("\"requestId\":1"),
@@ -253,14 +259,19 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
         lines[0]
     );
     assert!(
-        lines[1].contains("\"exitCode\":1") && lines[1].contains("Java front end"),
-        "a Java-carrying target is refused: {}",
+        lines[1].contains("\"exitCode\":0") && lines[1].contains("\"requestId\":2"),
+        "forwarded codegen flags must compile: {}",
         lines[1]
     );
     assert!(
-        lines[2].contains("\"exitCode\":1") && lines[2].contains("--jvm_default disable"),
-        "an unemittable shape is refused, and the worker was still alive to say so: {}",
+        lines[2].contains("\"exitCode\":1") && lines[2].contains("Java front end"),
+        "a Java-carrying target is refused: {}",
         lines[2]
+    );
+    assert!(
+        lines[3].contains("\"exitCode\":1") && lines[3].contains("--jvm_default disable"),
+        "an unemittable shape is refused, and the worker was still alive to say so: {}",
+        lines[3]
     );
 
     // Every DECLARED output exists, or bazel fails the action.
@@ -282,5 +293,25 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
             .iter()
             .any(|entry| entry == "META-INF/intellij.demo.kotlin_module"),
         "--kotlin_module_name reached the compiler: {entries:?}"
+    );
+
+    let forwarded_entries = jar_entries(&forwarded_jar);
+    assert!(
+        !forwarded_entries
+            .iter()
+            .any(|entry| entry.contains("DefaultImpls")),
+        "forwarded -Xjvm-default=all must not be overwritten: {forwarded_entries:?}"
+    );
+    let forwarded_code = common::javap(&[
+        "-c",
+        "-p",
+        "-classpath",
+        &forwarded_jar.to_string_lossy(),
+        "demo.IKt",
+    ])
+    .expect("inspect forwarded worker output");
+    assert!(
+        !forwarded_code.contains("checkNotNullParameter"),
+        "forwarded -Xno-param-assertions must not be overwritten:\n{forwarded_code}"
     );
 }

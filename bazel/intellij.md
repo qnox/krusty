@@ -4,8 +4,9 @@
 `build/jvm-rules` `jvm-inc-builder`, so a `jvm_library` target can be moved onto krusty by changing
 which rule it loads — not by rewriting its options.
 
-Everything below was derived from that repository at `3f14adc599ef` and is reproduced here because
-the mapping is the integration; running it needs a bazel this machine does not have.
+Everything below was derived from that repository at `3f14adc599ef`. The rule and worker path were
+also exercised with Bazel 8.4.2: two dependent Kotlin targets were compiled by one reused
+`KrustyCompile` worker and consumed by a downstream Java target.
 
 ## What the project's options become
 
@@ -20,10 +21,10 @@ them into worker flags, and krusty's `--persistent_worker` parses exactly those:
 | `x_lambdas = "indy"` | `--x_lambdas indy` | what krusty emits already |
 | `x_sam_conversions = "indy"` | `--x_sam_conversions indy` | likewise |
 | `jvm_target = "25"` | `--jvm_target 25` | `-jvm-target 25` (class file v69) |
-| `api_version` / `language_version = "2.4"` | `--api_version` / `--language_version` | passed through |
-| `progressive = True` | `--progressive` | `-progressive` |
-| `x_x_language = ["+…"]` | `--x_xlanguage +…` | `-XXLanguage:+…` |
-| `opt_in = [...]` | `--opt_in …` | `-opt-in=…` |
+| `api_version` / `language_version = "2.4"` | `--api_version` / `--language_version` | accepted current mode and reported as a no-op; other versions are refused |
+| `progressive = True` | `--progressive` | reported as a diagnostics-only no-op |
+| `x_x_language = ["+…"]` | `--x_xlanguage +…` | supported language features are forwarded; the project's eager-accessibility check is reported as a no-op |
+| `opt_in = [...]` | `--opt_in …` | reported as a no-op because krusty does not enforce opt-in requirements |
 
 A value krusty cannot emit — `jvm_default = "disable"`, `x_lambdas = "class"` — fails the action
 rather than producing a different artifact than the target asked for.
@@ -39,8 +40,7 @@ bazel_dep(name = "krusty", version = "0.0.1")
 ```bash
 cargo build --release          # in the krusty checkout
 bazel build //some:target \
-  --//bazel:krusty_binary=//tools:krusty \
-  --//bazel:use_krusty=true
+  --@krusty//bazel:krusty_binary=//tools:krusty
 ```
 
 Then, for a target you want krusty to build, swap the loaded symbol:
@@ -63,8 +63,8 @@ krusty_jvm_library(
 ## Which targets are eligible today
 
 **Kotlin-only targets.** krusty has no Java front end, and `jvm-inc-builder` compiles both languages
-in one action (`--java-count`), so a target with any `.java` source is refused by the worker — loudly,
-with the target label, rather than by emitting a jar missing those classes.
+in one action (`--java-count`), so a target with any `.java` source is refused by the worker rather
+than emitting a jar missing those classes.
 
 That is a real restriction on this project: most `jvm_library` targets in intellij-community are
 mixed. The parity scan (`scripts/ij-parity.py`) reports which modules are Kotlin-only.
