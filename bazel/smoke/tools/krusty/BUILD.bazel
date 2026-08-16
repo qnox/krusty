@@ -1,0 +1,9 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+# `sh_binary` is not a native rule under Bazel 9, so it is loaded explicitly rather than relying on
+# the version in use.
+sh_binary(
+    name = "krusty",
+    srcs = ["krusty.sh"],
+    visibility = ["//visibility:public"],
+)
