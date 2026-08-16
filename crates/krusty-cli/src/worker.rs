@@ -33,14 +33,10 @@ pub struct WorkUnit {
     pub cri_file: Option<PathBuf>,
     pub sources: Vec<PathBuf>,
     pub classpath: Vec<PathBuf>,
-    /// `--friends`: modules whose `internal` declarations this target may see.
-    pub friends: Vec<PathBuf>,
     pub module_name: Option<String>,
     pub target_label: Option<String>,
     /// The kotlinc-style flags translated from the worker's own option names.
     pub kotlinc_args: Vec<String>,
-    pub jvm_default: JvmDefaultMode,
-    pub param_assertions: bool,
     /// Worker options that were understood but have no effect on krusty's output.
     pub inert: Vec<String>,
 }
@@ -90,24 +86,23 @@ const LIST_FLAGS: &[&str] = &[
 /// `None` is understood but changes nothing krusty emits.
 fn boolean_option(flag: &str) -> Option<Option<&'static str>> {
     Some(match flag {
-        "--progressive" => Some("-progressive"),
+        "--progressive" => None,
         "--x_allow_kotlin_package" => Some("-Xallow-kotlin-package"),
         "--x_allow_result_return_type" => Some("-Xallow-result-return-type"),
         "--x_allow_unstable_dependencies" => Some("-Xallow-unstable-dependencies"),
         "--x_consistent_data_class_copy_visibility" => {
             Some("-Xconsistent-data-class-copy-visibility")
         }
-        "--x_context_parameters" => Some("-Xcontext-parameters"),
+        "--x_context_parameters" => Some("-XXLanguage:+ContextParameters"),
         "--x_context_receivers" => Some("-Xcontext-receivers"),
         "--x_inline_classes" => Some("-Xinline-classes"),
         "--x_skip_prerelease_check" => Some("-Xskip-prerelease-check"),
-        "--x_when_guards" => Some("-Xwhen-guards"),
+        "--x_when_guards" => Some("-XXLanguage:+WhenGuards"),
         // Diagnostics and reporting: they change what the compiler PRINTS, not what it emits.
         "--x_render_internal_diagnostic_names"
         | "--x_report_all_warnings"
         | "--trace"
         | "--no-proc"
-        | "--x_strict_java_nullability_assertions"
         | "--x_wasm_attach_js_exception"
         | "--x_wasm_generate_closed_world_multimodule"
         | "--x_wasm_kclass_fqn" => None,
@@ -115,12 +110,59 @@ fn boolean_option(flag: &str) -> Option<Option<&'static str>> {
     })
 }
 
+/// Admit only language toggles the frontend actually observes. `LangFeatures` intentionally accepts
+/// arbitrary names for the conformance harness, so merely reparsing `-XXLanguage:` cannot prove that
+/// a build-request feature changes the compiler. The worker boundary must be stricter: an unknown
+/// toggle may change syntax or emitted declarations and therefore cannot be reported as successful.
+fn translate_language_features(
+    unit: &mut WorkUnit,
+    value: &str,
+    source_flag: &str,
+) -> Result<(), Refusal> {
+    const MODELED: &[&str] = &[
+        "ContextParameters",
+        "EnableNameBasedDestructuringShortForm",
+        "ExplicitBackingFields",
+        "ExplicitContextArguments",
+        "ImplicitSignedToUnsignedIntegerConversion",
+        "MultiDollarInterpolation",
+        "MultiPlatformProjects",
+        "NameBasedDestructuring",
+        "WhenGuards",
+    ];
+    let tokens = value.split(',').collect::<Vec<_>>();
+    if tokens.iter().any(|token| token.is_empty()) {
+        return Err(Refusal::Malformed(format!(
+            "{source_flag}: requires at least one +Feature or -Feature"
+        )));
+    }
+    for token in tokens {
+        let Some(name) = token.strip_prefix('+').or_else(|| token.strip_prefix('-')) else {
+            return Err(Refusal::Malformed(format!(
+                "{source_flag} {token}: expected +Feature or -Feature"
+            )));
+        };
+        if name.is_empty() {
+            return Err(Refusal::Malformed(format!(
+                "{source_flag} {token}: feature name is empty"
+            )));
+        }
+        if name == "AllowEagerSupertypeAccessibilityChecks" {
+            unit.inert.push(format!("{source_flag} {token}"));
+        } else if MODELED.contains(&name) {
+            unit.kotlinc_args.push(format!("-XXLanguage:{token}"));
+        } else {
+            return Err(Refusal::Unsupported(format!(
+                "{source_flag} {token}: language feature is not modeled by krusty"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Translate one `jvm-inc-builder` argument list into a [`WorkUnit`].
 pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
-    let mut unit = WorkUnit {
-        param_assertions: true,
-        ..WorkUnit::default()
-    };
+    let mut unit = WorkUnit::default();
     let mut java_count: Option<usize> = None;
     let mut source_jars = Vec::new();
     let mut index = 0;
@@ -153,6 +195,11 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         if path.extension().and_then(|e| e.to_str()) == Some("java") {
                             return Err(Refusal::JavaSources(format!("{value} is a Java source")));
                         }
+                        if !krusty::source::is_batch_compilable_path(&path) {
+                            return Err(Refusal::Unsupported(format!(
+                                "--srcs {value}: krusty's batch compiler accepts only .kt sources"
+                            )));
+                        }
                         unit.sources.push(path);
                     }
                 }
@@ -171,12 +218,27 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         )));
                     }
                 }
+                // krusty does not enforce opt-in requirements, so supplying an opt-in changes no
+                // emitted bytes today. Report that fact instead of pretending the CLI consumed it.
                 "--opt_in" => unit
-                    .kotlinc_args
-                    .extend(values.into_iter().map(|value| format!("-opt-in={value}"))),
-                "--x_xlanguage" => unit
-                    .kotlinc_args
-                    .extend(values.into_iter().map(|v| format!("-XXLanguage:{v}"))),
+                    .inert
+                    .extend(values.into_iter().map(|value| format!("--opt_in {value}"))),
+                "--x_xlanguage" => {
+                    if values.is_empty() {
+                        return Err(Refusal::Malformed(
+                            "--x_xlanguage requires at least one feature".to_string(),
+                        ));
+                    }
+                    for value in values {
+                        translate_language_features(&mut unit, &value, flag)?;
+                    }
+                }
+                "--plugin_options" => {
+                    return Err(Refusal::Unsupported(
+                        "--plugin_options: krusty does not run compiler plugins supplied by the build"
+                            .to_string(),
+                    ));
+                }
                 // Understood, but they do not change the bytes krusty writes.
                 _ => unit.inert.push(flag.to_string()),
             }
@@ -225,14 +287,14 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 unit.kotlinc_args.push(value_of(index, flag)?);
                 index += 2;
             }
-            "--api_version" => {
-                unit.kotlinc_args.push("-api-version".to_string());
-                unit.kotlinc_args.push(value_of(index, flag)?);
-                index += 2;
-            }
-            "--language_version" => {
-                unit.kotlinc_args.push("-language-version".to_string());
-                unit.kotlinc_args.push(value_of(index, flag)?);
+            "--api_version" | "--language_version" => {
+                let value = value_of(index, flag)?;
+                if value != "2.4" {
+                    return Err(Refusal::Unsupported(format!("{flag} {value}")));
+                }
+                // This compiler implements the current 2.4 language/API surface directly; it has
+                // no alternate-version mode to select. State the accepted no-op in the response.
+                unit.inert.push(format!("{flag} {value}"));
                 index += 2;
             }
             // The four options this worker exists to honor. Each selects an artifact SHAPE, so a
@@ -242,7 +304,17 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 let mode = JvmDefaultMode::parse(&value)
                     .filter(|mode| mode.is_modelled())
                     .ok_or_else(|| Refusal::Unsupported(format!("--jvm_default {value}")))?;
-                unit.jvm_default = mode;
+                unit.kotlinc_args.push("-jvm-default".to_string());
+                unit.kotlinc_args.push(
+                    match mode {
+                        JvmDefaultMode::Enable => "enable",
+                        JvmDefaultMode::NoCompatibility => "no-compatibility",
+                        JvmDefaultMode::Disable => {
+                            unreachable!("unmodelled mode was rejected above")
+                        }
+                    }
+                    .to_string(),
+                );
                 index += 2;
             }
             "--x_lambdas" | "--x_sam_conversions" => {
@@ -253,7 +325,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 index += 2;
             }
             "--x_no_param_assertions" => {
-                unit.param_assertions = false;
+                unit.kotlinc_args.push("-Xno-param-assertions".to_string());
                 index += 1;
             }
             "--x_no_call_assertions" => {
@@ -265,20 +337,43 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             // would have to re-spell every option in the worker vocabulary, and anything it could
             // not spell would silently not reach the compiler.
             "--kotlinc-arg" => {
-                unit.kotlinc_args.push(value_of(index, flag)?);
+                let value = value_of(index, flag)?;
+                if matches!(
+                    value.as_str(),
+                    "-d" | "-cp" | "-classpath" | "-class-path" | "-module-name"
+                ) || value.starts_with('@')
+                {
+                    return Err(Refusal::Unsupported(format!(
+                        "{flag} {value}: output, module, sources, and classpath are owned by the work request"
+                    )));
+                } else if let Some(features) = value.strip_prefix("-XXLanguage:") {
+                    translate_language_features(&mut unit, features, flag)?;
+                } else {
+                    match value.as_str() {
+                        // Diagnostics/current-language policy only; the compiler already implements
+                        // its current semantics and records these no-ops for Bazel to print.
+                        "-progressive" | "-nowarn" => unit.inert.push(value),
+                        "-Xexplicit-api=disable" => unit.inert.push(value),
+                        _ => unit.kotlinc_args.push(value),
+                    }
+                }
                 index += 2;
             }
             "--x_explicit_api" => {
                 let value = value_of(index, flag)?;
-                if value != "disable" {
-                    unit.kotlinc_args.push(format!("-Xexplicit-api={value}"));
+                if value == "disable" {
+                    unit.inert.push(format!("--x_explicit_api {value}"));
+                } else {
+                    return Err(Refusal::Unsupported(format!("{flag} {value}")));
                 }
                 index += 2;
             }
             "--warn" => {
                 let value = value_of(index, flag)?;
                 if value == "off" {
-                    unit.kotlinc_args.push("-nowarn".to_string());
+                    unit.inert.push(format!("--warn {value}"));
+                } else {
+                    return Err(Refusal::Unsupported(format!("{flag} {value}")));
                 }
                 index += 2;
             }
@@ -301,10 +396,21 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             // `--reduced-classpath-mode true` (and the `--direct-dependencies` list that accompanies
             // it) narrow what the builder puts on the classpath. Ignoring the optimization is safe:
             // krusty still receives the full `--cp`.
-            "--reduced-classpath-mode" | "--x_compiler_plugin_order" => {
+            "--reduced-classpath-mode" => {
+                let value = value_of(index, flag)?;
+                if !matches!(value.as_str(), "true" | "false") {
+                    return Err(Refusal::Malformed(format!(
+                        "{flag} {value}: expected true or false"
+                    )));
+                }
+                unit.inert.push(format!("{flag} {value}"));
+                index += 2;
+            }
+            "--x_compiler_plugin_order" => {
                 unit.inert.push(flag.to_string());
                 index += 1;
-                // These carry a value; consume it rather than meeting it as a stray argument.
+                // Plugin order is a list. Consume all entries rather than meeting them as stray
+                // arguments; any actual plugin is refused by the plugin flags above.
                 while index < arguments.len() && !arguments[index].starts_with("--") {
                     index += 1;
                 }
@@ -335,6 +441,26 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
     }
     if unit.output_jar.as_os_str().is_empty() {
         return Err(Refusal::Malformed("no --out".to_string()));
+    }
+    // `kotlinc_opts` is intentionally open-ended at the Starlark surface. The batch CLI accepts
+    // unknown compatibility flags for interactive use, but a worker must be stricter: silently
+    // ignoring an unknown target option can emit a different artifact. Everything intentionally
+    // inert was removed above; every remaining option must be genuinely modeled by the CLI.
+    let parsed = crate::cli::parse(unit.kotlinc_args.clone());
+    if !parsed.errors.is_empty() {
+        return Err(Refusal::Unsupported(parsed.errors.join("; ")));
+    }
+    if !parsed.ignored.is_empty() {
+        return Err(Refusal::Unsupported(format!(
+            "compiler option(s) not modeled by krusty: {}",
+            parsed.ignored.join(", ")
+        )));
+    }
+    if !parsed.sources.is_empty() {
+        return Err(Refusal::Malformed(format!(
+            "unexpected positional kotlinc option value(s): {}",
+            parsed.sources.join(", ")
+        )));
     }
     Ok(unit)
 }
@@ -527,22 +653,24 @@ mod tests {
             vec![PathBuf::from("a/A.kt"), PathBuf::from("a/B.kt")]
         );
         assert_eq!(unit.classpath, vec![PathBuf::from("lib/dep.jar")]);
-        assert_eq!(unit.jvm_default, JvmDefaultMode::NoCompatibility);
-        assert!(unit.param_assertions);
-        for expected in [
-            "-jvm-target",
-            "25",
-            "-api-version",
-            "2.4",
-            "-progressive",
-            "-nowarn",
-            "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks",
-        ] {
+        let parsed = crate::cli::parse(unit.kotlinc_args.clone());
+        assert_eq!(parsed.jvm_default, JvmDefaultMode::NoCompatibility);
+        assert!(!parsed.no_param_assertions);
+        for expected in ["-jvm-target", "25"] {
             assert!(
                 unit.kotlinc_args.iter().any(|a| a == expected),
                 "{expected} missing from {:?}",
                 unit.kotlinc_args
             );
+        }
+        for inert in [
+            "--api_version 2.4",
+            "--language_version 2.4",
+            "--progressive",
+            "--warn off",
+            "--x_xlanguage +AllowEagerSupertypeAccessibilityChecks",
+        ] {
+            assert!(unit.inert.iter().any(|value| value == inert), "{inert}");
         }
     }
 
@@ -559,7 +687,10 @@ mod tests {
             "o.jar",
         ]))
         .unwrap();
-        assert_eq!(unit.jvm_default, JvmDefaultMode::NoCompatibility);
+        assert_eq!(
+            crate::cli::parse(unit.kotlinc_args).jvm_default,
+            JvmDefaultMode::NoCompatibility
+        );
     }
 
     /// A mode krusty does not emit fails the action instead of producing another shape.
@@ -588,7 +719,7 @@ mod tests {
             "o.jar",
         ]))
         .unwrap();
-        assert!(!unit.param_assertions);
+        assert!(crate::cli::parse(unit.kotlinc_args).no_param_assertions);
         assert!(unit.inert.iter().any(|f| f == "--x_no_call_assertions"));
     }
 
@@ -629,6 +760,16 @@ mod tests {
         assert!(matches!(by_count, Refusal::JavaSources(_)), "{by_count:?}");
     }
 
+    /// The batch CLI silently ignores scripts and unknown path kinds. A worker cannot inherit that
+    /// compatibility behavior: Bazel would receive a successful jar missing a declared source.
+    #[test]
+    fn every_declared_source_must_be_batch_compilable_kotlin() {
+        for source in ["A.kts", "README", "generated/source.txt"] {
+            let refusal = translate(&args(&["--srcs", source, "--out", "o.jar"])).unwrap_err();
+            assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+        }
+    }
+
     #[test]
     fn source_jars_and_plugins_are_refused() {
         for arguments in [
@@ -667,6 +808,18 @@ mod tests {
         ]))
         .expect("must translate");
         assert_eq!(unit.sources, vec![PathBuf::from("A.kt")]);
+
+        let malformed = translate(&args(&[
+            "--reduced-classpath-mode",
+            "true",
+            "not-a-second-value",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .unwrap_err();
+        assert!(matches!(malformed, Refusal::Malformed(_)), "{malformed:?}");
     }
 
     /// Resources would be dropped from the jar, so the target is refused rather than shipped
@@ -702,10 +855,110 @@ mod tests {
             "o.jar",
         ]))
         .expect("must translate");
-        assert_eq!(
-            unit.kotlinc_args,
-            vec!["-Xjvm-default=all".to_string(), "-progressive".to_string()]
-        );
+        assert_eq!(unit.kotlinc_args, vec!["-Xjvm-default=all".to_string()]);
+        assert_eq!(unit.inert, vec!["-progressive".to_string()]);
+    }
+
+    /// A target-provided compiler flag is safe only when the CLI actually models it. Accepting an
+    /// arbitrary `-X...` here lets the CLI's compatibility parser ignore a potentially
+    /// output-changing option while the worker reports success.
+    #[test]
+    fn an_unknown_forwarded_kotlinc_flag_is_refused() {
+        for option in [
+            "-Xshape-krusty-does-not-model",
+            "-XXLanguage:+ShapeKrustyDoesNotModel",
+        ] {
+            let refusal = translate(&args(&[
+                "--kotlinc-arg",
+                option,
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]))
+            .unwrap_err();
+            assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+        }
+    }
+
+    #[test]
+    fn forwarded_flags_cannot_replace_worker_owned_inputs_or_outputs() {
+        for option in ["-d", "-classpath", "-module-name", "@other.args"] {
+            let refusal = translate(&args(&[
+                "--kotlinc-arg",
+                option,
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]))
+            .unwrap_err();
+            assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+        }
+    }
+
+    #[test]
+    fn modeled_language_features_reach_the_frontend() {
+        let unit = translate(&args(&[
+            "--x_xlanguage",
+            "+WhenGuards",
+            "-ContextParameters",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("modeled language features");
+        let parsed = crate::cli::parse(unit.kotlinc_args);
+        assert!(parsed.features.has("WhenGuards"));
+        assert!(!parsed.features.has("ContextParameters"));
+    }
+
+    #[test]
+    fn unknown_worker_language_features_are_refused() {
+        let refusal = translate(&args(&[
+            "--x_xlanguage",
+            "+ShapeKrustyDoesNotModel",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .unwrap_err();
+        assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+
+        for arguments in [
+            args(&["--x_xlanguage", ",", "--srcs", "A.kt", "--out", "o.jar"]),
+            args(&[
+                "--kotlinc-arg",
+                "-XXLanguage:",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+        ] {
+            assert!(
+                matches!(translate(&arguments).unwrap_err(), Refusal::Malformed(_)),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    /// Plugin options are output-affecting even if a malformed request omitted the companion
+    /// plugin id/classpath flags. They must never fall through the generic inert-list path.
+    #[test]
+    fn plugin_options_are_refused() {
+        let refusal = translate(&args(&[
+            "--plugin_options",
+            "plugin:option=value",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .unwrap_err();
+        assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
     }
 
     /// `--friends` carries the modules whose `internal` declarations must be visible. krusty has no
@@ -757,10 +1010,12 @@ mod tests {
     /// An unknown option may well select an output shape, so it is refused rather than dropped.
     #[test]
     fn an_unknown_worker_option_is_refused() {
-        assert!(matches!(
-            translate(&args(&["--srcs", "A.kt", "--out", "o.jar", "--brand-new"])).unwrap_err(),
-            Refusal::Unsupported(_)
-        ));
+        for option in ["--brand-new", "--x_strict_java_nullability_assertions"] {
+            assert!(matches!(
+                translate(&args(&["--srcs", "A.kt", "--out", "o.jar", option])).unwrap_err(),
+                Refusal::Unsupported(_)
+            ));
+        }
     }
 
     #[test]

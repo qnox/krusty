@@ -106,10 +106,7 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
     argv.extend(unit.kotlinc_args.iter().cloned());
     argv.extend(unit.sources.iter().map(|path| path.display().to_string()));
 
-    let mut opts = cli::parse(argv);
-    // The two options the worker decides directly rather than through a flag string.
-    opts.jvm_default = unit.jvm_default;
-    opts.no_param_assertions = !unit.param_assertions;
+    let opts = cli::parse(argv);
     if !opts.errors.is_empty() {
         return Err(format!("krusty: {}\n", opts.errors.join("; ")));
     }
