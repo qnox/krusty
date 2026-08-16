@@ -20,6 +20,8 @@ mod abstract_member_check_e2e;
 mod abstract_modifier_consistency_e2e;
 #[path = "annotated_setter_parameter_e2e.rs"]
 mod annotated_setter_parameter_e2e;
+#[path = "annotation_array_literal_e2e.rs"]
+mod annotation_array_literal_e2e;
 #[path = "annotation_class_element_e2e.rs"]
 mod annotation_class_element_e2e;
 #[path = "annotation_emission_e2e.rs"]

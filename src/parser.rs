@@ -1873,8 +1873,14 @@ impl<'a> Parser<'a> {
             let start = self.tok().span;
             self.bump(); // '['
             self.skip_newlines();
+            // The elements are kept AS PARSED. Which array factory they belong to follows the
+            // annotation element's declared type, which the parser cannot see, so the checker
+            // folds this literal against that type.
+            let mut elements = Vec::new();
             while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
-                self.parse_annotation_value();
+                if let Some(element) = self.parse_annotation_value() {
+                    elements.push(element);
+                }
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -1882,12 +1888,10 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
             }
             self.expect(TokenKind::RBracket, "']'");
-            Some(self.file.add_expr(
-                Expr::UnsupportedAnnotationArgument(
-                    crate::ast::UnsupportedAnnotationArgument::ArrayLiteral,
-                ),
-                start,
-            ))
+            Some(
+                self.file
+                    .add_expr(Expr::AnnotationArrayLiteral(elements), start),
+            )
         } else if self.at(TokenKind::At) {
             let start = self.tok().span;
             let _ = self.parse_annotation();
