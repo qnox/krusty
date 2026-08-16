@@ -1044,7 +1044,14 @@ fn build_class_metadata(
                             property.ty != field.ty
                                 || crate::metadata::descriptor_needs_recording(property.ty)
                         })
-                        .map(|(_, field)| desc(field.ty)),
+                        .map(|(_, field)| desc(field.ty))
+                        // A HOISTED companion property has no field on THIS class — it lives on the
+                        // outer one — so `backing` is None while the record still describes a field.
+                        .or_else(|| {
+                            hoisted_static_for(ir, c, property_index)
+                                .filter(|s| crate::metadata::descriptor_needs_recording(s.ty))
+                                .map(|s| type_descriptor(s.ty))
+                        }),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
                     field_name: backing

@@ -244,6 +244,13 @@ the same "the reader cannot derive this" reason — but unlike those, it is take
 rather than off the getter's return type, because a `private val` has no getter and kotlinc records
 its descriptor all the same.
 
+The property rule reaches every writer a backing field can travel through, each of which finds the
+field somewhere different: an instance property reads `backing`; a HOISTED companion property has no
+field on its own class (it lives on the outer one) and reads `hoisted_static_for`; a top-level
+property is written by the facade builder from the declared type. kotlinc interns the getter/setter
+strings BEFORE the field descriptor even though the proto writes `field` (f1) first, so the accessor
+messages must be BUILT first and assembled afterwards — the byte-identity rows catch the order.
+
 The facade writer (`metadata/builder.rs`) and the class writer (`metadata/class_builder.rs`) encode
 value parameters through separate code, so both suites carry the rows: the facade path in
 `tests/metadata_array_signature_e2e.rs`, the class-member/constructor/property path in

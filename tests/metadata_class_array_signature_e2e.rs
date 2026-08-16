@@ -122,6 +122,21 @@ fn an_array_property_records_its_field_descriptor() {
     assert_identical("ClsArrProp", SRC, "app/Holder");
 }
 
+/// A COMPANION property's field is hoisted to a static on the outer class, and travels a different
+/// `PropMeta` construction than an instance property — the field-descriptor rule has to reach it too.
+#[test]
+fn a_companion_array_property_records_its_field_descriptor() {
+    const SRC: &str = "package app\n\
+        \n\
+        class K {\n\
+        \x20   companion object {\n\
+        \x20       val xs: Array<String> = arrayOf()\n\
+        \x20       val ns: IntArray = intArrayOf()\n\
+        \x20   }\n\
+        }\n";
+    assert_identical("ClsCompanionArr", SRC, "app/K$Companion");
+}
+
 /// The same rule on a property with NO ACCESSOR to read a descriptor off: a `private val` gets no
 /// getter, yet kotlinc still records its field descriptor — so the descriptor has to come from the
 /// FIELD, not the getter's return type. (`@JvmField` is the other accessor-less shape; krusty has a

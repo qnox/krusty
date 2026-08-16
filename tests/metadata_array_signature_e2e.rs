@@ -81,6 +81,19 @@ fn a_reference_vararg_records_a_projected_array_and_its_descriptor() {
     assert_identical("VarargRef", SRC, "app/VarargRefKt");
 }
 
+/// A PROPERTY's backing field takes the rule through `JvmPropertySignature.field`: an `Array`
+/// field's descriptor depends on its type argument, so kotlinc records `JvmFieldSignature.desc`
+/// (name omitted — that stays derivable) and records nothing for the `IntArray` its table maps.
+#[test]
+fn an_array_property_records_its_field_descriptor() {
+    const SRC: &str = "package app\n\
+        \n\
+        val xs: Array<String> = arrayOf()\n\
+        \n\
+        val ns: IntArray = intArrayOf()\n";
+    assert_identical("ArrProp", SRC, "app/ArrPropKt");
+}
+
 /// A `vararg` of a PRIMITIVE element is an `IntArray`, which the reader's table maps on its own —
 /// kotlinc records NO descriptor, and neither may krusty. The boundary case that keeps the rule
 /// honest: a vararg-keyed rule would over-record here.

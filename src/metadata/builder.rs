@@ -624,19 +624,32 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         p.field_varint(7, property_flags::DECLARED_ACCESSOR);
     }
     let mut jvm = Pb::new();
+    // kotlinc interns the getter/setter strings BEFORE the field descriptor even though the proto
+    // writes `field` (f1) first, so the accessor messages are BUILT first and assembled after.
+    let accessors = (!m.is_const).then(|| {
+        // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the
+        // field entry alone.
+        (
+            jvm_method_sig(st, &m.getter.0, &m.getter.1),
+            m.setter.as_ref().map(|(sn, sd)| jvm_method_sig(st, sn, sd)),
+        )
+    });
     // `field` (empty → derived) only when a backing field EXISTS: a computed or extension property
-    // has none, and kotlinc omits the entry rather than recording an empty one.
+    // has none, and kotlinc omits the entry rather than recording an empty one. An `Array` field's
+    // descriptor depends on its type ARGUMENT, which the reader's name-keyed table cannot express,
+    // so it is recorded explicitly — the property-side of `metadata::descriptor_needs_recording`.
     if m.has_backing_field {
-        jvm.field_message(1, &Pb::new());
+        let mut field = Pb::new();
+        if super::descriptor_needs_recording(m.ty) {
+            let desc = crate::jvm::names::type_descriptor(m.ty);
+            field.field_varint(2, st.local(&desc) as u64); // JvmFieldSignature.desc = 2
+        }
+        jvm.field_message(1, &field);
     }
-    // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
-    // entry alone.
-    if !m.is_const {
-        let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
-        jvm.field_message(3, &getter);
-        if let Some((sn, sd)) = &m.setter {
-            let setter = jvm_method_sig(st, sn, sd);
-            jvm.field_message(4, &setter);
+    if let Some((getter, setter)) = &accessors {
+        jvm.field_message(3, getter);
+        if let Some(setter) = setter {
+            jvm.field_message(4, setter);
         }
     }
     p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
