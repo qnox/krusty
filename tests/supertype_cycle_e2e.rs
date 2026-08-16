@@ -123,3 +123,23 @@ fn an_ordinary_hierarchy_is_not_reported() {
         );
     }
 }
+
+/// An unresolved type-parameter bound is a FRONTEND error. It must never reach metadata emission,
+/// panic there, or silently produce a Kotlin class without authoritative Kotlin metadata.
+#[test]
+fn an_unresolved_type_parameter_bound_stops_before_metadata_emission() {
+    let source = "abstract class C<P>(val p: P) where P : DefinitelyAbsentBoundA, P : DefinitelyAbsentBoundB\n";
+    let reported = diagnostics(source);
+    assert_eq!(
+        reported,
+        [
+            "unresolved reference 'DefinitelyAbsentBoundA'.",
+            "unresolved reference 'DefinitelyAbsentBoundB'.",
+        ]
+    );
+    let classes = common::compile_in_process(source, "P", &[], None);
+    assert!(
+        classes.is_none(),
+        "a frontend error must stop emission instead of dropping metadata"
+    );
+}

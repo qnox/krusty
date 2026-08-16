@@ -8507,15 +8507,21 @@ fn collect_signatures_with_cp_impl(
 /// declaration itself.
 ///
 /// Individual walkers carry their own `seen` sets where they were known to need them; cutting the
-/// link here means the walkers that never grew a guard cannot meet a cycle among SOURCE classes.
-/// A cycle closed through a classpath class is NOT detected: this walk reads the source table only,
-/// while the walkers federate source and libraries. A stale jar declaring the other half of a
-/// hierarchy still compiles silently here and fails at class load.
+/// link here means the walkers that never grew a guard cannot meet the cycle. Traversal uses the
+/// same normalized direct-supertype model as ordinary inheritance: source declarations come from
+/// the module table and dependency declarations come from the semantic platform boundary.
 fn break_supertype_cycles(table: &mut SymbolTable, files: &[File], diags: &mut DiagSink) {
+    let graph = supertype_graph(table);
+    let (component_of, cyclic_components) = supertype_components(&graph);
     let mut cyclic: Vec<TypeName> = table
         .classes
         .iter()
-        .filter(|(internal, sig)| sig.source_decl.is_some() && reaches_itself(table, **internal))
+        .filter(|(internal, sig)| {
+            sig.source_decl.is_some()
+                && component_of
+                    .get(internal)
+                    .is_some_and(|component| cyclic_components.contains(component))
+        })
         .map(|(internal, _)| *internal)
         .collect();
     // `table.classes` is a `HashMap`, so its iteration order varies run to run. Every other
@@ -8525,13 +8531,22 @@ fn break_supertype_cycles(table: &mut SymbolTable, files: &[File], diags: &mut D
         table
             .classes
             .get(internal)
-            .map(|sig| (sig.source_file, cycle_span(sig, files).lo))
+            .map(|sig| {
+                (
+                    sig.source_file,
+                    cycle_span(*internal, sig, files, &component_of).lo,
+                )
+            })
             .unwrap_or_default()
     });
     for internal in cyclic {
+        let component = component_of.get(&internal).copied();
+        let same_component = |parent: TypeName| {
+            component.is_some() && component_of.get(&parent).copied() == component
+        };
         if let Some(sig) = table.classes.get(&internal) {
             let file = sig.source_file;
-            let span = cycle_span(sig, files);
+            let span = cycle_span(internal, sig, files, &component_of);
             diags.set_file(file);
             diags.error(
                 span,
@@ -8545,14 +8560,14 @@ fn break_supertype_cycles(table: &mut SymbolTable, files: &[File], diags: &mut D
             .classes
             .get(&internal)
             .and_then(|sig| sig.super_internal)
-            .is_some_and(|parent| reaches(table, parent, internal));
-        let cyclic_interfaces: Vec<TypeName> = table
+            .is_some_and(same_component);
+        let cyclic_interfaces: std::collections::HashSet<TypeName> = table
             .classes
             .get(&internal)
             .map(|sig| {
                 sig.interfaces
                     .iter_ids()
-                    .filter(|parent| reaches(table, *parent, internal))
+                    .filter(|parent| same_component(*parent))
                     .collect()
             })
             .unwrap_or_default();
@@ -8576,69 +8591,136 @@ fn break_supertype_cycles(table: &mut SymbolTable, files: &[File], diags: &mut D
     }
 }
 
+fn supertype_graph(table: &SymbolTable) -> HashMap<TypeName, Vec<TypeName>> {
+    let mut graph = HashMap::new();
+    let mut pending = table.classes.keys().copied().collect::<Vec<_>>();
+    while let Some(current) = pending.pop() {
+        if graph.contains_key(&current) {
+            continue;
+        }
+        let parents = direct_supertypes(table, current);
+        pending.extend(parents.iter().copied());
+        graph.insert(current, parents);
+    }
+    graph
+}
+
+/// Iterative Kosaraju traversal. Hierarchies can be arbitrarily deep in malformed inputs, so the
+/// validator itself must not put one Rust stack frame per declaration.
+fn supertype_components(
+    graph: &HashMap<TypeName, Vec<TypeName>>,
+) -> (HashMap<TypeName, usize>, std::collections::HashSet<usize>) {
+    let mut visited = std::collections::HashSet::new();
+    let mut order = Vec::with_capacity(graph.len());
+    for root in graph.keys().copied() {
+        if !visited.insert(root) {
+            continue;
+        }
+        let mut stack = vec![(root, 0usize)];
+        while let Some((current, next)) = stack.last_mut() {
+            let parents = graph.get(current).map(Vec::as_slice).unwrap_or_default();
+            if let Some(parent) = parents.get(*next).copied() {
+                *next += 1;
+                if visited.insert(parent) {
+                    stack.push((parent, 0));
+                }
+            } else {
+                order.push(*current);
+                stack.pop();
+            }
+        }
+    }
+
+    let mut reverse: HashMap<TypeName, Vec<TypeName>> = graph
+        .keys()
+        .copied()
+        .map(|name| (name, Vec::new()))
+        .collect();
+    for (child, parents) in graph {
+        for parent in parents {
+            reverse.entry(*parent).or_default().push(*child);
+        }
+    }
+
+    let mut component_of = HashMap::new();
+    let mut cyclic = std::collections::HashSet::new();
+    let mut next_component = 0;
+    for root in order.into_iter().rev() {
+        if component_of.contains_key(&root) {
+            continue;
+        }
+        let component = next_component;
+        next_component += 1;
+        let mut members = Vec::new();
+        let mut stack = vec![root];
+        component_of.insert(root, component);
+        while let Some(current) = stack.pop() {
+            members.push(current);
+            for child in reverse.get(&current).into_iter().flatten() {
+                if !component_of.contains_key(child) {
+                    component_of.insert(*child, component);
+                    stack.push(*child);
+                }
+            }
+        }
+        if members.len() > 1
+            || graph
+                .get(&root)
+                .is_some_and(|parents| parents.contains(&root))
+        {
+            cyclic.insert(component);
+        }
+    }
+    (component_of, cyclic)
+}
+
 /// Where to report a cyclic hierarchy.
 ///
-/// kotlinc names the supertype itself (`open class B : C()` → the column of `C`). A supertype
-/// written without parentheses is a `TypeRef` and carries its own span, so that case matches. A
-/// CALLED base is parsed into `base_class`, a bare name with no span — and reading the first
-/// parenless supertype there would point at an innocent bystander (`: Other(), Marker` → `Marker`),
-/// so the class declaration's span stands in. A signature with no source declaration falls back to
-/// the file start.
-fn cycle_span(sig: &ClassSig, files: &[File]) -> Span {
+/// kotlinc names the supertype itself (`open class B : C()` → the column of `C`). Both called base
+/// classes and parenless supertypes retain the reference's source span. Select only an edge in the
+/// declaration's cyclic component, so an innocent base or interface cannot receive the diagnostic.
+fn cycle_span(
+    internal: TypeName,
+    sig: &ClassSig,
+    files: &[File],
+    component_of: &HashMap<TypeName, usize>,
+) -> Span {
+    let component = component_of.get(&internal).copied();
+    let same_component =
+        |parent: TypeName| component.is_some() && component_of.get(&parent).copied() == component;
     sig.source_decl
         .and_then(|declaration| {
             let file = files.get(sig.source_file as usize)?;
             match file.decl(declaration) {
-                Decl::Class(class) if class.base_class.is_none() => {
-                    class.supertypes.first().map(|supertype| supertype.span)
+                Decl::Class(class) => {
+                    if sig.super_internal.is_some_and(same_component) {
+                        return class.base_class_span;
+                    }
+                    sig.interfaces
+                        .iter_ids()
+                        .position(same_component)
+                        .and_then(|index| class.supertypes.get(index))
+                        .map(|supertype| supertype.span)
                 }
-                Decl::Class(class) => Some(class.span),
                 _ => None,
             }
         })
         .unwrap_or_else(|| Span::new(0, 0))
 }
 
-/// Does `from`'s supertype chain reach `target`?
-fn reaches(table: &SymbolTable, from: TypeName, target: TypeName) -> bool {
-    let mut seen = std::collections::HashSet::new();
-    let mut stack = vec![from];
-    while let Some(current) = stack.pop() {
-        if current == target {
-            return true;
-        }
-        if !seen.insert(current) {
-            continue;
-        }
-        let Some(sig) = table.classes.get(&current) else {
-            continue;
-        };
-        stack.extend(sig.super_internal);
-        stack.extend(sig.interfaces.iter_ids());
+fn direct_supertypes(table: &SymbolTable, current: TypeName) -> Vec<TypeName> {
+    if let Some(signature) = table.classes.get(&current) {
+        return signature
+            .super_internal
+            .into_iter()
+            .chain(signature.interfaces.iter_ids())
+            .collect();
     }
-    false
-}
-
-/// Does `start`'s supertype chain (superclass and interfaces) come back to `start`?
-fn reaches_itself(table: &SymbolTable, start: TypeName) -> bool {
-    let mut seen = std::collections::HashSet::new();
-    let mut stack = vec![start];
-    let mut first = true;
-    while let Some(current) = stack.pop() {
-        if !first && current == start {
-            return true;
-        }
-        first = false;
-        if !seen.insert(current) {
-            continue;
-        }
-        let Some(sig) = table.classes.get(&current) else {
-            continue;
-        };
-        stack.extend(sig.super_internal);
-        stack.extend(sig.interfaces.iter_ids());
-    }
-    false
+    table
+        .libraries
+        .classifier(current)
+        .map(|classifier| classifier.supertypes.iter_ids().collect())
+        .unwrap_or_default()
 }
 
 fn report_conflicting_top_level_overloads(
@@ -26823,6 +26905,9 @@ impl<'a> Checker<'a> {
     /// declaration-site variance (`Comparable<T>` is semantically `Comparable<in T>`).
     fn check_type_parameter_bound(&mut self, scope: &CheckerScope<'_>, bound: &TypeRef) -> Ty {
         let checked = self.type_ref_ty(scope, bound);
+        if checked.contains_error() {
+            self.report_unresolved_type_ref(scope, bound);
+        }
         let bound_is_interface = checked
             .non_null()
             .obj_internal()
