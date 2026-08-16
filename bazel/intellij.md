@@ -7,11 +7,15 @@ which rule it loads — not by rewriting its options.
 Everything below was derived from that repository at `3f14adc599ef`, and the option table was
 checked against the worker in this repository.
 
-The Starlark rule itself has no automated coverage here: `tests/bazel_cli_contract_e2e.rs` drives the
-worker protocol directly because a Bazel action cannot run from the test suite. The rule and worker
-were exercised once manually with Bazel 8.4.2 (two dependent Kotlin targets through one reused
-worker, consumed by a downstream Java target); that run is not reproducible from this checkout, so
-treat the rule wiring below as unverified by CI.
+The Starlark rule has no automated coverage — `tests/bazel_cli_contract_e2e.rs` drives the worker
+protocol directly, because a Bazel action cannot run from the test suite. What it has instead is
+`bazel/smoke/`, a workspace small enough to read that compiles a Kotlin target with
+`krusty_jvm_library`; running it produces `bazel-bin/greet.jar` holding `smoke/Greeter.class`,
+`META-INF/smoke.kotlin_module` and a manifest, with `1 worker` in the build's process summary (the
+`KrustyCompile` mnemonic itself shows only under `--subcommands`, `bazel aquery`, or on failure).
+Verified against Bazel 9 and 8.4.2. It is not wired into CI, and it needs two machine paths filled
+in before it runs, so it is a recipe you follow — not a gate, and not proof that a target as large
+as an intellij module builds.
 
 ## What the project's options become
 
@@ -56,7 +60,12 @@ local_path_override(module_name = "krusty", path = "/path/to/krusty")
 ```
 
 `//tools:krusty` below is a target the CONSUMING repository defines to wrap the binary built by
-`cargo` (see `bazel/BUILD.bazel` for the shape); it is not provided by krusty.
+`cargo` (see `bazel/BUILD.bazel` for the shape, and `bazel/smoke/tools/krusty/` for a working one);
+it is not provided by krusty. Two constraints that wrapper must respect, both found by running it:
+Bazel gives an action no environment beyond what the rule passes — so a `set -u` script building its
+path from `$HOME` dies with "HOME: unbound variable", and this is not sandbox-specific
+(`--spawn_strategy=local` behaves the same); and under Bazel 9 `sh_binary` is no longer native and
+must be loaded from `rules_shell`.
 
 ```bash
 cargo build --release          # in the krusty checkout
@@ -76,11 +85,24 @@ krusty_jvm_library(
     deps = [...],
     module_name = "intellij.platform.util",
     jvm_target = "25",
-    kotlinc_opts = ["-Xjvm-default=all", "-progressive"],
+    # krusty resolves the stdlib by walking up from its own binary to `kotlin-versions` and looking
+    # for `target/cache/kotlinc/<ver>` beneath it. (Its $HOME/.gradle and $HOME/.m2 fallbacks are
+    # unreachable under Bazel, which passes no HOME. `KRUSTY_KOTLINC` in `env` is another way out.)
+    # A binary shipped without one — a fresh worktree, a copied release artifact — fails with
+    # "cannot locate kotlin-stdlib.jar; configure a Kotlin distribution or pass -no-stdlib".
+    # `-no-stdlib` opts out and takes the stdlib from `deps` instead.
+    kotlinc_opts = ["-no-stdlib", "-Xjvm-default=all", "-progressive"],
     use_worker = True,
     # Without JAVA_HOME krusty has no platform classpath and every `java.*` reference is
-    # unresolved, so a real module fails without this.
-    env = {"JAVA_HOME": "/path/to/jdk"},
+    # unresolved, so a real module fails without this. It must be set HERE: the rule passes `env`
+    # to `ctx.actions.run`, which REPLACES the action environment — `--action_env` is not merged.
+    # Measured, an action sees only what this dict carries plus TMPDIR; notably no HOME and no PATH,
+    # so anything else the compiler needs (KRUSTY_KOTLINC, KRUSTY_TRACE) must be listed here too —
+    # including KRUSTY_BINARY if, like `bazel/smoke/tools/krusty/`, the wrapper reads it.
+    env = {
+        "JAVA_HOME": "/path/to/jdk",
+        "KRUSTY_BINARY": "/path/to/krusty/target/release/krusty",
+    },
 )
 ```
 

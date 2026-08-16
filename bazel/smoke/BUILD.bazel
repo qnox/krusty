@@ -1,0 +1,32 @@
+load("@krusty//bazel:defs.bzl", "krusty_jvm_library")
+load("@rules_java//java:defs.bzl", "java_import")
+
+# The Kotlin stdlib as a plain jar dependency. Copy one in (see README.md) rather than depending on
+# a Kotlin rules setup, which would make this fixture about that instead of about krusty.
+java_import(
+    name = "stdlib",
+    jars = ["lib/kotlin-stdlib.jar"],
+)
+
+krusty_jvm_library(
+    name = "greet",
+    srcs = ["src/Greet.kt"],
+    # krusty resolves the stdlib by walking up from its own binary to a `kotlin-versions` file and
+    # looking for `target/cache/kotlinc/<ver>` beneath it. (The CLI also falls back to $HOME/.gradle
+    # and $HOME/.m2 — unreachable under Bazel, which passes no HOME.) A binary in a checkout that never ran `just kotlinc` (a fresh worktree, a copied
+    # binary) finds none and fails with "cannot locate kotlin-stdlib.jar; configure a Kotlin
+    # distribution or pass -no-stdlib". Passing it here is what makes this fixture independent of
+    # that: the stdlib comes from `deps` instead.
+    kotlinc_opts = ["-no-stdlib"],
+    module_name = "smoke",
+    use_worker = True,
+    # `krusty_jvm_library` passes this env to the action explicitly, which OVERRIDES `--action_env`
+    # — so these cannot be supplied on the command line. Replace both paths for your machine.
+    #   JAVA_HOME:     without it krusty has no platform classpath, and every `java.*` is unresolved
+    #   KRUSTY_BINARY: the binary `cargo build --release` produced
+    env = {
+        "JAVA_HOME": "/replace/with/your/jdk",
+        "KRUSTY_BINARY": "/replace/with/krusty/target/release/krusty",
+    },
+    deps = [":stdlib"],
+)
