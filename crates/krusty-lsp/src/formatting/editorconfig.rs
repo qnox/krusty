@@ -1,4 +1,5 @@
-//! Minimal `.editorconfig` resolution for the formatting component.
+//! The ktlint configuration provider: `.editorconfig` resolution for the formatting
+//! component.
 //!
 //! ktlint itself reads `.editorconfig` through ec4j; to stay byte compatible with ktlint
 //! output the same properties must reach the krusty formatting engine. This module resolves
@@ -10,26 +11,15 @@ use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use super::StyleProperties;
+
 const MAX_EDITORCONFIG_BYTES: u64 = 256 * 1024;
 
-/// Resolved editorconfig properties for a single document (lowercased keys, trimmed values).
-#[derive(Clone, Debug, Default)]
-pub struct EditorConfig {
-    pub properties: BTreeMap<String, String>,
-}
-
-impl EditorConfig {
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.properties.get(key).map(String::as_str)
-    }
-}
-
-/// Resolves the editorconfig chain for `document_path`. Missing or unreadable files yield
-/// an empty configuration; resolution never fails.
-pub fn resolve(document_path: &Path) -> EditorConfig {
-    let Some(document_dir) = document_path.parent() else {
-        return EditorConfig::default();
-    };
+/// Resolves the editorconfig chain for `document_path`, or `None` when no `.editorconfig`
+/// file exists along it — autodetection then falls through to the next provider. Unreadable
+/// files are skipped; resolution never fails.
+pub fn resolve(document_path: &Path) -> Option<StyleProperties> {
+    let document_dir = document_path.parent()?;
     // Nearest file first; merged farthest-first so nearer files win.
     let mut chain: Vec<(PathBuf, ParsedFile)> = Vec::new();
     for dir in document_dir.ancestors() {
@@ -43,6 +33,9 @@ pub fn resolve(document_path: &Path) -> EditorConfig {
         if stop {
             break;
         }
+    }
+    if chain.is_empty() {
+        return None;
     }
     let mut properties = BTreeMap::new();
     for (dir, parsed) in chain.iter().rev() {
@@ -58,7 +51,7 @@ pub fn resolve(document_path: &Path) -> EditorConfig {
             }
         }
     }
-    EditorConfig { properties }
+    Some(StyleProperties { properties })
 }
 
 fn read_bounded(path: &Path) -> Option<String> {

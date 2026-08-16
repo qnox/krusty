@@ -15,7 +15,7 @@ pub mod runner;
 mod sources;
 pub mod sync;
 mod walk;
-mod xml;
+pub(crate) mod xml;
 
 #[cfg(test)]
 mod testing;

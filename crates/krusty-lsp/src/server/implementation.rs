@@ -2384,9 +2384,9 @@ where
             insert_final_newline: params.options.insert_final_newline.unwrap_or(true),
             trim_final_newlines: params.options.trim_final_newlines.unwrap_or(true),
         };
-        // The document path drives `.editorconfig` resolution; a non-file document (e.g.
-        // an untitled buffer) gets the client options alone instead of probing for an
-        // `.editorconfig` relative to the server process's working directory.
+        // The document path drives configuration-provider resolution (`.editorconfig`,
+        // `.idea`); a non-file document (e.g. an untitled buffer) gets the client options
+        // alone instead of probing relative to the server process's working directory.
         let document_path = crate::uri::file_uri_to_path(&params.text_document.uri);
         let Some(formatted) = crate::formatting::format_document(
             document_path.as_deref(),

@@ -42,7 +42,20 @@ fn run_cases(cases: Vec<PathBuf>) -> String {
             .unwrap_or_else(|error| panic!("{name}: unreadable input.kt: {error}"));
         let expected = fs::read_to_string(case.join("expected.kt"))
             .unwrap_or_else(|error| panic!("{name}: unreadable expected.kt: {error}"));
-        let document_path = case.join("input.kt");
+        // Format a temp-dir copy of the case, exactly like bless-formatting.sh runs ktlint
+        // in a temp dir: fixture output must depend only on the case's own `.editorconfig`,
+        // never on a contributor's local `.idea` or `.editorconfig` above the repo.
+        let work = std::env::temp_dir().join(format!("krusty-formatting-fixture-{name}"));
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).expect("fixture work dir");
+        let document_path = work.join("Input.kt");
+        fs::write(&document_path, &input).expect("fixture input copy");
+        let case_editorconfig = case.join(".editorconfig");
+        if case_editorconfig.exists() {
+            let editorconfig = fs::read(&case_editorconfig)
+                .unwrap_or_else(|error| panic!("{name}: unreadable .editorconfig: {error}"));
+            fs::write(work.join(".editorconfig"), editorconfig).expect("editorconfig copy");
+        }
         let actual = format_document(Some(&document_path), &input, &ClientOptions::default());
         match actual {
             Some(actual) if actual == expected => {}
