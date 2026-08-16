@@ -2010,23 +2010,80 @@ pub(crate) fn infer_generic_return_bindings_from_symbols(
     expected: Ty,
     admits: impl FnMut(Ty, Ty) -> bool,
 ) -> Option<GSigBinds> {
-    let declared = match (generic_sig.ret.non_null(), expected.non_null()) {
+    let declared = return_shape_at_expected_owner(source, generic_sig.ret, expected)?;
+    let mut projected = generic_sig.clone();
+    projected.ret = declared;
+    infer_generic_return_bindings(&projected, expected, admits)
+}
+
+/// The declared return restated at the expected type's own constructor. `MutableReply<T>` used where
+/// `Reply<Any>` is expected relates through the applied supertype `Reply<T>`; equal constructors are
+/// already comparable, and an unrelated constructor has no relation to report.
+fn return_shape_at_expected_owner(
+    source: &dyn SymbolSource,
+    declared: Ty,
+    expected: Ty,
+) -> Option<Ty> {
+    match (declared.non_null(), expected.non_null()) {
         (Ty::Obj(declared_owner, _), Ty::Obj(expected_owner, _))
             if declared_owner != expected_owner =>
         {
-            receiver_hierarchy(source, generic_sig.ret.non_null())
+            receiver_hierarchy(source, declared.non_null())
                 .into_iter()
                 .map(|(ty, _)| ty)
                 .find(|ty| {
                     ty.obj_internal()
                         .is_some_and(|owner| owner == expected_owner)
-                })?
+                })
         }
-        _ => generic_sig.ret,
+        _ => Some(declared),
+    }
+}
+
+/// Widen argument-derived bindings that an expected result fixes invariantly. Value arguments only
+/// contribute lower bounds — `reply("s")` infers `T = String` — but an invariant occurrence of the
+/// formal in the declared return admits exactly one solution, so `Reply<Any>` in return position
+/// forces `T = Any` the way kotlinc's constraint solver does. Covariant occurrences keep the narrower
+/// argument solution (`listOf("x")` stays `List<String>` where `List<Any>` is expected), a projected
+/// expectation (`Reply<out Any>`) is a bound rather than an equality, and a widening the argument
+/// itself cannot satisfy — or that breaks a declared bound — is left alone so the call is still
+/// reported against its real type.
+pub(crate) fn widen_invariant_expected_bindings(
+    source: &dyn SymbolSource,
+    signature: &GenericSig,
+    explicit_type_argument_count: usize,
+    bindings: &mut GSigBinds,
+    expected_bindings: &GSigBinds,
+    expected: Ty,
+    mut admits: impl FnMut(Ty, Ty) -> bool,
+) {
+    let Some(declared) = return_shape_at_expected_owner(source, signature.ret, expected) else {
+        return;
     };
-    let mut projected = generic_sig.clone();
-    projected.ret = declared;
-    infer_generic_return_bindings(&projected, expected, admits)
+    // Declaration order, not map order: a widening is accepted against the bindings the earlier
+    // formals already settled, so the outcome must not depend on iteration order.
+    for formal in signature.formals.iter().skip(explicit_type_argument_count) {
+        let Some((&expected_argument, &inferred)) =
+            expected_bindings.get(formal).zip(bindings.get(formal))
+        else {
+            continue;
+        };
+        if expected_argument.projection_inner().is_some() {
+            continue;
+        }
+        if inferred == expected_argument
+            || formal_variance_in_type(source, declared, formal)
+                != Some(crate::types::TypeVariance::Invariant)
+            || !admits(inferred, expected_argument)
+        {
+            continue;
+        }
+        let mut trial = bindings.clone();
+        trial.insert(formal.clone(), expected_argument);
+        if generic_bindings_satisfy_bounds(signature, &trial, &mut admits) {
+            *bindings = trial;
+        }
+    }
 }
 
 /// Symbolic constraints contributed by an expected return type. `constrained_formals` also contains
@@ -8099,6 +8156,122 @@ mod tests {
                 any,
             ),
             foo,
+        );
+    }
+
+    /// `fixtures/Reply<B>` is invariant, `fixtures/Producer<out B>` is covariant.
+    struct VarianceSource;
+
+    impl SymbolSource for VarianceSource {
+        fn symbols(
+            &self,
+            namespace: SymbolNamespace,
+            name: &str,
+        ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+            let classifier_name = namespace.existing_classifier(name);
+            let variance = if classifier_name.is_some_and(|name| name.matches("fixtures/Reply")) {
+                Some(crate::types::TypeVariance::Invariant)
+            } else if classifier_name.is_some_and(|name| name.matches("fixtures/Producer")) {
+                Some(crate::types::TypeVariance::Out)
+            } else {
+                None
+            };
+            let classifier = variance.map(|variance| {
+                let mut classifier = fake_library_type(Vec::new(), Vec::new());
+                classifier.type_parameters = crate::types::TypeParameters::new(
+                    vec!["B".to_string()],
+                    vec![Vec::new()],
+                    vec![variance],
+                );
+                classifier
+            });
+            std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                classifier_name: classifier.as_ref().and(classifier_name),
+                classifier: classifier.map(std::sync::Arc::new),
+                callables: Callables::None,
+            })
+        }
+    }
+
+    /// `fun <T> reply(body: T): Owner<T>`.
+    fn expected_result_signature(owner: &str) -> GenericSig {
+        let any = Ty::obj("kotlin/Any");
+        let parameter = Ty::ty_param("T", any);
+        GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![vec![any]],
+            receiver: None,
+            params: vec![parameter],
+            ret: Ty::obj_args(owner, &[parameter]),
+            return_policy: GenericReturnPolicy::Exact,
+        }
+    }
+
+    fn widened(
+        owner: &str,
+        inferred: Ty,
+        expected_argument: Ty,
+        explicit_type_argument_count: usize,
+    ) -> Option<Ty> {
+        let signature = expected_result_signature(owner);
+        let mut bindings = GSigBinds::new();
+        bindings.insert("T".to_string(), inferred);
+        let mut expected_bindings = GSigBinds::new();
+        expected_bindings.insert("T".to_string(), expected_argument);
+        widen_invariant_expected_bindings(
+            &VarianceSource,
+            &signature,
+            explicit_type_argument_count,
+            &mut bindings,
+            &expected_bindings,
+            Ty::obj_args(owner, &[expected_argument]),
+            |actual, bound| bound == Ty::obj("kotlin/Any") || actual == bound,
+        );
+        bindings.get("T").copied()
+    }
+
+    #[test]
+    fn an_invariant_expected_result_widens_the_argument_binding() {
+        assert_eq!(
+            widened("fixtures/Reply", Ty::String, Ty::obj("kotlin/Any"), 0),
+            Some(Ty::obj("kotlin/Any")),
+        );
+    }
+
+    #[test]
+    fn a_covariant_expected_result_keeps_the_argument_binding() {
+        assert_eq!(
+            widened("fixtures/Producer", Ty::String, Ty::obj("kotlin/Any"), 0),
+            Some(Ty::String),
+        );
+    }
+
+    #[test]
+    fn an_unsatisfiable_expected_result_keeps_the_argument_binding() {
+        assert_eq!(
+            widened("fixtures/Reply", Ty::Int, Ty::String, 0),
+            Some(Ty::Int),
+        );
+    }
+
+    #[test]
+    fn a_projected_expected_result_keeps_the_argument_binding() {
+        assert_eq!(
+            widened(
+                "fixtures/Reply",
+                Ty::String,
+                Ty::out_projection(Ty::obj("kotlin/Any")),
+                0,
+            ),
+            Some(Ty::String),
+        );
+    }
+
+    #[test]
+    fn an_explicit_type_argument_is_never_widened() {
+        assert_eq!(
+            widened("fixtures/Reply", Ty::String, Ty::obj("kotlin/Any"), 1),
+            Some(Ty::String),
         );
     }
 

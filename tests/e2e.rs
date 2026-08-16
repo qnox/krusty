@@ -466,6 +466,8 @@ mod enum_implements_interface_e2e;
 mod enum_value_of_intrinsic_e2e;
 #[path = "enum_vararg_e2e.rs"]
 mod enum_vararg_e2e;
+#[path = "expected_return_invariant_binding_e2e.rs"]
+mod expected_return_invariant_binding_e2e;
 #[path = "expected_type_propagation_e2e.rs"]
 mod expected_type_propagation_e2e;
 #[path = "explicit_backing_field_e2e.rs"]

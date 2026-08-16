@@ -4191,6 +4191,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   cannot know which parameter the argument lands in.
   Test: `tests/classpath_member_overload_no_names_e2e.rs`.
 
+- **An expected result fixes a call's type arguments where the declared return mentions them
+  invariantly.** Value arguments contribute a LOWER bound only: `fun <T> reply(body: T): Reply<T>`
+  called as `reply("s")` infers `T = String`. An invariant occurrence of `T` in the declared return
+  admits exactly one solution, so a `Reply<Any>` return position forces `T = Any` — previously the
+  argument-derived binding always won and the call was reported as
+  `return type mismatch: expected 'Reply<Any>', actual 'Reply<String>'`. The expected type is
+  related through the declared return's applied supertypes, so a Java factory declared
+  `static <T> MutableReply<T> ok(T body)` is seen as `Reply<T>` where `Reply<Any>` is expected (the
+  shape that made a Micronaut-style controller returning `HttpResponse<Any>` unusable, including
+  through the merged branches of an `if`/`try` used as the function body). Covariant occurrences
+  keep the narrower argument solution (`listOf("x")` stays `List<String>` where `List<Any>` is
+  expected), a projected expectation (`Reply<out Any>`) is a bound rather than an equality, and a
+  widening the argument itself cannot satisfy, or that would break a declared bound, is left alone
+  so the real mismatch is still reported. Tests:
+  `tests/expected_return_invariant_binding_e2e.rs`, `symbol_resolver` variance unit regressions.
+
 - **A type parameter is a lexical binding, declared on the rung of the declaration that introduces
   it.** `class C<T>` binds `T` on its CLASS rung, `fun <T> f()` on the function's own rung — one
   namespace (`Ns::Classifier`), different declaring rung — so a parameter retires with its
