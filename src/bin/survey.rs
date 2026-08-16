@@ -151,7 +151,7 @@ fn emit_checked_ir(
     // Facade `@Metadata`, as the gate and CLI backend write — a later MODULE's compile reads this
     // module's output from the classpath and needs it to resolve cross-module extensions.
     let metadata =
-        krusty::jvm::backend::facade_package_metadata_with_ir(file, file_index, syms, ir);
+        krusty::jvm::backend::facade_package_metadata_with_ir(file, file_index, syms, ir, "main");
     let run = krusty::jvm::ir_emit::EmitRun::default();
     // Survey exactly the artifact shape users receive. A survey-local partial option literal used to
     // omit class metadata and `SourceFile`, masking failures that only occur when a later module reads

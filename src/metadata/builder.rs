@@ -659,6 +659,7 @@ pub fn build_package(
     funcs: &[FnMeta],
     props: &[PropMeta],
     aliases: &[TypeAliasMeta],
+    module_name: Option<&str>,
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
     let mut package = Pb::new();
@@ -710,6 +711,12 @@ pub fn build_package(
     }
     for ap in alias_pbs.iter().flatten() {
         package.repeated_message(5, ap); // Package.type_alias = 5
+    }
+    // The `-module-name` value → `JvmProtoBuf.packageModuleName` (f101). kotlinc interns it LAST
+    // (the end of d2) and omits the field for the default module `main` (callers pass `None` then).
+    if let Some(module) = module_name {
+        let module_idx = st.local(module);
+        package.field_varint(101, module_idx as u64);
     }
     let stt = st.serialize_types();
 
@@ -765,9 +772,62 @@ mod tests {
             }],
             &[],
             &[],
+            None,
         );
         assert_eq!(d2, vec!["f".to_string(), "".to_string(), "a".to_string()]);
         assert_eq!(d1, REF, "\n got: {:02x?}\n ref: {:02x?}", d1, REF);
+    }
+
+    /// Exact bytes kotlinc 2.4.10 emits for `fun f(a: Int): Int = a` under `-module-name mymod`:
+    /// the same package payload plus `packageModuleName` (f101) = the module name, interned last.
+    const REF_MODULE_NAME: &[u8] = &[
+        0x00, 0x0a, 0x0a, 0x00, 0x0a, 0x02, 0x10, 0x08, 0x0a, 0x02, 0x08, 0x02, 0x1a, 0x0e, 0x10,
+        0x00, 0x1a, 0x02, 0x30, 0x01, 0x32, 0x06, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x01, 0xa8, 0x06,
+        0x03,
+    ];
+
+    #[test]
+    fn package_module_name_metadata_byte_matches_kotlinc() {
+        let (d1, d2) = build_package(
+            &[FnMeta {
+                annotations: Vec::new(),
+                decl_order: 0,
+                jvm_name: None,
+                name: "f".into(),
+                params: vec![("a".into(), Ty::Int)],
+                ret: Ty::Int,
+                receiver: None,
+                param_defaults: Vec::new(),
+                suspend: false,
+                jvm_desc: None,
+                contract: None,
+                inline: false,
+                operator: false,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                context_count: 0,
+                vararg_index: None,
+                visibility: crate::types::Visibility::Public,
+            }],
+            &[],
+            &[],
+            Some("mymod"),
+        );
+        assert_eq!(
+            d2,
+            vec![
+                "f".to_string(),
+                "".to_string(),
+                "a".to_string(),
+                "mymod".to_string()
+            ]
+        );
+        assert_eq!(
+            d1, REF_MODULE_NAME,
+            "\n got: {:02x?}\n ref: {:02x?}",
+            d1, REF_MODULE_NAME
+        );
     }
 
     #[test]
@@ -836,6 +896,7 @@ mod tests {
                 decl_order: 0,
             }],
             &[],
+            None,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
         let meta =
@@ -879,6 +940,7 @@ mod tests {
                 decl_order: 0,
             }],
             &[],
+            None,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
         let meta =
@@ -948,6 +1010,7 @@ mod tests {
             }],
             &[],
             &[],
+            None,
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
         let meta =
@@ -989,6 +1052,7 @@ mod tests {
             }],
             &[],
             &[],
+            None,
         );
         assert_eq!(d2.iter().filter(|s| s.is_empty()).count(), 1);
     }
