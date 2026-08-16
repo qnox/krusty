@@ -1497,14 +1497,7 @@ fn build_class_metadata(
                     annotations: ir
                         .function_annotations
                         .get(&fid)
-                        .map(|annotations| {
-                            annotations
-                                .visible
-                                .iter()
-                                .chain(&annotations.invisible)
-                                .cloned()
-                                .collect()
-                        })
+                        .map(|annotations| annotations.applications().cloned().collect())
                         .unwrap_or_default(),
                 })
             })
@@ -1783,13 +1776,7 @@ fn build_class_metadata(
                 }
             ),
             vararg_index: sc.vararg_index,
-            annotations: sc
-                .annotations
-                .visible
-                .iter()
-                .chain(&sc.annotations.invisible)
-                .cloned()
-                .collect(),
+            annotations: sc.annotations.applications().cloned().collect(),
         })
         .collect();
     let secondary_ctor_metas: Vec<crate::metadata::class_builder::CtorMeta> = secondary_ctor_shapes
@@ -3938,14 +3925,7 @@ fn property_marker_annotations(
     };
     ir.function_annotations
         .get(marker)
-        .map(|annotations| {
-            annotations
-                .visible
-                .iter()
-                .chain(&annotations.invisible)
-                .cloned()
-                .collect()
-        })
+        .map(|annotations| annotations.applications().cloned().collect())
         .unwrap_or_default()
 }
 
@@ -3972,14 +3952,7 @@ fn property_backing_field_annotations(
     c.field_annotations
         .iter()
         .find(|annotations| annotations.field == property)
-        .map(|annotations| {
-            annotations
-                .visible
-                .iter()
-                .chain(&annotations.invisible)
-                .cloned()
-                .collect()
-        })
+        .map(|annotations| annotations.annotations.applications().cloned().collect())
         .unwrap_or_default()
 }
 
@@ -5164,7 +5137,7 @@ fn emit_class(
                 .iter()
                 .find(|annotations| annotations.field == *name)
             {
-                cw.set_last_late_field_annotations(&annotations.visible, &annotations.invisible);
+                cw.set_last_late_field_annotations(&annotations.annotations);
             }
         }
     }

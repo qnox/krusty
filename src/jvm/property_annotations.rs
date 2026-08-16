@@ -28,13 +28,8 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
                 .iter()
                 .find(|&&fid| ir.functions[fid as usize].name == marker_name)
             {
-                ir.function_annotations.insert(
-                    existing,
-                    crate::ir::FnAnnotations {
-                        visible: property.visible,
-                        invisible: property.invisible,
-                    },
-                );
+                ir.function_annotations
+                    .insert(existing, property.annotations);
                 let class_identity = ir.classes[class_index].fq_name_id();
                 ir.property_annotation_markers
                     .insert((class_identity, property.property.clone()), existing);
@@ -66,13 +61,7 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
             ir.open_methods.insert(marker);
             ir.synthetic_methods.insert(marker);
             ir.deprecated_methods.insert(marker);
-            ir.function_annotations.insert(
-                marker,
-                crate::ir::FnAnnotations {
-                    visible: property.visible,
-                    invisible: property.invisible,
-                },
-            );
+            ir.function_annotations.insert(marker, property.annotations);
             let class_identity = ir.classes[class_index].fq_name_id();
             ir.property_annotation_markers
                 .insert((class_identity, property.property.clone()), marker);

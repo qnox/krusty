@@ -27857,39 +27857,57 @@ fn class_field_annotations(
                 .map(|property| (&property.name, &property.annotations, false)),
         );
     for (name, declared, on_constructor_parameter) in declarations {
-        let mut visible = Vec::new();
-        let mut invisible = Vec::new();
-        for annotation in declared {
-            let Some(applied) = info.applied_annotation(annotation) else {
-                continue;
-            };
-            if applied
-                .targets
-                .property_declaration_site(on_constructor_parameter)
-                != Some(crate::types::PropertyAnnotationSite::Field)
-            {
-                continue;
-            }
-            match applied.retention {
-                crate::types::AnnotationRetention::Default
-                | crate::types::AnnotationRetention::Runtime => {
-                    visible.push(checked_annotation_to_ir(applied))
-                }
-                crate::types::AnnotationRetention::Binary => {
-                    invisible.push(checked_annotation_to_ir(applied))
-                }
-                crate::types::AnnotationRetention::Source => {}
-            }
-        }
-        if !visible.is_empty() || !invisible.is_empty() {
+        let annotations = property_site_annotations(
+            declared,
+            info,
+            on_constructor_parameter,
+            crate::types::PropertyAnnotationSite::Field,
+        );
+        if !annotations.is_empty() {
             out.push(crate::ir::FieldAnnotations {
                 field: name.clone(),
-                visible,
-                invisible,
+                annotations,
             });
         }
     }
     out
+}
+
+/// The retained annotations a property declaration places on ONE use site (`field` or `property`).
+/// Kotlin's use-site defaulting decides the site per annotation from its own `@Target`, so the same
+/// declaration feeds both [`class_field_annotations`] and [`class_property_annotations`] and each
+/// keeps only what it owns.
+///
+/// Unlike [`declaration_annotations`], an application the frontend did not record is DROPPED rather
+/// than a panic: krusty's annotation constant folder is narrower than kotlinc's (a plugin-folded
+/// argument such as `@SerialName("$prefix.bar")` never reaches `applied_annotation`), and property
+/// applications were never checked before. Recording what folds keeps the previous behaviour for the
+/// rest instead of rejecting sources kotlinc accepts.
+fn property_site_annotations(
+    declared: &[ast::AnnotationRef],
+    info: &FrontendTypeInfo,
+    on_constructor_parameter: bool,
+    site: crate::types::PropertyAnnotationSite,
+) -> crate::ir::DeclarationAnnotations {
+    crate::ir::DeclarationAnnotations::new(
+        declared
+            .iter()
+            .filter_map(|annotation| info.applied_annotation(annotation))
+            .filter(|applied| {
+                applied
+                    .targets
+                    .property_declaration_site(on_constructor_parameter)
+                    == Some(site)
+            })
+            .filter_map(|applied| match applied.retention {
+                crate::types::AnnotationRetention::Source => None,
+                retention => Some(crate::ir::RetainedAnnotation {
+                    retention,
+                    annotation: checked_annotation_to_ir(applied),
+                }),
+            })
+            .collect(),
+    )
 }
 
 /// The user annotations applied to this class's PROPERTY declarations that Kotlin's use-site
@@ -27918,35 +27936,16 @@ fn class_property_annotations(
                 .map(|property| (&property.name, &property.annotations, false)),
         );
     for (name, declared, on_constructor_parameter) in declarations {
-        let mut visible = Vec::new();
-        let mut invisible = Vec::new();
-        for annotation in declared {
-            let Some(applied) = info.applied_annotation(annotation) else {
-                continue;
-            };
-            if applied
-                .targets
-                .property_declaration_site(on_constructor_parameter)
-                != Some(crate::types::PropertyAnnotationSite::Property)
-            {
-                continue;
-            }
-            match applied.retention {
-                crate::types::AnnotationRetention::Default
-                | crate::types::AnnotationRetention::Runtime => {
-                    visible.push(checked_annotation_to_ir(applied))
-                }
-                crate::types::AnnotationRetention::Binary => {
-                    invisible.push(checked_annotation_to_ir(applied))
-                }
-                crate::types::AnnotationRetention::Source => {}
-            }
-        }
-        if !visible.is_empty() || !invisible.is_empty() {
+        let annotations = property_site_annotations(
+            declared,
+            info,
+            on_constructor_parameter,
+            crate::types::PropertyAnnotationSite::Property,
+        );
+        if !annotations.is_empty() {
             out.push(crate::ir::PropertyAnnotations {
                 property: name.clone(),
-                visible,
-                invisible,
+                annotations,
             });
         }
     }

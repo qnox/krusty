@@ -522,6 +522,35 @@ struct LateField {
     lead: bool,
 }
 
+/// Partition retained declaration annotations into the two class-file attributes the JVM splits them
+/// across: `RuntimeVisibleAnnotations` (Kotlin's RUNTIME, the default) then `RuntimeInvisibleAnnotations`
+/// (BINARY). Common IR carries one list per declaration; this boundary is the only place the split
+/// exists. SOURCE-retained applications never reach the IR.
+fn split_declaration_annotations(
+    annotations: &crate::ir::DeclarationAnnotations,
+) -> (
+    Vec<crate::ir::AppliedAnnotation>,
+    Vec<crate::ir::AppliedAnnotation>,
+) {
+    use crate::types::AnnotationRetention;
+    let of = |keep: fn(&AnnotationRetention) -> bool| {
+        annotations
+            .iter()
+            .filter(|retained| keep(&retained.retention))
+            .map(|retained| retained.annotation.clone())
+            .collect()
+    };
+    (
+        of(|retention| {
+            matches!(
+                retention,
+                AnnotationRetention::Default | AnnotationRetention::Runtime
+            )
+        }),
+        of(|retention| matches!(retention, AnnotationRetention::Binary)),
+    )
+}
+
 pub struct ClassWriter {
     cp: ConstPool,
     /// Emit (and therefore seed the pool for) `Intrinsics.checkNotNullParameter` guards. Cleared by
@@ -954,7 +983,9 @@ impl ClassWriter {
         &mut self,
         annotations: &crate::ir::DeclarationAnnotations,
     ) {
-        let (visible, invisible) = self.encode_declaration_annotations(annotations);
+        // Kept UNENCODED: a deferred field's annotation types must intern in the field-table window,
+        // which `intern_late_fields` opens, not here. Only the retention → attribute split happens now.
+        let (visible, invisible) = split_declaration_annotations(annotations);
         if let Some(field) = self.late_fields.last_mut() {
             field.user_visible = visible;
             field.user_invisible = invisible;
@@ -974,22 +1005,15 @@ impl ClassWriter {
         &mut self,
         annotations: &crate::ir::DeclarationAnnotations,
     ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
-        use crate::types::AnnotationRetention;
-        let mut visible = Vec::new();
-        let mut invisible = Vec::new();
-        for retained in annotations.iter() {
-            if matches!(
-                retained.retention,
-                AnnotationRetention::Default | AnnotationRetention::Runtime
-            ) {
-                visible.push(self.encode_annotation(&retained.annotation));
-            }
-        }
-        for retained in annotations.iter() {
-            if matches!(retained.retention, AnnotationRetention::Binary) {
-                invisible.push(self.encode_annotation(&retained.annotation));
-            }
-        }
+        let (visible, invisible) = split_declaration_annotations(annotations);
+        let visible = visible
+            .iter()
+            .map(|annotation| self.encode_annotation(annotation))
+            .collect();
+        let invisible = invisible
+            .iter()
+            .map(|annotation| self.encode_annotation(annotation))
+            .collect();
         (visible, invisible)
     }
 
