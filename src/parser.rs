@@ -302,6 +302,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         delegations: Vec::new(),
         delegation_exprs: Vec::new(),
         base_class: None,
+        base_class_span: None,
         base_type_args: Vec::new(),
         base_args: Vec::new(),
         primary_ctor_annotations: Some(Vec::new()),
@@ -596,6 +597,7 @@ fn fixup_parenless_base_classes(file: &mut File) {
             {
                 let base = c.supertypes.remove(pos);
                 detached.push(base.clone());
+                c.base_class_span = Some(base.span);
                 c.base_class = Some(base.name);
                 c.base_type_args = base.targs;
             }
@@ -2343,8 +2345,15 @@ impl<'a> Parser<'a> {
             "Companion".to_string()
         };
         let name = format!("{outer}.{simple_name}");
-        let (supertypes, base_class, base_type_args, base_args, delegations, delegation_exprs) =
-            self.parse_supertypes();
+        let (
+            supertypes,
+            base_class,
+            base_class_span,
+            base_type_args,
+            base_args,
+            delegations,
+            delegation_exprs,
+        ) = self.parse_supertypes();
         let mut methods = Vec::new();
         let mut props = Vec::new();
         let mut init_order = Vec::new();
@@ -2427,6 +2436,7 @@ impl<'a> Parser<'a> {
             delegations,
             delegation_exprs,
             base_class,
+            base_class_span,
             base_type_args,
             base_args,
             secondary_ctors: Vec::new(),
@@ -2506,7 +2516,8 @@ impl<'a> Parser<'a> {
         // Always enter the shared optional parser. Besides avoiding a declaration-specific colon
         // branch, this lets enum headers honor the same `NL* ':'` grammar as class, interface, object,
         // companion-object, and anonymous-object headers.
-        let (enum_supertypes, _base, _base_targs, _args, _del, _del_e) = self.parse_supertypes();
+        let (enum_supertypes, _base, _base_span, _base_targs, _args, _del, _del_e) =
+            self.parse_supertypes();
         let mut entries: Vec<AstEnumEntry> = Vec::new();
         let mut methods = Vec::new();
         // Enum body member properties (`enum class C { A; val x = … }`) and their initializer order.
@@ -2787,6 +2798,7 @@ impl<'a> Parser<'a> {
             delegations: Vec::new(),
             delegation_exprs: Vec::new(),
             base_class: None,
+            base_class_span: None,
             base_type_args: Vec::new(),
             base_args: Vec::new(),
             secondary_ctors,
@@ -2926,7 +2938,7 @@ impl<'a> Parser<'a> {
                 self.bump();
             } // interface name
             self.parse_type_args();
-            let (supertypes, _, _, _, _, _) = self.parse_supertypes();
+            let (supertypes, _, _, _, _, _, _) = self.parse_supertypes();
             let _ = supertypes;
             if self.at(TokenKind::LBrace) {
                 let _ = self.parse_block_expr(false);
@@ -3511,8 +3523,15 @@ impl<'a> Parser<'a> {
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
-        let (supertypes, base_class, base_type_args, base_args, delegations, delegation_exprs) =
-            self.parse_supertypes();
+        let (
+            supertypes,
+            base_class,
+            base_class_span,
+            base_type_args,
+            base_args,
+            delegations,
+            delegation_exprs,
+        ) = self.parse_supertypes();
         // `class Derived<T> : Base<T>() where T : I1, T : I2` — generic constraints after the
         // supertype list, before the body. Same constraint as the inline form; one joined list.
         let mut type_param_bounds = type_param_bounds;
@@ -3684,6 +3703,7 @@ impl<'a> Parser<'a> {
             delegations,
             delegation_exprs,
             base_class,
+            base_class_span,
             base_type_args,
             base_args,
             // A class has a primary constructor when it wrote one (parens / `constructor` keyword) OR
@@ -3706,6 +3726,7 @@ impl<'a> Parser<'a> {
     ) -> (
         Vec<TypeRef>,
         Option<String>,
+        Option<Span>,
         Vec<TypeRef>,
         Vec<ExprId>,
         Vec<(String, String, bool)>,
@@ -3713,6 +3734,7 @@ impl<'a> Parser<'a> {
     ) {
         let mut ifaces: Vec<TypeRef> = Vec::new();
         let mut base: Option<String> = None;
+        let mut base_span = None;
         let mut base_type_args = Vec::new();
         let mut base_args = Vec::new();
         let mut delegations = Vec::new();
@@ -3831,6 +3853,7 @@ impl<'a> Parser<'a> {
                     reference.targs = targs.clone();
                     self.file.detached_type_refs.push(reference);
                     base = Some(effective.clone());
+                    base_span = Some(sup_span);
                     base_type_args = targs;
                     if arg_names.iter().any(|n| n.is_some()) {
                         if let Some(first) = args.first() {
@@ -3893,6 +3916,7 @@ impl<'a> Parser<'a> {
         (
             ifaces,
             base,
+            base_span,
             base_type_args,
             base_args,
             delegations,
@@ -3919,7 +3943,8 @@ impl<'a> Parser<'a> {
                 Vec::new(),
             )
         };
-        let (supertypes, _base, _base_type_args, _base_args, _, _) = self.parse_supertypes();
+        let (supertypes, _base, _base_span, _base_type_args, _base_args, _, _) =
+            self.parse_supertypes();
         // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the
         // body. Same constraint as the inline form; one joined list.
         let mut type_param_bounds = type_param_bounds;
@@ -4025,6 +4050,7 @@ impl<'a> Parser<'a> {
             delegations: Vec::new(),
             delegation_exprs: Vec::new(),
             base_class: None,
+            base_class_span: None,
             base_type_args: Vec::new(),
             base_args: Vec::new(),
             secondary_ctors: Vec::new(),
@@ -4118,8 +4144,15 @@ impl<'a> Parser<'a> {
 
     fn parse_anon_object(&mut self, span: Span) -> ExprId {
         self.bump(); // 'object'
-        let (supertypes, base_class, base_type_args, base_args, delegations, delegation_exprs) =
-            self.parse_supertypes();
+        let (
+            supertypes,
+            base_class,
+            base_class_span,
+            base_type_args,
+            base_args,
+            delegations,
+            delegation_exprs,
+        ) = self.parse_supertypes();
         let (methods, body_props, init_order) = self.parse_object_body();
         let end = self.t[self.i.saturating_sub(1)].span;
         let name = format!("Anon$anon${}", span.lo);
@@ -4150,6 +4183,7 @@ impl<'a> Parser<'a> {
             delegations,
             delegation_exprs,
             base_class,
+            base_class_span,
             base_type_args,
             base_args,
             secondary_ctors: Vec::new(),
@@ -4180,8 +4214,15 @@ impl<'a> Parser<'a> {
         let name = self.ident_or_error("object name");
         // Capture the object's implemented INTERFACES (`object X : KSerializer<C>`) AND a base class
         // (`object A : Sealed()`): the general class lowering/emit handles the `extends` + `super(args)`.
-        let (supertypes, base_class, base_type_args, base_args, delegations, delegation_exprs) =
-            self.parse_supertypes();
+        let (
+            supertypes,
+            base_class,
+            base_class_span,
+            base_type_args,
+            base_args,
+            delegations,
+            delegation_exprs,
+        ) = self.parse_supertypes();
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
@@ -4284,6 +4325,7 @@ impl<'a> Parser<'a> {
             delegations,
             delegation_exprs,
             base_class,
+            base_class_span,
             base_type_args,
             base_args,
             secondary_ctors: Vec::new(),

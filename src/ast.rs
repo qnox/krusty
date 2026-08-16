@@ -989,6 +989,8 @@ pub struct ClassDecl {
     pub delegation_exprs: Vec<(String, ExprId)>,
     /// A base-class supertype `: Base(args)` (name + constructor arguments), if any.
     pub base_class: Option<String>,
+    /// Source span of the base-class reference itself (`Base` above), retained for diagnostics.
+    pub base_class_span: Option<Span>,
     pub base_type_args: Vec<TypeRef>,
     pub base_args: Vec<ExprId>,
     /// Secondary constructors: `constructor(params) : this/super(args) { body }`.
