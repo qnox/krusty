@@ -107,3 +107,66 @@ denominator above without contributing to any cluster.
 | 5182 | intellij.platform.vcs.log.impl:main |
 | 5151 | intellij.grid.impl:main |
 | 4038 | intellij.platform.externalSystem.impl:main |
+
+## Bazel worker: what actually builds
+
+The numbers above measure ANALYSIS (diagnostics per file). This section measures EMISSION through
+the Bazel path — `krusty --persistent_worker` speaking jvm-inc-builder's argument surface, driven by
+`scripts/bazel-worker-probe.py`. No bazel install is involved: the worker protocol is line-delimited
+JSON on stdin/stdout, so the probe drives it directly. That isolates krusty's side of the
+integration; it does NOT exercise the Starlark rule, and the caveats below say where the two differ.
+
+Only modules whose full transitive closure is Kotlin-only are attempted — 91 of 2570 (the probe also
+skips closures above `--max-files`, inert at the default 400 on this checkout). krusty compiles no
+Java, so a closure containing Java sources cannot be built from source at all. Modules are built in
+dependency order and each produced jar is fed to its dependents' `--cp`, which is what an upstream
+`krusty_jvm_library` target supplies.
+
+| measure | value |
+|---|---:|
+| modules with a Kotlin-only closure | 91 |
+| attempted (every Kotlin dependency built) | 42 |
+| built to a jar | 6 |
+| `.kt` files compiled | 39 |
+| requests served by ONE worker process | 42 |
+
+| outcome of an attempt | modules |
+|---|---:|
+| other diagnostic | 13 |
+| unresolved reference | 11 |
+| `unsupported by krusty` | 11 |
+| internal compiler panic | 1 |
+
+| not attempted | modules |
+|---|---:|
+| blocked upstream (a Kotlin dependency failed) | 47 |
+| refused by the rule (`--friends`) | 2 |
+
+The 47 blocked modules are deliberately not compiled and not counted as failures. Compiling a module
+whose dependency never produced a jar measures an incomplete classpath, not the module: an earlier
+version of this probe did exactly that and reported roughly twice as many "unresolved reference"
+blockers as really exist.
+
+**`built` is an upper bound.** The probe sends the compile-shaping options but not `--resources`,
+`--java-count`, or `--abi-out`, which the real rule derives from the target. At least one of the six,
+`intellij.platform.buildData`, declares `resources = glob(["resources/**/*"])` in its `BUILD.bazel`,
+and the worker refuses `--resources` outright rather than write a jar silently missing them. Under
+the real rule that target fails.
+
+`-Xlambdas=class` is the largest single refusal (10 of the 11 `unsupported` rows; the eleventh is
+`-Xexplicit-api=strict`) and the refusal is correct: krusty emits `invokedynamic` lambdas only, so it
+declines rather than emitting a shape it does not model. Note that `build/compiler-options.bzl` only
+*defaults* `x_lambdas` to `indy`; 40 `BUILD.bazel` files — almost all under `fleet/` — pass
+`x_lambdas = "class"` explicitly, and those are the modules that hit this. The bazel and JPS
+configurations agree; the gap is krusty's.
+
+The one panic is a compiler bug rather than a worker bug: it surfaces on
+`intellij.kotlin.base.projectModel` as `invalid emitted metadata type: semantic type '<error>'`, and
+the worker survived it — `catch_unwind` failed that single request and served the rest. Narrowing it
+to a fixture is not part of this branch, so treat the module name and message as the only checked
+facts.
+
+Reproduce (needs `JAVA_HOME` pointing at a real JDK, and `cargo build --release`, which the test
+harness does not produce):
+
+    scripts/bazel-worker-probe.py --json probe.json
