@@ -405,7 +405,7 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
     assert!(
         ambiguous_diagnostics
             .iter()
-            .any(|message| message.contains("unresolved function 'set'")),
+            .any(|message| message.contains("unresolved reference 'set'.")),
         "mixed receiver/non-receiver overloads must defer lambda typing: {ambiguous_diagnostics:?}"
     );
     let blocked_by_member = "import lib.blocked\nfun probe() { lib.Ui().blocked { set(1) } }";
@@ -414,7 +414,7 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
     assert!(
         blocked_by_member_diagnostics
             .iter()
-            .any(|message| message.contains("unresolved function 'set'")),
+            .any(|message| message.contains("unresolved reference 'set'.")),
         "an ordinary member must block lower-priority extension pretyping: {blocked_by_member_diagnostics:?}"
     );
     let ordinary_function_lambda = "fun probe() { lib.Ui().route(1) { touch(1) } }";
@@ -433,7 +433,7 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
     assert!(
         joined_member_receiver_diagnostics
             .iter()
-            .any(|message| message.contains("unresolved function 'set'")),
+            .any(|message| message.contains("unresolved reference 'set'.")),
         "an applicable member with a joined generic receiver must block extension pretyping: {joined_member_receiver_diagnostics:?}"
     );
     for (case, source) in [
@@ -466,7 +466,7 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
     assert!(
         blocked_by_inner_receiver_diagnostics
             .iter()
-            .any(|message| message.contains("unresolved function 'set'")),
+            .any(|message| message.contains("unresolved reference 'set'.")),
         "a nearer ordinary member must block outer implicit receiver pretyping: {blocked_by_inner_receiver_diagnostics:?}"
     );
     let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))

@@ -48033,7 +48033,9 @@ impl<'a> Checker<'a> {
                         }),
                     )
                 } else {
-                    (format!("unresolved function '{fname}'"), None)
+                    // kotlinc has no "unresolved function" diagnostic: a callee that names nothing at
+                    // all is UNRESOLVED_REFERENCE, the same diagnostic a bare unresolved name gets.
+                    (format!("unresolved reference '{fname}'."), None)
                 };
                 if let Some(identity) = identity {
                     self.diags.error_with_identity(span, identity, message);

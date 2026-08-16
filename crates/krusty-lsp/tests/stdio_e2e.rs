@@ -1575,14 +1575,14 @@ fn stdio_server_reanalyzes_after_an_unopened_source_changes() {
                 .is_some_and(|diagnostics| {
                     diagnostics
                         .iter()
-                        .any(|diagnostic| diagnostic["message"] == "Unresolved function 'Item'")
+                        .any(|diagnostic| diagnostic["message"] == "Unresolved reference 'Item'.")
                 })
     });
     assert!(changed["params"]["diagnostics"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|diagnostic| diagnostic["message"] == "Unresolved function 'Item'"));
+        .any(|diagnostic| diagnostic["message"] == "Unresolved reference 'Item'."));
 
     server.shutdown_and_exit();
 }

@@ -256,7 +256,7 @@ fn java_ctor_lambda_body_error_reports_exactly_once() {
     }
     let occurrences = diags
         .iter()
-        .filter(|d| d.contains("unresolved function 'noSuchFunction'"))
+        .filter(|d| d.contains("unresolved reference 'noSuchFunction'."))
         .count();
     assert_eq!(occurrences, 1, "expected exactly one report, got {diags:?}");
 }
@@ -288,7 +288,7 @@ fn java_ctor_lambda_against_non_sam_parameter_still_fails() {
     assert!(
         diags
             .iter()
-            .any(|d| d.contains("unresolved function 'TextOnly'")),
+            .any(|d| d.contains("unresolved reference 'TextOnly'.")),
         "expected unresolved-constructor diagnostic, got {diags:?}"
     );
 }
