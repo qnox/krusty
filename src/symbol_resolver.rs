@@ -303,6 +303,12 @@ enum TypePosition {
     Invariant,
 }
 
+#[derive(Clone, Copy)]
+enum UnboundSpecialization {
+    Preserve,
+    UseUpperBound,
+}
+
 fn compose_position(position: TypePosition, variance: crate::types::TypeVariance) -> TypePosition {
     use crate::types::TypeVariance;
     match (position, variance) {
@@ -320,16 +326,20 @@ fn compose_position(position: TypePosition, variance: crate::types::TypeVariance
 /// projection semantics. Projection belongs to the classifier argument (`Box<out X>`); a value type
 /// never becomes `out X`: reads expose `X`, writes admit `Nothing`, and nested function/class variance
 /// composes with the surrounding position.
-fn specialize_member_type(
+fn specialize_member_type_with_unbound(
     source: &dyn SymbolSource,
     ty: Ty,
     bindings: &GSigBinds,
     position: TypePosition,
+    unbound: UnboundSpecialization,
 ) -> Ty {
     match ty {
         Ty::TyParam(name, bound) => {
             let Some(binding) = bindings.get(name).copied() else {
-                return ty;
+                return match unbound {
+                    UnboundSpecialization::Preserve => ty,
+                    UnboundSpecialization::UseUpperBound => bound.non_null(),
+                };
             };
             let adjusted = |binding: Ty| {
                 if bound.upper_bound_admits_null() {
@@ -355,36 +365,39 @@ fn specialize_member_type(
                 .params
                 .iter()
                 .map(|parameter| {
-                    specialize_member_type(
+                    specialize_member_type_with_unbound(
                         source,
                         *parameter,
                         bindings,
                         compose_position(position, crate::types::TypeVariance::In),
+                        unbound,
                     )
                 })
                 .collect(),
-            specialize_member_type(source, signature.ret, bindings, position),
+            specialize_member_type_with_unbound(source, signature.ret, bindings, position, unbound),
             signature.context_count,
             signature.has_receiver,
             signature.suspend,
         ),
-        Ty::Nullable(inner) => {
-            Ty::nullable(specialize_member_type(source, *inner, bindings, position))
-        }
-        Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(specialize_member_type(source, *inner, bindings, position))
-        }
-        Ty::InProjection(inner) => Ty::in_projection(specialize_member_type(
+        Ty::Nullable(inner) => Ty::nullable(specialize_member_type_with_unbound(
+            source, *inner, bindings, position, unbound,
+        )),
+        Ty::PlatformNullable(inner) => Ty::platform_nullable(specialize_member_type_with_unbound(
+            source, *inner, bindings, position, unbound,
+        )),
+        Ty::InProjection(inner) => Ty::in_projection(specialize_member_type_with_unbound(
             source,
             *inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::In),
+            unbound,
         )),
-        Ty::OutProjection(inner) => Ty::out_projection(specialize_member_type(
+        Ty::OutProjection(inner) => Ty::out_projection(specialize_member_type_with_unbound(
             source,
             *inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::Out),
+            unbound,
         )),
         Ty::Obj(internal, arguments) if !arguments.is_empty() => {
             let variances = source
@@ -397,7 +410,7 @@ fn specialize_member_type(
                     .iter()
                     .enumerate()
                     .map(|(index, argument)| {
-                        specialize_member_type(
+                        specialize_member_type_with_unbound(
                             source,
                             *argument,
                             bindings,
@@ -405,6 +418,7 @@ fn specialize_member_type(
                                 position,
                                 variances.get(index).copied().unwrap_or_default(),
                             ),
+                            unbound,
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -414,12 +428,33 @@ fn specialize_member_type(
     }
 }
 
+fn specialize_member_type(
+    source: &dyn SymbolSource,
+    ty: Ty,
+    bindings: &GSigBinds,
+    position: TypePosition,
+) -> Ty {
+    specialize_member_type_with_unbound(
+        source,
+        ty,
+        bindings,
+        position,
+        UnboundSpecialization::Preserve,
+    )
+}
+
 pub(crate) fn specialize_signature_input_type(
     source: &dyn SymbolSource,
     ty: Ty,
     bindings: &GSigBinds,
 ) -> Ty {
-    specialize_member_type(source, ty, bindings, TypePosition::In)
+    specialize_member_type_with_unbound(
+        source,
+        ty,
+        bindings,
+        TypePosition::In,
+        UnboundSpecialization::Preserve,
+    )
 }
 
 pub(crate) fn specialize_signature_output_type(
@@ -427,7 +462,27 @@ pub(crate) fn specialize_signature_output_type(
     ty: Ty,
     bindings: &GSigBinds,
 ) -> Ty {
-    specialize_member_type(source, ty, bindings, TypePosition::Out)
+    specialize_member_type_with_unbound(
+        source,
+        ty,
+        bindings,
+        TypePosition::Out,
+        UnboundSpecialization::Preserve,
+    )
+}
+
+fn specialize_final_signature_output_type(
+    source: &dyn SymbolSource,
+    ty: Ty,
+    bindings: &GSigBinds,
+) -> Ty {
+    specialize_member_type_with_unbound(
+        source,
+        ty,
+        bindings,
+        TypePosition::Out,
+        UnboundSpecialization::UseUpperBound,
+    )
 }
 
 pub(crate) fn specialize_signature_receiver_type(
@@ -435,7 +490,13 @@ pub(crate) fn specialize_signature_receiver_type(
     ty: Ty,
     bindings: &GSigBinds,
 ) -> Ty {
-    specialize_member_type(source, ty, bindings, TypePosition::Invariant)
+    specialize_member_type_with_unbound(
+        source,
+        ty,
+        bindings,
+        TypePosition::Invariant,
+        UnboundSpecialization::Preserve,
+    )
 }
 
 fn specialize_callable(
@@ -2472,7 +2533,13 @@ fn source_property_visible(property: &PropertyInfo) -> bool {
         || matches!(property.getter.origin, Origin::Module { .. })
 }
 
-fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> Ty {
+fn bind_ext_ret(
+    source: &dyn SymbolSource,
+    gsig: &GenericSig,
+    receiver: Ty,
+    args: &[Ty],
+    targs: &[Ty],
+) -> Ty {
     let mut binds = seeded_gsig_binds(gsig, targs);
     if let Some(recv_sig) = gsig.receiver {
         unify_ty(recv_sig, receiver, &mut binds);
@@ -2481,7 +2548,10 @@ fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> T
         unify_ty(*ps, a, &mut binds);
     }
     complete_bottom_constraint_bindings(gsig, &mut binds, targs.len());
-    ty_subst(gsig.ret, &binds)
+    // A projection is a generic-argument constraint, never an expression value. Consume it while
+    // materializing the selected callable's output: `Iterable<out Range>.first()` returns `Range`,
+    // not the invalid top-level type `out Range`.
+    specialize_final_signature_output_type(source, gsig.ret, &binds)
 }
 
 fn specialized_extension_return(lib: &dyn SemanticPlatform, o: &FunctionInfo, inferred: Ty) -> Ty {
@@ -2503,6 +2573,7 @@ fn specialized_extension_return(lib: &dyn SemanticPlatform, o: &FunctionInfo, in
 }
 
 fn bind_defaulted_ext_ret(
+    source: &dyn SymbolSource,
     o: &FunctionInfo,
     receiver: Ty,
     args: &[Ty],
@@ -2527,10 +2598,11 @@ fn bind_defaulted_ext_ret(
             unify_ty(*ps, *a, &mut binds);
         }
     }
-    ty_subst(semantic.ret, &binds)
+    specialize_final_signature_output_type(source, semantic.ret, &binds)
 }
 
 fn bind_defaulted_ext_ret_slots(
+    source: &dyn SymbolSource,
     o: &FunctionInfo,
     receiver: Ty,
     slots: &[Option<Ty>],
@@ -2546,7 +2618,7 @@ fn bind_defaulted_ext_ret_slots(
             unify_ty(*ps, *arg, &mut binds);
         }
     }
-    ty_subst(semantic.ret, &binds)
+    specialize_final_signature_output_type(source, semantic.ret, &binds)
 }
 
 /// If `sig` is a function type, the partially substituted semantic types of its lambda parameters.
@@ -3776,7 +3848,13 @@ impl<'a> SymbolResolver<'a> {
                         specialized_extension_return(
                             self.lib,
                             &selected,
-                            bind_ext_ret(signature, binding_receiver, &arg_tys, type_args),
+                            bind_ext_ret(
+                                &self.src,
+                                signature,
+                                binding_receiver,
+                                &arg_tys,
+                                type_args,
+                            ),
                         )
                     },
                 )
@@ -3863,7 +3941,7 @@ impl<'a> SymbolResolver<'a> {
                 .as_ref()
                 .map_or(selected.callable.ret, |sig| {
                     if selected.is_extension() {
-                        bind_ext_ret(sig, binding_receiver, &arg_tys, type_args)
+                        bind_ext_ret(&self.src, sig, binding_receiver, &arg_tys, type_args)
                     } else {
                         bind_member_return(
                             &self.src,
@@ -3968,6 +4046,7 @@ impl<'a> SymbolResolver<'a> {
                         self.lib,
                         &selected,
                         bind_ext_ret(
+                            &self.src,
                             signature,
                             binding_receiver,
                             &args.iter().map(CallArgKind::ty).collect::<Vec<_>>(),
@@ -4933,7 +5012,7 @@ impl<'a> SymbolResolver<'a> {
         if vparams.len() == args.len() {
             let c = &o.callable;
             let semantic = o.semantic_signature();
-            let ret_ty = bind_ext_ret(&semantic, binding_receiver, args, type_args);
+            let ret_ty = bind_ext_ret(&self.src, &semantic, binding_receiver, args, type_args);
             let ret_ty2 = specialized_extension_return(self.lib, o, ret_ty);
             crate::trace_compiler!(
                 "resolve",
@@ -4959,7 +5038,14 @@ impl<'a> SymbolResolver<'a> {
         let ret_ty = specialized_extension_return(
             self.lib,
             o,
-            bind_defaulted_ext_ret(o, binding_receiver, args, type_args, trailing_lambda),
+            bind_defaulted_ext_ret(
+                &self.src,
+                o,
+                binding_receiver,
+                args,
+                type_args,
+                trailing_lambda,
+            ),
         );
         // Prefer a real `name$default` synthetic when it exists — even for an `inline` function. Many
         // `inline` stdlib/coroutine functions (`Mutex.withLock`) also emit a `$default` callable (the
@@ -5080,7 +5166,7 @@ impl<'a> SymbolResolver<'a> {
         let ret_ty = specialized_extension_return(
             self.lib,
             o,
-            bind_defaulted_ext_ret_slots(o, binding_receiver, slots, type_args),
+            bind_defaulted_ext_ret_slots(&self.src, o, binding_receiver, slots, type_args),
         );
         if let Some(c) = selected_default_callable(o) {
             crate::trace_compiler!(
@@ -7036,7 +7122,11 @@ fn indexed_call_shape(
         .iter()
         .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
         .collect::<Vec<_>>();
-    let inferred_ret = ty_subst_keep_unbound(signature.ret, &bindings);
+    let inferred_ret = if overload.is_extension() {
+        specialize_signature_output_type(source, signature.ret, &bindings)
+    } else {
+        ty_subst_keep_unbound(signature.ret, &bindings)
+    };
     let ret = if overload.is_extension() {
         specialized_extension_return(lib, overload, inferred_ret)
     } else {
@@ -7435,6 +7525,29 @@ mod tests {
                 vec![Ty::obj_args("fixtures/Box", &[Ty::String]), any],
                 Ty::obj_args("fixtures/Result", &[any]),
             ))
+        );
+    }
+
+    #[test]
+    fn final_extension_output_consumes_projection_without_preserving_unbound_formals() {
+        let any = Ty::obj("kotlin/Any");
+        let output = Ty::ty_param("R", any);
+
+        assert_eq!(
+            specialize_signature_output_type(&EMPTY_SOURCE, output, &GSigBinds::new()),
+            output
+        );
+        assert_eq!(
+            specialize_final_signature_output_type(&EMPTY_SOURCE, output, &GSigBinds::new()),
+            any
+        );
+        assert_eq!(
+            specialize_final_signature_output_type(
+                &EMPTY_SOURCE,
+                output,
+                &GSigBinds::from([("R".to_string(), Ty::out_projection(Ty::String),)]),
+            ),
+            Ty::String
         );
     }
 

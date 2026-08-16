@@ -942,6 +942,8 @@ mod primitive_operator_extension_e2e;
 mod primitive_spread_e2e;
 #[path = "private_set_e2e.rs"]
 mod private_set_e2e;
+#[path = "projected_receiver_extension_e2e.rs"]
+mod projected_receiver_extension_e2e;
 #[path = "property_accessor_e2e.rs"]
 mod property_accessor_e2e;
 #[path = "property_conversion_inference_e2e.rs"]
