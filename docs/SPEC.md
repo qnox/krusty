@@ -6330,3 +6330,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Like the property annotations above, these are RECORDED but NOT diagnosed by the checker — krusty's
   annotation constant folder is narrower than kotlinc's, and reporting from a newly added check would
   reject sources that compile today.
+- **A type variable is solved through the declaration's own bound relation.** A generic declaration
+  states constraints beyond its parameter types, and both are load-bearing at a call site. For
+  `fun <T : Base<T>, C : T> C.f(subs: Iterable<T>)`, an argument can pin `T` to a type its OWN bound
+  forbids — `Auth().f(listOf(Login()))` pins `T = Login`, but `Login` is a `Base<Cmd>`, not a
+  `Base<Login>` — and with a `vararg` parameter no argument reaches `T` at all, leaving only `C`
+  bound from the receiver. The recursive bound is the map in both directions: the application of
+  `Base` in the known value's hierarchy carries the answer (`Login` → `Base<Cmd>` → `T = Cmd`), which
+  is what kotlinc solves. Keeping the violating binding, or leaving the variable open, drops the
+  candidate as violating its own declared bounds — reported as "unresolved Java static …" or
+  "argument type mismatch: … but 'Iterable<Base<T>>' was expected".
+
+  The re-solve replaces only a binding the bounds check would have rejected anyway, and only where
+  the hierarchy answers with a concrete type, so it can rescue no call that kotlinc rejects: the
+  solution is always an application in the value's own hierarchy, and where that does not make the
+  arguments fit, the call still fails. Explicit type arguments are never touched — a wrong one stays
+  an error. Tests: `tests/bound_relation_type_variable_e2e.rs`.

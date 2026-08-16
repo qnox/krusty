@@ -1311,6 +1311,25 @@ pub(crate) fn merge_generic_bindings(
     bindings: &mut GSigBinds,
     inferred: GSigBinds,
 ) {
+    merge_generic_bindings_from(
+        None,
+        signature,
+        explicit_type_argument_count,
+        bindings,
+        inferred,
+    );
+}
+
+/// [`merge_generic_bindings`] with the symbol source its completion steps need. Re-solving a
+/// binding against a recursive bound is a hierarchy question, so a caller that has a source passes
+/// it; one that does not gets exactly the previous behaviour.
+pub(crate) fn merge_generic_bindings_from(
+    source: Option<&dyn SymbolSource>,
+    signature: &GenericSig,
+    explicit_type_argument_count: usize,
+    bindings: &mut GSigBinds,
+    inferred: GSigBinds,
+) {
     for (formal, actual) in inferred {
         let Some(formal_index) = signature
             .formals
@@ -1334,6 +1353,7 @@ pub(crate) fn merge_generic_bindings(
     // `R := Nothing?` under `C : R`; the solution is `R = C?`). Here, at the common merge funnel,
     // so every selection, realization, and lambda-expectation path sees the same completed map.
     complete_bottom_constraint_bindings(signature, bindings, explicit_type_argument_count);
+    resolve_bound_violating_bindings(source, signature, bindings, explicit_type_argument_count);
 }
 
 /// Merge constraints contributed by an expected call result. These are upper bounds: they can fill
@@ -1978,6 +1998,132 @@ pub(crate) fn complete_bottom_constraint_bindings(
         }
         if !changed {
             break;
+        }
+    }
+}
+
+/// Solve a formal from the declaration's own bound relation: one that no argument reached, and one
+/// whose argument-derived binding its OWN bound forbids.
+///
+/// An argument can pin a type variable to something its declared bound rules out. For
+/// `fun <T : Base<T>, C : T> f(self: C, subs: Iterable<T>)` called as `f(Auth(), listOf(Login()))`,
+/// the element type pins `T = Login` — but `Login` is a `Base<Cmd>`, not a `Base<Login>`, so that
+/// binding cannot be what the call means. Kotlin solves `T` from the same recursive bound: the
+/// application of `Base` in `Login`'s hierarchy is `Base<Cmd>`, so `T = Cmd`. Keeping the violating
+/// binding instead makes the parameter `Iterable<Login>` and the call is reported inapplicable.
+///
+/// Only a binding that ALREADY fails its bound is touched, and only when the hierarchy answers, so
+/// a caller with no symbol source — or a bound the walk cannot reach — leaves every binding alone.
+pub(crate) fn resolve_bound_violating_bindings(
+    source: Option<&dyn SymbolSource>,
+    generic_sig: &GenericSig,
+    bindings: &mut GSigBinds,
+    explicit: usize,
+) {
+    let Some(source) = source else {
+        return;
+    };
+    let oracle = SourceOracle(source);
+    // A formal can be reachable ONLY through another's bound: `<T : Base<T>, C : T>` mentions `T` in
+    // no parameter position of `f(self: C, subs: Array<out T>)` once the argument is a vararg
+    // element. `C`'s value answers it through the same recursive bound.
+    for (index, bounds) in generic_sig.formal_bounds.iter().enumerate() {
+        if index < explicit {
+            continue;
+        }
+        let Some(actual) = generic_sig
+            .formals
+            .get(index)
+            .and_then(|formal| bindings.get(formal))
+            .copied()
+        else {
+            continue;
+        };
+        for bound in bounds {
+            let Ty::TyParam(open, _) = bound.non_null() else {
+                continue;
+            };
+            let Some(open_index) = generic_sig
+                .formals
+                .iter()
+                .position(|candidate| candidate == open)
+            else {
+                continue;
+            };
+            if open_index < explicit || bindings.contains_key(open) {
+                continue;
+            }
+            let Some(open_bounds) = generic_sig.formal_bounds.get(open_index) else {
+                continue;
+            };
+            for open_bound in open_bounds {
+                let Some(position) = open_bound.type_args().iter().position(
+                    |argument| matches!(argument.non_null(), Ty::TyParam(name, _) if name == open),
+                ) else {
+                    continue;
+                };
+                let Some(target) = open_bound.kotlin_class_internal() else {
+                    continue;
+                };
+                let Some(applied) =
+                    crate::assignable::applied_supertype(&oracle, actual, Ty::obj_name(target))
+                else {
+                    continue;
+                };
+                let Some(&solution) = applied.type_args().get(position) else {
+                    continue;
+                };
+                if solution != Ty::Error && !solution.mentions_ty_param() {
+                    bindings.insert(open.to_string(), solution);
+                    break;
+                }
+            }
+        }
+    }
+    for (index, (formal, bounds)) in generic_sig
+        .formals
+        .iter()
+        .zip(&generic_sig.formal_bounds)
+        .enumerate()
+    {
+        if index < explicit {
+            continue;
+        }
+        let Some(actual) = bindings.get(formal).copied() else {
+            continue;
+        };
+        for bound in bounds {
+            // Only a bound that mentions the formal ITSELF can be re-solved this way: it is what
+            // ties the variable to a position in its own hierarchy.
+            let Some(position) = bound.type_args().iter().position(
+                |argument| matches!(argument.non_null(), Ty::TyParam(name, _) if name == formal),
+            ) else {
+                continue;
+            };
+            let applied_bound = ty_subst_keep_unbound(*bound, bindings);
+            if crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                &oracle,
+                actual,
+                applied_bound,
+            ) {
+                continue;
+            }
+            let Some(target) = bound.kotlin_class_internal() else {
+                continue;
+            };
+            let Some(applied) =
+                crate::assignable::applied_supertype(&oracle, actual, Ty::obj_name(target))
+            else {
+                continue;
+            };
+            let Some(&solution) = applied.type_args().get(position) else {
+                continue;
+            };
+            if solution != Ty::Error && !solution.mentions_ty_param() && solution != actual {
+                bindings.insert(formal.clone(), solution);
+                break;
+            }
         }
     }
 }
@@ -7121,7 +7267,7 @@ fn generic_bounds_admit(
     for (&parameter, &argument) in gsig.params.iter().zip(args) {
         unify_inferred_ty_impl(Some(src), parameter, argument, &mut inferred);
     }
-    merge_generic_bindings(gsig, type_args.len(), &mut binds, inferred);
+    merge_generic_bindings_from(Some(src), gsig, type_args.len(), &mut binds, inferred);
     generic_bindings_satisfy_bounds(gsig, &binds, |actual, bound| {
         actual == bound
             || crate::assignable::is_assignable(
@@ -7153,7 +7299,7 @@ fn generic_bounds_admit_slots(
             unify_inferred_ty_impl(Some(src), parameter, *argument, &mut inferred);
         }
     }
-    merge_generic_bindings(gsig, type_args.len(), &mut binds, inferred);
+    merge_generic_bindings_from(Some(src), gsig, type_args.len(), &mut binds, inferred);
     generic_bindings_satisfy_bounds(gsig, &binds, |actual, bound| {
         actual == bound
             || crate::assignable::is_assignable(
