@@ -124,10 +124,7 @@ fn classifier_access_diagnostics_follow_resolution_scope() {
             "import lib.Hidden\n\
              fun use(Hidden: Int): Int { Hidden(); return 0 }\n"
         ),
-        [
-            "expression 'Hidden' of type 'Int' cannot be invoked as a function. \
-          Function 'invoke()' is not found."
-        ]
+        ["no value passed for parameter 'value'."]
     );
     assert_eq!(
         fixture.diagnostics(
@@ -136,10 +133,7 @@ fn classifier_access_diagnostics_follow_resolution_scope() {
              val Hidden: Int = 1\n\
              fun use(): Int { Hidden(); return 0 }\n"
         ),
-        [
-            "expression 'Hidden' of type 'Int' cannot be invoked as a function. \
-          Function 'invoke()' is not found."
-        ]
+        ["no value passed for parameter 'value'."]
     );
     assert_eq!(
         fixture.diagnostics_files(&[

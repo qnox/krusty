@@ -45368,12 +45368,12 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                // Invoking a function-typed MEMBER PROPERTY: `obj.func(args)` where `func` is a
-                // `val func: (…) -> R` property (e.g. an enum entry's `func`). No method `func` exists;
-                // read the property (its type is `Ty::Fun`) and invoke it through the one invoke
-                // convention, exactly like a local/top-level function-typed value.
-                let prop_fun_ty = match self.select_property_read(scope, rt, &name) {
-                    Ok(Some(selection)) if matches!(selection.ty(), Ty::Fun(_)) => {
+                // A MEMBER PROPERTY used with call syntax is a value read followed by the ordinary
+                // invoke convention. A callable value (`obj.func(args)`) flows through that shared
+                // selection. A non-callable value is FUNCTION_EXPECTED: unlike a bare `func(args)`,
+                // the member selection has already resolved the callee expression to this property.
+                let property_value = match self.select_property_read(scope, rt, &name) {
+                    Ok(Some(selection)) => {
                         if let Some((visibility, owner)) = selection.access() {
                             if visibility != Visibility::Public
                                 && !self.member_accessible(visibility, owner)
@@ -45387,7 +45387,7 @@ impl<'a> Checker<'a> {
                                 return Ty::Error;
                             }
                         }
-                        Some(self.record_property_read(scope, Some(callee), selection))
+                        Some((selection.ty(), selection))
                     }
                     Err(_) => {
                         self.diags.error(
@@ -45396,22 +45396,36 @@ impl<'a> Checker<'a> {
                         );
                         return Ty::Error;
                     }
-                    Ok(Some(_) | None) => None,
+                    Ok(None) => None,
                 };
-                if let Some(fun_ty) = prop_fun_ty {
-                    if let Some(ret) = self.record_invoke_or_report(
-                        scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &arg_tys,
-                        },
-                        callee,
-                        fun_ty,
-                        span,
-                    ) {
-                        return ret;
+                if let Some((property_ty, selection)) = property_value {
+                    if self.value_type_claims_call(scope, property_ty) {
+                        let value_ty = self.record_property_read(scope, Some(callee), selection);
+                        if let Some(ret) = self.record_invoke_or_report(
+                            scope,
+                            CallArgs {
+                                call,
+                                args,
+                                arg_tys: &arg_tys,
+                            },
+                            callee,
+                            value_ty,
+                            span,
+                        ) {
+                            return ret;
+                        }
                     }
+                    if property_ty != Ty::Error {
+                        self.diags.error(
+                            self.call_callee_name_span(call),
+                            format!(
+                                "expression '{name}' of type '{}' cannot be invoked as a function. \
+                                 Function 'invoke()' is not found.",
+                                property_ty.source_name()
+                            ),
+                        );
+                    }
+                    return Ty::Error;
                 }
                 if rt.is_nullable() {
                     let non_null = rt.non_null();
@@ -45517,26 +45531,14 @@ impl<'a> Checker<'a> {
                     .lookup(scope, &fname)
                     .map(|local| (local.ty, local.origin));
                 let local_value_ty = local_value.map(|(ty, _)| ty);
-                // For a call carrying a LAMBDA argument, a value binding claims call syntax only
-                // when it can actually be invoked — it is function-typed or its type declares an
-                // `invoke` operator. Kotlin resolves call candidates among callables; a
-                // non-invokable value (a builder's `var schema` seen through the implicit receiver,
-                // an enclosing `fmt: String?` parameter) never shadows a member FUNCTION of the
-                // same name. Deciding this BEFORE typing the arguments matters as much as the
-                // outcome: the invoke attempt types the lambda against the value's type, and those
-                // bindings and diagnostics (an "unresolved reference" inside the mis-typed body)
-                // survive even after a later rung resolves the call correctly.
-                //
-                // Lambda-argument calls ONLY: for plain arguments the attempt is harmless (their
-                // types are receiver-independent, `record_invoke` falls through on Absent), and a
-                // callable-reference local (`val av = a::v; av()` — `KProperty0`, whose `invoke`
-                // arrives via the reflect/`FunctionN` supertypes rather than an operator-flagged
-                // member) must keep reaching the invoke rung.
-                let lambda_argument = args
-                    .iter()
-                    .any(|&argument| matches!(self.file.expr(argument), Expr::Lambda { .. }));
-                let local_value_invokable = !lambda_argument
-                    || local_value.is_some_and(|(ty, _)| self.value_type_claims_call(scope, ty));
+                // A lexical value claims CALL syntax only when its semantic type supports the
+                // invoke convention. A plain local/parameter such as `val count = 1` remains a value
+                // binding for ordinary expressions but contributes no `count()` callable candidate;
+                // a same-named classifier/function may therefore win the call tower, exactly as in
+                // kotlinc. Callable-reference values keep reaching this rung through their semantic
+                // FunctionN/invoke supertypes, never through their spelling.
+                let local_value_invokable =
+                    local_value.is_some_and(|(ty, _)| self.value_type_claims_call(scope, ty));
                 if let Some((mut receiver_ty, origin)) =
                     local_value.filter(|_| local_value_invokable)
                 {
@@ -46263,7 +46265,7 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                let unshadowed_name = !self.lexical_value_declares(scope, &fname);
+                let unshadowed_name = !self.lexical_value_claims_call(scope, &fname);
                 let (bare_classifier, ambiguous_classifier, implicit_constructor_outer) =
                     if unshadowed_name {
                         let (nested, receiver) = self.implicit_nested_classifier(scope, &fname);
@@ -46273,15 +46275,19 @@ impl<'a> Checker<'a> {
                             }
                             InheritedNestedClassifier::Ambiguous => (None, true, receiver),
                             InheritedNestedClassifier::NotFound => {
-                                match self.qualifier(scope, QualifierInput::Root(&fname)) {
-                                    Ok(ResolvedQualifier::Classifier(internal)) => {
+                                // Call syntax selects from callable/classifier candidates rather
+                                // than first committing the spelling as an ordinary value root. A
+                                // non-callable `val Registry` therefore contributes no candidate
+                                // and does not hide the independently scoped `class Registry`.
+                                // `select_classifier` is the common scope/import/provider query;
+                                // using `qualifier` here would incorrectly reintroduce value-root
+                                // precedence from qualified-expression resolution.
+                                match self.select_classifier(scope, &fname) {
+                                    InheritedNestedClassifier::Found(internal) => {
                                         (Some(internal), false, None)
                                     }
-                                    Err(QualifierError::AmbiguousRoot { .. }) => (None, true, None),
-                                    Ok(
-                                        ResolvedQualifier::Value | ResolvedQualifier::Package(_),
-                                    )
-                                    | Err(_) => (None, false, None),
+                                    InheritedNestedClassifier::Ambiguous => (None, true, None),
+                                    InheritedNestedClassifier::NotFound => (None, false, None),
                                 }
                             }
                         }
@@ -48031,34 +48037,6 @@ impl<'a> Checker<'a> {
                 }
                 let (message, identity) = if had_rejected_callable {
                     (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None)
-                } else if matches!(
-                    self.qualifier(scope, QualifierInput::Root(&fname)),
-                    Ok(ResolvedQualifier::Value)
-                ) {
-                    // The callee names a VALUE that carries no `invoke`: the name resolved, so this is
-                    // kotlinc's FUNCTION_EXPECTED, which reports the expression and its type. A value
-                    // whose own type could not be determined has already been diagnosed, so fall back
-                    // to the unresolved form rather than naming an error type.
-                    // Reuse the callee's recorded type when the tower already typed it; typing it a
-                    // second time would repeat any diagnostic its own resolution reports.
-                    let recorded = self.expr_types[callee.0 as usize];
-                    let value = if recorded == Ty::Error {
-                        self.expr(scope, callee)
-                    } else {
-                        recorded
-                    };
-                    if value == Ty::Error {
-                        (format!("unresolved reference '{fname}'."), None)
-                    } else {
-                        (
-                            format!(
-                                "expression '{fname}' of type '{}' cannot be invoked as a function. \
-                                 Function 'invoke()' is not found.",
-                                value.source_name()
-                            ),
-                            None,
-                        )
-                    }
                 } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
                 {
                     (
@@ -52852,7 +52830,7 @@ fun box(): String {
     }
 
     #[test]
-    fn local_value_named_like_class_blocks_constructor_retry() {
+    fn non_callable_local_does_not_hide_a_constructor_from_call_syntax() {
         let (errs, _) = check(
             r#"
 class Foo
@@ -52864,10 +52842,8 @@ fun box(): String {
 "#,
         );
         assert!(
-            errs.iter().any(|e| e
-                == "expression 'Foo' of type 'Int' cannot be invoked as a function. \
-                    Function 'invoke()' is not found."),
-            "expected local value to shadow class constructor, got {errs:?}"
+            errs.is_empty(),
+            "expected Foo() to construct the class: {errs:?}"
         );
     }
 
