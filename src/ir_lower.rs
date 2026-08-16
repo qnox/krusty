@@ -21881,7 +21881,7 @@ impl<'a> Lower<'a> {
             Expr::NullLit => self.emit_const(IrConst::Null),
             // The checker either diagnosed this node at an emitted annotation application or left
             // it inert at a source position this compiler does not consume. It has no IR value.
-            Expr::UnsupportedAnnotationArgument(_) => return None,
+            Expr::UnsupportedAnnotationArgument(_) | Expr::AnnotationArrayLiteral(_) => return None,
             // `throw e` — throw the exception value; control never returns.
             Expr::Throw { operand } => {
                 let v = self.expr(operand)?;
