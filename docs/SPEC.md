@@ -5820,3 +5820,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nested application reads the call's names by position, a direct one reads the annotation's names
   per argument. Holds at any depth and for a mix of positional and named arguments. Test:
   `tests/annotation_emission_e2e.rs::nested_annotation_named_arguments_bind_by_label`.
+
+- **Annotation declarations publish one normalized application shape.** The checker consumes
+  semantic element identities, types, defaults, vararg position, and positional-argument policy;
+  it does not ask whether a declaration came from source, Kotlin metadata, or a Java classfile.
+  Kotlin constructors use their ordinary source parameter list. At the JVM provider boundary, a
+  constructor-less Java `@interface` becomes the same `ParamList`: `AnnotationDefault` presence
+  marks an optional element, descriptor width preserves `byte`/`short` annotation tags, a scalar
+  element named `value` alone accepts one positional argument, and an array-typed `value` accepts
+  positional elements as a vararg. Other Java elements are named-only. Omitting a Java array
+  element emits nothing so its declaration default remains effective; omitting a Kotlin
+  `vararg val` materializes the empty array required by Kotlin semantics. Unsupported parsed
+  annotation values remain explicit AST nodes and are diagnosed only if an emitted annotation
+  application consumes them—never as fabricated names and never at inert property, field,
+  parameter, or local positions. Tests: `tests/annotation_emission_e2e.rs`.

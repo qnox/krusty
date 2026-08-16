@@ -208,6 +208,7 @@ struct CtorShape<'a> {
     param_defaults: &'a [bool],
     param_tparams: &'a [Option<u32>],
     sig_name: Option<&'a str>,
+    emit_jvm_signature: bool,
     /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type` (f4),
     /// the only place ctor vararg-ness survives into metadata.
     vararg_index: Option<usize>,
@@ -246,8 +247,10 @@ fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &Type
         }
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
-    let sig = jvm_method_sig(st, Some(shape.sig_name.unwrap_or("<init>")), shape.desc);
-    ctor.field_message(100, &sig); // JvmProtoBuf.constructorSignature = 100
+    if shape.emit_jvm_signature {
+        let sig = jvm_method_sig(st, Some(shape.sig_name.unwrap_or("<init>")), shape.desc);
+        ctor.field_message(100, &sig); // JvmProtoBuf.constructorSignature = 100
+    }
     ctor
 }
 
@@ -326,6 +329,10 @@ pub struct ClassTail<'a> {
     /// `Constructor.flags` (f1) for the PRIMARY constructor — 0 (omitted) for an ordinary class; a
     /// sealed class's primary ctor is PROTECTED, which kotlinc records.
     pub primary_ctor_flags: u64,
+    /// Whether the primary declaration has a JVM constructor realization. Kotlin annotation
+    /// classes expose a language-level constructor in metadata, but their classfile is an
+    /// annotation interface and therefore has no `<init>` method.
+    pub primary_ctor_jvm_signature: bool,
     /// The primary constructor's `JvmMethodSignature` NAME — a value class's primary ctor is realized as
     /// the static `constructor-impl`, not `<init>`. `None` ⇒ `<init>` (the ordinary shape).
     pub ctor_sig_name: Option<&'a str>,
@@ -342,6 +349,8 @@ pub struct ClassTail<'a> {
     /// the classfile `super_class`/`interfaces` entries; Kotlin metadata must retain `H<A>` so
     /// reflection and downstream type substitution do not see a raw `H`.
     pub supertypes: &'a [Ty],
+    /// BINARY/RUNTIME-retained annotations attached to the class declaration.
+    pub annotations: &'a [crate::ir::AppliedAnnotation],
 }
 
 impl Default for ClassTail<'_> {
@@ -362,11 +371,13 @@ impl Default for ClassTail<'_> {
             ctor_vararg_index: None,
             emit_primary_ctor: true,
             primary_ctor_flags: 0,
+            primary_ctor_jvm_signature: true,
             type_params: &[],
             type_param_bounds: &[],
             captured_type_params: &[],
             sealed_subclasses: &[],
             supertypes: &[],
+            annotations: &[],
         }
     }
 }
@@ -475,6 +486,7 @@ pub fn build_class(
                 param_defaults: tail.ctor_param_defaults,
                 param_tparams: &ctor_param_tparams,
                 sig_name: tail.ctor_sig_name,
+                emit_jvm_signature: tail.primary_ctor_jvm_signature,
                 vararg_index: tail.ctor_vararg_index,
             },
             &class_type_parameters,
@@ -492,6 +504,7 @@ pub fn build_class(
                 param_defaults: &[],
                 param_tparams: &[],
                 sig_name: None,
+                emit_jvm_signature: true,
                 vararg_index: sc.vararg_index,
             },
             &class_type_parameters,
@@ -731,6 +744,14 @@ pub fn build_class(
         })
         .collect();
 
+    // Class.annotation = f25. Build after members so annotation names/values follow accessor
+    // signatures in the shared string table, matching kotlinc's declaration order.
+    let annotation_msgs: Vec<Pb> = tail
+        .annotations
+        .iter()
+        .map(|annotation| crate::metadata::builder::annotation_pb(&mut st, annotation))
+        .collect();
+
     // A `@JvmInline value class`'s underlying property name + type (`Class` f17/f18). Interned with the
     // members (before the companion/nested tail) so the d2 order matches kotlinc.
     let inline_underlying: Option<(u32, Pb)> = tail
@@ -798,6 +819,9 @@ pub fn build_class(
     if let Some((name_id, ty_pb)) = &inline_underlying {
         class.field_varint(17, *name_id as u64); // Class.inlineClassUnderlyingPropertyName = 17
         class.field_message(18, ty_pb); // Class.inlineClassUnderlyingType = 18
+    }
+    for annotation in &annotation_msgs {
+        class.repeated_message(25, annotation); // Class.annotation = 25
     }
     if let Some((major, minor, patch)) = tail.compiler_version_requirement {
         // Class.versionRequirement (f31) indexes Class.versionRequirementTable (f32). The compact

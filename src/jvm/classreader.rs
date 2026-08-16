@@ -41,6 +41,9 @@ pub struct MethodSig {
     /// callable exists only for binary compatibility: kotlinc removes it from overload
     /// resolution entirely, so it must never enter a candidate set.
     pub deprecated_hidden: bool,
+    /// For a Java `@interface` element: the declaration has an `AnnotationDefault`, so a use site
+    /// may omit it. Always false for an ordinary method.
+    pub has_annotation_default: bool,
 }
 
 impl MethodSig {
@@ -117,6 +120,9 @@ struct RawMember {
 #[derive(Default)]
 struct MemberAttributes {
     signature: Option<String>,
+    /// The method carries an `AnnotationDefault` attribute (JVMS 4.7.22) — it is an annotation
+    /// element with a default, so a use site may omit it.
+    has_annotation_default: bool,
     const_value: Option<ConstVal>,
     parameter_nullability: Vec<Option<JavaNullability>>,
     declaration_nullability: Option<JavaNullability>,
@@ -498,6 +504,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             parameter_nullability: member.attributes.parameter_nullability,
             return_nullability: member.attributes.declaration_nullability,
             deprecated_hidden: member.attributes.deprecated_hidden,
+            has_annotation_default: member.attributes.has_annotation_default,
         })
         .collect();
 
@@ -770,6 +777,13 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                     &mut attributes.deprecated_hidden,
                 )?;
             }
+            // The default VALUE is not needed: kotlinc never materializes an omitted element into
+            // the use site's annotation, so only its PRESENCE (may this element be omitted?)
+            // matters here.
+            Some(C::Utf8(s)) if s == "AnnotationDefault" => {
+                attributes.has_annotation_default = true;
+                r.take(len)?;
+            }
             _ => {
                 r.take(len)?;
             }
@@ -1035,6 +1049,7 @@ mod tests {
             parameter_nullability: Vec::new(),
             return_nullability: None,
             deprecated_hidden: false,
+            has_annotation_default: false,
         };
         let concrete = method("(Ljava/lang/String;I)Ljava/lang/String;");
         let return_bridge = method("(Ljava/lang/String;I)Ljava/lang/Object;");

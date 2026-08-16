@@ -1064,6 +1064,35 @@ pub struct ParamList {
     /// member call inside unresolved. Empty when the origin records no per-parameter types.
     pub recv_fun: Vec<bool>,
     pub vararg: Option<usize>,
+    /// Present only when this is a provider-normalized annotation application shape rather than a
+    /// constructor parameter list. The checker consumes the policy without asking whether the
+    /// declaration came from source, Kotlin metadata, or a Java classfile.
+    pub annotation: Option<AnnotationParameterPolicy>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnnotationParameterPolicy {
+    /// Whether positional arguments use ordinary constructor order, are unavailable, or feed the
+    /// array-typed `value` element as individual values.
+    pub positional: AnnotationPositionalPolicy,
+    /// Kotlin declaration `vararg val` materializes an omitted empty array; a classfile annotation
+    /// element with a default must remain absent so its declaration default stands.
+    pub materialize_omitted_vararg: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnotationPositionalPolicy {
+    Constructor,
+    NamedOnly,
+    /// The declaration's `value` parameter alone accepts one positional argument.
+    Value,
+    ValueVararg,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnnotationApplication {
+    pub parameters: ParamList,
+    pub policy: AnnotationParameterPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2122,8 +2151,10 @@ pub struct LibraryType {
     /// the accessor is not a source-callable `getEntries()` function, and keeping a dedicated fact
     /// prevents consumers from rediscovering it by provider-specific names or descriptors.
     pub enum_entries_accessor: Option<LibraryMember>,
-    /// Constructor SOURCE parameter names plus per-parameter default flags from `@Metadata`.
-    pub ctor_named_params: Vec<ParamList>,
+    /// Provider-normalized named application parameter lists. Constructor declarations use
+    /// [`ParamList::annotation`] = `None`; a declaration format without a constructor can publish
+    /// its annotation element list with the application policy attached.
+    pub named_parameter_lists: Vec<ParamList>,
     /// For a classpath annotation type: the `java.lang.annotation.RetentionPolicy` constant name of its
     /// `@Retention` (`"RUNTIME"` / `"CLASS"` / `"SOURCE"`), or `None` if absent. Drives whether a use of
     /// the annotation is emitted `RuntimeVisibleAnnotations` (RUNTIME) / `RuntimeInvisibleAnnotations`
@@ -2198,7 +2229,7 @@ impl LibraryType {
             sealed_subclasses: TypeNameList::new(),
             enum_entries: Vec::new(),
             enum_entries_accessor: None,
-            ctor_named_params: Vec::new(),
+            named_parameter_lists: Vec::new(),
             retention: None,
         }
     }
@@ -2278,11 +2309,13 @@ impl LibraryType {
 
     /// Constructor source parameter names/default flags for a named call with `min_arity` supplied args.
     pub fn constructor_named_params(&self, min_arity: usize) -> Option<ParamList> {
-        self.ctor_named_params
+        self.named_parameter_lists
             .iter()
             .find(|params| {
-                params.names.len() >= min_arity
+                params.annotation.is_none()
+                    && params.names.len() >= min_arity
                     && params.names.len() == params.defaults.len()
+                    && (params.types.is_empty() || params.names.len() == params.types.len())
                     && !params.names.iter().any(String::is_empty)
             })
             .cloned()
@@ -2290,41 +2323,34 @@ impl LibraryType {
 }
 
 impl LibraryType {
-    /// Annotation members `(name, Ty)` — the no-argument accessors of an `@interface`.
-    pub fn annotation_members(&self) -> Option<Vec<(String, Ty)>> {
+    /// Complete annotation application shape normalized at the declaration-provider boundary.
+    /// Kotlin annotation constructors already carry the ordinary positional/default/vararg facts;
+    /// providers for constructor-less declaration formats attach an explicit annotation policy.
+    pub fn annotation_application(&self) -> Option<AnnotationApplication> {
         if !self.is_annotation() {
             return None;
         }
-        // A Kotlin annotation's element declarations are constructor properties in metadata; their
-        // physical no-arg methods are accessor realizations, not Kotlin function declarations, and are
-        // intentionally absent from `members`. The primary constructor therefore supplies the exact
-        // element names/types. A Java `@interface` has no Kotlin constructor metadata and falls through
-        // to its declared abstract methods below.
-        if let Some(parameters) = self.ctor_named_params.iter().find(|parameters| {
-            !parameters.names.is_empty()
-                && parameters.names.len() == parameters.types.len()
-                && !parameters.names.iter().any(String::is_empty)
-                && !parameters.types.contains(&Ty::Error)
-        }) {
-            return Some(
-                parameters
-                    .names
-                    .iter()
-                    .cloned()
-                    .zip(parameters.types.iter().copied())
-                    .collect(),
-            );
-        }
-        let mut out = Vec::new();
-        for m in &self.members {
-            if m.params.is_empty() && m.name != "<init>" {
-                if m.ret == Ty::Error {
-                    return None; // a member type we can't model — skip the whole annotation
-                }
-                out.push((m.name.clone(), m.ret));
+        let parameters = if let Some(parameters) = self
+            .named_parameter_lists
+            .iter()
+            .find(|parameters| parameters.annotation.is_some())
+        {
+            if parameters.names.len() != parameters.defaults.len()
+                || parameters.names.len() != parameters.types.len()
+                || parameters.names.iter().any(String::is_empty)
+                || parameters.types.contains(&Ty::Error)
+            {
+                return None;
             }
-        }
-        Some(out)
+            parameters.clone()
+        } else {
+            self.constructor_named_params(0)?
+        };
+        let policy = parameters.annotation.unwrap_or(AnnotationParameterPolicy {
+            positional: AnnotationPositionalPolicy::Constructor,
+            materialize_omitted_vararg: parameters.vararg.is_some(),
+        });
+        Some(AnnotationApplication { parameters, policy })
     }
 }
 
@@ -2674,7 +2700,11 @@ impl SemanticPlatform for EmptySymbolSource {}
 
 #[cfg(test)]
 mod tests {
-    use super::{map_call_args, CallSig, InlineKind, ParamList, Visibility};
+    use super::{
+        map_call_args, AnnotationApplication, AnnotationParameterPolicy,
+        AnnotationPositionalPolicy, CallSig, InlineKind, ParamList, TypeKind, Visibility,
+    };
+    use crate::types::Ty;
 
     #[test]
     fn visibility_from_metadata_maps_the_kotlin_enum() {
@@ -2754,7 +2784,7 @@ mod tests {
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: vec![],
             enum_entries_accessor: None,
-            ctor_named_params: vec![],
+            named_parameter_lists: vec![],
             retention: None,
         };
         f(&mut t);
@@ -2779,24 +2809,52 @@ mod tests {
             types: Vec::new(),
             recv_fun: vec![false, false],
             vararg: None,
+            annotation: None,
         };
         let t = ty_with(|t| {
-            t.ctor_named_params = vec![expected.clone()];
+            t.named_parameter_lists = vec![expected.clone()];
         });
         assert_eq!(t.constructor_named_params(1), Some(expected));
         assert!(t.constructor_named_params(3).is_none());
 
         let bad = ty_with(|t| {
-            t.ctor_named_params = vec![ParamList {
+            t.named_parameter_lists = vec![ParamList {
                 visibility: Visibility::Public,
                 names: vec!["".into()],
                 defaults: vec![false],
                 types: Vec::new(),
                 recv_fun: vec![false],
                 vararg: None,
+                annotation: None,
             }];
         });
         assert!(bad.constructor_named_params(0).is_none());
+    }
+
+    #[test]
+    fn normalized_annotation_parameters_never_become_a_constructor() {
+        let policy = AnnotationParameterPolicy {
+            positional: AnnotationPositionalPolicy::NamedOnly,
+            materialize_omitted_vararg: false,
+        };
+        let parameters = ParamList {
+            visibility: Visibility::Public,
+            names: vec!["text".into()],
+            defaults: vec![false],
+            types: vec![Ty::String],
+            recv_fun: vec![false],
+            vararg: None,
+            annotation: Some(policy),
+        };
+        let annotation = ty_with(|ty| {
+            ty.kind = TypeKind::Annotation;
+            ty.named_parameter_lists = vec![parameters.clone()];
+        });
+        assert!(annotation.constructor_named_params(0).is_none());
+        assert_eq!(
+            annotation.annotation_application(),
+            Some(AnnotationApplication { parameters, policy })
+        );
     }
 
     #[test]

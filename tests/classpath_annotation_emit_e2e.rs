@@ -17,7 +17,7 @@ fn role_bytes() -> Vec<u8> {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
     let lib = common::compile_lib("annlib", LIB).expect("compile annotation lib");
-    let classes = common::compile_in_process(
+    let classes = common::expect_compile_in_process(
         "package demo\n\
          import lib.Vis\n\
          import lib.Inv\n\
@@ -29,8 +29,7 @@ fn role_bytes() -> Vec<u8> {
         "File",
         &[lib, sl, jdk.clone()],
         Some(jdk.as_path()),
-    )
-    .expect("compile enum against the annotation lib");
+    );
     classes
         .into_iter()
         .find(|(n, _)| n == "demo/Role")
@@ -40,6 +39,23 @@ fn role_bytes() -> Vec<u8> {
 
 fn contains(bytes: &[u8], needle: &str) -> bool {
     bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+#[test]
+fn kotlin_annotation_metadata_is_byte_identical_to_kotlinc() {
+    let build = common::compile_libs_build("annotation_metadata_bytes", &[("Lib.kt", LIB)])
+        .expect("compile annotation library with krusty");
+    let reference = build
+        .reference_out()
+        .expect("compile annotation library with kotlinc");
+    for classifier in ["Vis", "Inv", "Src"] {
+        let relative = format!("lib/{classifier}.class");
+        let krusty = std::fs::read(build.krusty_out().join(&relative))
+            .unwrap_or_else(|error| panic!("read krusty {relative}: {error}"));
+        let kotlinc = std::fs::read(reference.join(&relative))
+            .unwrap_or_else(|error| panic!("read kotlinc {relative}: {error}"));
+        assert_eq!(krusty, kotlinc, "{relative}");
+    }
 }
 
 #[test]

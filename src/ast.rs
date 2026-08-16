@@ -170,6 +170,10 @@ pub enum Expr {
     /// lone surrogate (`'\uD800'`) is a legal Kotlin `Char` but not a legal Unicode scalar value.
     CharLit(u16),
     NullLit,
+    /// Valid annotation-value syntax that the annotation checker cannot model yet. Keeping the
+    /// source form as an explicit AST fact lets the annotation-consumption site issue the error;
+    /// inert annotation positions are never consumed, and no fabricated name enters resolution.
+    UnsupportedAnnotationArgument(UnsupportedAnnotationArgument),
     Name(String),
     /// `operand!!` — not-null assertion (throws NPE if null, else the value).
     NotNull {
@@ -313,6 +317,12 @@ pub enum Expr {
         receiver: Option<ExprId>,
         name: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnsupportedAnnotationArgument {
+    ArrayLiteral,
+    NestedAnnotation,
 }
 
 #[derive(Clone, Debug)]
@@ -1731,6 +1741,7 @@ impl File {
             | Expr::NullLit
             | Expr::Break { .. }
             | Expr::Continue { .. }
+            | Expr::UnsupportedAnnotationArgument(_)
             | Expr::Name(_) => false,
             Expr::CallableRef { receiver, .. } => receiver.is_some_and(&mut *fe),
             Expr::Return { value, .. } => match value {
@@ -2118,6 +2129,16 @@ impl File {
                 None => out.push_str(&format!("'\\u{c:04X}'")),
             },
             Expr::NullLit => out.push_str("null"),
+            Expr::UnsupportedAnnotationArgument(kind) => {
+                out.push_str(match kind {
+                    UnsupportedAnnotationArgument::ArrayLiteral => {
+                        "<unsupported annotation array literal>"
+                    }
+                    UnsupportedAnnotationArgument::NestedAnnotation => {
+                        "<unsupported nested annotation>"
+                    }
+                });
+            }
             Expr::Name(n) => out.push_str(n),
             Expr::NotNull { operand } => {
                 out.push_str("(!! ");

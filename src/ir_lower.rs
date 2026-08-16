@@ -1182,7 +1182,7 @@ fn lower_file_at_reporting_impl(
                 is_companion: false,
                 companion_class: None,
                 secondary_ctors: vec![],
-                has_primary_ctor: c.primary_ctor_annotations.is_some(),
+                has_primary_ctor: c.primary_ctor_annotations.is_some() || c.is_annotation(),
                 applied_annotations: class_applied_annotations(c, info),
                 field_annotations: class_field_annotations(c, info),
                 annotation_retention: (c.kind == ast::ClassKind::Annotation).then(|| {
@@ -1205,6 +1205,7 @@ fn lower_file_at_reporting_impl(
                 impl_class.fq_name = type_name(&format!("{internal}$annotationImpl"));
                 impl_class.is_annotation = false;
                 impl_class.annotation_impl_of = Some(type_name(&internal));
+                impl_class.is_source_declared = false;
                 impl_class.interfaces = vec![type_name(&internal)].into();
                 impl_class.superclass = type_name("kotlin/Any");
                 impl_class.supertypes = vec![];
@@ -21878,6 +21879,9 @@ impl<'a> Lower<'a> {
             Expr::BoolLit(b) => self.emit_const(IrConst::Boolean(b)),
             Expr::StringLit(s) => self.ir_const_str(s),
             Expr::NullLit => self.emit_const(IrConst::Null),
+            // The checker either diagnosed this node at an emitted annotation application or left
+            // it inert at a source position this compiler does not consume. It has no IR value.
+            Expr::UnsupportedAnnotationArgument(_) => return None,
             // `throw e` — throw the exception value; control never returns.
             Expr::Throw { operand } => {
                 let v = self.expr(operand)?;
@@ -27608,6 +27612,12 @@ fn checked_annotation_value_to_ir(value: &crate::types::AnnotationValue) -> crat
     use crate::types::AnnotationValue;
     match value {
         AnnotationValue::Int(value) => crate::ir::AnnoValue::Const(crate::ir::IrConst::Int(*value)),
+        AnnotationValue::Byte(value) => {
+            crate::ir::AnnoValue::Const(crate::ir::IrConst::Byte(*value))
+        }
+        AnnotationValue::Short(value) => {
+            crate::ir::AnnoValue::Const(crate::ir::IrConst::Short(*value))
+        }
         AnnotationValue::Long(value) => {
             crate::ir::AnnoValue::Const(crate::ir::IrConst::Long(*value))
         }
