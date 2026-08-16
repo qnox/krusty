@@ -1,5 +1,5 @@
 //! Duplicate type-parameter names (`fun <T, T>`, `class C<T, T>`) and multiple `vararg` parameters
-//! are illegal (kotlinc: conflicting declaration / multiple vararg parameters not allowed). Covers
+//! are illegal (kotlinc: conflicting declaration / multiple vararg parameters are prohibited). Covers
 //! the check_fun and class-arm scans.
 
 use super::common;

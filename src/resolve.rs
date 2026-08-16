@@ -28274,12 +28274,21 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // At most one `vararg` parameter is allowed (kotlinc: multiple vararg parameters not allowed).
-        if f.params.iter().filter(|p| p.is_vararg).count() > 1 {
-            self.diags.error(
-                f.span,
-                "multiple vararg parameters are prohibited.".to_string(),
-            );
+        // At most one `vararg` parameter is allowed (kotlinc: multiple vararg parameters are prohibited).
+        let vararg_count = f
+            .params
+            .iter()
+            .filter(|parameter| parameter.is_vararg)
+            .count();
+        if vararg_count > 1 {
+            for parameter in f.params.iter().filter(|parameter| parameter.is_vararg) {
+                self.diags.error(
+                    parameter
+                        .vararg_span
+                        .expect("a parsed vararg parameter must retain its modifier span"),
+                    "multiple vararg parameters are prohibited.".to_string(),
+                );
+            }
         }
         // A `reified` type parameter is only allowed on an `inline` function (kotlinc rejects it
         // otherwise — reification needs the body inlined at the call site).
@@ -29413,8 +29422,11 @@ impl<'a> Checker<'a> {
                             })
                         };
                         if m.is_override() && !is_any_member(m) && !overrides_super {
-                            self.diags
-                                .error(m.span, format!("'{}' overrides nothing.", m.name));
+                            self.diags.error(
+                                m.override_span
+                                    .expect("an override function must retain its modifier span"),
+                                format!("'{}' overrides nothing.", m.name),
+                            );
                         }
                     }
                 }
@@ -33148,7 +33160,7 @@ impl<'a> Checker<'a> {
                 self.diags.error(
                     self.span(e),
                     format!(
-                        "operator '{name}' cannot be applied to '{}' and '{}'.",
+                        "operator '{name}' cannot be applied to '{}' and '{}'",
                         lt.source_name(),
                         rt.source_name()
                     ),
@@ -33192,7 +33204,8 @@ impl<'a> Checker<'a> {
                         {
                             self.diags.error(
                                 self.span(e),
-                                "'this' is not defined in this context.".to_string(),
+                                "cannot access '<this>' before the instance has been initialized."
+                                    .to_string(),
                             );
                             Ty::Error
                         }
@@ -33216,7 +33229,7 @@ impl<'a> Checker<'a> {
                         None => {
                             self.diags.error(
                                 self.span(e),
-                                "'this' is not available outside a class member".to_string(),
+                                "'this' is not defined in this context.".to_string(),
                             );
                             Ty::Error
                         }
@@ -37801,13 +37814,19 @@ impl<'a> Checker<'a> {
 
     fn bin_err(&mut self, op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
         crate::trace_compiler!("resolve", "bin_err op={:?} lt={:?} rt={:?}", op, lt, rt);
-        // One diagnostic for every binary operator: kotlinc names the operator in all of them.
-        let message = format!(
-            "operator '{}' cannot be applied to '{}' and '{}'.",
-            op.source_symbol(),
-            lt.source_name(),
-            rt.source_name()
-        );
+        let message = match op {
+            BinOp::Eq | BinOp::Ne => format!(
+                "operator '{}' cannot be applied to '{}' and '{}'.",
+                if op == BinOp::Eq { "==" } else { "!=" },
+                lt.source_name(),
+                rt.source_name()
+            ),
+            _ => format!(
+                "operator cannot be applied to '{}' and '{}'",
+                lt.source_name(),
+                rt.source_name()
+            ),
+        };
         if matches!(op, BinOp::Eq | BinOp::Ne) {
             self.diags
                 .error_kind(span, DiagnosticKind::IncompatibleEquality, message);

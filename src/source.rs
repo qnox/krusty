@@ -62,6 +62,10 @@ impl<'a> SourceInput<'a> {
         Self::new(SourceKind::Kotlin, text)
     }
 
+    pub fn kotlin_script(text: &'a str) -> Self {
+        Self::new(SourceKind::KotlinScript, text)
+    }
+
     pub fn java(text: &'a str) -> Self {
         Self::new(SourceKind::Java, text)
     }

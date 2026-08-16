@@ -5846,13 +5846,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   application consumes them—never as fabricated names and never at inert property, field,
   parameter, or local positions. Tests: `tests/annotation_emission_e2e.rs`.
 
-- **Diagnostic text is the Kotlin frontend's own template.** Every message krusty and kotlinc both
-  report is the template compiled into `FirErrorsDefaultMessages`, with its first letter lowercased;
-  the LSP boundary sentence-cases it back, so the CLI and the language server agree with the
-  reference frontend character for character. Concretely: `'break' and 'continue' are only allowed
-  inside loops.`, `multiple vararg parameters are prohibited.`, `'return' is prohibited here.`,
-  `'this' is not defined in this context.`, `'{name}' overrides nothing.`, and — for EVERY binary
-  operator, not just `==`/`!=` — `operator '{op}' cannot be applied to '{left}' and '{right}'.`, with
-  the operator spelled as written via `BinOp::source_symbol`. `scripts/lsp-wording-audit.py` recovers
-  the templates from the language-server jars and reports the remaining divergences.
-  Tests: `tests/diagnostic_wording_e2e.rs`.
+- **Shared diagnostic text uses the Kotlin frontend's emitted wording.** Template extraction is an
+  audit lead, not proof that a source construct emits that template: tests compile the same source
+  with krusty and kotlinc and compare their complete diagnostics. The verified messages are
+  `'break' and 'continue' are only allowed inside loops.`, `multiple vararg parameters are
+  prohibited.`, `'return' is prohibited here.`, `'this' is not defined in this context.`, `cannot
+  access '<this>' before the instance has been initialized.`, and `'{name}' overrides nothing.`
+  Tests: `tests/diagnostics_match_kotlinc.rs::shared_diagnostic_wording_matches_kotlinc` and
+  `tests/diagnostics_match_kotlinc.rs::prohibited_script_returns_match_kotlinc`.
