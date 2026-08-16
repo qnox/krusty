@@ -11,10 +11,10 @@ use super::jvm_class_map::to_kotlin_internal;
 use super::metadata;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
-    CallSig, EmptySymbolSource, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy,
-    GenericSig, InlineBodyPlan, InlineKind, LibConst, LibraryCallable, LibraryConst, LibraryField,
-    LibraryMember, LibraryType, PropKind, PropertyInfo, PropertySet, ReturnInfo, SemanticPlatform,
-    Visibility,
+    AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
+    FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineBodyPlan, InlineKind,
+    LibConst, LibraryCallable, LibraryConst, LibraryField, LibraryMember, LibraryType, ParamList,
+    PropKind, PropertyInfo, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
 };
 use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
@@ -2561,6 +2561,10 @@ impl JvmLibraries {
                 .collect::<Vec<_>>();
             let callable_signature =
                 callable_signature.or_else(|| function_interface_signature(&supertypes, &members));
+            let mut named_parameter_lists = metadata::class_constructor_params(&ci);
+            if kind == crate::libraries::TypeKind::Annotation && !has_kotlin_metadata {
+                named_parameter_lists.push(java_annotation_parameter_list(&ci)?);
+            }
             Some(LibraryType {
                 access: if let Some(visibility) = ci.meta.class_visibility {
                     visibility.into()
@@ -2610,7 +2614,7 @@ impl JvmLibraries {
                 sealed_subclasses: metadata::class_sealed_subclasses(&ci).into(),
                 enum_entries,
                 enum_entries_accessor,
-                ctor_named_params: metadata::class_constructor_params(&ci),
+                named_parameter_lists,
                 // JLS default: an annotation declaration without `@Retention` has CLASS retention.
                 // Normalize that provider fact here so common checking never branches on declaration
                 // origin or tries to interpret an absent classfile attribute.
@@ -3263,6 +3267,48 @@ fn field_desc_to_ty(d: &str) -> Ty {
     }
 }
 
+/// Normalize a constructor-less annotation declaration into the common application shape while
+/// JVM descriptors and `AnnotationDefault` are still provider-owned facts. Core never reparses a
+/// descriptor or asks whether this classifier came from Java.
+fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) -> Option<ParamList> {
+    let mut elements = class
+        .methods
+        .iter()
+        .filter(|method| method.is_public() && !method.is_static() && method.name != "<init>")
+        .map(|method| {
+            let (parameters, ret) = crate::jvm::names::parse_method_descriptor(&method.descriptor)?;
+            if !parameters.is_empty() {
+                return None;
+            }
+            let ty = field_desc_to_ty(ret);
+            (ty != Ty::Error).then(|| (method.name.clone(), ty, method.has_annotation_default))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let value_index = elements.iter().position(|(name, _, _)| name == "value");
+    let value_vararg = value_index.is_some_and(|index| elements[index].1.array_elem().is_some());
+    if let Some(index) = value_index {
+        let value = elements.remove(index);
+        elements.insert(0, value);
+    }
+    let positional = match (value_index, value_vararg) {
+        (_, true) => AnnotationPositionalPolicy::ValueVararg,
+        (Some(_), false) => AnnotationPositionalPolicy::Value,
+        (None, false) => AnnotationPositionalPolicy::NamedOnly,
+    };
+    Some(ParamList {
+        visibility: Visibility::Public,
+        names: elements.iter().map(|(name, _, _)| name.clone()).collect(),
+        defaults: elements.iter().map(|(_, _, default)| *default).collect(),
+        types: elements.iter().map(|(_, ty, _)| *ty).collect(),
+        recv_fun: vec![false; elements.len()],
+        vararg: value_vararg.then_some(0),
+        annotation: Some(AnnotationParameterPolicy {
+            positional,
+            materialize_omitted_vararg: false,
+        }),
+    })
+}
+
 /// Minimal classifier signature for a mapped builtin whose physical JVM class is absent. This is
 /// provider construction data: core still receives an ordinary `LibraryType` record and performs the
 /// same member/hierarchy selection as for every other classifier.
@@ -3306,7 +3352,7 @@ fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
         sealed_subclasses: TypeNameList::new(),
         enum_entries: Vec::new(),
         enum_entries_accessor: None,
-        ctor_named_params: Vec::new(),
+        named_parameter_lists: Vec::new(),
         retention: None,
     })
 }
@@ -3372,7 +3418,7 @@ fn builtin_library_type(
         sealed_subclasses: TypeNameList::new(),
         enum_entries: Vec::new(),
         enum_entries_accessor: None,
-        ctor_named_params: Vec::new(),
+        named_parameter_lists: Vec::new(),
         retention: None,
     }
 }

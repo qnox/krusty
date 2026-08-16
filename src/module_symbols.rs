@@ -337,7 +337,7 @@ impl<'a> ModuleSymbols<'a> {
         } else {
             Default::default()
         };
-        let ctor_named_params = (c.has_primary_ctor
+        let named_parameter_lists = (c.has_primary_ctor
             && c.ctor_param_names.len() == c.ctor_params.len())
         .then(|| ParamList {
             visibility: c.visibility,
@@ -358,6 +358,7 @@ impl<'a> ModuleSymbols<'a> {
                 .map(|parameter| matches!(parameter.non_null(), Ty::Fun(sig) if sig.has_receiver))
                 .collect(),
             vararg: c.ctor_vararg,
+            annotation: None,
         })
         .into_iter()
         .collect();
@@ -428,7 +429,7 @@ impl<'a> ModuleSymbols<'a> {
             sealed_subclasses,
             enum_entries,
             enum_entries_accessor,
-            ctor_named_params,
+            named_parameter_lists,
             retention: None,
         };
         let mut names = c

@@ -3138,6 +3138,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
                     types,
                     recv_fun,
                     vararg,
+                    annotation: None,
                 };
                 let jvm_desc = jvm_desc.or_else(|| {
                     params

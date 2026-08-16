@@ -459,7 +459,7 @@ fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
         0
     };
     // A value class carries `@JvmInline`, which sets `hasAnnotations`.
-    let has_annotations = u64::from(c.is_value);
+    let has_annotations = u64::from(c.is_value || !c.applied_annotations.is_empty());
     has_annotations
         | (visibility << 1)
         | (modality << 4)
@@ -927,7 +927,7 @@ fn build_class_metadata(
                 .backing_field
                 .and_then(|index| c.fields.get(index as usize).map(|field| (index, field)));
             let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
-            let getter = property
+            let ordinary_getter = property
                 .getter
                 .and_then(|fid| ir.functions.get(fid as usize))
                 .map(|function| {
@@ -954,6 +954,11 @@ fn build_class_metadata(
                             .then(|| (default_getter, format!("(){}", desc(field.ty))))
                     })
                 });
+            let getter = if c.is_annotation {
+                Some((property.name.clone(), format!("(){}", desc(property.ty))))
+            } else {
+                ordinary_getter
+            };
             let setter = property
                 .setter
                 .and_then(|fid| ir.functions.get(fid as usize))
@@ -999,8 +1004,9 @@ fn build_class_metadata(
                         .is_some_and(|s| !s.is_var && const_value_idx_peek(ir, s.init)),
                     is_const: false,
                     is_abstract: c.is_interface && property.getter.is_none(),
-                    has_backing_field: (backing.is_some()
-                        || hoisted_static_for(ir, c, property_index).is_some())
+                    has_backing_field: !c.is_annotation
+                        && (backing.is_some()
+                            || hoisted_static_for(ir, c, property_index).is_some())
                         && !c.is_interface,
                     tparam: ir.field_signatures(&c.fq_name()).and_then(|signatures| {
                         signatures
@@ -1648,6 +1654,7 @@ fn build_class_metadata(
                 _ if c.is_singleton() || !c.enum_entries.is_empty() => OBJECT_CTOR_FLAGS,
                 _ => 0,
             },
+            primary_ctor_jvm_signature: !c.is_annotation,
             module_name: opts.module_name.as_deref(),
             ctor_param_defaults: &ctor_param_defaults,
             inline_underlying: c
@@ -1686,6 +1693,7 @@ fn build_class_metadata(
             member_order: &member_order,
             sealed_subclasses: &sealed_refs,
             supertypes: &supertypes,
+            annotations: &c.applied_annotations,
         },
     );
     // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
@@ -1737,7 +1745,6 @@ fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) ->
     // parameters are not declarations of the generated class, so publishing a class metadata record
     // would require falsely redeclaring them; omit the non-observable record instead.
     !(c.is_local_class
-        || c.is_annotation
         || c.enum_entry_of.is_some()
         || c.prop_ref.is_some()
         || c.func_ref.is_some()
@@ -1748,7 +1755,10 @@ fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) ->
         || c.secondary_ctors
             .iter()
             .any(|sc| !sc.synthetic && sc.named_params.len() != sc.params.len())
-        || (!c.has_primary_ctor && c.secondary_ctors.is_empty() && !c.is_interface && c.enum_entries.is_empty())
+        || (!c.has_primary_ctor
+            && c.secondary_ctors.is_empty()
+            && !c.is_interface
+            && c.enum_entries.is_empty())
         || (c.fields.len() as u32) < c.ctor_param_count)
 }
 
@@ -4336,7 +4346,7 @@ fn emit_class(
         return emit_annotation_impl_class(ir, c, &iface.render(), facade, env, opts);
     }
     if c.is_annotation {
-        return emit_annotation_class(c, opts, class_meta);
+        return emit_annotation_class(ir, c, opts, class_meta);
     }
     if c.is_interface {
         return emit_interface_class(ir, c, facade, env, opts, class_meta, extra);
@@ -6747,6 +6757,7 @@ fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
 /// member (`int x()`, `String s()`) named after the property and returning its type — kotlinc's shape.
 /// Members come from `fields`. Instances are built by the synthetic impl ([`emit_annotation_impl_class`]).
 fn emit_annotation_class(
+    ir: &IrFile,
     c: &crate::ir::IrClass,
     opts: &EmitOptions,
     class_meta: Option<&KotlinMetadata>,
@@ -6802,9 +6813,18 @@ fn emit_annotation_class(
             policy,
         ));
     }
-    meta.extend(c.applied_annotations.iter().cloned());
+    let kotlin_retention = crate::types::type_name("kotlin/annotation/Retention");
+    meta.extend(
+        c.applied_annotations
+            .iter()
+            .filter(|annotation| annotation.internal != kotlin_retention)
+            .cloned(),
+    );
     cw.set_runtime_annotations(&meta);
-    if let Some(m) = class_meta {
+    let computed = (class_meta.is_none() && opts.emit_class_metadata)
+        .then(|| build_class_metadata(ir, c, opts))
+        .flatten();
+    if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     cw.finish()

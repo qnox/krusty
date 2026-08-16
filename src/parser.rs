@@ -1817,9 +1817,9 @@ impl<'a> Parser<'a> {
         (qname, annotation_span)
     }
 
-    /// Parse an annotation argument list `( (name =)? value ,* )` through the real grammar, returning
-    /// the ordinary-expression arguments (array/nested-annotation values contribute nothing). The exprs
-    /// are real AST nodes so an extension can const-fold a value (`@SerialName("$prefix.bar")`).
+    /// Parse an annotation argument list `( (name =)? value ,* )` through the real grammar. Values
+    /// the checker cannot model retain an explicit [`UnsupportedAnnotationArgument`] node so the
+    /// annotation-consumption site can reject them without fabricating a resolvable name.
     fn parse_annotation_args(&mut self) -> Vec<ExprId> {
         let mut out = Vec::new();
         if !self.eat(TokenKind::LParen) {
@@ -1853,8 +1853,7 @@ impl<'a> Parser<'a> {
     }
 
     /// A single annotation argument value: an array literal `[…]`, a nested annotation `@Foo(…)`,
-    /// or an ordinary expression (incl. `Foo::class`). Returns the expr for the ordinary case (kept for
-    /// const-folding by extensions); array/nested values return `None`.
+    /// or an ordinary expression (including `Foo::class`).
     fn parse_annotation_value(&mut self) -> Option<ExprId> {
         // Annotation arrays, nested annotations, and spreads recurse while a declaration prefix is
         // still being consumed, before `parse_bp` or a class-like parser is necessarily entered.
@@ -1869,6 +1868,7 @@ impl<'a> Parser<'a> {
 
     fn parse_annotation_value_inner(&mut self) -> Option<ExprId> {
         if self.at(TokenKind::LBracket) {
+            let start = self.tok().span;
             self.bump(); // '['
             self.skip_newlines();
             while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
@@ -1880,10 +1880,21 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
             }
             self.expect(TokenKind::RBracket, "']'");
-            None
+            Some(self.file.add_expr(
+                Expr::UnsupportedAnnotationArgument(
+                    crate::ast::UnsupportedAnnotationArgument::ArrayLiteral,
+                ),
+                start,
+            ))
         } else if self.at(TokenKind::At) {
-            self.parse_annotation();
-            None
+            let start = self.tok().span;
+            let _ = self.parse_annotation();
+            Some(self.file.add_expr(
+                Expr::UnsupportedAnnotationArgument(
+                    crate::ast::UnsupportedAnnotationArgument::NestedAnnotation,
+                ),
+                start,
+            ))
         } else if self.at(TokenKind::Star) {
             // A spread argument in an annotation (`@A(*arrayOf("O"), "K")` — a `vararg` annotation
             // parameter). Preserve the same spread fact as an ordinary call argument; checking uses
