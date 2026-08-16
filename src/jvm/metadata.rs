@@ -2079,6 +2079,9 @@ pub struct MetaProp {
     pub setter: Option<MetaJvmMethodSig>,
     pub visibility: crate::types::Visibility,
     pub is_const: bool,
+    /// Semantic property modality from metadata. The classfile accessor can still be abstract when
+    /// a legacy `$DefaultImpls` method realizes this concrete declaration.
+    pub is_abstract: bool,
     /// `var` (has a setter) vs `val`.
     pub is_var: bool,
     /// The EXTENSION receiver's class name (`val String.foo` → `kotlin/String`) — `None` for an
@@ -3525,6 +3528,7 @@ fn decode_properties(
             setter,
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
             is_const: flags & is_const_bit != 0,
+            is_abstract: (flags >> 4) & 0x3 == 2,
             is_var,
             receiver_class,
             is_extension: receiver_body.is_some(),

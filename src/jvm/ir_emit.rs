@@ -202,8 +202,9 @@ fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
 ///     stub). kotlinc also puts a forwarder there for every other member with a body, emits the
 ///     `access$…$jd` bridges, and gives implementing classes forwarder overrides. That gap predates
 ///     `-jvm-default` support and is why `Enable` is not yet claimed as byte-parity.
-///   * `Disable` is emitted within a compilation; across modules it is not modelled rather than compiling a
-///     different shape than the build asked for.
+///   * `Disable` emits holder bodies and implementing-class forwarders. A dependency compiled in
+///     that mode publishes those holder methods as its declarations' exact physical realizations,
+///     so a consumer does not reinterpret the dependency from its own mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum JvmDefaultMode {
     /// kotlinc's own default since 2.2 (legacy spelling `-Xjvm-default=all-compatibility`): default
@@ -7279,7 +7280,7 @@ fn emit_interface_class(
                     w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
                     w
                 });
-                emit_holder_method(ir, fid, &fq_name, facade, di, env);
+                emit_holder_method(ir, fid, c.fq_name, &fq_name, facade, di, env);
             }
             let desc = ir_method_desc(&f.params, &f.ret);
             cw.add_abstract_method_sig(
@@ -7351,8 +7352,19 @@ fn emit_interface_class(
             }
         }
     }
-    if let Some(di) = default_impls {
-        extra.push((format!("{fq_name}$DefaultImpls"), di.finish()));
+    let emitted_default_impls = default_impls.is_some();
+    if let Some(mut di) = default_impls {
+        let holder = format!("{fq_name}$DefaultImpls");
+        di.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+            inner: holder.clone(),
+            outer: Some(fq_name.clone()),
+            name: Some("DefaultImpls".to_string()),
+            access: 0x0019, // PUBLIC | STATIC | FINAL
+        });
+        // A compiler-generated implementation class carries the minimal synthetic-class metadata
+        // record. Kotlin reflection and downstream metadata readers rely on `k=3` to classify it.
+        di.set_kotlin_metadata(3, &[2, 4, 0], 48, &[], &[]);
+        extra.push((holder, di.finish()));
     }
     // A companion `val` on the interface is a `public static final` field ON THE INTERFACE (interface
     // fields are implicitly static final): a `const val` as a `ConstantValue`, a non-const `val`
@@ -7412,6 +7424,18 @@ fn emit_interface_class(
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+    }
+    if emitted_default_impls {
+        let holder = format!("{fq_name}$DefaultImpls");
+        // The outer interface must publish the same nested-class relation as the synthetic holder.
+        // Seed after metadata so the class constant lands in kotlinc's class-visit order.
+        cw.seed_class(&holder);
+        cw.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+            inner: holder,
+            outer: Some(fq_name.clone()),
+            name: Some("DefaultImpls".to_string()),
+            access: 0x0019,
+        });
     }
     cw.finish()
 }
@@ -8009,9 +8033,13 @@ fn emit_default_impls_forwarders(
         )
         .collect::<std::collections::HashSet<_>>();
     let mut selected = std::collections::HashSet::new();
-    let mut write_forwarder = |name: &str,
+    let mut write_forwarder = |interface: crate::types::TypeName,
+                               name: &str,
                                param_tys: &[Ty],
+                               semantic_params: &[Ty],
+                               param_names: &[String],
                                ret: Ty,
+                               semantic_ret: Ty,
                                target_owner: &str,
                                target_name: &str,
                                target_descriptor: &str| {
@@ -8041,6 +8069,39 @@ fn emit_default_impls_forwarders(
             _ => code.ireturn(),
         }
         finish_code::<0x0041>(cw, name, &desc, &mut code, argument_words);
+        let mut locals = vec![("this".to_string(), format!("L{};", c.fq_name()), 0)];
+        let mut slot = 1u16;
+        for (index, parameter) in param_tys.iter().enumerate() {
+            let parameter_name = param_names
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| format!("p{index}"));
+            locals.push((parameter_name, local_variable_desc(*parameter), slot));
+            slot += slot_words(*parameter);
+        }
+        cw.set_method_debug(
+            name,
+            &desc,
+            (c.decl_line != 0).then_some((0, c.decl_line)),
+            &locals,
+        );
+        let ann = |ty: Ty| {
+            if matches!(ty.non_null(), Ty::TyParam(..)) || !ir_ty_to_jvm(&ty).is_reference() {
+                None
+            } else if ty.is_nullable() {
+                Some("Lorg/jetbrains/annotations/Nullable;")
+            } else {
+                Some("Lorg/jetbrains/annotations/NotNull;")
+            }
+        };
+        let parameter_annotations = semantic_params.iter().copied().map(ann).collect::<Vec<_>>();
+        cw.set_method_nullability(name, &desc, ann(semantic_ret), &parameter_annotations);
+        cw.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+            inner: target_owner.to_string(),
+            outer: Some(interface.render()),
+            name: Some("DefaultImpls".to_string()),
+            access: 0x0019,
+        });
     };
     for (interface, shape) in closure {
         for member in &shape.members {
@@ -8089,9 +8150,13 @@ fn emit_default_impls_forwarders(
             };
             let ret = ir_ty_to_jvm(&member.physical_ret);
             write_forwarder(
+                interface,
                 name,
                 &param_tys,
+                &member.params,
+                &member.call_sig.param_names,
                 ret,
+                member.ret,
                 &target_owner,
                 &target_name,
                 &holder_desc,
@@ -8104,34 +8169,23 @@ fn emit_default_impls_forwarders(
         // feed their getter/setter realizations through the identical forwarder writer.
         for callables in shape.declared_callables.values() {
             for property in callables.properties() {
-                let source_property = ir
-                    .classes
-                    .iter()
-                    .find(|class| class.fq_name == interface)
-                    .and_then(|class| {
-                        class
-                            .properties
-                            .iter()
-                            .find(|item| item.name == property.name)
-                    });
-                for (callable, has_source_body, visibility) in std::iter::once((
-                    &property.getter,
-                    source_property.is_some_and(|property| property.getter.is_some()),
-                    property.visibility,
-                ))
-                .chain(property.setter.as_ref().map(|setter| {
-                    (
-                        setter,
-                        source_property.is_some_and(|property| property.setter.is_some()),
-                        property.setter_visibility,
+                for (callable, visibility) in
+                    std::iter::once((&property.getter, property.visibility)).chain(
+                        property
+                            .setter
+                            .as_ref()
+                            .map(|setter| (setter, property.setter_visibility)),
                     )
-                })) {
+                {
                     if visibility == crate::types::Visibility::Private {
                         continue;
                     }
                     let params = jvm_tys(&callable.physical_params);
                     let key = method_key(&callable.name, &params);
-                    if !selected.insert(key.clone()) || implemented.contains(&key) {
+                    if !selected.insert(key.clone())
+                        || callable.is_abstract
+                        || implemented.contains(&key)
+                    {
                         continue;
                     }
                     let (target_owner, target_descriptor) = match callable.member_realization {
@@ -8139,7 +8193,8 @@ fn emit_default_impls_forwarders(
                             pass_receiver: true,
                         } => (callable.owner.render(), callable.descriptor.clone()),
                         crate::libraries::MemberRealization::Dispatch
-                            if env.jvm_default == JvmDefaultMode::Disable && has_source_body =>
+                            if env.jvm_default == JvmDefaultMode::Disable
+                                && property.source_member.is_some() =>
                         {
                             let mut with_receiver = vec![Ty::obj_name(interface)];
                             with_receiver.extend_from_slice(&params);
@@ -8155,9 +8210,13 @@ fn emit_default_impls_forwarders(
                         _ => continue,
                     };
                     write_forwarder(
+                        interface,
                         &callable.name,
                         &params,
+                        &callable.params,
+                        &property.context_param_names,
                         ir_ty_to_jvm(&callable.physical_ret),
+                        callable.ret,
                         &target_owner,
                         &callable.name,
                         &target_descriptor,
@@ -8175,12 +8234,88 @@ fn emit_default_impls_forwarders(
 fn emit_holder_method(
     ir: &IrFile,
     fid: u32,
+    receiver: crate::types::TypeName,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
-    emit_method_inner_with_holder(ir, fid, owner, facade, cw, true, env, Some(owner));
+    emit_method_inner_with_holder(ir, fid, owner, facade, cw, true, env, Some(receiver));
+}
+
+/// A moved interface body keeps the source method's generic signature, but `$DefaultImpls` makes
+/// the interface receiver its first static parameter and promotes the interface's type parameters
+/// to method type parameters. Transform the already-computed method signature so suspend and other
+/// specialized signatures retain their exact tail rather than being reconstructed by ABI shape.
+fn holder_method_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    receiver: crate::types::TypeName,
+    method_signature: Option<&str>,
+    descriptor: &str,
+) -> Option<String> {
+    let class_signature = ir.class_signature_name(receiver);
+    let class_type_params = class_signature
+        .map(|signature| signature.type_params.as_slice())
+        .unwrap_or_default();
+    if class_type_params.is_empty() && method_signature.is_none() {
+        return None;
+    }
+
+    fn leading_type_parameters(signature: &str) -> (&str, &str) {
+        if !signature.starts_with('<') {
+            return ("", signature);
+        }
+        let mut depth = 0usize;
+        for (index, byte) in signature.bytes().enumerate() {
+            match byte {
+                b'<' => depth += 1,
+                b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (&signature[1..index], &signature[index + 1..]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        ("", signature)
+    }
+
+    let class_declaration = class_signature
+        .and_then(|signature| jvm_type_params(formatter, signature))
+        .unwrap_or_default();
+    let class_declaration = class_declaration
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or_default();
+    let base = method_signature.unwrap_or(descriptor);
+    let (method_declaration, method_tail) = leading_type_parameters(base);
+    let declaration = if class_declaration.is_empty() && method_declaration.is_empty() {
+        String::new()
+    } else {
+        format!("<{class_declaration}{method_declaration}>")
+    };
+
+    let receiver_ty = if class_type_params.is_empty() {
+        Ty::obj_name(receiver)
+    } else {
+        let arguments = class_type_params
+            .iter()
+            .map(|parameter| {
+                let bound = parameter
+                    .bounds
+                    .first()
+                    .map(|(bound, _)| *bound)
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                Ty::ty_param(&parameter.name, bound)
+            })
+            .collect::<Vec<_>>();
+        Ty::obj_args_name(receiver, &arguments)
+    };
+    let receiver_signature = formatter.method_ty(&receiver_ty)?;
+    let parameters = method_tail.strip_prefix('(')?;
+    Some(format!("{declaration}({receiver_signature}{parameters}"))
 }
 
 fn emit_method_inner(
@@ -8207,7 +8342,7 @@ fn emit_method_inner_with_holder(
     cw: &mut ClassWriter,
     instance: bool,
     env: &EmitEnv,
-    holder_receiver: Option<&str>,
+    holder_receiver: Option<crate::types::TypeName>,
 ) {
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
@@ -8232,14 +8367,24 @@ fn emit_method_inner_with_holder(
     let reserved_desc = match holder_receiver {
         // The holder's static takes the receiver as parameter 0: `f(I)`, `g(I, int)`.
         Some(receiver) => {
-            let mut with_receiver = vec![Ty::obj(receiver)];
+            let mut with_receiver = vec![Ty::obj_name(receiver)];
             with_receiver.extend_from_slice(&param_tys);
             method_descriptor(&with_receiver, ret)
         }
         None => method_descriptor(&param_tys, ret),
     };
     let signature_formatter = JvmSignatureFormatter::new(env);
-    let reserved_sig = method_signature(&signature_formatter, ir, fid, f);
+    let method_sig = method_signature(&signature_formatter, ir, fid, f);
+    let reserved_sig = match holder_receiver {
+        Some(receiver) => holder_method_signature(
+            &signature_formatter,
+            ir,
+            receiver,
+            method_sig.as_deref(),
+            &method_descriptor(&param_tys, ret),
+        ),
+        None => method_sig,
+    };
     let ann_of = |t: Ty| -> Option<&'static str> {
         let d = crate::jvm::names::type_descriptor(t);
         if !(d.starts_with('L') || d.starts_with('[')) {
@@ -8290,6 +8435,14 @@ fn emit_method_inner_with_holder(
             }
         })
         .collect();
+    let emitted_param_anns = holder_receiver.map_or_else(
+        || param_anns.clone(),
+        |_| {
+            std::iter::once(Some("Lorg/jetbrains/annotations/NotNull;"))
+                .chain(param_anns.iter().copied())
+                .collect()
+        },
+    );
     let declared_annotations = ir
         .function_annotations
         .get(&fid)
@@ -8301,7 +8454,7 @@ fn emit_method_inner_with_holder(
     let nullability_annotated = !declared_annotations.deprecated_hidden();
     let ann_types: Vec<&str> = ret_ann
         .into_iter()
-        .chain(param_anns.iter().flatten().copied())
+        .chain(emitted_param_anns.iter().flatten().copied())
         .filter(|_| nullability_annotated)
         .collect();
     e.cw.reserve_method_pool_with_annotations(
@@ -8385,12 +8538,17 @@ fn emit_method_inner_with_holder(
     // Suspend rewriting invalidates source-local expression ids, but its physical parameters remain
     // stable and reflection/debug tooling still expects `$completion` (plus the declared receiver and
     // arguments) in the LocalVariableTable.
-    if e.record_locals || ir.suspend_funs.contains(&fid) {
+    if e.record_locals || ir.suspend_funs.contains(&fid) || holder_receiver.is_some() {
         if instance {
             let this_desc = format!("L{owner};");
-            e.cw.seed_utf8("this");
+            let receiver_name = if holder_receiver.is_some() {
+                "$this"
+            } else {
+                "this"
+            };
+            e.cw.seed_utf8(receiver_name);
             e.cw.seed_utf8(&this_desc);
-            code.add_local_entry(0, None, 0, "this", &this_desc);
+            code.add_local_entry(0, None, 0, receiver_name, &this_desc);
         }
         let mut slot = u16::from(instance);
         for (i, t) in param_tys.iter().enumerate() {
@@ -8485,8 +8643,10 @@ fn emit_method_inner_with_holder(
     let desc = reserved_desc;
     e.cw.add_method_sig(access, &f.name, &desc, &code, reserved_sig.as_deref());
     // kotlinc annotates a reference return and each reference parameter of a declared method.
-    if nullability_annotated && (ret_ann.is_some() || param_anns.iter().any(Option::is_some)) {
-        e.cw.set_method_nullability(&f.name, &desc, ret_ann, &param_anns);
+    if nullability_annotated
+        && (ret_ann.is_some() || emitted_param_anns.iter().any(Option::is_some))
+    {
+        e.cw.set_method_nullability(&f.name, &desc, ret_ann, &emitted_param_anns);
     }
     if ir.deprecated_methods.contains(&fid) {
         e.cw.mark_method_deprecated(&f.name, &desc);
