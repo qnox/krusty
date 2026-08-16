@@ -718,10 +718,8 @@ fn facade_package_metadata_inner(
             .and_then(|(ir, fid)| ir.function_annotations.get(fid))
             .map(|annotations| {
                 annotations
-                    .visible
                     .iter()
-                    .chain(&annotations.invisible)
-                    .cloned()
+                    .map(|retained| retained.annotation.clone())
                     .collect()
             })
             .unwrap_or_default();

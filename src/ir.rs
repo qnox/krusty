@@ -991,9 +991,10 @@ pub struct IrClass {
     /// `<init>` comes from `secondary_ctors` (a `Super`-delegating one carries the init body). `true`
     /// for every other class (including synthesized/enum/object).
     pub has_primary_ctor: bool,
-    /// RUNTIME-retained annotations applied to this class (`@Anno(...) class TTT`), emitted into the
-    /// class's `RuntimeVisibleAnnotations` attribute. Empty for a class with none.
-    pub applied_annotations: Vec<AppliedAnnotation>,
+    /// Resolved annotations applied to this class (`@Anno(...) class TTT`) with their semantic
+    /// retention. A backend decides how each retained annotation is represented; SOURCE-retained
+    /// annotations are absent. Empty for a class with none.
+    pub applied_annotations: DeclarationAnnotations,
     /// User annotations applied to this class's fields (property backing fields and enum-constant
     /// fields), by field name — emitted into each field's `Runtime[In]VisibleAnnotations`. Empty for a
     /// class whose fields carry none.
@@ -1025,50 +1026,66 @@ pub enum AnnoValue {
     Array(Vec<AnnoValue>),
 }
 
-/// User annotations on one field, split by JVM retention: RUNTIME → `RuntimeVisibleAnnotations`,
-/// BINARY → `RuntimeInvisibleAnnotations` (SOURCE-retained ones are dropped during lowering).
+/// User annotations on one field. Retention remains a semantic fact on each annotation; the backend
+/// chooses its physical representation.
 #[derive(Clone, Debug)]
 pub struct FieldAnnotations {
     pub field: String,
-    pub visible: Vec<AppliedAnnotation>,
-    pub invisible: Vec<AppliedAnnotation>,
+    pub annotations: DeclarationAnnotations,
 }
 
-/// User annotations on one function, split by JVM retention (see [`FieldAnnotations`], the
-/// property-field analogue). A HIDDEN-deprecated declaration is identified from these records
-/// rather than a separate flag: the annotation IS the fact.
+/// One retained annotation application on a declaration. The application payload stays independent
+/// of retention so nested annotation values can reuse [`AppliedAnnotation`] without inventing a
+/// declaration-retention fact for the nested value.
+#[derive(Clone, Debug)]
+pub struct RetainedAnnotation {
+    pub retention: AnnoRetention,
+    pub annotation: AppliedAnnotation,
+}
+
+/// Backend-agnostic annotations on any declaration kind. A HIDDEN-deprecated declaration is
+/// identified from these records rather than a separate flag: the annotation IS the fact.
 #[derive(Clone, Debug, Default)]
-pub struct FnAnnotations {
-    pub visible: Vec<AppliedAnnotation>,
-    pub invisible: Vec<AppliedAnnotation>,
-}
+pub struct DeclarationAnnotations(Vec<RetainedAnnotation>);
 
-impl FnAnnotations {
+impl DeclarationAnnotations {
+    pub fn new(annotations: Vec<RetainedAnnotation>) -> Self {
+        Self(annotations)
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, RetainedAnnotation> {
+        self.0.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     /// Whether these annotations include `@kotlin.Deprecated` at any level. kotlinc additionally
     /// stamps the classic `Deprecated` class-file attribute on such a declaration, beside the
     /// annotation itself.
     pub fn deprecated(&self) -> bool {
-        self.visible
-            .iter()
-            .chain(&self.invisible)
-            .any(|annotation| annotation.internal.matches("kotlin/Deprecated"))
+        self.iter()
+            .any(|retained| retained.annotation.internal.matches("kotlin/Deprecated"))
     }
 
     /// Whether these annotations include `@kotlin.Deprecated(level = DeprecationLevel.HIDDEN)`.
     /// kotlinc removes such a declaration from resolution and emits its realization
     /// `ACC_SYNTHETIC`; both facts follow from this one annotation.
     pub fn deprecated_hidden(&self) -> bool {
-        self.visible
-            .iter()
-            .chain(&self.invisible)
-            .any(|annotation| {
-                annotation.internal.matches("kotlin/Deprecated")
-                    && annotation.values.iter().any(|(name, value)| {
-                        name == "level"
-                            && matches!(value, AnnoValue::Enum(ty, constant)
+        self.iter().any(|retained| {
+            let annotation = &retained.annotation;
+            annotation.internal.matches("kotlin/Deprecated")
+                && annotation.values.iter().any(|(name, value)| {
+                    name == "level"
+                        && matches!(value, AnnoValue::Enum(ty, constant)
                             if ty.matches("kotlin/DeprecationLevel") && constant == "HIDDEN")
-                    })
-            })
+                })
+        })
     }
 }
 
@@ -1287,7 +1304,7 @@ pub struct IrSecondaryCtor {
     /// User annotations declared on this constructor, split by JVM retention — the constructor
     /// analogue of [`IrFile::function_annotations`] (a secondary constructor is not an
     /// [`IrFunction`], so it carries them directly).
-    pub annotations: FnAnnotations,
+    pub annotations: DeclarationAnnotations,
     pub params: Vec<Ty>,
     /// SOURCE parameter names paired with SEMANTIC (checker-resolved) types — what the class
     /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
@@ -1449,11 +1466,10 @@ pub struct IrFile {
     /// matching the property's spelling against a static field name.
     jvm_companion_property_statics: std::collections::HashMap<(TypeName, u32), u32>,
     /// User annotations applied to FUNCTIONS (top-level and members share the `functions` arena),
-    /// by function id, split by JVM retention: RUNTIME → `RuntimeVisibleAnnotations`, BINARY →
-    /// `RuntimeInvisibleAnnotations`. A side table rather than a field on [`IrFunction`], for the
+    /// by function id, retaining the resolved semantic retention. A side table rather than a field on [`IrFunction`], for the
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
     /// carry none, and every synthesized function stays constructible without naming them.
-    pub function_annotations: std::collections::HashMap<u32, FnAnnotations>,
+    pub function_annotations: std::collections::HashMap<u32, DeclarationAnnotations>,
     pub exprs: Vec<IrExpr>,
     /// Sparse construction facts keyed by the ordinary [`IrExpr::New`] identity. Common lowering
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
@@ -2832,7 +2848,7 @@ mod tests {
             companion_class: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
-            applied_annotations: Vec::new(),
+            applied_annotations: DeclarationAnnotations::default(),
             annotation_retention: None,
         }
     }
