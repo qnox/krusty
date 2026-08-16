@@ -148,6 +148,18 @@ impl IrConst {
     }
 }
 
+/// Checked semantic shape of an annotation constructor call. The common IR retains the annotation
+/// interface and lexical scope; a backend chooses the concrete runtime implementation and name.
+#[derive(Clone, Debug)]
+pub struct IrAnnotationConstruction {
+    pub interface: TypeName,
+    pub members: Vec<(String, Ty)>,
+    /// Constructor defaults as lowered declarations, not evaluated call operands.
+    pub defaults: Vec<Option<ExprId>>,
+    /// Lexical classifier containing this call. `None` means a top-level/file-facade scope.
+    pub enclosing_class: Option<TypeName>,
+}
+
 /// An IR expression node (a subset of Kotlin IR's `IrExpression` hierarchy). Operands reference
 /// other expressions by `ExprId` into the arena.
 #[derive(Clone, Debug)]
@@ -1431,6 +1443,10 @@ pub struct IrFile {
     /// carry none, and every synthesized function stays constructible without naming them.
     pub function_annotations: std::collections::HashMap<u32, FnAnnotations>,
     pub exprs: Vec<IrExpr>,
+    /// Sparse construction facts keyed by the ordinary [`IrExpr::New`] identity. Common lowering
+    /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
+    /// must realize annotation instances through a platform-specific implementation class.
+    pub annotation_constructions: std::collections::HashMap<ExprId, IrAnnotationConstruction>,
     /// Exact `SetField` expression identities that realize a source property declaration's
     /// initializer. A later assignment can target the same field with the same value, so backend
     /// storage passes must consume this linkage instead of recognizing stores by shape or spelling.
@@ -1979,13 +1995,23 @@ impl IrFile {
     }
 
     pub fn insert_class_ctor_defaults(&mut self, internal: &str, defaults: Vec<Option<u32>>) {
-        self.class_ctor_defaults
-            .insert(crate::types::type_name(internal), defaults);
+        self.insert_class_ctor_defaults_name(crate::types::type_name(internal), defaults);
+    }
+
+    pub fn insert_class_ctor_defaults_name(
+        &mut self,
+        internal: TypeName,
+        defaults: Vec<Option<u32>>,
+    ) {
+        self.class_ctor_defaults.insert(internal, defaults);
     }
 
     pub fn class_ctor_defaults(&self, internal: &str) -> Option<&Vec<Option<u32>>> {
-        self.class_ctor_defaults
-            .get(&crate::types::type_name(internal))
+        self.class_ctor_defaults_name(crate::types::type_name(internal))
+    }
+
+    pub fn class_ctor_defaults_name(&self, internal: TypeName) -> Option<&Vec<Option<u32>>> {
+        self.class_ctor_defaults.get(&internal)
     }
 
     pub fn insert_class_signature(&mut self, internal: &str, sig: IrGenericSig) {
