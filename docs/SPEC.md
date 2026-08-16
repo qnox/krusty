@@ -6194,9 +6194,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   22 → 23. The one list per declaration rejoins krusty's retention split (`FnAnnotations`'
   `visible`/`invisible`), which exists only because the class file has two attributes; kotlinc records
   every non-SOURCE annotation in one repeated field. Two ORDERS are independent and must not be
-  conflated: the `JvmMethodSignature` extension (f100) INTERNS its d2 strings BEFORE the annotations
-  even though it SERIALIZES after them, so an annotated `suspend` member's CPS descriptor precedes
-  `Lp/Mark;` in `d2` while its bytes stay in ascending field order. Tests:
+  conflated: the `JvmMethodSignature` extension (f100) INTERNS its d2 strings BEFORE the
+  DECLARATION-level annotation records (f3/f12/f14) even though it SERIALIZES after them, so an
+  annotated `suspend` member's CPS descriptor precedes `Lp/Mark;` in `d2` while its bytes stay in
+  ascending field order. The rule is per FIELD, not "annotations vs f100": a VALUE-PARAMETER
+  annotation interns with its own parameter, ahead of f100. Measured on
+  `class C @OnCtor constructor(@OnParam val x: Int)` — `d2` is
+  `["Lp/C;", "", "x", "", "Lp/OnParam;", "<init>", "(I)V", "Lp/OnCtor;", …]`, the parameter's
+  annotation before the constructor's signature strings and the constructor's own after them. Tests:
   `tests/annotation_emission_e2e.rs::member_function_annotation_reaches_metadata` (byte-identical to
   kotlinc), `…::member_function_annotation_arguments_reach_metadata`,
   `…::binary_retained_member_annotation_reaches_metadata`,
