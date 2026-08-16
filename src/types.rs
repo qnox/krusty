@@ -653,6 +653,48 @@ pub const FUNCTION_N_INTERNAL: [&str; 23] = [
     "kotlin/jvm/functions/Function22",
 ];
 
+/// `java.lang.annotation.ElementType` constants in DECLARATION order. kotlinc projects a Kotlin
+/// `@Target` onto an `EnumSet<ElementType>`, so the `@java.lang.annotation.Target` mirror it writes is
+/// always in this order — never the order the Kotlin targets were written in.
+pub const JAVA_ELEMENT_TYPES: [&str; 10] = [
+    "TYPE",
+    "FIELD",
+    "METHOD",
+    "PARAMETER",
+    "CONSTRUCTOR",
+    "LOCAL_VARIABLE",
+    "ANNOTATION_TYPE",
+    "PACKAGE",
+    "TYPE_PARAMETER",
+    "TYPE_USE",
+];
+
+/// Index into [`JAVA_ELEMENT_TYPES`] for a `kotlin.annotation.AnnotationTarget` constant — the Java
+/// counterpart kotlinc mirrors that target onto. `None` for a Kotlin-only target (`PROPERTY`, `FILE`,
+/// `TYPEALIAS`, `EXPRESSION`, which the JVM cannot express) or an unknown name; such a target
+/// contributes nothing to the mirror, though the mirror itself is still emitted — a set of only
+/// Kotlin-only targets mirrors to an EMPTY array, matching kotlinc, rather than being omitted.
+///
+/// The rows are measured against kotlinc, not derived: the mapping is neither an identity (`CLASS`
+/// becomes `TYPE`, `VALUE_PARAMETER` becomes `PARAMETER`) nor injective (`FUNCTION`,
+/// `PROPERTY_GETTER` and `PROPERTY_SETTER` all become `METHOD`, and collapse to one entry).
+pub fn java_element_type_of_annotation_target(target: &str) -> Option<usize> {
+    let element = match target {
+        "CLASS" => "TYPE",
+        "ANNOTATION_CLASS" => "ANNOTATION_TYPE",
+        "TYPE_PARAMETER" => "TYPE_PARAMETER",
+        "FIELD" => "FIELD",
+        "LOCAL_VARIABLE" => "LOCAL_VARIABLE",
+        "VALUE_PARAMETER" => "PARAMETER",
+        "CONSTRUCTOR" => "CONSTRUCTOR",
+        "FUNCTION" | "PROPERTY_GETTER" | "PROPERTY_SETTER" => "METHOD",
+        "TYPE" => "TYPE_USE",
+        // PROPERTY / FILE / TYPEALIAS / EXPRESSION have no `ElementType` counterpart.
+        _ => return None,
+    };
+    JAVA_ELEMENT_TYPES.iter().position(|&e| e == element)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     Unit,
