@@ -2303,15 +2303,38 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declared bound in `TParams::from_decl_with` (a class-name → JVM-internal resolver, `resolve.rs`) and
   stores it as the FUNCTION type parameter's erasure, so member/operator resolution on a `T`-typed value
   peels to the real bound and the descriptor uses it (`String`/user-class/Kotlin-builtin bounds; an
-  unbounded `T` stays `Object`, a primitive bound still specializes). CLASS type parameters keep the
-  erased (`Object`) model — the value-class pass owns class-bound handling. The generic `Signature`
-  attribute is still omitted (same gap as above). The bound is also visible to the JVM **mapped-builtin**
+  unbounded `T` stays `Object`, a primitive bound still specializes). A CLASS type parameter erases the
+  same way (`class Bounded<T : Cargo>(val t: T)` signs its constructor, backing field, and getter with
+  `Lapp/Cargo;`): `TParams::erased_with` builds the class scope from the declared bounds and then
+  collapses any NON-REFERENCE erasure back to `Any`, so a reference bound reaches the descriptor while a
+  primitive bound keeps the erased model the value-class pass depends on. Enclosing declarations (an
+  outer class of an `inner`, the declaration surrounding a local class) are folded in first, so an inner
+  class erases the outer's bounded parameter too and a same-spelled own formal shadows it. The generic
+  `Signature` attribute is still omitted (same gap as above). The bound is also visible to the JVM **mapped-builtin**
   member tables below, so `x.get(i)`/`x.toInt()`/`x.length` on a `<T : CharSequence>`/`<T : Number>`
   resolve. NOT supported: a `<T : Comparable<T>>` bound whose body uses the `<`/`>` operator AND is called
   with a primitive (`maxOf2(3, 5)`) — that needs the type argument inferred (`T = Int`) and the primitive
   BOXED into the `Comparable`-erased parameter slot, which krusty's emit does not do (a raw `int` reaching
   a `Comparable` parameter is a VerifyError), so such a call is DECLINED (the file skips), never
-  miscompiled. Tests: `tests/bounded_type_param_e2e.rs`.
+  miscompiled. One facet remains open, and it is shared by the function and class paths (so not a
+  class/function asymmetry): a NULLABLE bound (`<T : Cargo?>`) still erases to `Object` where kotlinc
+  uses `Lapp/Cargo;` — `tparam_bound_erasure` keeps `Any` for a nullable bound, deliberately.
+  Tests: `tests/bounded_type_param_e2e.rs`, `tests/class_type_param_bound_erasure_e2e.rs`.
+
+- **A type parameter with a NON-NULL bound is a non-null reference.** `<T : Cargo>` and `<T : Any>`
+  cannot hold null, so kotlinc annotates the field, the getter, the constructor parameter and a `var`
+  setter's parameter `@NotNull`, and guards `<init>`/the setter/a method parameter with
+  `Intrinsics.checkNotNullParameter`; an unbounded `<T>` (implicitly `Any?`) or a `<T : Cargo?>` gets
+  NEITHER — kotlinc leaves the nullable case UNANNOTATED rather than marking it `@Nullable`. This is
+  independent of the erasure above: `<T : Any>` still erases to `Object` yet takes the annotations and
+  the guard. Lowering reads the DECLARED bounds (`declared_type_param_admits_null`, following a bound
+  that names a sibling parameter); the JVM emitter states the same rule over the RESOLVED bounds in the
+  class's generic signature (`IrFile::class_type_param_admits_null`). One predicate
+  (`field_nullability_kind`) serves the constant-pool seeder, the field/accessor/parameter annotations,
+  the setter guard, and the constructor's `LineNumberTable` start pc — they must agree, since a field
+  classified as guarded in one and unguarded in another puts the line entry at the wrong offset. With
+  this, a bounded generic class is BYTE-IDENTICAL to kotlinc. Test:
+  `tests/class_type_param_bound_erasure_e2e.rs`.
 
 - **A mapped collection's member scope comes from `.kotlin_builtins`, not from the JVM class.** A mapped
   Kotlin type (`kotlin/collections/MutableList`, …) has no `.class` of its own; krusty resolves it through

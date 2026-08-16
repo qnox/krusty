@@ -150,6 +150,8 @@ mod class_literal_e2e;
 mod class_metadata_roundtrip;
 #[path = "class_tparam_cast_e2e.rs"]
 mod class_tparam_cast_e2e;
+#[path = "class_type_param_bound_erasure_e2e.rs"]
+mod class_type_param_bound_erasure_e2e;
 #[path = "classfile_e2e.rs"]
 mod classfile_e2e;
 #[path = "classifier_class_signature_e2e.rs"]

@@ -697,13 +697,47 @@ fn init_body_value_class_ctors(
     out
 }
 
-/// Is this property declared as a bare TYPE PARAMETER (`class C<T>(val a: T)`)? It erases to
-/// `Ljava/lang/Object;`, but `T`'s implicit bound is `Any?`, so kotlinc annotates it neither
-/// `@NotNull` nor `@Nullable` and emits no `checkNotNullParameter` guard. `field_signatures` already
-/// tracks these — it is what drives their `Signature` attribute.
-fn is_type_parameter_field(ir: &IrFile, fq_name: &str, field: &str) -> bool {
-    ir.field_signatures(fq_name)
-        .is_some_and(|fs| fs.iter().any(|(name, _)| name == field))
+/// The TYPE PARAMETER a field is declared as (`class Pair<A, B>(val a: A)` → `a` is `A`), or `None` when
+/// the field has a type of its own. `field_signatures` already tracks these — it is what drives their
+/// `Signature` attribute. Callers ask so they can consult that parameter's BOUND: the erased descriptor
+/// says nothing about whether the field can hold null.
+fn type_parameter_field_name<'a>(ir: &'a IrFile, fq_name: &str, field: &str) -> Option<&'a str> {
+    ir.field_signatures(fq_name)?
+        .iter()
+        .find(|(name, _)| name == field)
+        .map(|(_, parameter)| parameter.as_str())
+}
+
+/// kotlinc's nullability classification for a class field / primary-constructor parameter: `0` = no
+/// annotation (a primitive, or a type parameter that admits null), `1` = a non-null reference
+/// (`@NotNull`, plus an `Intrinsics.checkNotNullParameter` guard wherever one applies), `2` = a nullable
+/// reference (`@Nullable`, never guarded).
+///
+/// A field declared as a TYPE PARAMETER answers from that parameter's BOUND, not from the erased
+/// descriptor: `<T : Cargo>`/`<T : Any>` cannot hold null and is `@NotNull`, while an unbounded `<T>`
+/// (= `Any?`) or a `<T : Cargo?>` is left UNANNOTATED — kotlinc does not mark it `@Nullable`.
+///
+/// One predicate for the pool seeder, the field/accessor/parameter annotations, the `var` setter guard,
+/// and the constructor's `LineNumberTable` start pc, because those must agree: classify a field as
+/// guarded in one and unguarded in another and the line entry lands at the wrong offset.
+fn field_nullability_kind(ir: &IrFile, fq_name: &str, name: &str, t: Ty) -> u8 {
+    let d = crate::jvm::names::type_descriptor(t);
+    if !(d.starts_with('L') || d.starts_with('[')) {
+        return 0;
+    }
+    if let Some(parameter) = type_parameter_field_name(ir, fq_name, name) {
+        return u8::from(!ir.class_type_param_admits_null(fq_name, parameter));
+    }
+    if matches!(t, Ty::Nullable(_)) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Whether a field/constructor parameter is a NON-NULL reference — [`field_nullability_kind`] `== 1`.
+fn is_nonnull_reference_field(ir: &IrFile, fq_name: &str, name: &str, t: Ty) -> bool {
+    field_nullability_kind(ir, fq_name, name, t) == 1
 }
 
 /// Field indices a class `init_body` assigns a compile-time literal — a BODY property such as
@@ -2041,17 +2075,7 @@ fn seed_plain_class_pool(
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     // Reference-type annotation kind: 0 = primitive or bare type parameter (no annotation), 1 =
     // non-null reference (@NotNull + a `checkNotNullParameter` guard), 2 = nullable (@Nullable, no guard).
-    let ann_kind = |name: &str, t: Ty| -> u8 {
-        let d = desc(t);
-        if !(d.starts_with('L') || d.starts_with('[')) || is_type_parameter_field(ir, fq_name, name)
-        {
-            0
-        } else if matches!(t, Ty::Nullable(_)) {
-            2
-        } else {
-            1
-        }
-    };
+    let ann_kind = |name: &str, t: Ty| -> u8 { field_nullability_kind(ir, fq_name, name, t) };
     let ctor_desc = format!("({})V", ctor_field_descs(c));
     let body_consts = init_body_string_consts(ir, c);
     let body_value_class_ctors = init_body_value_class_ctors(ir, c);
@@ -2233,7 +2257,7 @@ fn seed_plain_class_pool(
                     .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
                 let guarded = accessor_ty.is_reference()
                     && !property.ty.is_nullable()
-                    && !is_type_parameter_field(ir, fq_name, &field.name);
+                    && is_nonnull_reference_field(ir, fq_name, &field.name, field.ty);
                 data_accessors.push(crate::jvm::classfile::DataAccessorInfo {
                     name: setter,
                     desc: format!("({accessor_desc})V"),
@@ -2360,12 +2384,8 @@ fn attach_synth_debug_tables(
     // offset. The guard's length is SLOT-dependent: `aload_0..3` is 1 byte but `aload <u1>` (slot ≥ 4)
     // is 2, so a class with enough (or wide) ctor params pushes a non-null-ref param past slot 3 and its
     // guard grows — the fixed-6 assumption was wrong there.
-    let is_nonnull_ref = |name: &str, t: Ty| -> bool {
-        let d = desc(t);
-        (d.starts_with('L') || d.starts_with('['))
-            && !matches!(t, Ty::Nullable(_))
-            && !is_type_parameter_field(ir, &c.fq_name(), name)
-    };
+    let is_nonnull_ref =
+        |name: &str, t: Ty| -> bool { is_nonnull_reference_field(ir, &c.fq_name(), name, t) };
     // `aload <slot>` byte length: 1 (aload_0..3), 2 (aload u1), or 4 (wide aload u2).
     let aload_len = |slot: u16| -> u16 {
         if slot <= 3 {
@@ -2675,17 +2695,11 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     // A reference type (descriptor `L…;`/`[…`) gets `@NotNull` unless it is `Ty::Nullable`, then
     // `@Nullable`; a primitive gets no annotation.
     let ann = |name: &str, t: Ty| -> Option<&'static str> {
-        let d = desc(t);
-        if !(d.starts_with('L') || d.starts_with('['))
-            || is_type_parameter_field(ir, &c.fq_name(), name)
-        {
-            return None;
+        match field_nullability_kind(ir, &c.fq_name(), name, t) {
+            1 => Some("Lorg/jetbrains/annotations/NotNull;"),
+            2 => Some("Lorg/jetbrains/annotations/Nullable;"),
+            _ => None,
         }
-        Some(if matches!(t, Ty::Nullable(_)) {
-            "Lorg/jetbrains/annotations/Nullable;"
-        } else {
-            "Lorg/jetbrains/annotations/NotNull;"
-        })
     };
     // Interfaces have accessors but no backing fields. The annotation targets the PHYSICAL field
     // (`result$1` when mangled away from a same-named hoisted companion static).
@@ -4737,11 +4751,12 @@ fn emit_declared_property_accessor(
             let words = slot_words(accessor_jt);
             let mut st = CodeBuilder::new(1 + words);
             // kotlinc guards a non-null REFERENCE setter parameter, naming it `<set-?>`. A primitive
-            // cannot be null, and a bare type parameter's bound is `Any?`, so neither is guarded.
+            // cannot be null, and neither is a type parameter that admits null (an unbounded `<T>` is
+            // `Any?`); a NON-null-bounded one (`<T : Cargo>`) is guarded like any other reference.
             let guarded = param_assertions
                 && accessor_jt.is_reference()
                 && !property.ty.is_nullable()
-                && !is_type_parameter_field(ir, fq_name, &field.name);
+                && is_nonnull_reference_field(ir, fq_name, &field.name, field.ty);
             if guarded {
                 st.aload(1);
                 st.push_string("<set-?>", cw);
@@ -5113,15 +5128,16 @@ fn emit_class(
         if c.is_data || is_continuation {
             cw.add_field_sig(acc, &physical_name, &field_desc, field_sig.as_deref());
         } else {
-            let field_ann = ((field_desc.starts_with('L') || field_desc.starts_with('['))
-                && field.type_param.is_none())
-            .then(|| {
-                if ty.is_nullable() {
-                    "Lorg/jetbrains/annotations/Nullable;"
-                } else {
-                    "Lorg/jetbrains/annotations/NotNull;"
-                }
-            });
+            // Through the SHARED classification, so this field's annotation cannot disagree with the
+            // pool seeder's ordering or the constructor's `LineNumberTable` start pc. It reads the
+            // field's TYPE PARAMETER (and that parameter's bound) rather than the erased descriptor —
+            // the local `type_parameter` above is the `Signature` attribute's spelling, a wider source
+            // that must not become a second answer to the same question.
+            let field_ann = match field_nullability_kind(ir, &fq_name, name, *ty) {
+                1 => Some("Lorg/jetbrains/annotations/NotNull;"),
+                2 => Some("Lorg/jetbrains/annotations/Nullable;"),
+                _ => None,
+            };
             cw.add_field_late_sig(
                 acc,
                 &physical_name,
