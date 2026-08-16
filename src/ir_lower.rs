@@ -16784,6 +16784,52 @@ impl<'a> Lower<'a> {
     /// lives on the selected receiver and contains the exact checker-selected non-virtual call. Its
     /// explicit receiver parameter preserves that dispatch semantics across backends without deriving
     /// a helper identity from the rendered classifier name.
+    fn emit_selected_super_call(
+        &mut self,
+        target: &ResolvedSuperCall,
+        receiver: u32,
+        arguments: Vec<u32>,
+    ) -> Option<u32> {
+        let descriptor = if target.descriptor.is_empty() {
+            self.runtime
+                .method_descriptor(&target.params, target.physical_ret)?
+        } else {
+            target.descriptor.clone()
+        };
+        Some(match target.realization {
+            crate::libraries::MemberRealization::Dispatch => self.emit_call(
+                Callee::Special {
+                    owner: target.owner,
+                    name: target.name.clone(),
+                    descriptor,
+                    interface: target.interface,
+                    source_member: target.source_member,
+                },
+                Some(receiver),
+                arguments,
+            ),
+            crate::libraries::MemberRealization::Direct { pass_receiver } => {
+                let mut physical = Vec::with_capacity(arguments.len() + usize::from(pass_receiver));
+                if pass_receiver {
+                    physical.push(receiver);
+                }
+                physical.extend(arguments);
+                self.emit_call(
+                    Callee::Static {
+                        owner: target.owner,
+                        name: target.name.clone(),
+                        descriptor,
+                        inline: crate::libraries::InlineKind::None,
+                    },
+                    None,
+                    physical,
+                )
+            }
+            crate::libraries::MemberRealization::Intrinsic(_)
+            | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
+        })
+    }
+
     fn ensure_labeled_super_accessor(&mut self, target: &ResolvedSuperCall) -> Option<u32> {
         let dispatch_owner = target.receiver.ty.obj_internal()?;
         let class = self.class_info_name(dispatch_owner)?.id;
@@ -16802,26 +16848,11 @@ impl<'a> Lower<'a> {
             accessor = format!("{base}${suffix}");
         }
 
-        let descriptor = if target.descriptor.is_empty() {
-            self.runtime
-                .method_descriptor(&target.params, target.physical_ret)?
-        } else {
-            target.descriptor.clone()
-        };
         let receiver = self.emit_get_value(0);
         let arguments = (0..target.params.len())
             .map(|index| self.emit_get_value((index + 1) as u32))
             .collect::<Vec<_>>();
-        let call = self.emit_call(
-            Callee::Special {
-                owner: target.owner,
-                name: target.name.clone(),
-                descriptor,
-                interface: target.interface,
-            },
-            Some(receiver),
-            arguments,
-        );
+        let call = self.emit_selected_super_call(target, receiver, arguments)?;
         let call = if target.physical_ret != target.ret {
             self.coerce_to_static(call, target.ret, target.physical_ret)
         } else {
@@ -16893,22 +16924,7 @@ impl<'a> Lower<'a> {
                 arguments,
             ));
         }
-        let descriptor = if target.descriptor.is_empty() {
-            self.runtime
-                .method_descriptor(&target.params, target.physical_ret)?
-        } else {
-            target.descriptor.clone()
-        };
-        let call = self.emit_call(
-            Callee::Special {
-                owner: target.owner,
-                name: target.name,
-                descriptor,
-                interface: target.interface,
-            },
-            Some(receiver),
-            lowered,
-        );
+        let call = self.emit_selected_super_call(&target, receiver, lowered)?;
         Some(if target.physical_ret != target.ret {
             self.coerce_to_static(call, target.ret, target.physical_ret)
         } else {

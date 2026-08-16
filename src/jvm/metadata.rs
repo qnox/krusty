@@ -734,6 +734,10 @@ struct ParsedValueParam {
 struct ParsedFunction {
     is_inline: bool,
     is_suspend: bool,
+    /// Kotlin declaration modality from metadata. This is deliberately independent of the
+    /// realization method's classfile access: under `-jvm-default=disable`, a concrete interface
+    /// declaration is represented by an abstract interface method plus a static holder body.
+    is_abstract: bool,
     is_operator: bool,
     is_infix: bool,
     visibility: crate::types::Visibility,
@@ -940,6 +944,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     Some(ParsedFunction {
         is_inline: flags & IS_INLINE_BIT != 0,
         is_suspend: flags & IS_SUSPEND_BIT != 0,
+        is_abstract: (flags >> 4) & 0x3 == 2,
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
@@ -1836,6 +1841,7 @@ impl MfnFlags {
     const IS_INFIX: u16 = 1 << 6;
     const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 7;
     const DEPRECATED_HIDDEN: u16 = 1 << 8;
+    const IS_ABSTRACT: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1886,6 +1892,10 @@ impl MfnFlags {
     #[inline]
     pub const fn with_deprecated_hidden(self, on: bool) -> Self {
         self.with(Self::DEPRECATED_HIDDEN, on)
+    }
+    #[inline]
+    pub const fn with_is_abstract(self, on: bool) -> Self {
+        self.with(Self::IS_ABSTRACT, on)
     }
 }
 
@@ -1944,6 +1954,10 @@ impl MetaFn {
     #[inline]
     pub fn is_suspend(&self) -> bool {
         self.flags.has(MfnFlags::IS_SUSPEND)
+    }
+    #[inline]
+    pub fn is_abstract(&self) -> bool {
+        self.flags.has(MfnFlags::IS_ABSTRACT)
     }
     #[inline]
     pub fn is_extension(&self) -> bool {
@@ -2804,6 +2818,7 @@ fn decode_functions(
                         flags: MfnFlags::default()
                             .with_is_inline(pf.is_inline)
                             .with_is_suspend(pf.is_suspend)
+                            .with_is_abstract(pf.is_abstract)
                             .with_is_extension(pf.has_receiver)
                             .with_ret_nullable(ret_ty.is_some_and(Ty::is_nullable))
                             .with_is_operator(pf.is_operator)

@@ -686,6 +686,7 @@ mod tests {
                 name: "value".to_string(),
                 descriptor: "()I".to_string(),
                 interface: false,
+                source_member: None,
             },
             dispatch_receiver: Some(receiver),
             args: Vec::new(),
