@@ -64,6 +64,8 @@ mod bazel_cli_contract_e2e;
 mod bound_expr_ref_e2e;
 #[path = "bound_library_ref_e2e.rs"]
 mod bound_library_ref_e2e;
+#[path = "bound_relation_type_variable_e2e.rs"]
+mod bound_relation_type_variable_e2e;
 #[path = "bounded_type_param_e2e.rs"]
 mod bounded_type_param_e2e;
 #[path = "box_harness_skip_semantics_e2e.rs"]
