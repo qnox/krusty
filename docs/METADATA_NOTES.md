@@ -113,6 +113,40 @@ String interning is SOURCE-DECL order (a property's setter-param name interns be
 property's name; function names may intern after property strings even though `Package.function`=3
 serializes before f4) — relevant only to byte identity, not to consumption.
 
+## Annotation elements beyond `d1`/`d2` — `pn` (declared package)
+
+`@Metadata` carries the DECLARING Kotlin package in `pn` (an `s`-tagged String element) whenever
+`@JvmPackageName` moved the emitted class out of that package. It is absent on every unrelocated
+class, where the class's own JVM package is the declared one. Reading it is not optional for a
+consumer: kotlin-test's JUnit5 variant declares `package kotlin.test` and emits its facade to
+`kotlin/test/junit5/annotations/AnnotationsKt`, so `kotlin.test.Test` is only findable through `pn`
+(the `.kotlin_module` catalog records the same fact for jars — see `read_kotlin_module`'s
+`jvm_package_name` table — but a class directory need not carry one). `classreader` decodes it once
+into `KotlinMeta::package`; every consumer keys declarations by that field rather than by splitting
+the class's internal name.
+
+**Writer side — OPEN.** krusty cannot yet compile a source carrying `@file:JvmPackageName`, so it
+emits no `pn`. Closing it is four pieces: `-Xfriend-paths` (the annotation is `internal` to the
+stdlib, so no source can name it otherwise), emitting the facade class at the relocated JVM package,
+writing `pn`, and writing the `.kotlin_module` `jvm_package_name` table with
+`class_with_jvm_package_name_{short_name,package_id}`. Reachable only by a library that names an
+stdlib-internal annotation — kotlin-test itself, essentially.
+
+## Known byte-identity gap — `Type.abbreviatedType`
+
+kotlinc records the ALIAS SPELLING at a use site: a declaration written `fun make(): Cargo` where
+`typealias Cargo = Payload` encodes `Type{class_name=Payload, abbreviated_type=Type{…Cargo…}}`.
+krusty writes only the expanded target, so any consumer that spells a typealias in a DECLARED type
+differs from kotlinc in `d1`/`d2` alone (bytecode, descriptors and the constant pool all match).
+This applies to every classpath typealias, relocated facade or not — measured both ways.
+
+This is the byte-identity blocker that real code hits, and it is a `Ty` REPRESENTATION change, not a
+writer patch: every metadata entry point (`class_builder::build_class`, `builder`, `type_encoder`) is
+driven by `Ty`, which is fully expanded by the time it reaches them and carries no alias identity.
+Emitting `abbreviatedType` means threading the source spelling from `TypeRef` through `Ty` to every
+declared-type encode site — the same shape as the in-flight `Ty` nullability migration, and owed its
+own workstream.
+
 ## Status — round-trips PASSING
 Encoding chain ✅, schema + builtin table ✅, `UTF8_MODE_MARKER` ✅. **Both round-trips pass**: a
 *Kotlin consumer* compiled by the real kotlinc resolves krusty's top-level functions (facade

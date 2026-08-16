@@ -2890,6 +2890,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   This proto reader replaced a `d2` `$annotations` heuristic that a facade's annotated top-level property
   would have tripped. Resolves the alias as a constructor and in a type position. Test:
   `tests/classpath_typealias_e2e.rs`.
+- **A classpath declaration belongs to the package its `@Metadata` NAMES, not the directory its class
+  file sits in.** `@JvmPackageName` moves an emitted file facade out of its declared Kotlin package
+  and records the declared one in `@Metadata`'s `pn` element (a `s`-tagged String, absent on every
+  unrelocated class). kotlin-test's JUnit5 variant is the shape every Kotlin test source hits:
+  `package kotlin.test` with `@file:JvmPackageName("kotlin.test.junit5.annotations")`, so
+  `typealias Test = org.junit.jupiter.api.Test` is declared in `kotlin.test` but emitted to
+  `kotlin/test/junit5/annotations/AnnotationsKt`. krusty keyed every classpath alias by the JVM parent
+  of its facade, filing `Test` under `kotlin/test/junit5/annotations/Test`, so `import kotlin.test.Test`
+  reported `unresolved reference 'Test'` on every `@Test`-annotated function. `pn` is now decoded once
+  in `classreader` and is the single declaring-package fact (`KotlinMeta::package`) that keys the alias
+  table, the class-directory facade recovery, and the per-package facade admission — no channel infers
+  a declaring package from a class's location. Test:
+  `tests/classpath_relocated_facade_typealias_e2e.rs`.
 - **A classpath TOP-LEVEL property is a value (`import kotlin.math.E; import pkg.plugin`).** A package's
   namespace record carried its top-level FUNCTIONS and its EXTENSION properties but never its receiver-less
   top-level properties, so every use site — explicit import, star import, same package — reported
