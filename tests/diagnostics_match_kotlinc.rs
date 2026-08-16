@@ -222,6 +222,10 @@ fn errors_match_kotlinc_in_text_and_location() {
     // Snippets within krusty's subset that produce a diagnostic kotlinc also produces identically.
     let cases = [
         "fun f(): Int = q",
+        // A missing callee is the ordinary UNRESOLVED_REFERENCE diagnostic, not a distinct
+        // "unresolved function" error. Cover both function- and constructor-shaped calls.
+        "fun use(): Int { noSuchFunction(); return 0 }",
+        "fun use(): Any = NoSuchClass(1)",
         // A qualified expression commits to its lexical root before resolving later segments.
         // `java` is the local Int here, not the lower-priority JDK package, so both compilers must
         // diagnose `io` and must not backtrack to `java.io.File`.

@@ -4328,7 +4328,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   callee DOES resolve — to a value that is not callable — is a different kotlinc diagnostic
   (FUNCTION_EXPECTED: `Expression '{0}' of type '{1}' cannot be invoked as a function. Function
   'invoke()' is not found.`) and is not covered here.
-  Tests: `tests/unresolved_call_wording_e2e.rs`.
+  Tests: `tests/diagnostics_match_kotlinc.rs`.
 
 ## 8. Success criteria for the PoC
 

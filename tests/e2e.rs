@@ -1200,8 +1200,6 @@ mod unit_value_e2e;
 mod unit_vararg_e2e;
 #[path = "unqualified_enum_entry_e2e.rs"]
 mod unqualified_enum_entry_e2e;
-#[path = "unresolved_call_wording_e2e.rs"]
-mod unresolved_call_wording_e2e;
 #[path = "unsigned_array_e2e.rs"]
 mod unsigned_array_e2e;
 #[path = "unsigned_classpath_call_e2e.rs"]
