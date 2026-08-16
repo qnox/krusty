@@ -6094,6 +6094,15 @@ fn collect_signatures_with_cp_impl(
         if !library.is_annotation() {
             continue;
         }
+        // The declared `@Target`, normalized by the provider (a Java `@interface` can never target a
+        // Kotlin property). Recorded even when the retention below is unusable, since use-site
+        // placement is a separate question from whether the annotation reaches the class file.
+        if let Some(targets) = library.annotation_targets {
+            table
+                .annotation_targets
+                .entry(annotation)
+                .or_insert(targets);
+        }
         let retention = match library.retention.as_deref() {
             Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,
             Some("CLASS") => crate::types::AnnotationRetention::Binary,
@@ -52715,6 +52724,7 @@ val result = object { fun value(): String = captured }
             enum_entries_accessor: None,
             named_parameter_lists: Vec::new(),
             retention: None,
+            annotation_targets: None,
         }
     }
 
@@ -55420,6 +55430,7 @@ fun box(): String {
                     enum_entries_accessor: None,
                     named_parameter_lists: vec![],
                     retention: None,
+                    annotation_targets: None,
                 })
             })
         }

@@ -271,7 +271,19 @@ fn require_same_metadata(name: &str, file: &str, class: &str, src: &str) {
 /// The whole class file must be byte-for-byte identical to kotlinc's — the strongest form, available
 /// when nothing but the metadata mirror separated the two.
 fn require_identical_class(name: &str, file: &str, class: &str, src: &str) {
-    let (krusty_dir, kotlinc_dir) = compile_both(name, file, src)
+    require_identical_class_with(name, file, class, src, None)
+}
+
+/// [`require_identical_class`] against an extra classpath entry — a Java `@interface` fixture, whose
+/// `@Target` only the class file states.
+fn require_identical_class_with(
+    name: &str,
+    file: &str,
+    class: &str,
+    src: &str,
+    library: Option<&std::path::Path>,
+) {
+    let (krusty_dir, kotlinc_dir) = compile_both_with(name, file, src, library)
         .unwrap_or_else(|| panic!("{name}: provisioned kotlinc/JAVA_HOME unavailable"));
     let read = |dir: &std::path::Path| {
         fs::read(dir.join(format!("{class}.class")))
@@ -1147,6 +1159,42 @@ fn omitted_java_default_and_named_vararg_constants_match_kotlinc() {
          \x20   @Vals(value = booleanArrayOf(K.T, K.F))\n\
          \x20   fun constants() {}\n\
          }\n",
+        Some(library.as_path()),
+    );
+}
+
+/// A CLASSPATH annotation's `@Target` must be read from its class file, not assumed. A Java
+/// `@interface` restricted to `ElementType.FIELD` — the shape every field-oriented Java framework
+/// annotation has — cannot target a Kotlin PROPERTY at all, so kotlinc puts it on the backing field.
+/// Assuming the Kotlin default (applicable everywhere) instead parks it on the property's synthetic
+/// `$annotations` marker, where nothing reflecting over fields will ever see it.
+#[test]
+fn a_field_targeted_java_annotation_lands_on_the_backing_field() {
+    let java = [(
+        "OnField.java".into(),
+        "package jl;
+         import java.lang.annotation.*;
+         @Retention(RetentionPolicy.RUNTIME)
+         @Target({ElementType.FIELD})
+         public @interface OnField {}
+"
+        .into(),
+    )];
+    let (library, _) = common::javac_compile(&java, &[])
+        .expect("javac must build the field-targeted annotation fixture");
+    require_identical_class_with(
+        "java_field_target",
+        "A.kt",
+        "p/C",
+        "package p
+
+         import jl.OnField
+
+         class C {
+             @OnField
+             val v: Int = 1
+         }
+",
         Some(library.as_path()),
     );
 }

@@ -155,6 +155,14 @@ pub struct ClassInfo {
     /// use of this annotation is emitted `RuntimeVisibleAnnotations` for RUNTIME, `RuntimeInvisible…` for
     /// CLASS, and dropped for SOURCE.
     pub retention: Option<String>,
+    /// For an annotation type: the `@kotlin.annotation.Target` `allowedTargets` entries
+    /// (`AnnotationTarget` constant names) — a KOTLIN annotation's declared target set, which has no
+    /// Java equivalent for `PROPERTY`. Empty when the annotation declares no `@Target` (applicable
+    /// everywhere) or is not a Kotlin annotation.
+    pub kotlin_targets: Vec<String>,
+    /// For an annotation type: the `@java.lang.annotation.Target` `value` entries (`ElementType`
+    /// constant names). Empty when none is declared.
+    pub java_targets: Vec<String>,
     pub inner_classes: Vec<InnerClassRef>,
 }
 
@@ -546,6 +554,8 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         meta,
         signature: attrs.signature,
         retention: attrs.retention,
+        kotlin_targets: attrs.kotlin_targets,
+        java_targets: attrs.java_targets,
         inner_classes: attrs.inner_classes,
     })
 }
@@ -565,6 +575,8 @@ struct ClassAttrs {
     pn: Option<String>,
     signature: Option<String>,
     retention: Option<String>,
+    kotlin_targets: Vec<String>,
+    java_targets: Vec<String>,
     inner_classes: Vec<InnerClassRef>,
 }
 
@@ -631,6 +643,12 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
             let atype = utf8(ati);
             let is_kotlin_meta = atype == "Lkotlin/Metadata;";
             let is_retention = atype == "Ljava/lang/annotation/Retention;";
+            // An annotation type's DECLARED target set. Kotlin records its own
+            // (`allowedTargets`, which can name `PROPERTY` — a site Java has no word for); a Java
+            // `@interface` records `ElementType`s. Both decide where an application written without
+            // a use-site prefix lands.
+            let is_kotlin_target = atype == "Lkotlin/annotation/Target;";
+            let is_java_target = atype == "Ljava/lang/annotation/Target;";
             let Ok(n_pairs) = attr.u2() else { break };
             for _ in 0..n_pairs {
                 let Ok(eni) = attr.u2() else { break };
@@ -682,9 +700,24 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                     }
                     continue;
                 }
+                if (is_kotlin_target && ename == "allowedTargets")
+                    || (is_java_target && ename == "value")
+                {
+                    match read_element_value(&mut attr, cp, ElementValueExtract::EnumConstants) {
+                        Ok(Some(constants)) if is_kotlin_target => out.kotlin_targets = constants,
+                        Ok(Some(constants)) => out.java_targets = constants,
+                        Ok(None) => {}
+                        Err(_) => return out,
+                    }
+                    continue;
+                }
                 let field = if is_kotlin_meta { ename } else { "" };
-                let want = field == "d1" || field == "d2";
-                match skip_element_value_extract_string_array(&mut attr, cp, want) {
+                let want = if field == "d1" || field == "d2" {
+                    ElementValueExtract::Strings
+                } else {
+                    ElementValueExtract::Skip
+                };
+                match read_element_value(&mut attr, cp, want) {
                     Ok(Some(strings)) if field == "d1" => out.d1 = Some(strings),
                     Ok(Some(strings)) => out.d2 = Some(strings),
                     Ok(None) => {}
@@ -696,12 +729,35 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
     out
 }
 
-/// Skip or extract an element_value. If `extract` is true and the value is a string array,
-/// return the strings; otherwise return None.
-fn skip_element_value_extract_string_array(
+/// What [`read_element_value`] should pull out of an element_value ARRAY; every other shape is
+/// skipped either way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ElementValueExtract {
+    Skip,
+    /// String elements (`s`) — `@Metadata`'s `d1`/`d2`.
+    Strings,
+    /// Enum-constant elements (`e`) — an annotation's `@Target` entries, of which only the CONSTANT
+    /// name is kept (the enum type is implied by the element).
+    EnumConstants,
+}
+
+/// Skip an element_value, extracting an array's elements when `extract` asks for their shape.
+fn read_element_value(
     r: &mut Reader,
     cp: &[C],
-    extract: bool,
+    extract: ElementValueExtract,
+) -> Result<Option<Vec<String>>, ReadError> {
+    let tag = r.u1()? as char;
+    read_element_value_body(r, cp, tag, extract)
+}
+
+/// One element_value whose TAG has already been read — the array walk reads element tags itself, to
+/// tell an enum element (two indices) from a string one (one index).
+fn read_element_value_body(
+    r: &mut Reader,
+    cp: &[C],
+    tag: char,
+    extract: ElementValueExtract,
 ) -> Result<Option<Vec<String>>, ReadError> {
     let utf8 = |i: u16| -> String {
         match cp.get(i as usize) {
@@ -709,8 +765,6 @@ fn skip_element_value_extract_string_array(
             _ => String::new(),
         }
     };
-
-    let tag = r.u1()? as char;
     match tag {
         'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 's' | 'c' => {
             r.u2()?;
@@ -724,24 +778,43 @@ fn skip_element_value_extract_string_array(
             let n = r.u2()?;
             for _ in 0..n {
                 r.u2()?; // element name
-                skip_element_value_extract_string_array(r, cp, false)?;
+                read_element_value(r, cp, ElementValueExtract::Skip)?;
             }
         }
         '[' => {
             let n = r.u2()? as usize;
-            if extract {
-                let mut result = Vec::with_capacity(n);
-                for _ in 0..n {
-                    let t = r.u1()? as char;
-                    let s = r.u2()?;
-                    if t == 's' {
-                        result.push(utf8(s));
+            match extract {
+                ElementValueExtract::Strings => {
+                    let mut result = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let t = r.u1()? as char;
+                        let s = r.u2()?;
+                        if t == 's' {
+                            result.push(utf8(s));
+                        }
                     }
+                    return Ok(Some(result));
                 }
-                return Ok(Some(result));
-            } else {
-                for _ in 0..n {
-                    skip_element_value_extract_string_array(r, cp, false)?;
+                // An enum element is `e` + type descriptor + constant name, two indices where a
+                // string element has one — reading it as a string array would desync the walk.
+                ElementValueExtract::EnumConstants => {
+                    let mut result = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let t = r.u1()? as char;
+                        if t != 'e' {
+                            read_element_value_body(r, cp, t, ElementValueExtract::Skip)?;
+                            continue;
+                        }
+                        r.u2()?; // enum type descriptor
+                        let constant = r.u2()?;
+                        result.push(utf8(constant));
+                    }
+                    return Ok(Some(result));
+                }
+                ElementValueExtract::Skip => {
+                    for _ in 0..n {
+                        read_element_value(r, cp, ElementValueExtract::Skip)?;
+                    }
                 }
             }
         }
@@ -867,7 +940,7 @@ fn read_declaration_annotations(
                 }
                 continue;
             }
-            skip_element_value_extract_string_array(&mut r, cp, false)?;
+            read_element_value(&mut r, cp, ElementValueExtract::Skip)?;
         }
         if nullability.is_some() {
             *nullability_out = nullability;
@@ -928,7 +1001,7 @@ fn read_parameter_nullability(
             let pair_count = r.u2()?;
             for _ in 0..pair_count {
                 r.u2()?;
-                skip_element_value_extract_string_array(&mut r, cp, false)?;
+                read_element_value(&mut r, cp, ElementValueExtract::Skip)?;
             }
             if let Some(nullable) = nullability {
                 *slot = Some(nullable);

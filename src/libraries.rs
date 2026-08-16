@@ -2172,6 +2172,11 @@ pub struct LibraryType {
     /// the annotation is emitted `RuntimeVisibleAnnotations` (RUNTIME) / `RuntimeInvisibleAnnotations`
     /// (CLASS = Kotlin BINARY) / dropped (SOURCE).
     pub retention: Option<String>,
+    /// For a classpath annotation type: where an application written with NO use-site prefix may
+    /// land, normalized from the declaration's `@Target` at the provider boundary. `None` for a
+    /// non-annotation type. A Java `@interface` can never target a Kotlin PROPERTY, which is the
+    /// distinction this carries and a raw target-name list would not.
+    pub annotation_targets: Option<crate::types::AnnotationTargets>,
 }
 
 impl std::ops::Deref for LibraryType {
@@ -2243,6 +2248,7 @@ impl LibraryType {
             enum_entries_accessor: None,
             named_parameter_lists: Vec::new(),
             retention: None,
+            annotation_targets: None,
         }
     }
 
@@ -2823,6 +2829,7 @@ mod tests {
             enum_entries_accessor: None,
             named_parameter_lists: vec![],
             retention: None,
+            annotation_targets: None,
         };
         f(&mut t);
         t

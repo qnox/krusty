@@ -527,6 +527,7 @@ mod tests {
             enum_entries_accessor: None,
             named_parameter_lists: Vec::new(),
             retention: None,
+            annotation_targets: None,
         }
     }
 
