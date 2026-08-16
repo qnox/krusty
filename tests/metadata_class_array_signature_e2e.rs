@@ -122,6 +122,35 @@ fn an_array_property_records_its_field_descriptor() {
     assert_identical("ClsArrProp", SRC, "app/Holder");
 }
 
+/// The same rule on a property with NO ACCESSOR to read a descriptor off: a `private val` gets no
+/// getter, yet kotlinc still records its field descriptor — so the descriptor has to come from the
+/// FIELD, not the getter's return type. (`@JvmField` is the other accessor-less shape; krusty has a
+/// separate, unrelated gap there — it emits a getter and drops the annotation — so it is not a row
+/// here.)
+#[test]
+fn an_accessorless_array_property_records_its_field_descriptor() {
+    const SRC: &str = "package app\n\
+        \n\
+        class H {\n\
+        \x20   private val xs: Array<String> = arrayOf()\n\
+        \x20   fun n(): Int = xs.size\n\
+        }\n";
+    assert_identical("ClsArrPropNoGetter", SRC, "app/H");
+}
+
+/// A body property may share a PLAIN (non-`val`) vararg parameter's name without being it — its own
+/// type is recorded, unprojected. The vararg-property rule keys on the parameter declaring a
+/// property, not on the name alone.
+#[test]
+fn a_body_property_sharing_a_plain_vararg_parameter_name_keeps_its_own_type() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Shadow(vararg xs: String) {\n\
+        \x20   val xs: Array<Int> = arrayOf(xs.size)\n\
+        }\n";
+    assert_identical("ClsShadowVararg", SRC, "app/Shadow");
+}
+
 /// A SECONDARY constructor's `vararg`, which travels a different `CtorMeta` path than the primary.
 #[test]
 fn a_secondary_constructor_reference_vararg_records_a_projected_array() {

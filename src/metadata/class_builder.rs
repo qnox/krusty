@@ -645,13 +645,6 @@ pub fn build_class(
                 .getter
                 .as_ref()
                 .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
-            // A `kotlin/Array` field's descriptor depends on its type ARGUMENT, which the reader's
-            // name-keyed table cannot express — the same reason a function records its
-            // `JvmMethodSignature.desc`. See `metadata::descriptor_needs_recording`.
-            _ if crate::metadata::descriptor_needs_recording(p.ty) => p
-                .getter
-                .as_ref()
-                .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
             _ => None,
         });
         let mut field = Pb::new();

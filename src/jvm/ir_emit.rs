@@ -991,8 +991,13 @@ fn build_class_metadata(
                     // A `vararg val xs: E` property IS the constructor parameter, so it records the
                     // parameter's `Array<out E>` — see `metadata::vararg_recorded_type`. The backing
                     // field keeps the invariant type; only the recorded one carries the projection.
+                    // `is_field` is what makes the match sound: only a `vararg val`/`var` DECLARES a
+                    // property, so a body property that merely shares a plain vararg parameter's
+                    // name is not this parameter and keeps its own type.
                     ty: if c.ctor_args.iter().any(|arg| {
-                        arg.is_vararg && arg.name.as_deref() == Some(property.name.as_str())
+                        arg.is_vararg
+                            && arg.is_field
+                            && arg.name.as_deref() == Some(property.name.as_str())
                     }) {
                         crate::metadata::vararg_recorded_type(property.ty)
                     } else {
@@ -1029,8 +1034,16 @@ fn build_class_metadata(
                     receiver: None,
                     getter,
                     setter,
+                    // An `Array` field's descriptor depends on its type ARGUMENT, which the reader's
+                    // name-keyed table cannot express — the same reason a function records its
+                    // `JvmMethodSignature.desc` (`metadata::descriptor_needs_recording`). Taken from
+                    // the FIELD, not the getter: a `private val` or a `@JvmField` has no getter to
+                    // read the descriptor off, and kotlinc records it for those too.
                     field_desc: backing
-                        .filter(|(_, field)| property.ty != field.ty)
+                        .filter(|(_, field)| {
+                            property.ty != field.ty
+                                || crate::metadata::descriptor_needs_recording(property.ty)
+                        })
                         .map(|(_, field)| desc(field.ty)),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).

@@ -240,7 +240,9 @@ A PROPERTY's backing field obeys the same rule through `JvmPropertySignature.fie
 Array<String>` records `JvmFieldSignature.desc = [Ljava/lang/String;` (no name — that stays
 derivable), while `val ns: IntArray` records an empty `field` entry like any derivable property. It
 joins the boxed-nullable-primitive and bare-type-parameter arms that record a field descriptor for
-the same "the reader cannot derive this" reason.
+the same "the reader cannot derive this" reason — but unlike those, it is taken from the FIELD
+rather than off the getter's return type, because a `private val` has no getter and kotlinc records
+its descriptor all the same.
 
 The facade writer (`metadata/builder.rs`) and the class writer (`metadata/class_builder.rs`) encode
 value parameters through separate code, so both suites carry the rows: the facade path in
