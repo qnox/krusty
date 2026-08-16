@@ -30977,6 +30977,18 @@ impl<'a> Checker<'a> {
                 self.check_annotation_application(scope, annotation, arguments);
             }
         }
+        // The PRIMARY CONSTRUCTOR's own annotations (`class C @Mark constructor(…)`) — recorded on
+        // the same terms as the property annotations above, and silent for the same reason: they
+        // were never checked before, so a diagnostic raised here would reject sources that compile
+        // today.
+        for (annotation, arguments) in cl
+            .primary_ctor_annotations
+            .iter()
+            .flatten()
+            .zip(&cl.primary_ctor_annotation_args)
+        {
+            self.check_annotation_application(scope, annotation, arguments);
+        }
         self.diags.diags.truncate(diagnostics);
         // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
         // conflicting declaration). `cl.props` holds every primary-ctor parameter (property

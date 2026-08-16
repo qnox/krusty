@@ -1001,6 +1001,9 @@ pub struct ClassDecl {
     /// Annotation names on the primary constructor. `None` means there is no primary constructor;
     /// `Some([])` is an implicit or unannotated primary constructor.
     pub primary_ctor_annotations: Option<Vec<AnnotationRef>>,
+    /// Argument expressions of [`Self::primary_ctor_annotations`], positionally parallel to it — the
+    /// same `(annotation, args)` pairing every other declaration's annotations carry.
+    pub primary_ctor_annotation_args: Vec<Vec<ExprId>>,
     pub span: Span,
     /// 1-based source line of the class declaration (from `span.lo`), for the `LineNumberTable` of
     /// kotlinc's synthesized members (ctor/accessors), which all map to the class's declaration line.

@@ -1213,6 +1213,7 @@ fn lower_file_at_reporting_impl(
                 applied_annotations: declaration_annotations(&c.annotations, info),
                 field_annotations: class_field_annotations(c, info),
                 property_annotations: class_property_annotations(c, info),
+                primary_ctor_annotations: primary_ctor_annotations(c, info),
                 annotation_retention: (c.kind == ast::ClassKind::Annotation).then(|| {
                     syms.annotation_retention(class_identity)
                         .unwrap_or(crate::ir::AnnoRetention::Default)
@@ -4345,6 +4346,7 @@ fn lower_file_at_reporting_impl(
                             secondary_ctors: vec![],
                             has_primary_ctor: true,
                             applied_annotations: crate::ir::DeclarationAnnotations::default(),
+                            primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
                             field_annotations: Vec::new(),
                             property_annotations: Vec::new(),
                             annotation_retention: None,
@@ -11084,6 +11086,7 @@ impl<'a> Lower<'a> {
             secondary_ctors: vec![],
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
+            primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
             property_annotations: Vec::new(),
             annotation_retention: None,
@@ -13317,6 +13320,7 @@ impl<'a> Lower<'a> {
             secondary_ctors: vec![],
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
+            primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
             property_annotations: Vec::new(),
             annotation_retention: None,
@@ -13464,6 +13468,7 @@ impl<'a> Lower<'a> {
             secondary_ctors: vec![],
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
+            primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
             property_annotations: Vec::new(),
             annotation_retention: None,
@@ -13709,6 +13714,7 @@ impl<'a> Lower<'a> {
             secondary_ctors: vec![],
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
+            primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
             property_annotations: Vec::new(),
             annotation_retention: None,
@@ -14424,6 +14430,7 @@ impl<'a> Lower<'a> {
             secondary_ctors: vec![],
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
+            primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
             property_annotations: Vec::new(),
             annotation_retention: None,
@@ -27959,6 +27966,19 @@ fn ctor_annotations(
     info: &FrontendTypeInfo,
 ) -> crate::ir::DeclarationAnnotations {
     declaration_annotations(&sc.annotations, info)
+}
+
+/// The user annotations applied to the PRIMARY constructor (`class C @Mark constructor(…)`). A class
+/// with no primary constructor has none to apply, and folds to nothing — the same fold every other
+/// declaration kind gets, since `@Anno(...)` is one applied-annotation shape wherever it is written.
+fn primary_ctor_annotations(
+    c: &ast::ClassDecl,
+    info: &FrontendTypeInfo,
+) -> crate::ir::DeclarationAnnotations {
+    declaration_annotations(
+        c.primary_ctor_annotations.as_deref().unwrap_or_default(),
+        info,
+    )
 }
 
 /// The user annotations applied to a function declaration.
