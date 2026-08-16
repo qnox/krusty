@@ -143,3 +143,80 @@ other row above has to be re-spelled as a kotlinc flag in `kotlinc_opts`. That i
 equivalent to the builder's own spelling — `--opt_in kotlin.RequiresOptIn` is inert, while the same
 thing written as `kotlinc_opts = ["-opt-in", "kotlin.RequiresOptIn"]` FAILS the action, because the
 CLI does not model `-opt-in` and the worker refuses anything it ignores.
+## The macOS SDK repository (building on a Mac without JetBrains credentials)
+
+intellij-community's C/C++ toolchain (the `llvm` Bazel module, exercised even by pure-JVM builds
+because the toolchain registers globally) fetches an Apple Command Line Tools SDK package as the
+`@@llvm++osx+macos_sdk` repository. On a machine where that download is not reachable (the fetch
+goes through JetBrains infrastructure that answers 401 without credentials), any
+`bazel build` in the repository fails during repository fetching — before a single krusty action
+runs.
+
+The workaround is a local repository override pointing at the SDK already installed with Xcode's
+Command Line Tools. Create this layout anywhere (`/tmp/macos_sdk_override` here):
+
+```
+macos_sdk_override/
+  REPO.bazel            # marker; a comment is enough
+  BUILD.bazel           # empty
+  sysroot/
+    BUILD.bazel         # headers_directory target, see below
+    usr/
+      include -> /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include
+      lib     -> /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib
+```
+
+`sysroot/BUILD.bazel`:
+
+```python
+load("@llvm//:directory.bzl", "headers_directory")
+
+headers_directory(
+    name = "sysroot",
+    path = ".",
+    visibility = ["//visibility:public"],
+)
+```
+
+Then add to every `bazel` invocation:
+
+```
+--override_repository=llvm++osx+macos_sdk=/tmp/macos_sdk_override
+```
+
+Two constraints, both found by running it:
+
+* **Expose ONLY `usr/include` and `usr/lib`, as symlinks.** Symlinking the whole SDK breaks
+  Bazel's globbing twice: `Ruby.framework` contains a self-referential symlink the glob walker
+  follows forever, and man-page filenames containing `:` are invalid as Bazel labels.
+* The `headers_directory` rule comes from the `llvm` module itself, so the override only works
+  inside a repository that already depends on `llvm` (intellij-community does).
+
+Setup on a new machine:
+
+```bash
+mkdir -p /tmp/macos_sdk_override/sysroot/usr
+printf '# Local stand-in for the JetBrains-hosted macOS SDK package, which requires credentials.\n' \
+  > /tmp/macos_sdk_override/REPO.bazel
+touch /tmp/macos_sdk_override/BUILD.bazel
+cat > /tmp/macos_sdk_override/sysroot/BUILD.bazel <<'EOF'
+load("@llvm//:directory.bzl", "headers_directory")
+
+headers_directory(
+    name = "sysroot",
+    path = ".",
+    visibility = ["//visibility:public"],
+)
+EOF
+ln -s /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include /tmp/macos_sdk_override/sysroot/usr/include
+ln -s /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib /tmp/macos_sdk_override/sysroot/usr/lib
+```
+
+With the override in place, the icons-api target builds with:
+
+```bash
+JAVA_HOME=/path/to/jdk21 \
+bazel build //platform/icons-api:icons-api_krusty \
+  --override_repository=llvm++osx+macos_sdk=/tmp/macos_sdk_override \
+  --@krusty//bazel:krusty_binary=//tools/krusty:krusty
+```
