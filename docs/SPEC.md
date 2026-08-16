@@ -4214,7 +4214,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   one reads as the FORMAL's own declared bound — `Holder<in String>` whose parameter is `T :
   CharSequence` reads back a `CharSequence`, because the projection only says a caller may write a
   `String` there. So `m["k"]` is `Any?`, exactly as kotlinc types it. Only the value's own type is
-  approximated: a returned `List<out X>` is a legal type and stays as declared. The JVM side erases
+  approximated: a returned `List<out X>` is a legal type and stays as declared. Three facts decide
+  what a projected argument means, and each is decided once. A DECLARATION-site variance makes the
+  matching use-site projection redundant — `interface List<out E>` means `List<*>` simply is
+  `List<Any?>`, so its members read `indexOf(element: Any?)` and `l.indexOf("x")` is accepted, while
+  an invariant classifier keeps the projection and `MutableList<*>.add` still collapses to `Nothing`
+  and stays prohibited. A LAMBDA parameter shaped from a projected receiver is an ordinary value
+  slot, so `l.any { it == "a" }` shapes `it` as `Any?`. And a formal's FIRST lower constraint keeps
+  the projection — the stand-in for kotlinc's captured type — so the parameter substitutes back to
+  the argument's own type and `unwrap(cell)` on a `Cell<*>` stays applicable, while a second,
+  concrete constraint merges and widens, which is what still rejects a write through it. The JVM side erases
   a projection like a type parameter (`out X` → `X`, `in X` → `Object`) rather than treating it as
   an unrepresentable type — leaving `(out Any?)?` in place produced a `Ty::Error` operand that
   reached the comparison emitter and aborted the compile. Test:
