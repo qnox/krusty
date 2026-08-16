@@ -78,6 +78,9 @@ pub struct FnMeta {
     /// (field 13) next to its expanded classifier — `Ty` is expanded and cannot carry it. Default
     /// (everything empty) for a declaration that names no alias, which is nearly all of them.
     pub spellings: crate::spelling::DeclaredSpellings,
+    /// User annotations on each value parameter (`fun f(@Mark a: Int)`), parallel to `params`. A short
+    /// or empty vec leaves the remaining parameters unannotated.
+    pub param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>>,
 }
 
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
@@ -387,10 +390,21 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     }
     for (i, (pname, pty)) in f.params.iter().enumerate() {
         let mut vp = Pb::new();
+        let annotations = f.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
         // ValueParameter.flags = 1 (before name, matching kotlinc's field order): bit 1 =
-        // DECLARES_DEFAULT_VALUE, set when this parameter has a default so a caller may omit it.
-        if f.param_defaults.get(i).copied().unwrap_or(false) {
-            vp.field_varint(1, DECLARES_DEFAULT_VALUE_BIT);
+        // DECLARES_DEFAULT_VALUE, set when this parameter has a default so a caller may omit it;
+        // bit 0 = HAS_ANNOTATIONS, set when the `annotation` records below are written.
+        let flags = if f.param_defaults.get(i).copied().unwrap_or(false) {
+            DECLARES_DEFAULT_VALUE_BIT
+        } else {
+            0
+        } | if crate::metadata::class_builder::records_annotations(annotations) {
+            crate::metadata::class_builder::HAS_ANNOTATIONS
+        } else {
+            0
+        };
+        if flags != 0 {
+            vp.field_varint(1, flags);
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
                                                     // A `vararg` parameter is SPELLED as its element (`vararg xs: Cargo`) but RECORDED as the
@@ -417,6 +431,7 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
                 vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
             }
         }
+        crate::metadata::class_builder::append_param_annotations(st, &mut vp, annotations);
         if i < f.context_count {
             // Leading context parameters → Function.context_parameter = 13 (filled implicitly
             // by callers), NOT the positional value_parameter list.
@@ -772,6 +787,7 @@ mod tests {
                 context_count: 0,
                 vararg_index: None,
                 visibility: crate::types::Visibility::Public,
+                param_annotations: Vec::new(),
             }],
             &[],
             &[],
@@ -1011,6 +1027,7 @@ mod tests {
                 context_count: 0,
                 vararg_index: None,
                 visibility: crate::types::Visibility::Public,
+                param_annotations: Vec::new(),
             }],
             &[],
             &[],
@@ -1053,6 +1070,7 @@ mod tests {
                 context_count: 0,
                 vararg_index: None,
                 visibility: crate::types::Visibility::Public,
+                param_annotations: Vec::new(),
             }],
             &[],
             &[],

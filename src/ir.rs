@@ -897,6 +897,11 @@ pub struct IrClass {
     /// `is_field`, and optional null-check name). Empty for synthesized/enum/object classes (then the
     /// constructor arity is `ctor_param_count`).
     pub ctor_args: Vec<IrCtorArg>,
+    /// User annotations on each primary-constructor parameter, parallel to `ctor_args`. Empty when no
+    /// parameter carries one (every synthesized class). Kept off [`IrCtorArg`] so the many synthesized
+    /// constructors that build one stay unchanged. An annotation reaches this list only when Kotlin's
+    /// use-site defaulting puts it on the PARAMETER rather than the property or the backing field.
+    pub ctor_param_annotations: Vec<DeclarationAnnotations>,
     /// Constructor body run after `super(…)`: an effect `Block` lowered with `this` = value 0 and the
     /// constructor parameters as values `1..=N`. When [`explicit_param_stores`] is set it BEGINS with the
     /// `val`/`var` param→field stores (the desugared primary-constructor sugar); it also carries body-
@@ -1573,6 +1578,12 @@ pub struct IrFile {
     /// so a consumer admits the conventional call form (`recv(args)` for `invoke`, `a[i]` for
     /// `get`, …); the JVM method itself carries no such bit.
     pub operator_fns: std::collections::HashSet<u32>,
+    /// Per declared method/function, the user annotations on each SOURCE parameter, parallel to
+    /// [`IrFunction::params`] (so an extension's leading receiver slot is present and empty). Absent ⇒
+    /// no parameter of that function carries one, the overwhelmingly common case; the JVM emitter and
+    /// `@Metadata` both read it, so it must not be folded into either representation. Retention stays
+    /// SEMANTIC here — the JVM split into visible/invisible attributes belongs to the emitter.
+    pub fn_param_annotations: std::collections::HashMap<u32, Vec<DeclarationAnnotations>>,
     /// Value-class internal name → the lowered default expression of its single primary-constructor
     /// property, when it has one (`value class ItemId(val value: String = IdGen.next())`).
     /// Lowered in the STATIC `constructor-impl` frame (the sole param is value-index 0, no `this`); the
@@ -2894,6 +2905,7 @@ mod tests {
             property_annotations: Vec::new(),
             ctor_param_count: 0,
             ctor_args: Vec::new(),
+            ctor_param_annotations: Vec::new(),
             init_body: None,
             pre_super_param_fields: Vec::new(),
             explicit_param_stores: false,

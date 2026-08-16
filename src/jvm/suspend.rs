@@ -5599,6 +5599,7 @@ fn build_continuation_class(
         fields,
         ctor_param_count: 0,
         ctor_args,
+        ctor_param_annotations: Vec::new(),
         init_body: None,
         pre_super_param_fields,
         explicit_param_stores: false,
