@@ -24,9 +24,12 @@ import zipfile
 MESSAGE_CLASSES = re.compile(
     r"(FirErrorsDefaultMessages|FirSyntaxErrorsDefaultMessages|Fir\w+ErrorsDefaultMessages)\.class$"
 )
-EMIT_CALL = re.compile(r"\.(?:error|warn|error_with_identity|warn_with_identity)\s*\(")
+EMIT_CALL = re.compile(
+    r"\.(?:error|error_kind|error_with_identity|error_with_editor_span)\s*\("
+)
 STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
 PLACEHOLDER = re.compile(r"\{[^}]*\}")
+MAX_CLASS_BYTES = 16 * 1024 * 1024
 
 
 def constant_pool_strings(class_bytes):
@@ -75,13 +78,18 @@ def reference_templates(dist):
             archive = zipfile.ZipFile(jar)
         except (zipfile.BadZipFile, OSError):
             continue
-        for entry in archive.namelist():
-            if not MESSAGE_CLASSES.search(entry):
-                continue
-            for text in constant_pool_strings(archive.read(entry)):
-                if len(text) > 8 and " " in text and not text.startswith("("):
-                    # `''` is the MessageFormat escape for a literal quote.
-                    templates.add(re.sub(r"\{\d+\}", "{}", text).replace("''", "'"))
+        with archive:
+            for entry in archive.infolist():
+                if not MESSAGE_CLASSES.search(entry.filename) or entry.file_size > MAX_CLASS_BYTES:
+                    continue
+                try:
+                    class_bytes = archive.read(entry)
+                except (OSError, RuntimeError, zipfile.BadZipFile):
+                    continue
+                for text in constant_pool_strings(class_bytes):
+                    if len(text) > 8 and " " in text and not text.startswith("("):
+                        # `''` is the MessageFormat escape for a literal quote.
+                        templates.add(re.sub(r"\{\d+\}", "{}", text).replace("''", "'"))
     return templates
 
 
@@ -122,7 +130,7 @@ def krusty_messages(sources):
     """Message literals krusty reports, mapped to the sites that report them."""
     sites = {}
     for path in sorted(pathlib.Path(sources).rglob("*.rs")):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for call in EMIT_CALL.finditer(text):
             argument = balanced_call(text, call.end() - 1)
             if not argument:
@@ -187,7 +195,7 @@ def main():
         print(f"  krusty   : {gap['krusty']}")
         print(f"  reference: {gap['reference']}")
     if arguments.json:
-        pathlib.Path(arguments.json).write_text(json.dumps(report, indent=2))
+        pathlib.Path(arguments.json).write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"\nfull report: {arguments.json}")
     return 0
 

@@ -17,12 +17,17 @@ Usage:
 import argparse
 import json
 import os
+import pathlib
 import queue
+import shlex
 import signal
 import subprocess
 import sys
 import threading
 import time
+
+PUSH_SETTLE_SECONDS = 2.0
+EMPTY_PULL_SETTLE_SECONDS = 5.0
 
 
 class Lsp:
@@ -30,14 +35,27 @@ class Lsp:
 
     def __init__(self, argv, root, name):
         self.name = name
-        self.proc = subprocess.Popen(
-            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=(open(os.environ["LSP_DIFF_LOG_DIR"] + "/" + name + ".log", "wb")
-                    if os.environ.get("LSP_DIFF_LOG_DIR") else subprocess.DEVNULL),
-            cwd=root,
-            # Own process group: the launcher forks a JVM, and killing only the launcher
-            # would leave that JVM indexing forever.
-            start_new_session=True)
+        self.stderr_log = None
+        log_dir = os.environ.get("LSP_DIFF_LOG_DIR")
+        if log_dir:
+            directory = pathlib.Path(log_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+            self.stderr_log = (directory / f"{name}.log").open("wb")
+        try:
+            self.proc = subprocess.Popen(
+                argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=self.stderr_log or subprocess.DEVNULL,
+                cwd=root,
+                # Own process group: the launcher forks a JVM, and killing only the launcher
+                # would leave that JVM indexing forever.
+                start_new_session=True)
+        except Exception:
+            if self.stderr_log:
+                self.stderr_log.close()
+            raise
+        # start_new_session makes the child both the session and process-group leader. Keep the
+        # group id even if the launcher exits so shutdown can still reap a surviving child JVM.
+        self.process_group = self.proc.pid
         self.inbox = queue.Queue()
         self.next_id = 1
         self.pull = False
@@ -87,26 +105,31 @@ class Lsp:
         self.next_id += 1
         self.send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
         deferred = []
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                message = self.inbox.get(timeout=max(1, deadline - time.time()))
-            except queue.Empty:
-                break
-            if message is None:
-                raise RuntimeError(f"{self.name}: server closed the connection")
-            if message.get("id") == rid and ("result" in message or "error" in message):
-                for held in deferred:
-                    self.inbox.put(held)
-                return message
-            if "id" in message and "method" in message:
-                self._answer_server_request(message)
-            else:
-                deferred.append(message)
+        deadline = time.monotonic() + timeout
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    message = self.inbox.get(
+                        timeout=max(0.001, deadline - time.monotonic()))
+                except queue.Empty:
+                    break
+                if message is None:
+                    raise RuntimeError(f"{self.name}: server closed the connection")
+                if message.get("id") == rid and ("result" in message or "error" in message):
+                    return message
+                if "id" in message and "method" in message:
+                    self._answer_server_request(message)
+                else:
+                    deferred.append(message)
+        finally:
+            # A timed-out request must not silently discard diagnostics/progress notifications that
+            # arrived while it was waiting for its own response.
+            for held in deferred:
+                self.inbox.put(held)
         raise TimeoutError(f"{self.name}: {method} timed out")
 
     def initialize(self, root, timeout):
-        root_uri = "file://" + root
+        root_uri = pathlib.Path(root).as_uri()
         response = self.request("initialize", {
             "processId": None,
             "rootUri": root_uri,
@@ -131,53 +154,70 @@ class Lsp:
 
     def diagnostics_for(self, path, timeout):
         """Open `path` and return its diagnostics (None if the server never reported any)."""
-        uri = "file://" + path
+        uri = pathlib.Path(path).as_uri()
         with open(path, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
         self.notify("textDocument/didOpen", {"textDocument": {
             "uri": uri, "languageId": "kotlin", "version": 1, "text": text}})
-        if self.pull:
-            return self._pull_diagnostics(uri, timeout)
-        deadline = time.time() + timeout
-        latest = None
-        while time.time() < deadline:
-            try:
-                message = self.inbox.get(timeout=max(1, deadline - time.time()))
-            except queue.Empty:
-                break
-            if message is None:
-                raise RuntimeError(f"{self.name}: server closed the connection")
-            if message.get("method") == "textDocument/publishDiagnostics":
-                if message["params"]["uri"] == uri:
-                    latest = message["params"]["diagnostics"]
+        try:
+            if self.pull:
+                return self._pull_diagnostics(uri, timeout)
+            deadline = time.monotonic() + timeout
+            latest = None
+            settle_deadline = None
+            while time.monotonic() < deadline:
+                wait_until = min(deadline, settle_deadline) if settle_deadline else deadline
+                try:
+                    message = self.inbox.get(
+                        timeout=max(0.001, wait_until - time.monotonic()))
+                except queue.Empty:
                     break
-            elif "id" in message and "method" in message:
-                self._answer_server_request(message)
-        self.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
-        return latest
+                if message is None:
+                    raise RuntimeError(f"{self.name}: server closed the connection")
+                if message.get("method") == "textDocument/publishDiagnostics":
+                    if message["params"]["uri"] == uri:
+                        latest = message["params"]["diagnostics"]
+                        # Push servers commonly publish an empty preliminary result followed by the
+                        # analyzed one. Keep the latest publication after a short quiet period.
+                        settle_deadline = min(
+                            deadline, time.monotonic() + PUSH_SETTLE_SECONDS)
+                elif "id" in message and "method" in message:
+                    self._answer_server_request(message)
+            return latest
+        finally:
+            try:
+                self.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+            except (BrokenPipeError, OSError):
+                pass
 
     def _pull_diagnostics(self, uri, timeout):
         """Ask for this document's diagnostics until the server stops answering 'not ready yet'.
 
         Analysis is asynchronous: right after `didOpen` the server can legitimately answer with an
-        empty report because indexing has not reached the file. Re-ask until two consecutive reports
-        agree, so an empty answer means "clean", not "too early".
+        empty report because indexing has not reached the file. Re-ask until non-empty reports agree;
+        an empty result must also remain stable for a minimum window, so "clean" does not mean "the
+        first two requests were both too early".
         """
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         previous = None
-        while time.time() < deadline:
+        first_observed_at = None
+        while time.monotonic() < deadline:
             response = self.request("textDocument/diagnostic", {
-                "textDocument": {"uri": uri}}, max(5, deadline - time.time()))
+                "textDocument": {"uri": uri}}, max(0.001, deadline - time.monotonic()))
             if "error" in response:
                 return None
             report = response.get("result") or {}
             items = report.get("items")
             if items is None:
                 return None
+            now = time.monotonic()
             if previous is not None and items == previous:
-                return items
-            previous = items
-            time.sleep(2)
+                if items or now - first_observed_at >= EMPTY_PULL_SETTLE_SECONDS:
+                    return items
+            else:
+                previous = items
+                first_observed_at = now
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
         return previous
 
     def shutdown(self):
@@ -188,61 +228,26 @@ class Lsp:
             pass
         try:
             self.proc.wait(timeout=10)
-            return
         except Exception:
             pass
+        # Even if the launcher exited cleanly, a forked JVM may still own this process group.
+        # Signal only the group created by this Lsp instance; never sweep unrelated editor servers.
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
             try:
-                os.killpg(os.getpgid(self.proc.pid), signal_number)
+                os.killpg(self.process_group, signal_number)
             except OSError:
-                return
+                break
             try:
                 self.proc.wait(timeout=5)
-                return
             except Exception:
-                continue
-
-
-
-SERVER_PATTERNS = ("intellij-server", "krusty-lsp")
-
-
-def live_servers():
-    """PIDs of language servers this harness may have left behind."""
-    found = []
-    for pid in os.listdir("/proc"):
-        if not pid.isdigit():
-            continue
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as handle:
-                command = handle.read().decode(errors="replace").replace("\0", " ")
-        except OSError:
-            continue
-        if any(pattern in command for pattern in SERVER_PATTERNS) and "lsp-diff.py" not in command:
-            found.append((int(pid), command.strip()))
-    return found
-
-
-def sweep_servers(kill):
-    """A language server indexes in the background and costs a core plus a GB; never leave one alive."""
-    strays = live_servers()
-    if not strays:
-        return
-    if not kill:
-        listing = "\n  ".join(f"{pid} {command[:100]}" for pid, command in strays)
-        raise SystemExit(
-            f"{len(strays)} language server(s) already running; stop them or pass --kill-strays:\n  {listing}")
-    for pid, _ in strays:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    time.sleep(2)
-    for pid, _ in live_servers():
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+                pass
+        for stream in (self.proc.stdin, self.proc.stdout):
+            try:
+                stream.close()
+            except (AttributeError, OSError):
+                pass
+        if self.stderr_log:
+            self.stderr_log.close()
 
 
 def start(line, character):
@@ -250,8 +255,15 @@ def start(line, character):
 
 
 def key_of(diagnostic):
-    position = diagnostic.get("range", {}).get("start", {})
-    return (position.get("line", -1), position.get("character", -1))
+    diagnostic_range = diagnostic.get("range", {})
+    start_position = diagnostic_range.get("start", {})
+    end_position = diagnostic_range.get("end", {})
+    return (
+        start_position.get("line", -1),
+        start_position.get("character", -1),
+        end_position.get("line", -1),
+        end_position.get("character", -1),
+    )
 
 
 def normalize(message):
@@ -299,7 +311,11 @@ def compare(reference, krusty):
 def find_kotlin_files(root, limit):
     found = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in (".git", "out", "build", "node_modules")]
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in (".git", ".gradle", "out", "build", "target", "node_modules")
+        ]
+        dirnames.sort()
         for name in sorted(filenames):
             if name.endswith(".kt"):
                 found.append(os.path.join(dirpath, name))
@@ -320,23 +336,31 @@ def main():
     parser.add_argument("--timeout", type=float, default=120.0, help="per-document seconds")
     parser.add_argument("--init-timeout", type=float, default=900.0)
     parser.add_argument("--json")
-    parser.add_argument("--kill-strays", action="store_true",
-                        help="terminate language servers left over from an earlier run")
     args = parser.parse_args()
 
-    root = os.path.abspath(args.root)
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    krusty_argv = (args.krusty or
-                   f"{os.path.join(repo, 'target', 'gate', 'krusty-lsp')} --stdio").split()
-    reference_argv = args.reference.split()
+    if args.timeout <= 0 or args.init_timeout <= 0:
+        raise SystemExit("timeouts must be positive")
+    if args.limit is not None and args.limit <= 0:
+        raise SystemExit("--limit must be positive")
 
-    files = [os.path.abspath(f) for f in args.files]
+    root = os.path.abspath(args.root)
+    if not os.path.isdir(root):
+        raise SystemExit(f"project root is not a directory: {root}")
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    krusty_argv = shlex.split(
+        args.krusty or f"{os.path.join(repo, 'target', 'gate', 'krusty-lsp')} --stdio")
+    reference_argv = shlex.split(args.reference)
+    if not krusty_argv or not reference_argv:
+        raise SystemExit("language-server command must not be empty")
+
+    files = [
+        os.path.abspath(f if os.path.isabs(f) else os.path.join(root, f))
+        for f in args.files
+    ]
     if not files:
         files = find_kotlin_files(root, args.limit or 25)
     if not files:
         raise SystemExit("no Kotlin files selected")
-
-    sweep_servers(args.kill_strays)
 
     servers = {}
     try:
@@ -389,7 +413,7 @@ def main():
     report["totals"] = totals
     print("lsp-diff: " + " ".join(f"{key}={value}" for key, value in totals.items()))
     if args.json:
-        with open(args.json, "w") as handle:
+        with open(args.json, "w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=1, sort_keys=True)
     return 0 if totals["extra"] == 0 and totals["wording"] == 0 else 1
 
