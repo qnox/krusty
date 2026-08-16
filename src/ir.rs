@@ -1420,6 +1420,18 @@ impl FnParamInfo {
     }
 }
 
+/// Stable source identity and lexical naming context for one lowered lambda implementation. A
+/// source lambda can be lowered more than once (for example into multiple constructors); every such
+/// implementation carries the same origin so a backend can realize one closure artifact without
+/// recovering identity from generated method names or scanning unrelated expression/value tables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrLambdaOrigin {
+    pub source_expression: u32,
+    pub enclosing_name: String,
+    pub binding_name: Option<String>,
+    pub ordinal: u32,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -1462,6 +1474,8 @@ pub struct IrFile {
     /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
     /// Compiler-generated temporaries are omitted.
     pub value_names: std::collections::HashMap<u32, String>,
+    /// Lifted lambda implementation id → stable source origin and lexical binding context.
+    pub lambda_origins: std::collections::HashMap<u32, IrLambdaOrigin>,
     /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
     /// the lowerer — NOT erased. The value-class pass consults it to recover the representation of a value
     /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its

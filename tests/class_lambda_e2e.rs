@@ -31,6 +31,12 @@ fun useTwo(a: (Int) -> Int, b: (Int) -> Int): Int = a(1) + b(2)
 interface Defaulted { fun go(): Int = useLambda { it * 4 } }
 class Impl : Defaulted
 
+class MultiCtor {
+    val value: () -> Int = { 7 }
+    constructor()
+    constructor(ignored: Int)
+}
+
 fun box(): String {
     val plain = useLambda { it * 2 }
     val captured = 10
@@ -41,9 +47,10 @@ fun box(): String {
     val other = 20
     val pair = useTwo({ it + captured }, { it + other })
     val viaDefault = (Impl() as Defaulted).go()
+    val viaBothConstructors = MultiCtor().value() + MultiCtor(0).value()
     val ok = plain == 6 && closing == 13 && sam == 6 && text == 3 &&
-        real == 3.0f && pair == 33 && viaDefault == 12
-    return if (ok) "OK" else "fail: $plain $closing $sam $text $real $pair $viaDefault"
+        real == 3.0f && pair == 33 && viaDefault == 12 && viaBothConstructors == 14
+    return if (ok) "OK" else "fail: $plain $closing $sam $text $real $pair $viaDefault $viaBothConstructors"
 }
 "#;
 
@@ -64,24 +71,29 @@ fn collect_classes(root: &Path, dir: &Path, classes: &mut Vec<String>) {
     }
 }
 
-fn compile_krusty_with(strategy: &str) -> Vec<String> {
+fn compile_krusty_with_modes_and_args(
+    lambda_strategy: &str,
+    sam_strategy: &str,
+    extra_args: &[&str],
+) -> Vec<String> {
     let work = common::scratch_dir().expect("allocate krusty class-lambda fixture");
     let source = work.join("L.kt");
     let output = work.join("out");
     std::fs::create_dir_all(&output).expect("create krusty output");
     std::fs::write(&source, LAMBDA_SOURCE).expect("write krusty class-lambda fixture");
     let result = std::process::Command::new(common::krusty_binary())
-        .args(["-d", output.to_str().expect("UTF-8 output")])
+        .args(["-d", output.to_str().expect("UTF-8 output"), "-no-reflect"])
         .args([
-            &format!("-Xlambdas={strategy}"),
-            &format!("-Xsam-conversions={strategy}"),
+            &format!("-Xlambdas={lambda_strategy}"),
+            &format!("-Xsam-conversions={sam_strategy}"),
         ])
+        .args(extra_args)
         .arg(&source)
         .output()
         .expect("run krusty CLI");
     assert!(
         result.status.success(),
-        "krusty rejected -Xlambdas={strategy}: stdout={} stderr={}",
+        "krusty rejected lambda={lambda_strategy}, sam={sam_strategy}: stdout={} stderr={}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
@@ -92,11 +104,15 @@ fn compile_krusty_with(strategy: &str) -> Vec<String> {
     classes
 }
 
-fn compile_krusty() -> Vec<String> {
-    compile_krusty_with("class")
+fn compile_krusty_with_modes(lambda_strategy: &str, sam_strategy: &str) -> Vec<String> {
+    compile_krusty_with_modes_and_args(lambda_strategy, sam_strategy, &[])
 }
 
-fn compile_reference_with(strategy: &str) -> Vec<String> {
+fn compile_krusty() -> Vec<String> {
+    compile_krusty_with_modes("class", "class")
+}
+
+fn compile_reference_with_modes(lambda_strategy: &str, sam_strategy: &str) -> Vec<String> {
     let work = common::scratch_dir().expect("allocate kotlinc class-lambda fixture");
     let source = work.join("L.kt");
     let output = work.join("out");
@@ -106,8 +122,8 @@ fn compile_reference_with(strategy: &str) -> Vec<String> {
         "-d".to_string(),
         output.to_string_lossy().into_owned(),
         "-nowarn".to_string(),
-        format!("-Xlambdas={strategy}"),
-        format!("-Xsam-conversions={strategy}"),
+        format!("-Xlambdas={lambda_strategy}"),
+        format!("-Xsam-conversions={sam_strategy}"),
         source.to_string_lossy().into_owned(),
     ];
     let (code, stderr) = common::kotlinc_compile(&args).expect("reference compiler unavailable");
@@ -141,26 +157,57 @@ fn class_lambdas_are_accepted() {
 /// absolute counts would report it here as a lambda defect.
 #[test]
 fn class_lambdas_emit_one_class_per_lambda() {
-    let ours = compile_krusty_with("class").len() - compile_krusty_with("indy").len();
-    let reference = compile_reference_with("class").len() - compile_reference_with("indy").len();
+    let ours = compile_krusty_with_modes("class", "class").len()
+        - compile_krusty_with_modes("indy", "indy").len();
+    let reference = compile_reference_with_modes("class", "class").len()
+        - compile_reference_with_modes("indy", "indy").len();
     assert_eq!(
         ours, reference,
         "the class strategy must add the same number of classes as it does for kotlinc"
     );
 }
 
-/// Exact synthetic-class NAMES are not reached yet: kotlinc names a lambda after the declaration it
-/// initializes (`LKt$box$plain$1`), and krusty numbers them within the enclosing declaration
-/// (`LKt$box$1`). The count and the runtime behaviour above are unaffected, but a consumer reading a
-/// stack trace or reflecting on the name sees a different one, so this stays recorded as a gap
-/// rather than deleted.
 #[test]
-#[ignore = "synthetic lambda class names do not yet match kotlinc's declaration-derived scheme"]
+fn lambda_and_sam_strategies_are_independent() {
+    let ours_base = compile_krusty_with_modes("indy", "indy").len();
+    let reference_base = compile_reference_with_modes("indy", "indy").len();
+    for (lambda_strategy, sam_strategy) in [("class", "indy"), ("indy", "class")] {
+        let ours = compile_krusty_with_modes(lambda_strategy, sam_strategy).len() - ours_base;
+        let reference =
+            compile_reference_with_modes(lambda_strategy, sam_strategy).len() - reference_base;
+        assert_eq!(
+            ours, reference,
+            "lambda={lambda_strategy}, sam={sam_strategy} must select only its own class strategy"
+        );
+    }
+}
+
+#[test]
+fn class_strategy_supports_the_pre_indy_jvm_target() {
+    assert!(
+        !compile_krusty_with_modes_and_args("class", "class", &["-jvm-target", "1.6"]).is_empty(),
+        "class-strategy lambdas do not require invokedynamic or JVM 1.7"
+    );
+}
+
+/// Compare the exact class names each compiler's class strategy adds over its own indy strategy.
+/// Taking the set difference excludes unrelated artifact differences such as `$DefaultImpls`.
+#[test]
 fn class_lambda_names_match_kotlinc() {
+    let ours_class = compile_krusty();
+    let ours_indy = compile_krusty_with_modes("indy", "indy");
+    let reference_class = compile_reference_with_modes("class", "class");
+    let reference_indy = compile_reference_with_modes("indy", "indy");
+    let added = |class: Vec<String>, indy: Vec<String>| {
+        class
+            .into_iter()
+            .filter(|name| !indy.contains(name))
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        compile_krusty(),
-        compile_reference_with("class"),
-        "class set differs from kotlinc under -Xlambdas=class"
+        added(ours_class, ours_indy),
+        added(reference_class, reference_indy),
+        "lambda class names differ from kotlinc under -Xlambdas=class"
     );
 }
 
@@ -176,7 +223,7 @@ fn class_lambdas_run() {
     std::fs::write(&source, LAMBDA_SOURCE).expect("write fixture");
     let stdlib = common::stdlib_jar();
     let result = std::process::Command::new(common::krusty_binary())
-        .args(["-d", output.to_str().expect("UTF-8 output")])
+        .args(["-d", output.to_str().expect("UTF-8 output"), "-no-reflect"])
         .args(["-Xlambdas=class", "-Xsam-conversions=class"])
         .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib")])
         .arg(&source)
