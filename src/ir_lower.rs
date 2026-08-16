@@ -223,6 +223,9 @@ fn lower_file_at_reporting_impl(
         cur_fn: crate::ir::IrFunctionScope::default(),
         cur_fn_suspend: false,
         synthetic_seq_by_owner: HashMap::new(),
+        lambda_origin_context: None,
+        lambda_origin_by_source: HashMap::new(),
+        lambda_ordinal_by_context: HashMap::new(),
         local_class_captures: HashMap::new(),
         shared_cell_vars: std::collections::HashSet::new(),
         boxed_elem: HashMap::new(),
@@ -4336,7 +4339,11 @@ fn lower_file_at_reporting_impl(
                             let mut stmts = Vec::new();
                             for (fi, (_, fty)) in prop_fields.iter().enumerate() {
                                 let init = eprops[fi].init.unwrap();
-                                let val = lo.lower_arg(init, &ty_to_ir(*fty))?;
+                                let val = lo.with_lambda_origin_context(
+                                    eprops[fi].name.clone(),
+                                    None,
+                                    |lowerer| lowerer.lower_arg(init, &ty_to_ir(*fty)),
+                                )?;
                                 let recv = lo.emit_get_value(this_v);
                                 stmts.push(lo.emit_set_field(recv, sub_id, fi as u32, val));
                             }
@@ -4424,6 +4431,9 @@ fn lower_file_at_reporting_impl(
                 lo.boxed_elem.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
+                // One source naming context for every top-level property shape; accessor branches
+                // replace it with their declared function identity before lowering accessor bodies.
+                lo.cur_fn = crate::ir::IrFunctionScope::synthetic(p.name.clone());
                 if is_computed_prop(p) {
                     let context_types = syms
                         .source_props
@@ -4583,8 +4593,6 @@ fn lower_file_at_reporting_impl(
                         lo.cur_static_field = None;
                     }
                 } else {
-                    // Property-initializer lambdas use the property name as their synthetic owner.
-                    lo.cur_fn = crate::ir::IrFunctionScope::synthetic(p.name.clone());
                     let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
                     let constant_init = syms
                         .source_props
@@ -5602,6 +5610,15 @@ pub(crate) struct Lower<'a> {
     cur_fn_suspend: bool,
     /// Synthetic-method sequence shared by declarations with the same JVM owner and name.
     synthetic_seq_by_owner: HashMap<(Option<TypeName>, String), u32>,
+    /// Optional `(enclosing declaration, initializer binding)` naming context for lambdas. A local
+    /// initializer uses `(function, Some(local))`; a property initializer uses `(property, None)`.
+    /// Nested declarations save/restore this context; lambda origins consume it directly.
+    lambda_origin_context: Option<(String, Option<String>)>,
+    /// A source lambda can be lowered into more than one physical body. Cache its single lexical
+    /// origin by AST expression identity so every realization shares backend artifact identity.
+    lambda_origin_by_source: HashMap<u32, crate::ir::IrLambdaOrigin>,
+    /// Next lambda ordinal per enclosing declaration and optional initializer binding.
+    lambda_ordinal_by_context: HashMap<(Option<TypeName>, String, Option<String>), u32>,
     /// A local class's captures, by IR class id. The class carries each one as a leading constructor
     /// parameter, so every construction of it — whichever argument-mapping arm reaches `emit_new` —
     /// supplies them ahead of the source arguments.
@@ -8441,7 +8458,11 @@ impl<'a> Lower<'a> {
                     ) {
                         return None;
                     }
-                    let val = self.lower_arg(init_e, &field_ty)?;
+                    let val = self.with_lambda_origin_context(
+                        c.body_props[*i].name.clone(),
+                        None,
+                        |lowerer| lowerer.lower_arg(init_e, &field_ty),
+                    )?;
                     if self.expr_diverges(init_e) {
                         stmts.push(val);
                     } else {
@@ -10326,6 +10347,28 @@ impl<'a> Lower<'a> {
             (ty_to_ir(method_ret), b, inline)
         };
         let seq = self.next_synthetic_seq();
+        let lambda_origin = if let Some(origin) = self.lambda_origin_by_source.get(&e.0) {
+            origin.clone()
+        } else {
+            let (enclosing_name, binding_name) = self
+                .lambda_origin_context
+                .clone()
+                .unwrap_or_else(|| (self.cur_fn.source_name.clone(), None));
+            let next = self
+                .lambda_ordinal_by_context
+                .entry((self.cur_class, enclosing_name.clone(), binding_name.clone()))
+                .or_insert(0);
+            let ordinal = *next;
+            *next += 1;
+            let origin = crate::ir::IrLambdaOrigin {
+                source_expression: e.0,
+                enclosing_name,
+                binding_name,
+                ordinal,
+            };
+            self.lambda_origin_by_source.insert(e.0, origin.clone());
+            origin
+        };
         let impl_name = format!("{}$lambda${}", self.cur_fn.source_name, seq);
         // Impl parameters: captured variables first, then the lambda's own parameters.
         let mut params_ir: Vec<Ty> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
@@ -10350,6 +10393,7 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             param_checks,
         });
+        self.ir.lambda_origins.insert(fid, lambda_origin);
         // kotlinc gives the impl DEBUG tables: a LineNumberTable from the lambda body's line, and a
         // LocalVariableTable naming the parameters (`<this>` for a receiver, source names else).
         if let Some(&line) = self
@@ -18756,7 +18800,18 @@ impl<'a> Lower<'a> {
     }
 
     fn stmt(&mut self, s: crate::ast::StmtId) -> Option<u32> {
-        let r = self.stmt_inner(s);
+        let binding = match self.afile.stmt(s) {
+            Stmt::Local { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        let r = match binding {
+            Some(name) => self.with_lambda_origin_context(
+                self.cur_fn.source_name.clone(),
+                Some(name),
+                |lowerer| lowerer.stmt_inner(s),
+            ),
+            None => self.stmt_inner(s),
+        };
         if r.is_none() && self.bail.borrow().starts_with("deep") {
             self.set_bail(&format!(
                 "stmt {}",
@@ -18764,6 +18819,20 @@ impl<'a> Lower<'a> {
             ));
         }
         r
+    }
+
+    fn with_lambda_origin_context<T>(
+        &mut self,
+        enclosing_name: String,
+        binding_name: Option<String>,
+        lower: impl FnOnce(&mut Self) -> Option<T>,
+    ) -> Option<T> {
+        let previous = self
+            .lambda_origin_context
+            .replace((enclosing_name, binding_name));
+        let result = lower(self);
+        self.lambda_origin_context = previous;
+        result
     }
 
     fn stmt_inner(&mut self, s: crate::ast::StmtId) -> Option<u32> {

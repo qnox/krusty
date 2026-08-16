@@ -256,7 +256,7 @@ pub struct JvmBackend {
     /// Class-file major version to emit (`-jvm-target`), or `None` for krusty's default (v52).
     class_major: Option<u16>,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
-    lambdas: crate::jvm::ir_emit::LambdaMode,
+    lambda_modes: crate::jvm::ir_emit::LambdaModes,
     /// Whether to emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions`
     /// clears this).
     param_assertions: bool,
@@ -268,7 +268,7 @@ impl JvmBackend {
             cp,
             class_major: None,
             jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
-            lambdas: crate::jvm::ir_emit::LambdaMode::default(),
+            lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
             param_assertions: true,
         }
     }
@@ -285,10 +285,9 @@ impl JvmBackend {
         self
     }
 
-    /// `-Xlambdas` / `-Xsam-conversions`: whether a lambda becomes an `invokedynamic` call site or
-    /// its own class.
-    pub fn with_lambdas(mut self, mode: crate::jvm::ir_emit::LambdaMode) -> JvmBackend {
-        self.lambdas = mode;
+    /// Independently select `-Xlambdas` and `-Xsam-conversions` realization strategies.
+    pub fn with_lambda_modes(mut self, modes: crate::jvm::ir_emit::LambdaModes) -> JvmBackend {
+        self.lambda_modes = modes;
         self
     }
 
@@ -327,8 +326,8 @@ pub fn shipping_emit_options(
         source_file: Some(format!("{source_stem}.kt")),
         // kotlinc records `classModuleName` in @Metadata unless the module is the default `main`.
         module_name: (module_name != "main").then(|| module_name.to_string()),
-        // Per-INVOCATION strategy; the CLI overrides it with `EmitOptions::with_lambdas`.
-        lambdas: crate::jvm::ir_emit::LambdaMode::default(),
+        // Per-invocation strategies; the CLI overrides them on the backend.
+        lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
         // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
         // unreadable BY KRUSTY: the facade metadata describes top-level declarations only, so a
         // second compilation sees no constructor/member parameter names (named arguments) and no
@@ -464,7 +463,7 @@ impl Backend for JvmBackend {
 
         let emit_opts = shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
             .with_jvm_default(self.jvm_default)
-            .with_lambdas(self.lambdas);
+            .with_lambda_modes(self.lambda_modes);
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
