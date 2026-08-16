@@ -267,7 +267,10 @@ fn parse_source_set_named(
     Some(files)
 }
 
-fn cached_classpath(cp_jars: &[PathBuf], jdk_modules: Option<&Path>) -> std::rc::Rc<Classpath> {
+pub(super) fn cached_classpath(
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&Path>,
+) -> std::rc::Rc<Classpath> {
     let mut paths = cp_jars.to_vec();
     if let Some(path) = jdk_modules {
         paths.push(path.to_path_buf());

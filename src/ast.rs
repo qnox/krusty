@@ -121,29 +121,6 @@ impl BinOp {
         })
     }
 
-    /// How the operator is written in source. Diagnostics name the operator the way the programmer
-    /// typed it (`operator '+' cannot be applied to …`), so the mapping lives here rather than in a
-    /// list at each report site.
-    pub fn source_symbol(self) -> &'static str {
-        match self {
-            BinOp::Add => "+",
-            BinOp::Sub => "-",
-            BinOp::Mul => "*",
-            BinOp::Div => "/",
-            BinOp::Rem => "%",
-            BinOp::Eq => "==",
-            BinOp::Ne => "!=",
-            BinOp::Lt => "<",
-            BinOp::Le => "<=",
-            BinOp::Gt => ">",
-            BinOp::Ge => ">=",
-            BinOp::And => "&&",
-            BinOp::Or => "||",
-            BinOp::RefEq => "===",
-            BinOp::RefNe => "!==",
-        }
-    }
-
     /// Inverse of [`arith_operator_name`](Self::arith_operator_name): the arithmetic operator a
     /// Kotlin operator-function name (`plus`/`minus`/…) desugars from, or `None`.
     pub fn from_arith_operator_name(name: &str) -> Option<BinOp> {
@@ -653,6 +630,8 @@ pub struct Param {
     /// `true` for a `vararg` parameter — its runtime type is `Array<ty>` and callers pack the
     /// trailing arguments into a fresh array.
     pub is_vararg: bool,
+    /// Exact span of the `vararg` modifier. Present exactly when [`Self::is_vararg`] is true.
+    pub vararg_span: Option<Span>,
     /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted arguments. A
     /// default may reference parameters declared before it, matching Kotlin's left-to-right scope.
     pub default: Option<ExprId>,
@@ -769,6 +748,8 @@ pub struct FunDecl {
     pub span: Span,
     /// Source range from `fun` through the optional `where` clause, excluding the body.
     pub signature_span: Span,
+    /// Exact span of the `override` modifier. Present exactly when [`Self::is_override`] is true.
+    pub override_span: Option<Span>,
     /// 1-based source line of the `fun` declaration (from `span.lo`), for its `LineNumberTable`.
     /// 0 = unknown (no debug table emitted). Filled by the same parser post-pass as `Class::decl_line`.
     pub decl_line: u32,
