@@ -3200,6 +3200,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   publish through one classifier boundary that records visibility; previously only the plain `class`
   arm did. A local classifier is a measured control: it has no declared visibility and kotlinc keeps
   its own class flags `ACC_PUBLIC`. Test: `tests/private_classifier_access_e2e.rs`.
+- **A `private` primary constructor is `ACC_PRIVATE` unless another class constructs the type.**
+  kotlinc emits the constructor private and, WHEN a site outside the class constructs it (a companion
+  factory is the common shape), adds a synthetic `public` `(…, DefaultConstructorMarker)` bridge that
+  delegates to it; the cross-class `new` then passes `aconst_null` for the marker. krusty does not emit
+  that bridge yet, so it chooses the flag by the construction sites it can see: `ACC_PRIVATE` when
+  nothing outside constructs the class (kotlinc's shape, and the common case), `ACC_PUBLIC` when
+  something does — `ACC_PRIVATE` without the bridge would make the cross-class construction an
+  `IllegalAccessError`. "Outside" is decided by INVERSION: the constructions reachable from the
+  class's own declarations are collected, and any other construction of it in the file counts as
+  external. A DEFAULT ARGUMENT is the case that makes this necessary — it is evaluated at the call
+  site, so a nested class whose parameter defaults to `Hidden(…)` constructs the private constructor
+  from a different JVM class, and enumerating only function bodies missed it. `@Metadata` records the declared privacy either way. A SECONDARY constructor's
+  visibility is not modeled at all yet (`IrSecondaryCtor` has no visibility). Test:
+  `tests/private_constructor_access_e2e.rs`.
 
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell
