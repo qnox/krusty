@@ -22,6 +22,10 @@ pub(crate) mod property_flags {
     pub const IS_CONST: u64 = 1 << 11;
     pub const HAS_CONSTANT: u64 = 1 << 13;
     pub const MODALITY_ABSTRACT: u64 = 1 << 5;
+    /// `Property.getter_flags`/`setter_flags` for a DECLARED accessor: public (visibility 3 in bits
+    /// 1-3) · final · `isNotDefault` (bit 6). The accessor flag word has its own layout — bit 0
+    /// `hasAnnotations`, bits 1-3 visibility, bits 4-5 modality, bit 6 `isNotDefault`.
+    pub const DECLARED_ACCESSOR: u64 = 70;
 }
 
 pub(crate) fn serialize_string_table_types(records: &[Pb], local_names: &[u32]) -> Pb {

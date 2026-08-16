@@ -22,6 +22,8 @@ use crate::types::{Ty, Visibility};
 pub struct PropMeta {
     pub name: String,
     pub ty: Ty,
+    /// How SOURCE spelled the declared type and receiver — see [`FnMeta::spellings`].
+    pub spellings: crate::spelling::DeclaredSpellings,
     pub is_var: bool,
     pub visibility: Visibility,
     /// The property has a compile-time constant initializer.
@@ -95,6 +97,10 @@ pub struct FnMeta {
     /// The `JvmMethodSignature.name` (f1) when the JVM name differs from the Kotlin one — a value
     /// class's `equals` → `equals-impl`. `None` ⇒ name omitted (derivable), kotlinc's usual shape.
     pub jvm_sig_name: Option<String>,
+    /// How SOURCE spelled this member's declared types, so a `typealias` becomes
+    /// `Type.abbreviated_type` (see [`crate::spelling`]). Default for a SYNTHESIZED member
+    /// (`componentN`, `copy`, `equals`), which has no source spelling at all.
+    pub spellings: crate::spelling::DeclaredSpellings,
 }
 
 impl FnMeta {
@@ -115,6 +121,7 @@ impl FnMeta {
             vararg_index: None,
             jvm_sig: None,
             jvm_sig_name: None,
+            spellings: crate::spelling::DeclaredSpellings::default(),
         }
     }
 }
@@ -184,17 +191,33 @@ fn type_pb(st: &mut StringTable, t: Ty, type_parameters: &TypeParameters) -> Pb 
         .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
 
+/// [`type_pb`] for a DECLARED type, carrying how source spelled it so a `typealias` becomes
+/// `Type.abbreviated_type` (field 13).
+fn type_pb_declared(
+    st: &mut StringTable,
+    t: Ty,
+    spelled: &crate::spelling::Spelled,
+    type_parameters: &TypeParameters,
+) -> Pb {
+    crate::metadata::type_encoder::encode_declared_type(st, t, spelled, type_parameters)
+        .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
+}
+
 /// [`type_pb`], but a `Some(id)` encodes the type as `Type.typeParameter` (f7) — a bare type parameter
 /// (`val a: T`), which kotlinc records by INDEX rather than by the erased `java/lang/Object` class name.
 fn type_pb_tp(
     st: &mut StringTable,
     t: Ty,
     tparam: Option<u32>,
+    spelled: &crate::spelling::Spelled,
     type_parameters: &TypeParameters,
 ) -> Pb {
     match tparam {
+        // A bare type parameter is recorded by INDEX and has no classifier to abbreviate.
         Some(index) => encode_indexed_type_parameter(st, t, index),
-        None => encode_type(st, t, type_parameters),
+        None => {
+            crate::metadata::type_encoder::encode_declared_type(st, t, spelled, type_parameters)
+        }
     }
     .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
@@ -203,6 +226,10 @@ fn type_pb_tp(
 /// JvmProtoBuf constructor signature (f100, name `<init>` + `desc`).
 struct CtorShape<'a> {
     params: &'a [(String, Ty)],
+    /// How SOURCE spelled each parameter's type, parallel to `params` — a primary constructor's
+    /// come from the class header (`class Holder(val p: Cargo)`). Empty leaves them unabbreviated,
+    /// which is right for a SECONDARY constructor until its own spellings are threaded.
+    param_spellings: &'a [crate::spelling::Spelled],
     desc: &'a str,
     flags: u64,
     param_defaults: &'a [bool],
@@ -231,6 +258,10 @@ fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &Type
             st,
             *pty,
             shape.param_tparams.get(i).copied().flatten(),
+            shape
+                .param_spellings
+                .get(i)
+                .unwrap_or(crate::spelling::Spelled::NONE),
             type_parameters,
         );
         vp.field_message(3, &ty); // ValueParameter.type = 3
@@ -241,7 +272,16 @@ fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &Type
                 .array_elem()
                 .or_else(|| pty.type_args().first().copied());
             if let Some(elem) = elem {
-                let et = type_pb(st, elem, type_parameters);
+                let et = type_pb_declared(
+                    st,
+                    elem,
+                    shape
+                        .param_spellings
+                        .get(i)
+                        .unwrap_or(crate::spelling::Spelled::NONE)
+                        .arg(0),
+                    type_parameters,
+                );
                 vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
             }
         }
@@ -292,6 +332,14 @@ pub enum ClassMemberOrder {
 }
 
 pub struct ClassTail<'a> {
+    /// How SOURCE spelled the CLASS HEADER's types: primary-constructor parameters and
+    /// type-parameter bounds. Members carry their own on [`FnMeta`]/[`PropMeta`].
+    pub spellings: crate::spelling::DeclaredSpellings,
+    /// Supertype spellings ALREADY ALIGNED to [`Self::supertypes`] — see
+    /// [`DeclaredSpellings::supertype_spellings`](crate::spelling::DeclaredSpellings::supertype_spellings).
+    /// Only the emitter knows whether that list reserves a leading slot for an undeclared
+    /// superclass, so the alignment happens there rather than here.
+    pub supertype_spellings: &'a [crate::spelling::Spelled],
     pub flags: u64,
     pub companion: Option<&'a str>,
     pub nested: &'a [&'a str],
@@ -356,6 +404,8 @@ pub struct ClassTail<'a> {
 impl Default for ClassTail<'_> {
     fn default() -> Self {
         ClassTail {
+            supertype_spellings: &[],
+            spellings: crate::spelling::DeclaredSpellings::default(),
             flags: DEFAULT_CLASS_FLAGS,
             companion: None,
             nested: &[],
@@ -442,6 +492,12 @@ pub fn build_class(
                     reified: false,
                     variance: parameter.variance,
                     upper_bounds: parameter.bounds.iter().map(|(bound, _)| *bound).collect(),
+                    upper_bound_spellings: tail
+                        .spellings
+                        .type_param_bounds
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_default(),
                 },
                 &class_type_parameters,
             )
@@ -464,8 +520,15 @@ pub fn build_class(
             &class_type_parameters,
         ));
     } else {
-        for supertype in tail.supertypes {
-            supertype_msgs.push(type_pb(&mut st, *supertype, &class_type_parameters));
+        for (index, supertype) in tail.supertypes.iter().enumerate() {
+            supertype_msgs.push(type_pb_declared(
+                &mut st,
+                *supertype,
+                tail.supertype_spellings
+                    .get(index)
+                    .unwrap_or(crate::spelling::Spelled::NONE),
+                &class_type_parameters,
+            ));
         }
     }
 
@@ -481,6 +544,8 @@ pub fn build_class(
             &mut st,
             CtorShape {
                 params: ctor_params,
+                // A primary-constructor parameter's spelling is part of the CLASS HEADER.
+                param_spellings: &tail.spellings.params,
                 desc: ctor_desc,
                 flags: tail.primary_ctor_flags,
                 param_defaults: tail.ctor_param_defaults,
@@ -499,6 +564,7 @@ pub fn build_class(
             &mut st,
             CtorShape {
                 params: sc.params,
+                param_spellings: &[],
                 desc: sc.desc,
                 flags: sc.flags,
                 param_defaults: &[],
@@ -518,13 +584,14 @@ pub fn build_class(
             st,
             p.ty,
             p.tparam.map(|index| index + captured_count as u32),
+            &p.spellings.ret,
             &class_type_parameters,
         );
         prop.field_message(3, &ty); // Property.return_type = 3
         if let Some(recv) = p.receiver {
             // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
             // its presence is what makes the record an extension.
-            let rt = type_pb(st, recv, &class_type_parameters);
+            let rt = type_pb_declared(st, recv, &p.spellings.receiver, &class_type_parameters);
             prop.field_message(5, &rt);
         }
         let pflags = property_flags(p);
@@ -626,13 +693,25 @@ pub fn build_class(
                     reified: false,
                     variance: crate::types::TypeVariance::Invariant,
                     upper_bounds: m.type_param_bounds.get(index).cloned().unwrap_or_default(),
+                    upper_bound_spellings: m
+                        .spellings
+                        .type_param_bounds
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_default(),
                 },
                 &function_type_parameters,
             )
             .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"));
             func.repeated_message(4, &parameter);
         }
-        let ret = encode_type(st, m.ret, &function_type_parameters).unwrap_or_else(|error| {
+        let ret = crate::metadata::type_encoder::encode_declared_type(
+            st,
+            m.ret,
+            &m.spellings.ret,
+            &function_type_parameters,
+        )
+        .unwrap_or_else(|error| {
             panic!(
                 "invalid emitted metadata return type for '{class_internal}.{}': {error}",
                 m.name
@@ -642,7 +721,13 @@ pub fn build_class(
         if let Some(recv) = m.receiver {
             // Function.receiver_type = 5 — a MEMBER EXTENSION's receiver, restored from the
             // physical `params[0]` realization so consumers see the LOGICAL shape.
-            let rt = encode_type(st, recv, &function_type_parameters).unwrap_or_else(|error| {
+            let rt = crate::metadata::type_encoder::encode_declared_type(
+                st,
+                recv,
+                &m.spellings.receiver,
+                &function_type_parameters,
+            )
+            .unwrap_or_else(|error| {
                 panic!(
                     "invalid emitted metadata receiver for '{class_internal}.{}': {error}",
                     m.name
@@ -656,7 +741,20 @@ pub fn build_class(
                 vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
             }
             vp.field_varint(2, st.local(pname) as u64);
-            let ty = encode_type(st, *pty, &function_type_parameters).unwrap_or_else(
+            // A `vararg` parameter is SPELLED as its element but RECORDED as the array; see the
+            // package-function writer for why the spelling is lifted rather than applied.
+            let declared_spelling = if m.vararg_index == Some(i) {
+                m.spellings.param(i).as_array_element()
+            } else {
+                m.spellings.param(i).clone()
+            };
+            let ty = crate::metadata::type_encoder::encode_declared_type(
+                st,
+                *pty,
+                &declared_spelling,
+                &function_type_parameters,
+            )
+            .unwrap_or_else(
                     |error| {
                         panic!(
                             "invalid emitted metadata parameter '{pname}' for '{class_internal}.{}': {error}",
@@ -671,14 +769,19 @@ pub fn build_class(
                     .array_elem()
                     .or_else(|| pty.type_args().first().copied());
                 if let Some(elem) = elem {
-                    let et =
-                        encode_type(st, elem, &function_type_parameters).unwrap_or_else(|error| {
-                            panic!(
-                                "invalid emitted metadata vararg element for \
+                    let et = crate::metadata::type_encoder::encode_declared_type(
+                        st,
+                        elem,
+                        m.spellings.param(i),
+                        &function_type_parameters,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "invalid emitted metadata vararg element for \
                                      '{class_internal}.{}': {error}",
-                                m.name
-                            )
-                        });
+                            m.name
+                        )
+                    });
                     vp.field_message(4, &et);
                 }
             }
@@ -894,6 +997,7 @@ mod tests {
     fn const_property_flags_preserve_visibility() {
         let flags = |visibility| {
             property_flags(&PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
                 is_var: false,
@@ -951,6 +1055,7 @@ mod tests {
             &[("x".into(), Ty::Int)],
             "(I)V",
             &[PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
                 is_var: false,
@@ -998,6 +1103,7 @@ mod tests {
         let any_q = Ty::nullable(Ty::obj("kotlin/Any"));
         let methods = vec![
             FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "component1".into(),
                 params: vec![],
                 ret: Ty::Int,
@@ -1013,6 +1119,7 @@ mod tests {
                 jvm_sig_name: None,
             },
             FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "component2".into(),
                 params: vec![],
                 ret: Ty::String,
@@ -1028,6 +1135,7 @@ mod tests {
                 jvm_sig_name: None,
             },
             FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "copy".into(),
                 params: vec![("x".into(), Ty::Int), ("y".into(), Ty::String)],
                 ret: Ty::obj("demo/Point"),
@@ -1043,6 +1151,7 @@ mod tests {
                 jvm_sig_name: None,
             },
             FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "equals".into(),
                 params: vec![("other".into(), any_q)],
                 ret: Ty::Boolean,
@@ -1058,6 +1167,7 @@ mod tests {
                 jvm_sig_name: None,
             },
             FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "hashCode".into(),
                 params: vec![],
                 ret: Ty::Int,
@@ -1073,6 +1183,7 @@ mod tests {
                 jvm_sig_name: None,
             },
             FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "toString".into(),
                 params: vec![],
                 ret: Ty::String,
@@ -1090,6 +1201,7 @@ mod tests {
         ];
         let props = vec![
             PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
                 is_var: false,
@@ -1106,6 +1218,7 @@ mod tests {
                 field_name: None,
             },
             PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "y".into(),
                 ty: Ty::String,
                 is_var: true,
@@ -1171,6 +1284,7 @@ mod tests {
             &[("r".into(), list_string)],
             "(Ljava/util/List;)V",
             &[PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "r".into(),
                 ty: list_string,
                 is_var: false,
@@ -1315,6 +1429,7 @@ mod tests {
             &[("x".into(), Ty::Int)],
             "(I)V",
             &[PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
                 is_var: false,
@@ -1367,6 +1482,7 @@ mod tests {
             &[("x".into(), Ty::Int)],
             "(I)V",
             &[PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
                 is_var: false,
@@ -1424,6 +1540,7 @@ mod tests {
             "(ILjava/lang/String;)V",
             &[
                 PropMeta {
+                    spellings: crate::spelling::DeclaredSpellings::default(),
                     name: "x".into(),
                     ty: Ty::Int,
                     is_var: false,
@@ -1440,6 +1557,7 @@ mod tests {
                     field_name: None,
                 },
                 PropMeta {
+                    spellings: crate::spelling::DeclaredSpellings::default(),
                     name: "y".into(),
                     ty: Ty::String,
                     is_var: true,

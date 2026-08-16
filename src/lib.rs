@@ -40,6 +40,7 @@ pub mod plugins;
 mod resolve;
 pub mod runtime;
 pub mod source;
+pub mod spelling;
 pub mod symbol_resolver;
 pub mod symbol_source;
 pub mod synthetics;

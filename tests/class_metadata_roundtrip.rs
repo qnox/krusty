@@ -117,6 +117,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         variance: TypeVariance::Invariant,
     };
     let methods = vec![FnMeta {
+        spellings: krusty::spelling::DeclaredSpellings::default(),
         name: "pair".to_string(),
         params: vec![
             (
@@ -190,6 +191,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
     };
     let parameter = |name: &str| (name.to_string(), Ty::ty_param(name, bound));
     let methods = vec![FnMeta {
+        spellings: krusty::spelling::DeclaredSpellings::default(),
         name: "triple".to_string(),
         params: vec![parameter(&outer), parameter(&middle), parameter(&own)],
         ret: Ty::Unit,
@@ -244,6 +246,7 @@ fn package_value_param_defaults_round_trip() {
     // per-parameter default flags must survive `build_package` → `package_functions`, so a dependent
     // module can omit `b` (the reader's `metadata_param_defaults` drives classpath default-omission).
     let funcs = vec![PkgFnMeta {
+        spellings: krusty::spelling::DeclaredSpellings::default(),
         annotations: Vec::new(),
         decl_order: 0,
         jvm_name: None,
@@ -288,6 +291,7 @@ fn package_function_type_parameter_bound_round_trips() {
     use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
     let t = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
     let funcs = vec![PkgFnMeta {
+        spellings: krusty::spelling::DeclaredSpellings::default(),
         annotations: Vec::new(),
         decl_order: 0,
         jvm_name: None,
@@ -334,6 +338,7 @@ fn package_extension_receiver_round_trips() {
     // `route`), not 2. Without this a dependent counts the receiver as an argument and can't resolve a
     // `builder.composable("x")` call.
     let funcs = vec![PkgFnMeta {
+        spellings: krusty::spelling::DeclaredSpellings::default(),
         annotations: Vec::new(),
         decl_order: 0,
         jvm_name: None,
@@ -389,6 +394,7 @@ fn package_receiver_function_type_param_round_trips() {
     // metadata Type must carry @ExtensionFunctionType + the receiver as the first type argument, so a
     // dependent recognizes a lambda passed to `builder` binds `this` to NGB (drives classpath lambda_recv).
     let funcs = vec![PkgFnMeta {
+        spellings: krusty::spelling::DeclaredSpellings::default(),
         annotations: Vec::new(),
         decl_order: 0,
         jvm_name: None,

@@ -1427,6 +1427,23 @@ pub struct File {
     /// Declared visibility of a `typealias` when NON-public (`internal typealias A = …`) — public
     /// aliases are absent. Feeds `@Metadata` `TypeAlias.flags`.
     pub type_alias_visibility: std::collections::HashMap<String, Visibility>,
+    /// The `typealias` spelling each declared type had BEFORE the parse seam expanded it away,
+    /// keyed by the span of the node that was rewritten — kept only so `@Metadata` can record
+    /// `Type.abbreviated_type` (see [`crate::spelling`]).
+    ///
+    /// `expand_fun_type_aliases` rewrites a same-file alias reference INTO its target shape, which
+    /// is what every semantic consumer wants and which destroys the one thing metadata needs. The
+    /// entry holds the pre-expansion node — its name and its AS-SPELLED type arguments, whose arity
+    /// may differ from the expansion's. It lives HERE rather than on [`TypeRef`] because `TypeRef`
+    /// is embedded by value in the expression arena, where eight more bytes per node is a real
+    /// cost the arena's size guard enforces.
+    ///
+    /// The rewrite preserves the original node's span, so the span is a stable key. Only the
+    /// OUTERMOST alias of a chain is recorded, matching kotlinc: `typealias Chain = Cargo` spelled
+    /// as `Chain` records `Chain`, not `Cargo`. A reference to an alias declared ELSEWHERE (a
+    /// sibling file or the classpath) is never rewritten and so still spells the alias in
+    /// [`TypeRef::name`]; it has no entry here.
+    pub alias_spellings: std::collections::HashMap<Span, TypeRef>,
     /// Every `typealias Name<T…> = Target`: the alias name, its declared type-parameter names, and
     /// the complete source target shape. Resolution binds this once for semantic use and metadata;
     /// the parser's same-file structural expansion also uses it for function-type aliases.

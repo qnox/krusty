@@ -8,6 +8,7 @@ use crate::features::LangFeatures;
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
+use std::collections::HashMap;
 
 /// Parse with the default language feature set.
 pub fn parse(src: &str, tokens: &[Token], diags: &mut DiagSink) -> File {
@@ -632,7 +633,12 @@ fn substitute_type_alias_parameters(ty: &mut TypeRef, params: &[String], args: &
     }
 }
 
-fn expand_type_alias_ref(ty: &mut TypeRef, aliases: &TypeAliasShapes, depth: u32) {
+fn expand_type_alias_ref(
+    ty: &mut TypeRef,
+    aliases: &TypeAliasShapes,
+    depth: u32,
+    spellings: &mut HashMap<Span, TypeRef>,
+) {
     if depth > 8 {
         return;
     }
@@ -640,30 +646,46 @@ fn expand_type_alias_ref(ty: &mut TypeRef, aliases: &TypeAliasShapes, depth: u32
         if let Some((params, target)) = aliases.get(&ty.name) {
             if ty.targs.len() == params.len() {
                 for argument in &mut ty.targs {
-                    expand_type_alias_ref(argument, aliases, depth + 1);
+                    expand_type_alias_ref(argument, aliases, depth + 1, spellings);
                 }
                 let nullable = ty.nullable();
+                // A USE-SITE PROJECTION belongs to the reference, not to the alias's target:
+                // `List<out Cargo>` must stay `out` after `Cargo` expands to `Payload`. The
+                // wholesale `*ty = expanded` below replaces the flags word, so carry these across
+                // exactly as nullability is carried.
+                let in_projection = ty.in_projection();
+                let out_projection = ty.out_projection();
                 let span = ty.span;
+                // The spelling this rewrite is about to destroy — its name and AS-SPELLED type
+                // arguments — kept for `@Metadata`'s `Type.abbreviated_type` (`File::alias_spellings`).
+                let spelled = ty.clone();
                 let mut expanded = target.clone();
                 if !params.is_empty() {
                     substitute_type_alias_parameters(&mut expanded, params, &ty.targs);
                 }
                 *ty = expanded;
                 ty.set_nullable(ty.nullable() || nullable);
+                ty.set_projection(
+                    ty.in_projection() || in_projection,
+                    ty.out_projection() || out_projection,
+                );
                 ty.span = span;
-                expand_type_alias_ref(ty, aliases, depth + 1);
+                expand_type_alias_ref(ty, aliases, depth + 1, spellings);
+                // AFTER the recursive expansion, so an alias chain records the OUTERMOST spelling:
+                // `typealias Chain = Cargo` used as `Chain` writes `Chain`, as kotlinc does.
+                spellings.insert(span, spelled);
                 return;
             }
         }
     }
     if let Some(argument) = &mut ty.arg {
-        expand_type_alias_ref(argument, aliases, depth + 1);
+        expand_type_alias_ref(argument, aliases, depth + 1, spellings);
     }
     for argument in &mut ty.targs {
-        expand_type_alias_ref(argument, aliases, depth + 1);
+        expand_type_alias_ref(argument, aliases, depth + 1, spellings);
     }
     for parameter in &mut ty.fun_params {
-        expand_type_alias_ref(parameter, aliases, depth + 1);
+        expand_type_alias_ref(parameter, aliases, depth + 1, spellings);
     }
 }
 
@@ -672,13 +694,14 @@ fn expand_type_alias_ref(ty: &mut TypeRef, aliases: &TypeAliasShapes, depth: u32
 pub(crate) fn expanded_type_alias_target(
     declarations: &[(String, Vec<String>, TypeRef)],
     target: &TypeRef,
+    spellings: &mut HashMap<Span, TypeRef>,
 ) -> TypeRef {
     let aliases: TypeAliasShapes = declarations
         .iter()
         .map(|(name, params, target)| (name.clone(), (params.clone(), target.clone())))
         .collect();
     let mut expanded = target.clone();
-    expand_type_alias_ref(&mut expanded, &aliases, 0);
+    expand_type_alias_ref(&mut expanded, &aliases, 0, spellings);
     expanded
 }
 
@@ -691,61 +714,97 @@ fn expand_fun_type_aliases(file: &mut File) {
     if file.type_alias_fun.is_empty() {
         return;
     }
+    // Keyed by BOTH the simple spelling and this file's own fully qualified one: `app.Handler`
+    // denotes the same declaration as `Handler`, and only the qualified form reaches resolution
+    // intact (nothing else expands it), so without the second key it resolves as a qualified
+    // CLASSIFIER — which a function-type alias has none of, making valid Kotlin unresolvable.
+    let package = file.package.as_deref().unwrap_or("");
     let aliases: TypeAliasShapes = file
         .type_alias_fun
         .iter()
-        .map(|(n, ps, t)| (n.clone(), (ps.clone(), t.clone())))
+        .flat_map(|(n, ps, t)| {
+            let qualified =
+                (!package.is_empty()).then(|| (format!("{package}.{n}"), (ps.clone(), t.clone())));
+            std::iter::once((n.clone(), (ps.clone(), t.clone()))).chain(qualified)
+        })
         .collect();
-    fn expand_opt(tr: &mut Option<TypeRef>, aliases: &TypeAliasShapes) {
+    // Taken out and put back so the walk below can borrow the declaration arena mutably while
+    // recording into it.
+    let mut spellings = std::mem::take(&mut file.alias_spellings);
+    fn expand_opt(
+        tr: &mut Option<TypeRef>,
+        aliases: &TypeAliasShapes,
+        spellings: &mut HashMap<Span, TypeRef>,
+    ) {
         if let Some(t) = tr {
-            expand_type_alias_ref(t, aliases, 0);
+            expand_type_alias_ref(t, aliases, 0, spellings);
         }
     }
-    fn expand_params(params: &mut [Param], aliases: &TypeAliasShapes) {
+    fn expand_params(
+        params: &mut [Param],
+        aliases: &TypeAliasShapes,
+        spellings: &mut HashMap<Span, TypeRef>,
+    ) {
         for p in params {
-            expand_type_alias_ref(&mut p.ty, aliases, 0);
+            expand_type_alias_ref(&mut p.ty, aliases, 0, spellings);
         }
     }
-    fn expand_bounds(bounds: &mut [(String, TypeRef)], aliases: &TypeAliasShapes) {
+    fn expand_bounds(
+        bounds: &mut [(String, TypeRef)],
+        aliases: &TypeAliasShapes,
+        spellings: &mut HashMap<Span, TypeRef>,
+    ) {
         for (_, t) in bounds {
-            expand_type_alias_ref(t, aliases, 0);
+            expand_type_alias_ref(t, aliases, 0, spellings);
         }
     }
-    fn expand_fun(f: &mut FunDecl, aliases: &TypeAliasShapes) {
-        expand_opt(&mut f.receiver, aliases);
-        expand_params(&mut f.params, aliases);
-        expand_opt(&mut f.ret, aliases);
-        expand_bounds(&mut f.type_param_bounds, aliases);
+    fn expand_fun(
+        f: &mut FunDecl,
+        aliases: &TypeAliasShapes,
+        spellings: &mut HashMap<Span, TypeRef>,
+    ) {
+        expand_opt(&mut f.receiver, aliases, spellings);
+        expand_params(&mut f.params, aliases, spellings);
+        expand_opt(&mut f.ret, aliases, spellings);
+        expand_bounds(&mut f.type_param_bounds, aliases, spellings);
     }
-    fn expand_prop(p: &mut PropDecl, aliases: &TypeAliasShapes) {
-        expand_opt(&mut p.receiver, aliases);
-        expand_opt(&mut p.ty, aliases);
-        expand_bounds(&mut p.type_param_bounds, aliases);
+    fn expand_prop(
+        p: &mut PropDecl,
+        aliases: &TypeAliasShapes,
+        spellings: &mut HashMap<Span, TypeRef>,
+    ) {
+        expand_opt(&mut p.receiver, aliases, spellings);
+        expand_opt(&mut p.ty, aliases, spellings);
+        expand_bounds(&mut p.type_param_bounds, aliases, spellings);
     }
-    fn expand_class(c: &mut ClassDecl, aliases: &TypeAliasShapes) {
+    fn expand_class(
+        c: &mut ClassDecl,
+        aliases: &TypeAliasShapes,
+        spellings: &mut HashMap<Span, TypeRef>,
+    ) {
         c.type_parameters
-            .map_bounds(|bounds| expand_bounds(bounds, aliases));
+            .map_bounds(|bounds| expand_bounds(bounds, aliases, spellings));
         for p in &mut c.props {
-            expand_type_alias_ref(&mut p.ty, aliases, 0);
+            expand_type_alias_ref(&mut p.ty, aliases, 0, spellings);
         }
         for t in &mut c.supertypes {
-            expand_type_alias_ref(t, aliases, 0);
+            expand_type_alias_ref(t, aliases, 0, spellings);
         }
         for m in &mut c.methods {
-            expand_fun(m, aliases);
+            expand_fun(m, aliases, spellings);
         }
         for p in &mut c.body_props {
-            expand_prop(p, aliases);
+            expand_prop(p, aliases, spellings);
         }
         for sc in &mut c.secondary_ctors {
-            expand_params(&mut sc.params, aliases);
+            expand_params(&mut sc.params, aliases, spellings);
         }
         for e in &mut c.enum_entries {
             for m in &mut e.methods {
-                expand_fun(m, aliases);
+                expand_fun(m, aliases, spellings);
             }
             for p in &mut e.props {
-                expand_prop(p, aliases);
+                expand_prop(p, aliases, spellings);
             }
         }
     }
@@ -753,17 +812,19 @@ fn expand_fun_type_aliases(file: &mut File) {
     let aliases = &aliases;
     for decl in &mut file.decl_arena {
         match decl {
-            Decl::Fun(f) => expand_fun(f, aliases),
-            Decl::Property(p) => expand_prop(p, aliases),
-            Decl::Class(c) => expand_class(c, aliases),
+            Decl::Fun(f) => expand_fun(f, aliases, &mut spellings),
+            Decl::Property(p) => expand_prop(p, aliases, &mut spellings),
+            Decl::Class(c) => expand_class(c, aliases, &mut spellings),
         }
     }
     for expr in &mut file.expr_arena {
         match expr {
-            Expr::Is { ty, .. } | Expr::As { ty, .. } => expand_type_alias_ref(ty, aliases, 0),
+            Expr::Is { ty, .. } | Expr::As { ty, .. } => {
+                expand_type_alias_ref(ty, aliases, 0, &mut spellings)
+            }
             Expr::Try { catches, .. } => {
                 for c in catches {
-                    expand_type_alias_ref(&mut c.ty, aliases, 0);
+                    expand_type_alias_ref(&mut c.ty, aliases, 0, &mut spellings);
                 }
             }
             _ => {}
@@ -771,29 +832,32 @@ fn expand_fun_type_aliases(file: &mut File) {
     }
     for stmt in &mut file.stmt_arena {
         match stmt {
-            Stmt::Local { ty, .. } | Stmt::LocalDelegate { ty, .. } => expand_opt(ty, aliases),
-            Stmt::LocalLateinit { ty, .. } => expand_type_alias_ref(ty, aliases, 0),
-            Stmt::LocalFun(f) => expand_fun(f, aliases),
-            Stmt::LocalClass(c) => expand_class(c, aliases),
+            Stmt::Local { ty, .. } | Stmt::LocalDelegate { ty, .. } => {
+                expand_opt(ty, aliases, &mut spellings)
+            }
+            Stmt::LocalLateinit { ty, .. } => expand_type_alias_ref(ty, aliases, 0, &mut spellings),
+            Stmt::LocalFun(f) => expand_fun(f, aliases, &mut spellings),
+            Stmt::LocalClass(c) => expand_class(c, aliases, &mut spellings),
             _ => {}
         }
     }
     for trs in file.call_type_args.values_mut() {
         for t in trs {
-            expand_type_alias_ref(t, aliases, 0);
+            expand_type_alias_ref(t, aliases, 0, &mut spellings);
         }
     }
     for trs in file.lambda_param_types.values_mut() {
         for t in trs.iter_mut().flatten() {
-            expand_type_alias_ref(t, aliases, 0);
+            expand_type_alias_ref(t, aliases, 0, &mut spellings);
         }
     }
     for t in file.anon_fun_ret.values_mut() {
-        expand_type_alias_ref(t, aliases, 0);
+        expand_type_alias_ref(t, aliases, 0, &mut spellings);
     }
     for t in file.anon_fun_receivers.values_mut() {
-        expand_type_alias_ref(t, aliases, 0);
+        expand_type_alias_ref(t, aliases, 0, &mut spellings);
     }
+    file.alias_spellings = spellings;
 }
 
 struct Parser<'a> {

@@ -744,6 +744,14 @@ fn facade_package_metadata_inner(
         };
         metas.push(crate::metadata::builder::FnMeta {
             name: f.name.clone(),
+            // How source SPELLED this declaration's types. Collected once, beside resolution, so a
+            // `typealias` survives into `Type.abbreviated_type` — `Ty` is expanded and cannot carry
+            // it. Absent for a declaration that named no alias, which is nearly all of them.
+            spellings: syms
+                .declared_spellings
+                .get(&(file_index, d))
+                .cloned()
+                .unwrap_or_default(),
             params,
             decl_order,
             annotations,
@@ -861,6 +869,17 @@ fn facade_package_metadata_inner(
         });
         prop_metas.push(crate::metadata::builder::PropMeta {
             name: p.name.clone(),
+            // A DECLARED getter (`val d get() = 5L`, and every extension property, which cannot
+            // have a backing field) records `getter_flags`; a compiler-default one does not.
+            has_declared_getter: p.getter.is_some(),
+            // A backing field exists only for a property that STORES its value: an extension
+            // property never does, and a computed one does only when its getter reads `field`.
+            has_backing_field: p.receiver.is_none() && (p.getter.is_none() || p.getter_reads_field),
+            spellings: syms
+                .declared_spellings
+                .get(&(file_index, d))
+                .cloned()
+                .unwrap_or_default(),
             ty,
             is_var,
             type_params,
@@ -878,10 +897,27 @@ fn facade_package_metadata_inner(
         .as_deref()
         .unwrap_or_default()
         .replace('.', "/");
+    // A `typealias` is not an entry in the file's declaration arena, so its interning position is
+    // recovered from source order: the number of declarations that start before it. kotlinc interns
+    // package-member strings in source-declaration order across kinds, and an alias declared above
+    // a function must therefore intern before it.
+    let decl_starts: Vec<u32> = file
+        .decls
+        .iter()
+        .map(|&d| match file.decl(d) {
+            Decl::Fun(f) => f.span.lo,
+            Decl::Property(p) => p.span.lo,
+            Decl::Class(c) => c.span.lo,
+        })
+        .collect();
     let alias_metas = file
         .type_alias_fun
         .iter()
-        .map(|(alias, _, _)| {
+        .map(|(alias, _, target)| {
+            let decl_order = decl_starts
+                .iter()
+                .filter(|&&start| start < target.span.lo)
+                .count();
             let qualified = if package.is_empty() {
                 alias.clone()
             } else {
@@ -893,6 +929,12 @@ fn facade_package_metadata_inner(
                 .unwrap_or_else(|| panic!("frontend did not resolve typealias '{qualified}'"));
             crate::metadata::builder::TypeAliasMeta {
                 name: alias.clone(),
+                decl_order,
+                expansion_spelling: syms
+                    .alias_expansion_spellings
+                    .get(&crate::types::type_name(&qualified))
+                    .map(|(spelling, _, _)| spelling.clone())
+                    .unwrap_or_default(),
                 formals: formals.clone(),
                 expansion: *expansion,
                 visibility: file

@@ -3153,6 +3153,322 @@ fn collect_class_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>
 /// Byte-compare one class emitted by krusty and kotlinc.
 #[allow(dead_code)]
 pub fn byte_diff_against_kotlinc(name: &str, src: &str, class: &str) -> Option<Result<(), String>> {
+    byte_diff_against_kotlinc_cp(name, src, class, &[])
+}
+
+/// [`metadata_diff_against_kotlinc_cp`] with a DEPENDENCY compiled by the reference kotlinc first.
+///
+/// The dependency is what makes a classpath `typealias` reachable: a same-file alias is rewritten
+/// away at the parse seam, while one declared in a dependency is never rewritten and only name
+/// resolution can identify it — two different routes into the same metadata.
+#[allow(dead_code)]
+pub fn metadata_diff_against_kotlinc_lib(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+    class: &str,
+) -> Option<Result<(), String>> {
+    let libout = kotlinc_lib_out(lib)?;
+    let dir = scratch_dir()?;
+    let kref = dir.join("ref");
+    std::fs::create_dir_all(&kref).ok()?;
+    let src_path = dir.join(format!("{name}.kt"));
+    std::fs::write(&src_path, src).ok()?;
+    let args = vec![
+        "-d".to_string(),
+        kref.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        libout.to_string_lossy().into_owned(),
+        src_path.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = kotlinc_compile(&args)?;
+    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+    let reference = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
+    let classpath = [libout, stdlib_jar()];
+    let classes = compile_in_process_metadata_cp(src, name, &classpath)
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let (_, actual) = classes
+        .iter()
+        .find(|(n, _)| n == class)
+        .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
+    let result = compare_kotlin_metadata(name, class, actual, &reference);
+    let _ = std::fs::remove_dir_all(&dir);
+    Some(result)
+}
+
+/// Compare only the `@kotlin.Metadata` PAYLOAD — `d1` bytes and the `d2` string table — of
+/// `class` against kotlinc's, rather than the whole class file.
+///
+/// This is the right instrument for metadata work. Whole-classfile identity also covers the
+/// constant pool, code, and attributes, which diverge for reasons that have nothing to do with the
+/// metadata (a generic function's class file differs by hundreds of bytes today while its `d1` is
+/// already identical), so a whole-file comparison cannot say whether a metadata change landed.
+///
+/// `Ok(())` when both sides agree. `None` when the reference toolchain is unavailable; krusty
+/// REJECTING the source panics, since a fixture krusty cannot compile is not a skip.
+#[allow(dead_code)]
+pub fn metadata_diff_against_kotlinc_cp(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+) -> Option<Result<(), String>> {
+    let dir = scratch_dir()?;
+    let kref = dir.join("ref");
+    std::fs::create_dir_all(&kref).ok()?;
+    let src_path = dir.join(format!("{name}.kt"));
+    std::fs::write(&src_path, src).ok()?;
+    let args = vec![
+        "-d".to_string(),
+        kref.to_string_lossy().into_owned(),
+        src_path.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = kotlinc_compile(&args)?;
+    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+    let reference = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
+
+    let classes = compile_in_process_metadata_cp(src, name, cp_jars)
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let (_, actual) = classes
+        .iter()
+        .find(|(n, _)| n == class)
+        .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    Some(compare_kotlin_metadata(name, class, actual, &reference))
+}
+
+/// Compare two class files' `@Metadata` payloads, reporting the `d2` tables and the `d1` bytes on a
+/// mismatch — the two things a metadata change actually moves.
+fn compare_kotlin_metadata(
+    name: &str,
+    class: &str,
+    actual: &[u8],
+    reference: &[u8],
+) -> Result<(), String> {
+    let metadata = |bytes: &[u8], side: &str| -> (Vec<u8>, Vec<String>) {
+        raw_kotlin_metadata(bytes)
+            .unwrap_or_else(|| panic!("{name}: {side} {class} carries no readable @Metadata"))
+    };
+    let (reference_d1, reference_d2) = metadata(reference, "kotlinc");
+    let (actual_d1, actual_d2) = metadata(actual, "krusty");
+    if actual_d1 == reference_d1 && actual_d2 == reference_d2 {
+        return Ok(());
+    }
+    let mut report = format!("{name}/{class}: @Metadata differs from kotlinc\n");
+    if actual_d2 != reference_d2 {
+        report.push_str(&format!(
+            "  d2 kotlinc: {reference_d2:?}\n  d2 krusty : {actual_d2:?}\n"
+        ));
+    }
+    if actual_d1 != reference_d1 {
+        let at = actual_d1
+            .iter()
+            .zip(&reference_d1)
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| actual_d1.len().min(reference_d1.len()));
+        report.push_str(&format!(
+            "  d1 differs at byte {at} (krusty {} B, kotlinc {} B)\n    kotlinc: {}\n    krusty : {}\n",
+            actual_d1.len(),
+            reference_d1.len(),
+            hex(&reference_d1),
+            hex(&actual_d1),
+        ));
+    }
+    Err(report)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The RAW `@kotlin.Metadata` payload of a class file: the `d1` bytes and the `d2` strings, exactly
+/// as written.
+///
+/// `krusty::jvm::classreader` decodes `@Metadata` at parse time and does not retain the packed
+/// form, and the packed form is precisely what a byte-identity comparison needs — so this walks the
+/// constant pool and the class-level `RuntimeVisibleAnnotations` itself. `None` when the class
+/// carries no `@Metadata`.
+fn raw_kotlin_metadata(bytes: &[u8]) -> Option<(Vec<u8>, Vec<String>)> {
+    struct Reader<'a> {
+        bytes: &'a [u8],
+        at: usize,
+    }
+    impl<'a> Reader<'a> {
+        fn u1(&mut self) -> u8 {
+            let value = self.bytes[self.at];
+            self.at += 1;
+            value
+        }
+        fn u2(&mut self) -> usize {
+            let value = u16::from_be_bytes([self.bytes[self.at], self.bytes[self.at + 1]]);
+            self.at += 2;
+            value as usize
+        }
+        fn u4(&mut self) -> usize {
+            let value = u32::from_be_bytes(self.bytes[self.at..self.at + 4].try_into().unwrap());
+            self.at += 4;
+            value as usize
+        }
+        fn skip(&mut self, n: usize) {
+            self.at += n;
+        }
+    }
+
+    /// Read one `element_value`: the strings of a string or array-of-string value, empty for any
+    /// other tag. Advances past the value either way, so the caller stays in sync.
+    fn read_element(r: &mut Reader<'_>, utf8: &HashMap<usize, String>) -> Vec<String> {
+        let tag = r.u1();
+        match tag {
+            b'[' => {
+                let n = r.u2();
+                let mut all = Vec::new();
+                for _ in 0..n {
+                    all.extend(read_element(r, utf8));
+                }
+                all
+            }
+            b's' => {
+                let index = r.u2();
+                vec![utf8.get(&index).cloned().unwrap_or_default()]
+            }
+            b'e' => {
+                r.skip(4); // type_name_index + const_name_index
+                Vec::new()
+            }
+            b'c' | b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' => {
+                r.skip(2);
+                Vec::new()
+            }
+            b'@' => {
+                r.skip(2);
+                let pairs = r.u2();
+                for _ in 0..pairs {
+                    r.skip(2);
+                    read_element(r, utf8);
+                }
+                Vec::new()
+            }
+            other => panic!("unknown annotation element tag {other}"),
+        }
+    }
+
+    let mut r = Reader { bytes, at: 8 };
+    let count = r.u2();
+    let mut utf8: HashMap<usize, String> = HashMap::new();
+    let mut index = 1;
+    while index < count {
+        let tag = r.u1();
+        match tag {
+            1 => {
+                let len = r.u2();
+                // Modified UTF-8; `d1` only ever holds chars whose low byte is the payload, and the
+                // standard decoder recovers those faithfully for every code point kotlinc emits.
+                let raw = &r.bytes[r.at..r.at + len];
+                r.skip(len);
+                utf8.insert(index, mutf8_to_string(raw));
+            }
+            7 | 8 | 16 | 19 | 20 => r.skip(2),
+            15 => r.skip(3),
+            3 | 4 | 9 | 10 | 11 | 12 | 17 | 18 => r.skip(4),
+            5 | 6 => {
+                r.skip(8);
+                index += 1; // long/double occupy two entries
+            }
+            other => panic!("unknown constant-pool tag {other}"),
+        }
+        index += 1;
+    }
+    r.skip(6); // access, this_class, super_class
+    let interfaces = r.u2();
+    r.skip(interfaces * 2);
+    for _ in 0..2 {
+        // fields, then methods
+        let members = r.u2();
+        for _ in 0..members {
+            r.skip(6);
+            let attributes = r.u2();
+            for _ in 0..attributes {
+                r.skip(2);
+                let len = r.u4();
+                r.skip(len);
+            }
+        }
+    }
+    let attributes = r.u2();
+    for _ in 0..attributes {
+        let name = r.u2();
+        let len = r.u4();
+        let end = r.at + len;
+        if utf8.get(&name).map(String::as_str) != Some("RuntimeVisibleAnnotations") {
+            r.at = end;
+            continue;
+        }
+        let annotations = r.u2();
+        for _ in 0..annotations {
+            let ty = r.u2();
+            let pairs = r.u2();
+            let is_metadata = utf8.get(&ty).map(String::as_str) == Some("Lkotlin/Metadata;");
+            let mut d1: Option<Vec<String>> = None;
+            let mut d2: Option<Vec<String>> = None;
+            for _ in 0..pairs {
+                let element = r.u2();
+                let element = utf8.get(&element).cloned().unwrap_or_default();
+                let value = read_element(&mut r, &utf8);
+                match element.as_str() {
+                    "d1" if is_metadata => d1 = Some(value),
+                    "d2" if is_metadata => d2 = Some(value),
+                    _ => {}
+                }
+            }
+            if let Some(d1) = d1 {
+                let payload = d1.concat().chars().map(|c| c as u8).collect();
+                return Some((payload, d2.unwrap_or_default()));
+            }
+        }
+        r.at = end;
+    }
+    None
+}
+
+/// Decode modified UTF-8 into a `String`.
+fn mutf8_to_string(raw: &[u8]) -> String {
+    let mut out = String::new();
+    let mut at = 0;
+    while at < raw.len() {
+        let byte = raw[at];
+        let code = if byte < 0x80 {
+            at += 1;
+            byte as u32
+        } else if byte & 0xE0 == 0xC0 {
+            let code = ((byte as u32 & 0x1F) << 6) | (raw[at + 1] as u32 & 0x3F);
+            at += 2;
+            code
+        } else {
+            let code = ((byte as u32 & 0x0F) << 12)
+                | ((raw[at + 1] as u32 & 0x3F) << 6)
+                | (raw[at + 2] as u32 & 0x3F);
+            at += 3;
+            code
+        };
+        out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+    }
+    out
+}
+
+/// [`byte_diff_against_kotlinc`] with an explicit classpath for the KRUSTY side.
+///
+/// The no-classpath form compiles krusty against nothing at all, which is fine for a fixture whose
+/// every type is declared in the source but silently diverges from kotlinc — which always has its
+/// stdlib — the moment one is not: `open class`, a stdlib type, or a generic bound all resolve
+/// differently. Pass `&[stdlib_jar()]` for any fixture beyond bare source-declared classes.
+#[allow(dead_code)]
+pub fn byte_diff_against_kotlinc_cp(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+) -> Option<Result<(), String>> {
     let dir = scratch_dir()?;
     let kref = dir.join("ref");
     std::fs::create_dir_all(&kref).ok()?;
@@ -3167,7 +3483,7 @@ pub fn byte_diff_against_kotlinc(name: &str, src: &str, class: &str) -> Option<R
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
     let ref_bytes = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
 
-    let classes = compile_in_process_metadata_cp(src, name, &[])
+    let classes = compile_in_process_metadata_cp(src, name, cp_jars)
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     let (_, krusty_bytes) = classes
         .iter()

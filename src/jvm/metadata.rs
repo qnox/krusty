@@ -2985,6 +2985,9 @@ pub struct MetaTypeAlias {
     /// The target applied to its own arguments, with the alias's parameters as `Ty::TyParam`.
     /// Metadata decoding is authoritative: an alias is not published when this type cannot decode.
     pub expansion: Ty,
+    /// How the right-hand side SPELLED the arguments it passes to its target — see
+    /// [`crate::spelling`]. A consuming module inherits these into every use site's expansion.
+    pub expansion_spelling: crate::spelling::Spelled,
 }
 
 /// Decode a public `TypeAlias` message → its name, the expanded/underlying class internal name, and
@@ -3051,12 +3054,129 @@ fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<MetaT
             0,
         )
     })?;
+    // How the right-hand side SPELLED its arguments, so a use site in another module inherits the
+    // abbreviation (`typealias CargoBox = PBox<Cargo, Cargo>` abbreviates both expanded arguments).
+    let expansion_spelling = expanded_body
+        .map(|type_body| crate::spelling::Spelled {
+            alias: None,
+            alias_args: Vec::new(),
+            args: parse_type_argument_spellings(type_body, records, d2),
+        })
+        .unwrap_or_default();
     Some(MetaTypeAlias {
         name,
         target: internal,
         formals,
         expansion,
+        expansion_spelling,
     })
+}
+
+/// The `typealias` SPELLINGS recorded on a `Type`'s arguments, as `Type.abbreviated_type`
+/// (field 13, whose `Type.type_alias_name` is field 12).
+///
+/// A dependency's alias keeps the spelling of its own right-hand side here, and a use site inherits
+/// it: `typealias CargoBox = PBox<Cargo, Cargo>` abbreviates BOTH expanded arguments as `Cargo`,
+/// whoever writes `CargoBox`. Only the argument spellings are recovered — the node's own
+/// abbreviation belongs to the use site, which names the alias itself.
+fn parse_type_argument_spellings(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+) -> Vec<crate::spelling::Spelled> {
+    let mut arguments = Vec::new();
+    let mut pb = Pb { b: body, i: 0 };
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            // Type.argument = 2, each an `Argument { projection = 1, type = 2 }`.
+            (2, 2) => {
+                let Some(len) = pb.varint() else { break };
+                let Some(argument) = pb.bytes(len as usize) else {
+                    break;
+                };
+                arguments.push(parse_argument_spelling(argument, records, d2));
+            }
+            (_, wire) => {
+                if pb.skip(wire).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    // Nothing spelled an alias anywhere — keep the empty vec the callers treat as "no spellings".
+    if arguments.iter().all(crate::spelling::Spelled::is_none) {
+        return Vec::new();
+    }
+    arguments
+}
+
+/// One `Argument`'s spelling: its inner `Type`'s own abbreviation plus, recursively, its arguments'.
+fn parse_argument_spelling(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+) -> crate::spelling::Spelled {
+    let mut pb = Pb { b: body, i: 0 };
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (2, 2) => {
+                let Some(len) = pb.varint() else { break };
+                let Some(inner) = pb.bytes(len as usize) else {
+                    break;
+                };
+                return crate::spelling::Spelled {
+                    alias: parse_type_alias_name(inner, records, d2),
+                    alias_args: Vec::new(),
+                    args: parse_type_argument_spellings(inner, records, d2),
+                };
+            }
+            (_, wire) => {
+                if pb.skip(wire).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    crate::spelling::Spelled::default()
+}
+
+/// The alias a `Type` was SPELLED as: its `abbreviated_type` (f13) and that message's
+/// `type_alias_name` (f12), resolved to a fully-qualified name.
+fn parse_type_alias_name(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+) -> Option<crate::types::TypeName> {
+    let mut pb = Pb { b: body, i: 0 };
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (13, 2) => {
+                let len = pb.varint()? as usize;
+                let abbreviated = pb.bytes(len)?;
+                let mut inner = Pb {
+                    b: abbreviated,
+                    i: 0,
+                };
+                while !inner.at_end() {
+                    let tag = inner.varint()?;
+                    match (tag >> 3, tag & 7) {
+                        (12, 0) => {
+                            let id = inner.varint()?;
+                            return resolve_class_name(records, d2, id as usize)
+                                .map(|name| type_name(&name));
+                        }
+                        (_, wire) => inner.skip(wire)?,
+                    }
+                }
+                return None;
+            }
+            (_, wire) => pb.skip(wire)?,
+        }
+    }
+    None
 }
 
 /// Constructor source parameter names/default flags from `Class` `@Metadata`, in declaration order.

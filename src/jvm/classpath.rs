@@ -951,7 +951,10 @@ pub struct TypeIndex {
     type_aliases: HashMap<TypeName, TypeName>,
     /// Alias name → its EXPANSION: the target applied to its own arguments, with the alias's own
     /// parameters left as `Ty::TyParam`. A use site substitutes its arguments into this template.
-    alias_expansions: HashMap<TypeName, (TypeName, Vec<String>, Ty)>,
+    /// `(target, formals, expansion, right-hand-side argument spellings)` — the last carries the
+    /// dependency's own `typealias` spellings so a consumer's use site inherits them (see
+    /// [`crate::spelling`]).
+    alias_expansions: HashMap<TypeName, (TypeName, Vec<String>, Ty, crate::spelling::Spelled)>,
 }
 
 impl TypeIndex {
@@ -3005,7 +3008,10 @@ impl Classpath {
     /// The alias's EXPANSION template — its formal names plus the target applied to its own
     /// arguments — for a use site that must substitute its own arguments. `None` only when this
     /// identity is not a published alias declaration.
-    pub fn type_alias_expansion(&self, internal: TypeName) -> Option<(TypeName, Vec<String>, Ty)> {
+    pub fn type_alias_expansion(
+        &self,
+        internal: TypeName,
+    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
         let tree = self.package_tree();
         if !tree.incomplete_entries.is_empty() {
             return self.scan_types().alias_expansions.get(&internal).cloned();
@@ -5485,6 +5491,7 @@ fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
                 type_name(&alias.target),
                 alias.formals.clone(),
                 alias.expansion,
+                alias.expansion_spelling.clone(),
             ),
         );
     }

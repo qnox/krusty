@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::metadata::{protobuf::Pb, serialize_string_table_types};
+use crate::spelling::Spelled;
 use crate::types::{Ty, TypeName};
 
 /// kotlinc's `JvmNameResolverBase.PREDEFINED_STRINGS`, indexed by `Record.predefined_index`.
@@ -181,6 +182,9 @@ pub struct MetadataTypeParameter {
     pub reified: bool,
     pub variance: crate::types::TypeVariance,
     pub upper_bounds: Vec<Ty>,
+    /// How source spelled each of `upper_bounds` — `<T : Cargo>` records the alias on the bound's
+    /// `Type`. Parallel to `upper_bounds`; a short or empty vec leaves the rest unabbreviated.
+    pub upper_bound_spellings: Vec<Spelled>,
 }
 
 pub(crate) fn type_parameters<'a>(names: impl Iterator<Item = &'a str>) -> TypeParameters {
@@ -220,12 +224,75 @@ pub(crate) fn semantic_named_type_parameters<'a>(
         .collect()
 }
 
+/// Encode a type whose source spelling cannot name a `typealias` — a synthesized member's
+/// signature, a builtin classifier, a contract conclusion. Declared types reachable from source
+/// must use [`encode_declared_type`] so an alias spelling becomes `Type.abbreviated_type`.
 pub(crate) fn encode_type(
     strings: &mut StringTable,
     ty: Ty,
     type_parameters: &TypeParameters,
 ) -> Result<Pb, TypeEncodeError> {
-    encode_type_with_parameter(strings, ty, type_parameters, None)
+    encode_type_with_parameter(
+        strings,
+        ty,
+        Spelled::NONE,
+        type_parameters,
+        None,
+        Expansion::Expanded,
+    )
+}
+
+/// Encode a DECLARED type together with how source spelled it, so a `typealias` at any node of the
+/// tree is recorded as `Type.abbreviated_type` (field 13) next to its expanded classifier.
+pub(crate) fn encode_declared_type(
+    strings: &mut StringTable,
+    ty: Ty,
+    spelled: &Spelled,
+    type_parameters: &TypeParameters,
+) -> Result<Pb, TypeEncodeError> {
+    encode_type_with_parameter(
+        strings,
+        ty,
+        spelled,
+        type_parameters,
+        None,
+        Expansion::Expanded,
+    )
+}
+
+/// Encode a type AS SOURCE WROTE IT: every node that named a `typealias` becomes a bare
+/// `Type.type_alias_name` reference instead of its expanded classifier, recursively, and no node
+/// carries an `abbreviated_type` (there is nothing to abbreviate — the whole tree is the spelling).
+///
+/// This is `TypeAlias.underlying_type` (field 4). kotlinc writes the alias's right-hand side there
+/// exactly as written and its fully expanded form in `expanded_type` (field 6), so
+/// `typealias CargoBox = PBox<Cargo, Cargo>` records `PBox<Cargo, Cargo>` in f4 — argument nodes
+/// included — and `PBox<Payload, Payload>` with per-argument abbreviations in f6.
+pub(crate) fn encode_spelled_type(
+    strings: &mut StringTable,
+    ty: Ty,
+    spelled: &Spelled,
+    type_parameters: &TypeParameters,
+) -> Result<Pb, TypeEncodeError> {
+    encode_type_with_parameter(
+        strings,
+        ty,
+        spelled,
+        type_parameters,
+        None,
+        Expansion::AsSpelled,
+    )
+}
+
+/// Which of the two forms of a declared type an encode call is producing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Expansion {
+    /// The expanded classifier, with any `typealias` spelling recorded alongside as
+    /// `Type.abbreviated_type`. Every declared type in a signature takes this form.
+    Expanded,
+    /// The spelling itself: aliases stay alias references and nothing is abbreviated. Only
+    /// `TypeAlias.underlying_type` takes this form.
+    AsSpelled,
 }
 
 pub(crate) fn encode_indexed_type_parameter(
@@ -233,15 +300,37 @@ pub(crate) fn encode_indexed_type_parameter(
     ty: Ty,
     index: u32,
 ) -> Result<Pb, TypeEncodeError> {
-    encode_type_with_parameter(strings, ty, &TypeParameters::new(), Some(index as u64))
+    encode_type_with_parameter(
+        strings,
+        ty,
+        Spelled::NONE,
+        &TypeParameters::new(),
+        Some(index as u64),
+        Expansion::Expanded,
+    )
 }
 
 fn encode_type_with_parameter(
     strings: &mut StringTable,
     ty: Ty,
+    spelled: &Spelled,
     type_parameters: &TypeParameters,
     forced_parameter: Option<u64>,
+    expansion: Expansion,
 ) -> Result<Pb, TypeEncodeError> {
+    // As-spelled, an aliased node IS the alias reference — its expanded classifier never appears.
+    if expansion == Expansion::AsSpelled && spelled.alias.is_some() {
+        if let Some(reference) = encode_alias_reference(
+            strings,
+            spelled,
+            ty.is_nullable(),
+            type_parameters,
+            // `underlying_type` is the spelling all the way down.
+            Expansion::AsSpelled,
+        )? {
+            return Ok(reference);
+        }
+    }
     let (nullable, flexible, base) = match ty {
         Ty::Nullable(inner) => (true, false, *inner),
         Ty::PlatformNullable(inner) => (false, true, *inner),
@@ -253,8 +342,10 @@ fn encode_type_with_parameter(
         let upper = encode_type_with_parameter(
             strings,
             Ty::nullable(base),
+            spelled,
             type_parameters,
             forced_parameter,
+            expansion,
         )?;
         message.field_varint(4, capability as u64);
         message.field_message(5, &upper);
@@ -295,14 +386,30 @@ fn encode_type_with_parameter(
             // kotlinc interns the enclosing classifier before recursively interning its arguments,
             // even though protobuf field order writes `argument` before `class_name`.
             let classifier = strings.class_id(classifier);
-            encode_arguments(&mut message, strings, arguments, type_parameters)?;
+            encode_arguments(
+                &mut message,
+                strings,
+                arguments,
+                spelled,
+                type_parameters,
+                expansion,
+            )?;
             if nullable {
                 message.field_varint(3, 1);
             }
             message.field_varint(6, classifier as u64);
+            if expansion == Expansion::Expanded {
+                encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
+            }
         }
-        Ty::Unit => encode_classifier(&mut message, strings, "kotlin/Unit", nullable),
-        Ty::Nothing => encode_classifier(&mut message, strings, "kotlin/Nothing", nullable),
+        Ty::Unit => {
+            encode_classifier(&mut message, strings, "kotlin/Unit", nullable);
+            encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
+        }
+        Ty::Nothing => {
+            encode_classifier(&mut message, strings, "kotlin/Nothing", nullable);
+            encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
+        }
         Ty::Fun(signature) => {
             let arity = signature.params.len() + usize::from(signature.suspend);
             if arity > 22 {
@@ -320,11 +427,26 @@ fn encode_type_with_parameter(
             } else {
                 arguments.push(signature.ret);
             }
-            encode_arguments(&mut message, strings, &arguments, type_parameters)?;
+            // A function type's metadata arguments are SYNTHESIZED (`params… + ret`, or the CPS
+            // `Continuation`/`Any?` pair for a suspend one). `spelling_of_ref` lays an arrow type's
+            // component spellings out in that same order, so they zip positionally; a spelling that
+            // came from a NAMED alias has no argument list and contributes nothing here, which is
+            // right — its arguments belong to the abbreviation, not to the expansion.
+            encode_arguments(
+                &mut message,
+                strings,
+                &arguments,
+                spelled,
+                type_parameters,
+                expansion,
+            )?;
             if nullable {
                 message.field_varint(3, 1);
             }
             message.field_varint(6, classifier as u64);
+            if expansion == Expansion::Expanded {
+                encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
+            }
             if signature.has_receiver {
                 add_extension_function_annotation(&mut message, strings);
             }
@@ -362,9 +484,11 @@ fn encode_arguments(
     message: &mut Pb,
     strings: &mut StringTable,
     arguments: &[Ty],
+    spelled: &Spelled,
     type_parameters: &TypeParameters,
+    expansion: Expansion,
 ) -> Result<(), TypeEncodeError> {
-    for argument in arguments {
+    for (index, argument) in arguments.iter().enumerate() {
         let (projection, argument) = match argument {
             Ty::InProjection(inner) => (Some(0), **inner),
             Ty::OutProjection(inner) => (Some(1), **inner),
@@ -374,9 +498,103 @@ fn encode_arguments(
         if let Some(projection) = projection {
             encoded_argument.field_varint(1, projection);
         }
-        encoded_argument.field_message(2, &encode_type(strings, argument, type_parameters)?);
+        // A use-site projection wraps the argument; the abbreviation belongs to the type INSIDE it
+        // (`List<out Cargo>` records `Argument{projection, type={Payload, abbreviated=Cargo}}`).
+        encoded_argument.field_message(
+            2,
+            &encode_type_with_parameter(
+                strings,
+                argument,
+                spelled.arg(index),
+                type_parameters,
+                None,
+                expansion,
+            )?,
+        );
         message.repeated_message(2, &encoded_argument);
     }
+    Ok(())
+}
+
+/// A `Type` that names a `typealias` DIRECTLY through `Type.type_alias_name` (field 12) with no
+/// `class_name` — the shape of both `Type.abbreviated_type`'s payload and a
+/// `TypeAlias.underlying_type` whose right-hand side spells another alias.
+///
+/// Its arguments are the AS-SPELLED ones, which is why they come from `alias_args` rather than
+/// from any expanded `Ty`. Returns `None` when nothing was spelled as an alias here.
+pub(crate) fn encode_alias_reference(
+    strings: &mut StringTable,
+    spelled: &Spelled,
+    nullable: bool,
+    type_parameters: &TypeParameters,
+    arguments: Expansion,
+) -> Result<Option<Pb>, TypeEncodeError> {
+    let Some(alias) = spelled.alias else {
+        return Ok(None);
+    };
+    // Like every other `Type`, the classifier reference interns BEFORE its arguments — the rule
+    // that keeps `d2` in kotlinc's order.
+    let alias_id = strings.class_id(alias);
+    let mut message = Pb::new();
+    for (ty, argument_spelling) in &spelled.alias_args {
+        let (projection, ty) = match ty {
+            Ty::InProjection(inner) => (Some(0), **inner),
+            Ty::OutProjection(inner) => (Some(1), **inner),
+            ordinary => (None, *ordinary),
+        };
+        let mut encoded_argument = Pb::new();
+        if let Some(projection) = projection {
+            encoded_argument.field_varint(1, projection);
+        }
+        encoded_argument.field_message(
+            2,
+            &encode_type_with_parameter(
+                strings,
+                ty,
+                argument_spelling,
+                type_parameters,
+                None,
+                arguments,
+            )?,
+        );
+        message.repeated_message(2, &encoded_argument);
+    }
+    if nullable {
+        message.field_varint(3, 1);
+    }
+    message.field_varint(12, alias_id as u64); // Type.type_alias_name = 12
+    Ok(Some(message))
+}
+
+/// Append `Type.abbreviated_type` (field 13) when source spelled a `typealias` at this node.
+///
+/// The abbreviated `Type` is a full message in its own right: it repeats the node's `nullable` flag
+/// (a declared `Cargo?` is nullable on BOTH forms), carries the alias's AS-SPELLED arguments — a
+/// different arity from the expanded type's — and names the alias through `Type.type_alias_name`
+/// (field 12) INSTEAD of `class_name`. Like every other `Type`, its classifier reference interns
+/// before its arguments, which is what keeps `d2` in kotlinc's order.
+fn encode_abbreviation(
+    message: &mut Pb,
+    strings: &mut StringTable,
+    spelled: &Spelled,
+    nullable: bool,
+    type_parameters: &TypeParameters,
+) -> Result<(), TypeEncodeError> {
+    // An ABBREVIATION's own arguments are EXPANDED, each carrying its own abbreviation:
+    // `Boxed<Cargo>` writes `abbreviated_type = {argument={Payload, abbreviated={Cargo}}, Boxed}`,
+    // NOT a bare `Cargo` reference. This is the one place the two alias-reference forms differ, and
+    // it is read off kotlinc 2.4.10 rather than inferred.
+    let Some(abbreviated) = encode_alias_reference(
+        strings,
+        spelled,
+        nullable,
+        type_parameters,
+        Expansion::Expanded,
+    )?
+    else {
+        return Ok(());
+    };
+    message.field_message(13, &abbreviated); // Type.abbreviated_type = 13
     Ok(())
 }
 
@@ -404,8 +622,15 @@ pub(crate) fn encode_metadata_type_parameter(
         crate::types::TypeVariance::Out => message.field_varint(4, 1),
         crate::types::TypeVariance::Invariant => {}
     }
-    for bound in &parameter.upper_bounds {
-        message.field_message(5, &encode_type(strings, *bound, type_parameters)?);
+    for (index, bound) in parameter.upper_bounds.iter().enumerate() {
+        let spelled = parameter
+            .upper_bound_spellings
+            .get(index)
+            .unwrap_or(Spelled::NONE);
+        message.field_message(
+            5,
+            &encode_declared_type(strings, *bound, spelled, type_parameters)?,
+        );
     }
     Ok(message)
 }
@@ -424,6 +649,7 @@ pub(crate) fn encode_type_parameter(
             reified,
             variance: crate::types::TypeVariance::Invariant,
             upper_bounds: Vec::new(),
+            upper_bound_spellings: Vec::new(),
         },
         &TypeParameters::new(),
     )
