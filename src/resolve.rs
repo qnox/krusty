@@ -25045,14 +25045,24 @@ impl<'a> Checker<'a> {
                 .any(|shape| shape.is_operator)
     }
 
+    /// Whether the selected lexical VALUE contributes an invoke candidate. Callable references
+    /// retain their exact function shape beside their nominal `KProperty`/`KFunction` type, so the
+    /// binding record is authoritative; ordinary callable objects still derive capability from
+    /// their semantic type and declared `operator fun invoke`.
+    fn local_value_claims_call(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
+        self.lookup(scope, name).is_some_and(|local| {
+            self.local_callable_type(scope, name).is_some()
+                || self.value_type_claims_call(scope, local.ty)
+        })
+    }
+
     /// Whether a lexical binding of `name` claims CALL syntax. A value (local, parameter, or
     /// receiver property) competes for `name(…)` only when its semantic type supports the invoke
     /// convention; Kotlin never lets a non-invokable value shadow a member FUNCTION of an implicit
     /// receiver in call position (`var schema` + `fun schema(builder)` on a builder: `schema { … }`
     /// binds the function). Local `fun`s always claim.
     fn lexical_value_claims_call(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
-        self.lookup(scope, name)
-            .is_some_and(|local| self.value_type_claims_call(scope, local.ty))
+        self.local_value_claims_call(scope, name)
             || self
                 .lookup_lexical_callable_overloads(scope, name)
                 .is_some_and(|overloads| !overloads.is_empty())
@@ -45535,10 +45545,10 @@ impl<'a> Checker<'a> {
                 // invoke convention. A plain local/parameter such as `val count = 1` remains a value
                 // binding for ordinary expressions but contributes no `count()` callable candidate;
                 // a same-named classifier/function may therefore win the call tower, exactly as in
-                // kotlinc. Callable-reference values keep reaching this rung through their semantic
-                // FunctionN/invoke supertypes, never through their spelling.
+                // kotlinc. Callable-reference values keep reaching this rung through the exact
+                // callable shape recorded on their lexical binding, never through their spelling.
                 let local_value_invokable =
-                    local_value.is_some_and(|(ty, _)| self.value_type_claims_call(scope, ty));
+                    local_value.is_some() && self.local_value_claims_call(scope, &fname);
                 if let Some((mut receiver_ty, origin)) =
                     local_value.filter(|_| local_value_invokable)
                 {
