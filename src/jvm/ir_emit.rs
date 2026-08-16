@@ -4879,6 +4879,76 @@ fn class_public_bit(ir: &IrFile, c: &crate::ir::IrClass) -> u16 {
     }
 }
 
+/// Whether any code OUTSIDE `fq` constructs it — a companion factory, a nested class, another class
+/// in the file, a top-level property initializer, a default argument evaluated elsewhere.
+///
+/// kotlinc keeps a private constructor reachable from such a site through a synthetic
+/// `DefaultConstructorMarker` bridge. krusty does not emit that bridge yet, so a class constructed
+/// from outside must keep its constructor JVM-public: `ACC_PRIVATE` would turn the cross-class `new`
+/// into an `IllegalAccessError`. A class nobody constructs from outside takes kotlinc's shape.
+///
+/// The question is answered by INVERSION: collect the expressions reachable from the class's OWN
+/// declarations, then scan the whole arena for a construction of `fq` that is not among them. A root
+/// this function fails to enumerate therefore makes a construction look EXTERNAL — which keeps the
+/// constructor public, the conservative answer — instead of hiding a real cross-class site.
+///
+/// The scan runs only for a class that actually declares a private constructor, which is rare.
+fn constructed_outside(ir: &IrFile, fq: &str) -> bool {
+    // A SUBCLASS reaches the constructor without ever constructing the type: its own `<init>` calls
+    // `invokespecial <super>.<init>`, which is the same private access from a different JVM class. A
+    // private constructor is extensible only from inside the class (Kotlin rejects it elsewhere), so
+    // this is the nested-subclass shape — `class Base private constructor() { class Sub : Base() }`.
+    if ir
+        .classes
+        .iter()
+        .any(|c| !c.fq_name_matches(fq) && c.superclass_matches(fq))
+    {
+        return true;
+    }
+    // Every construction of this class in the file. None at all — a class nobody instantiates —
+    // answers `false`: kotlinc emits such a constructor private with no bridge.
+    let constructions: Vec<crate::ir::ExprId> = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, IrExpr::New { internal, .. } if internal.matches(fq)))
+        .map(|(id, _)| id as crate::ir::ExprId)
+        .collect();
+    if constructions.is_empty() {
+        return false;
+    }
+    let mut roots: Vec<crate::ir::ExprId> = Vec::new();
+    for c in ir.classes.iter().filter(|c| c.fq_name_matches(fq)) {
+        for &fid in &c.methods {
+            roots.extend(ir.functions.get(fid as usize).and_then(|f| f.body));
+            if let Some(defaults) = ir.fn_params.get(&fid).and_then(|p| p.defaults.as_ref()) {
+                roots.extend(defaults.iter().flatten().copied());
+            }
+        }
+        roots.extend(c.init_body);
+        roots.extend(c.super_args.iter().copied());
+        for ctor in &c.secondary_ctors {
+            roots.extend(ctor.body);
+            roots.extend(ctor.delegate_prelude.iter().copied());
+            roots.extend(ctor.delegate_args.iter().copied());
+            roots.extend(ctor.defaults.iter().flatten().copied());
+        }
+        for entry in &c.enum_entries {
+            roots.extend(entry.args.iter().copied());
+        }
+        roots.extend(c.properties.iter().filter_map(|p| p.initializer));
+    }
+    let mut inside: std::collections::HashSet<crate::ir::ExprId> = std::collections::HashSet::new();
+    let mut stack = roots;
+    while let Some(cur) = stack.pop() {
+        if !inside.insert(cur) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, cur, &mut |child| stack.push(child));
+    }
+    constructions.iter().any(|id| !inside.contains(id))
+}
+
 fn emit_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -5413,12 +5483,15 @@ fn emit_class(
             0x0000
         } else {
             // A DECLARED protected constructor reaches the JVM method too (kotlinc emits `<init>`
-            // protected). A declared PRIVATE ctor stays JVM-public for now: a companion factory
-            // calls it cross-class, which kotlinc routes through the `DefaultConstructorMarker`
-            // accessor — until krusty models that route, ACC_PRIVATE would be an
-            // IllegalAccessError; `@Metadata` still records the declared privacy.
+            // protected). A declared PRIVATE one is ACC_PRIVATE like kotlinc's, EXCEPT when another
+            // class constructs it: kotlinc routes that through a `DefaultConstructorMarker` bridge
+            // krusty does not emit yet, and without the bridge the cross-class `new` would be an
+            // IllegalAccessError. `@Metadata` records the declared privacy either way.
             match ir.ctor_visibilities.get(&c.fq_name_id()) {
                 Some(crate::types::Visibility::Protected) => 0x0004,
+                Some(crate::types::Visibility::Private) if !constructed_outside(ir, &fq_name) => {
+                    0x0002
+                }
                 _ => 0x0001,
             }
         };

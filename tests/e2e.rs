@@ -970,6 +970,8 @@ mod primitive_operator_extension_e2e;
 mod primitive_spread_e2e;
 #[path = "private_classifier_access_e2e.rs"]
 mod private_classifier_access_e2e;
+#[path = "private_constructor_access_e2e.rs"]
+mod private_constructor_access_e2e;
 #[path = "private_set_e2e.rs"]
 mod private_set_e2e;
 #[path = "projected_receiver_extension_e2e.rs"]
