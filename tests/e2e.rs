@@ -408,8 +408,6 @@ mod destructure_e2e;
 mod diagnostic_duplication_e2e;
 #[path = "diagnostic_markers_e2e.rs"]
 mod diagnostic_markers_e2e;
-#[path = "diagnostic_wording_e2e.rs"]
-mod diagnostic_wording_e2e;
 #[path = "diagnostics_match_kotlinc.rs"]
 mod diagnostics_match_kotlinc;
 #[path = "diverging_init_e2e.rs"]

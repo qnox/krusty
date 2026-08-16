@@ -123,6 +123,30 @@ pub fn front_end_diagnostics_with_stdlib(source: &str) -> Vec<String> {
     common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(jdk.as_path()))
 }
 
+/// Run source-kind-aware inputs through the production frontend. Scripts are intentionally not sent
+/// to the batch backend, but their parser/checker diagnostics still need the same semantic platform.
+pub fn front_end_diagnostics_inputs(
+    inputs: &[krusty::frontend::SourceInput<'_>],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Vec<String> {
+    let cp = common::cached_classpath(cp_jars, jdk_modules);
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let mut diagnostics = krusty::diag::DiagSink::new();
+    let _ = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        inputs,
+        platform,
+        &krusty::features::LangFeatures::new(),
+        |_, _| {},
+        &mut diagnostics,
+    );
+    diagnostics
+        .diags
+        .iter()
+        .map(|diagnostic| diagnostic.msg.clone())
+        .collect()
+}
+
 /// Assert one Kotlin language feature's gate against the reference compiler.
 pub fn assert_language_feature_gate(source: &str, feature: &str) {
     let stdlib = common::stdlib_jar();
@@ -247,6 +271,16 @@ pub fn inspect_checker_with_stdlib<T>(
 /// Compile one in-memory fixture with the persistent reference compiler harness.
 pub fn kotlinc_source_result(tag: &str, source: &str) -> (i32, String) {
     kotlinc_source_result_with_args(tag, source, &[])
+}
+
+/// Compile one named source with kotlinc. Unlike [`kotlinc_source_result`], this preserves a caller
+/// supplied extension so frontend-only Kotlin script diagnostics can be compared directly.
+pub fn kotlinc_named_source_result(filename: &str, source: &str) -> (i32, String) {
+    let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
+    let source_paths = write_fixture_sources(&work, &[(filename, source)]);
+    let result = kotlinc_paths_result(&source_paths, &work.join("out"), &[]);
+    let _ = std::fs::remove_dir_all(work);
+    result
 }
 
 /// Compile one in-memory fixture with extra reference-compiler arguments.

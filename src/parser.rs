@@ -2891,6 +2891,17 @@ impl<'a> Parser<'a> {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
+        let override_span = modifiers
+            .iter()
+            .any(|modifier| modifier == "override")
+            .then(|| {
+                self.t[..self.i]
+                    .iter()
+                    .rev()
+                    .find(|token| self.token_keyword_text(**token, "override"))
+                    .map(|token| token.span)
+                    .expect("an override modifier must retain its source token")
+            });
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
                      // Skip the entire interface body with a clean unsupported-feature message.
@@ -2922,6 +2933,7 @@ impl<'a> Parser<'a> {
                 reified_type_params: Default::default(),
                 span: start,
                 signature_span: start,
+                override_span: None,
                 flags: FdFlags::default(),
                 visibility: Visibility::Public,
                 annotations,
@@ -2994,6 +3006,7 @@ impl<'a> Parser<'a> {
             reified_type_params,
             span: Span::new(start.lo, end.hi),
             signature_span: Span::new(start.lo, signature_end),
+            override_span,
             flags: function_flags(modifiers),
             visibility: visibility_of(modifiers),
             annotations,
@@ -3098,6 +3111,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LParen, "'('");
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            let prefix_start = self.i;
             let mut pmods = Vec::new();
             let mut pannos = Vec::new();
             let mut pannos_args = Vec::new();
@@ -3110,6 +3124,13 @@ impl<'a> Parser<'a> {
                 pannos_args = self.take_pending_annotation_args();
             }
             let is_vararg = pmods.iter().any(|m| m == "vararg");
+            let vararg_span = is_vararg.then(|| {
+                self.t[prefix_start..self.i]
+                    .iter()
+                    .find(|token| self.token_keyword_text(**token, "vararg"))
+                    .map(|token| token.span)
+                    .expect("a vararg parameter must retain its source modifier")
+            });
             let pname = if self.at(TokenKind::Ident) {
                 let n = self.text().to_string();
                 self.bump();
@@ -3134,6 +3155,7 @@ impl<'a> Parser<'a> {
                 name: pname,
                 ty,
                 is_vararg,
+                vararg_span,
                 default,
                 annotations: pannos,
                 annotation_args: pannos_args,
@@ -8631,6 +8653,39 @@ mod tests {
         assert!(top.params[0].is_vararg);
         assert!(class.props[0].is_vararg);
         assert!(class.secondary_ctors[0].params[0].is_vararg);
+        for parameter in [&top.params[0], &class.secondary_ctors[0].params[0]] {
+            let span = parameter
+                .vararg_span
+                .expect("vararg parameter modifier span");
+            assert_eq!(&source[span.lo as usize..span.hi as usize], "vararg");
+        }
+    }
+
+    #[test]
+    fn override_function_retains_modifier_span() {
+        let source = "open class Base { open fun present() {} }\n\
+                      class Derived : Base() { override fun present() {} }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "{}",
+            diagnostics.render("test", source)
+        );
+        let derived = file
+            .decls
+            .iter()
+            .filter_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) => Some(class),
+                _ => None,
+            })
+            .find(|class| class.name == "Derived")
+            .expect("derived class");
+        let method = derived.methods.first().expect("override method");
+        assert!(method.is_override());
+        let span = method.override_span.expect("override modifier span");
+        assert_eq!(&source[span.lo as usize..span.hi as usize], "override");
     }
 
     #[test]
