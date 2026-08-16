@@ -52,7 +52,7 @@ fn dup_among_three_type_params() {
 fn multiple_vararg_params() {
     assert_has(
         "fun f(vararg a: Int, vararg b: Int) {}",
-        "multiple vararg parameters are not allowed",
+        "multiple vararg parameters are prohibited.",
     );
 }
 
