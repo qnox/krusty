@@ -1738,6 +1738,15 @@ pub fn expect_box_ok_files_with_stdlib(sources: &[(&str, &str)], stem: &str) {
     assert_eq!(out, "OK", "{stem}");
 }
 
+/// Front-end diagnostics for a multi-file source set with stdlib/JDK symbols. Empty means the
+/// front end ACCEPTED the sources.
+#[allow(dead_code)]
+pub fn front_end_diagnostics_files_with_stdlib(sources: &[&str]) -> Vec<String> {
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    front_end_diagnostics_files(sources, std::slice::from_ref(&stdlib), Some(jdk.as_path()))
+}
+
 /// Assert that a multi-file source set is accepted by the shared frontend with stdlib/JDK symbols.
 #[allow(dead_code)]
 pub fn expect_front_end_ok_files_with_stdlib(sources: &[&str], stem: &str) {
