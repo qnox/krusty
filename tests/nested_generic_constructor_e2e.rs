@@ -111,7 +111,7 @@ fn extension_receiver_nested_constructor_requires_qualification() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic == "unresolved function 'Item'"),
+            .any(|diagnostic| diagnostic == "unresolved reference 'Item'."),
         "expected the unqualified nested constructor to stay unresolved, got: {diagnostics:?}"
     );
 }

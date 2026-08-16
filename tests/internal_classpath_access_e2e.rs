@@ -117,7 +117,7 @@ fn classifier_access_diagnostics_follow_resolution_scope() {
     );
     assert_eq!(
         fixture.diagnostics("fun use(): Int { Hidden(1); return 0 }\n"),
-        ["unresolved function 'Hidden'"]
+        ["unresolved reference 'Hidden'."]
     );
     assert_eq!(
         fixture.diagnostics(
