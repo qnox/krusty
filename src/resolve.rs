@@ -19930,7 +19930,14 @@ impl<'a> Checker<'a> {
                 .params
                 .iter()
                 .map(|parameter| {
-                    crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
+                    crate::symbol_resolver::instantiate_slot(
+                        Some(&source),
+                        Some(&signature),
+                        *parameter,
+                        &bindings,
+                        crate::symbol_resolver::TypePosition::In,
+                        crate::symbol_resolver::UnboundSpecialization::Preserve,
+                    )
                 })
                 .collect::<Vec<_>>();
             let exact_arguments_admitted =
@@ -20029,7 +20036,14 @@ impl<'a> Checker<'a> {
                     .params
                     .iter()
                     .map(|parameter| {
-                        crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
+                        crate::symbol_resolver::instantiate_slot(
+                            Some(&source),
+                            Some(&signature),
+                            *parameter,
+                            &bindings,
+                            crate::symbol_resolver::TypePosition::In,
+                            crate::symbol_resolver::UnboundSpecialization::Preserve,
+                        )
                     })
                     .collect();
                 shape = if missing_context {
@@ -20126,12 +20140,13 @@ impl<'a> Checker<'a> {
                     }
                 })
                 .collect::<Option<Vec<_>>>()?;
-            // A projected receiver argument binds a formal to the projection itself (`Map<*, *>`
-            // binds the `get` extension's `V` to `out Any?`). The call's VALUE takes the
-            // approximation of that capture, never the projection.
-            let inferred_ret = crate::symbol_resolver::approximate_projected_value(
+            let inferred_ret = crate::symbol_resolver::instantiate_slot(
+                Some(&source),
+                Some(&signature),
                 signature.ret,
-                crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings),
+                &bindings,
+                crate::symbol_resolver::TypePosition::Out,
+                crate::symbol_resolver::UnboundSpecialization::Preserve,
             );
             // Input constraints may legitimately choose bottom for an `in`-projected parameter while
             // the expected-result constraint approximates the expression to its consumer type. Keep
@@ -21007,7 +21022,16 @@ impl<'a> Checker<'a> {
                             .get(parameter)
                             .into_iter()
                             .flatten()
-                            .map(|ty| crate::symbol_resolver::ty_subst(*ty, &binds))
+                            .map(|ty| {
+                                crate::symbol_resolver::instantiate_slot(
+                                    None,
+                                    Some(&semantic),
+                                    *ty,
+                                    &binds,
+                                    crate::symbol_resolver::TypePosition::Out,
+                                    crate::symbol_resolver::UnboundSpecialization::UseUpperBound,
+                                )
+                            })
                             .collect()
                     })
             })
@@ -38112,9 +38136,13 @@ impl<'a> Checker<'a> {
             // type-parameter-shaped, erased to Any/Object, or erased to the formal's declared
             // BOUND, as `<reified T : Number>` erases to Number).
             if let Some(signature) = selected.generic_sig.as_ref() {
-                let refined = crate::symbol_resolver::ty_subst_keep_unbound(
+                let refined = crate::symbol_resolver::instantiate_slot(
+                    Some(&self.fed_source()),
+                    Some(signature),
                     signature.ret,
                     &selected.bindings,
+                    crate::symbol_resolver::TypePosition::Out,
+                    crate::symbol_resolver::UnboundSpecialization::Preserve,
                 );
                 let declared_bound_erasure = match signature.ret.non_null() {
                     Ty::TyParam(_, bound) => Some(*bound),
@@ -38143,16 +38171,6 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // A projected receiver argument binds the extension's formal to the projection itself
-            // (`List<*>.first()` binds `T` to `out Any?`). The call's VALUE takes the approximation
-            // of that capture — a projection is not a type any value has.
-            callable.ret = crate::symbol_resolver::approximate_projected_value(
-                selected
-                    .generic_sig
-                    .as_ref()
-                    .map_or(callable.ret, |signature| signature.ret),
-                callable.ret,
-            );
             let ret = callable.ret;
             let mut resolved = ResolvedExtensionCall::library(callable.clone());
             resolved.context_args = context_args;
