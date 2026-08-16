@@ -343,6 +343,97 @@ pub fn shipping_emit_options(
     }
 }
 
+/// An [`InnerClassResolver`] that also sees SAME-MODULE SOURCE classes: a nested class declared in
+/// another file of this module (`Owner$Companion` from `Owner.kt`, referenced by `Use.kt`) is not on
+/// the classpath, so [`classpath_inner_class_resolver`] alone cannot give it an `InnerClasses`
+/// entry. The snapshot mirrors `inner_class_access`: the entry carries SOURCE visibility, `static`
+/// unless `inner`, and the class-kind bits, exactly as the same-file candidate path derives them.
+pub fn module_inner_class_resolver(
+    syms: &FrontendSymbols,
+    cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
+) -> crate::jvm::classfile::InnerClassResolver {
+    const PUBLIC: u16 = 0x0001;
+    const PROTECTED: u16 = 0x0004;
+    const PRIVATE: u16 = 0x0002;
+    const STATIC: u16 = 0x0008;
+    const FINAL: u16 = 0x0010;
+    const INTERFACE: u16 = 0x0200;
+    const ABSTRACT: u16 = 0x0400;
+    const ANNOTATION: u16 = 0x2000;
+    const ENUM: u16 = 0x4000;
+
+    let mut source: std::collections::HashMap<String, crate::jvm::classfile::InnerClassDetails> =
+        std::collections::HashMap::new();
+    for (type_name, class) in &syms.classes {
+        let internal = type_name.render();
+        // Only MEMBER-nested classes get snapshot entries, and the outer boundary is NOT the last
+        // `$` (mirroring `register_inner_classes`): the boundary is the longest proper prefix that
+        // is itself a module class. A name whose remainder still carries `$` past that boundary is
+        // a hoisted LOCAL class (`pkg/Outer$m$Local` — `m` is a function, not a class) or a
+        // backticked simple name; kotlinc spells a local's entry with `outer_class_info_index = 0`,
+        // and inventing an outer makes the loader chase a class that does not exist
+        // (`NoClassDefFoundError`). The two are not distinguishable from the name alone (a
+        // backticked MEMBER `` class `X$Y` `` is denotable cross-file and would deserve an entry),
+        // so the snapshot omits the ambiguous shape rather than risk fabricating an outer.
+        let Some(boundary) = internal
+            .char_indices()
+            .filter(|&(_, ch)| ch == '$')
+            .map(|(at, _)| at)
+            .filter(|&at| {
+                syms.classes
+                    .contains_key(&crate::types::type_name(&internal[..at]))
+            })
+            .max()
+        else {
+            continue; // top-level (or nested under nothing this module declares)
+        };
+        let (outer, simple) = (&internal[..boundary], &internal[boundary + 1..]);
+        if simple.contains('$') {
+            continue;
+        }
+        let visibility = match class.visibility {
+            crate::types::Visibility::Protected => PROTECTED,
+            crate::types::Visibility::Private => PRIVATE,
+            _ => PUBLIC,
+        };
+        let mut access = visibility
+            | if class.inner_of_name().is_some() {
+                0
+            } else {
+                STATIC
+            };
+        if class.is_annotation() {
+            access |= INTERFACE | ABSTRACT | ANNOTATION;
+        } else if class.is_interface() {
+            access |= INTERFACE | ABSTRACT;
+        } else if syms
+            .enum_entries_of(class.internal_name())
+            .is_some_and(|entries| !entries.is_empty())
+        {
+            access |= FINAL | ENUM;
+        } else if class.is_sealed() || class.is_abstract() {
+            access |= ABSTRACT;
+        } else if class.is_final() {
+            access |= FINAL;
+        }
+        source.insert(
+            internal.clone(),
+            crate::jvm::classfile::InnerClassDetails {
+                outer: Some(outer.to_string()),
+                name: Some(simple.to_string()),
+                access,
+            },
+        );
+    }
+    let classpath = classpath_inner_class_resolver(cp);
+    std::rc::Rc::new(move |internal: &str| {
+        source
+            .get(internal)
+            .cloned()
+            .or_else(|| classpath(internal))
+    })
+}
+
 pub fn classpath_inner_class_resolver(
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
 ) -> crate::jvm::classfile::InnerClassResolver {
@@ -461,9 +552,13 @@ impl Backend for JvmBackend {
         let syms = checked.symbols;
         let module_name = checked.module_name;
 
-        let emit_opts = shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
-            .with_jvm_default(self.jvm_default)
-            .with_lambda_modes(self.lambda_modes);
+        let mut emit_opts =
+            shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
+                .with_jvm_default(self.jvm_default)
+                .with_lambda_modes(self.lambda_modes);
+        // The shipping resolver sees only the classpath; a nested class declared in ANOTHER FILE of
+        // this module also needs an `InnerClasses` entry, and only the checked symbols know it.
+        emit_opts.inner_class_resolver = Some(module_inner_class_resolver(syms, self.cp.clone()));
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
