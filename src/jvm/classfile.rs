@@ -512,9 +512,43 @@ struct LateField {
     const_value: Option<crate::ir::IrConst>,
     /// BINARY-retention nullability annotation type descriptor (`Lorg/jetbrains/annotations/NotNull;`).
     ann: Option<String>,
+    /// USER annotations on the field (`@Target(FIELD)` on the property), split by retention. Held
+    /// unencoded so their types intern in the field-table window, where kotlinc interns them —
+    /// before the class's own `@Metadata`, not after the methods.
+    user_visible: Vec<crate::ir::AppliedAnnotation>,
+    user_invisible: Vec<crate::ir::AppliedAnnotation>,
     /// `true` ⇒ the realized field LEADS the field table (before the eagerly-added fields) — the
     /// `Companion` field's position — while its pool entries still intern late.
     lead: bool,
+}
+
+/// Partition retained declaration annotations into the two class-file attributes the JVM splits them
+/// across: `RuntimeVisibleAnnotations` (Kotlin's RUNTIME, the default) then `RuntimeInvisibleAnnotations`
+/// (BINARY). Common IR carries one list per declaration; this boundary is the only place the split
+/// exists. SOURCE-retained applications never reach the IR.
+fn split_declaration_annotations(
+    annotations: &crate::ir::DeclarationAnnotations,
+) -> (
+    Vec<crate::ir::AppliedAnnotation>,
+    Vec<crate::ir::AppliedAnnotation>,
+) {
+    use crate::types::AnnotationRetention;
+    let of = |keep: fn(&AnnotationRetention) -> bool| {
+        annotations
+            .iter()
+            .filter(|retained| keep(&retained.retention))
+            .map(|retained| retained.annotation.clone())
+            .collect()
+    };
+    (
+        of(|retention| {
+            matches!(
+                retention,
+                AnnotationRetention::Default | AnnotationRetention::Runtime
+            )
+        }),
+        of(|retention| matches!(retention, AnnotationRetention::Binary)),
+    )
 }
 
 pub struct ClassWriter {
@@ -832,6 +866,8 @@ impl ClassWriter {
             access,
             name: name.to_string(),
             desc: desc.to_string(),
+            user_visible: Vec::new(),
+            user_invisible: Vec::new(),
             signature: signature.map(str::to_string),
             const_value,
             ann: ann.map(str::to_string),
@@ -850,6 +886,8 @@ impl ClassWriter {
             const_value: None,
             // The `Companion` field is a non-null reference — kotlinc annotates it.
             ann: Some("Lorg/jetbrains/annotations/NotNull;".to_string()),
+            user_visible: Vec::new(),
+            user_invisible: Vec::new(),
             lead: true,
         });
     }
@@ -878,21 +916,29 @@ impl ClassWriter {
                     IrConst::Null => return None,
                 })
             });
-            let invisible_anns = lf
-                .ann
-                .as_ref()
-                .map(|a| {
-                    let ti = self.cp.utf8(a);
-                    vec![vec![(ti >> 8) as u8, ti as u8, 0, 0]]
-                })
-                .unwrap_or_default();
+            // A user annotation interns before the nullability one, matching the attribute order
+            // (`RuntimeVisibleAnnotations` precedes `RuntimeInvisibleAnnotations`).
+            let visible_anns: Vec<Vec<u8>> = lf
+                .user_visible
+                .iter()
+                .map(|annotation| self.encode_annotation(annotation))
+                .collect();
+            let mut invisible_anns: Vec<Vec<u8>> = lf
+                .user_invisible
+                .iter()
+                .map(|annotation| self.encode_annotation(annotation))
+                .collect();
+            invisible_anns.extend(lf.ann.as_ref().map(|a| {
+                let ti = self.cp.utf8(a);
+                vec![(ti >> 8) as u8, ti as u8, 0, 0]
+            }));
             let info = FieldInfo {
                 access: lf.access,
                 name: n,
                 desc: d,
                 signature,
                 const_value: cv,
-                visible_anns: Vec::new(),
+                visible_anns,
                 invisible_anns,
             };
             if lf.lead {
@@ -931,6 +977,21 @@ impl ClassWriter {
         }
     }
 
+    /// Attach user annotations to the most recently DEFERRED field ([`Self::add_field_late_sig`]),
+    /// which realizes them when the field table interns.
+    pub fn set_last_late_field_annotations(
+        &mut self,
+        annotations: &crate::ir::DeclarationAnnotations,
+    ) {
+        // Kept UNENCODED: a deferred field's annotation types must intern in the field-table window,
+        // which `intern_late_fields` opens, not here. Only the retention → attribute split happens now.
+        let (visible, invisible) = split_declaration_annotations(annotations);
+        if let Some(field) = self.late_fields.last_mut() {
+            field.user_visible = visible;
+            field.user_invisible = invisible;
+        }
+    }
+
     /// Encode one `annotation` structure (type_index + element_value_pairs) to a fresh byte buffer.
     fn encode_annotation(&mut self, a: &crate::ir::AppliedAnnotation) -> Vec<u8> {
         let mut body = Vec::new();
@@ -944,22 +1005,15 @@ impl ClassWriter {
         &mut self,
         annotations: &crate::ir::DeclarationAnnotations,
     ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
-        use crate::types::AnnotationRetention;
-        let mut visible = Vec::new();
-        let mut invisible = Vec::new();
-        for retained in annotations.iter() {
-            if matches!(
-                retained.retention,
-                AnnotationRetention::Default | AnnotationRetention::Runtime
-            ) {
-                visible.push(self.encode_annotation(&retained.annotation));
-            }
-        }
-        for retained in annotations.iter() {
-            if matches!(retained.retention, AnnotationRetention::Binary) {
-                invisible.push(self.encode_annotation(&retained.annotation));
-            }
-        }
+        let (visible, invisible) = split_declaration_annotations(annotations);
+        let visible = visible
+            .iter()
+            .map(|annotation| self.encode_annotation(annotation))
+            .collect();
+        let invisible = invisible
+            .iter()
+            .map(|annotation| self.encode_annotation(annotation))
+            .collect();
         (visible, invisible)
     }
 
@@ -2210,12 +2264,18 @@ impl ClassWriter {
         let mut field_sig_name: Option<u16> = None;
         let mut constval_attr_name: Option<u16> = None;
         let mut field_ria: Option<u16> = None;
+        // A field's own `RuntimeVisibleAnnotations` name interns in this same field-first window; the
+        // method/class-level uses below dedup onto it.
+        let mut field_rva: Option<u16> = None;
         for i in 0..self.fields.len() {
             if self.fields[i].signature.is_some() && field_sig_name.is_none() {
                 field_sig_name = Some(self.cp.utf8("Signature"));
             }
             if self.fields[i].const_value.is_some() && constval_attr_name.is_none() {
                 constval_attr_name = Some(self.cp.utf8("ConstantValue"));
+            }
+            if !self.fields[i].visible_anns.is_empty() && field_rva.is_none() {
+                field_rva = Some(self.cp.utf8("RuntimeVisibleAnnotations"));
             }
             if !self.fields[i].invisible_anns.is_empty() && field_ria.is_none() {
                 field_ria = Some(self.cp.utf8("RuntimeInvisibleAnnotations"));
@@ -2266,7 +2326,7 @@ impl ClassWriter {
         // A method-level `RuntimeVisibleAnnotations` shares its attribute-name entry with the class
         // annotations when both are present; the class table is written later, so intern on first
         // METHOD use here and let that later write reuse the index.
-        let mut vis_ann_name: Option<u16> = None;
+        let mut vis_ann_name: Option<u16> = field_rva;
         // `Deprecated` interned from the per-method sequence above; the class-level fallback below
         // dedups onto it when a method already introduced the name.
         let mut method_dep_name: Option<u16> = None;
@@ -2305,11 +2365,7 @@ impl ClassWriter {
                 .then(|| self.cp.utf8("Deprecated"))
         });
         // Field annotation attribute names, interned only when a field actually carries them.
-        let field_vis_ann_name = if self.fields.iter().any(|f| !f.visible_anns.is_empty()) {
-            Some(self.cp.utf8("RuntimeVisibleAnnotations"))
-        } else {
-            None
-        };
+        let field_vis_ann_name = field_rva;
         // Field-level `RuntimeInvisibleAnnotations` reuses the name interned before `Code` (dedup).
         let field_invis_ann_name = if self.fields.iter().any(|f| !f.invisible_anns.is_empty()) {
             invis_ann_name

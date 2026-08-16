@@ -999,6 +999,12 @@ pub struct IrClass {
     /// fields), by field name — emitted into each field's `Runtime[In]VisibleAnnotations`. Empty for a
     /// class whose fields carry none.
     pub field_annotations: Vec<FieldAnnotations>,
+    /// User annotations that landed on the PROPERTY itself (`@Anno val v`, where the annotation's
+    /// `@Target` admits `PROPERTY`), by property name. Kotlin properties have no class-file
+    /// declaration, so these are emitted onto a synthetic `get<Name>$annotations()` marker method
+    /// that the property's `JvmPropertySignature` names. Empty for a class whose properties carry
+    /// none.
+    pub property_annotations: Vec<PropertyAnnotations>,
     /// For an `annotation class`: its declared Kotlin retention. `None` for every other class. Drives the
     /// meta-annotations the emitter stamps on the annotation interface — kotlinc writes
     /// `@kotlin.annotation.Retention(<declared>)` for an EXPLICIT `@Retention(…)` plus
@@ -1045,6 +1051,14 @@ pub struct RetainedAnnotation {
 
 /// Backend-agnostic annotations on any declaration kind. A HIDDEN-deprecated declaration is
 /// identified from these records rather than a separate flag: the annotation IS the fact.
+/// User annotations that landed on one PROPERTY. Retention remains semantic until a backend maps
+/// the declaration onto its physical representation (a JVM marker method, for example).
+#[derive(Clone, Debug)]
+pub struct PropertyAnnotations {
+    pub property: String,
+    pub annotations: DeclarationAnnotations,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DeclarationAnnotations(Vec<RetainedAnnotation>);
 
@@ -1055,6 +1069,12 @@ impl DeclarationAnnotations {
 
     pub fn iter(&self) -> std::slice::Iter<'_, RetainedAnnotation> {
         self.0.iter()
+    }
+
+    /// Applied annotation payloads in declaration order, independent of the physical retention
+    /// partition a backend may later require.
+    pub fn applications(&self) -> impl Iterator<Item = &AppliedAnnotation> {
+        self.0.iter().map(|retained| &retained.annotation)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1470,6 +1490,10 @@ pub struct IrFile {
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
     /// carry none, and every synthesized function stays constructible without naming them.
     pub function_annotations: std::collections::HashMap<u32, DeclarationAnnotations>,
+    /// `(class, property name)` → the synthetic `get<Name>$annotations()` marker method that carries
+    /// that property's annotations. The property's `JvmPropertySignature` names the marker, so
+    /// emission reads its FINAL name from here (the value-class pass may have mangled it).
+    pub property_annotation_markers: std::collections::HashMap<(TypeName, String), u32>,
     pub exprs: Vec<IrExpr>,
     /// Sparse construction facts keyed by the ordinary [`IrExpr::New`] identity. Common lowering
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
@@ -2837,6 +2861,7 @@ mod tests {
             properties: Vec::new(),
             fields: Vec::new(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             ctor_param_count: 0,
             ctor_args: Vec::new(),
             init_body: None,

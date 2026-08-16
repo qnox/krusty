@@ -431,6 +431,7 @@ impl<'a> ModuleSymbols<'a> {
             enum_entries_accessor,
             named_parameter_lists,
             retention: None,
+            annotation_targets: None,
         };
         let mut names = c
             .methods

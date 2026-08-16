@@ -2657,6 +2657,13 @@ impl JvmLibraries {
                 retention: ci.retention.clone().or_else(|| {
                     (kind == crate::libraries::TypeKind::Annotation).then(|| "CLASS".to_string())
                 }),
+                // The declared `@Target`, normalized to the three sites a PROPERTY application can
+                // take. A KOTLIN annotation states its own set (`kotlin.annotation.Target`, the only
+                // place `PROPERTY` can be named); a JAVA `@interface` states `ElementType`s, none of
+                // which is a Kotlin property — so kotlinc puts a bare Java annotation on a property's
+                // FIELD, never on the property.
+                annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
+                    .then(|| classpath_annotation_targets(&ci)),
             })
         }
     }
@@ -3416,6 +3423,7 @@ fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
         enum_entries_accessor: None,
         named_parameter_lists: Vec::new(),
         retention: None,
+        annotation_targets: None,
     })
 }
 
@@ -3482,6 +3490,7 @@ fn builtin_library_type(
         enum_entries_accessor: None,
         named_parameter_lists: Vec::new(),
         retention: None,
+        annotation_targets: None,
     }
 }
 
@@ -6185,6 +6194,38 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                 ctor_desc: "(Ljava/lang/String;)V".to_string(),
             }),
         }
+    }
+}
+
+/// Where an application of this classpath annotation, written with no use-site prefix, may land.
+///
+/// A KOTLIN annotation carries `@kotlin.annotation.Target(allowedTargets = …)` — the only form that
+/// can name `PROPERTY` — and declaring none means "applicable everywhere". A JAVA `@interface`
+/// carries `@java.lang.annotation.Target(ElementType…)`, and Java has no property: kotlinc places a
+/// bare Java annotation written on a Kotlin property on its parameter or backing field instead.
+fn classpath_annotation_targets(
+    ci: &crate::jvm::classreader::ClassInfo,
+) -> crate::types::AnnotationTargets {
+    if !ci.kotlin_targets.is_empty() {
+        return crate::types::AnnotationTargets {
+            value_parameter: ci.kotlin_targets.iter().any(|t| t == "VALUE_PARAMETER"),
+            property: ci.kotlin_targets.iter().any(|t| t == "PROPERTY"),
+            field: ci.kotlin_targets.iter().any(|t| t == "FIELD"),
+        };
+    }
+    // A Kotlin annotation is identified by its own `@Metadata`; without a declared `@Target` it is
+    // applicable everywhere.
+    if ci.meta.class_kind.is_some() {
+        return crate::types::AnnotationTargets::DEFAULT;
+    }
+    // Java. An `@interface` with no `@Target` is applicable in every declaration context.
+    let java_target = |name: &str| {
+        ci.java_targets.is_empty() || ci.java_targets.iter().any(|entry| entry == name)
+    };
+    crate::types::AnnotationTargets {
+        value_parameter: java_target("PARAMETER"),
+        property: false,
+        field: java_target("FIELD"),
     }
 }
 

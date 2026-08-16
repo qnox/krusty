@@ -8,15 +8,19 @@
 //! and each declaration's `javap -v` attribute section is compared. That pins the annotation
 //! payload, the `Deprecated` attribute, `ACC_SYNTHETIC` on a hidden declaration, and the attribute
 //! ORDER — the facts a shape-only assertion would miss.
+//!
+//! The class file's attribute is only half of it: kotlinc ALSO mirrors a declaration's annotations
+//! into `@kotlin.Metadata`, which is where a Kotlin consumer reads them back from. The
+//! `…_reaches_metadata` cases below compare that payload (`d1`/`d2`) directly.
 use std::fs;
 
 use super::common;
 
 /// Per-DECLARATION annotation facts from `javap -v`, keyed by the declaration line: its flags and
 /// its annotation attributes, with constant-pool indices stripped (`#12` → `#`). Class-level
-/// attributes (notably `@Metadata`) are excluded — kotlinc also records annotations in the
-/// metadata protobuf, which krusty does not write yet; that gap is tracked separately and would
-/// otherwise mask what this comparison is for.
+/// attributes (notably `@Metadata`) are excluded — the metadata mirror of these same annotations is
+/// compared separately (`metadata_payload`), and folding it in here would mask which of the two
+/// halves diverged.
 fn annotation_shapes(
     dir: &std::path::Path,
     class: &str,
@@ -69,10 +73,9 @@ fn annotation_shapes(
 }
 
 /// The class's `Constant pool:` listing, one entry per line with the index dropped. Excludes the
-/// `@Metadata` payload (a `Utf8` whose text starts with a NUL) — kotlinc records annotations in the
-/// metadata protobuf and krusty does not yet, a tracked gap that would otherwise mask everything
-/// else. Pool ORDER is what the annotation-reservation and attribute-name interning fixes are
-/// about, so this compares the sequence, not a set.
+/// `@Metadata` payload (a `Utf8` whose text starts with a NUL), which `metadata_payload` compares on
+/// its own terms. Pool ORDER is what the annotation-reservation and attribute-name interning fixes
+/// are about, so this compares the sequence, not a set.
 fn constant_pool(dir: &std::path::Path, class: &str) -> Vec<String> {
     let path = dir.join(format!("{class}.class"));
     let raw = common::javap(&["-v", "-p", &path.to_string_lossy()]).expect("pooled javap");
@@ -233,6 +236,275 @@ fn require_same_annotations_with(
     let (krusty_dir, kotlinc_dir) = compile_both_with(name, file, src, library)
         .unwrap_or_else(|| panic!("{name}: provisioned kotlinc/JAVA_HOME unavailable"));
     assert_compiled_annotations(name, class, decls, &krusty_dir, &kotlinc_dir);
+}
+
+/// The class's `@kotlin.Metadata` payload — the `d1`/`d2` lines of `javap -v`, verbatim. This is the
+/// Kotlin-level MIRROR of an annotation: the class file's `RuntimeVisibleAnnotations` attribute makes
+/// the annotation work at runtime, while a Kotlin consumer (and `kotlin-reflect`) reads the applied
+/// annotations back out of these two arrays.
+fn metadata_payload(dir: &std::path::Path, class: &str) -> Vec<String> {
+    let path = dir.join(format!("{class}.class"));
+    let raw = common::javap(&["-v", "-p", &path.to_string_lossy()]).expect("pooled javap");
+    let payload: Vec<String> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("d1=") || line.starts_with("d2="))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(payload.len(), 2, "{class} carries a @Metadata d1 and d2");
+    payload
+}
+
+/// A declaration's annotations must reach `@Metadata`, not only the class file's annotation
+/// attributes — compared against kotlinc's own payload, which pins the record's field numbers, the
+/// `HAS_ANNOTATIONS` flag bit, and the position the annotation's class id takes in the string table.
+fn require_same_metadata(name: &str, file: &str, class: &str, src: &str) {
+    let (krusty_dir, kotlinc_dir) = compile_both(name, file, src)
+        .unwrap_or_else(|| panic!("{name}: provisioned kotlinc/JAVA_HOME unavailable"));
+    assert_eq!(
+        metadata_payload(&krusty_dir, class),
+        metadata_payload(&kotlinc_dir, class),
+        "{name}: {class}'s @Metadata must record the applied annotations exactly as kotlinc does"
+    );
+}
+
+/// The whole class file must be byte-for-byte identical to kotlinc's — the strongest form, available
+/// when nothing but the metadata mirror separated the two.
+fn require_identical_class(name: &str, file: &str, class: &str, src: &str) {
+    require_identical_class_with(name, file, class, src, None)
+}
+
+/// [`require_identical_class`] against an extra classpath entry — a Java `@interface` fixture, whose
+/// `@Target` only the class file states.
+fn require_identical_class_with(
+    name: &str,
+    file: &str,
+    class: &str,
+    src: &str,
+    library: Option<&std::path::Path>,
+) {
+    let (krusty_dir, kotlinc_dir) = compile_both_with(name, file, src, library)
+        .unwrap_or_else(|| panic!("{name}: provisioned kotlinc/JAVA_HOME unavailable"));
+    let read = |dir: &std::path::Path| {
+        fs::read(dir.join(format!("{class}.class")))
+            .unwrap_or_else(|e| panic!("{name}: reading {class}.class: {e}"))
+    };
+    let (krusty, kotlinc) = (read(&krusty_dir), read(&kotlinc_dir));
+    assert_eq!(
+        metadata_payload(&krusty_dir, class),
+        metadata_payload(&kotlinc_dir, class),
+        "{name}: {class}'s @Metadata must match kotlinc's"
+    );
+    assert_eq!(
+        krusty,
+        kotlinc,
+        "{name}: {class} must be byte-for-byte identical to kotlinc (krusty {} B, kotlinc {} B)",
+        krusty.len(),
+        kotlinc.len(),
+    );
+}
+
+/// An annotated MEMBER FUNCTION: the class file's `RuntimeVisibleAnnotations` always carried it, but
+/// the `@Metadata` mirror did not, so a Kotlin consumer reading the declaration back saw an
+/// unannotated function. kotlinc records `Function.annotation` (f12) plus the `HAS_ANNOTATIONS` flag
+/// bit; with those the whole class file matches.
+#[test]
+fn member_function_annotation_reaches_metadata() {
+    require_identical_class(
+        "member_fn_anno",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         annotation class Mark\n\n\
+         class C {\n\
+         \x20   @Mark\n\
+         \x20   fun f(): Int = 1\n\
+         }\n",
+    );
+}
+
+/// The same mirror with ARGUMENTS and a second annotation: the record carries the element values
+/// (`Annotation.argument`), so the ORDER the values intern their strings in is pinned too.
+#[test]
+fn member_function_annotation_arguments_reach_metadata() {
+    require_same_metadata(
+        "member_fn_anno_args",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         annotation class Mark(val tag: String, val level: Int)\n\n\
+         annotation class Plain\n\n\
+         class C {\n\
+         \x20   @Mark(tag = \"t\", level = 2)\n\
+         \x20   @Plain\n\
+         \x20   fun f(): Int = 1\n\
+         }\n",
+    );
+}
+
+/// A BINARY-retained annotation reaches the same record. The class file splits the two retentions
+/// into different attributes (`RuntimeInvisibleAnnotations` here); `@Metadata` keeps ONE list, so
+/// mirroring only the runtime-visible half would lose the declaration kotlinc records.
+#[test]
+fn binary_retained_member_annotation_reaches_metadata() {
+    require_same_metadata(
+        "member_fn_binary_anno",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         @Retention(AnnotationRetention.BINARY)\n\
+         annotation class Mark\n\n\
+         class C {\n\
+         \x20   @Mark\n\
+         \x20   fun f(): Int = 1\n\
+         }\n",
+    );
+}
+
+/// An annotated PROPERTY. Kotlin has no `property` in the class file, so kotlinc parks the
+/// annotation on a synthetic `getV$annotations()V` marker method and names it from
+/// `JvmPropertySignature.syntheticMethod` — the annotation is not on the field and not on the getter.
+/// krusty dropped it from both the class file and the metadata.
+#[test]
+fn property_annotation_becomes_a_synthetic_marker_method() {
+    require_identical_class(
+        "prop_anno",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         annotation class Mark\n\n\
+         class C {\n\
+         \x20   @Mark\n\
+         \x20   val v: Int = 1\n\
+         }\n",
+    );
+}
+
+/// An annotated `var` with ARGUMENTS: the marker carries the element values, and the property's
+/// SETTER flags word is written out beside the getter's (both differ from the default kotlinc
+/// derives from an annotated property). Two annotated properties also pin each marker's position —
+/// it follows its own getter, not the last one.
+#[test]
+fn annotated_var_and_second_property_keep_their_own_markers() {
+    require_identical_class(
+        "prop_anno_var",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         annotation class Mark(val tag: String)\n\n\
+         class C {\n\
+         \x20   @Mark(\"a\")\n\
+         \x20   var first: Int = 1\n\
+         \x20   @Mark(\"b\")\n\
+         \x20   val second: String = \"s\"\n\
+         }\n",
+    );
+}
+
+/// `@Target` written as a NAMED array (`allowedTargets = [...]`) — the only spelling that can list
+/// more than one target — must resolve to the same target set as the positional vararg one. Reading
+/// only the vararg form left the set empty, which drops the annotation from BOTH use sites.
+#[test]
+fn array_spelled_target_still_places_the_annotation() {
+    require_identical_class(
+        "prop_anno_array_target",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         @Target(allowedTargets = [AnnotationTarget.FIELD, AnnotationTarget.VALUE_PARAMETER])\n\
+         annotation class Mark\n\n\
+         class C {\n\
+         \x20   @Mark\n\
+         \x20   val v: Int = 1\n\
+         }\n",
+    );
+}
+
+/// A FIELD-targeted annotation on the same declaration takes the other route: Kotlin's use-site
+/// default picks the backing field, so the annotation lands on the field and the metadata records it
+/// in the property's field-annotation list — no marker method exists.
+#[test]
+fn field_targeted_property_annotation_lands_on_the_backing_field() {
+    require_identical_class(
+        "prop_field_anno",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         @Target(AnnotationTarget.FIELD)\n\
+         annotation class Mark\n\n\
+         class C {\n\
+         \x20   @Mark\n\
+         \x20   val v: Int = 1\n\
+         }\n",
+    );
+}
+
+/// A primary-constructor `val` is a property too, but its annotations default to the PARAMETER — so
+/// only an annotation that cannot target a value parameter reaches the property (or the field). Both
+/// non-parameter routes are exercised here; the plain `@Mark` case stays a parameter annotation.
+#[test]
+fn constructor_property_annotations_follow_their_declared_target() {
+    require_identical_class(
+        "ctor_prop_anno",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         @Target(AnnotationTarget.PROPERTY)\n\
+         annotation class OnProperty\n\n\
+         @Target(AnnotationTarget.FIELD)\n\
+         annotation class OnField\n\n\
+         class C(@OnProperty val a: Int, @OnField val b: Int)\n",
+    );
+}
+
+/// A declaration carrying BOTH an annotation and a `JvmMethodSignature` (a `suspend` member, whose
+/// CPS descriptor the proto types do not imply) pins the two ORDERS apart: the signature interns its
+/// strings FIRST, while the annotation serializes first (f12 before f100). Getting that backwards
+/// swaps two d2 entries and every index after them.
+#[test]
+fn annotated_suspend_member_interns_its_signature_before_the_annotation() {
+    require_same_metadata(
+        "member_suspend_anno",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         annotation class Mark\n\n\
+         class C {\n\
+         \x20   @Mark\n\
+         \x20   suspend fun f(a: Int): Int = a\n\
+         }\n",
+    );
+}
+
+/// The same order through the FACADE's package metadata, which a separate serializer builds.
+#[test]
+fn annotated_suspend_top_level_function_interns_its_signature_before_the_annotation() {
+    require_same_metadata(
+        "facade_suspend_anno",
+        "A.kt",
+        "p/AKt",
+        "package p\n\n\
+         annotation class Mark\n\n\
+         @Mark\n\
+         suspend fun f(a: Int): Int = a\n",
+    );
+}
+
+/// An annotated SECONDARY CONSTRUCTOR — `Constructor.annotation` is its own field (f3), and the
+/// constructor's flags word gains the same `HAS_ANNOTATIONS` bit (22 → 23).
+#[test]
+fn secondary_constructor_annotation_reaches_metadata() {
+    require_same_metadata(
+        "ctor_anno",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         annotation class Mark\n\n\
+         class C(val x: Int) {\n\
+         \x20   @Mark\n\
+         \x20   constructor() : this(1)\n\
+         }\n",
+    );
 }
 
 #[test]
@@ -887,6 +1159,42 @@ fn omitted_java_default_and_named_vararg_constants_match_kotlinc() {
          \x20   @Vals(value = booleanArrayOf(K.T, K.F))\n\
          \x20   fun constants() {}\n\
          }\n",
+        Some(library.as_path()),
+    );
+}
+
+/// A CLASSPATH annotation's `@Target` must be read from its class file, not assumed. A Java
+/// `@interface` restricted to `ElementType.FIELD` — the shape every field-oriented Java framework
+/// annotation has — cannot target a Kotlin PROPERTY at all, so kotlinc puts it on the backing field.
+/// Assuming the Kotlin default (applicable everywhere) instead parks it on the property's synthetic
+/// `$annotations` marker, where nothing reflecting over fields will ever see it.
+#[test]
+fn a_field_targeted_java_annotation_lands_on_the_backing_field() {
+    let java = [(
+        "OnField.java".into(),
+        "package jl;
+         import java.lang.annotation.*;
+         @Retention(RetentionPolicy.RUNTIME)
+         @Target({ElementType.FIELD})
+         public @interface OnField {}
+"
+        .into(),
+    )];
+    let (library, _) = common::javac_compile(&java, &[])
+        .expect("javac must build the field-targeted annotation fixture");
+    require_identical_class_with(
+        "java_field_target",
+        "A.kt",
+        "p/C",
+        "package p
+
+         import jl.OnField
+
+         class C {
+             @OnField
+             val v: Int = 1
+         }
+",
         Some(library.as_path()),
     );
 }

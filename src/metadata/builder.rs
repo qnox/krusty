@@ -428,6 +428,13 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     if flags != 0x06 {
         p.field_varint(9, flags);
     }
+    // The `JvmMethodSignature` extension (f100) INTERNS its strings before the annotations even
+    // though it SERIALIZES after them — kotlinc's serializer writes the extension first, so an
+    // ANNOTATED suspend function's CPS descriptor precedes `Lp/Mark;` in d2. Interning it early only
+    // when annotations exist leaves every unannotated function's string table exactly where it was.
+    let mut signature = (!f.annotations.is_empty())
+        .then(|| method_signature_pb(st, f))
+        .flatten();
     // Applied annotations (Function.annotation = 12): `Annotation.id` (field 1) referencing the class
     // through the string table's DESC_TO_CLASS_ID form, exactly as kotlinc records e.g.
     // `@LowPriorityInOverloadResolution`.
@@ -442,15 +449,22 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     }
     // JvmProtoBuf.methodSignature extension (Function field 100): only the descriptor (field 2) — the
     // name defaults to the function's, exactly as kotlinc emits for a top-level function.
-    if let Some(desc) = &f.jvm_desc {
-        let mut sig = Pb::new();
-        if let Some(name) = &f.jvm_name {
-            sig.field_varint(1, st.local(name) as u64); // JvmMethodSignature.name = 1 (mangled)
-        }
-        sig.field_varint(2, st.local(desc) as u64); // JvmMethodSignature.desc = 2
-        p.field_message(100, &sig); // Function.methodSignature = 100
+    signature = signature.or_else(|| method_signature_pb(st, f));
+    if let Some(sig) = &signature {
+        p.field_message(100, sig); // Function.methodSignature = 100
     }
     p
+}
+
+/// The function's `JvmMethodSignature` message, or `None` when it records no physical handle.
+fn method_signature_pb(st: &mut StringTable, f: &FnMeta) -> Option<Pb> {
+    let desc = f.jvm_desc.as_ref()?;
+    let mut sig = Pb::new();
+    if let Some(name) = &f.jvm_name {
+        sig.field_varint(1, st.local(name) as u64); // JvmMethodSignature.name = 1 (mangled)
+    }
+    sig.field_varint(2, st.local(desc) as u64); // JvmMethodSignature.desc = 2
+    Some(sig)
 }
 
 /// A top-level property for the package metadata (`Package.property` = field 4).

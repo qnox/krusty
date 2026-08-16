@@ -79,6 +79,10 @@ pub fn run_backend_passes_with_metadata(
         jvm_plugin_type_descriptor,
     );
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
+    // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
+    // declaration that has no class-file form. Before the value-class pass, which renames a marker
+    // together with its mangled getter.
+    crate::jvm::property_annotations::synthesize_property_annotation_markers(ir);
     // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
     // property declaration and semantic initializer; this pass selects the outer-static realization.
     crate::jvm::companion::lower_companion_properties(ir);

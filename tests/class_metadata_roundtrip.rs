@@ -29,6 +29,8 @@ fn class_info_kind(internal: &str, d1: Vec<u8>, d2: Vec<String>, kind: Option<i3
         meta: decode_metadata(&d1_strings, &d2, kind, internal, None, &[]),
         signature: None,
         retention: None,
+        kotlin_targets: Vec::new(),
+        java_targets: Vec::new(),
         inner_classes: Vec::new(),
     }
 }
@@ -146,6 +148,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
+        annotations: Vec::new(),
     }];
     let own_names = vec!["U".to_string()];
     let captured = vec![outer];
@@ -205,6 +208,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
+        annotations: Vec::new(),
     }];
     let own_names = vec!["V".to_string()];
     let captured = vec![outer, middle];

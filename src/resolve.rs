@@ -2557,6 +2557,10 @@ pub struct SymbolTable {
     /// Retention normalized at the declaration/provider boundary by resolved annotation identity.
     /// Lowering and backends consume this fact without reopening a source declaration or classpath.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
+    /// Declared `@Target` set per annotation identity, normalized at the same declaration/provider
+    /// boundary as the retention. An identity absent from this map declares no `@Target` and is
+    /// therefore applicable everywhere ([`crate::types::AnnotationTargets::DEFAULT`]).
+    annotation_targets: HashMap<TypeName, crate::types::AnnotationTargets>,
     /// Top-level function name → the facade class it lives on (`helper` → `pkg/AKt`), for the WHOLE
     /// multi-file compilation. Populated only by the multi-file driver (which knows each file's
     /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
@@ -2630,6 +2634,7 @@ impl Default for SymbolTable {
             class_names: ClassNames::default(),
             resolved_annotations: HashMap::new(),
             annotation_retentions: HashMap::new(),
+            annotation_targets: HashMap::new(),
             fn_facades: HashMap::new(),
             fn_facades_by_decl: HashMap::new(),
             unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
@@ -2795,6 +2800,15 @@ impl SymbolTable {
         annotation: TypeName,
     ) -> Option<crate::types::AnnotationRetention> {
         self.annotation_retentions.get(&annotation).copied()
+    }
+
+    /// The annotation's declared `@Target` set; an annotation that declares none is applicable
+    /// everywhere, which is what Kotlin's use-site defaulting assumes.
+    pub fn annotation_targets(&self, annotation: TypeName) -> crate::types::AnnotationTargets {
+        self.annotation_targets
+            .get(&annotation)
+            .copied()
+            .unwrap_or(crate::types::AnnotationTargets::DEFAULT)
     }
 
     /// Insert under the class's own internal name (the map's key scheme).
@@ -6019,6 +6033,51 @@ fn collect_signatures_with_cp_impl(
             table
                 .annotation_retentions
                 .insert(annotation_identity, retention);
+            // `@Target(AnnotationTarget.X, …)` decides where an application written with no use-site
+            // prefix lands. Only the three declaration sites a PROPERTY application can take are
+            // modeled; an annotation class that declares no `@Target` is applicable everywhere and is
+            // left out of the map entirely.
+            let declared_targets = class
+                .annotations
+                .iter()
+                .zip(&class.annotation_args)
+                .find_map(|(annotation, arguments)| {
+                    table
+                        .resolved_annotation(file_index as u32, annotation)
+                        .filter(|name| name.matches("kotlin/annotation/Target"))?;
+                    let mut targets = crate::types::AnnotationTargets {
+                        value_parameter: false,
+                        property: false,
+                        field: false,
+                    };
+                    for &argument in arguments {
+                        // `@Target` takes a `vararg` of enum entries. The NAMED form spells the same
+                        // list as an array literal (`allowedTargets = [FIELD, …]`) or an `arrayOf`
+                        // call — the only way to write more than one target — so both flatten here.
+                        let entries: Vec<ExprId> = match file.expr(argument) {
+                            Expr::AnnotationArrayLiteral(elements) => elements.clone(),
+                            Expr::Call { args, .. } => args.to_vec(),
+                            _ => vec![argument],
+                        };
+                        for entry in entries {
+                            let Expr::Member { name, .. } = file.expr(entry) else {
+                                continue;
+                            };
+                            match name.as_str() {
+                                "VALUE_PARAMETER" => targets.value_parameter = true,
+                                "PROPERTY" => targets.property = true,
+                                "FIELD" => targets.field = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                    Some(targets)
+                });
+            if let Some(targets) = declared_targets {
+                table
+                    .annotation_targets
+                    .insert(annotation_identity, targets);
+            }
         }
     }
     // Providers normalize compiled declarations into `LibraryType`; retain only the semantic policy
@@ -6034,6 +6093,15 @@ fn collect_signatures_with_cp_impl(
         };
         if !library.is_annotation() {
             continue;
+        }
+        // The declared `@Target`, normalized by the provider (a Java `@interface` can never target a
+        // Kotlin property). Recorded even when the retention below is unusable, since use-site
+        // placement is a separate question from whether the annotation reaches the class file.
+        if let Some(targets) = library.annotation_targets {
+            table
+                .annotation_targets
+                .entry(annotation)
+                .or_insert(targets);
         }
         let retention = match library.retention.as_deref() {
             Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,
@@ -30003,10 +30071,12 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::types::AppliedAnnotation> {
         let values = self.fold_annotation_values(internal, arguments, None)?;
         let retention = self.syms.annotation_retention(internal)?;
+        let targets = self.syms.annotation_targets(internal);
         Some(crate::types::AppliedAnnotation {
             internal,
             values,
             retention,
+            targets,
         })
     }
 
@@ -30884,6 +30954,30 @@ impl<'a> Checker<'a> {
                 self.check_annotation_application(scope, annotation, arguments);
             }
         }
+        // Property annotations are RECORDED here — the same fold every other declaration's
+        // annotations get, so lowering can place each one by its declared `@Target` (a constructor
+        // property parameter's own parameter, the property's synthetic marker, or the backing
+        // field) — but they are NOT diagnosed. krusty's annotation folder is narrower than
+        // kotlinc's (`@SerialName("$prefix.bar")` over a `const val` folds in the serialization
+        // plugin, not here), and these applications were never checked before, so reporting from
+        // here would reject sources kotlinc accepts. What folds is recorded; what does not is
+        // dropped, exactly as before.
+        let diagnostics = self.diags.diags.len();
+        for property in cl.body_props.iter() {
+            for (annotation, arguments) in
+                property.annotations.iter().zip(&property.annotation_args)
+            {
+                self.check_annotation_application(scope, annotation, arguments);
+            }
+        }
+        for parameter in &cl.props {
+            for (annotation, arguments) in
+                parameter.annotations.iter().zip(&parameter.annotation_args)
+            {
+                self.check_annotation_application(scope, annotation, arguments);
+            }
+        }
+        self.diags.diags.truncate(diagnostics);
         // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
         // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
         // and plain) in order.
@@ -52630,6 +52724,7 @@ val result = object { fun value(): String = captured }
             enum_entries_accessor: None,
             named_parameter_lists: Vec::new(),
             retention: None,
+            annotation_targets: None,
         }
     }
 
@@ -55335,6 +55430,7 @@ fun box(): String {
                     enum_entries_accessor: None,
                     named_parameter_lists: vec![],
                     retention: None,
+                    annotation_targets: None,
                 })
             })
         }
