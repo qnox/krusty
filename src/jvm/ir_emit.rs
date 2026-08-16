@@ -117,6 +117,9 @@ pub struct EmitRun {
     /// replacement is emitted and drained by the class driver. They cannot be written inline: the
     /// emitter is mid-way through the ENCLOSING class's writer when it reaches a lambda.
     lambda_classes: std::cell::RefCell<Vec<LambdaClassPlan>>,
+    /// `(impl, name)` of every lambda class already written this file, so a body emitted twice does
+    /// not contribute two classes.
+    lambda_classes_written: std::cell::RefCell<std::collections::HashSet<(u32, String)>>,
 }
 
 /// One synthetic lambda class to write under [`LambdaMode::Class`].
@@ -147,6 +150,10 @@ struct LambdaClassPlan {
     /// Whether the body lives on an INTERFACE: a static call to one needs an `InterfaceMethodref`
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
+    /// The lambda's implementation function. IDENTITY: one source lambda has exactly one impl, so
+    /// this is what keeps a body emitted more than once (a property initializer is emitted per
+    /// constructor) from contributing a second class.
+    impl_fn: u32,
 }
 
 impl EmitRun {
@@ -3725,10 +3732,19 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
 /// Draining per class keeps a synthetic next to its enclosing class in the output order.
 fn drain_lambda_classes(env: &EmitEnv, opts: &EmitOptions) -> Vec<(String, Vec<u8>)> {
     let plans: Vec<LambdaClassPlan> = env.run.lambda_classes.borrow_mut().drain(..).collect();
-    plans
-        .iter()
-        .map(|plan| build_lambda_class(plan, opts))
-        .collect()
+    let mut written = env.run.lambda_classes_written.borrow_mut();
+    let mut out = Vec::new();
+    for plan in plans {
+        // A body can be EMITTED more than once (a class property initializer is emitted into every
+        // constructor) while still being one source lambda, and two plans must never resolve to the
+        // same class name — the output is a plain list, so a duplicate would silently overwrite the
+        // other on disk.
+        if !written.insert((plan.impl_fn, plan.internal.clone())) {
+            continue;
+        }
+        out.push(build_lambda_class(&plan, opts));
+    }
+    out
 }
 
 /// Load a value of `ty` from a local slot — the constructor's capture parameters, which arrive in the
@@ -13447,6 +13463,7 @@ impl<'a> Emitter<'a> {
                         captures: cap_tys.to_vec(),
                         arity: *arity as u32,
                         kotlin_function: sam.is_none(),
+                        impl_fn: *impl_fn,
                         owner_is_interface: self
                             .ir
                             .classes
