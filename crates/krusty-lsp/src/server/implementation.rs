@@ -2377,15 +2377,21 @@ where
         else {
             return formatting_response(id, Value::Null);
         };
-        let Some(formatted) = krusty::source::format_kotlin(
+        let client_options = crate::formatting::ClientOptions {
+            tab_size: params.options.tab_size,
+            insert_spaces: params.options.insert_spaces,
+            trim_trailing_whitespace: params.options.trim_trailing_whitespace.unwrap_or(true),
+            insert_final_newline: params.options.insert_final_newline.unwrap_or(true),
+            trim_final_newlines: params.options.trim_final_newlines.unwrap_or(true),
+        };
+        // The document path drives `.editorconfig` resolution; a non-file document (e.g.
+        // an untitled buffer) gets the client options alone instead of probing for an
+        // `.editorconfig` relative to the server process's working directory.
+        let document_path = crate::uri::file_uri_to_path(&params.text_document.uri);
+        let Some(formatted) = crate::formatting::format_document(
+            document_path.as_deref(),
             &open.text,
-            krusty::source::FormattingOptions {
-                tab_size: params.options.tab_size,
-                insert_spaces: params.options.insert_spaces,
-                trim_trailing_whitespace: params.options.trim_trailing_whitespace,
-                insert_final_newline: params.options.insert_final_newline,
-                trim_final_newlines: params.options.trim_final_newlines,
-            },
+            &client_options,
         ) else {
             return formatting_response(id, Value::Null);
         };
@@ -3335,12 +3341,14 @@ struct DocumentFormattingParams {
 struct FormattingOptions {
     tab_size: u32,
     insert_spaces: bool,
+    // Optional per LSP; absent means "let the server decide", which for us is the
+    // ktlint default (true), not the serde false default.
     #[serde(default)]
-    trim_trailing_whitespace: bool,
+    trim_trailing_whitespace: Option<bool>,
     #[serde(default)]
-    insert_final_newline: bool,
+    insert_final_newline: Option<bool>,
     #[serde(default)]
-    trim_final_newlines: bool,
+    trim_final_newlines: Option<bool>,
 }
 
 #[derive(Deserialize)]
