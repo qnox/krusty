@@ -5438,9 +5438,7 @@ fn emit_class(
     // `-jvm-default=disable`: the interface holds no bodies, so a class that inherits one gets an
     // explicit override forwarding to the holder. Without these the class does not implement its own
     // interface and every inherited call is an `AbstractMethodError`.
-    if opts.jvm_default == JvmDefaultMode::Disable {
-        emit_default_impls_forwarders(ir, c, &mut cw, env);
-    }
+    emit_default_impls_forwarders(ir, c, &mut cw, env);
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
     // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
@@ -7846,9 +7844,7 @@ fn emit_enum_class(
     // annotations) through the shared path, exactly like `emit_class` and `emit_interface_class`.
     // An `enum class` implementing an interface needs the same holder forwarders an ordinary class
     // does — it reaches emission through this function, not `emit_class`.
-    if opts.jvm_default == JvmDefaultMode::Disable {
-        emit_default_impls_forwarders(ir, c, &mut cw, env);
-    }
+    emit_default_impls_forwarders(ir, c, &mut cw, env);
     if let Some(m) = opts
         .emit_class_metadata
         .then(|| build_class_metadata(ir, c, opts))
@@ -7933,160 +7929,242 @@ fn emit_default_impls_forwarders(
     if c.is_interface {
         return;
     }
-    // Keyed on the ERASED shape, not the declared one. A class overriding a generic interface member
-    // already carries the erasure bridge (`f(Object)` → `f(String)`); adding a forwarder with that
-    // same erased signature makes two methods with one name and descriptor, and the JVM refuses to
-    // load the class (`ClassFormatError: Duplicate method`).
-    let erased_params = |params: &[Ty]| -> Vec<String> {
-        params
-            .iter()
-            .map(|t| crate::jvm::names::type_descriptor(*t))
-            .collect()
-    };
-    let erased_key = |name: &str, params: &[Ty]| -> (String, String) {
-        (name.to_string(), erased_params(params).concat())
-    };
-    // Every method the class declares itself, by name and erased parameter list.
-    let declared: Vec<(String, Vec<String>)> = c
-        .methods
-        .iter()
-        .map(|fid| {
-            let f = &ir.functions[*fid as usize];
-            (f.name.clone(), erased_params(&jvm_tys(&f.params)))
-        })
-        .collect();
-    // Does the class already implement this interface member?
-    //
-    // Not just an exact descriptor match: a class overriding a member declared on a GENERIC
-    // interface (`I<T>.f(T)` erased to `f(Object)`) declares `f(String)` and carries the erasure
-    // bridge, so a forwarder keyed on the exact erasure would collide with that bridge and the class
-    // would not load. An interface parameter erased to `Object` is therefore satisfied by any
-    // declared parameter — while a genuine overload (`f(String)` beside `f(Int)`) still differs and
-    // keeps its own forwarder.
-    let class_implements = |name: &str, iface_params: &[String]| -> bool {
-        declared.iter().any(|(declared_name, declared_params)| {
-            declared_name == name
-                && declared_params.len() == iface_params.len()
-                && declared_params
-                    .iter()
-                    .zip(iface_params)
-                    .all(|(mine, theirs)| mine == theirs || theirs == "Ljava/lang/Object;")
-        })
-    };
-    // The whole superinterface CLOSURE, not just the direct ones: a body inherited through an
-    // intermediate interface (`class C : B`, `interface B : A`, `A` holding the body) still needs a
-    // forwarder on `C`, or the class does not implement its own interface.
-    let mut pending: Vec<String> = c.interfaces.iter_rendered().collect();
-    let mut seen: std::collections::HashSet<String> = pending.iter().cloned().collect();
-    let mut closure: Vec<&crate::ir::IrClass> = Vec::new();
-    while let Some(interface) = pending.pop() {
-        let Some(iface) = ir
-            .classes
-            .iter()
-            .find(|other| other.is_interface && other.fq_name_matches(&interface))
-        else {
-            continue; // a classpath interface: its holder, if any, was compiled elsewhere
-        };
-        for parent in iface.interfaces.iter_rendered() {
-            if seen.insert(parent.clone()) {
-                pending.push(parent);
+    let symbols = env.signature_symbols;
+    let classifier = |owner| symbols.classifier(owner);
+    let derives_from = |candidate: crate::types::TypeName, ancestor: crate::types::TypeName| {
+        let mut pending = vec![candidate];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(owner) = pending.pop() {
+            if !seen.insert(owner) {
+                continue;
             }
-        }
-        closure.push(iface);
-    }
-    // A member the class inherits from more than one interface is forwarded ONCE, to its MOST
-    // DERIVED declaration. `interface B : A` overriding `A.f` must win over `A` itself; picking
-    // whichever the walk happened to reach first made the answer depend on the order the class
-    // listed its supertypes (`class C : B, D` printed `B.f`, `class C : D, B` printed `A.f`).
-    let derives_from = |candidate: &crate::ir::IrClass, ancestor: &str| -> bool {
-        let mut pending: Vec<String> = candidate.interfaces.iter_rendered().collect();
-        let mut seen: std::collections::HashSet<String> = pending.iter().cloned().collect();
-        while let Some(name) = pending.pop() {
-            if name == ancestor {
-                return true;
-            }
-            let Some(next) = ir
-                .classes
-                .iter()
-                .find(|other| other.is_interface && other.fq_name_matches(&name))
-            else {
+            let Some(shape) = classifier(owner) else {
                 continue;
             };
-            for parent in next.interfaces.iter_rendered() {
-                if seen.insert(parent.clone()) {
+            for parent in shape.supertypes.iter_ids() {
+                if parent == ancestor {
+                    return true;
+                }
+                if classifier(parent).is_some_and(|parent| parent.is_interface()) {
                     pending.push(parent);
                 }
             }
         }
         false
     };
-    let mut forwarded: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
-    // Most-derived first, so the first declaration reached for a key is the one to forward to.
-    closure.sort_by(|left, right| {
-        if derives_from(left, &right.fq_name()) {
+
+    // Read every declaration through the same symbol-source classifier model. Module and classpath
+    // providers both expose direct declarations and direct supertypes; this pass neither searches IR
+    // classes nor retries a missing class against another origin.
+    let mut pending = c.interfaces.iter_ids().collect::<Vec<_>>();
+    let mut seen_interfaces = std::collections::HashSet::new();
+    let mut closure = Vec::new();
+    while let Some(owner) = pending.pop() {
+        if !seen_interfaces.insert(owner) {
+            continue;
+        }
+        let Some(shape) = classifier(owner).filter(|shape| shape.is_interface()) else {
+            continue;
+        };
+        pending.extend(
+            shape
+                .supertypes
+                .iter_ids()
+                .filter(|parent| classifier(*parent).is_some_and(|parent| parent.is_interface())),
+        );
+        closure.push((owner, shape));
+    }
+    closure.sort_by(|(left, _), (right, _)| {
+        if derives_from(*left, *right) {
             std::cmp::Ordering::Less
-        } else if derives_from(right, &left.fq_name()) {
+        } else if derives_from(*right, *left) {
             std::cmp::Ordering::Greater
         } else {
             std::cmp::Ordering::Equal
         }
     });
-    for iface in closure {
-        for &fid in &iface.methods {
-            let f = &ir.functions[fid as usize];
-            if f.body.is_none() {
+
+    let method_key = |name: &str, params: &[Ty]| {
+        (
+            name.to_string(),
+            params
+                .iter()
+                .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+                .collect::<String>(),
+        )
+    };
+    // Include already-derived generic/covariant bridges. They are emitted before these forwarders;
+    // ignoring them creates duplicate `(name, descriptor)` methods on a concrete implementer.
+    let mut implemented = c
+        .methods
+        .iter()
+        .map(|fid| {
+            let function = &ir.functions[*fid as usize];
+            method_key(&function.name, &jvm_tys(&function.params))
+        })
+        .chain(
+            c.bridges
+                .iter()
+                .map(|bridge| method_key(&bridge.name, &bridge.erased_params)),
+        )
+        .collect::<std::collections::HashSet<_>>();
+    let mut selected = std::collections::HashSet::new();
+    let mut write_forwarder = |name: &str,
+                               param_tys: &[Ty],
+                               ret: Ty,
+                               target_owner: &str,
+                               target_name: &str,
+                               target_descriptor: &str| {
+        let desc = method_descriptor(param_tys, ret);
+        let mut code = CodeBuilder::new(1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>());
+        code.aload(0);
+        let mut slot = 1u16;
+        for ty in param_tys {
+            match *ty {
+                Ty::Long => code.lload(slot),
+                Ty::Double => code.dload(slot),
+                Ty::Float => code.fload(slot),
+                t if t.is_reference() => code.aload(slot),
+                _ => code.iload(slot),
+            }
+            slot += slot_words(*ty);
+        }
+        let target = cw.methodref(target_owner, target_name, target_descriptor);
+        let argument_words = 1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>();
+        code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
+        match ret {
+            Ty::Unit => code.ret_void(),
+            Ty::Long => code.lreturn(),
+            Ty::Double => code.dreturn(),
+            Ty::Float => code.freturn(),
+            t if t.is_reference() => code.areturn(),
+            _ => code.ireturn(),
+        }
+        finish_code::<0x0041>(cw, name, &desc, &mut code, argument_words);
+    };
+    for (interface, shape) in closure {
+        for member in &shape.members {
+            let physical_params = if member.physical_params.len() == member.params.len() {
+                member.physical_params.clone()
+            } else {
+                member.params.clone()
+            };
+            let param_tys = jvm_tys(&physical_params);
+            let name = member
+                .physical_name
+                .as_deref()
+                .unwrap_or(member.name.as_str());
+            let key = method_key(name, &param_tys);
+            // The nearest declaration wins even when it is abstract: an abstract redeclaration
+            // suppresses a farther ancestor's body rather than exposing it as a fake override.
+            if !selected.insert(key.clone()) {
                 continue;
             }
-            // A private interface member is not inherited, so it gets no forwarder — publishing one
-            // would put it in the class's public ABI, where kotlinc does not have it.
-            if ir.private_methods.contains(&fid) {
+            if member.is_abstract()
+                || member.visibility == crate::types::Visibility::Private
+                || implemented.contains(&key)
+            {
                 continue;
             }
-            let desc = ir_method_desc(&f.params, &f.ret);
-            let iface_params = erased_params(&jvm_tys(&f.params));
-            let key = erased_key(&f.name, &jvm_tys(&f.params));
-            if class_implements(&f.name, &iface_params) || !forwarded.insert(key) {
-                continue;
-            }
-            let param_tys = jvm_tys(&f.params);
-            let ret = ir_ty_to_jvm(&f.ret);
-            let mut code =
-                CodeBuilder::new(1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>());
-            code.aload(0);
-            let mut slot = 1u16;
-            for ty in &param_tys {
-                match *ty {
-                    Ty::Long => code.lload(slot),
-                    Ty::Double => code.dload(slot),
-                    Ty::Float => code.fload(slot),
-                    t if t.is_reference() => code.aload(slot),
-                    _ => code.iload(slot),
+            let (target_owner, target_name, holder_desc) = match member.realization {
+                crate::libraries::MemberRealization::Direct {
+                    pass_receiver: true,
+                } => {
+                    let Some(owner) = member.owner else { continue };
+                    (owner.render(), name.to_string(), member.descriptor.clone())
                 }
-                slot += slot_words(*ty);
-            }
-            let mut with_receiver = vec![Ty::obj(&iface.fq_name())];
-            with_receiver.extend_from_slice(&param_tys);
-            let holder_desc = method_descriptor(&with_receiver, ret);
-            let target = cw.methodref(
-                &format!("{}$DefaultImpls", iface.fq_name()),
-                &f.name,
+                crate::libraries::MemberRealization::Dispatch
+                    if env.jvm_default == JvmDefaultMode::Disable
+                        && member.source_member.is_some() =>
+                {
+                    let mut with_receiver = vec![Ty::obj_name(interface)];
+                    with_receiver.extend_from_slice(&param_tys);
+                    (
+                        crate::types::type_name_nested_child(interface, "DefaultImpls").render(),
+                        name.to_string(),
+                        method_descriptor(&with_receiver, ir_ty_to_jvm(&member.physical_ret)),
+                    )
+                }
+                _ => continue,
+            };
+            let ret = ir_ty_to_jvm(&member.physical_ret);
+            write_forwarder(
+                name,
+                &param_tys,
+                ret,
+                &target_owner,
+                &target_name,
                 &holder_desc,
             );
-            let argument_words: u16 = with_receiver.iter().map(|t| slot_words(*t)).sum();
-            code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
-            match ret {
-                Ty::Unit => code.ret_void(),
-                Ty::Long => code.lreturn(),
-                Ty::Double => code.dreturn(),
-                Ty::Float => code.freturn(),
-                t if t.is_reference() => code.areturn(),
-                _ => code.ireturn(),
+            implemented.insert(key);
+        }
+
+        // Properties use the same normalized callable handles as functions. They are not members of
+        // the source function namespace, so consume the classifier's declared property facets and
+        // feed their getter/setter realizations through the identical forwarder writer.
+        for callables in shape.declared_callables.values() {
+            for property in callables.properties() {
+                let source_property = ir
+                    .classes
+                    .iter()
+                    .find(|class| class.fq_name == interface)
+                    .and_then(|class| {
+                        class
+                            .properties
+                            .iter()
+                            .find(|item| item.name == property.name)
+                    });
+                for (callable, has_source_body, visibility) in std::iter::once((
+                    &property.getter,
+                    source_property.is_some_and(|property| property.getter.is_some()),
+                    property.visibility,
+                ))
+                .chain(property.setter.as_ref().map(|setter| {
+                    (
+                        setter,
+                        source_property.is_some_and(|property| property.setter.is_some()),
+                        property.setter_visibility,
+                    )
+                })) {
+                    if visibility == crate::types::Visibility::Private {
+                        continue;
+                    }
+                    let params = jvm_tys(&callable.physical_params);
+                    let key = method_key(&callable.name, &params);
+                    if !selected.insert(key.clone()) || implemented.contains(&key) {
+                        continue;
+                    }
+                    let (target_owner, target_descriptor) = match callable.member_realization {
+                        crate::libraries::MemberRealization::Direct {
+                            pass_receiver: true,
+                        } => (callable.owner.render(), callable.descriptor.clone()),
+                        crate::libraries::MemberRealization::Dispatch
+                            if env.jvm_default == JvmDefaultMode::Disable && has_source_body =>
+                        {
+                            let mut with_receiver = vec![Ty::obj_name(interface)];
+                            with_receiver.extend_from_slice(&params);
+                            (
+                                crate::types::type_name_nested_child(interface, "DefaultImpls")
+                                    .render(),
+                                method_descriptor(
+                                    &with_receiver,
+                                    ir_ty_to_jvm(&callable.physical_ret),
+                                ),
+                            )
+                        }
+                        _ => continue,
+                    };
+                    write_forwarder(
+                        &callable.name,
+                        &params,
+                        ir_ty_to_jvm(&callable.physical_ret),
+                        &target_owner,
+                        &callable.name,
+                        &target_descriptor,
+                    );
+                    implemented.insert(key);
+                }
             }
-            let _ = env;
-            // kotlinc marks a `$DefaultImpls` forwarder ACC_PUBLIC | ACC_BRIDGE (0x0041).
-            // `argument_words` already counts the receiver, so it IS the local count.
-            finish_code::<0x0041>(cw, &f.name, &desc, &mut code, argument_words);
         }
     }
 }
@@ -10790,24 +10868,10 @@ impl<'a> Emitter<'a> {
                             .sum()
                     })
                     .unwrap_or_else(|| slot_words(target) as i32);
-                // Under `-jvm-default=disable` an interface carries no executable member, its
-                // `$default` synthetic included: that lives on the holder. A call site still aimed at
-                // the interface links to a method that was never emitted (`NoSuchMethodError`).
-                let holder;
-                let (owner, is_interface) = if self.jvm_default == JvmDefaultMode::Disable
-                    && is_interface
-                    && is_static
-                    && name.ends_with("$default")
-                {
-                    holder = format!("{owner}$DefaultImpls");
-                    (&holder, false)
-                } else {
-                    (&owner, is_interface)
-                };
                 let m = if is_interface {
-                    self.cw.interface_methodref(owner, &name, &descriptor)
+                    self.cw.interface_methodref(&owner, &name, &descriptor)
                 } else {
-                    self.cw.methodref(owner, &name, &descriptor)
+                    self.cw.methodref(&owner, &name, &descriptor)
                 };
                 if is_static {
                     code.invokestatic(m, words, 0);
@@ -11402,21 +11466,15 @@ impl<'a> Emitter<'a> {
     /// `invokespecial` the interface. Under `disable` the interface holds no body, so the call has to
     /// become `invokestatic <Iface>$DefaultImpls.f(LIface;…)` — the receiver already on the stack is
     /// exactly the holder static's parameter 0. Returns `None` when the call should stay as it is.
-    fn holder_call(&self, owner: &str, name: &str, descriptor: &str) -> Option<(String, String)> {
-        if self.jvm_default != JvmDefaultMode::Disable {
+    fn holder_call(
+        &self,
+        owner: &str,
+        descriptor: &str,
+        current_source_body: bool,
+    ) -> Option<(String, String)> {
+        if self.jvm_default != JvmDefaultMode::Disable || !current_source_body {
             return None;
         }
-        // Only a member this compilation moved to a holder: a source interface whose method of that
-        // name carries a body. An abstract member stays an interface dispatch.
-        let iface = self
-            .ir
-            .classes
-            .iter()
-            .find(|c| c.is_interface && c.fq_name_matches(owner))?;
-        iface.methods.iter().find(|fid| {
-            let f = &self.ir.functions[**fid as usize];
-            f.name == name && f.body.is_some()
-        })?;
         let holder_descriptor = descriptor
             .strip_prefix('(')
             .map(|rest| format!("(L{owner};{rest}"))?;
@@ -11864,7 +11922,7 @@ impl<'a> Emitter<'a> {
                     // `disable` the body moved to the holder, and an `invokespecial` naming the
                     // interface from another class is not even verifiable.
                     if let Some((holder, holder_desc)) = is_iface
-                        .then(|| self.holder_call(&owner, &name, &desc))
+                        .then(|| self.holder_call(&owner, &desc, true))
                         .flatten()
                     {
                         let m = self.cw.methodref(&holder, &name, &holder_desc);
@@ -12164,24 +12222,11 @@ impl<'a> Emitter<'a> {
                     // reached when a call omits an interface-declared default) must be an `InterfaceMethodref`
                     // even for `invokestatic` — else the JVM throws `IncompatibleClassChangeError`. Classes
                     // (stdlib facades, the common case) stay `Methodref`.
-                    // Under `-jvm-default=disable` the interface carries no `$default` synthetic —
-                    // it lives on the holder — so a call site aimed at the interface would link to a
-                    // method that was never emitted (`NoSuchMethodError` at the first such call).
                     let owner_is_interface = self.bodies.owner_is_interface(&owner);
-                    let holder;
-                    let (owner, owner_is_interface) = if self.jvm_default == JvmDefaultMode::Disable
-                        && owner_is_interface
-                        && name.ends_with("$default")
-                    {
-                        holder = format!("{owner}$DefaultImpls");
-                        (&holder, false)
-                    } else {
-                        (&owner, owner_is_interface)
-                    };
                     let m = if owner_is_interface {
-                        self.cw.interface_methodref(owner, &name, &descriptor)
+                        self.cw.interface_methodref(&owner, &name, &descriptor)
                     } else {
-                        self.cw.methodref(owner, &name, &descriptor)
+                        self.cw.methodref(&owner, &name, &descriptor)
                     };
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
@@ -12396,6 +12441,7 @@ impl<'a> Emitter<'a> {
                     name,
                     descriptor,
                     interface,
+                    source_member,
                 } => {
                     let (owner, name, descriptor, interface) =
                         (owner.render(), name.clone(), descriptor.clone(), *interface);
@@ -12416,7 +12462,7 @@ impl<'a> Emitter<'a> {
                     // `InterfaceMethodref` (JVM allows a direct-superinterface default this way) —
                     // unless `disable` moved that body to the holder, where it is a plain static.
                     if let Some((holder, holder_desc)) = interface
-                        .then(|| self.holder_call(&owner, &name, &descriptor))
+                        .then(|| self.holder_call(&owner, &descriptor, source_member.is_some()))
                         .flatten()
                     {
                         let m = self.cw.methodref(&holder, &name, &holder_desc);

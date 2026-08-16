@@ -178,24 +178,16 @@ pub fn jvm_default_mode(src: &str) -> crate::jvm::ir_emit::JvmDefaultMode {
         .unwrap_or_default()
 }
 
-/// `// JVM_DEFAULT_MODE:` configurations krusty cannot run soundly.
-///
-/// All three of kotlinc's strategies are emitted WITHIN a compilation. `disable` is not yet modelled
-/// ACROSS one: the class-side forwarders are emitted only for interfaces this compilation declares,
-/// and super/default-argument resolution does not consult a classpath interface's `$DefaultImpls`.
-/// A multi-`// MODULE:` test compiles the interface separately and then reads it back, so judging it
-/// would grade a configuration krusty does not claim. Every `disable` test in the Kotlin corpus is
-/// of that shape today.
+/// `// JVM_DEFAULT_MODE:` values krusty does not model. All three kotlinc strategies are emitted and
+/// consumed across module boundaries; only a missing or unknown value is unsupported.
 pub fn needs_unmodeled_jvm_default_mode(src: &str) -> bool {
-    let cross_module = src
-        .lines()
-        .any(|l| l.trim_start().starts_with("// MODULE:"));
     src.lines()
         .filter_map(|l| l.trim().strip_prefix("// JVM_DEFAULT_MODE:"))
-        .any(|mode| match mode.split_whitespace().next() {
-            Some("enable") | Some("no-compatibility") => false,
-            Some("disable") => cross_module,
-            _ => true,
+        .any(|mode| {
+            !matches!(
+                mode.split_whitespace().next(),
+                Some("disable") | Some("enable") | Some("no-compatibility")
+            )
         })
 }
 
@@ -752,9 +744,7 @@ mod tests {
             );
             assert_eq!(jvm_default_mode(&src), expected);
         }
-        // `disable` ACROSS modules is not modelled: the forwarders and the holder lookups only see
-        // interfaces this compilation declares.
-        assert!(needs_unmodeled_compiler_flag(
+        assert!(!needs_unmodeled_compiler_flag(
             "// JVM_DEFAULT_MODE: disable\n// MODULE: lib\nfun box() = \"OK\""
         ));
         assert!(!needs_unmodeled_compiler_flag(

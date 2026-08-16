@@ -105,6 +105,10 @@ pub enum Callee {
         /// `owner` is an INTERFACE (a diamond `super.f()` dispatched to a superinterface's DEFAULT method):
         /// the method reference must be an `InterfaceMethodref` and the call an `invokespecial` on it.
         interface: bool,
+        /// Exact source declaration selected for a current-compilation interface body. A JVM backend
+        /// may relocate that body according to the requested output mode; dependency realizations
+        /// arrive as `Callee::Static` instead and leave this unset.
+        source_member: Option<crate::libraries::SourceMember>,
     },
 }
 

@@ -12501,47 +12501,39 @@ pub struct ResolvedSuperCall {
     /// Empty for a source signature whose descriptor is derived from the semantic parameter types.
     pub descriptor: String,
     pub interface: bool,
+    /// Provider-owned physical realization of the selected semantic declaration. A JVM-default
+    /// holder is an ordinary direct realization; lowering does not rediscover it from a mode or
+    /// owner spelling.
+    pub realization: crate::libraries::MemberRealization,
     pub source_member: Option<crate::libraries::SourceMember>,
 }
 
 impl ResolvedSuperCall {
-    fn source(
+    fn selected(
         receiver: ImplicitReceiverSelection,
-        owner: TypeName,
-        name: String,
+        dispatch_owner: TypeName,
         interface: bool,
-        params: Vec<Ty>,
-        ret: Ty,
-        source_member: Option<crate::libraries::SourceMember>,
-    ) -> Self {
-        Self {
-            receiver,
-            owner,
-            name,
-            params,
-            ret,
-            physical_ret: ret,
-            descriptor: String::new(),
-            interface,
-            source_member,
-        }
-    }
-
-    fn classpath(
-        receiver: ImplicitReceiverSelection,
         member: crate::libraries::LibraryMember,
     ) -> Option<Self> {
-        let interface = member.is_interface();
+        let realization = member.realization;
         let source_member = member.source_member;
+        let physical_owner = member.owner?;
+        let owner = match realization {
+            crate::libraries::MemberRealization::Dispatch => dispatch_owner,
+            crate::libraries::MemberRealization::Direct { .. } => physical_owner,
+            crate::libraries::MemberRealization::Intrinsic(_)
+            | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
+        };
         Some(Self {
             receiver,
-            owner: member.owner?,
-            name: member.name,
+            owner,
+            name: member.physical_name.unwrap_or(member.name),
             params: member.params,
             ret: member.ret,
             physical_ret: member.physical_ret,
             descriptor: member.descriptor,
             interface,
+            realization,
             source_member,
         })
     }
@@ -21613,23 +21605,28 @@ impl<'a> Checker<'a> {
             if setter {
                 let selected = self.select_property_setter(Ty::obj_name(owner), name)?;
                 let callable = selected.callable;
+                let realization = callable.member_realization;
+                let physical_owner = match realization {
+                    crate::libraries::MemberRealization::Dispatch => owner,
+                    crate::libraries::MemberRealization::Direct { .. } => callable.owner,
+                    crate::libraries::MemberRealization::Intrinsic(_)
+                    | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
+                };
                 Some(ResolvedSuperCall {
                     receiver: receiver.clone(),
-                    owner,
+                    owner: physical_owner,
                     name: callable.name,
                     params: callable.params,
                     ret: callable.ret,
                     physical_ret: callable.physical_ret,
                     descriptor: callable.descriptor,
                     interface,
+                    realization,
                     source_member: selected.source_member,
                 })
             } else {
                 let member = self.select_property_member(Ty::obj_name(owner), name)?;
-                let mut target = ResolvedSuperCall::classpath(receiver.clone(), member.member)?;
-                target.owner = owner;
-                target.interface = interface;
-                Some(target)
+                ResolvedSuperCall::selected(receiver.clone(), owner, interface, member.member)
             }
         };
 
@@ -45197,44 +45194,20 @@ impl<'a> Checker<'a> {
                             }
                         });
                         if let Some(sup) = sup.filter(|s| matches_qual(*s)) {
-                            // A user base-class method.
-                            if let Some((owner, sig)) = self
-                                .syms
-                                .method_matching_with_owner_name(sup, &name, &arg_tys)
-                                .filter(|(_, signature)| !signature.is_abstract())
-                            {
-                                self.expect_call_args(scope, &sig.params, false, args, &arg_tys);
-                                self.resolved_super_calls.insert(
-                                    call,
-                                    ResolvedSuperCall::source(
-                                        dispatch_receiver.clone(),
-                                        owner,
-                                        name.clone(),
-                                        false,
-                                        sig.params.clone(),
-                                        sig.ret,
-                                        sig.source_member,
-                                    ),
-                                );
-                                return sig.ret;
-                            }
-                            // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
+                            // Source/module/classpath declarations are normalized by the federated
+                            // symbol source before selection. The selected member carries both the
+                            // semantic signature and its opaque physical realization, so there is no
+                            // origin retry and no later owner reconstruction.
                             if let Some(m) = applied_sup.and_then(|recv| {
                                 self.select_super_instance(recv, &name, &arg_kinds)
                             }) {
                                 let ret = m.ret;
-                                if let Some(mut target) =
-                                    ResolvedSuperCall::classpath(dispatch_receiver.clone(), m)
-                                {
-                                    // `invokespecial` must name the DIRECT superclass. JVM method
-                                    // resolution continues from there to the inherited declaration;
-                                    // naming the declaration's indirect interface is verifier-invalid.
-                                    // With an implicit `Any`, there is no source-owned direct class
-                                    // identity to substitute: retain the provider's physical owner.
-                                    if declared_super.is_some() {
-                                        target.owner = sup;
-                                    }
-                                    target.interface = false;
+                                if let Some(target) = ResolvedSuperCall::selected(
+                                    dispatch_receiver.clone(),
+                                    sup,
+                                    false,
+                                    m,
+                                ) {
                                     self.resolved_super_calls.insert(call, target);
                                 } else {
                                     self.diags.error(
@@ -45250,32 +45223,29 @@ impl<'a> Checker<'a> {
                         // `I`'s default. Resolve across the superinterfaces matching the `super<T>`
                         // qualifier — with none, EXACTLY ONE must provide the method (matching the
                         // lowerer); more than one needs the explicit `super<T>.foo()` krusty now honors.
-                        let matches: Vec<(TypeName, Signature)> = self
+                        let matches: Vec<(TypeName, crate::libraries::LibraryMember)> = self
                             .syms
                             .class_by_type_name(internal)
                             .into_iter()
                             .flat_map(|c| c.interfaces.iter_ids())
                             .filter(|iface| matches_qual(*iface))
                             .filter_map(|iface| {
-                                self.syms
-                                    .method_matching_with_owner_name(iface, &name, &arg_tys)
+                                self.select_super_instance(Ty::obj_name(iface), &name, &arg_kinds)
+                                    .map(|member| (iface, member))
                             })
                             .collect();
-                        if let [(iface, sig)] = matches.as_slice() {
-                            self.expect_call_args(scope, &sig.params, false, args, &arg_tys);
-                            self.resolved_super_calls.insert(
-                                call,
-                                ResolvedSuperCall::source(
-                                    dispatch_receiver.clone(),
-                                    *iface,
-                                    name.clone(),
-                                    true,
-                                    sig.params.clone(),
-                                    sig.ret,
-                                    sig.source_member,
-                                ),
-                            );
-                            return sig.ret;
+                        if let [(iface, member)] = matches.as_slice() {
+                            self.expect_call_args(scope, &member.params, false, args, &arg_tys);
+                            let ret = member.ret;
+                            if let Some(target) = ResolvedSuperCall::selected(
+                                dispatch_receiver.clone(),
+                                *iface,
+                                true,
+                                member.clone(),
+                            ) {
+                                self.resolved_super_calls.insert(call, target);
+                                return ret;
+                            }
                         }
                     }
                     self.diags

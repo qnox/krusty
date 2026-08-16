@@ -1916,11 +1916,37 @@ impl JvmLibraries {
                     }
                 }
                 member.physical_ret = physical_ret;
-                member.set_is_abstract(m.is_abstract());
+                // Kotlin metadata owns declaration modality. In legacy JVM-default mode the
+                // interface method is physically abstract even though the Kotlin declaration has
+                // a body on `$DefaultImpls`; treating the classfile access bit as semantic made the
+                // declaration disappear from `super` selection and inherited-implementation plans.
+                member.set_is_abstract(
+                    declaration
+                        .map_or_else(|| m.is_abstract(), |declaration| declaration.is_abstract()),
+                );
+                member.set_is_interface(ci.is_interface());
                 if m.is_static() {
                     member.realization = crate::libraries::MemberRealization::Direct {
                         pass_receiver: physical_params.len() == member.params.len() + 1,
                     };
+                }
+                // A concrete Kotlin interface declaration may have no body on the interface at
+                // all. Normalize that ABI at the provider boundary: semantic selection still sees
+                // the metadata declaration, while lowering receives the exact static holder owner,
+                // name, and descriptor as its ordinary direct realization.
+                if ci.is_interface()
+                    && declaration.is_some_and(|declaration| !declaration.is_abstract())
+                    && m.is_abstract()
+                {
+                    if let Some((holder, holder_method_descriptor)) =
+                        interface_holder_method(&self.cp, internal_name, &m.name, &m.descriptor)
+                    {
+                        member.owner = Some(holder);
+                        member.descriptor = holder_method_descriptor;
+                        member.realization = crate::libraries::MemberRealization::Direct {
+                            pass_receiver: true,
+                        };
+                    }
                 }
                 // The declared return classifier comes directly from the metadata declaration. A
                 // nullable declared return stays absent because it is genuinely boxed.
@@ -3538,6 +3564,28 @@ fn strip_continuation_param(desc: &str) -> String {
     desc.to_string()
 }
 
+/// Exact physical realization of a legacy concrete interface declaration, if the classpath
+/// publishes one. Semantic selection stays on the metadata declaration; this only couples it to the
+/// matching receiver-first static method at the provider boundary.
+fn interface_holder_method(
+    cp: &crate::jvm::classpath::Classpath,
+    interface: TypeName,
+    name: &str,
+    descriptor: &str,
+) -> Option<(TypeName, String)> {
+    let holder = crate::types::type_name_nested_child(interface, "DefaultImpls");
+    let descriptor = descriptor
+        .strip_prefix('(')
+        .map(|tail| format!("(L{};{tail}", interface.render()))?;
+    cp.find_name(holder)
+        .is_some_and(|class| {
+            class.methods.iter().any(|method| {
+                method.is_static() && method.name == name && method.descriptor == descriptor
+            })
+        })
+        .then_some((holder, descriptor))
+}
+
 fn inline_body_descriptor(callable: &LibraryCallable) -> Option<String> {
     if !callable.suspend {
         return Some(callable.descriptor.clone());
@@ -3724,6 +3772,15 @@ impl JvmLibraries {
                     getter.desc,
                 );
                 getter.owner_is_interface = ci.is_interface();
+                if let Some((holder, descriptor)) =
+                    interface_holder_method(&self.cp, cn, &getter.name, &getter.descriptor)
+                {
+                    getter.owner = holder;
+                    getter.descriptor = descriptor;
+                    getter.member_realization = crate::libraries::MemberRealization::Direct {
+                        pass_receiver: true,
+                    };
+                }
                 let getter_signature = self
                     .member_functions(recv, &getter.name)
                     .overloads
@@ -3754,6 +3811,15 @@ impl JvmLibraries {
                     );
                     setter.params = vec![ty];
                     setter.owner_is_interface = ci.is_interface();
+                    if let Some((holder, descriptor)) =
+                        interface_holder_method(&self.cp, cn, &setter.name, &setter.descriptor)
+                    {
+                        setter.owner = holder;
+                        setter.descriptor = descriptor;
+                        setter.member_realization = crate::libraries::MemberRealization::Direct {
+                            pass_receiver: true,
+                        };
+                    }
                     Some(setter)
                 });
                 overloads.push(PropertyInfo {
@@ -4859,11 +4925,21 @@ impl JvmLibraries {
                 return None;
             }
             let (params, ret) = parse_method_desc_with_field_params(&method.descriptor)?;
-            let (_, after_receiver) = params.split_first()?;
-            if !after_receiver.starts_with(&base_params) {
+            // A dispatched member's base descriptor excludes its receiver while its static
+            // `$default` bridge prepends one. A provider-normalized direct realization (legacy
+            // interface holder, value-class implementation method) already carries that receiver
+            // in the base descriptor. Compare the exact physical prefix supplied by the selected
+            // declaration instead of assuming one origin-specific layout.
+            let prefix = match member.realization {
+                crate::libraries::MemberRealization::Direct {
+                    pass_receiver: true,
+                } => params.as_slice(),
+                _ => params.get(1..).unwrap_or_default(),
+            };
+            if !prefix.starts_with(&base_params) {
                 return None;
             }
-            let mut suffix = &after_receiver[base_params.len()..];
+            let mut suffix = &prefix[base_params.len()..];
             if suspend {
                 let (continuation, rest) = suffix.split_first()?;
                 if !is_continuation(*continuation) {
@@ -4871,7 +4947,7 @@ impl JvmLibraries {
                 }
                 suffix = rest;
             }
-            let mask_count = base_params.len().div_ceil(32).max(1);
+            let mask_count = member.params.len().div_ceil(32).max(1);
             if suffix.len() != mask_count + 1
                 || !suffix[..suffix.len() - 1]
                     .iter()
