@@ -926,6 +926,7 @@ fn fn_info(
         ret: sig.ret,
         physical_ret: sig.ret,
         suspend: sig.is_suspend(),
+        is_abstract: sig.is_abstract(),
         // Declaration capabilities travel on the selected callable for every symbol source. A module
         // owner may be re-readable today, but making later consumers re-query only that origin would
         // let the source and classpath resolution paths drift and would lose this fact on a generic
@@ -997,6 +998,7 @@ fn source_callable(
         ret,
         physical_ret: ret,
         suspend: false,
+        is_abstract: false,
         owner_is_interface,
         member_realization: crate::libraries::MemberRealization::Dispatch,
         inline: InlineKind::None,
@@ -1060,6 +1062,22 @@ fn source_property(
     owner_is_interface: bool,
     receiver_rank: u32,
 ) -> PropertyInfo {
+    let mut getter = source_property_getter(
+        owner,
+        property.getter_name.clone(),
+        property.context_params.clone(),
+        property.ty,
+        owner_is_interface,
+    );
+    getter.is_abstract = property.is_abstract;
+    let setter = property.setter_name.as_ref().map(|setter| {
+        let mut params = property.context_params.clone();
+        params.push(stored_value_ty(property.ty));
+        let mut setter =
+            source_callable(owner, setter.clone(), params, Ty::Unit, owner_is_interface);
+        setter.is_abstract = property.is_abstract;
+        setter
+    });
     PropertyInfo {
         name: name.to_string(),
         kind: PropKind::Member,
@@ -1068,18 +1086,8 @@ fn source_property(
         ty: property.ty,
         context_count: property.context_params.len(),
         context_param_names: Vec::new(),
-        getter: source_property_getter(
-            owner,
-            property.getter_name.clone(),
-            property.context_params.clone(),
-            property.ty,
-            owner_is_interface,
-        ),
-        setter: property.setter_name.as_ref().map(|setter| {
-            let mut params = property.context_params.clone();
-            params.push(stored_value_ty(property.ty));
-            source_callable(owner, setter.clone(), params, Ty::Unit, owner_is_interface)
-        }),
+        getter,
+        setter,
         setter_visibility: property.setter_visibility.unwrap_or(property.visibility),
         is_const: property.is_const,
         visibility: property.visibility,
@@ -1601,6 +1609,7 @@ mod tests {
                 setter_name: None,
                 setter_visibility: None,
                 has_custom_getter: false,
+                is_abstract: false,
                 is_open: false,
                 context_params: Vec::new(),
                 source_member: None,
@@ -1828,6 +1837,7 @@ mod tests {
                 setter_name: Some("setState".into()),
                 setter_visibility: Some(Visibility::Protected),
                 has_custom_getter: false,
+                is_abstract: false,
                 is_open: false,
                 context_params: Vec::new(),
                 source_member: None,

@@ -1101,6 +1101,9 @@ pub struct DeclaredPropertySig {
     /// different value than an earlier proof, so flow narrowing (smart casts) must skip it
     /// (kotlinc: "smart cast is impossible, because the property has a custom getter").
     pub has_custom_getter: bool,
+    /// The property declares no accessor implementation. Providers carry this semantic modality
+    /// beside the accessor handles so consumers never infer a body from source/classpath origin.
+    pub is_abstract: bool,
     /// Whether this property's accessor remains overridable. Smart-cast stability depends on the
     /// selected property's modality, not merely on whether its declaring class is open: a default
     /// `val` is final even in an open class, while an `open val` becomes stable when viewed through
@@ -6772,6 +6775,7 @@ fn collect_signatures_with_cp_impl(
                                         .is_var
                                         .then_some(property.visibility),
                                     has_custom_getter: false,
+                                    is_abstract: false,
                                     is_open: property.is_open,
                                     context_params: Vec::new(),
                                     source_member: Some(
@@ -7325,6 +7329,7 @@ fn collect_signatures_with_cp_impl(
                                 setter_name: bp.is_var.then(|| property_setter_name(&bp.name)),
                                 setter_visibility: declared_setter_visibility(bp),
                                 has_custom_getter: bp.getter.is_some() || bp.delegate.is_some(),
+                                is_abstract: bp.is_abstract,
                                 // An abstract property is necessarily overridable even when its
                                 // source omitted the redundant `open` modifier.
                                 is_open: bp.is_open || bp.is_abstract,
@@ -12519,7 +12524,14 @@ impl ResolvedSuperCall {
         let source_member = member.source_member;
         let physical_owner = member.owner?;
         let owner = match realization {
-            crate::libraries::MemberRealization::Dispatch => dispatch_owner,
+            // A selected class declaration remains the exact non-virtual target even when it was
+            // inherited through another class. An interface declaration reached through a class
+            // supertype must instead name that direct class in the InterfaceMethodref search path;
+            // the normalized declaration kind, not its symbol-source origin, decides the shape.
+            crate::libraries::MemberRealization::Dispatch if member.is_interface() => {
+                dispatch_owner
+            }
+            crate::libraries::MemberRealization::Dispatch => physical_owner,
             crate::libraries::MemberRealization::Direct { .. } => physical_owner,
             crate::libraries::MemberRealization::Intrinsic(_)
             | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
@@ -15179,6 +15191,7 @@ fn install_anonymous_object_captures(
                     setter_name: None,
                     setter_visibility: None,
                     has_custom_getter: false,
+                    is_abstract: false,
                     is_open: false,
                     context_params: Vec::new(),
                     source_member: None,
@@ -21605,6 +21618,9 @@ impl<'a> Checker<'a> {
             if setter {
                 let selected = self.select_property_setter(Ty::obj_name(owner), name)?;
                 let callable = selected.callable;
+                if callable.is_abstract {
+                    return None;
+                }
                 let realization = callable.member_realization;
                 let physical_owner = match realization {
                     crate::libraries::MemberRealization::Dispatch => owner,
@@ -21626,6 +21642,9 @@ impl<'a> Checker<'a> {
                 })
             } else {
                 let member = self.select_property_member(Ty::obj_name(owner), name)?;
+                if member.member.is_abstract() {
+                    return None;
+                }
                 ResolvedSuperCall::selected(receiver.clone(), owner, interface, member.member)
             }
         };

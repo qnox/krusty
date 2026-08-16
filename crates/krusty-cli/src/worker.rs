@@ -690,11 +690,10 @@ mod tests {
         );
     }
 
-    /// A mode krusty does not emit fails the action instead of producing another shape.
-    #[test]
     /// All three of kotlinc's `-jvm-default` strategies are emitted, so a target pinning any of them
     /// translates. A value naming none of them is still refused rather than compiled as some other
     /// interface shape.
+    #[test]
     fn every_jvm_default_mode_translates_and_nonsense_is_refused() {
         for mode in ["disable", "enable", "no-compatibility"] {
             let unit = translate(&args(&[

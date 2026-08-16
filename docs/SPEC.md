@@ -1225,9 +1225,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   = 1<<1, decoded from kotlinc 2.4.0; krusty once numbered physically, bit 4, so a kotlinc-convention
   caller's omitted `port` silently kept the zero placeholder). The stub emitters slice the receiver
   prefix off the registered defaults and offset the parameter slots; member-`$default` call sites
-  subtract the member-extension receiver from the bit index the same way. Not yet modeled (such
-  files are skipped, never miscompiled): interface defaults (kotlinc routes them through
-  `$DefaultImpls`) and >31 parameters (kotlinc's multi-`int` mask).
+  subtract the member-extension receiver from the bit index the same way. Interface defaults use the
+  mode-selected interface or `$DefaultImpls` realization. More than 31 parameters (kotlinc's
+  multi-`int` mask) remains unmodeled and is skipped, never miscompiled.
 - `-jvm-default` (interface members with bodies): kotlinc offers three JVM realizations of the same
   Kotlin source, and the flag changes the CLASS SET, not just method bodies. Measured against
   kotlinc 2.4.10 on an interface with a default getter, a default method, a defaulted parameter and
@@ -1243,17 +1243,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     the receiver as parameter 0, implementing classes forwarding with `invokestatic`, and no
     `jvmClassFlags` field at all.
 
-  krusty emits `no-compatibility` faithfully and refuses `disable` at the CLI: emitting the `enable`
-  shape while stamping `disable` into `@Metadata` would make a consumer route every call through a
-  `$DefaultImpls` method that was never emitted (`NoSuchMethodError` at run time), which is strictly
-  worse than declining the option. `enable` remains krusty's default but is not yet byte-parity — it
+  krusty emits and accepts all three modes. Under `disable`, holder methods, class forwarders,
+  `super` calls, properties, and default-argument calls use provider-recorded realizations across
+  source files and module boundaries; a consumer's own mode never reinterprets a dependency.
+  `$DefaultImpls` holder bytes are differential-tested exactly against kotlinc, including their
+  generic receiver signatures, parameter annotations, local-variable slots, `InnerClasses`, and
+  synthetic Kotlin metadata. `enable` remains krusty's default but is not yet byte-parity — it
   emits the holder only for a member with default parameter values, and none of the `access$…$jd`
   bridges or class forwarders. The box corpus compiles each test under the mode its
-  `// JVM_DEFAULT_MODE:` directive pins; only `disable` is still skipped
-  (`conformance::needs_unmodeled_jvm_default_mode`). Tests: `tests/jvm_default_mode_e2e.rs`
-  (differential class sets and public method realization vs kotlinc, emitted `jvmClassFlags`, the
-  1.4.0 requirement, behavior parity, and refusal without output) and the `-jvm-default` parsing
-  tests in `crates/krusty-cli/src/cli.rs`.
+  `// JVM_DEFAULT_MODE:` directive pins; every recognized mode runs, including multi-module
+  `disable`. Tests: `tests/jvm_default_mode_e2e.rs` (differential class sets, public method
+  realization and holder bytes vs kotlinc, emitted `jvmClassFlags`, behavior parity, and cross-module
+  consumption) and the `-jvm-default` parsing tests in `crates/krusty-cli/src/cli.rs`.
 - `-Xno-param-assertions` / `-Xno-call-assertions`: the two null-check families kotlinc emits, and
   which a build can turn off. Measured against kotlinc 2.4.10:
   * `-Xno-param-assertions` removes every `Intrinsics.checkNotNullParameter` — the guard at the entry

@@ -1998,6 +1998,10 @@ impl IrFile {
             .get(&crate::types::type_name(internal))
     }
 
+    pub fn class_signature_name(&self, internal: crate::types::TypeName) -> Option<&IrGenericSig> {
+        self.class_signatures.get(&internal)
+    }
+
     pub fn insert_field_signatures(&mut self, internal: &str, sigs: Vec<(String, String)>) {
         self.field_signatures
             .insert(crate::types::type_name(internal), sigs);
