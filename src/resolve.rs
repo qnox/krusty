@@ -19340,7 +19340,9 @@ impl<'a> Checker<'a> {
                             let parameter = if *whole_array {
                                 target_parameter
                             } else {
-                                target_parameter.array_elem().unwrap_or(target_parameter)
+                                target_parameter
+                                    .array_read_elem()
+                                    .unwrap_or(target_parameter)
                             };
                             for value in values {
                                 if matches!(adapted_params[*value], Ty::TyParam(_, _)) {
@@ -19931,7 +19933,7 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|parameter| {
                     crate::symbol_resolver::instantiate_slot(
-                        Some(&source),
+                        &source,
                         Some(&signature),
                         *parameter,
                         &bindings,
@@ -20037,7 +20039,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|parameter| {
                         crate::symbol_resolver::instantiate_slot(
-                            Some(&source),
+                            &source,
                             Some(&signature),
                             *parameter,
                             &bindings,
@@ -20134,14 +20136,14 @@ impl<'a> Checker<'a> {
                         && !whole_array
                         && !self.file.is_spread_arg(args[argument])
                     {
-                        declared.array_elem().or(Some(declared))
+                        declared.array_read_elem().or(Some(declared))
                     } else {
                         Some(declared)
                     }
                 })
                 .collect::<Option<Vec<_>>>()?;
             let inferred_ret = crate::symbol_resolver::instantiate_slot(
-                Some(&source),
+                &source,
                 Some(&signature),
                 signature.ret,
                 &bindings,
@@ -20181,7 +20183,8 @@ impl<'a> Checker<'a> {
             }
             candidate.callable.ret = ret;
             if let Some(vararg) = packed_vararg {
-                candidate.callable.vararg_elem = params.get(vararg).and_then(|ty| ty.array_elem());
+                candidate.callable.vararg_elem =
+                    params.get(vararg).and_then(|ty| ty.array_read_elem());
                 candidate.callable.vararg_index = candidate.callable.vararg_elem.map(|_| vararg);
             } else {
                 candidate.callable.vararg_elem = None;
@@ -20595,7 +20598,7 @@ impl<'a> Checker<'a> {
             let expected = if shape.call_sig.vararg_index == Some(parameter)
                 && !self.file.is_spread_arg(args[source])
             {
-                declared.array_elem().unwrap_or(declared)
+                declared.array_read_elem().unwrap_or(declared)
             } else {
                 declared
             };
@@ -20640,7 +20643,13 @@ impl<'a> Checker<'a> {
                 semantic
                     .params
                     .first()
-                    .map(|selector| crate::symbol_resolver::function_input_types(*selector, &binds))
+                    .map(|selector| {
+                        crate::symbol_resolver::function_input_types(
+                            &self.fed_source(),
+                            *selector,
+                            &binds,
+                        )
+                    })
                     .filter(|params| !params.is_empty())
             })
     }
@@ -20773,7 +20782,7 @@ impl<'a> Checker<'a> {
                     if overload.call_sig.vararg_index == Some(parameter)
                         && whole_array_varargs.get(argument).copied().unwrap_or(false)
                     {
-                        actual.non_null().array_elem().unwrap_or(actual)
+                        actual.non_null().array_read_elem().unwrap_or(actual)
                     } else {
                         actual
                     }
@@ -20788,7 +20797,7 @@ impl<'a> Checker<'a> {
                 let declared = semantic.params.get(parameter).copied()?;
                 if overload.call_sig.vararg_index == Some(parameter) {
                     let whole_array = whole_array_varargs.get(argument).copied().unwrap_or(false);
-                    if let (Some(actual), Some(element)) = (actual, declared.array_elem()) {
+                    if let (Some(actual), Some(element)) = (actual, declared.array_read_elem()) {
                         if whole_array {
                             return Some(element);
                         }
@@ -21012,7 +21021,11 @@ impl<'a> Checker<'a> {
                     .params
                     .get(parameter)
                     .map(|parameter| {
-                        crate::symbol_resolver::function_input_types(*parameter, &binds)
+                        crate::symbol_resolver::function_input_types(
+                            &self.fed_source(),
+                            *parameter,
+                            &binds,
+                        )
                     })
                     .filter(|types| !types.is_empty())
                     .unwrap_or_else(|| {
@@ -21024,7 +21037,7 @@ impl<'a> Checker<'a> {
                             .flatten()
                             .map(|ty| {
                                 crate::symbol_resolver::instantiate_slot(
-                                    None,
+                                    &self.fed_source(),
                                     Some(&semantic),
                                     *ty,
                                     &binds,
@@ -24053,7 +24066,7 @@ impl<'a> Checker<'a> {
                         }
                         let whole_array = vararg && self.receiver_is_assignable(actual, declared);
                         let expected = if vararg && !whole_array {
-                            declared.array_elem().unwrap_or(declared)
+                            declared.array_read_elem().unwrap_or(declared)
                         } else {
                             declared
                         };
@@ -26519,7 +26532,7 @@ impl<'a> Checker<'a> {
                 {
                     parameter
                 } else {
-                    parameter.array_elem()?
+                    parameter.array_read_elem()?
                 }
             } else {
                 if self.file.is_spread_arg(argument) {
@@ -28590,7 +28603,7 @@ impl<'a> Checker<'a> {
             let expected =
                 if parameters.vararg == Some(index) && !named && !self.file.is_spread_arg(argument)
                 {
-                    declared.array_elem()?
+                    declared.array_read_elem()?
                 } else {
                     declared
                 };
@@ -28801,7 +28814,7 @@ impl<'a> Checker<'a> {
             let expected =
                 if parameters.vararg == Some(index) && !named && !self.file.is_spread_arg(argument)
                 {
-                    declared.array_elem().unwrap_or(*declared)
+                    declared.array_read_elem().unwrap_or(*declared)
                 } else {
                     *declared
                 };
@@ -31493,7 +31506,7 @@ impl<'a> Checker<'a> {
     ) {
         if let Some(n_fixed) = vararg_index.filter(|&slot| slot < params.len()) {
             let array_param = params[n_fixed];
-            let elem = array_param.array_elem().unwrap_or(array_param);
+            let elem = array_param.array_read_elem().unwrap_or(array_param);
             for (i, a) in arg_tys.iter().enumerate() {
                 if i >= args.len() {
                     break;
@@ -31537,7 +31550,7 @@ impl<'a> Checker<'a> {
         for (source, parameter) in parameters.into_iter().enumerate() {
             let declared = params[parameter];
             let expected = if vararg_index == Some(parameter) {
-                declared.array_elem().unwrap_or(declared)
+                declared.array_read_elem().unwrap_or(declared)
             } else {
                 declared
             };
@@ -31655,7 +31668,7 @@ impl<'a> Checker<'a> {
         whole_array_syntax: bool,
         inferred_element: Option<Ty>,
     ) -> Ty {
-        let declared_element = declared_array.array_elem().unwrap_or(declared_array);
+        let declared_element = declared_array.array_read_elem().unwrap_or(declared_array);
         let element = inferred_element.unwrap_or(declared_element);
         if !whole_array_syntax || actual.non_null().array_elem().is_none() {
             return element;
@@ -31731,11 +31744,11 @@ impl<'a> Checker<'a> {
         // Generic-array assignability is erased elsewhere, but a vararg's whole-array form is a
         // semantic element-type check: `s = *ints` cannot satisfy `vararg s: String`. Compare the
         // elements directly whenever the argument still carries its array shape.
-        if let Some(actual_element) = actual.non_null().array_elem() {
+        if let Some(actual_element) = actual.non_null().array_read_elem() {
             if !self.file.is_spread_arg(argument) {
                 self.resolved_whole_array_vararg_args.insert(argument);
             }
-            let expected_element = array.array_elem().unwrap_or(array);
+            let expected_element = array.array_read_elem().unwrap_or(array);
             self.expect_assignable(
                 expected_element,
                 actual_element,
@@ -31747,7 +31760,7 @@ impl<'a> Checker<'a> {
         // A spread expression may already have been typed as its element on some checking paths.
         if self.file.is_spread_arg(argument) {
             self.expect_assignable(
-                array.array_elem().unwrap_or(array),
+                array.array_read_elem().unwrap_or(array),
                 actual,
                 self.span(argument),
                 "argument",
@@ -31908,7 +31921,7 @@ impl<'a> Checker<'a> {
             if vararg_index.is_some_and(|vararg| index >= vararg)
                 && !self.file.is_spread_arg(argument)
             {
-                parameter = parameter.array_elem().unwrap_or(parameter);
+                parameter = parameter.array_read_elem().unwrap_or(parameter);
             }
             self.record_selected_sam_conversion(parameter, argument);
         }
@@ -38137,7 +38150,7 @@ impl<'a> Checker<'a> {
             // BOUND, as `<reified T : Number>` erases to Number).
             if let Some(signature) = selected.generic_sig.as_ref() {
                 let refined = crate::symbol_resolver::instantiate_slot(
-                    Some(&self.fed_source()),
+                    &self.fed_source(),
                     Some(signature),
                     signature.ret,
                     &selected.bindings,
@@ -41546,12 +41559,12 @@ impl<'a> Checker<'a> {
             // ordinary argument contributes its own type. Normalizing both sides to the element keeps
             // `render(*intArray)` and `render(1)` on one inference path and works for non-final varargs.
             let declared = if vararg {
-                declared.array_elem().unwrap_or(declared)
+                declared.array_read_elem().unwrap_or(declared)
             } else {
                 declared
             };
             let actual = if vararg && self.file.is_spread_arg(args[source]) {
-                actual.array_elem().unwrap_or(*actual)
+                actual.array_read_elem().unwrap_or(*actual)
             } else {
                 *actual
             };
@@ -41576,7 +41589,7 @@ impl<'a> Checker<'a> {
         // this semantic boundary regardless of whether the provider supplied source syntax or metadata.
         if let Some(index) = full_call_sig.vararg_index {
             let parameter = logical_params.get_mut(index)?;
-            *parameter = parameter.array_elem().unwrap_or(*parameter);
+            *parameter = parameter.array_read_elem().unwrap_or(*parameter);
         }
         let visible_params = parameter_indices
             .iter()
@@ -42488,7 +42501,7 @@ impl<'a> Checker<'a> {
                 && !argument.is_spread()
                 && !self.receiver_is_assignable(aty, params[i])
             {
-                params[i].array_elem().unwrap_or(params[i])
+                params[i].array_read_elem().unwrap_or(params[i])
             } else {
                 params[i]
             };
@@ -43811,9 +43824,9 @@ impl<'a> Checker<'a> {
                     .and_then(|names| names.get(source))
                     .is_some_and(Option::is_some);
                 let (expected, actual) = if parameter == vararg {
-                    let element = declared.array_elem()?;
+                    let element = declared.array_read_elem()?;
                     let contributed = if spread || named {
-                        actual.non_null().array_elem().unwrap_or(actual)
+                        actual.non_null().array_read_elem().unwrap_or(actual)
                     } else {
                         actual
                     };
@@ -43905,7 +43918,7 @@ impl<'a> Checker<'a> {
                 return None;
             }
             let expected = if is_vararg_slot && !spread {
-                parameter.array_elem().unwrap_or(Ty::Error)
+                parameter.array_read_elem().unwrap_or(Ty::Error)
             } else {
                 *parameter
             };
@@ -44905,7 +44918,7 @@ impl<'a> Checker<'a> {
                                             Some(slot)
                                                 if i >= slot && !self.file.is_spread_arg(*a) =>
                                             {
-                                                c.params.get(slot).and_then(|p| p.array_elem())
+                                                c.params.get(slot).and_then(|p| p.array_read_elem())
                                             }
                                             Some(slot) if i >= slot => c.params.get(slot).copied(),
                                             _ => c.params.get(i).copied(),
@@ -44933,8 +44946,10 @@ impl<'a> Checker<'a> {
                                                         != c.params.get(slot).copied()
                                             });
                                         if packs {
-                                            c.vararg_elem =
-                                                c.params.get(slot).and_then(|p| p.array_elem());
+                                            c.vararg_elem = c
+                                                .params
+                                                .get(slot)
+                                                .and_then(|p| p.array_read_elem());
                                             c.vararg_index = Some(slot);
                                         }
                                     }
@@ -46651,7 +46666,7 @@ impl<'a> Checker<'a> {
                                 for (i, a) in args.iter().enumerate() {
                                     let p = if sig.vararg() && i >= value_count.saturating_sub(1) {
                                         sig.params[sig.params.len() - 1]
-                                            .array_elem()
+                                            .array_read_elem()
                                             .unwrap_or(Ty::Error)
                                     } else {
                                         sig.params[ctx_count + i]
@@ -48075,7 +48090,7 @@ impl<'a> Checker<'a> {
                                 }
                                 if let Some(parameter) = semantic_parameter {
                                     let expected = if sig.vararg() && pi + 1 == sig.params.len() {
-                                        parameter.array_elem().unwrap_or(Ty::Error)
+                                        parameter.array_read_elem().unwrap_or(Ty::Error)
                                     } else {
                                         parameter
                                     };
@@ -48089,7 +48104,7 @@ impl<'a> Checker<'a> {
                         // mixed/unsupported spread shape still type-checks here but the lowering skips it.
                         if self.file.is_spread_arg(a) {
                             let t = self.expr(scope, a);
-                            if let Some(elem) = t.array_elem() {
+                            if let Some(elem) = t.array_read_elem() {
                                 return elem;
                             }
                         }

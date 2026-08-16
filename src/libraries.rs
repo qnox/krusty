@@ -2462,7 +2462,7 @@ impl EmptySymbolSource {
     fn builtin_classifier(name: &str, internal: TypeName) -> Option<LibraryType> {
         let known = Ty::from_name(name).is_some()
             || Ty::primitive_array_element(name).is_some()
-            || matches!(name, "Array" | "Function");
+            || matches!(name, "Array" | "Enum" | "Function");
         if !known {
             return None;
         }
@@ -2472,6 +2472,14 @@ impl EmptySymbolSource {
             classifier.kind = TypeKind::Interface;
             classifier.type_parameters =
                 TypeParameters::invariant(vec!["R".to_string()], vec![Vec::new()]);
+        }
+        if name == "Enum" {
+            // `enum class E` has the implicit semantic supertype `Enum<E>` even with an empty
+            // target classpath. Publish the corresponding core declaration through the same symbol
+            // provider as the other language builtins, so checked IR never needs an emitter-only
+            // classifier exception merely to format that already-recorded type.
+            classifier.type_parameters =
+                TypeParameters::invariant(vec!["E".to_string()], vec![Vec::new()]);
         }
         if name == "Unit" {
             classifier.kind = TypeKind::Object;
@@ -2715,6 +2723,20 @@ mod tests {
         AnnotationPositionalPolicy, CallSig, InlineKind, ParamList, TypeKind, Visibility,
     };
     use crate::types::Ty;
+
+    #[test]
+    fn empty_platform_publishes_the_implicit_enum_supertype_declaration() {
+        let classifier = crate::symbol_source::SymbolSource::classifier(
+            &super::EmptySymbolSource,
+            crate::types::type_name("kotlin/Enum"),
+        )
+        .expect("Enum is a core classifier even without a target classpath");
+        assert_eq!(classifier.type_params(), &["E"]);
+        assert_eq!(
+            classifier.type_param_variances(),
+            &[crate::types::TypeVariance::Invariant]
+        );
+    }
 
     #[test]
     fn visibility_from_metadata_maps_the_kotlin_enum() {

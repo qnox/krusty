@@ -2886,17 +2886,10 @@ fn new_classifier_writer(
     env: &EmitEnv,
     opts: &EmitOptions,
 ) -> ClassWriter {
-    let internal = c.fq_name();
     let signature = ir
-        .class_signature(&internal)
-        .and_then(|signature| jvm_class_signature(&JvmSignatureFormatter::new(env), signature))
-        .or_else(|| {
-            // An enum with no entries records no signature of its own, yet still extends the
-            // parameterized `java/lang/Enum<E>`. Key this on the SUPERCLASS, not on the entries:
-            // an entry-less enum is emitted through the ordinary class path.
-            (c.superclass_matches("java/lang/Enum") || c.superclass_matches("kotlin/Enum"))
-                .then(|| format!("Ljava/lang/Enum<L{internal};>;"))
-        });
+        .class_signature_name(c.fq_name)
+        .and_then(|signature| jvm_class_signature(&JvmSignatureFormatter::new(env), signature));
+    let internal = c.fq_name();
     // kotlinc (ASM) visits `(name, signature, superName)`, so the signature VALUE interns between
     // the two class names — it must reach the writer's constructor, not only `set_signature`.
     let mut cw = new_writer_generic(&internal, signature.as_deref(), super_internal, opts);
@@ -15544,7 +15537,14 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
                 type_args
                     .first()
                     .map(|e| {
-                        let et = ir_ty_to_jvm(e);
+                        // A projection is valid here as the ARRAY classifier's type argument, even
+                        // though it is never a value type of its own. Erase it at this boundary:
+                        // `out X` has the readable element `X`; `in X` can only be read as `Any`.
+                        let et = match e.non_null() {
+                            Ty::OutProjection(inner) => ir_ty_to_jvm(inner),
+                            Ty::InProjection(_) => Ty::obj("kotlin/Any"),
+                            _ => ir_ty_to_jvm(e),
+                        };
                         let boxed = reference_array_element(et);
                         // Keep a NULLABLE element's `?`: `Array<Int?>` = `Integer[]` whose `get` yields the
                         // BOXED element (it can be `null`), UNLIKE `Array<Int>` whose `get` unboxes.
@@ -15573,11 +15573,6 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // erases to `java/lang/Object` for an `Any` bound). This is the ONE place `T` becomes a
         // concrete JVM type.
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
-        // JVM erasure of a projected type argument that reached a value position: the projection is
-        // a use-site variance mark on a classifier argument, never a JVM type of its own, so it
-        // erases through its bound exactly like a type parameter (`out X` → `X`, `in X` → `Object`).
-        Ty::OutProjection(inner) => ir_ty_to_jvm(inner),
-        Ty::InProjection(_) => ir_ty_to_jvm(&Ty::obj("kotlin/Any")),
         _ => Ty::Error,
     }
 }

@@ -74,13 +74,20 @@ fn a_star_projected_member_read_is_approximated_to_its_bound() {
         code, 0,
         "kotlinc rejected the control source: {diagnostics}"
     );
-    let krusty = common::front_end_diagnostics_with_stdlib(SOURCE);
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let krusty =
+        common::front_end_diagnostics(SOURCE, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
     assert!(
         krusty.is_empty(),
         "a star-projected member read must type as its bound: {krusty:?}"
     );
-    let Some(output) = common::compile_and_run_with_stdlib(SOURCE, "StarProjectedMemberRead")
-    else {
+    let Some(output) = common::compile_and_run_box(
+        SOURCE,
+        "StarProjectedMemberRead",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    ) else {
         panic!("expected the star-projection fixture to compile and run");
     };
     assert_eq!(output.trim(), "OK");
@@ -110,7 +117,10 @@ fn a_write_through_a_projected_receiver_is_rejected() {
         code, 0,
         "kotlinc must reject a write through a star projection"
     );
-    let krusty = common::front_end_diagnostics_with_stdlib(SOURCE);
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let krusty =
+        common::front_end_diagnostics(SOURCE, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
     assert_eq!(
         krusty.len(),
         2,

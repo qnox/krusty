@@ -820,6 +820,18 @@ impl Ty {
         }
     }
 
+    /// The type produced by READING one element from this array. [`Ty::array_elem`] preserves the
+    /// classifier argument exactly, including a use-site projection; an expression cannot itself
+    /// have that projection wrapper. Reading `Array<out T>` yields `T`, while an `in`-projected
+    /// array exposes only nullable `Any`. Primitive and invariant arrays keep their declared element.
+    pub fn array_read_elem(self) -> Option<Ty> {
+        Some(match self.array_elem()? {
+            Ty::OutProjection(inner) => *inner,
+            Ty::InProjection(_) => Ty::nullable(Ty::obj("kotlin/Any")),
+            element => element,
+        })
+    }
+
     /// Whether this type is any array — a primitive specialized array (`kotlin/IntArray`, …) or a boxed
     /// `Array<T>` (`Obj("kotlin/Array", [T])`). The single array-ness predicate; consumers must use this
     /// instead of pattern-matching a specific spelling so the representation can migrate under them.
@@ -2035,6 +2047,21 @@ pub(crate) fn ty_subst_keep_unbound(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn array_read_element_approximates_use_site_projections() {
+        let platform_string = Ty::platform_nullable(Ty::String);
+        assert_eq!(
+            Ty::obj_args("kotlin/Array", &[Ty::out_projection(platform_string)]).array_read_elem(),
+            Some(platform_string)
+        );
+        assert_eq!(
+            Ty::obj_args("kotlin/Array", &[Ty::in_projection(Ty::String)]).array_read_elem(),
+            Some(Ty::nullable(Ty::obj("kotlin/Any")))
+        );
+        assert_eq!(Ty::array(Ty::Int).array_read_elem(), Some(Ty::Int));
+        assert_eq!(Ty::array(Ty::String).array_read_elem(), Some(Ty::String));
+    }
 
     #[test]
     fn type_name_tree_operations_preserve_identity_without_text_round_trip() {
