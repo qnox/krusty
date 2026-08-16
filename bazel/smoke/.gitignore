@@ -1,0 +1,11 @@
+# The stdlib jar is taken from whatever Kotlin distribution the checkout provisions (README.md);
+# only the jar is ignored, so the directory itself stays in the tree for the copy to land in.
+lib/*.jar
+# Bazel's generated convenience symlinks, anchored so a real `bazel-…` source file is not hidden.
+/bazel-bin
+/bazel-out
+/bazel-smoke
+/bazel-testlogs
+# Rewritten in place by whichever Bazel the reader runs (9 and 8 use different lock versions), so
+# committing it guarantees a dirty tree for one of them.
+MODULE.bazel.lock

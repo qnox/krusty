@@ -1,0 +1,4 @@
+# The smoke fixture is its own Bazel workspace. Without this, a `bazel build //...` from the repo
+# root follows its `bazel-smoke` convenience symlink into the external-repo cache ("infinite symlink
+# expansion") and then fails loading third-party example packages, none of which names the fixture.
+bazel/smoke

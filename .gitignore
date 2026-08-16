@@ -15,3 +15,7 @@ __pycache__/
 
 # ktlint CLI binary used by the formatting diff harness (downloaded, not committed)
 tools/ktlint/
+
+# Left behind by any root-level Bazel invocation.
+/bazel-*
+/MODULE.bazel.lock

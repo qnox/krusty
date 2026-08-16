@@ -1,0 +1,15 @@
+# The smallest workspace that builds a Kotlin target with krusty, so the rule's claim to work
+# under Bazel is reproducible rather than asserted. See README.md.
+module(name = "krusty_rule_smoke", version = "0.0.1")
+
+bazel_dep(name = "rules_java", version = "8.14.0")
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "krusty", version = "0.0.1")
+
+# krusty is not published to a registry. Point this at a checkout that CONTAINS `bazel/` and
+# `MODULE.bazel`; a checkout parked on a branch without them resolves to a directory with no
+# module file and bzlmod rejects it.
+local_path_override(
+    module_name = "krusty",
+    path = "../..",
+)
