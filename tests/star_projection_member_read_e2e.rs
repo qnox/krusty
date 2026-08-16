@@ -26,6 +26,10 @@ fn a_star_projected_member_read_is_approximated_to_its_bound() {
 
         fun anyMapEquals(a: Any): Boolean = (a as Map<*, *>)["k"] != "v"
 
+        fun bareFirst(l: List<*>): Boolean = l.first() != "x"
+
+        fun branchMerge(l: List<*>): Any? = if (l.size > 0) l.first() else null
+
         fun box(): String {
             val m: Map<String, String> = mapOf("k" to "v")
             val l: List<String> = listOf("a")
@@ -37,6 +41,8 @@ fn a_star_projected_member_read_is_approximated_to_its_bound() {
             if (listValue(l) != "a") return "listValue"
             if (!listEquals(l)) return "listEquals"
             if (anyMapEquals(m)) return "anyMapEquals"
+            if (bareFirst(l) != true) return "bareFirst"
+            if (branchMerge(l) != "a") return "branchMerge"
             return "OK"
         }
     "#;

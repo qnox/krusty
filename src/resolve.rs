@@ -38143,6 +38143,16 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // A projected receiver argument binds the extension's formal to the projection itself
+            // (`List<*>.first()` binds `T` to `out Any?`). The call's VALUE takes the approximation
+            // of that capture — a projection is not a type any value has.
+            callable.ret = crate::symbol_resolver::approximate_projected_value(
+                selected
+                    .generic_sig
+                    .as_ref()
+                    .map_or(callable.ret, |signature| signature.ret),
+                callable.ret,
+            );
             let ret = callable.ret;
             let mut resolved = ResolvedExtensionCall::library(callable.clone());
             resolved.context_args = context_args;
