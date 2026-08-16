@@ -54,15 +54,19 @@ fn collect_classes(root: &Path, dir: &Path, classes: &mut Vec<(String, Vec<u8>)>
 }
 
 fn compile(mode: JvmDefaultMode) -> Vec<(String, Vec<u8>)> {
+    compile_source(mode, INTERFACE_SOURCE, "I")
+}
+
+fn compile_source(mode: JvmDefaultMode, source_text: &str, stem: &str) -> Vec<(String, Vec<u8>)> {
     let flag = match mode {
         JvmDefaultMode::Enable => "enable",
         JvmDefaultMode::NoCompatibility => "no-compatibility",
         JvmDefaultMode::Disable => "disable",
     };
     let work = common::scratch_dir().expect("allocate krusty fixture");
-    let source = work.join("I.kt");
+    let source = work.join(format!("{stem}.kt"));
     let output = work.join("out");
-    std::fs::write(&source, INTERFACE_SOURCE).expect("write krusty fixture");
+    std::fs::write(&source, source_text).expect("write krusty fixture");
     let result = std::process::Command::new(common::krusty_binary())
         .args(["-d", output.to_str().expect("UTF-8 output")])
         .arg(format!("-jvm-default={flag}"))
@@ -156,31 +160,41 @@ fn no_compatibility_emits_no_default_impls_class() {
     );
 }
 
-/// `disable` needs a different emitter. The CLI must stop before compilation; printing a warning
-/// and continuing under `enable` would leave a successful build containing the wrong class shape.
+/// `disable`: no default methods at all. Every interface member is abstract, every body moves to the
+/// `$DefaultImpls` holder as a static taking the receiver as parameter 0, and each implementing class
+/// forwards to it with `invokestatic`. Measured against kotlinc 2.4.10 — the class SET and the member
+/// set of all three classes must match.
 #[test]
-fn disable_is_rejected_without_emitting_fallback_classes() {
-    let work = common::scratch_dir().expect("allocate disable fixture");
-    let source = work.join("I.kt");
-    let output = work.join("out");
-    std::fs::write(&source, "interface I { fun f(): Int = 1 }").expect("write disable fixture");
-    let result = std::process::Command::new(common::krusty_binary())
-        .args(["-d", output.to_str().expect("UTF-8 output")])
-        .arg("-jvm-default=disable")
-        .arg(&source)
-        .output()
-        .expect("run krusty");
-    assert!(!result.status.success(), "disable unexpectedly compiled");
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        stderr.contains("does not emit that interface shape"),
-        "unexpected diagnostic: {stderr}"
+fn disable_moves_every_body_to_the_holder() {
+    let ours = compile(JvmDefaultMode::Disable);
+    let reference = compile_reference("disable");
+    assert_eq!(
+        class_names(&ours),
+        class_names(&reference),
+        "class set diverges under -jvm-default=disable"
     );
-    assert!(
-        !output.exists(),
-        "a rejected output-shape option must not leave compiler output"
-    );
-    let _ = std::fs::remove_dir_all(work);
+    for class_name in ["I", "I$DefaultImpls", "C"] {
+        let mut mine = public_method_shape(&ours, class_name);
+        let mut theirs = public_method_shape(&reference, class_name);
+        mine.sort();
+        theirs.sort();
+        assert_eq!(
+            mine, theirs,
+            "{class_name} diverges under -jvm-default=disable"
+        );
+    }
+}
+
+/// The forwarders are what make the artifact correct: without them an implementing class does not
+/// implement its own interface, and every inherited call is an `AbstractMethodError` at run time.
+#[test]
+fn a_disable_compiled_program_still_runs() {
+    let classes = compile(JvmDefaultMode::Disable);
+    let box_class = common::find_box_class(&classes).expect("no box class emitted");
+    let Some(result) = common::run_box(&classes, &box_class, &[common::stdlib_jar()]) else {
+        return; // no JVM available — the shape assertions above still ran
+    };
+    assert_eq!(result, "OK");
 }
 
 /// The set of class files krusty produces must match kotlinc's for the same sources and the same
@@ -283,4 +297,92 @@ fn a_program_behaves_the_same_under_every_modelled_mode() {
             .expect("JVM unavailable for jvm-default behavior test");
         assert_eq!(result, "OK", "{mode:?}");
     }
+}
+
+/// The shapes a one-interface fixture cannot see. Each of these compiled clean and then failed at RUN
+/// time before the emitter handled it — `AbstractMethodError`, `ClassFormatError`, `VerifyError` —
+/// so each asserts the program's OUTPUT, not its class shape.
+#[test]
+fn every_inheritance_shape_runs_under_disable() {
+    for (name, source, expected) in [
+        (
+            "direct",
+            "interface I { fun f(): String = \"I.f\" }\n             class C : I\n             fun box(): String = if (C().f() == \"I.f\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+        (
+            // The body is inherited through an intermediate interface: forwarding only for DIRECT
+            // superinterfaces leaves the class not implementing its own interface.
+            "transitive",
+            "interface A { fun f(): String = \"A.f\" }\n             interface B : A\n             class C : B\n             fun box(): String { val c: A = C(); return if (c.f() == \"A.f\") \"OK\" else \"fail\" }\n",
+            "OK",
+        ),
+        (
+            // The class already carries an erasure bridge with this signature; a forwarder beside it
+            // makes two methods with one name and descriptor, and the class will not load.
+            "generic override",
+            "interface I<T> { fun f(t: T): String = \"I.f\" }\n             class C : I<String> { override fun f(t: String): String = \"C.f\" }\n             fun box(): String = if (C().f(\"x\") == \"C.f\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+        (
+            // An enum reaches emission through a different function than an ordinary class.
+            "enum",
+            "interface I { fun f(): String = \"I.f\" }\n             enum class E : I { A, B }\n             fun box(): String = if (E.A.f() == \"I.f\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+        (
+            // `super.f()` is a non-virtual call to a body that now lives on the holder.
+            "super call",
+            "interface I { fun f(): String = \"I.f\" }\n             class C : I { override fun f(): String = \"C+\" + super.f() }\n             fun box(): String = if (C().f() == \"C+I.f\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+        (
+            // Two same-arity overloads, one overridden: keying the skip on arity alone dropped the
+            // OTHER one's forwarder, and the class stopped implementing its interface.
+            "overload, one overridden",
+            "interface I { fun f(x: String): String = \"I:$x\"\n                           fun f(x: Int): String = \"I:$x\" }\n             class C : I { override fun f(x: Int): String = \"C:$x\" }\n             fun box(): String { val c: I = C()\n               return if (c.f(\"a\") == \"I:a\" && c.f(1) == \"C:1\") \"OK\" else \"fail\" }\n",
+            "OK",
+        ),
+        (
+            // A member declared on `A` and overridden on `B` must forward to the MOST DERIVED
+            // declaration. Taking whichever the walk reached first made the answer depend on the
+            // order the class listed its supertypes.
+            "diamond, most derived wins",
+            "interface A { fun f(): String = \"A.f\" }\n             interface B : A { override fun f(): String = \"B.f\" }\n             interface D : A\n             class C : D, B\n             fun box(): String = if (C().f() == \"B.f\") \"OK\" else \"fail: \" + C().f()\n",
+            "OK",
+        ),
+        (
+            // A private interface member: its body moves to the holder as a PRIVATE static, it gets
+            // no class forwarder, and the call inside the moved body must go to the holder too — an
+            // `invokespecial` naming the interface from another class does not even verify.
+            "private member",
+            "interface I { private fun h(): String = \"h\"; fun f(): String = h() + \"!\" }\n             class C : I\n             fun box(): String = if (C().f() == \"h!\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+    ] {
+        let classes = compile_source(JvmDefaultMode::Disable, source, "T");
+        let box_class = common::find_box_class(&classes)
+            .unwrap_or_else(|| panic!("{name}: no box class emitted"));
+        let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+            .unwrap_or_else(|| panic!("{name}: JVM unavailable for the disable behavior test"));
+        assert_eq!(result, expected, "{name}");
+    }
+}
+
+/// A private interface member's body is a PRIVATE static on the holder, and never a member of the
+/// implementing class's ABI — both measured against kotlinc.
+#[test]
+fn a_private_interface_member_stays_private_under_disable() {
+    let source = "interface I { private fun h(): String = \"h\"; fun f(): String = h() + \"!\" }\n                  class C : I\n";
+    let ours = compile_source(JvmDefaultMode::Disable, source, "T");
+    let holder = public_method_shape(&ours, "I$DefaultImpls");
+    assert!(
+        !holder.iter().any(|(name, _, _)| name == "h"),
+        "a private holder static is not public: {holder:?}"
+    );
+    let implementer = public_method_shape(&ours, "C");
+    assert!(
+        !implementer.iter().any(|(name, _, _)| name == "h"),
+        "a private interface member never reaches the class ABI: {implementer:?}"
+    );
 }

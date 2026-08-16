@@ -302,16 +302,13 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             "--jvm_default" => {
                 let value = value_of(index, flag)?;
                 let mode = JvmDefaultMode::parse(&value)
-                    .filter(|mode| mode.is_modelled())
                     .ok_or_else(|| Refusal::Unsupported(format!("--jvm_default {value}")))?;
                 unit.kotlinc_args.push("-jvm-default".to_string());
                 unit.kotlinc_args.push(
                     match mode {
                         JvmDefaultMode::Enable => "enable",
                         JvmDefaultMode::NoCompatibility => "no-compatibility",
-                        JvmDefaultMode::Disable => {
-                            unreachable!("unmodelled mode was rejected above")
-                        }
+                        JvmDefaultMode::Disable => "disable",
                     }
                     .to_string(),
                 );
@@ -695,10 +692,25 @@ mod tests {
 
     /// A mode krusty does not emit fails the action instead of producing another shape.
     #[test]
-    fn an_unemittable_jvm_default_is_refused() {
+    /// All three of kotlinc's `-jvm-default` strategies are emitted, so a target pinning any of them
+    /// translates. A value naming none of them is still refused rather than compiled as some other
+    /// interface shape.
+    fn every_jvm_default_mode_translates_and_nonsense_is_refused() {
+        for mode in ["disable", "enable", "no-compatibility"] {
+            let unit = translate(&args(&[
+                "--jvm_default",
+                mode,
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]))
+            .unwrap_or_else(|error| panic!("{mode} must translate: {error:?}"));
+            assert_eq!(unit.sources, vec![PathBuf::from("A.kt")]);
+        }
         let refusal = translate(&args(&[
             "--jvm_default",
-            "disable",
+            "sideways",
             "--srcs",
             "A.kt",
             "--out",

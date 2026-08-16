@@ -205,6 +205,7 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     )
     .expect("write source");
     let jar = dir.join("demo.jar");
+    let disable_jar = dir.join("demo-disable.jar");
     let forwarded_jar = dir.join("forwarded.jar");
     let abi = dir.join("demo.abi.jar");
     let cri = dir.join("demo.kotlinCriStorage");
@@ -225,11 +226,12 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
             "\n",
             r#"{{"arguments":["--srcs","{src}","--out","{jar}","--java-count","4"],"requestId":3}}"#,
             "\n",
-            r#"{{"arguments":["--srcs","{src}","--out","{jar}","--jvm_default","disable"],"requestId":4}}"#,
+            r#"{{"arguments":["--srcs","{src}","--out","{disable_jar}","--jvm_default","disable"],"requestId":4}}"#,
             "\n"
         ),
         src = source.display(),
         jar = jar.display(),
+        disable_jar = disable_jar.display(),
         forwarded_jar = forwarded_jar.display(),
         abi = abi.display(),
         cri = cri.display()
@@ -269,8 +271,9 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
         lines[2]
     );
     assert!(
-        lines[3].contains("\"exitCode\":1") && lines[3].contains("--jvm_default disable"),
-        "an unemittable shape is refused, and the worker was still alive to say so: {}",
+        lines[3].contains("\"exitCode\":0") && lines[3].contains("\"requestId\":4"),
+        "every -jvm-default strategy is emitted, `disable` included, and the worker was still \
+         alive to answer a fourth request: {}",
         lines[3]
     );
 
@@ -283,6 +286,15 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     assert!(
         entries.iter().any(|entry| entry == "demo/I.class"),
         "{entries:?}"
+    );
+    // Request 4 asked for `disable`, whose whole point is the holder the other mode omits. Its own
+    // jar keeps the two shapes apart — writing both to one output would just prove the later write.
+    let disable_entries = jar_entries(&disable_jar);
+    assert!(
+        disable_entries
+            .iter()
+            .any(|entry| entry.contains("DefaultImpls")),
+        "disable moves the bodies to the holder: {disable_entries:?}"
     );
     assert!(
         !entries.iter().any(|entry| entry.contains("DefaultImpls")),
