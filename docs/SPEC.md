@@ -1276,6 +1276,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   Both are set per module by intellij-community (`build/compiler-options.bzl`). Tests:
   `tests/no_assertions_flags_e2e.rs`.
+- `-Xlambdas` / `-Xsam-conversions`: how a lambda and a SAM conversion are realized. krusty emits
+  `indy` — an `invokedynamic` call site bound through `LambdaMetafactory.metafactory` — always, which
+  is kotlinc's own default since 2.0 and what intellij-community builds with. Verified against
+  kotlinc 2.4.10 for a Kotlin function type, a `fun interface`, and a Java SAM (`Runnable`): the same
+  class set (no synthetic lambda class), one `invokedynamic` per lambda, and an identical
+  `BootstrapMethods` table — modulo constant-pool indices, which differ because the two pools differ
+  in size — down to the synthetic implementation-method names (`box$lambda$0`…). The `class` strategy
+  (one synthetic class per lambda) has no emitter, so that value FAILS the compile rather than
+  quietly producing `indy` output: it differs in the class set, not just in instructions. Because
+  `invokedynamic` requires class-file version 51 or newer, a real indy call site under
+  `-jvm-target 1.6` fails the compile without emitting artifacts; fully spliced inline lambdas remain
+  valid because they emit no call site. Tests: `tests/indy_lambda_parity_e2e.rs`.
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

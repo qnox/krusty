@@ -606,6 +606,8 @@ mod import_scope_conformance_e2e;
 mod imported_companion_property_e2e;
 #[path = "indy_infra_e2e.rs"]
 mod indy_infra_e2e;
+#[path = "indy_lambda_parity_e2e.rs"]
+mod indy_lambda_parity_e2e;
 #[path = "inferred_computed_prop_e2e.rs"]
 mod inferred_computed_prop_e2e;
 #[path = "inferred_property_type_args_e2e.rs"]
