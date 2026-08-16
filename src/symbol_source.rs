@@ -220,6 +220,7 @@ mod tests {
                                     formals: Vec::new(),
                                     ty: Ty::Int,
                                     context_count: 0,
+                                    context_param_names: Vec::new(),
                                     getter: callable(&self.owner, name),
                                     setter: None,
                                     setter_visibility: Visibility::Public,
