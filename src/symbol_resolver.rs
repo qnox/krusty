@@ -318,14 +318,14 @@ fn classifier_type_parameter_bounds(
 }
 
 #[derive(Clone, Copy)]
-enum TypePosition {
+pub(crate) enum TypePosition {
     In,
     Out,
     Invariant,
 }
 
 #[derive(Clone, Copy)]
-enum UnboundSpecialization {
+pub(crate) enum UnboundSpecialization {
     Preserve,
     UseUpperBound,
 }
@@ -348,7 +348,7 @@ fn compose_position(position: TypePosition, variance: crate::types::TypeVariance
 /// never becomes `out X`: reads expose `X`, writes admit `Nothing`, and nested function/class variance
 /// composes with the surrounding position.
 fn specialize_member_type_with_unbound(
-    source: &dyn SymbolSource,
+    source: Option<&dyn SymbolSource>,
     ty: Ty,
     bindings: &GSigBinds,
     position: TypePosition,
@@ -422,7 +422,7 @@ fn specialize_member_type_with_unbound(
         )),
         Ty::Obj(internal, arguments) if !arguments.is_empty() => {
             let variances = source
-                .classifier(internal)
+                .and_then(|source| source.classifier(internal))
                 .map(|classifier| classifier.type_param_variances.clone())
                 .unwrap_or_default();
             Ty::obj_args_name(
@@ -456,12 +456,54 @@ fn specialize_member_type(
     position: TypePosition,
 ) -> Ty {
     specialize_member_type_with_unbound(
-        source,
+        Some(source),
         ty,
         bindings,
         position,
         UnboundSpecialization::Preserve,
     )
+}
+
+/// THE decision point for what a projected type argument means to a consumer. A binding map may
+/// legitimately carry a use-site projection (`List<*>` binds a formal to `out Any?` — the stand-in
+/// for kotlinc's captured type); what that capture means depends only on the POSITION of the slot
+/// being instantiated, never on the callee: a read sees the projection's readable bound, a write
+/// admits `Nothing`, and a classifier-argument position keeps the projection, because `List<out X>`
+/// is a legal type. Raw `ty_subst`/`ty_subst_keep_unbound` ARE that invariant rule and stay correct
+/// wherever a receiver or classifier argument is formed; every slot that types a VALUE — parameter,
+/// return, lambda input — instantiates through here instead. `signature` supplies `formal_bounds`
+/// for bound-aware reads, since the inline `TyParam` bound is not always populated.
+pub(crate) fn instantiate_slot(
+    source: Option<&dyn SymbolSource>,
+    signature: Option<&GenericSig>,
+    ty: Ty,
+    bindings: &GSigBinds,
+    position: TypePosition,
+    unbound: UnboundSpecialization,
+) -> Ty {
+    if !bindings
+        .values()
+        .any(|binding| binding.projection_inner().is_some())
+    {
+        return match unbound {
+            UnboundSpecialization::Preserve => ty_subst_keep_unbound(ty, bindings),
+            UnboundSpecialization::UseUpperBound => ty_subst(ty, bindings),
+        };
+    }
+    let ty = signature.map_or(ty, |signature| {
+        let bounds: std::collections::HashMap<String, Ty> = signature
+            .formals
+            .iter()
+            .zip(&signature.formal_bounds)
+            .filter_map(|(formal, bounds)| bounds.first().map(|bound| (formal.clone(), *bound)))
+            .collect();
+        if bounds.is_empty() {
+            ty
+        } else {
+            crate::types::ty_with_param_bounds(ty, &bounds)
+        }
+    });
+    specialize_member_type_with_unbound(source, ty, bindings, position, unbound)
 }
 
 pub(crate) fn specialize_signature_input_type(
@@ -470,7 +512,7 @@ pub(crate) fn specialize_signature_input_type(
     bindings: &GSigBinds,
 ) -> Ty {
     specialize_member_type_with_unbound(
-        source,
+        Some(source),
         ty,
         bindings,
         TypePosition::In,
@@ -484,7 +526,7 @@ pub(crate) fn specialize_signature_output_type(
     bindings: &GSigBinds,
 ) -> Ty {
     specialize_member_type_with_unbound(
-        source,
+        Some(source),
         ty,
         bindings,
         TypePosition::Out,
@@ -498,7 +540,7 @@ fn specialize_final_signature_output_type(
     bindings: &GSigBinds,
 ) -> Ty {
     specialize_member_type_with_unbound(
-        source,
+        Some(source),
         ty,
         bindings,
         TypePosition::Out,
@@ -512,7 +554,7 @@ pub(crate) fn specialize_signature_receiver_type(
     bindings: &GSigBinds,
 ) -> Ty {
     specialize_member_type_with_unbound(
-        source,
+        Some(source),
         ty,
         bindings,
         TypePosition::Invariant,
@@ -1317,32 +1359,6 @@ pub(crate) fn merge_generic_upper_bindings(
         }
         let selected = bindings.get(&formal).copied().unwrap_or(upper);
         bindings.insert(formal, selected);
-    }
-}
-
-/// Approximate a value type that a projected type argument produced. A value never HAS a projected
-/// type: `Map<*, *>` binds the `get` extension's `V` to `out Any?`, and Kotlin approximates that
-/// captured value to its bound, so `m["k"]` reads as `Any?`. `declared` is the type the substitution
-/// started from, so the approximation can use the FORMAL's own bound: reading a `C<in String>` whose
-/// parameter is declared `T : CharSequence` yields `CharSequence`, not `Any?` — the projection only
-/// says the caller may write a `String` there, never that the value read back is one. Only the
-/// value's own type is approximated: `List<out X>` is a legal type and stays exactly as declared.
-pub(crate) fn approximate_projected_value(declared: Ty, substituted: Ty) -> Ty {
-    match (declared, substituted) {
-        (_, Ty::OutProjection(inner)) => approximate_projected_value(declared, *inner),
-        (Ty::TyParam(_, bound), Ty::InProjection(_)) => approximate_projected_value(*bound, *bound),
-        (_, Ty::InProjection(_)) => Ty::nullable(Ty::obj("kotlin/Any")),
-        (Ty::Nullable(declared) | Ty::PlatformNullable(declared), Ty::Nullable(substituted)) => {
-            Ty::nullable(approximate_projected_value(*declared, *substituted))
-        }
-        (Ty::Nullable(declared) | Ty::PlatformNullable(declared), Ty::PlatformNullable(inner)) => {
-            Ty::platform_nullable(approximate_projected_value(*declared, *inner))
-        }
-        (_, Ty::Nullable(inner)) => Ty::nullable(approximate_projected_value(declared, *inner)),
-        (_, Ty::PlatformNullable(inner)) => {
-            Ty::platform_nullable(approximate_projected_value(declared, *inner))
-        }
-        _ => substituted,
     }
 }
 
@@ -2569,7 +2585,14 @@ fn bind_member_return(
     for (&parameter, &argument) in gsig.params.iter().zip(args) {
         unify_ty_from_symbols(source, parameter, argument, &mut binds);
     }
-    let ret = ty_subst(gsig.ret, &binds);
+    let ret = instantiate_slot(
+        Some(source),
+        Some(gsig),
+        gsig.ret,
+        &binds,
+        TypePosition::Out,
+        UnboundSpecialization::UseUpperBound,
+    );
     // A direct METHOD-owned return variable specializes to the inferred argument even when its
     // erased provider return is a non-top upper bound (`<A : Annotation> … : A` physically returns
     // `Annotation`). Owner variables are deliberately excluded: their provider-specialized return
@@ -2612,10 +2635,30 @@ fn specialize_property(mut property: PropertyInfo, receiver: Ty) -> PropertyInfo
     if let Some(declared_receiver) = property.receiver {
         unify_ty(declared_receiver, receiver, &mut binds);
     }
-    property.ty = ty_subst(property.ty, &binds);
+    property.ty = instantiate_slot(
+        None,
+        None,
+        property.ty,
+        &binds,
+        TypePosition::Out,
+        UnboundSpecialization::UseUpperBound,
+    );
     property.getter.ret = property.ty;
     if let Some(setter) = property.setter.as_mut() {
-        setter.params = ty_subst_all(&setter.params, &binds);
+        setter.params = setter
+            .params
+            .iter()
+            .map(|ty| {
+                instantiate_slot(
+                    None,
+                    None,
+                    *ty,
+                    &binds,
+                    TypePosition::In,
+                    UnboundSpecialization::UseUpperBound,
+                )
+            })
+            .collect();
     }
     property
 }
@@ -2742,7 +2785,14 @@ pub(crate) fn function_input_types(sig: Ty, binds: &GSigBinds) -> Vec<Ty> {
             // A lambda PARAMETER is an ordinary value slot: a formal bound to a projection by a
             // projected receiver shapes `it` as the approximation, never as `out X` itself.
             .map(|parameter| {
-                approximate_projected_value(*parameter, ty_subst_keep_unbound(*parameter, binds))
+                instantiate_slot(
+                    None,
+                    None,
+                    *parameter,
+                    binds,
+                    TypePosition::Out,
+                    UnboundSpecialization::Preserve,
+                )
             })
             .collect(),
         _ => Vec::new(),
@@ -5463,14 +5513,30 @@ impl<'a> SymbolResolver<'a> {
             let semantic_params = semantic
                 .params
                 .iter()
-                .map(|parameter| ty_subst(*parameter, &bindings))
+                .map(|parameter| {
+                    instantiate_slot(
+                        Some(&self.src),
+                        Some(&semantic),
+                        *parameter,
+                        &bindings,
+                        TypePosition::In,
+                        UnboundSpecialization::UseUpperBound,
+                    )
+                })
                 .collect::<Vec<_>>();
             if mapping.iter().any(|(parameter, argument)| {
                 !self.arg_fits_or_subtype(&semantic_params[*parameter], &args[*argument])
             }) {
                 return None;
             }
-            let ret_ty = ty_subst(semantic.ret, &bindings);
+            let ret_ty = instantiate_slot(
+                Some(&self.src),
+                Some(&semantic),
+                semantic.ret,
+                &bindings,
+                TypePosition::Out,
+                UnboundSpecialization::UseUpperBound,
+            );
             crate::trace_compiler!(
                 "resolve",
                 "top_level_default {name} base_gsig={} mapping={mapping:?} -> ret={ret_ty:?}",
@@ -7101,7 +7167,16 @@ fn logical_value_params(o: &FunctionInfo, recv: Ty, type_args: &[Ty]) -> Vec<Ty>
     let params = semantic
         .params
         .iter()
-        .map(|parameter| ty_subst_keep_unbound(*parameter, &binds))
+        .map(|parameter| {
+            instantiate_slot(
+                None,
+                Some(&semantic),
+                *parameter,
+                &binds,
+                TypePosition::In,
+                UnboundSpecialization::Preserve,
+            )
+        })
         .collect::<Vec<_>>();
     params[o.context_count.min(params.len())..].to_vec()
 }
@@ -7156,7 +7231,16 @@ fn logical_call_params(
     let parameters = signature
         .params
         .iter()
-        .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
+        .map(|parameter| {
+            instantiate_slot(
+                Some(source),
+                Some(&signature),
+                *parameter,
+                &bindings,
+                TypePosition::In,
+                UnboundSpecialization::Preserve,
+            )
+        })
         .collect::<Vec<_>>();
     parameters[overload.context_count.min(parameters.len())..].to_vec()
 }

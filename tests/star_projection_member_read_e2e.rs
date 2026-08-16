@@ -85,3 +85,35 @@ fn a_star_projected_member_read_is_approximated_to_its_bound() {
     };
     assert_eq!(output.trim(), "OK");
 }
+
+/// The same rule in the other direction: a WRITE through a projected receiver is prohibited, whether
+/// it is spelled as a member or as an extension. `MutableList<T>` is invariant, so `MutableList<*>`
+/// keeps the projection and the parameter slot admits nothing — the extension form was accepted
+/// until the read and write views came from one position-aware substitution.
+#[test]
+fn a_write_through_a_projected_receiver_is_rejected() {
+    const SOURCE: &str = r#"
+        fun <T> MutableList<T>.setFirst(value: T) {
+            this[0] = value
+        }
+
+        fun member(m: MutableList<*>) {
+            m.add("x")
+        }
+
+        fun extension(m: MutableList<*>) {
+            m.setFirst("x")
+        }
+    "#;
+    let (code, _) = common::kotlinc_source_result("ProjectedReceiverWrite", SOURCE);
+    assert_ne!(
+        code, 0,
+        "kotlinc must reject a write through a star projection"
+    );
+    let krusty = common::front_end_diagnostics_with_stdlib(SOURCE);
+    assert_eq!(
+        krusty.len(),
+        2,
+        "both the member and the extension write must be rejected: {krusty:?}"
+    );
+}
