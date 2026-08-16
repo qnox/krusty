@@ -4319,6 +4319,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   zero-length constant-pool entry.
   Tests: `tests/qualified_name_e2e.rs`.
 
+- **An unresolvable callee is UNRESOLVED_REFERENCE, not a call-specific diagnostic.** kotlinc has no
+  "unresolved function" diagnostic: when the callee of `f(...)` names nothing at all — no function,
+  no constructor, no classifier, no value — the frontend reports its ordinary
+  `Unresolved reference '{0}'.`, the same text a bare unresolved name gets. krusty reports it
+  lowercase-first (`unresolved reference 'f'.`) and the LSP boundary sentence-cases it, so both the
+  CLI and the language server agree with the reference frontend. The neighbouring case where the
+  callee DOES resolve — to a value that is not callable — is a different kotlinc diagnostic
+  (FUNCTION_EXPECTED: `Expression '{0}' of type '{1}' cannot be invoked as a function. Function
+  'invoke()' is not found.`) and is not covered here.
+  Tests: `tests/unresolved_call_wording_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
