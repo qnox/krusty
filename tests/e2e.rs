@@ -798,6 +798,8 @@ mod member_extension_property_e2e;
 mod member_infix_inference_e2e;
 #[path = "member_overloads_e2e.rs"]
 mod member_overloads_e2e;
+#[path = "member_property_inference_e2e.rs"]
+mod member_property_inference_e2e;
 #[path = "member_read_on_nullable_call_result_e2e.rs"]
 mod member_read_on_nullable_call_result_e2e;
 #[path = "metadata_kept_params.rs"]
