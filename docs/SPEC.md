@@ -5888,3 +5888,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   named-only reports `Only named arguments are available for Java annotations.`, naming the reason
   the positional form is unavailable.
   Tests: `tests/context_and_loop_wording_e2e.rs`, `tests/annotation_emission_e2e.rs`.
+
+- **A deferred local declaration's grammar does not depend on nullability.** `val x: T` with no
+  initializer is a deferred assignment, whether `T` is nullable or not. The parser therefore keeps
+  both forms on the same AST path; the checker owns the declared semantic type and assignment
+  narrowing. The current local representation synthesizes the type's default value and makes the
+  deferred slot writable for lowering. Rejecting only a nullable spelling in the parser produced
+  `expected '='` for source kotlinc accepts, including IntelliJ's deferred
+  `val ranges: List<MatchedFragment>?` assigned in both arms of an `if`.
+  Tests: `tests/deferred_nullable_val_e2e.rs`.

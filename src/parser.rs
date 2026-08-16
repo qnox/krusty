@@ -5653,12 +5653,11 @@ impl<'a> Parser<'a> {
                 // default value (`0`/`false`/`null`); a later `x = …` assigns it. Kotlin's definite-
                 // assignment guarantees the synthetic default is always overwritten before a read, so a
                 // deferred `val` behaves like a once-assigned `var` — treat it as internally mutable
-                // (krusty doesn't enforce assign-once; kotlinc already rejects misuse). A NULLABLE `val`
-                // is left out: assigning a non-null value to it relies on smart-cast-after-assignment
-                // that the checker doesn't yet model, so keep rejecting it (skip, never miscompile).
-                let deferred = ty.is_some()
-                    && !self.at(TokenKind::Eq)
-                    && (is_var || !ty.as_ref().unwrap().nullable());
+                // (krusty doesn't enforce assign-once; kotlinc already rejects misuse). Nullability of
+                // the declared type does not enter into it: a deferred `val` is lowered exactly like
+                // the `var` spelling, which already handles a nullable declared type and the
+                // smart-cast-after-assignment that follows it.
+                let deferred = ty.is_some() && !self.at(TokenKind::Eq);
                 let init_operator = (!deferred).then(|| {
                     let operator = self.tok().span;
                     self.expect(TokenKind::Eq, "'='");
