@@ -619,6 +619,8 @@ name = "krusty-cli"
 version = "0.0.1"
 dependencies = [
  "krusty",
+ "serde",
+ "serde_json",
  "zip",
 ]
 
