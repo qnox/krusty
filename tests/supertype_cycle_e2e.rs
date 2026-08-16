@@ -50,6 +50,63 @@ fn a_cycle_through_an_interface_is_reported() {
     assert!(reports_a_cycle("interface I : J\ninterface J : I\n"));
 }
 
+/// An interface that merely sits ALONGSIDE a cyclic superclass is innocent. Cutting it too made its
+/// members vanish, and krusty then reported `'m' overrides nothing` on a method kotlinc accepts.
+#[test]
+fn an_innocent_interface_survives_the_cut() {
+    let source = "interface Marker { fun m(): Int }\n                  open class Cyc : Cyc(), Marker { override fun m(): Int = 1 }\n";
+    let reported = diagnostics(source);
+    assert!(
+        reported.iter().any(|d| d.contains("cycle in supertypes")),
+        "the cycle is still reported: {reported:?}"
+    );
+    assert!(
+        !reported.iter().any(|d| d.contains("overrides nothing")),
+        "the interface's members must survive, so the override still has a base: {reported:?}"
+    );
+}
+
+/// The cycle must be CUT, not merely reported: a diagnostic alone leaves the cyclic edge in place
+/// for every later walker, and the recursion that follows takes down the whole test binary rather
+/// than failing one case. Compiling a subclass of a cyclic class exercises those walkers.
+#[test]
+fn the_cyclic_edge_is_cut_so_later_walks_terminate() {
+    let reported =
+        diagnostics("open class Cyc : Cyc()\nclass Sub : Cyc()\nfun use(s: Sub): Cyc = s\n");
+    assert!(
+        reported.iter().any(|d| d.contains("cycle in supertypes")),
+        "{reported:?}"
+    );
+}
+
+/// Diagnostics are emitted in SOURCE order. The pass collects from a hash map, whose iteration order
+/// varies per run; every other krusty path — and kotlinc — reports in source order.
+#[test]
+fn cycles_are_reported_in_source_order() {
+    let source = "open class A1 : A2()\nopen class A2 : A3()\nopen class A3 : A1()\n";
+    let first = diagnostics(source);
+    assert_eq!(first.len(), 3, "one per class in the cycle: {first:?}");
+    for _ in 0..4 {
+        assert_eq!(
+            diagnostics(source),
+            first,
+            "the order must not vary between runs"
+        );
+    }
+}
+
+/// A cycle that does not pass through the scanned class: `A` reaches `B -> C -> B` but is not itself
+/// in the cycle. kotlinc reports `B` and `C` and not `A`; so does krusty.
+#[test]
+fn only_the_classes_actually_in_the_cycle_are_reported() {
+    let reported = diagnostics("open class A : B()\nopen class B : C()\nopen class C : B()\n");
+    assert_eq!(
+        reported.len(),
+        2,
+        "B and C are in the cycle, A only reaches it: {reported:?}"
+    );
+}
+
 /// The guard must not fire on ordinary hierarchies — including a diamond, where the same supertype
 /// is reached twice by different paths and a naive "already visited" test would call it a cycle.
 #[test]
