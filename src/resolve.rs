@@ -8507,52 +8507,116 @@ fn collect_signatures_with_cp_impl(
 /// declaration itself.
 ///
 /// Individual walkers carry their own `seen` sets where they were known to need them; cutting the
-/// link here means none of them can meet a cycle in the first place, including the ones that never
-/// grew a guard.
+/// link here means the walkers that never grew a guard cannot meet a cycle among SOURCE classes.
+/// A cycle closed through a classpath class is NOT detected: this walk reads the source table only,
+/// while the walkers federate source and libraries. A stale jar declaring the other half of a
+/// hierarchy still compiles silently here and fails at class load.
 fn break_supertype_cycles(table: &mut SymbolTable, files: &[File], diags: &mut DiagSink) {
-    let cyclic: Vec<TypeName> = table
+    let mut cyclic: Vec<TypeName> = table
         .classes
         .iter()
         .filter(|(internal, sig)| sig.source_decl.is_some() && reaches_itself(table, **internal))
         .map(|(internal, _)| *internal)
         .collect();
+    // `table.classes` is a `HashMap`, so its iteration order varies run to run. Every other
+    // diagnostic path reports in source order, and so does kotlinc; without this a rebuild reorders
+    // the errors for no reason.
+    cyclic.sort_by_key(|internal| {
+        table
+            .classes
+            .get(internal)
+            .map(|sig| (sig.source_file, cycle_span(sig, files).lo))
+            .unwrap_or_default()
+    });
     for internal in cyclic {
         if let Some(sig) = table.classes.get(&internal) {
-            // Point at the offending declaration, near where kotlinc points (it names the supertype
-            // itself: `open class B : C()` → the column of `C`). A signature that carries no source
-            // declaration — an `object`'s, among others — falls back to the file start; the message
-            // and the file are still right, only the column is not.
             let file = sig.source_file;
-            let span = sig
-                .source_decl
-                .and_then(|declaration| {
-                    let file = files.get(file as usize)?;
-                    match file.decl(declaration) {
-                        // A supertype written WITHOUT parentheses is a `TypeRef` and carries its own
-                        // span, which is where kotlinc points. A called one (`: Foo()`) is parsed
-                        // into `base_class`, a bare name with no span, so the class declaration's
-                        // span stands in — still the offending declaration, one column off.
-                        Decl::Class(class) => Some(
-                            class
-                                .supertypes
-                                .first()
-                                .map_or(class.span, |supertype| supertype.span),
-                        ),
-                        _ => None,
-                    }
-                })
-                .unwrap_or_else(|| Span::new(0, 0));
+            let span = cycle_span(sig, files);
             diags.set_file(file);
             diags.error(
                 span,
                 "cycle in supertypes and/or containing declarations detected.".to_string(),
             );
         }
+        // Cut ONLY the edges that close a cycle. Clearing every interface as well made an innocent
+        // `interface Marker` disappear from a cyclic class, and its members with it — krusty then
+        // reported `'m' overrides nothing` on a method kotlinc accepts.
+        let super_is_cyclic = table
+            .classes
+            .get(&internal)
+            .and_then(|sig| sig.super_internal)
+            .is_some_and(|parent| reaches(table, parent, internal));
+        let cyclic_interfaces: Vec<TypeName> = table
+            .classes
+            .get(&internal)
+            .map(|sig| {
+                sig.interfaces
+                    .iter_ids()
+                    .filter(|parent| reaches(table, *parent, internal))
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(sig) = table.classes.get_mut(&internal) {
-            sig.super_internal = None;
-            sig.interfaces = Default::default();
+            if super_is_cyclic {
+                sig.super_internal = None;
+            }
+            if !cyclic_interfaces.is_empty() {
+                let kept: Vec<TypeName> = sig
+                    .interfaces
+                    .iter_ids()
+                    .filter(|parent| !cyclic_interfaces.contains(parent))
+                    .collect();
+                let mut interfaces = crate::types::TypeNameList::new();
+                for parent in kept {
+                    interfaces.push_name(parent);
+                }
+                sig.interfaces = interfaces;
+            }
         }
     }
+}
+
+/// Where to report a cyclic hierarchy.
+///
+/// kotlinc names the supertype itself (`open class B : C()` → the column of `C`). A supertype
+/// written without parentheses is a `TypeRef` and carries its own span, so that case matches. A
+/// CALLED base is parsed into `base_class`, a bare name with no span — and reading the first
+/// parenless supertype there would point at an innocent bystander (`: Other(), Marker` → `Marker`),
+/// so the class declaration's span stands in. A signature with no source declaration falls back to
+/// the file start.
+fn cycle_span(sig: &ClassSig, files: &[File]) -> Span {
+    sig.source_decl
+        .and_then(|declaration| {
+            let file = files.get(sig.source_file as usize)?;
+            match file.decl(declaration) {
+                Decl::Class(class) if class.base_class.is_none() => {
+                    class.supertypes.first().map(|supertype| supertype.span)
+                }
+                Decl::Class(class) => Some(class.span),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| Span::new(0, 0))
+}
+
+/// Does `from`'s supertype chain reach `target`?
+fn reaches(table: &SymbolTable, from: TypeName, target: TypeName) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![from];
+    while let Some(current) = stack.pop() {
+        if current == target {
+            return true;
+        }
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(sig) = table.classes.get(&current) else {
+            continue;
+        };
+        stack.extend(sig.super_internal);
+        stack.extend(sig.interfaces.iter_ids());
+    }
+    false
 }
 
 /// Does `start`'s supertype chain (superclass and interfaces) come back to `start`?
