@@ -50,6 +50,8 @@ mod backtick_identifier_e2e;
 mod backtick_keyword_identifier_e2e;
 #[path = "bare_accessor_and_setter_bridge_e2e.rs"]
 mod bare_accessor_and_setter_bridge_e2e;
+#[path = "bazel_cli_contract_e2e.rs"]
+mod bazel_cli_contract_e2e;
 #[path = "bound_expr_ref_e2e.rs"]
 mod bound_expr_ref_e2e;
 #[path = "bound_library_ref_e2e.rs"]

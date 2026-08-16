@@ -1,0 +1,31 @@
+# The krusty compiler as a Bazel tool, plus the rule that drives it.
+#
+# krusty is consumed as a PREBUILT binary rather than something Bazel builds from source: the
+# compiler is a Cargo workspace, and wiring a Rust toolchain into every consumer's build is a far
+# larger dependency than pointing at the binary `cargo build --release` already produces.
+#
+# Point the flag at that binary:
+#
+#     bazel build //... --@krusty//bazel:krusty_binary=//tools:krusty
+#
+# where `//tools:krusty` is any target providing an executable file (an `sh_binary`, a
+# `native_binary` from bazel_skylib, or a repository rule that downloads a release artifact).
+# There is deliberately no default: a silently-wrong compiler binary is worse than a build error
+# naming the flag.
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["defs.bzl"])
+
+label_flag(
+    name = "krusty_binary",
+    build_setting_default = ":krusty_unset",
+)
+
+# Fails the build with an actionable message when `--@krusty//bazel:krusty_binary` was not set.
+genrule(
+    name = "krusty_unset",
+    outs = ["krusty_unset.sh"],
+    cmd = "echo 'error: set --@krusty//bazel:krusty_binary to a built krusty executable' >&2; exit 1",
+    executable = True,
+)
