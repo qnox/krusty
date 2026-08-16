@@ -270,9 +270,25 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                     "{flag}: krusty does not load compiler plugins supplied by the build"
                 )));
             }
-            "--resources" | "--reduced-classpath-mode" | "--x_compiler_plugin_order" => {
+            // `--resources` is followed by colon-joined `strip_prefix:add_prefix:file…` groups.
+            // krusty's jar writer emits class files and the `kotlin_module` index, nothing else, so a
+            // target with resources would get a jar silently missing them.
+            "--resources" => {
+                return Err(Refusal::Unsupported(
+                    "--resources: krusty does not package resources into the output jar"
+                        .to_string(),
+                ));
+            }
+            // `--reduced-classpath-mode true` (and the `--direct-dependencies` list that accompanies
+            // it) narrow what the builder puts on the classpath. Ignoring the optimization is safe:
+            // krusty still receives the full `--cp`.
+            "--reduced-classpath-mode" | "--x_compiler_plugin_order" => {
                 unit.inert.push(flag.to_string());
                 index += 1;
+                // These carry a value; consume it rather than meeting it as a stray argument.
+                while index < arguments.len() && !arguments[index].starts_with("--") {
+                    index += 1;
+                }
             }
             other if other.starts_with("--") => {
                 // An unknown worker option may well select a shape; refusing is the safe default.
@@ -602,6 +618,42 @@ mod tests {
                 "{arguments:?}"
             );
         }
+    }
+
+    /// `--resources` and `--reduced-classpath-mode` carry values in the real rules
+    /// (`builder-args.bzl:33-40`), so treating either as a bare flag met its value as a stray
+    /// argument and failed every target that sets them.
+    #[test]
+    fn the_value_carrying_structural_flags_are_consumed_whole() {
+        let unit = translate(&args(&[
+            "--reduced-classpath-mode",
+            "true",
+            "--direct-dependencies",
+            "a.jar",
+            "b.jar",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("must translate");
+        assert_eq!(unit.sources, vec![PathBuf::from("A.kt")]);
+    }
+
+    /// Resources would be dropped from the jar, so the target is refused rather than shipped
+    /// incomplete.
+    #[test]
+    fn a_target_with_resources_is_refused() {
+        let refusal = translate(&args(&[
+            "--resources",
+            "res:prefix:a.txt",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .unwrap_err();
+        assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
     }
 
     #[test]
