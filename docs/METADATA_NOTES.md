@@ -81,6 +81,24 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   lives on that metadata `Type`, not in the getter's JVM descriptor or generic `Signature`; classpath
   decoding therefore retains it separately when specializing a generic extension-property result.
 - `JvmMethodSignature`: `f1 = name`, `f2 = desc`.
+- Applied annotations (kotlinc 2.4.10, `class C { @Mark fun f(): Int = 1 }`): `Function.annotation`
+  = f12, `Constructor.annotation` = f3, `Class.annotation` = f25, each an `Annotation` message
+  `{f1 = id (a DESC_TO_CLASS_ID string-table entry), f2 = argument {f1 = name, f2 = Value}}`. The
+  declaration's flags word gains bit 0 (`hasAnnotations`): a plain member goes 6 → 7, a secondary
+  constructor 22 → 23. Both non-SOURCE retentions (RUNTIME and BINARY) go in this one list, even
+  though the class file splits them across `RuntimeVisibleAnnotations`/`RuntimeInvisibleAnnotations`.
+  INTERNING order ≠ serialization order: the `JvmMethodSignature`/`JvmConstructorSignature` extension
+  (f100) interns its `d2` strings BEFORE the annotations, while the annotation field serializes first
+  (ascending field number). An annotated `suspend fun f(a: Int)` therefore lands
+  `…, "a", "(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;", "Lp/Mark;"` in `d2`.
+- A PROPERTY-targeted annotation has no class-file declaration to sit on: kotlinc emits a synthetic
+  `getX$annotations()V` method (`ACC_PUBLIC|ACC_STATIC|ACC_SYNTHETIC` + a `Deprecated` attribute)
+  carrying the annotation attribute, names it from `JvmPropertySignature.syntheticMethod` (f2), and
+  records the annotation as `Property.annotation` = f14. A FIELD-targeted one instead goes on the
+  backing field, with `Property` f34 as its metadata record. Either sets `hasAnnotations` in
+  `Property.flags` (8710 → 8711) — and because kotlinc derives an accessor's DEFAULT flags word from
+  the property's (that bit included), an annotated property with plain accessors also writes
+  `getter_flags`/`setter_flags` = 6 explicitly.
 
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
 `Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one

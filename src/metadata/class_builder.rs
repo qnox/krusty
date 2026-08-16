@@ -59,6 +59,17 @@ pub struct PropMeta {
     /// (`result` → `result$1`). `None` leaves the name derived (the property name), which is what
     /// every ordinary property records.
     pub field_name: Option<String>,
+    /// Annotations that landed on the PROPERTY (`Property.annotation` = f14). A Kotlin property has
+    /// no class-file declaration, so their attribute lives on the synthetic marker named by
+    /// [`Self::synthetic_method`]; this record is how a consumer gets from the property to them.
+    pub annotations: Vec<crate::ir::AppliedAnnotation>,
+    /// Annotations that landed on the BACKING FIELD (`@Target(FIELD)`) — recorded separately (f34),
+    /// because the reader must not attribute a field annotation to the property.
+    pub field_annotations: Vec<crate::ir::AppliedAnnotation>,
+    /// `(name, descriptor)` of the `get<Name>$annotations()` marker method carrying
+    /// [`Self::annotations`] — `JvmPropertySignature.syntheticMethod` (f2). `None` when the property
+    /// has no property-targeted annotation.
+    pub synthetic_method: Option<(String, String)>,
 }
 
 /// Member-function descriptor for class metadata (`Class.function` = f9). The JVM signature is usually
@@ -101,6 +112,12 @@ pub struct FnMeta {
     /// `Type.abbreviated_type` (see [`crate::spelling`]). Default for a SYNTHESIZED member
     /// (`componentN`, `copy`, `equals`), which has no source spelling at all.
     pub spellings: crate::spelling::DeclaredSpellings,
+    /// BINARY/RUNTIME-retained annotations applied to the member, with their frontend-checked element
+    /// values — emitted as `Function.annotation` (f12) and setting the `HAS_ANNOTATIONS` flag bit. The
+    /// class file's `Runtime[In]VisibleAnnotations` attribute makes the annotation work at RUNTIME;
+    /// this record is what a KOTLIN consumer (and `kotlin-reflect`) reads the declaration's
+    /// annotations back from. SOURCE-retained annotations never enter this list.
+    pub annotations: Vec<crate::ir::AppliedAnnotation>,
 }
 
 impl FnMeta {
@@ -122,6 +139,7 @@ impl FnMeta {
             jvm_sig: None,
             jvm_sig_name: None,
             spellings: crate::spelling::DeclaredSpellings::default(),
+            annotations: Vec::new(),
         }
     }
 }
@@ -239,12 +257,16 @@ struct CtorShape<'a> {
     /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type` (f4),
     /// the only place ctor vararg-ness survives into metadata.
     vararg_index: Option<usize>,
+    /// Applied annotations → `Constructor.annotation` (f3) + the `HAS_ANNOTATIONS` flag bit.
+    annotations: &'a [crate::ir::AppliedAnnotation],
 }
 
 fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &TypeParameters) -> Pb {
     let mut ctor = Pb::new();
-    if shape.flags != 0 {
-        ctor.field_varint(1, shape.flags); // Constructor.flags = 1
+    // `HAS_ANNOTATIONS` (bit 0) follows from the records below, exactly like a function's.
+    let flags = shape.flags | u64::from(!shape.annotations.is_empty());
+    if flags != 0 {
+        ctor.field_varint(1, flags); // Constructor.flags = 1
     }
     for (i, (pname, pty)) in shape.params.iter().enumerate() {
         let mut vp = Pb::new();
@@ -287,9 +309,24 @@ fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &Type
         }
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
-    if shape.emit_jvm_signature {
-        let sig = jvm_method_sig(st, Some(shape.sig_name.unwrap_or("<init>")), shape.desc);
-        ctor.field_message(100, &sig); // JvmProtoBuf.constructorSignature = 100
+    // The JVM signature INTERNS first (kotlinc's serializer writes the extension before folding the
+    // annotations, so `()V` precedes `Lp/Mark;` in d2) while the annotation SERIALIZES first — the
+    // proto fields stay in ascending order. Building both messages before appending either keeps the
+    // two orders independent.
+    let sig = shape
+        .emit_jvm_signature
+        .then(|| jvm_method_sig(st, Some(shape.sig_name.unwrap_or("<init>")), shape.desc));
+    // Constructor.annotation = 3 — after the value parameters, in kotlinc's ascending field order.
+    let annotations: Vec<Pb> = shape
+        .annotations
+        .iter()
+        .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
+        .collect();
+    for annotation in &annotations {
+        ctor.repeated_message(3, annotation);
+    }
+    if let Some(sig) = &sig {
+        ctor.field_message(100, sig); // JvmProtoBuf.constructorSignature = 100
     }
     ctor
 }
@@ -320,6 +357,9 @@ pub struct CtorMeta<'a> {
     pub vararg_index: Option<usize>,
     /// `Constructor.flags` (f8's f1) — e.g. 22 for a plain secondary ctor. 0 ⇒ omitted (the primary).
     pub flags: u64,
+    /// BINARY/RUNTIME-retained annotations applied to the constructor — `Constructor.annotation`
+    /// (f3), the constructor analogue of [`FnMeta::annotations`].
+    pub annotations: &'a [crate::ir::AppliedAnnotation],
 }
 
 /// Source declaration order across the protobuf's separately stored function/property lists. The
@@ -553,6 +593,10 @@ pub fn build_class(
                 sig_name: tail.ctor_sig_name,
                 emit_jvm_signature: tail.primary_ctor_jvm_signature,
                 vararg_index: tail.ctor_vararg_index,
+                // A PRIMARY constructor's own annotations (`class C @Anno constructor(…)`) are
+                // dropped before the IR — they reach neither the class file's annotation attribute
+                // nor this record. Nothing to mirror here until lowering carries them.
+                annotations: &[],
             },
             &class_type_parameters,
         )]
@@ -572,6 +616,7 @@ pub fn build_class(
                 sig_name: None,
                 emit_jvm_signature: true,
                 vararg_index: sc.vararg_index,
+                annotations: sc.annotations,
             },
             &class_type_parameters,
         ));
@@ -594,7 +639,20 @@ pub fn build_class(
             let rt = type_pb_declared(st, recv, &p.spellings.receiver, &class_type_parameters);
             prop.field_message(5, &rt);
         }
-        let pflags = property_flags(p);
+        // `HAS_ANNOTATIONS` (bit 0) is a function of the annotation records below, on EITHER use
+        // site: kotlinc sets it for a field-targeted annotation too.
+        let annotated = !p.annotations.is_empty() || !p.field_annotations.is_empty();
+        let pflags = property_flags(p) | u64::from(annotated);
+        // An accessor's flags word is emitted when it differs from the DEFAULT one, which kotlinc
+        // derives from the PROPERTY (its `hasAnnotations` bit included). An annotated property whose
+        // getter carries no annotation of its own therefore writes its plain accessor word out.
+        let accessor_flags = property_flags::DEFAULT_ACCESSOR;
+        if annotated {
+            prop.field_varint(7, accessor_flags); // Property.getter_flags = 7
+            if p.setter.is_some() {
+                prop.field_varint(8, accessor_flags); // Property.setter_flags = 8
+            }
+        }
         if pflags != property_flags::DEFAULT {
             prop.field_varint(11, pflags); // Property.flags = 11
         }
@@ -605,6 +663,11 @@ pub fn build_class(
         // (the boxed descriptor = the getter's return type). Every other property leaves the field
         // empty (the reader derives it). kotlinc interns the getter/setter strings BEFORE the field
         // descriptor (even though the proto writes `field` (f1) first), so build them in that order.
+        // The marker interns BEFORE the getter, exactly as it serializes (f2 before f3).
+        let synthetic_method = p
+            .synthetic_method
+            .as_ref()
+            .map(|(name, desc)| jvm_method_sig(st, Some(name), desc));
         let getter = p
             .getter
             .as_ref()
@@ -649,8 +712,29 @@ pub fn build_class(
         }
         // An abstract property has no backing field at all — kotlinc omits the entry rather than
         // writing an empty one (which is what a concrete property's derived field looks like).
+        // Property.annotation = 14 / the backing field's = 34, both interning after the signature's
+        // strings (kotlinc's serializer writes the JVM extension first).
+        let annotations: Vec<Pb> = p
+            .annotations
+            .iter()
+            .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
+            .collect();
+        let field_annotations: Vec<Pb> = p
+            .field_annotations
+            .iter()
+            .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
+            .collect();
+        for annotation in &annotations {
+            prop.repeated_message(14, annotation); // Property.annotation = 14
+        }
+        for annotation in &field_annotations {
+            prop.repeated_message(34, annotation); // Property.backingFieldAnnotation = 34
+        }
         if p.has_backing_field {
             jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
+        }
+        if let Some(synthetic_method) = &synthetic_method {
+            jvm.field_message(2, synthetic_method); // JvmPropertySignature.syntheticMethod = 2
         }
         if let Some(getter) = &getter {
             jvm.field_message(3, getter); // JvmPropertySignature.getter = 3
@@ -787,14 +871,35 @@ pub fn build_class(
             }
             func.repeated_message(6, &vp); // Function.value_parameter = 6
         }
+        // An annotated declaration sets `HAS_ANNOTATIONS` (bit 0) on top of whatever the caller
+        // derived — the bit is a function OF the records below, never an independent input.
+        let flags = m.flags | u64::from(!m.annotations.is_empty());
         // Omitted at the public-final-declaration default, exactly like `Class.flags`.
-        if m.flags != DEFAULT_FUNCTION_FLAGS {
-            func.field_varint(9, m.flags); // Function.flags = 9
+        if flags != DEFAULT_FUNCTION_FLAGS {
+            func.field_varint(9, flags); // Function.flags = 9
         }
-        if let Some(sig) = &m.jvm_sig {
-            // `JvmMethodSignature` (f100), desc only (name derivable) — a boxed nullable-primitive
-            // signature kotlinc records because the proto types alone don't pin the JVM descriptor.
-            func.field_message(100, &jvm_method_sig(st, m.jvm_sig_name.as_deref(), sig));
+        // The `JvmMethodSignature` (f100) INTERNS before the annotations even though it SERIALIZES
+        // after them — kotlinc's serializer writes the extension first, so a suspend member's
+        // descriptor precedes `Lp/Mark;` in d2. Build both, then append in field order.
+        let sig = m
+            .jvm_sig
+            .as_ref()
+            // desc only (name derivable) unless a mangled realization renamed the method — a boxed
+            // nullable-primitive signature kotlinc records because the proto types alone don't pin
+            // the JVM descriptor.
+            .map(|sig| jvm_method_sig(st, m.jvm_sig_name.as_deref(), sig));
+        // Function.annotation = 12 — the applied annotations, each an `Annotation.id` (f1) naming the
+        // annotation class through the string table's `DESC_TO_CLASS_ID` form, plus its arguments.
+        let annotations: Vec<Pb> = m
+            .annotations
+            .iter()
+            .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
+            .collect();
+        for annotation in &annotations {
+            func.repeated_message(12, annotation);
+        }
+        if let Some(sig) = &sig {
+            func.field_message(100, sig);
         }
         func
     };
@@ -1012,6 +1117,9 @@ mod tests {
                 setter: None,
                 field_desc: None,
                 field_name: None,
+                annotations: Vec::new(),
+                field_annotations: Vec::new(),
+                synthetic_method: None,
             })
         };
 
@@ -1070,6 +1178,9 @@ mod tests {
                 setter: None,
                 field_desc: None,
                 field_name: None,
+                annotations: Vec::new(),
+                field_annotations: Vec::new(),
+                synthetic_method: None,
             }],
             &[],
             &[],
@@ -1117,6 +1228,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
+                annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1133,6 +1245,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
+                annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1149,6 +1262,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
+                annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1165,6 +1279,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
+                annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1181,6 +1296,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
+                annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1197,6 +1313,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
+                annotations: Vec::new(),
             },
         ];
         let props = vec![
@@ -1216,6 +1333,9 @@ mod tests {
                 setter: None,
                 field_desc: None,
                 field_name: None,
+                annotations: Vec::new(),
+                field_annotations: Vec::new(),
+                synthetic_method: None,
             },
             PropMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1233,6 +1353,9 @@ mod tests {
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                 field_desc: None,
                 field_name: None,
+                annotations: Vec::new(),
+                field_annotations: Vec::new(),
+                synthetic_method: None,
             },
         ];
         let (d1, _d2) = build_class(
@@ -1299,6 +1422,9 @@ mod tests {
                 setter: None,
                 field_desc: None,
                 field_name: None,
+                annotations: Vec::new(),
+                field_annotations: Vec::new(),
+                synthetic_method: None,
             }],
             &[],
             &[],
@@ -1444,6 +1570,9 @@ mod tests {
                 setter: None,
                 field_desc: None,
                 field_name: None,
+                annotations: Vec::new(),
+                field_annotations: Vec::new(),
+                synthetic_method: None,
             }],
             &[],
             &[],
@@ -1497,6 +1626,9 @@ mod tests {
                 setter: None,
                 field_desc: None,
                 field_name: None,
+                annotations: Vec::new(),
+                field_annotations: Vec::new(),
+                synthetic_method: None,
             }],
             &[],
             &[],
@@ -1506,6 +1638,7 @@ mod tests {
                     desc: "()V",
                     vararg_index: None,
                     flags: 22,
+                    annotations: &[],
                 }],
                 ..Default::default()
             },
@@ -1555,6 +1688,9 @@ mod tests {
                     setter: None,
                     field_desc: None,
                     field_name: None,
+                    annotations: Vec::new(),
+                    field_annotations: Vec::new(),
+                    synthetic_method: None,
                 },
                 PropMeta {
                     spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1572,6 +1708,9 @@ mod tests {
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                     field_desc: None,
                     field_name: None,
+                    annotations: Vec::new(),
+                    field_annotations: Vec::new(),
+                    synthetic_method: None,
                 },
             ],
             &[],

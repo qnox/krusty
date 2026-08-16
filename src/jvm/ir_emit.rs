@@ -1125,6 +1125,12 @@ fn build_class_metadata(
                     field_name: backing
                         .map(|(_, field)| instance_field_jvm_name(ir, c, field))
                         .filter(|physical| *physical != property.name),
+                    // A property-targeted annotation lives on its synthetic marker method; the
+                    // record here is what connects the property to it (and the marker's FINAL name,
+                    // which the value-class pass may have mangled with the getter's).
+                    annotations: property_marker_annotations(ir, c, &property.name),
+                    field_annotations: property_backing_field_annotations(c, &property.name),
+                    synthetic_method: property_marker_signature(ir, c, &property.name),
                 },
             )
         })
@@ -1157,6 +1163,9 @@ fn build_class_metadata(
                 setter: None,
                 field_desc: None,
                 field_name: None,
+                annotations: property_marker_annotations(ir, c, &prop.name),
+                field_annotations: property_backing_field_annotations(c, &prop.name),
+                synthetic_method: property_marker_signature(ir, c, &prop.name),
             },
         ));
     }
@@ -1202,6 +1211,9 @@ fn build_class_metadata(
             setter: ext.setter.and_then(accessor_sig),
             field_desc: None,
             field_name: None,
+            annotations: property_marker_annotations(ir, c, &ext.name),
+            field_annotations: Vec::new(),
+            synthetic_method: property_marker_signature(ir, c, &ext.name),
         });
         prop_source_orders.push(
             ir.fn_source_order
@@ -1478,6 +1490,15 @@ fn build_class_metadata(
                             .any(|parameter| matches!(parameter, crate::types::Ty::TyParam(..))))
                     .then(|| crate::jvm::names::method_descriptor(&f.params, f.ret)),
                     jvm_sig_name: (name != f.name).then(|| f.name.clone()),
+                    // The declaration's own annotations, mirrored into `@Metadata`. Retention split
+                    // the two class-file attributes apart (`RuntimeVisible`/`RuntimeInvisible`); the
+                    // metadata record keeps ONE list, so they are rejoined here — SOURCE-retained
+                    // annotations were dropped during lowering and never reach either.
+                    annotations: ir
+                        .function_annotations
+                        .get(&fid)
+                        .map(|annotations| annotations.applications().cloned().collect())
+                        .unwrap_or_default(),
                 })
             })
             .collect::<Vec<_>>()
@@ -1503,6 +1524,7 @@ fn build_class_metadata(
                 vararg_index: None,
                 jvm_sig: boxed_fn_sig(&[], f.ty),
                 jvm_sig_name: None,
+                annotations: Vec::new(),
             })
             .collect();
         if synthesizes_copy {
@@ -1524,6 +1546,7 @@ fn build_class_metadata(
                 vararg_index: None,
                 jvm_sig: boxed_fn_sig(&field_tys, class_ty),
                 jvm_sig_name: None,
+                annotations: Vec::new(),
             });
         }
         m.push(FnMeta {
@@ -1541,6 +1564,7 @@ fn build_class_metadata(
             vararg_index: None,
             jvm_sig: None,
             jvm_sig_name: None,
+            annotations: Vec::new(),
         });
         m.push(FnMeta {
             spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1557,6 +1581,7 @@ fn build_class_metadata(
             vararg_index: None,
             jvm_sig: None,
             jvm_sig_name: None,
+            annotations: Vec::new(),
         });
         m.push(FnMeta {
             spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1573,6 +1598,7 @@ fn build_class_metadata(
             vararg_index: None,
             jvm_sig: None,
             jvm_sig_name: None,
+            annotations: Vec::new(),
         });
         m.extend(declared_methods());
         m
@@ -1596,6 +1622,7 @@ fn build_class_metadata(
                 vararg_index: None,
                 jvm_sig: Some(format!("({u}Ljava/lang/Object;)Z")),
                 jvm_sig_name: Some("equals-impl".into()),
+                annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1612,6 +1639,7 @@ fn build_class_metadata(
                 vararg_index: None,
                 jvm_sig: Some(format!("({u})I")),
                 jvm_sig_name: Some("hashCode-impl".into()),
+                annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1628,6 +1656,7 @@ fn build_class_metadata(
                 vararg_index: None,
                 jvm_sig: Some(format!("({u})Ljava/lang/String;")),
                 jvm_sig_name: Some("toString-impl".into()),
+                annotations: Vec::new(),
             },
         ]
     } else {
@@ -1747,6 +1776,7 @@ fn build_class_metadata(
                 }
             ),
             vararg_index: sc.vararg_index,
+            annotations: sc.annotations.applications().cloned().collect(),
         })
         .collect();
     let secondary_ctor_metas: Vec<crate::metadata::class_builder::CtorMeta> = secondary_ctor_shapes
@@ -1756,6 +1786,7 @@ fn build_class_metadata(
             desc: &shape.desc,
             vararg_index: shape.vararg_index,
             flags: crate::metadata::class_builder::SECONDARY_CTOR_FLAGS,
+            annotations: &shape.annotations,
         })
         .collect();
     let metadata_annotations: Vec<crate::ir::AppliedAnnotation> = c
@@ -3878,6 +3909,53 @@ fn collect_var_types(ir: &IrFile, roots: impl IntoIterator<Item = u32>) -> HashM
 }
 
 /// Attach any user annotations recorded for `field` (by name) to the most recently added field.
+/// The annotations on a property's synthetic `$annotations` marker — the PROPERTY's own, which
+/// `@Metadata` records as `Property.annotation`. Both retentions rejoin into the single list a
+/// metadata record keeps.
+fn property_marker_annotations(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    property: &str,
+) -> Vec<crate::ir::AppliedAnnotation> {
+    let Some(marker) = ir
+        .property_annotation_markers
+        .get(&(c.fq_name_id(), property.to_string()))
+    else {
+        return Vec::new();
+    };
+    ir.function_annotations
+        .get(marker)
+        .map(|annotations| annotations.applications().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// `(name, descriptor)` of that marker, read from the emitted function so a value-class-mangled
+/// getter's marker is named as the class file spells it.
+fn property_marker_signature(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    property: &str,
+) -> Option<(String, String)> {
+    let marker = ir
+        .property_annotation_markers
+        .get(&(c.fq_name_id(), property.to_string()))?;
+    let function = ir.functions.get(*marker as usize)?;
+    Some((function.name.clone(), "()V".to_string()))
+}
+
+/// The annotations that landed on the property's BACKING FIELD (`@Target(FIELD)`) — the same records
+/// the field's own class-file attribute carries, mirrored as `Property.backingFieldAnnotation`.
+fn property_backing_field_annotations(
+    c: &crate::ir::IrClass,
+    property: &str,
+) -> Vec<crate::ir::AppliedAnnotation> {
+    c.field_annotations
+        .iter()
+        .find(|annotations| annotations.field == property)
+        .map(|annotations| annotations.annotations.applications().cloned().collect())
+        .unwrap_or_default()
+}
+
 fn apply_field_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
     if let Some(fa) = c.field_annotations.iter().find(|fa| fa.field == field) {
         cw.set_last_field_annotations(&fa.annotations);
@@ -4704,17 +4782,60 @@ fn emit_declared_property_accessor(
     }
 }
 
+/// What emitting one class's property accessors (and the `$annotations` markers beside them) needs
+/// besides the IR: the class's JVM name, its file facade, the signature formatter, and the emit
+/// environment. Grouped so the accessor walk stays within the argument-count limit, like
+/// [`crate::metadata::class_builder::ClassTail`] does for the metadata writer.
+struct PropertyAccessorEmit<'a> {
+    fq_name: &'a str,
+    facade: &'a str,
+    formatter: &'a JvmSignatureFormatter<'a>,
+    param_assertions: bool,
+    env: &'a EmitEnv<'a>,
+}
+
 fn emit_declared_property_accessors(
     ir: &IrFile,
     c: &crate::ir::IrClass,
-    fq_name: &str,
     cw: &mut ClassWriter,
-    formatter: &JvmSignatureFormatter<'_>,
-    param_assertions: bool,
+    emit: &PropertyAccessorEmit<'_>,
 ) {
+    let (fq_name, facade, formatter, param_assertions, env) = (
+        emit.fq_name,
+        emit.facade,
+        emit.formatter,
+        emit.param_assertions,
+        emit.env,
+    );
     for property in &c.properties {
         emit_declared_property_accessor(ir, c, property, fq_name, cw, formatter, param_assertions);
+        // The property's own annotations ride a synthetic marker method, emitted right here so the
+        // method table (and the constant pool behind it) matches kotlinc's.
+        if let Some(&marker) = ir
+            .property_annotation_markers
+            .get(&(c.fq_name_id(), property.name.clone()))
+        {
+            // The marker is STATIC (kotlinc's shape): no `this` slot.
+            emit_method(ir, marker, fq_name, facade, cw, false, env);
+        }
     }
+}
+
+/// The `$annotations` marker methods emitted with their property's accessors, by fid. kotlinc emits a
+/// marker directly after the accessors of the property it describes, not after every property's — so
+/// the class's method loop must skip a marker it already wrote here.
+fn property_annotation_marker_fids(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+) -> std::collections::HashSet<u32> {
+    c.properties
+        .iter()
+        .filter_map(|property| {
+            ir.property_annotation_markers
+                .get(&(c.fq_name_id(), property.name.clone()))
+                .copied()
+        })
+        .collect()
 }
 
 /// The checker/lowerer-bound callable that encloses an anonymous class, with its JVM owner. The
@@ -4741,6 +4862,10 @@ struct SecondaryCtorShape {
     params: Vec<(String, Ty)>,
     desc: String,
     vararg_index: Option<usize>,
+    /// The constructor's applied annotations, rejoined across the retention split (see
+    /// [`crate::metadata::class_builder::FnMeta::annotations`]) — owned so the borrowed `CtorMeta`
+    /// built from this shape outlives the fold.
+    annotations: Vec<crate::ir::AppliedAnnotation>,
 }
 
 /// The `ACC_PUBLIC` bit a class's own access flags carry. A `private` declaration — of ANY kind, at
@@ -5005,6 +5130,15 @@ fn emit_class(
                 None,
                 field_ann,
             );
+            // A FIELD-targeted property annotation (`@Target(AnnotationTarget.FIELD)`) belongs to the
+            // backing field itself, not to the property's marker method.
+            if let Some(annotations) = c
+                .field_annotations
+                .iter()
+                .find(|annotations| annotations.field == *name)
+            {
+                cw.set_last_late_field_annotations(&annotations.annotations);
+            }
         }
     }
     // A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
@@ -5480,6 +5614,7 @@ fn emit_class(
         DeclaredMember::Property(property) => property.source_order,
         DeclaredMember::Function(fid) => ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX),
     });
+    let markers = property_annotation_marker_fids(ir, c);
     for member in ordered {
         let fid = match member {
             DeclaredMember::Property(property) => {
@@ -5492,8 +5627,18 @@ fn emit_class(
                     &signature_formatter,
                     opts.param_assertions,
                 );
+                // The property's own annotations ride a synthetic marker method, which kotlinc emits
+                // directly after that property's accessors — it has no source order of its own.
+                if let Some(&marker) = ir
+                    .property_annotation_markers
+                    .get(&(c.fq_name_id(), property.name.clone()))
+                {
+                    // The marker is STATIC (kotlinc's shape): no `this` slot.
+                    emit_method(ir, marker, &fq_name, facade, &mut cw, false, env);
+                }
                 continue;
             }
+            DeclaredMember::Function(fid) if markers.contains(&fid) => continue,
             DeclaredMember::Function(fid) => fid,
         };
         let f = &ir.functions[fid as usize];
@@ -5989,12 +6134,20 @@ fn emit_enum_entry_subclass(
     emit_declared_property_accessors(
         ir,
         c,
-        &fq_name,
         &mut cw,
-        &signature_formatter,
-        opts.param_assertions,
+        &PropertyAccessorEmit {
+            fq_name: &fq_name,
+            facade,
+            formatter: &signature_formatter,
+            param_assertions: opts.param_assertions,
+            env,
+        },
     );
+    let markers = property_annotation_marker_fids(ir, c);
     for &fid in &c.methods {
+        if markers.contains(&fid) {
+            continue; // already emitted beside its property's accessors
+        }
         emit_method(ir, fid, &fq_name, facade, &mut cw, true, env);
     }
     cw.finish()
@@ -8243,12 +8396,20 @@ fn emit_enum_class(
     emit_declared_property_accessors(
         ir,
         c,
-        &fq,
         &mut cw,
-        &signature_formatter,
-        opts.param_assertions,
+        &PropertyAccessorEmit {
+            fq_name: &fq,
+            facade,
+            formatter: &signature_formatter,
+            param_assertions: opts.param_assertions,
+            env,
+        },
     );
+    let markers = property_annotation_marker_fids(ir, c);
     for &fid in &c.methods {
+        if markers.contains(&fid) {
+            continue; // already emitted beside its property's accessors
+        }
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
             // Honor `is_static` (an extension-synthesized `static` member like serialization's

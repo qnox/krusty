@@ -1182,6 +1182,9 @@ pub struct PropDecl {
     /// Annotations on the property declaration. Their source spelling is retained only until the
     /// signature pass resolves each occurrence to a classifier identity.
     pub annotations: Vec<AnnotationRef>,
+    /// Argument expressions of each annotation in [`Self::annotations`] (same order/length; an empty
+    /// inner vec for a no-argument annotation), mirroring [`ClassDecl::annotation_args`].
+    pub annotation_args: Vec<Vec<ExprId>>,
     /// Parameters from a preceding `context(...)` clause.
     pub context_params: Vec<Param>,
     /// 1-based source line of the declaration, filled by the parser post-pass (0 = unknown).

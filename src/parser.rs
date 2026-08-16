@@ -1998,7 +1998,7 @@ impl<'a> Parser<'a> {
         is_abstract: bool,
     ) -> PropDecl {
         let annotations = self.take_pending_annotations();
-        let _ = self.take_pending_annotation_args();
+        let annotation_args = self.take_pending_annotation_args();
         let context_params = std::mem::take(&mut self.pending_context_params);
         let start = self.tok().span;
         let is_var = self.at(TokenKind::KwVar);
@@ -2204,6 +2204,7 @@ impl<'a> Parser<'a> {
             is_open: false,
             name,
             annotations,
+            annotation_args,
             context_params,
             decl_line: 0,
             visibility: Visibility::Public,

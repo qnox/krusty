@@ -26,6 +26,11 @@ pub(crate) mod property_flags {
     /// 1-3) · final · `isNotDefault` (bit 6). The accessor flag word has its own layout — bit 0
     /// `hasAnnotations`, bits 1-3 visibility, bits 4-5 modality, bit 6 `isNotDefault`.
     pub const DECLARED_ACCESSOR: u64 = 70;
+    /// A plain `public final` accessor's own flags word (`Property.getter_flags`/`setter_flags`).
+    /// kotlinc emits an accessor's word only when it differs from the default it derives FROM THE
+    /// PROPERTY — whose `hasAnnotations` bit rides along — so an annotated property with plain
+    /// accessors writes this value explicitly.
+    pub const DEFAULT_ACCESSOR: u64 = 6;
 }
 
 pub(crate) fn serialize_string_table_types(records: &[Pb], local_names: &[u32]) -> Pb {

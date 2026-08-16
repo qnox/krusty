@@ -6183,3 +6183,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter unboxed while a read through the applied type emits `checkcast`, which does not verify.
   That lowering gap predates this inference and stays unreachable.
   Tests: `tests/generic_ctor_template_prepass_e2e.rs`.
+- **`@Metadata` mirrors a declaration's applied annotations; it is not implied by the class file's
+  annotation attribute.** A `RuntimeVisibleAnnotations`/`RuntimeInvisibleAnnotations` attribute makes
+  an annotation work at RUNTIME, but a Kotlin consumer (and `kotlin-reflect`) reads a declaration's
+  annotations back out of `@Metadata`, so kotlinc writes BOTH. krusty wrote the attribute only, which
+  left an annotated member function's class file differing from kotlinc's in `d1`/`d2` alone. Member
+  functions now record `Function.annotation` (f12), secondary constructors `Constructor.annotation`
+  (f3), and both set the `HAS_ANNOTATIONS` flag bit (bit 0) — derived FROM the records, never an
+  independent input, so a `public final` member's flags word goes 6 → 7 and a secondary constructor's
+  22 → 23. The one list per declaration rejoins krusty's retention split (`FnAnnotations`'
+  `visible`/`invisible`), which exists only because the class file has two attributes; kotlinc records
+  every non-SOURCE annotation in one repeated field. Two ORDERS are independent and must not be
+  conflated: the `JvmMethodSignature` extension (f100) INTERNS its d2 strings BEFORE the
+  DECLARATION-level annotation records (f3/f12/f14) even though it SERIALIZES after them, so an
+  annotated `suspend` member's CPS descriptor precedes `Lp/Mark;` in `d2` while its bytes stay in
+  ascending field order. The rule is per FIELD, not "annotations vs f100": a VALUE-PARAMETER
+  annotation interns with its own parameter, ahead of f100. Measured on
+  `class C @OnCtor constructor(@OnParam val x: Int)` — `d2` is
+  `["Lp/C;", "", "x", "", "Lp/OnParam;", "<init>", "(I)V", "Lp/OnCtor;", …]`, the parameter's
+  annotation before the constructor's signature strings and the constructor's own after them. Tests:
+  `tests/annotation_emission_e2e.rs::member_function_annotation_reaches_metadata` (byte-identical to
+  kotlinc), `…::member_function_annotation_arguments_reach_metadata`,
+  `…::binary_retained_member_annotation_reaches_metadata`,
+  `…::secondary_constructor_annotation_reaches_metadata`,
+  `…::annotated_suspend_member_interns_its_signature_before_the_annotation`,
+  `…::annotated_suspend_top_level_function_interns_its_signature_before_the_annotation`.
+  PROPERTY annotations now take their own route (below). Still DROPPED before the IR, so there is
+  nothing to mirror yet (each needs the class-file side first, not just the metadata record): a
+  PRIMARY constructor's own annotations (`class C @Anno constructor(…)`) and VALUE-PARAMETER
+  annotations (no `RuntimeVisibleParameterAnnotations` is emitted at all).

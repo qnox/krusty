@@ -1212,6 +1212,7 @@ fn lower_file_at_reporting_impl(
                 has_primary_ctor: c.primary_ctor_annotations.is_some() || c.is_annotation(),
                 applied_annotations: declaration_annotations(&c.annotations, info),
                 field_annotations: class_field_annotations(c, info),
+                property_annotations: class_property_annotations(c, info),
                 annotation_retention: (c.kind == ast::ClassKind::Annotation).then(|| {
                     syms.annotation_retention(class_identity)
                         .unwrap_or(crate::ir::AnnoRetention::Default)
@@ -4345,6 +4346,7 @@ fn lower_file_at_reporting_impl(
                             has_primary_ctor: true,
                             applied_annotations: crate::ir::DeclarationAnnotations::default(),
                             field_annotations: Vec::new(),
+                            property_annotations: Vec::new(),
                             annotation_retention: None,
                         });
                         // Register the subclass so an override body resolves a prop as `this.<field>` and
@@ -11083,6 +11085,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             annotation_retention: None,
         };
         let class_id = self.ir.add_class(class);
@@ -13315,6 +13318,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             annotation_retention: None,
         });
         if let Some(recv_e) = capture {
@@ -13461,6 +13465,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             annotation_retention: None,
         });
         match capture {
@@ -13705,6 +13710,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             annotation_retention: None,
         });
         Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE"))
@@ -14419,6 +14425,7 @@ impl<'a> Lower<'a> {
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
             annotation_retention: None,
         });
         match capture {
@@ -27832,6 +27839,112 @@ fn class_field_annotations(
         if !annotations.is_empty() {
             out.push(crate::ir::FieldAnnotations {
                 field: e.name.clone(),
+                annotations,
+            });
+        }
+    }
+    // A property annotation whose `@Target` admits FIELD but not PROPERTY lands on the BACKING FIELD
+    // — the same annotation written on a property-targeting annotation class would instead reach the
+    // marker method (`class_property_annotations`).
+    let declarations = c
+        .props
+        .iter()
+        .filter(|parameter| parameter.is_property)
+        .map(|parameter| (&parameter.name, &parameter.annotations, true))
+        .chain(
+            c.body_props
+                .iter()
+                .map(|property| (&property.name, &property.annotations, false)),
+        );
+    for (name, declared, on_constructor_parameter) in declarations {
+        let annotations = property_site_annotations(
+            declared,
+            info,
+            on_constructor_parameter,
+            crate::types::PropertyAnnotationSite::Field,
+        );
+        if !annotations.is_empty() {
+            out.push(crate::ir::FieldAnnotations {
+                field: name.clone(),
+                annotations,
+            });
+        }
+    }
+    out
+}
+
+/// The retained annotations a property declaration places on ONE use site (`field` or `property`).
+/// Kotlin's use-site defaulting decides the site per annotation from its own `@Target`, so the same
+/// declaration feeds both [`class_field_annotations`] and [`class_property_annotations`] and each
+/// keeps only what it owns.
+///
+/// Unlike [`declaration_annotations`], an application the frontend did not record is DROPPED rather
+/// than a panic: krusty's annotation constant folder is narrower than kotlinc's (a plugin-folded
+/// argument such as `@SerialName("$prefix.bar")` never reaches `applied_annotation`), and property
+/// applications were never checked before. Recording what folds keeps the previous behaviour for the
+/// rest instead of rejecting sources kotlinc accepts.
+fn property_site_annotations(
+    declared: &[ast::AnnotationRef],
+    info: &FrontendTypeInfo,
+    on_constructor_parameter: bool,
+    site: crate::types::PropertyAnnotationSite,
+) -> crate::ir::DeclarationAnnotations {
+    crate::ir::DeclarationAnnotations::new(
+        declared
+            .iter()
+            .filter_map(|annotation| info.applied_annotation(annotation))
+            .filter(|applied| {
+                applied
+                    .targets
+                    .property_declaration_site(on_constructor_parameter)
+                    == Some(site)
+            })
+            .filter_map(|applied| match applied.retention {
+                crate::types::AnnotationRetention::Source => None,
+                retention => Some(crate::ir::RetainedAnnotation {
+                    retention,
+                    annotation: checked_annotation_to_ir(applied),
+                }),
+            })
+            .collect(),
+    )
+}
+
+/// The user annotations applied to this class's PROPERTY declarations that Kotlin's use-site
+/// defaulting places on the property itself. A property application with no use-site prefix takes
+/// the first target the annotation declares among `param` → `property` → `field`, and only the
+/// middle one belongs here: a primary-constructor parameter's own annotation is a parameter
+/// annotation, and a FIELD-targeted one goes through [`class_field_annotations`]. SOURCE-retained
+/// annotations drop out of both, as everywhere else.
+fn class_property_annotations(
+    c: &ast::ClassDecl,
+    info: &FrontendTypeInfo,
+) -> Vec<crate::ir::PropertyAnnotations> {
+    let mut out = Vec::new();
+    // A primary-constructor `val`/`var` parameter is a property too. Its annotations default to the
+    // PARAMETER (which is why the ordinary `@Anno val x` in a constructor header is a parameter
+    // annotation, not a property one), so only an annotation that does NOT target a value parameter
+    // reaches the property here.
+    let declarations = c
+        .props
+        .iter()
+        .filter(|parameter| parameter.is_property)
+        .map(|parameter| (&parameter.name, &parameter.annotations, true))
+        .chain(
+            c.body_props
+                .iter()
+                .map(|property| (&property.name, &property.annotations, false)),
+        );
+    for (name, declared, on_constructor_parameter) in declarations {
+        let annotations = property_site_annotations(
+            declared,
+            info,
+            on_constructor_parameter,
+            crate::types::PropertyAnnotationSite::Property,
+        );
+        if !annotations.is_empty() {
+            out.push(crate::ir::PropertyAnnotations {
+                property: name.clone(),
                 annotations,
             });
         }
