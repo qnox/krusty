@@ -6038,3 +6038,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and assigns kotlinc's physical name. An annotation used only as an ANNOTATION ARGUMENT
   (`@Outer(Inner("x"))`) has no `New`, so it correctly emits no implementation.
   Tests: `tests/annotation_impl_class_e2e.rs`.
+
+- **`Nothing` descriptors as `java.lang.Void`.** `Nothing` is uninhabited, so no value ever carries
+  its descriptor — but it is written into signatures (`fun fail(): Nothing`, a `Nothing` getter), and
+  kotlinc writes `Ljava/lang/Void;` there, not `Ljava/lang/Object;`. A caller compiled against
+  kotlinc's ABI links against that descriptor, so emitting `Object` made every `Nothing`-returning
+  helper — of which intellij-community and the stdlib have many — a different method. The class-name
+  map already carried `kotlin/Nothing` → `java/lang/Void`; the type-descriptor path collapsed
+  `Nothing` into `kotlin/Any` alongside the `Null` and `Error` sentinels, which are not source types
+  and stay as they were.
+
+  Two positions still descriptor as `Object` where kotlinc writes `Void`, both because the declared
+  `Nothing` never reaches this path — adding a `Nullable(Nothing)` arm here changes neither, which is
+  how that was established: a PARAMETER (`fun f(n: Nothing)`) and a `Nothing?` RESULT
+  (`fun maybe(): Nothing? = null`).
+  Neither is reachable code — no caller can supply a `Nothing` argument, and the only `Nothing?` value
+  is `null` — but both are ABI, so they remain open.
+  Tests: `tests/nothing_descriptor_e2e.rs`.
