@@ -5897,3 +5897,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `expected '='` for source kotlinc accepts, including IntelliJ's deferred
   `val ranges: List<MatchedFragment>?` assigned in both arms of an `if`.
   Tests: `tests/deferred_nullable_val_e2e.rs`.
+
+- **An out projection is consumed when a callable output becomes a value.** Everything read out of
+  `List<out Range>` is a `Range`. A projection is a generic-argument constraint, never a top-level
+  expression type, so generic extension return specialization consumes `OutProjection` in output
+  position: `list.first()` becomes `Range` before ordinary member/property selection. Without that,
+  `list[0].startOffset` resolved (the indexed-member path already specializes output position) but
+  `list.first().startOffset` did not. `Ty::kotlin_class_internal` remains a strict identity query and
+  does not turn an invalid projected expression into a usable class as a fallback.
+
+  Inferring a type parameter FROM a projected receiver is a separate, still-open gap:
+  `list.map { it.startOffset }` does not bind `map`'s `T` from `List<out Range>`, so the candidate is
+  inapplicable and the lambda body is checked against nothing. Unwrapping the projection in
+  `unify_ty_impl` binds it, but regresses `Holder<*>::identity`, because a star projection is built
+  with `Any?` as its bound (`resolve.rs`'s `projected_typeref_argument` call sites) rather than the
+  type parameter's declared bound — so the unwrapped binding then fails the declared `T : CharSequence`
+  constraint. The star's bound has to carry the declared bound before that inference can be fixed.
+  Tests: `tests/projected_receiver_extension_e2e.rs`.
