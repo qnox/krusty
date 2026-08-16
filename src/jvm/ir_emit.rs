@@ -9456,10 +9456,6 @@ fn emit_method_inner_with_holder(
     }
 }
 
-/// Format backend-agnostic semantic types into JVM generic-signature elements. The ordinary JVM
-/// descriptor and the optional generic `Signature` attribute are separate classfile declarations: the
-/// former supplies runtime calling types, while this formatter preserves type parameters, type
-/// arguments, and declaration-site variance for classpath readers.
 /// Whether declaration-site variance becomes a JVM wildcard at the position being formatted.
 ///
 /// kotlinc writes those wildcards in PARAMETER positions only: a return type and a field type get the
@@ -9475,6 +9471,10 @@ enum Wildcards {
     Suppressed,
 }
 
+/// Format backend-agnostic semantic types into JVM generic-signature elements. The ordinary JVM
+/// descriptor and the optional generic `Signature` attribute are separate classfile declarations: the
+/// former supplies runtime calling types, while this formatter preserves type parameters, type
+/// arguments, and declaration-site variance for classpath readers.
 struct JvmSignatureFormatter<'a> {
     symbols: &'a dyn SymbolSource,
     run: &'a EmitRun,
