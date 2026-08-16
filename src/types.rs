@@ -1689,6 +1689,11 @@ pub enum AnnotationRetention {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AnnotationValue {
     Int(i32),
+    /// A `byte`/`short` element. The JVM writes these with their own element tags (`B`, `S`), so a
+    /// narrower element cannot borrow `Int`: reading such an annotation back throws
+    /// `AnnotationTypeMismatchException`.
+    Byte(i8),
+    Short(i16),
     Long(i64),
     Float(f32),
     Double(f64),

@@ -7905,7 +7905,7 @@ mod tests {
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: Vec::new(),
             enum_entries_accessor: None,
-            ctor_named_params: Vec::new(),
+            named_parameter_lists: Vec::new(),
             retention: None,
         }
     }

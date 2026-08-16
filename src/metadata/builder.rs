@@ -293,7 +293,7 @@ fn annotation_value_pb(st: &mut StringTable, value: &crate::ir::AnnoValue) -> Pb
     out
 }
 
-fn annotation_pb(st: &mut StringTable, annotation: &crate::ir::AppliedAnnotation) -> Pb {
+pub(crate) fn annotation_pb(st: &mut StringTable, annotation: &crate::ir::AppliedAnnotation) -> Pb {
     let mut out = Pb::new();
     out.field_varint(1, u64::from(st.class_id(annotation.internal)));
     for (name, value) in &annotation.values {

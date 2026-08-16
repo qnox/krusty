@@ -121,6 +121,18 @@ fn compile_both(
     file: &str,
     src: &str,
 ) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    compile_both_with(name, file, src, None)
+}
+
+/// [`compile_both`] against an extra classpath entry — the Java `@interface` fixtures live there,
+/// and their element facts (`AnnotationDefault`, a `byte`/`short` element's tag) cannot be
+/// expressed by a Kotlin annotation declared in the source under test.
+fn compile_both_with(
+    name: &str,
+    file: &str,
+    src: &str,
+    library: Option<&std::path::Path>,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     let base = std::env::temp_dir().join(format!("krusty_anno_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     let krusty_dir = base.join("krusty");
@@ -131,16 +143,25 @@ fn compile_both(
     let source = base.join(file);
     fs::write(&source, src).ok()?;
     let stdlib = common::stdlib_jar();
-    let (code, stderr) = common::kotlinc_compile(&[
+    let mut kotlinc_args = vec![
         source.to_string_lossy().to_string(),
         "-d".to_string(),
         kotlinc_dir.to_string_lossy().to_string(),
-    ])?;
+    ];
+    if let Some(library) = library {
+        kotlinc_args.push("-cp".to_string());
+        kotlinc_args.push(library.to_string_lossy().to_string());
+    }
+    let (code, stderr) = common::kotlinc_compile(&kotlinc_args)?;
     assert_eq!(code, 0, "{name}: kotlinc rejected the fixture: {stderr}");
 
     let stem = file.strip_suffix(".kt").expect("fixture is a .kt file");
+    let mut classpath = vec![stdlib];
+    if let Some(library) = library {
+        classpath.push(library.to_path_buf());
+    }
     let classes =
-        common::compile_in_process(src, stem, &[stdlib], Some(common::jdk_modules().as_path()))
+        common::compile_in_process(src, stem, &classpath, Some(common::jdk_modules().as_path()))
             .unwrap_or_else(|| panic!("{name}: krusty failed to compile the fixture"));
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));
@@ -197,6 +218,19 @@ fn assert_same_annotations(name: &str, file: &str, class: &str, decls: &[&str], 
 /// A regression whose only oracle is kotlinc must not turn green without running that oracle.
 fn require_same_annotations(name: &str, file: &str, class: &str, decls: &[&str], src: &str) {
     let (krusty_dir, kotlinc_dir) = compile_both(name, file, src)
+        .unwrap_or_else(|| panic!("{name}: provisioned kotlinc/JAVA_HOME unavailable"));
+    assert_compiled_annotations(name, class, decls, &krusty_dir, &kotlinc_dir);
+}
+
+fn require_same_annotations_with(
+    name: &str,
+    file: &str,
+    class: &str,
+    decls: &[&str],
+    src: &str,
+    library: Option<&std::path::Path>,
+) {
+    let (krusty_dir, kotlinc_dir) = compile_both_with(name, file, src, library)
         .unwrap_or_else(|| panic!("{name}: provisioned kotlinc/JAVA_HOME unavailable"));
     assert_compiled_annotations(name, class, decls, &krusty_dir, &kotlinc_dir);
 }
@@ -445,5 +479,382 @@ fn nested_annotation_named_arguments_bind_by_label() {
          \x20   @OuterTyped(Typed(a = \"AA\", n = 7))\n\
          \x20   fun typed() {}\n\
          }\n",
+    );
+}
+
+/// A Java `@interface` on the classpath, compiled by javac: `AnnotationDefault`, an array-typed
+/// `value`, and a second array element that has no shorthand.
+fn java_annotation_library() -> Option<std::path::PathBuf> {
+    let java = [
+        (
+            "Sched.java".into(),
+            "package jl;\n\
+             import java.lang.annotation.*;\n\
+             @Retention(RetentionPolicy.RUNTIME)\n\
+             @Target({ElementType.METHOD})\n\
+             public @interface Sched {\n\
+             \x20   String fixedDelay() default \"\";\n\
+             \x20   String cron() default \"\";\n\
+             \x20   String zoneId() default \"\";\n\
+             }\n"
+            .into(),
+        ),
+        (
+            "Filt.java".into(),
+            "package jl;\n\
+             import java.lang.annotation.*;\n\
+             @Retention(RetentionPolicy.RUNTIME)\n\
+             @Target({ElementType.TYPE})\n\
+             public @interface Filt {\n\
+             \x20   String[] value() default {};\n\
+             \x20   String[] tags() default {};\n\
+             }\n"
+            .into(),
+        ),
+        (
+            "Named.java".into(),
+            "package jl;\n\
+             import java.lang.annotation.*;\n\
+             @Retention(RetentionPolicy.RUNTIME)\n\
+             @Target({ElementType.TYPE})\n\
+             public @interface Named {\n\
+             \x20   String text();\n\
+             }\n"
+            .into(),
+        ),
+        (
+            "Single.java".into(),
+            "package jl;\n\
+             import java.lang.annotation.*;\n\
+             @Retention(RetentionPolicy.RUNTIME)\n\
+             @Target({ElementType.TYPE, ElementType.METHOD})\n\
+             public @interface Single {\n\
+             \x20   String value();\n\
+             \x20   String other() default \"\";\n\
+             }\n"
+            .into(),
+        ),
+    ];
+    common::javac_compile(&java, &[]).map(|(dir, _)| dir)
+}
+
+#[test]
+fn a_java_annotation_without_value_requires_named_arguments() {
+    let library = java_annotation_library().expect("javac must build the Java annotation fixture");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = vec![library.clone(), stdlib];
+    let accepted = "import jl.Named\n@Named(text = \"ok\")\nclass Accepted\n";
+    assert!(
+        common::front_end_diagnostics(accepted, &classpath, Some(jdk.as_path())).is_empty(),
+        "named Java annotation argument must be accepted"
+    );
+
+    let rejected = "import jl.Named\n@Named(\"bad\")\nclass Rejected\n";
+    let diagnostics = common::front_end_diagnostics(rejected, &classpath, Some(jdk.as_path()));
+    assert_eq!(
+        diagnostics,
+        ["only named arguments are available for this annotation"]
+    );
+
+    let base = std::env::temp_dir().join(format!(
+        "krusty_java_annotation_named_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    let output = base.join("out");
+    fs::create_dir_all(&output).unwrap();
+    let source = base.join("Rejected.kt");
+    fs::write(&source, rejected).unwrap();
+    let (code, stderr) = common::kotlinc_compile(&[
+        source.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        library.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        output.to_string_lossy().into_owned(),
+    ])
+    .expect("provisioned kotlinc must check the Java annotation fixture");
+    assert_ne!(
+        code, 0,
+        "kotlinc unexpectedly accepted positional Java annotation argument"
+    );
+    assert!(
+        stderr.contains("only named arguments are available for Java annotations"),
+        "unexpected kotlinc diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn a_java_scalar_value_accepts_only_its_own_positional_argument() {
+    let library = java_annotation_library().expect("javac must build the Java annotation fixture");
+    require_same_annotations_with(
+        "java-scalar-value",
+        "Scalar.kt",
+        "ScalarAccepted",
+        &["marked()"],
+        "import jl.Single\n\
+         class ScalarAccepted {\n\
+         \x20   @Single(\"ok\", other = \"yes\")\n\
+         \x20   fun marked() {}\n\
+         }\n",
+        Some(library.as_path()),
+    );
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = vec![library.clone(), stdlib];
+    let rejected = "import jl.Single\n@Single(\"ok\", \"bad\")\nclass Rejected\n";
+    assert_eq!(
+        common::front_end_diagnostics(rejected, &classpath, Some(jdk.as_path())),
+        ["only named arguments are available for this annotation"]
+    );
+
+    let base = std::env::temp_dir().join(format!(
+        "krusty_java_annotation_scalar_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    let output = base.join("out");
+    fs::create_dir_all(&output).unwrap();
+    let source = base.join("Rejected.kt");
+    fs::write(&source, rejected).unwrap();
+    let (code, stderr) = common::kotlinc_compile(&[
+        source.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        library.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        output.to_string_lossy().into_owned(),
+    ])
+    .expect("provisioned kotlinc must check scalar Java annotation arguments");
+    assert_ne!(
+        code, 0,
+        "kotlinc unexpectedly accepted a second positional argument"
+    );
+    assert!(
+        stderr.contains("only named arguments are available for Java annotations"),
+        "unexpected kotlinc diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn unsupported_annotation_values_are_reported_only_at_consumed_positions() {
+    let source = "@Target(AnnotationTarget.CLASS, AnnotationTarget.PROPERTY, AnnotationTarget.FIELD, AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.LOCAL_VARIABLE)\n\
+        annotation class Meta(val tags: Array<String>)\n\
+        @Meta(tags = [\"class\"]) class Rejected(\n\
+        \x20   @Meta(tags = [\"parameter\"]) val parameter: String\n\
+        ) {\n\
+        \x20   @field:Meta(tags = [\"field\"])\n\
+        \x20   @Meta(tags = [\"property\"])\n\
+        \x20   val property: String = parameter\n\
+        \x20   fun keep(@Meta(tags = [\"value-parameter\"]) value: String): String {\n\
+        \x20       @Meta(tags = [\"local\"]) val local = value\n\
+        \x20       return local\n\
+        \x20   }\n\
+        }\n";
+    let (code, stderr) = common::kotlinc_source_result("AnnotationConsumption", source);
+    assert_eq!(code, 0, "kotlinc rejected annotation positions: {stderr}");
+    let diagnostics = common::front_end_diagnostics_with_stdlib(source);
+    assert_eq!(
+        diagnostics,
+        ["array-literal annotation argument is not yet supported"],
+        "only the emitted class annotation is consumed"
+    );
+}
+
+#[test]
+fn a_java_annotation_element_default_may_be_omitted() {
+    // `AnnotationDefault` is the ONLY carrier of a Java annotation element's default — a Java
+    // `@interface` has no Kotlin constructor to hold them. Ignoring the attribute made every
+    // unsupplied element a "no value passed for parameter" error, which gated whole modules on
+    // shapes as ordinary as `@Scheduled(fixedDelay = "1m")`.
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let library = java_annotation_library().expect("javac must build the Java annotation fixture");
+    let classpath = vec![library, stdlib];
+    const MAIN: &str = "import jl.Sched\n\
+        class Worker {\n\
+        \x20   @Sched(fixedDelay = \"1m\")\n\
+        \x20   fun tick() {}\n\
+        }\n\
+        fun box(): String = \"OK\"\n";
+    let classes = common::compile_in_process(MAIN, "Main", &classpath, Some(jdk.as_path()))
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                common::front_end_diagnostics(MAIN, &classpath, Some(jdk.as_path()))
+            )
+        });
+    assert_eq!(
+        common::run_box(&classes, "MainKt", &classpath).expect("box runner"),
+        "OK"
+    );
+}
+
+#[test]
+fn a_java_annotation_array_value_is_a_positional_vararg_only() {
+    // Measured against kotlinc 2.4.10, which is stricter than "arrays accept a single value":
+    // only the `value` element is a vararg, and only POSITIONALLY. `value = "a"` and any other
+    // array element still demand an array literal, so accepting those would compile what kotlinc
+    // rejects.
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let library = java_annotation_library().expect("javac must build the Java annotation fixture");
+    let classpath = vec![library, stdlib];
+    let source = |application: &str| {
+        format!("import jl.Filt\n{application}\nclass Target\nfun box(): String = \"OK\"\n")
+    };
+    for accepted in ["@Filt(\"a\")", "@Filt(\"a\", \"b\")"] {
+        let main = source(accepted);
+        assert!(
+            common::compile_in_process(&main, "Main", &classpath, Some(jdk.as_path())).is_some(),
+            "kotlinc accepts {accepted}: {:?}",
+            common::front_end_diagnostics(&main, &classpath, Some(jdk.as_path()))
+        );
+    }
+    // kotlinc accepts these two, but the parser does not model an array LITERAL argument. It
+    // stands a placeholder in the argument's slot, which fails to resolve WHERE THE ANNOTATION IS
+    // CHECKED — emitting the annotation without the element would be a silent miscompile, while
+    // reporting at parse time would hard-fail the annotation positions krusty never emits.
+    for unsupported in [
+        "@Filt(\"a\", tags = [\"t\"])",
+        "@Filt(value = [\"a\"], tags = [\"t\"])",
+    ] {
+        let main = source(unsupported);
+        let diagnostics = common::front_end_diagnostics(&main, &classpath, Some(jdk.as_path()));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("array-literal annotation argument")),
+            "{unsupported} must report the unmodelled argument, never emit a partial annotation: \
+             {diagnostics:?}"
+        );
+    }
+    for rejected in ["@Filt(tags = \"t\")", "@Filt(value = \"a\")"] {
+        let main = source(rejected);
+        let diagnostics = common::front_end_diagnostics(&main, &classpath, Some(jdk.as_path()));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("argument type mismatch")),
+            "kotlinc rejects {rejected}, so krusty must too: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn a_classpath_const_val_is_an_annotation_constant() {
+    // A qualified read in an annotation argument is an enum entry OR a named constant. Folding
+    // only the enum case rejected `@Guarded(Rules.AUTHENTICATED)` — a `const val` reached through
+    // its owner — as "not a supported compile-time constant".
+    const LIB: &str = "package lib\n\
+        interface Rules {\n\
+        \x20   companion object { const val AUTHENTICATED = \"isAuthenticated()\" }\n\
+        }\n\
+        @Target(AnnotationTarget.CLASS)\n\
+        @Retention(AnnotationRetention.RUNTIME)\n\
+        annotation class Guarded(vararg val value: String)\n";
+    const MAIN: &str = "import lib.Guarded\n\
+        import lib.Rules\n\
+        @Guarded(Rules.AUTHENTICATED)\n\
+        class Service\n\
+        fun box(): String = \"OK\"\n";
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let library = common::compile_lib("ann-const", LIB)
+        .expect("krusty must build the classpath annotation fixture");
+    let classpath = vec![library, stdlib];
+    let classes = common::compile_in_process(MAIN, "Main", &classpath, Some(jdk.as_path()))
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                common::front_end_diagnostics(MAIN, &classpath, Some(jdk.as_path()))
+            )
+        });
+    assert_eq!(
+        common::run_box(&classes, "MainKt", &classpath).expect("box runner"),
+        "OK"
+    );
+}
+
+#[test]
+fn java_element_tags_and_omitted_defaults_match_kotlinc() {
+    // Three facts a "does it compile" assertion cannot see, all differential against kotlinc:
+    //   * an OMITTED Java element emits nothing, so the classfile's own `AnnotationDefault`
+    //     stands — materializing `kept=[]` would override it;
+    //   * a `byte`/`short` element carries its own tag (`B`, `S`). The descriptor boundary widens
+    //     both to `Int` for overload resolution, and borrowing that tag throws
+    //     `AnnotationTypeMismatchException` when the annotation is read back;
+    //   * a NAMED vararg keeps the element expectation inside its array (`[Z`, not `[I`).
+    let java = [(
+        "Tags.java".into(),
+        "package jl;\n\
+         import java.lang.annotation.*;\n\
+         @Retention(RetentionPolicy.RUNTIME)\n\
+         @Target({ElementType.METHOD})\n\
+         public @interface Tags {\n\
+         \x20   String[] kept() default {\"d\"};\n\
+         \x20   byte by() default 0;\n\
+         \x20   short sh() default 0;\n\
+         \x20   boolean[] flags() default {};\n\
+         }\n"
+        .into(),
+    )];
+    let (library, _) =
+        common::javac_compile(&java, &[]).expect("javac must build the Java annotation fixture");
+    require_same_annotations_with(
+        "javatags",
+        "Tagged.kt",
+        "Holder",
+        &["tagged()"],
+        "import jl.Tags\n\
+         class Holder {\n\
+         \x20   @Tags(by = 3, sh = 9, flags = booleanArrayOf(true, false))\n\
+         \x20   fun tagged() {}\n\
+         }\n",
+        Some(library.as_path()),
+    );
+}
+
+#[test]
+fn omitted_java_default_and_named_vararg_constants_match_kotlinc() {
+    // The two guards the tag comparison above cannot reach, because its fixture has no element
+    // named `value`:
+    //   * an OMITTED element on an annotation that HAS a `value` vararg must still emit nothing,
+    //     so the classfile's own `AnnotationDefault` stands — materializing `value=[]` overrides
+    //     a non-empty default outright;
+    //   * a NAMED `value` fed CONSTANTS keeps the element expectation inside the array. Literals
+    //     cannot show this: they carry their own type, while a `const val` folds through the
+    //     expected type and lands as `I` without the guard.
+    let java = [(
+        "Vals.java".into(),
+        "package jl;\n\
+         import java.lang.annotation.*;\n\
+         @Retention(RetentionPolicy.RUNTIME)\n\
+         @Target({ElementType.METHOD})\n\
+         public @interface Vals {\n\
+         \x20   boolean[] value() default {};\n\
+         \x20   String[] kept() default {\"d\"};\n\
+         }\n"
+        .into(),
+    )];
+    let (library, _) =
+        common::javac_compile(&java, &[]).expect("javac must build the Java annotation fixture");
+    require_same_annotations_with(
+        "javavals",
+        "Vals.kt",
+        "Holder2",
+        &["omitted()", "constants()"],
+        "import jl.Vals\n\
+         object K {\n\
+         \x20   const val T = true\n\
+         \x20   const val F = false\n\
+         }\n\
+         class Holder2 {\n\
+         \x20   @Vals\n\
+         \x20   fun omitted() {}\n\
+         \x20   @Vals(value = booleanArrayOf(K.T, K.F))\n\
+         \x20   fun constants() {}\n\
+         }\n",
+        Some(library.as_path()),
     );
 }

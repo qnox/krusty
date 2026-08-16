@@ -13,9 +13,9 @@ use std::fmt::{self, Write};
 use crate::ast::*;
 use crate::diag::{DiagSink, DiagnosticIdentity, DiagnosticKind, Span};
 use crate::libraries::{
-    map_call_args, required_arity, CallArgMappingError, CallArgMappingFailure, CallSig,
-    EmptySymbolSource, GenericReturnPolicy, GenericSig, InlineKind, Origin, ParamList,
-    SemanticPlatform,
+    map_call_args, required_arity, AnnotationParameterPolicy, AnnotationPositionalPolicy,
+    CallArgMappingError, CallArgMappingFailure, CallSig, EmptySymbolSource, GenericReturnPolicy,
+    GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
 use crate::names::{property_getter_name, property_setter_name, COMPANION_OBJECT_NAME};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
@@ -16569,7 +16569,7 @@ struct LambdaCheckMode {
 }
 
 type AnnotationElements = Vec<(String, Ty)>;
-type AnnotationShape = (AnnotationElements, ParamList);
+type AnnotationShape = (AnnotationElements, ParamList, AnnotationParameterPolicy);
 
 struct Checker<'a> {
     file: &'a File,
@@ -25504,6 +25504,7 @@ impl<'a> Checker<'a> {
                 types: candidate.target.params().to_vec(),
                 recv_fun: candidate.lambda_receivers.clone(),
                 vararg: candidate.vararg,
+                annotation: None,
             };
             if let Err(failure) = map_param_list_args(args, names, &params, trailing_lambda) {
                 failures.push((failure, index));
@@ -27783,29 +27784,27 @@ impl<'a> Checker<'a> {
 
     fn annotation_shape(&self, internal: TypeName) -> Option<AnnotationShape> {
         let classifier = self.resolver().classifier(internal)?;
-        let members = classifier.annotation_members()?;
-        let parameters = classifier
-            .constructor_named_params(0)
-            .unwrap_or_else(|| ParamList {
-                names: members.iter().map(|(name, _)| name.clone()).collect(),
-                defaults: vec![false; members.len()],
-                types: members.iter().map(|(_, ty)| *ty).collect(),
-                ..ParamList::default()
-            });
-        Some((members, parameters))
+        let application = classifier.annotation_application()?;
+        let elements = application
+            .parameters
+            .names
+            .iter()
+            .cloned()
+            .zip(application.parameters.types.iter().copied())
+            .collect();
+        Some((elements, application.parameters, application.policy))
     }
 
-    fn annotation_argument_parameter_indices(
+    fn annotation_argument_names(
         &self,
-        parameters: &ParamList,
         arguments: &[ExprId],
         nested_call: Option<ExprId>,
-    ) -> Result<Vec<usize>, CallArgMappingFailure> {
+    ) -> Vec<Option<String>> {
         // A TOP-LEVEL annotation's labels are recorded per argument in `annotation_arg_names`. A
         // NESTED annotation (`@Outer(Inner(b = "BB", a = "AA"))`) is parsed as an ordinary call, so
         // its labels live in the call's own `call_arg_names` instead. Reading only the former bound
         // every nested argument positionally and silently swapped the values.
-        let argument_names = match nested_call {
+        match nested_call {
             // A nested annotation's labels are the CALL's, positionally parallel to its arguments.
             // An unlabelled call records no names at all, which is all-positional — never a reason
             // to consult the annotation map, whose keys are direct `@Ann(...)` arguments.
@@ -27819,7 +27818,15 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|argument| self.file.annotation_arg_names.get(&argument.0).cloned())
                 .collect::<Vec<_>>(),
-        };
+        }
+    }
+
+    fn annotation_argument_parameter_indices(
+        &self,
+        parameters: &ParamList,
+        arguments: &[ExprId],
+        argument_names: &[Option<String>],
+    ) -> Result<Vec<usize>, CallArgMappingFailure> {
         let signature = CallSig {
             param_names: parameters.names.clone(),
             param_defaults: parameters.defaults.clone(),
@@ -27831,7 +27838,7 @@ impl<'a> Checker<'a> {
         call_argument_parameter_indices_result(
             arguments.len(),
             parameters.names.len(),
-            Some(&argument_names),
+            Some(argument_names),
             false,
             &signature,
         )
@@ -27864,22 +27871,34 @@ impl<'a> Checker<'a> {
         e: ExprId,
         expected: Option<Ty>,
     ) -> Option<crate::types::AnnotationValue> {
-        use crate::libraries::LibConst;
         use crate::synthetics::SyntheticKind;
         use crate::types::AnnotationValue;
 
         let value = match self.file.expr(e) {
             Expr::StringLit(value) => AnnotationValue::String(value.clone()),
-            Expr::IntLit(value) | Expr::UIntLit(value) => AnnotationValue::Int(*value as i32),
+            // An integer LITERAL takes the element's declared width too. Emitting `I` for a
+            // `byte`/`short` element writes the wrong tag just as a mistyped constant does, and
+            // read-back throws `AnnotationTypeMismatchException`.
+            Expr::IntLit(value) | Expr::UIntLit(value) => match expected.map(Ty::non_null) {
+                Some(Ty::Byte) => AnnotationValue::Byte(i8::try_from(*value).ok()?),
+                Some(Ty::Short) => AnnotationValue::Short(i16::try_from(*value).ok()?),
+                Some(Ty::Long) => AnnotationValue::Long(*value),
+                _ => AnnotationValue::Int(*value as i32),
+            },
             Expr::LongLit(value) | Expr::ULongLit(value) => AnnotationValue::Long(*value),
             Expr::DoubleLit(value) => AnnotationValue::Double(*value),
             Expr::FloatLit(value) => AnnotationValue::Float(*value),
             Expr::BoolLit(value) => AnnotationValue::Boolean(*value),
             Expr::CharLit(value) => AnnotationValue::Char(*value),
-            Expr::Member { name, .. } => {
-                let owner = self.resolved_enum_entries.get(&e).copied()?;
-                AnnotationValue::Enum(owner, name.clone())
-            }
+            Expr::UnsupportedAnnotationArgument(_) => return None,
+            // A qualified read is an enum entry (`DeprecationLevel.HIDDEN`) OR a named constant
+            // reached through its owner (`Rules.AUTHENTICATED`, a `const val` on a companion).
+            // Only the first was folded, so every constant-qualified annotation argument was
+            // rejected as "not a supported compile-time constant".
+            Expr::Member { name, .. } => match self.resolved_enum_entries.get(&e).copied() {
+                Some(owner) => AnnotationValue::Enum(owner, name.clone()),
+                None => self.folded_library_constant(e, expected)?,
+            },
             Expr::CallableRef {
                 receiver: Some(_),
                 name,
@@ -27905,18 +27924,43 @@ impl<'a> Checker<'a> {
                     AnnotationValue::Annotation { internal, values }
                 }
             },
-            _ => {
-                let constant = self.resolved_constants.get(&e)?;
-                match &constant.value {
-                    LibConst::Int(value) => AnnotationValue::Int(*value),
-                    LibConst::Long(value) => AnnotationValue::Long(*value),
-                    LibConst::Float(value) => AnnotationValue::Float(*value),
-                    LibConst::Double(value) => AnnotationValue::Double(*value),
-                    LibConst::Str(value) => AnnotationValue::String(value.clone()),
-                }
-            }
+            _ => self.folded_library_constant(e, expected)?,
         };
         Some(value)
+    }
+
+    /// A resolved compile-time constant read (`const val`), whatever expression shape reached it.
+    ///
+    /// The value is re-typed to the ELEMENT's declared type. `LibConst` models an integral constant
+    /// as `Int` whatever its declared width, so folding it verbatim wrote a `boolean` element with
+    /// the `I` tag — which javap shows as `flag=1` where kotlinc writes `Z`/`flag=true`, and which
+    /// throws `AnnotationTypeMismatchException` when the annotation is read back. An element type
+    /// the constant cannot honor folds to `None`, which reports the argument rather than emitting
+    /// a mistyped one.
+    fn folded_library_constant(
+        &self,
+        e: ExprId,
+        expected: Option<Ty>,
+    ) -> Option<crate::types::AnnotationValue> {
+        use crate::libraries::LibConst;
+        use crate::types::AnnotationValue;
+
+        let constant = self.resolved_constants.get(&e)?;
+        let declared = expected.map(Ty::non_null);
+        Some(match &constant.value {
+            LibConst::Int(value) => match declared {
+                Some(Ty::Boolean) => AnnotationValue::Boolean(*value != 0),
+                Some(Ty::Char) => AnnotationValue::Char(u16::try_from(*value).ok()?),
+                Some(Ty::Long) => AnnotationValue::Long(i64::from(*value)),
+                Some(Ty::Byte) => AnnotationValue::Byte(i8::try_from(*value).ok()?),
+                Some(Ty::Short) => AnnotationValue::Short(i16::try_from(*value).ok()?),
+                _ => AnnotationValue::Int(*value),
+            },
+            LibConst::Long(value) => AnnotationValue::Long(*value),
+            LibConst::Float(value) => AnnotationValue::Float(*value),
+            LibConst::Double(value) => AnnotationValue::Double(*value),
+            LibConst::Str(value) => AnnotationValue::String(value.clone()),
+        })
     }
 
     fn fold_annotation_values(
@@ -27925,19 +27969,28 @@ impl<'a> Checker<'a> {
         arguments: &[ExprId],
         nested_call: Option<ExprId>,
     ) -> Option<Vec<(String, crate::types::AnnotationValue)>> {
-        let (elements, parameters) = self.annotation_shape(internal)?;
+        let (elements, parameters, policy) = self.annotation_shape(internal)?;
+        let argument_names = self.annotation_argument_names(arguments, nested_call);
         let parameter_indices = self
-            .annotation_argument_parameter_indices(&parameters, arguments, nested_call)
+            .annotation_argument_parameter_indices(&parameters, arguments, &argument_names)
             .ok()?;
         let mut values = Vec::with_capacity(arguments.len());
-        for (&argument, index) in arguments.iter().zip(parameter_indices) {
-            let (name, declared) = elements.get(index)?.clone();
-            let expected = if parameters.vararg == Some(index) && !self.file.is_spread_arg(argument)
-            {
-                declared.array_elem()?
-            } else {
-                declared
-            };
+        for ((&argument, index), argument_name) in
+            arguments.iter().zip(parameter_indices).zip(&argument_names)
+        {
+            let (element_name, declared) = elements.get(index)?.clone();
+            // Same rule as the checker: a vararg element takes its ELEMENT type only when the
+            // argument is POSITIONAL. Folding a named one against the element type dropped the
+            // expectation inside the array, so a `boolean[]` element fed constants was written
+            // with the `I` tag and threw AnnotationTypeMismatchException on read-back.
+            let named = argument_name.is_some();
+            let expected =
+                if parameters.vararg == Some(index) && !named && !self.file.is_spread_arg(argument)
+                {
+                    declared.array_elem()?
+                } else {
+                    declared
+                };
             let value = self.fold_annotation_value(argument, Some(expected))?;
             if parameters.vararg == Some(index) {
                 let item_values = match value {
@@ -27951,15 +28004,23 @@ impl<'a> Checker<'a> {
                 } else {
                     values.push((
                         index,
-                        name,
+                        element_name,
                         crate::types::AnnotationValue::Array(item_values),
                     ));
                 }
             } else {
-                values.push((index, name, value));
+                values.push((index, element_name, value));
             }
         }
-        if let Some(index) = parameters.vararg {
+        // An omitted vararg element materializes as an empty array only when the DECLARATION is a
+        // Kotlin `vararg val`. The Java `value` vararg is synthesized here from an array-typed
+        // element, and kotlinc never writes an omitted Java element: emitting `value=[]` would
+        // override the `AnnotationDefault` the classfile already carries (`@Dfl()` must keep
+        // `value=[x]`, not become `value=[]`).
+        if let Some(index) = parameters
+            .vararg
+            .filter(|_| policy.materialize_omitted_vararg)
+        {
             if !values.iter().any(|(slot, _, _)| *slot == index) {
                 let (name, _) = elements.get(index)?.clone();
                 values.push((
@@ -28005,21 +28066,14 @@ impl<'a> Checker<'a> {
             );
             return;
         };
-        let Some((elements, parameters)) = self.annotation_shape(internal) else {
+        let Some(shape) = self.annotation_shape(internal) else {
             self.diags.error(
                 annotation.span,
                 "resolved annotation has no semantic element declaration".to_string(),
             );
             return;
         };
-        if !self.check_annotation_arguments(
-            scope,
-            annotation.span,
-            &elements,
-            &parameters,
-            arguments,
-            None,
-        ) {
+        if !self.check_annotation_arguments(scope, annotation.span, &shape, arguments, None) {
             return;
         }
         let Some(applied) = self.fold_annotation_application(internal, arguments) else {
@@ -28068,20 +28122,68 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         application_span: Span,
-        elements: &[(String, Ty)],
-        parameters: &ParamList,
+        shape: &AnnotationShape,
         arguments: &[ExprId],
         nested_call: Option<ExprId>,
     ) -> bool {
-        let parameter_indices =
-            match self.annotation_argument_parameter_indices(parameters, arguments, nested_call) {
-                Ok(indices) => indices,
-                Err(failure) => {
-                    self.report_annotation_mapping_failure(application_span, arguments, failure);
-                    return false;
+        let (elements, parameters, policy) = shape;
+        let mut unsupported = false;
+        for &argument in arguments {
+            let Expr::UnsupportedAnnotationArgument(kind) = self.file.expr(argument) else {
+                continue;
+            };
+            let description = match kind {
+                crate::ast::UnsupportedAnnotationArgument::ArrayLiteral => "array-literal",
+                crate::ast::UnsupportedAnnotationArgument::NestedAnnotation => "nested-annotation",
+            };
+            self.diags.error(
+                self.span(argument),
+                format!("{description} annotation argument is not yet supported"),
+            );
+            unsupported = true;
+        }
+        if unsupported {
+            return false;
+        }
+        let argument_names = self.annotation_argument_names(arguments, nested_call);
+        let parameter_indices = match self.annotation_argument_parameter_indices(
+            parameters,
+            arguments,
+            &argument_names,
+        ) {
+            Ok(indices) => indices,
+            Err(failure) => {
+                self.report_annotation_mapping_failure(application_span, arguments, failure);
+                return false;
+            }
+        };
+        let mut forbidden_positional = false;
+        for ((&argument, &index), name) in arguments
+            .iter()
+            .zip(&parameter_indices)
+            .zip(&argument_names)
+        {
+            let permitted = match policy.positional {
+                AnnotationPositionalPolicy::Constructor => true,
+                AnnotationPositionalPolicy::NamedOnly => false,
+                AnnotationPositionalPolicy::Value | AnnotationPositionalPolicy::ValueVararg => {
+                    index == 0
                 }
             };
-        for (&argument, index) in arguments.iter().zip(parameter_indices) {
+            if name.is_none() && !permitted {
+                self.diags.error(
+                    self.span(argument),
+                    "only named arguments are available for this annotation".to_string(),
+                );
+                forbidden_positional = true;
+            }
+        }
+        if forbidden_positional {
+            return false;
+        }
+        for ((&argument, index), name) in
+            arguments.iter().zip(parameter_indices).zip(&argument_names)
+        {
             let Some((_, declared)) = elements.get(index) else {
                 self.diags.error(
                     self.span(argument),
@@ -28090,12 +28192,17 @@ impl<'a> Checker<'a> {
                 );
                 return false;
             };
-            let expected = if parameters.vararg == Some(index) && !self.file.is_spread_arg(argument)
-            {
-                declared.array_elem().unwrap_or(*declared)
-            } else {
-                *declared
-            };
+            // A vararg element takes its ELEMENT type only when the argument is passed
+            // POSITIONALLY: kotlinc accepts `@Filt("a")` but rejects `@Filt(value = "a")`, where
+            // naming the parameter demands the array itself.
+            let named = name.is_some();
+            let expected =
+                if parameters.vararg == Some(index) && !named && !self.file.is_spread_arg(argument)
+                {
+                    declared.array_elem().unwrap_or(*declared)
+                } else {
+                    *declared
+                };
             let actual = self.check_annotation_value_expression(scope, argument, expected);
             self.expect_assignable(expected, actual, self.span(argument), "annotation argument");
         }
@@ -28110,7 +28217,7 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         if let Expr::Call { callee, args } = self.file.expr(expression).clone() {
             if let Some(expected_internal) = expected.kotlin_class_internal() {
-                if let Some((elements, parameters)) = self.annotation_shape(expected_internal) {
+                if let Some(shape) = self.annotation_shape(expected_internal) {
                     let selected = self
                         .qualifier(scope, QualifierInput::Expression(callee))
                         .ok();
@@ -28118,8 +28225,7 @@ impl<'a> Checker<'a> {
                         if self.check_annotation_arguments(
                             scope,
                             self.span(expression),
-                            &elements,
-                            &parameters,
+                            &shape,
                             &args,
                             Some(expression),
                         ) {
@@ -32919,6 +33025,10 @@ impl<'a> Checker<'a> {
             Expr::StringLit(_) => Ty::String,
             Expr::CharLit(_) => Ty::Char,
             Expr::NullLit => Ty::Null,
+            // This sentinel is diagnosed by `check_annotation_arguments` only when its application
+            // is consumed. Keeping it as an error type here avoids inventing a resolvable spelling
+            // while leaving non-emitted annotation positions inert.
+            Expr::UnsupportedAnnotationArgument(_) => Ty::Error,
             Expr::NotNull { operand } => {
                 // The value with its non-null type; `T?!!` narrows to `T`.
                 let t = self.expr(scope, operand);
@@ -43969,22 +44079,6 @@ impl<'a> Checker<'a> {
                     let source = self.fed_source();
                     walk_qualifier(&source, prefix, &[(Some(callee), name.clone())])
                 });
-                // Qualified-name instantiation of a **classpath annotation**: `kotlin.SinceKotlin(…)`.
-                // The whole callee is a dotted path naming an `@interface` on the classpath.
-                if let Ok(ResolvedQualifier::Classifier(internal)) = member_qualifier {
-                    if let Some(members) = self
-                        .resolved_type_name(internal)
-                        .and_then(|t| t.annotation_members())
-                    {
-                        for (i, a) in args.iter().enumerate() {
-                            let at = self.expr(scope, *a);
-                            if let Some((_, pt)) = members.get(i) {
-                                self.expect_call_arg(scope, *pt, *a, at);
-                            }
-                        }
-                        return Ty::obj_name(internal);
-                    }
-                }
                 // A FULLY-QUALIFIED top-level FUNCTION call `a.b.helper(args)`: the receiver is a package
                 // PATH (its leftmost segment is not a value in scope), and `helper` is a top-level function
                 // of that package (compiled to `a/b/<File>Kt`). Resolve it by name among the classpath
@@ -50412,7 +50506,7 @@ val result = object { fun value(): String = captured }
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: Vec::new(),
             enum_entries_accessor: None,
-            ctor_named_params: Vec::new(),
+            named_parameter_lists: Vec::new(),
             retention: None,
         }
     }
@@ -53117,7 +53211,7 @@ fun box(): String {
                         Vec::new()
                     },
                     enum_entries_accessor: None,
-                    ctor_named_params: vec![],
+                    named_parameter_lists: vec![],
                     retention: None,
                 })
             })
