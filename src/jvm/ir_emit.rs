@@ -1023,7 +1023,7 @@ fn build_class_metadata(
                 .map(|function| {
                     (
                         function.name.clone(),
-                        method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
+                        ir_method_desc(&function.params, &function.ret),
                     )
                 })
                 .or_else(|| {
@@ -1034,7 +1034,7 @@ fn build_class_metadata(
                         .map(|function| {
                             (
                                 function.name.clone(),
-                                method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
+                                ir_method_desc(&function.params, &function.ret),
                             )
                         })
                 })
@@ -1055,7 +1055,7 @@ fn build_class_metadata(
                 .map(|function| {
                     (
                         function.name.clone(),
-                        method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
+                        ir_method_desc(&function.params, &function.ret),
                     )
                 })
                 .or_else(|| {
@@ -1066,7 +1066,7 @@ fn build_class_metadata(
                         .map(|function| {
                             (
                                 function.name.clone(),
-                                method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
+                                ir_method_desc(&function.params, &function.ret),
                             )
                         })
                 })
@@ -1172,7 +1172,7 @@ fn build_class_metadata(
             ir.functions.get(fid as usize).map(|function| {
                 (
                     function.name.clone(),
-                    method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)),
+                    ir_method_desc(&function.params, &function.ret),
                 )
             })
         };
@@ -1933,11 +1933,11 @@ fn instance_field_jvm_name(
     field: &crate::ir::IrField,
 ) -> String {
     let owner = class.fq_name();
-    let descriptor = type_descriptor(ir_ty_to_jvm(&field.ty));
+    let descriptor = type_descriptor(jvm_declared_ty(&field.ty));
     let conflicts_with_static = ir.statics.iter().any(|static_field| {
         static_field.owner_matches(&owner)
             && static_field.name == field.name
-            && type_descriptor(ir_ty_to_jvm(&static_field.ty)) == descriptor
+            && type_descriptor(jvm_declared_ty(&static_field.ty)) == descriptor
     });
     if !conflicts_with_static {
         return field.name.clone();
@@ -1945,12 +1945,12 @@ fn instance_field_jvm_name(
     for suffix in 1usize.. {
         let candidate = format!("{}${suffix}", field.name);
         let occupied_by_instance = class.fields.iter().any(|other| {
-            other.name == candidate && type_descriptor(ir_ty_to_jvm(&other.ty)) == descriptor
+            other.name == candidate && type_descriptor(jvm_declared_ty(&other.ty)) == descriptor
         });
         let occupied_by_static = ir.statics.iter().any(|static_field| {
             static_field.owner_matches(&owner)
                 && static_field.name == candidate
-                && type_descriptor(ir_ty_to_jvm(&static_field.ty)) == descriptor
+                && type_descriptor(jvm_declared_ty(&static_field.ty)) == descriptor
         });
         if !occupied_by_instance && !occupied_by_static {
             return candidate;
@@ -2220,7 +2220,7 @@ fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut Cl
             continue; // abstract: no Code, so no debug tables
         }
         let param_tys = jvm_tys(&f.params);
-        let ret = ir_ty_to_jvm(&f.ret);
+        let ret = jvm_declared_ty(&f.ret);
         let desc = method_descriptor(&param_tys, ret);
         let mut locals: Vec<(String, String, u16)> = Vec::new();
         let mut slot = 0u16;
@@ -2423,7 +2423,7 @@ fn attach_synth_debug_tables(
         } else {
             line
         };
-        let pd = crate::jvm::names::type_descriptor(ir_ty_to_jvm(&hoisted.ty));
+        let pd = crate::jvm::names::type_descriptor(jvm_declared_ty(&hoisted.ty));
         let (g, s) = accessor_jvm_names(c, &property.name);
         cw.set_method_debug(&g, &format!("(){pd}"), Some((0, pline)), &this_only);
         if hoisted.is_var {
@@ -2455,7 +2455,7 @@ fn attach_synth_debug_tables(
         })
         .map(|(_, s)| s)
     {
-        let pd = crate::jvm::names::type_descriptor(ir_ty_to_jvm(&s.ty));
+        let pd = crate::jvm::names::type_descriptor(jvm_declared_ty(&s.ty));
         let getter_bridge = format!("access${}$cp", crate::names::property_getter_name(&s.name));
         cw.set_method_debug(&getter_bridge, &format!("(){pd}"), Some((0, line)), &[]);
         if s.is_var {
@@ -2640,7 +2640,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
             })
             .map(|(_, s)| s)
         {
-            if let Some(a) = ann(&s.name, ir_ty_to_jvm(&s.ty)) {
+            if let Some(a) = ann(&s.name, jvm_declared_ty(&s.ty)) {
                 cw.set_field_nullability(&s.name, a);
             }
         }
@@ -3513,7 +3513,7 @@ fn emit_pass(
         facade_has_method = true;
         if facade_access_bridges.contains(&(i as u32)) {
             let param_tys = jvm_tys(&f.params);
-            let ret = ir_ty_to_jvm(&f.ret);
+            let ret = jvm_declared_ty(&f.ret);
             let desc = method_descriptor(&param_tys, ret);
             let words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
             let mut g = CodeBuilder::new(words);
@@ -4098,7 +4098,7 @@ fn emit_statics(
         if s.is_const || s.custom_accessor {
             continue;
         }
-        let jt = ir_ty_to_jvm(&s.ty);
+        let jt = jvm_declared_ty(&s.ty);
         let desc = type_descriptor(jt);
         if s.visibility.is_private() {
             if cross_get.contains(&(sidx as u32)) {
@@ -4231,7 +4231,7 @@ fn emit_statics(
             clinit_lines.push((code.bytes.len() as u16, s.line));
         }
         e.emit_value(s.init, &mut code);
-        let jt = ir_ty_to_jvm(&s.ty);
+        let jt = jvm_declared_ty(&s.ty);
         let fref = e.cw.fieldref(facade, &s.name, &type_descriptor(jt));
         code.putstatic(fref, slot_words(jt) as i32);
     }
@@ -4274,9 +4274,9 @@ fn declared_property_accessor_jvm(
         .obj_internal()
         .is_some_and(|name| ir.is_value_class_name(name))
     {
-        ir_ty_to_jvm(&field.ty)
+        jvm_declared_ty(&field.ty)
     } else {
-        ir_ty_to_jvm(&stored_value_ty(property.ty))
+        jvm_declared_ty(&stored_value_ty(property.ty))
     }
 }
 
@@ -4375,7 +4375,7 @@ fn emit_declared_property_accessor(
             .backing_field
             .and_then(|i| c.fields.get(i as usize))
         {
-            let field_jt = ir_ty_to_jvm(&field.ty);
+            let field_jt = jvm_declared_ty(&field.ty);
             let field_desc = type_descriptor(field_jt);
             let accessor_jt = declared_property_accessor_jvm(ir, property, field);
             let accessor_desc = type_descriptor(accessor_jt);
@@ -4391,7 +4391,7 @@ fn emit_declared_property_accessor(
             // reach the property, not to bypass the user's accessor.
             match property.getter.map(|fid| &ir.functions[fid as usize]) {
                 Some(f) => {
-                    let d = method_descriptor(&[], ir_ty_to_jvm(&f.ret));
+                    let d = ir_method_desc(&[], &f.ret);
                     let m = cw.methodref(fq_name, &f.name, &d);
                     g.invokevirtual(m, 0, slot_words(accessor_jt) as i32);
                 }
@@ -4432,7 +4432,7 @@ fn emit_declared_property_accessor(
                 // Same rule for the write: a declared setter is user code and is never bypassed.
                 match property.setter.map(|fid| &ir.functions[fid as usize]) {
                     Some(f) => {
-                        let d = method_descriptor(&[ir_ty_to_jvm(&f.params[0])], Ty::Unit);
+                        let d = method_descriptor(&[jvm_declared_ty(&f.params[0])], Ty::Unit);
                         let m = cw.methodref(fq_name, &f.name, &d);
                         st.invokevirtual(m, words as i32, 0);
                     }
@@ -4466,7 +4466,7 @@ fn emit_declared_property_accessor(
     let Some(field) = c.fields.get(field_index as usize) else {
         return;
     };
-    let field_jt = ir_ty_to_jvm(&field.ty);
+    let field_jt = jvm_declared_ty(&field.ty);
     let field_desc = type_descriptor(field_jt);
     let accessor_jt = declared_property_accessor_jvm(ir, property, field);
     let accessor_desc = type_descriptor(accessor_jt);
@@ -4482,8 +4482,7 @@ fn emit_declared_property_accessor(
     let occupied = |name: &str, descriptor: &str| {
         c.methods.iter().any(|&fid| {
             let function = &ir.functions[fid as usize];
-            function.name == name
-                && method_descriptor(&function.params, ir_ty_to_jvm(&function.ret)) == descriptor
+            function.name == name && ir_method_desc(&function.params, &function.ret) == descriptor
         })
     };
     let getter_desc = format!("(){accessor_desc}");
@@ -5524,7 +5523,7 @@ fn emit_class(
         })
         .map(|(_, s)| s)
     {
-        let jt = ir_ty_to_jvm(&s.ty);
+        let jt = jvm_declared_ty(&s.ty);
         let desc = type_descriptor(jt);
         // kotlinc visits the bridge's name before its body's field cluster.
         let getter_bridge = format!("access${}$cp", property_getter_name(&s.name));
@@ -5608,7 +5607,7 @@ fn emit_class(
                     }
                 }
                 e.emit_value(s.init, &mut clinit);
-                let jt = ir_ty_to_jvm(&s.ty);
+                let jt = jvm_declared_ty(&s.ty);
                 let fref = e.cw.fieldref(&fq_name, &s.name, &type_descriptor(jt));
                 clinit.putstatic(fref, slot_words(jt) as i32);
             }
@@ -7094,7 +7093,7 @@ fn emit_annotation_class(
     cw.set_access(0x0001 | 0x0200 | 0x0400 | 0x2000); // PUBLIC | INTERFACE | ABSTRACT | ANNOTATION
     cw.add_interface("java/lang/annotation/Annotation");
     for field in &c.fields {
-        let ret = ir_ty_to_jvm(&field.ty);
+        let ret = jvm_declared_ty(&field.ty);
         cw.add_abstract_method(0x0401, &field.name, &format!("(){}", type_descriptor(ret)));
         // PUBLIC|ABSTRACT
     }
@@ -7199,7 +7198,7 @@ fn emit_annotation_impl_class(
     let members: Vec<(String, Ty)> = c
         .fields
         .iter()
-        .map(|f| (f.name.clone(), ir_ty_to_jvm(&f.ty)))
+        .map(|f| (f.name.clone(), jvm_declared_ty(&f.ty)))
         .collect();
     let mut cw = new_writer(&fq, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0010 | 0x1000); // PUBLIC | FINAL | SYNTHETIC
@@ -7732,7 +7731,7 @@ fn emit_interface_class(
         emit_companion_init(e.cw, &mut clinit, &fq_name, c);
         for s in &clinit_statics {
             e.emit_value(s.init, &mut clinit);
-            let jt = ir_ty_to_jvm(&s.ty);
+            let jt = jvm_declared_ty(&s.ty);
             let fref = e.cw.fieldref(&fq_name, &s.name, &type_descriptor(jt));
             clinit.putstatic(fref, slot_words(jt) as i32);
         }
@@ -8074,7 +8073,7 @@ fn emit_enum_class(
         // — same shape as a plain class's `<clinit>` companion/static init.
         for s in &owner_statics {
             e.emit_value(s.init, &mut clinit);
-            let jt = ir_ty_to_jvm(&s.ty);
+            let jt = jvm_declared_ty(&s.ty);
             let fref = e.cw.fieldref(&fq, &s.name, &type_descriptor(jt));
             clinit.putstatic(fref, slot_words(jt) as i32);
         }
@@ -8472,12 +8471,12 @@ fn emit_default_impls_forwarders(
                     (
                         crate::types::type_name_nested_child(interface, "DefaultImpls").render(),
                         name.to_string(),
-                        method_descriptor(&with_receiver, ir_ty_to_jvm(&member.physical_ret)),
+                        ir_method_desc(&with_receiver, &member.physical_ret),
                     )
                 }
                 _ => continue,
             };
-            let ret = ir_ty_to_jvm(&member.physical_ret);
+            let ret = jvm_declared_ty(&member.physical_ret);
             write_forwarder(
                 interface,
                 name,
@@ -8676,7 +8675,7 @@ fn emit_method_inner_with_holder(
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
     let param_tys = jvm_tys(&f.params);
-    let ret = ir_ty_to_jvm(&f.ret);
+    let ret = jvm_declared_ty(&f.ret);
     let mut e = Emitter::new(ir, cw, env, owner, facade, ret, [body]);
     // Suspend lowering does not preserve source-local expression IDs.
     e.record_locals = ir.fn_decl_lines.contains_key(&fid) && !ir.suspend_funs.contains(&fid);
@@ -9543,7 +9542,7 @@ fn emit_default_stub(
         .len()
         .checked_sub(recv_offset)
         .expect("an extension receiver is a leading physical parameter");
-    let ret = ir_ty_to_jvm(&f.ret);
+    let ret = jvm_declared_ty(&f.ret);
     let owner_ty = Ty::obj(owner);
 
     let mut e = Emitter::new(
@@ -9720,7 +9719,7 @@ fn vc_underlying_jvm(ir: &IrFile, vc: &Ty) -> Ty {
             ir.classes.iter().find(|c| c.fq_name_matches(&fq))
         })
         .and_then(|c| c.fields.first())
-        .map(|f| ir_ty_to_jvm(&f.ty))
+        .map(|f| jvm_declared_ty(&f.ty))
         .unwrap_or(Ty::obj("java/lang/Object"))
 }
 
@@ -9784,7 +9783,7 @@ fn emit_facade_default_stub(
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
     let real_params = jvm_tys(&f.params);
-    let ret = ir_ty_to_jvm(&f.ret);
+    let ret = jvm_declared_ty(&f.ret);
     let recv_offset = usize::from(ir.extension_receiver_fns.contains(&fid));
     let logical_param_count = real_params
         .len()
@@ -10949,7 +10948,7 @@ impl<'a> Emitter<'a> {
                 let c = &self.ir.classes[class as usize];
                 let name = instance_field_jvm_name(self.ir, c, &c.fields[index as usize]);
                 let fty = c.fields[index as usize].ty.clone();
-                let jt = ir_ty_to_jvm(&fty);
+                let jt = jvm_declared_ty(&fty);
                 let owner = c.fq_name();
                 if static_storage(self.ir, c) {
                     // A static-storage object field: no instance operand (evaluate the receiver only
@@ -10982,7 +10981,7 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::SetStatic { index, value } => {
                 let s = &self.ir.statics[index as usize];
-                let jt = ir_ty_to_jvm(&s.ty);
+                let jt = jvm_declared_ty(&s.ty);
                 let name = s.name.clone();
                 let is_const = s.is_const;
                 let facade = self.facade.clone();
@@ -11493,7 +11492,7 @@ impl<'a> Emitter<'a> {
                 .backing_field
                 .and_then(|i| class.fields.get(i as usize))
                 .map_or(declared.ty, |f| f.ty);
-            let d = type_descriptor(ir_ty_to_jvm(&ty));
+            let d = type_descriptor(jvm_declared_ty(&ty));
             return Some(PropertyAccess::AccessBridge {
                 owner: owner.to_string(),
                 name: format!("access${}$p", crate::names::property_setter_name(name)),
@@ -11505,7 +11504,7 @@ impl<'a> Emitter<'a> {
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: f.name.clone(),
-                descriptor: method_descriptor(&[ir_ty_to_jvm(&f.params[0])], Ty::Unit),
+                descriptor: method_descriptor(&[jvm_declared_ty(&f.params[0])], Ty::Unit),
                 is_static: false,
                 is_interface: class.is_interface,
             });
@@ -11532,7 +11531,7 @@ impl<'a> Emitter<'a> {
         let accessor = |f: &crate::ir::IrFunction| PropertyAccess::Accessor {
             owner: owner.to_string(),
             name: f.name.clone(),
-            descriptor: method_descriptor(&[ir_ty_to_jvm(&f.params[0])], Ty::Unit),
+            descriptor: method_descriptor(&[jvm_declared_ty(&f.params[0])], Ty::Unit),
             is_static: false,
             is_interface: class.is_interface,
         };
@@ -11544,7 +11543,7 @@ impl<'a> Emitter<'a> {
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: setter_name,
-                descriptor: method_descriptor(&[ir_ty_to_jvm(&field.ty)], Ty::Unit),
+                descriptor: method_descriptor(&[jvm_declared_ty(&field.ty)], Ty::Unit),
                 is_static: false,
                 is_interface: class.is_interface,
             });
@@ -11552,7 +11551,7 @@ impl<'a> Emitter<'a> {
         Some(PropertyAccess::Field {
             owner: owner.to_string(),
             name: instance_field_jvm_name(self.ir, class, field),
-            descriptor: type_descriptor(ir_ty_to_jvm(&field.ty)),
+            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),
         })
@@ -11582,7 +11581,7 @@ impl<'a> Emitter<'a> {
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: f.name.clone(),
-                descriptor: method_descriptor(&f.params, ir_ty_to_jvm(&f.ret)),
+                descriptor: ir_method_desc(&f.params, &f.ret),
                 is_static: f.is_static,
                 is_interface: interface,
             });
@@ -11617,7 +11616,7 @@ impl<'a> Emitter<'a> {
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: accessor.name.clone(),
-                descriptor: method_descriptor(&[], ir_ty_to_jvm(&accessor.ret)),
+                descriptor: ir_method_desc(&[], &accessor.ret),
                 is_static: false,
                 is_interface: interface,
             });
@@ -11632,7 +11631,7 @@ impl<'a> Emitter<'a> {
             return Some(PropertyAccess::AccessBridge {
                 owner: owner.to_string(),
                 name: format!("access${}$p", crate::names::property_getter_name(name)),
-                descriptor: format!("(L{owner};){}", type_descriptor(ir_ty_to_jvm(&ty))),
+                descriptor: format!("(L{owner};){}", type_descriptor(jvm_declared_ty(&ty))),
             });
         }
         // A class of THIS compilation is answered from its declaration, always — never by falling through
@@ -11643,7 +11642,7 @@ impl<'a> Emitter<'a> {
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: accessor_name,
-                descriptor: method_descriptor(&[], ir_ty_to_jvm(&stored_value_ty(ty))),
+                descriptor: ir_method_desc(&[], &stored_value_ty(ty)),
                 is_static: false,
                 is_interface: interface,
             });
@@ -11658,7 +11657,7 @@ impl<'a> Emitter<'a> {
                     &[],
                     declared
                         .map(|property| declared_property_accessor_jvm(self.ir, property, field))
-                        .unwrap_or_else(|| ir_ty_to_jvm(&field.ty)),
+                        .unwrap_or_else(|| jvm_declared_ty(&field.ty)),
                 ),
                 is_static: false,
                 is_interface: interface,
@@ -11667,7 +11666,7 @@ impl<'a> Emitter<'a> {
         Some(PropertyAccess::Field {
             owner: owner.to_string(),
             name: instance_field_jvm_name(self.ir, class, field),
-            descriptor: type_descriptor(ir_ty_to_jvm(&field.ty)),
+            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),
         })
@@ -12148,7 +12147,7 @@ impl<'a> Emitter<'a> {
                 let source_name = c.fields[*index as usize].name.clone();
                 let name = instance_field_jvm_name(self.ir, c, &c.fields[*index as usize]);
                 let fty = c.fields[*index as usize].ty.clone();
-                let jt = ir_ty_to_jvm(&fty);
+                let jt = jvm_declared_ty(&fty);
                 let owner = c.fq_name();
                 let is_lateinit = c.fields[*index as usize].is_lateinit();
                 if static_storage(self.ir, c) {
@@ -12197,7 +12196,7 @@ impl<'a> Emitter<'a> {
                 let c = &self.ir.classes[*class as usize];
                 let name = instance_field_jvm_name(self.ir, c, &c.fields[*index as usize]);
                 let fty = c.fields[*index as usize].ty;
-                let jt = ir_ty_to_jvm(&fty);
+                let jt = jvm_declared_ty(&fty);
                 let owner = c.fq_name();
                 self.emit_value(*receiver, code);
                 let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
@@ -12205,7 +12204,7 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::GetStatic(i) => {
                 let s = &self.ir.statics[*i as usize];
-                let jt = ir_ty_to_jvm(&s.ty);
+                let jt = jvm_declared_ty(&s.ty);
                 let name = s.name.clone();
                 let is_const = s.is_const;
                 let facade = self.facade.clone();
@@ -12346,7 +12345,7 @@ impl<'a> Emitter<'a> {
                 let fid = c.methods[*index as usize];
                 let f = &self.ir.functions[fid as usize];
                 let param_tys = jvm_tys(&f.params);
-                let ret = ir_ty_to_jvm(&f.ret);
+                let ret = jvm_declared_ty(&f.ret);
                 let name = f.name.clone();
                 let owner = c.fq_name();
                 let is_iface = c.is_interface;
@@ -12498,7 +12497,7 @@ impl<'a> Emitter<'a> {
                 Callee::Local(fid) => {
                     let f = &self.ir.functions[*fid as usize];
                     let param_tys = jvm_tys(&f.params);
-                    let ret = ir_ty_to_jvm(&f.ret);
+                    let ret = jvm_declared_ty(&f.ret);
                     // A PRIVATE facade function can't be invoked from another class (a lambda impl on
                     // its enclosing class, a continuation class, any class member) — kotlinc routes
                     // those callers through the `access$<name>` bridge (emitted by `emit_pass` when
@@ -12538,7 +12537,7 @@ impl<'a> Emitter<'a> {
                 Callee::ClassStatic { owner, function } => {
                     let f = &self.ir.functions[*function as usize];
                     let param_tys = jvm_tys(&f.params);
-                    let ret = ir_ty_to_jvm(&f.ret);
+                    let ret = jvm_declared_ty(&f.ret);
                     if args.len() != param_tys.len() {
                         crate::trace_compiler!(
                             "emit",
@@ -12582,7 +12581,7 @@ impl<'a> Emitter<'a> {
                         default_mask_count(logical_param_count),
                     ));
                     param_tys.push(Ty::obj("java/lang/Object"));
-                    let ret = ir_ty_to_jvm(&f.ret);
+                    let ret = jvm_declared_ty(&f.ret);
                     let name = format!("{}$default", f.name);
                     let args = args.clone();
                     self.emit_operands(&args, code);
@@ -12647,7 +12646,7 @@ impl<'a> Emitter<'a> {
                 } => {
                     // A top-level function from another file → `invokestatic <facade>.<name>(desc)`.
                     let param_tys = jvm_tys(params);
-                    let ret = ir_ty_to_jvm(ret);
+                    let ret = jvm_declared_ty(ret);
                     let (facade, name) = (facade.render(), name.clone());
                     let args = args.clone();
                     self.emit_operands(&args, code);
@@ -12879,7 +12878,7 @@ impl<'a> Emitter<'a> {
                         let name = name.clone();
                         let interface = *interface;
                         let ptys = jvm_tys(param_tys);
-                        let ret = ir_ty_to_jvm(ret_ty);
+                        let ret = jvm_declared_ty(ret_ty);
                         let descriptor = method_descriptor(&ptys, ret);
                         let mut ops = vec![recv];
                         ops.extend(args.iter().copied());
@@ -13368,7 +13367,7 @@ impl<'a> Emitter<'a> {
                 let f = &self.ir.functions[*impl_fn as usize];
                 let impl_name = f.name.clone();
                 let impl_params = jvm_tys(&f.params);
-                let impl_ret = ir_ty_to_jvm(&f.ret);
+                let impl_ret = jvm_declared_ty(&f.ret);
                 // The impl method's parameters are the captured variables (bound at the call site)
                 // followed by the lambda's own parameters. Only the latter form the SAM/instantiated
                 // method types; the captures parameterize the `invokedynamic` itself.
@@ -15923,6 +15922,10 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     // stackmap frames all see the reference. A nullable REFERENCE keeps its descriptor (peel below).
     if let Ty::Nullable(inner) | Ty::PlatformNullable(inner) = t {
         if **inner == Ty::Nothing {
+            // In a VALUE position this is the null-only bottom type, which also arises when generic
+            // inference combines only `null` arguments. Keep its erased top representation here;
+            // declaration descriptors use `jvm_declared_ty` and name inferred or explicit
+            // `Nothing?` as Void.
             return Ty::obj("kotlin/Any");
         }
         if **inner == Ty::Unit {
@@ -16037,13 +16040,31 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     }
 }
 
+/// The physical JVM type of a declaration slot (parameter, field, constructor argument, or return).
+/// Semantic `Nothing` remains [`Ty::Nothing`] through expression lowering so a call with that result
+/// still terminates control flow, but a declaration descriptor names the uninhabited reference as
+/// `java/lang/Void` and therefore occupies one JVM slot.
+fn jvm_declared_ty(t: &Ty) -> Ty {
+    fn is_nothing(t: &Ty) -> bool {
+        match t {
+            Ty::Nothing => true,
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_nothing(inner),
+            Ty::Obj(name, _) => name.matches("kotlin/Nothing"),
+            _ => false,
+        }
+    }
+
+    if is_nothing(t) {
+        return Ty::obj("java/lang/Void");
+    }
+    match ir_ty_to_jvm(t) {
+        Ty::Nothing => Ty::obj("java/lang/Void"),
+        other => other,
+    }
+}
+
 pub(crate) fn jvm_tys(tys: &[Ty]) -> Vec<Ty> {
-    tys.iter()
-        .map(|t| match ir_ty_to_jvm(t) {
-            Ty::Nothing => Ty::obj("kotlin/Any"),
-            other => other,
-        })
-        .collect()
+    tys.iter().map(jvm_declared_ty).collect()
 }
 
 /// Whether a JVM type is an ERASED TOP reference — the `java/lang/Object` a type parameter erases to, or
@@ -16058,7 +16079,7 @@ fn jvm_is_erased_top(t: Ty) -> bool {
 }
 
 fn ir_type_desc(t: &Ty) -> String {
-    type_descriptor(ir_ty_to_jvm(t))
+    type_descriptor(jvm_declared_ty(t))
 }
 
 fn local_variable_desc(t: Ty) -> String {
@@ -16070,15 +16091,15 @@ fn local_variable_desc(t: Ty) -> String {
 }
 
 fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
-    method_descriptor(&jvm_tys(params), ir_ty_to_jvm(ret))
+    method_descriptor(&jvm_tys(params), jvm_declared_ty(ret))
 }
 
 fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
-    fields.iter().map(|f| ir_ty_to_jvm(&f.ty)).collect()
+    fields.iter().map(|f| jvm_declared_ty(&f.ty)).collect()
 }
 
 fn ctor_arg_jvm_tys(args: &[IrCtorArg]) -> Vec<Ty> {
-    args.iter().map(|a| ir_ty_to_jvm(&a.ty)).collect()
+    args.iter().map(|a| jvm_declared_ty(&a.ty)).collect()
 }
 
 fn class_ctor_jvm_tys(c: &IrClass) -> Vec<Ty> {
@@ -16370,6 +16391,21 @@ mod fail_soft_tests {
                 .expect("plain source class metadata");
         assert!(metadata.d2.iter().any(|entry| entry == "Node2"));
         assert!(!metadata.d2.iter().any(|entry| entry == "Impl3"));
+    }
+
+    #[test]
+    fn nothing_has_one_declared_slot_but_remains_bottom_at_a_call() {
+        assert_eq!(jvm_declared_ty(&Ty::Nothing), Ty::obj("java/lang/Void"));
+        assert_eq!(
+            jvm_declared_ty(&Ty::nullable(Ty::Nothing)),
+            Ty::obj("java/lang/Void")
+        );
+        assert_eq!(slot_words(jvm_declared_ty(&Ty::Nothing)), 1);
+        assert_eq!(call_ret_ty(&Ty::Nothing), Ty::Nothing);
+        assert_eq!(
+            call_ret_ty(&Ty::nullable(Ty::Nothing)),
+            Ty::obj("kotlin/Any")
+        );
     }
 
     #[test]
