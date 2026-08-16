@@ -256,6 +256,7 @@ pub struct JvmBackend {
     /// Class-file major version to emit (`-jvm-target`), or `None` for krusty's default (v52).
     class_major: Option<u16>,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
+    lambdas: crate::jvm::ir_emit::LambdaMode,
     /// Whether to emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions`
     /// clears this).
     param_assertions: bool,
@@ -267,6 +268,7 @@ impl JvmBackend {
             cp,
             class_major: None,
             jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
+            lambdas: crate::jvm::ir_emit::LambdaMode::default(),
             param_assertions: true,
         }
     }
@@ -280,6 +282,13 @@ impl JvmBackend {
     /// `-jvm-default`: which JVM shape an interface's members with bodies are compiled into.
     pub fn with_jvm_default(mut self, mode: crate::jvm::ir_emit::JvmDefaultMode) -> JvmBackend {
         self.jvm_default = mode;
+        self
+    }
+
+    /// `-Xlambdas` / `-Xsam-conversions`: whether a lambda becomes an `invokedynamic` call site or
+    /// its own class.
+    pub fn with_lambdas(mut self, mode: crate::jvm::ir_emit::LambdaMode) -> JvmBackend {
+        self.lambdas = mode;
         self
     }
 
@@ -318,6 +327,8 @@ pub fn shipping_emit_options(
         source_file: Some(format!("{source_stem}.kt")),
         // kotlinc records `classModuleName` in @Metadata unless the module is the default `main`.
         module_name: (module_name != "main").then(|| module_name.to_string()),
+        // Per-INVOCATION strategy; the CLI overrides it with `EmitOptions::with_lambdas`.
+        lambdas: crate::jvm::ir_emit::LambdaMode::default(),
         // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
         // unreadable BY KRUSTY: the facade metadata describes top-level declarations only, so a
         // second compilation sees no constructor/member parameter names (named arguments) and no
@@ -452,7 +463,8 @@ impl Backend for JvmBackend {
         let module_name = checked.module_name;
 
         let emit_opts = shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
-            .with_jvm_default(self.jvm_default);
+            .with_jvm_default(self.jvm_default)
+            .with_lambdas(self.lambdas);
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
