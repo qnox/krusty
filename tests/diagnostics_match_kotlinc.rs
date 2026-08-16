@@ -402,6 +402,15 @@ fn errors_match_kotlinc_in_text_and_location() {
         // A deliberately unique type present on NO supplied classpath. Keep the spelling synthetic:
         // diagnostic regressions must not depend on or disclose a class from the scanned project.
         "fun f(p: DefinitelyAbsentClassifier): Int = 0",
+        // Declaration bounds use the same normal classifier resolution and must fail before the
+        // metadata encoder. This source previously reached emission and panicked there.
+        "abstract class C<P>(val p: P) where P : DefinitelyAbsentBoundA, P : DefinitelyAbsentBoundB",
+        // A cyclic source hierarchy reports the frontend error at the same source coordinate rather
+        // than reaching an unguarded inheritance walker.
+        "object DefinitelyCyclicClassifier : DefinitelyCyclicClassifier()",
+        // The diagnostic belongs to the edge that participates in the cycle, not an innocent
+        // earlier supertype in the same declaration.
+        "interface MixedCycle : InnocentSupertype, CyclicPeer\ninterface InnocentSupertype\ninterface CyclicPeer : MixedCycle",
         // An `is` whose TARGET type is unresolved reports the unresolved reference at the type's
         // span — never a compiler-specific "not supported" rejection.
         "fun f(p: Any) = p is DefinitelyAbsentClassifier",
