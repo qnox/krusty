@@ -12,3 +12,6 @@ dhat-heap.json
 .DS_Store
 __pycache__/
 *.py[cod]
+
+# ktlint CLI binary used by the formatting diff harness (downloaded, not committed)
+tools/ktlint/

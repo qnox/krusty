@@ -614,6 +614,8 @@ mod tests {
             }),
         ));
         assert_eq!(analysis_calls.get(), 2, "formatting must not run analysis");
+        // Optional formatting flags are absent here, so the server falls back to the ktlint
+        // defaults (insert_final_newline = true), hence the trailing newline.
         assert_eq!(
             current.messages[0]["result"],
             json!([{
@@ -621,7 +623,7 @@ mod tests {
                     "start": {"line": 0, "character": 0},
                     "end": {"line": 0, "character": 30}
                 },
-                "newText": "fun current() {\n  val value = \"😀\"\n}"
+                "newText": "fun current() {\n  val value = \"😀\"\n}\n"
             }])
         );
 

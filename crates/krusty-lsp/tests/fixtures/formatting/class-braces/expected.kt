@@ -1,0 +1,4 @@
+class Foo {
+    fun bar() {
+    }
+}

@@ -5,6 +5,7 @@ mod dependency_sources;
 mod dependency_symbols;
 pub mod deps_cache;
 pub mod dump_cache;
+pub mod formatting;
 mod options;
 pub mod parity;
 pub mod project;
