@@ -280,7 +280,7 @@ fn indy_rejects_a_pre_java_7_target_without_emitting_invalid_classes() {
         "invalid indy target compiled"
     );
     assert!(
-        String::from_utf8_lossy(&result.stdout).contains("requires JVM target 1.7 or newer"),
+        String::from_utf8_lossy(&result.stderr).contains("requires JVM target 1.7 or newer"),
         "the rejection did not explain the class-version constraint: stdout={} stderr={}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
