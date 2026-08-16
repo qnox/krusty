@@ -1746,6 +1746,9 @@ pub struct IrFile {
     /// no accessor spelling or target descriptor. As with the JVM realization table below, the stable
     /// operation identity survives backend rewrites that move a property node to another arena slot.
     pub property_declaration_types: std::collections::HashMap<u32, Ty>,
+    /// Stable property-operation identity → checker-selected accessor identity and physical return.
+    /// This is a semantic selection, distinct from any backend rewrite of its platform spelling.
+    pub property_selected_accessors: std::collections::HashMap<u32, (String, Ty)>,
     /// Stable property-operation identity → JVM accessor spelling and physical property-value type,
     /// selected by the value-class pass for an owner in another source file. The common node keeps the
     /// Kotlin name and logical type; this backend side table carries the declaration-less target

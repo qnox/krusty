@@ -17067,10 +17067,10 @@ impl<'a> Lower<'a> {
                 *interface,
                 field.clone(),
             );
-            // A compiled declaration may also carry its exact accessor realization. Preserve that as
-            // backend data on the semantic property node; it must never replace the node with a call.
+            // A selected declaration may also carry an exact accessor identity. Preserve that semantic
+            // selection beside the property node; a backend realization remains a separate decision.
             let physical_ty = if let Some(resolved) = self.info.resolved_member(e) {
-                self.ir.property_accessor_jvm_realizations.insert(
+                self.ir.property_selected_accessors.insert(
                     read,
                     (resolved.member.name.clone(), resolved.member.physical_ret),
                 );
