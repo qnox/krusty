@@ -10823,6 +10823,10 @@ impl<'a> Emitter<'a> {
     fn emit_property_read(&mut self, operation: PropertyOperation<'_>, code: &mut CodeBuilder) {
         use crate::jvm::inline::PropertyAccess;
         let receiver_ty = self.value_ty(operation.receiver);
+        let selected = self
+            .ir
+            .property_selected_accessors
+            .get(&operation.expression);
         let stamped = self
             .ir
             .property_accessor_jvm_realizations
@@ -10831,11 +10835,14 @@ impl<'a> Emitter<'a> {
         // realization stamp is more specific (notably for a value-class-mangled accessor); otherwise
         // the semantic declaration type supplies the descriptor and the node's logical type remains
         // the value consumed by the surrounding expression.
-        let physical = stamped.map(|(_, physical)| physical).or_else(|| {
-            self.ir
-                .property_declaration_types
-                .get(&operation.expression)
-        });
+        let physical = stamped
+            .map(|(_, physical)| physical)
+            .or_else(|| selected.map(|(_, physical)| physical))
+            .or_else(|| {
+                self.ir
+                    .property_declaration_types
+                    .get(&operation.expression)
+            });
         let declaration_ty = *physical.unwrap_or(operation.ty);
         let array_realization = jvm_array_actual_realization(
             crate::types::type_name(operation.owner),
@@ -10878,7 +10885,7 @@ impl<'a> Emitter<'a> {
         if let Some(access) = self.declared_property_read_access(
             operation.owner,
             operation.name,
-            stamped.map(|(name, _)| name.as_str()),
+            selected.map(|(name, _)| name.as_str()),
             operation.interface,
         ) {
             return self.emit_realized_property_read(
@@ -10911,6 +10918,7 @@ impl<'a> Emitter<'a> {
             // The semantic IR node itself remains target-neutral.
             name: stamped
                 .map(|(name, _)| name.clone())
+                .or_else(|| selected.map(|(name, _)| name.clone()))
                 .unwrap_or_else(|| crate::names::property_getter_name(operation.name)),
             // The logical property type is intentionally retained on the node for the surrounding
             // expression. Its call boundary instead uses the most specific declaration fact: a JVM
@@ -11251,8 +11259,9 @@ impl<'a> Emitter<'a> {
             .iter()
             .find(|f| f.name == name)
             .filter(|_| declared.is_none_or(|p| p.backing_field.is_some()));
-        // A value-class-typed property's accessor is `@JvmName`-mangled; the declaration carries that
-        // spelling (stamped by the value-class pass), and the synthesizer emits the same one.
+        // A declaration-specified JVM name wins; otherwise the checker's selected accessor identity
+        // refines the naming convention. Backend value-class mangling lives in a different table and
+        // therefore cannot overwrite an inherited generic declaration here.
         let accessor_name = declared
             .and_then(|p| p.getter_jvm_name.clone())
             .or_else(|| selected_accessor.map(str::to_string))
