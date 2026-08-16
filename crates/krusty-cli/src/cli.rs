@@ -401,6 +401,23 @@ mod tests {
         assert!(!default.no_call_assertions);
     }
 
+    /// `-Xconsistent-data-class-copy-visibility` is genuinely modeled (a `LangFeatures` toggle the
+    /// backend reads), so it must land in `features`, never in `ignored` — the Bazel worker refuses
+    /// any request whose kotlinc options parse to a non-empty `ignored`.
+    #[test]
+    fn consistent_copy_visibility_is_modeled_not_ignored() {
+        let parsed = parse_args(&["-Xconsistent-data-class-copy-visibility", "x.kt"]);
+        assert!(
+            parsed.ignored.is_empty(),
+            "the flag must not be reported as unsupported: {:?}",
+            parsed.ignored
+        );
+        assert!(parsed
+            .features
+            .has("DataClassCopyRespectsConstructorVisibility"));
+        assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+    }
+
     /// `indy` is what krusty emits, so asking for it is honored silently. Any other value asks for a
     /// shape krusty cannot emit and must be reported — compiling `class` as `indy` would hand the
     /// build a different set of class files than it asked for.

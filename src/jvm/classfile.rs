@@ -145,6 +145,10 @@ pub struct DataMemberInfo<'a> {
     /// The `copy` method's generic `Signature` (`(Ljava/util/List<Ljava/lang/String;>;)Ldemo/D;`),
     /// interned right after the erased `copy` descriptor.
     pub copy_sig: Option<&'a str>,
+    /// Whether `copy` is PRIVATE (its ctor's visibility under
+    /// `DataClassCopyRespectsConstructorVisibility`) — kotlinc then omits the method's nullability
+    /// annotations, so its `@NotNull` utf8 must not be seeded either.
+    pub copy_is_private: bool,
     /// Per-field generic `Signature`, interned LATE (after all data-method entries, before `@Metadata`).
     pub field_sigs: &'a [Option<String>],
 }
@@ -1464,7 +1468,10 @@ impl ClassWriter {
             if let Some(s) = info.copy_sig {
                 self.cp.utf8(s);
             }
-            self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+            // A private `copy` carries no `@NotNull` (kotlinc drops nullability annotations on it).
+            if !info.copy_is_private {
+                self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+            }
             self.cp.methodref(this_internal, "<init>", ctor_desc);
             // copy$default — its descriptor, then the Methodref back to `copy`.
             self.cp.utf8("copy$default");
