@@ -688,6 +688,8 @@ mod is_nullable_and_notnull_smartcast_e2e;
 mod is_nullable_primitive_e2e;
 #[path = "is_primitive_smartcast_e2e.rs"]
 mod is_primitive_smartcast_e2e;
+#[path = "java_array_covariance_e2e.rs"]
+mod java_array_covariance_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
 mod java_class_intrinsic_e2e;
 #[path = "java_ctor_sam_conversion_e2e.rs"]
