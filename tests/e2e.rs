@@ -982,6 +982,8 @@ mod property_accessor_e2e;
 mod property_conversion_inference_e2e;
 #[path = "property_infer_member_e2e.rs"]
 mod property_infer_member_e2e;
+#[path = "property_initializer_newline_e2e.rs"]
+mod property_initializer_newline_e2e;
 #[path = "qq1_safecall_diverging_scope_block_e2e.rs"]
 mod qq1_safecall_diverging_scope_block_e2e;
 #[path = "qualified_name_e2e.rs"]
