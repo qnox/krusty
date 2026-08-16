@@ -896,6 +896,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn` — whose GENERIC half is a separate,
   facade-side rule (see "A facade `@Metadata` record keeps a BOUNDED type parameter as a type
   parameter").
+- **An `annotation class` that declares `@Target` carries THREE meta-annotations, and the Java one is
+  a PROJECTION.** kotlinc writes, into `RuntimeVisibleAnnotations`: every annotation the source
+  declares, in SOURCE order (`kotlin.annotation.Retention` and `kotlin.annotation.Target` among them);
+  then `java.lang.annotation.Retention`; then `java.lang.annotation.Target`. krusty emitted the two
+  retention stamps FIRST and the source's own annotations after them, and never emitted the java target
+  mirror at all. Source position matters and is not merely cosmetic ordering: `kotlin.annotation.
+  Retention` is SYNTHESIZED from the class's `annotation_retention` rather than carried through as a
+  written annotation, so it is now substituted IN PLACE of the source's `@Retention` instead of being
+  filtered out and re-appended — `@Retention(BINARY) @Target(FIELD)` and the same pair written the
+  other way round produce different classfiles, and both are pinned.
+  The java mirror is not a copy of the Kotlin target set: each `AnnotationTarget` maps to at most one
+  `ElementType` and the mapping is neither an identity (`CLASS` → `TYPE`, `ANNOTATION_CLASS` →
+  `ANNOTATION_TYPE`, `VALUE_PARAMETER` → `PARAMETER`, `TYPE` → `TYPE_USE`) nor injective (`FUNCTION`,
+  `PROPERTY_GETTER` and `PROPERTY_SETTER` all become `METHOD`). kotlinc collects the result in an
+  `EnumSet<ElementType>`, so duplicates COLLAPSE and the entries come out in `ElementType` DECLARATION
+  order, not the order the Kotlin targets were written: `@Target(TYPE, CLASS, VALUE_PARAMETER,
+  ANNOTATION_CLASS)` mirrors to `[TYPE, PARAMETER, ANNOTATION_TYPE, TYPE_USE]`. The Kotlin-only targets
+  (`PROPERTY`, `FILE`, `TYPEALIAS`, `EXPRESSION`) map to nothing — but the mirror is still EMITTED,
+  with an empty array: `@Target(AnnotationTarget.PROPERTY)` yields `java.lang.annotation.Target(value =
+  [])`. Only the ABSENCE of `@Target` omits the two target meta-annotations, and an explicit
+  `@Target()` is a third, distinct shape. A `javap` grep for `ElementType` hides the empty-mirror case,
+  which is why every row was measured per target against kotlinc 2.4.10 rather than derived. The table
+  is `types::java_element_type_of_annotation_target` + `types::JAVA_ELEMENT_TYPES` (ordering); the
+  emitter derives the mirror from the recorded `kotlin.annotation.Target`
+  (`jvm::ir_emit::java_target_mirror`), so there is one source of truth.
+  NOT yet byte-identical as a whole class: krusty emits no `@kotlin.Metadata` for an `annotation class`
+  at all (`class_metadata_common_shape_admitted` bails on `is_annotation`), and it emits a
+  `…$annotationImpl` class kotlinc only emits when the annotation is instantiated. Both are independent
+  of `@Target` — they diverge with or without it, which is why the tests in
+  `tests/annotation_target_emission_e2e.rs` compare the whole `RuntimeVisibleAnnotations` attribute
+  against kotlinc's rather than the whole class file.
 - **`suspend` function TYPE representation (`suspend (A..) -> R`).** kotlinc realizes it as
   `Function{n+1}<A.., Continuation<R>, Object>` — the arity is the logical parameter count PLUS one (a
   trailing continuation), the result erased to `Object`. krusty historically dropped the `suspend`
