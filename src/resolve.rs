@@ -20120,8 +20120,13 @@ impl<'a> Checker<'a> {
                     }
                 })
                 .collect::<Option<Vec<_>>>()?;
-            let inferred_ret =
-                crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings);
+            // A projected receiver argument binds a formal to the projection itself (`Map<*, *>`
+            // binds the `get` extension's `V` to `out Any?`). The call's VALUE takes the
+            // approximation of that capture, never the projection.
+            let inferred_ret = crate::symbol_resolver::approximate_projected_value(
+                signature.ret,
+                crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings),
+            );
             // Input constraints may legitimately choose bottom for an `in`-projected parameter while
             // the expected-result constraint approximates the expression to its consumer type. Keep
             // the bottom binding in `params` for applicability, but expose the contextual result just
