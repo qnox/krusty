@@ -9986,6 +9986,58 @@ fn jvm_bound_descriptor(formatter: &JvmSignatureFormatter<'_>, bound: &Ty) -> Op
     formatter.ty(bound)
 }
 
+/// kotlinc opens a member's `$default` synthetic with a guard on the trailing marker parameter:
+/// a `super.m()` call carrying defaults is impossible to dispatch (the stub would re-enter the
+/// OVERRIDE through `invokevirtual`), so it passes a non-null marker and the stub throws.
+///
+/// Only a member whose owner can be inherited from gets it. Measured against kotlinc 2.4.10: an
+/// `open`/`abstract`/`sealed` class does, and so does an `enum class` (its entries may carry bodies,
+/// which subclass it); a final class — including a `data class`, a nested or companion object, and a
+/// private one — does not, nor does an interface's `$DefaultImpls` or a file facade, none of which
+/// can be the receiver of such a `super` call.
+fn emit_default_super_guard(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    marker_slot: u16,
+    method_name: &str,
+    entry_locals: Vec<VerifType>,
+) {
+    code.aload(marker_slot);
+    let ok = code.new_label();
+    // The fall-through target is a branch target, so it needs a StackMapTable entry: the method-entry
+    // locals with an empty stack (kotlinc writes a `same_frame` here). Without it the JVM rejects the
+    // method — "Expecting a stackmap frame at branch target".
+    code.add_frame_if_new(ok, entry_locals, Vec::new());
+    code.ifnull(ok);
+    let cls = cw.class_ref("java/lang/UnsupportedOperationException");
+    code.new_obj(cls);
+    code.dup();
+    code.push_string(
+        &format!(
+            "Super calls with default arguments not supported in this target, function: {method_name}"
+        ),
+        cw,
+    );
+    let ctor = cw.methodref(
+        "java/lang/UnsupportedOperationException",
+        "<init>",
+        "(Ljava/lang/String;)V",
+    );
+    code.invokespecial(ctor, 1, 0);
+    code.athrow();
+    code.bind(ok);
+}
+
+/// Whether a class can be inherited from, and so whether its members' `$default` synthetics carry
+/// kotlinc's super-call guard. See [`emit_default_super_guard`].
+fn owner_is_inheritable(ir: &IrFile, owner: &str) -> bool {
+    ir.classes.iter().any(|c| {
+        c.fq_name_matches(owner)
+            && !c.is_object
+            && (c.is_open || c.is_abstract || c.is_sealed || !c.enum_entries.is_empty())
+    })
+}
+
 /// Emit the JVM `<name>$default(self, params…, mask: int, marker: Object)` synthetic stub for an
 /// instance method with default-valued parameters: for each defaulted param, `if ((mask & (1<<i)) != 0)
 /// param = <default>;` then tail-call the real method. The default-value exprs reference `self` as value
@@ -10059,6 +10111,17 @@ fn emit_default_stub(
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
+    if !is_interface && owner_is_inheritable(ir, owner) {
+        // The stub's locals at entry: the receiver, every stub parameter, one int per mask word, and
+        // the trailing marker.
+        let mut entry_locals = vec![VerifType::ObjectName(
+            crate::jvm::names::classfile_internal_name(owner),
+        )];
+        entry_locals.extend(stub_param_tys.iter().map(|t| verif_of(*t)));
+        entry_locals.extend(std::iter::repeat_n(VerifType::Integer, mask_slots.len()));
+        entry_locals.push(VerifType::ObjectName("java/lang/Object".to_string()));
+        emit_default_super_guard(e.cw, &mut code, slot - 1, &method_name, entry_locals);
+    }
     // A MEMBER EXTENSION's physical params — and its registered defaults — lead with the extension
     // receiver: slice that prefix off (the receiver never defaults) and offset the slots, so the
     // mask bits stay LOGICAL (kotlinc's convention).
