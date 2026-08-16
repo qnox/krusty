@@ -312,13 +312,22 @@ fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>) -> Ty {
     // `Array<String!>!`, and `List<String>` exposes `List<String!>!`. Qualifying only the outer
     // classifier incorrectly rejects `null` as an expanded Java `String...` element.
     let ty = match ty.non_null() {
-        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
-            name,
-            &arguments
+        Ty::Obj(name, arguments) if !arguments.is_empty() => {
+            let arguments = arguments
                 .iter()
                 .map(|argument| java_type_argument_nullability(*argument))
-                .collect::<Vec<_>>(),
-        ),
+                .collect::<Vec<_>>();
+            let classifier = Ty::obj_args_name(name, &arguments);
+            // Java arrays are covariant. Normalize that declaration fact at the provider boundary
+            // as Kotlin's `Array<(out) T!>!`; common assignability then needs no Java/classpath path.
+            if classifier.is_reference_array()
+                && matches!(arguments.as_slice(), [argument] if argument.projection_inner().is_none())
+            {
+                Ty::obj_args_name(name, &[Ty::out_projection(arguments[0])])
+            } else {
+                classifier
+            }
+        }
         _ => ty,
     };
     // Java wrapper classes are Kotlin primitive types with Java's flexible/nullability qualifier.
@@ -7153,6 +7162,16 @@ mod tests {
                 "java/util/List",
                 &[Ty::in_projection(Ty::platform_nullable(Ty::String))],
             )),
+        );
+
+        let base = Ty::obj("fixtures/Base");
+        assert_eq!(
+            java_type_nullability(Ty::array(base), None),
+            Ty::platform_nullable(Ty::obj_args(
+                "kotlin/Array",
+                &[Ty::out_projection(Ty::platform_nullable(base))],
+            )),
+            "the Java provider must publish reference-array covariance in the normalized type",
         );
     }
 

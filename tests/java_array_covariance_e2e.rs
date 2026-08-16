@@ -120,7 +120,10 @@ fn a_kotlin_array_parameter_stays_invariant() {
     "#;
     let (code, _) = common::kotlinc_source_result("KotlinArrayInvariance", SOURCE);
     assert_ne!(code, 0, "kotlinc must reject Array<Sub> for Array<Base>");
-    let krusty = common::front_end_diagnostics_with_stdlib(SOURCE);
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let krusty =
+        common::front_end_diagnostics(SOURCE, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
     assert!(
         krusty
             .iter()
