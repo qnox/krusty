@@ -3267,6 +3267,31 @@ fn field_desc_to_ty(d: &str) -> Ty {
     }
 }
 
+/// A Java annotation element's Kotlin-facing type. `Class` is `KClass` — non-null, because kotlinc
+/// expects `KClass<*>` here and rejects a null argument rather than treating the element as a
+/// platform type. An array element maps elementwise. The element's declared BOUND is erased with
+/// the rest of its generic signature, so `Class<? extends Runnable>` presents as a raw `KClass`.
+fn kotlin_facing_annotation_element_ty(declared: Ty) -> Ty {
+    let map = |t: Ty| {
+        if t.non_null() == Ty::obj("java/lang/Class") {
+            Ty::obj("kotlin/reflect/KClass")
+        } else {
+            t
+        }
+    };
+    match declared.array_elem() {
+        Some(element) => {
+            let mapped = map(element);
+            if mapped == element {
+                declared
+            } else {
+                Ty::array(mapped)
+            }
+        }
+        None => map(declared),
+    }
+}
+
 /// Normalize a constructor-less annotation declaration into the common application shape while
 /// JVM descriptors and `AnnotationDefault` are still provider-owned facts. Core never reparses a
 /// descriptor or asks whether this classifier came from Java.
@@ -3280,7 +3305,13 @@ fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) ->
             if !parameters.is_empty() {
                 return None;
             }
-            let ty = field_desc_to_ty(ret);
+            // A `Class` element is spelled with a Kotlin class literal at the use site
+            // (`@Replaces(Impl::class)`), whose type is `KClass`. The descriptor names the JVM
+            // type, so publishing it verbatim rejected every such application with "actual type is
+            // 'reflect.KClass<..>', but 'java.lang.Class!' was expected". Normalizing here keeps
+            // the mapping a provider-owned descriptor fact, and leaves ordinary Java method typing
+            // untouched. The emitted VALUE is a class constant either way.
+            let ty = kotlin_facing_annotation_element_ty(field_desc_to_ty(ret));
             (ty != Ty::Error).then(|| (method.name.clone(), ty, method.has_annotation_default))
         })
         .collect::<Option<Vec<_>>>()?;
