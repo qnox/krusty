@@ -11,7 +11,17 @@ use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty_cli::cli;
 
 fn main() {
-    let opts = cli::parse(std::env::args().skip(1));
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Bazel starts a persistent worker by appending `--persistent_worker` to the tool's command
+    // line; every actual compilation then arrives as a work request on stdin.
+    if argv
+        .iter()
+        .any(|argument| argument == "--persistent_worker")
+    {
+        run_persistent_worker();
+        return;
+    }
+    let opts = cli::parse(argv);
 
     if opts.print_version {
         println!("{}", cli::version_line());
@@ -35,22 +45,95 @@ fn main() {
         std::process::exit(2);
     }
 
+    match compile(&opts) {
+        Ok(emitted) => println!(
+            "ok: emitted {emitted} class file(s) to {}",
+            opts.dest.display()
+        ),
+        Err(error) => {
+            eprint!("{error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Serve Bazel work requests until stdin closes.
+///
+/// The process is REUSED across requests, which is the point of a worker: the classpath decoding a
+/// compilation pays for is still warm for the next target that shares those jars.
+fn run_persistent_worker() {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    if let Err(error) = krusty_cli::worker::run(&mut input, &mut output, &compile_work_unit) {
+        eprintln!("krusty: worker: {error}");
+        std::process::exit(1);
+    }
+}
+
+/// Run one translated work request: compile, then satisfy the outputs bazel declared for the action.
+fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
+    let mut argv: Vec<String> = vec!["-d".to_string(), unit.output_jar.display().to_string()];
+    if let Some(module_name) = &unit.module_name {
+        argv.push("-module-name".to_string());
+        argv.push(module_name.clone());
+    }
+    if !unit.classpath.is_empty() {
+        argv.push("-classpath".to_string());
+        argv.push(
+            unit.classpath
+                .iter()
+                .map(|entry| entry.display().to_string())
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+    }
+    argv.extend(unit.kotlinc_args.iter().cloned());
+    argv.extend(unit.sources.iter().map(|path| path.display().to_string()));
+
+    let mut opts = cli::parse(argv);
+    // The two options the worker decides directly rather than through a flag string.
+    opts.jvm_default = unit.jvm_default;
+    opts.no_param_assertions = !unit.param_assertions;
+    if !opts.errors.is_empty() {
+        return Err(format!("krusty: {}\n", opts.errors.join("; ")));
+    }
+    compile(&opts)?;
+
+    // Bazel fails an action whose DECLARED outputs are missing, so both must exist even though
+    // krusty has nothing distinct to put in them.
+    if let Some(abi_jar) = &unit.abi_jar {
+        std::fs::copy(&unit.output_jar, abi_jar)
+            .map_err(|error| format!("krusty: cannot write {}: {error}\n", abi_jar.display()))?;
+    }
+    if let Some(cri_file) = &unit.cri_file {
+        std::fs::write(cri_file, b"")
+            .map_err(|error| format!("krusty: cannot write {}: {error}\n", cri_file.display()))?;
+    }
+    Ok(())
+}
+
+/// Compile one source set, as configured. Returns the number of emitted class files, or a rendered
+/// error report.
+///
+/// Extracted from `main` so the Bazel persistent worker can run a compilation and REPORT its failure
+/// instead of terminating: a worker that exits on a broken source takes the whole build's worker
+/// process down with it.
+pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let mut diags = DiagSink::new();
     let mut sources = Vec::new();
     let mut stems = Vec::new();
     for path in &opts.sources {
-        let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
-            eprintln!("krusty: cannot read {path}: {e}");
-            std::process::exit(1);
-        });
+        let src = std::fs::read_to_string(path)
+            .map_err(|error| format!("krusty: cannot read {path}: {error}\n"))?;
         stems.push(file_stem(path));
         sources.push(src);
     }
 
-    let effective_classpath = opts.effective_classpath().unwrap_or_else(|error| {
-        eprintln!("krusty: {error}");
-        std::process::exit(1);
-    });
+    let effective_classpath = opts
+        .effective_classpath()
+        .map_err(|error| format!("krusty: {error}\n"))?;
     let cp = std::rc::Rc::new(Classpath::new(effective_classpath));
     let platform = Box::new(JvmLibraries::new(cp.clone()));
     let source_inputs = opts
@@ -100,9 +183,11 @@ fn main() {
             .zip(&sources)
             .map(|(p, s)| (p.as_str(), s.as_str()))
             .collect();
-        print!("{}", diags.render_all(&rendered));
-        eprintln!("krusty: {} error(s)", diags.diags.len());
-        std::process::exit(1);
+        return Err(format!(
+            "{}krusty: {} error(s)\n",
+            diags.render_all(&rendered),
+            diags.diags.len()
+        ));
     }
 
     let emitted = outputs
@@ -114,17 +199,13 @@ fn main() {
     } else {
         write_dir(&opts.dest, &outputs)
     };
-    if let Err(e) = result {
-        eprintln!(
-            "krusty: cannot write output to {}: {e}",
+    result.map_err(|error| {
+        format!(
+            "krusty: cannot write output to {}: {error}\n",
             opts.dest.display()
-        );
-        std::process::exit(1);
-    }
-    println!(
-        "ok: emitted {emitted} class file(s) to {}",
-        opts.dest.display()
-    );
+        )
+    })?;
+    Ok(emitted)
 }
 
 fn write_dir(dir: &Path, outputs: &[(String, Vec<u8>)]) -> std::io::Result<()> {
