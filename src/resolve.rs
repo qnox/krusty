@@ -41979,7 +41979,9 @@ impl<'a> Checker<'a> {
                         (
                             (field.is_none()
                                 && (!declaration.getter.descriptor.is_empty()
-                                    || declaration.getter.name != property_getter_name(name)))
+                                    || (declaration.getter.is_abstract
+                                        && !declaration.getter.name.is_empty()
+                                        && declaration.getter.name != property_getter_name(name))))
                             .then(|| {
                                 crate::symbol_resolver::ResolvedMember::from_callable(
                                     receiver,

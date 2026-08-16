@@ -6585,7 +6585,12 @@ impl<'a> Lower<'a> {
         construction: ExprId,
         owner: TypeName,
     ) -> Option<()> {
-        let model = self.syms.class_model(owner)?;
+        // Synthetic/local runtime classes can have an ordinary `New` without a frontend classifier
+        // declaration. They carry no annotation-construction fact; only a present normalized model can
+        // identify an annotation and require the backend realization.
+        let Some(model) = self.syms.class_model(owner) else {
+            return Some(());
+        };
         let Some(members) = model.annotation_members else {
             return Some(());
         };

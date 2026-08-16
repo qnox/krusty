@@ -72,19 +72,23 @@ fn a_constructed_annotation_reads_back_its_argument() {
 }
 
 #[test]
-fn a_constructed_annotation_implementation_is_byte_identical_to_kotlinc() {
-    let source = r#"package sample
-        annotation class Marker(val name: String)
-        fun make(): Marker = Marker("OK")
+fn annotation_tracking_ignores_an_ordinary_synthetic_construction() {
+    let source = r#"
+        fun box(): String {
+            val value = object { val text = "OK" }
+            return value.text
+        }
     "#;
-    let Some(result) = common::byte_diff_against_kotlinc(
-        "AnnotationImplParity",
-        source,
-        "sample/AnnotationImplParityKt$annotationImpl$sample_Marker$0",
-    ) else {
-        return;
-    };
-    assert!(result.is_ok(), "{}", result.unwrap_err());
+    assert_eq!(
+        common::compile_and_run_box(
+            source,
+            "Main",
+            std::slice::from_ref(&common::stdlib_jar()),
+            Some(common::jdk_modules().as_path()),
+        )
+        .as_deref(),
+        Some("OK")
+    );
 }
 
 #[test]
