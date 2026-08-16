@@ -1,64 +1,91 @@
-//! Two diagnostics whose wording drifted from the Kotlin frontend's templates: a context argument is
-//! reported for a CALLABLE, never "for property", and the `hasNext()` return-type error names the
-//! loop range's `iterator().hasNext()` rather than a bare `hasNext()`.
+//! Complete diagnostic differentials for a missing context argument and an invalid loop-range
+//! `hasNext`. Extracted message templates are audit leads; the emitted compiler output is proof.
+
+use std::path::Path;
 
 use super::common;
 
-fn diagnostics(source: &str) -> Vec<String> {
-    common::front_end_diagnostics(
-        source,
-        std::slice::from_ref(&common::stdlib_jar()),
-        Some(common::jdk_modules().as_path()),
-    )
+#[derive(Debug, PartialEq, Eq)]
+struct ObservedError {
+    file: String,
+    line: usize,
+    column: usize,
+    message: String,
+}
+
+fn errors(output: &str) -> Vec<ObservedError> {
+    output
+        .lines()
+        .filter_map(|rendered| {
+            let (location, message) = rendered.split_once("error:")?;
+            let location = location.trim().trim_end_matches(':');
+            let mut fields = location.rsplitn(3, ':');
+            let column = fields.next()?.trim().parse().ok()?;
+            let line = fields.next()?.trim().parse().ok()?;
+            let path = fields.next()?.trim();
+            Some(ObservedError {
+                file: Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_string(),
+                line,
+                column,
+                message: message.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn compare(file: &str, source: &str) -> Vec<ObservedError> {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(&[(file, source)], std::slice::from_ref(&stdlib));
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(result.reference_code, 0, "kotlinc silently accepted source");
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    let reference = errors(&result.reference_stderr);
+    assert_eq!(krusty, reference);
+    krusty
 }
 
 #[test]
-fn a_missing_context_argument_for_a_property_names_the_callable() {
-    const SOURCE: &str = r#"
-        // LANGUAGE: +ContextParameters
-        class C
-        context(c: C) val label: String get() = "OK"
-        fun box(): String = label
-    "#;
-
-    let reported = diagnostics(SOURCE);
-    assert!(
-        reported
-            .iter()
-            .any(|diagnostic| diagnostic.contains("No context argument for")),
-        "expected a missing-context diagnostic, got: {reported:?}"
+fn a_missing_context_argument_names_the_context_parameter() {
+    let errors = compare(
+        "ContextProperty.kt",
+        "// LANGUAGE: +ContextParameters\n\
+         class C\n\
+         context(c: C) val label: String get() = \"OK\"\n\
+         fun box(): String = label\n",
     );
-    assert!(
-        !reported
+    assert_eq!(
+        errors
             .iter()
-            .any(|diagnostic| diagnostic.contains("for property")),
-        "kotlinc's template has no 'property' in it: {reported:?}"
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>(),
+        ["no context argument for 'c: C' found."]
     );
 }
 
 #[test]
 fn a_loop_range_whose_has_next_is_not_boolean_names_the_iterator() {
-    const SOURCE: &str = r#"
-        class Cursor {
-            operator fun hasNext(): Int = 0
-            operator fun next(): String = "x"
-        }
-
-        class Range {
-            operator fun iterator(): Cursor = Cursor()
-        }
-
-        fun box() {
-            for (item in Range()) {
-            }
-        }
-    "#;
-
-    let reported = diagnostics(SOURCE);
-    assert!(
-        reported.iter().any(|diagnostic| diagnostic
-            == "the 'iterator().hasNext()' function of the loop range must return 'Boolean', \
-                but returns 'Int'."),
-        "expected the frontend's loop-range wording, got: {reported:?}"
+    let errors = compare(
+        "LoopRange.kt",
+        "class Cursor {\n\
+         \x20   operator fun hasNext(): Int = 0\n\
+         \x20   operator fun next(): String = \"x\"\n\
+         }\n\
+         class Range { operator fun iterator(): Cursor = Cursor() }\n\
+         fun box() { for (item in Range()) {} }\n",
+    );
+    assert_eq!(
+        errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "'operator' modifier is not applicable to function: must return 'Boolean'.",
+            "the 'iterator().hasNext()' function of the loop range must return 'Boolean', but returns 'Int'."
+        ]
     );
 }

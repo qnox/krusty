@@ -2902,6 +2902,17 @@ impl<'a> Parser<'a> {
                     .map(|token| token.span)
                     .expect("an override modifier must retain its source token")
             });
+        let operator_span = modifiers
+            .iter()
+            .any(|modifier| modifier == "operator")
+            .then(|| {
+                self.t[..self.i]
+                    .iter()
+                    .rev()
+                    .find(|token| self.token_keyword_text(**token, "operator"))
+                    .map(|token| token.span)
+                    .expect("an operator modifier must retain its source token")
+            });
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
                      // Skip the entire interface body with a clean unsupported-feature message.
@@ -2934,6 +2945,7 @@ impl<'a> Parser<'a> {
                 span: start,
                 signature_span: start,
                 override_span: None,
+                operator_span: None,
                 flags: FdFlags::default(),
                 visibility: Visibility::Public,
                 annotations,
@@ -3007,6 +3019,7 @@ impl<'a> Parser<'a> {
             span: Span::new(start.lo, end.hi),
             signature_span: Span::new(start.lo, signature_end),
             override_span,
+            operator_span,
             flags: function_flags(modifiers),
             visibility: visibility_of(modifiers),
             annotations,

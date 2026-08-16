@@ -1067,6 +1067,7 @@ fn source_property(
         formals: Vec::new(),
         ty: property.ty,
         context_count: property.context_params.len(),
+        context_param_names: Vec::new(),
         getter: source_property_getter(
             owner,
             property.getter_name.clone(),
@@ -1285,6 +1286,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                             formals: declaration.type_params().to_vec(),
                             ty: declaration.ret(),
                             context_count: declaration.context_params().len(),
+                            context_param_names: Vec::new(),
                             getter,
                             setter,
                             setter_visibility: declaration
@@ -1339,6 +1341,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 formals: Vec::new(),
                 ty: property.ty,
                 context_count: property.context_params.len(),
+                context_param_names: property.context_param_names.clone(),
                 getter,
                 setter,
                 setter_visibility: property.setter_visibility,
@@ -1388,6 +1391,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     formals: property.formals.clone(),
                     ty: property.ty,
                     context_count: property.context_params.len(),
+                    context_param_names: Vec::new(),
                     getter,
                     setter,
                     setter_visibility: property.visibility,

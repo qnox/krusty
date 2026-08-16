@@ -1928,6 +1928,8 @@ pub struct PropertyInfo {
     pub ty: Ty,
     /// Number of leading context parameters in each accessor's parameter list.
     pub context_count: usize,
+    /// Source names parallel to the context parameters, retained for diagnostics.
+    pub context_param_names: Vec<String>,
     /// The real getter — an opaque platform emit handle (the erased descriptor lives here).
     pub getter: LibraryCallable,
     /// The setter, present iff the property is a `var`.
@@ -2405,6 +2407,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             formals: Vec::new(),
             ty,
             context_count: 0,
+            context_param_names: Vec::new(),
             getter,
             setter: None,
             setter_visibility: Visibility::Private,
@@ -2528,6 +2531,7 @@ impl EmptySymbolSource {
                 formals: Vec::new(),
                 ty: Ty::Int,
                 context_count: 0,
+                context_param_names: Vec::new(),
                 getter,
                 setter: None,
                 setter_visibility: Visibility::Private,
@@ -2626,6 +2630,7 @@ impl EmptySymbolSource {
                 formals: Vec::new(),
                 ty,
                 context_count: 0,
+                context_param_names: Vec::new(),
                 getter,
                 setter: None,
                 setter_visibility: Visibility::Private,
