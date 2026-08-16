@@ -66,7 +66,21 @@ fn run_persistent_worker() {
     let stdout = std::io::stdout();
     let mut input = stdin.lock();
     let mut output = stdout.lock();
-    if let Err(error) = krusty_cli::worker::run(&mut input, &mut output, &compile_work_unit) {
+    // A panic inside the compiler must fail ONE request, not the worker process: bazel would
+    // otherwise lose the worker mid-build and report it as a crash rather than as this target's
+    // failure. `compile` has `expect`s, and a compiler does panic in the field.
+    let serve = |unit: krusty_cli::worker::WorkUnit| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile_work_unit(unit)))
+            .unwrap_or_else(|payload| {
+                let detail = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "panic".to_string());
+                Err(format!("krusty: internal compiler panic: {detail}\n"))
+            })
+    };
+    if let Err(error) = krusty_cli::worker::run(&mut input, &mut output, &serve) {
         eprintln!("krusty: worker: {error}");
         std::process::exit(1);
     }
