@@ -10,7 +10,12 @@ use super::runner::CommandRunner;
 use super::xml;
 use crate::uri::file_uri_or_path;
 
-const WATCH_GLOBS: &[&str] = &["**/.idea/misc.xml", "**/.idea/libraries/*.xml", "**/*.iml"];
+const WATCH_GLOBS: &[&str] = &[
+    "**/.idea/misc.xml",
+    "**/.idea/kotlinc.xml",
+    "**/.idea/libraries/*.xml",
+    "**/*.iml",
+];
 
 fn home_directory() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -162,6 +167,7 @@ fn parse_module(
         libraries,
         project_out,
         project_target,
+        &KotlinSettings::default(),
     )
     .map(|(modules, _)| modules)
 }
@@ -172,6 +178,7 @@ fn parse_module_with_exports(
     libraries: &HashMap<String, Vec<PathBuf>>,
     project_out: Option<&Path>,
     project_target: Option<&str>,
+    project_kotlin: &KotlinSettings,
 ) -> Result<(Vec<Module>, ExportedDeps), ProbeError> {
     // Listed modules may be absent from partial checkouts.
     let Some(document) = read_optional_xml(iml_path)? else {
@@ -278,9 +285,27 @@ fn parse_module_with_exports(
         }
     }
 
-    let jvm_target = manager
-        .attr("LANGUAGE_LEVEL")
-        .and_then(language_level_to_target)
+    // The module's own Kotlin facet REPLACES the project settings when it says so — which is what
+    // essentially every intellij-community module says. Replacement, not merge: IntelliJ takes the
+    // facet's arguments whole or the project's whole, with no field-level fallback between them.
+    // (The Gradle provider merges instead, because Gradle's project-level `freeCompilerArgs` really
+    // are additive; the difference is in the build systems, not an oversight here.)
+    let facet = module_kotlin_settings(&document);
+    let kotlinc_args = facet.as_ref().unwrap_or(project_kotlin).to_kotlinc_args();
+
+    // Only a FACET's `jvmTarget` outranks the Java language level: it is the target the Kotlin
+    // compiler is actually invoked with for this module. The project-wide value is a weaker signal
+    // than a module's own declaration, so it sits BELOW `LANGUAGE_LEVEL` — putting it above silently
+    // retargeted the 261 intellij-community modules that declare a level and have no Kotlin facet.
+    let jvm_target = facet
+        .as_ref()
+        .and_then(KotlinSettings::effective_jvm_target)
+        .or_else(|| {
+            manager
+                .attr("LANGUAGE_LEVEL")
+                .and_then(language_level_to_target)
+        })
+        .or_else(|| project_kotlin.effective_jvm_target())
         .or_else(|| project_target.map(str::to_string));
 
     let exports = ExportedDeps {
@@ -337,6 +362,7 @@ fn parse_module_with_exports(
         .map(ModuleOutput::Classes)
         .collect();
     main.jvm_target = jvm_target.clone();
+    main.kotlinc_args = kotlinc_args.clone();
 
     let has_test = !test_roots.is_empty() || entries.iter().any(|e| e.test_only);
     if !has_test {
@@ -358,6 +384,7 @@ fn parse_module_with_exports(
         .collect();
     test.friend_paths = production_output.into_iter().collect();
     test.jvm_target = jvm_target;
+    test.kotlinc_args = kotlinc_args;
 
     Ok((vec![main, test], exports))
 }
@@ -515,20 +542,219 @@ struct ProjectSettings {
     output: Option<PathBuf>,
     jvm_target: Option<String>,
     sdk_name: Option<String>,
+    /// `.idea/kotlinc.xml` — the project-wide Kotlin compiler configuration.
+    kotlin: KotlinSettings,
+}
+
+/// A Kotlin compiler configuration, from `.idea/kotlinc.xml` (project-wide) or from a module's
+/// `kotlin-language` facet.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct KotlinSettings {
+    jvm_target: Option<String>,
+    api_version: Option<String>,
+    language_version: Option<String>,
+    /// The free-form flag string (`-Xjvm-default=all -opt-in=… -progressive`), parsed with its
+    /// quoting preserved as argument boundaries.
+    additional_arguments: Vec<String>,
+}
+
+impl KotlinSettings {
+    fn effective_jvm_target(&self) -> Option<String> {
+        let mut effective = self.jvm_target.clone();
+        let mut index = 0;
+        while let Some(argument) = self.additional_arguments.get(index) {
+            if let ("-jvm-target", Some(value)) =
+                (argument.as_str(), self.additional_arguments.get(index + 1))
+            {
+                effective = Some(value.clone());
+                index += 2;
+                continue;
+            } else if let Some(value) = argument.strip_prefix("-jvm-target=") {
+                effective = Some(value.to_string());
+            }
+            index += 1;
+        }
+        effective
+    }
+
+    /// Render as a kotlinc argument list, the form [`Module::kotlinc_args`] carries.
+    ///
+    /// `-api-version` / `-language-version` take their value as a SEPARATE argument, which is how
+    /// kotlinc's own CLI spells them; the free-form arguments are already flags and pass through.
+    fn to_kotlinc_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for (flag, value) in [
+            ("-api-version", &self.api_version),
+            ("-language-version", &self.language_version),
+        ] {
+            if let Some(value) = value {
+                args.push(flag.to_string());
+                args.push(value.clone());
+            }
+        }
+        // The free-form arguments come LAST so they win: kotlinc takes the last occurrence of a
+        // repeated flag, and IntelliJ likewise parses `additionalArguments` over the typed ones. A
+        // facet whose free-form string sets `-api-version 2.0` must not be overruled by a stale
+        // typed `apiVersion`.
+        args.extend(self.additional_arguments.iter().cloned());
+        args
+    }
+}
+
+/// Split IntelliJ's free-form compiler command line while preserving quoted values. Backslashes are
+/// escapes only before whitespace, a quote, or another backslash, so a Windows path such as
+/// `C:\\plugins\\x.jar` remains intact.
+fn split_kotlinc_arguments(value: &str) -> Vec<String> {
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character.is_whitespace() && quote.is_none() {
+            if started {
+                arguments.push(std::mem::take(&mut current));
+                started = false;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+                continue;
+            }
+            if quote.is_none() {
+                quote = Some(character);
+                started = true;
+                continue;
+            }
+        }
+        let escaped = character == '\\'
+            && quote != Some('\'')
+            && characters
+                .peek()
+                .is_some_and(|next| next.is_whitespace() || matches!(next, '\\' | '\'' | '"'));
+        if escaped {
+            current.push(characters.next().expect("peeked escaped character"));
+            started = true;
+            continue;
+        }
+        current.push(character);
+        started = true;
+    }
+    if started {
+        arguments.push(current);
+    }
+    arguments
+}
+
+/// Read `<option name="…" value="…"/>` children of a component into a settings record.
+fn kotlin_settings_from_options(component: &xml::Element, into: &mut KotlinSettings) {
+    for option in component.children_named("option") {
+        let (Some(name), Some(value)) = (option.attr("name"), option.attr("value")) else {
+            continue;
+        };
+        match name {
+            "jvmTarget" => into.jvm_target = Some(value.to_string()),
+            "apiVersion" => into.api_version = Some(value.to_string()),
+            "languageVersion" => into.language_version = Some(value.to_string()),
+            "additionalArguments" => {
+                into.additional_arguments = split_kotlinc_arguments(value);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `.idea/kotlinc.xml`: the Kotlin compiler settings a project applies to every module that has not
+/// overridden them.
+fn project_kotlin_settings(root: &Path) -> Result<KotlinSettings, ProbeError> {
+    let path = root.join(".idea").join("kotlinc.xml");
+    let Some(document) = read_optional_xml(&path)? else {
+        return Ok(KotlinSettings::default());
+    };
+    let mut settings = KotlinSettings::default();
+    // Three components carry the parts: the JVM-specific arguments, the common ones, and the
+    // free-form flag string a user typed into the compiler settings dialog.
+    for component in document.children_named("component") {
+        match component.attr("name") {
+            Some("Kotlin2JvmCompilerArguments")
+            | Some("KotlinCommonCompilerArguments")
+            | Some("KotlinCompilerSettings") => {
+                kotlin_settings_from_options(component, &mut settings)
+            }
+            _ => {}
+        }
+    }
+    Ok(settings)
+}
+
+/// A module's `kotlin-language` facet, when it overrides the project settings.
+///
+/// `useProjectSettings="false"` is not an edge case: in intellij-community 1046 of the 1052 modules
+/// with a Kotlin facet set it, so a provider that read only `.idea/kotlinc.xml` would report the
+/// wrong compiler options for essentially every module in the project.
+fn module_kotlin_settings(document: &xml::Element) -> Option<KotlinSettings> {
+    let configuration = document
+        .children_named("component")
+        .find(|component| component.attr("name") == Some("FacetManager"))?
+        .children_named("facet")
+        .find(|facet| facet.attr("type") == Some("kotlin-language"))?
+        .child("configuration")?;
+    // IntelliJ's default is `true` — a facet only overrides when it says `false` EXPLICITLY. Reading
+    // an absent attribute as "the facet wins" inverts the rule for any `.iml` written by hand or by
+    // an older IDE: the module would compile under an empty configuration instead of the project's.
+    // (`KotlinFacet.kt`: `settings.takeUnless { it.useProjectSettings } ?: projectSettings`.)
+    if configuration.attr("useProjectSettings") != Some("false") {
+        return None;
+    }
+    let mut settings = KotlinSettings::default();
+    if let Some(compiler_settings) = configuration.child("compilerSettings") {
+        kotlin_settings_from_options(compiler_settings, &mut settings);
+    }
+    // `<compilerArguments><stringArguments><stringArg name="jvmTarget" arg="25"/>` — the typed
+    // arguments, spelled differently from the `<option name= value=>` pairs above.
+    if let Some(string_arguments) = configuration
+        .child("compilerArguments")
+        .and_then(|arguments| arguments.child("stringArguments"))
+    {
+        for argument in string_arguments.children_named("stringArg") {
+            let (Some(name), Some(value)) = (argument.attr("name"), argument.attr("arg")) else {
+                continue;
+            };
+            match name {
+                "jvmTarget" => settings.jvm_target = Some(value.to_string()),
+                "apiVersion" => settings.api_version = Some(value.to_string()),
+                "languageVersion" => settings.language_version = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+    Some(settings)
 }
 
 fn project_settings(root: &Path) -> Result<ProjectSettings, ProbeError> {
     let path = root.join(".idea").join("misc.xml");
+    // `.idea/kotlinc.xml` is independent of `misc.xml`: a project can carry Kotlin settings without a
+    // `ProjectRootManager`, so it is read before either early return.
+    let kotlin_only = || -> Result<ProjectSettings, ProbeError> {
+        Ok(ProjectSettings {
+            kotlin: project_kotlin_settings(root)?,
+            ..ProjectSettings::default()
+        })
+    };
     let Some(document) = read_optional_xml(&path)? else {
-        return Ok(ProjectSettings::default());
+        return kotlin_only();
     };
     let Some(manager) = document
         .children_named("component")
         .find(|component| component.attr("name") == Some("ProjectRootManager"))
     else {
-        return Ok(ProjectSettings::default());
+        return kotlin_only();
     };
+    let kotlin = project_kotlin_settings(root)?;
     Ok(ProjectSettings {
+        kotlin,
         output: manager
             .child("output")
             .and_then(|output| output.attr("url"))
@@ -588,6 +814,7 @@ impl JpsProvider {
                 &libraries,
                 settings.output.as_deref(),
                 settings.jvm_target.as_deref(),
+                &settings.kotlin,
             )?;
             if let Some(id) = parsed.first().and_then(|module| module.id.clone()) {
                 exported.insert(id, exports);
@@ -789,6 +1016,434 @@ mod tests {
         let iml = tree.write("core/core.iml", "<module><component></module>");
         let error = parse_module(&iml, tree.root(), &HashMap::new(), None, None).unwrap_err();
         assert!(matches!(error, ProbeError::Parse(_)));
+    }
+
+    /// The project-wide Kotlin settings, spread over three components of `.idea/kotlinc.xml`.
+    #[test]
+    fn project_kotlin_settings_come_from_kotlinc_xml() {
+        let tree = crate::project::testing::TempTree::new("kotlinc-xml");
+        tree.write(
+            ".idea/kotlinc.xml",
+            r#"<project version="4">
+                 <component name="Kotlin2JvmCompilerArguments">
+                   <option name="jvmTarget" value="25" />
+                 </component>
+                 <component name="KotlinCommonCompilerArguments">
+                   <option name="apiVersion" value="2.4" />
+                   <option name="languageVersion" value="2.4" />
+                 </component>
+                 <component name="KotlinCompilerSettings">
+                   <option name="additionalArguments" value="-Xjvm-default=all -progressive" />
+                 </component>
+               </project>"#,
+        );
+        let settings = project_kotlin_settings(&tree.root).unwrap();
+        assert_eq!(settings.jvm_target.as_deref(), Some("25"));
+        assert_eq!(settings.api_version.as_deref(), Some("2.4"));
+        assert_eq!(settings.language_version.as_deref(), Some("2.4"));
+        assert_eq!(
+            settings.additional_arguments,
+            vec!["-Xjvm-default=all".to_string(), "-progressive".to_string()]
+        );
+        assert_eq!(
+            settings.to_kotlinc_args(),
+            vec![
+                "-api-version".to_string(),
+                "2.4".to_string(),
+                "-language-version".to_string(),
+                "2.4".to_string(),
+                "-Xjvm-default=all".to_string(),
+                "-progressive".to_string(),
+            ],
+            "the typed arguments come first so the free-form ones can override them"
+        );
+    }
+
+    /// A project with no `kotlinc.xml`, or none of the Kotlin components, reports nothing rather
+    /// than inventing defaults.
+    #[test]
+    fn a_project_without_kotlin_settings_reports_none() {
+        let tree = crate::project::testing::TempTree::new("kotlinc-xml-absent");
+        assert_eq!(
+            project_kotlin_settings(&tree.root).unwrap(),
+            KotlinSettings::default()
+        );
+    }
+
+    #[test]
+    fn the_project_kotlin_settings_file_is_watched() {
+        assert!(
+            WATCH_GLOBS.contains(&"**/.idea/kotlinc.xml"),
+            "editing the settings file must invalidate the JPS model"
+        );
+    }
+
+    #[test]
+    fn quoted_additional_arguments_remain_single_arguments() {
+        let tree = crate::project::testing::TempTree::new("kotlinc-xml-quoted-argument");
+        tree.write(
+            ".idea/kotlinc.xml",
+            r#"<project version="4">
+                 <component name="KotlinCompilerSettings">
+                   <option name="additionalArguments" value="-Xplugin=&quot;/plugins/with space.jar&quot; -progressive" />
+                 </component>
+               </project>"#,
+        );
+        assert_eq!(
+            project_kotlin_settings(&tree.root)
+                .unwrap()
+                .additional_arguments,
+            vec![
+                "-Xplugin=/plugins/with space.jar".to_string(),
+                "-progressive".to_string(),
+            ]
+        );
+    }
+
+    /// `.idea/kotlinc.xml` is read even when `misc.xml` is absent — the two files are independent.
+    #[test]
+    fn kotlin_settings_survive_a_missing_misc_xml() {
+        let tree = crate::project::testing::TempTree::new("kotlinc-xml-no-misc");
+        tree.write(
+            ".idea/kotlinc.xml",
+            r#"<project version="4">
+                 <component name="KotlinCompilerSettings">
+                   <option name="additionalArguments" value="-progressive" />
+                 </component>
+               </project>"#,
+        );
+        let settings = project_settings(&tree.root).unwrap();
+        assert_eq!(
+            settings.kotlin.additional_arguments,
+            vec!["-progressive".to_string()]
+        );
+    }
+
+    fn kotlin_facet_iml(use_project_settings: &str) -> String {
+        format!(
+            r#"<module type="JAVA_MODULE" version="4">
+                 <component name="FacetManager">
+                   <facet type="kotlin-language" name="Kotlin">
+                     <configuration version="5" platform="JVM 25" useProjectSettings="{use_project_settings}">
+                       <compilerSettings>
+                         <option name="additionalArguments" value="-Xjvm-default=all -opt-in=kotlin.ExperimentalStdlibApi" />
+                       </compilerSettings>
+                       <compilerArguments>
+                         <stringArguments>
+                           <stringArg name="jvmTarget" arg="25" />
+                           <stringArg name="apiVersion" arg="2.4" />
+                           <stringArg name="languageVersion" arg="2.4" />
+                         </stringArguments>
+                       </compilerArguments>
+                     </configuration>
+                   </facet>
+                 </component>
+                 <component name="NewModuleRootManager" LANGUAGE_LEVEL="JDK_17">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                     <sourceFolder url="file://$MODULE_DIR$/testSrc" isTestSource="true" />
+                   </content>
+                 </component>
+               </module>"#
+        )
+    }
+
+    /// The module facet is what intellij-community actually configures: 1046 of its 1052 Kotlin
+    /// facets set `useProjectSettings="false"`, so reading only the project file would report the
+    /// wrong options for nearly every module.
+    #[test]
+    fn a_module_facet_overrides_the_project_settings() {
+        let tree = crate::project::testing::TempTree::new("kotlin-facet");
+        let iml = tree.write("app/app.iml", &kotlin_facet_iml("false"));
+        let project = KotlinSettings {
+            additional_arguments: vec!["-project-only".to_string()],
+            ..KotlinSettings::default()
+        };
+        let modules = parse_module_with_exports(
+            &iml,
+            &tree.root,
+            &HashMap::new(),
+            None,
+            Some("17"),
+            &project,
+        )
+        .unwrap()
+        .0;
+        let main = &modules[0];
+        assert_eq!(
+            main.kotlinc_args,
+            vec![
+                "-api-version".to_string(),
+                "2.4".to_string(),
+                "-language-version".to_string(),
+                "2.4".to_string(),
+                "-Xjvm-default=all".to_string(),
+                "-opt-in=kotlin.ExperimentalStdlibApi".to_string(),
+            ]
+        );
+        // The facet's jvmTarget outranks the module's Java LANGUAGE_LEVEL.
+        assert_eq!(main.jvm_target.as_deref(), Some("25"));
+    }
+
+    #[test]
+    fn an_explicit_empty_facet_still_replaces_the_project_settings() {
+        let tree = crate::project::testing::TempTree::new("kotlin-empty-facet");
+        let iml = tree.write(
+            "app/app.iml",
+            r#"<module type="JAVA_MODULE" version="4">
+                 <component name="FacetManager">
+                   <facet type="kotlin-language" name="Kotlin">
+                     <configuration version="5" useProjectSettings="false" />
+                   </facet>
+                 </component>
+                 <component name="NewModuleRootManager" LANGUAGE_LEVEL="JDK_17">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                 </component>
+               </module>"#,
+        );
+        let project = KotlinSettings {
+            jvm_target: Some("25".to_string()),
+            additional_arguments: vec!["-project-only".to_string()],
+            ..KotlinSettings::default()
+        };
+        let modules =
+            parse_module_with_exports(&iml, &tree.root, &HashMap::new(), None, None, &project)
+                .unwrap()
+                .0;
+        assert!(modules[0].kotlinc_args.is_empty());
+        assert_eq!(
+            modules[0].jvm_target.as_deref(),
+            Some("17"),
+            "an empty facet must not leak the project Kotlin target"
+        );
+    }
+
+    /// An absent `useProjectSettings` means TRUE — IntelliJ's default. Reading it as "the facet
+    /// wins" inverts the rule for any `.iml` written by hand or by an older IDE, which would then
+    /// compile under whatever the facet happens to carry instead of the project's settings.
+    #[test]
+    fn an_absent_use_project_settings_defers_to_the_project() {
+        let tree = crate::project::testing::TempTree::new("kotlin-facet-absent");
+        let iml = tree.write(
+            "app/app.iml",
+            r#"<module type="JAVA_MODULE" version="4">
+                 <component name="FacetManager">
+                   <facet type="kotlin-language" name="Kotlin">
+                     <configuration version="5">
+                       <compilerArguments>
+                         <stringArguments>
+                           <stringArg name="jvmTarget" arg="11" />
+                         </stringArguments>
+                       </compilerArguments>
+                     </configuration>
+                   </facet>
+                 </component>
+                 <component name="NewModuleRootManager" LANGUAGE_LEVEL="JDK_17">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                 </component>
+               </module>"#,
+        );
+        let project = KotlinSettings {
+            jvm_target: Some("25".to_string()),
+            additional_arguments: vec!["-Xjvm-default=all".to_string()],
+            ..KotlinSettings::default()
+        };
+        let modules =
+            parse_module_with_exports(&iml, &tree.root, &HashMap::new(), None, None, &project)
+                .unwrap()
+                .0;
+        assert_eq!(
+            modules[0].kotlinc_args,
+            vec!["-Xjvm-default=all".to_string()],
+            "the project settings apply when the facet does not opt out"
+        );
+        assert_eq!(
+            modules[0].jvm_target.as_deref(),
+            Some("17"),
+            "and the facet's jvmTarget is not consulted either"
+        );
+    }
+
+    /// A module with NO Kotlin facet keeps the Java language level it declares. The project-wide
+    /// `jvmTarget` is a weaker signal than the module's own declaration; ranking it higher silently
+    /// retargeted the 261 intellij-community modules in exactly this shape.
+    #[test]
+    fn a_project_jvm_target_does_not_shadow_a_declared_language_level() {
+        let tree = crate::project::testing::TempTree::new("kotlin-project-target");
+        let iml = tree.write("app/app.iml", app_iml());
+        let project = KotlinSettings {
+            jvm_target: Some("25".to_string()),
+            ..KotlinSettings::default()
+        };
+        let modules =
+            parse_module_with_exports(&iml, &tree.root, &HashMap::new(), None, None, &project)
+                .unwrap()
+                .0;
+        assert_eq!(modules[0].jvm_target.as_deref(), Some("17"));
+    }
+
+    /// With no language level of its own, a module does fall back to the project's Kotlin target.
+    #[test]
+    fn a_project_jvm_target_applies_when_nothing_else_declares_one() {
+        let tree = crate::project::testing::TempTree::new("kotlin-project-target-fallback");
+        let iml = tree.write(
+            "app/app.iml",
+            r#"<module type="JAVA_MODULE" version="4">
+                 <component name="NewModuleRootManager">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                 </component>
+               </module>"#,
+        );
+        let project = KotlinSettings {
+            jvm_target: Some("25".to_string()),
+            ..KotlinSettings::default()
+        };
+        let modules =
+            parse_module_with_exports(&iml, &tree.root, &HashMap::new(), None, None, &project)
+                .unwrap()
+                .0;
+        assert_eq!(modules[0].jvm_target.as_deref(), Some("25"));
+    }
+
+    /// kotlinc takes the LAST occurrence of a repeated flag, and IntelliJ parses `additionalArguments`
+    /// over the typed ones — so the free-form string must come last, or a stale typed value wins.
+    #[test]
+    fn free_form_arguments_outrank_the_typed_ones() {
+        let settings = KotlinSettings {
+            api_version: Some("2.4".to_string()),
+            additional_arguments: vec!["-api-version".to_string(), "2.0".to_string()],
+            ..KotlinSettings::default()
+        };
+        let args = settings.to_kotlinc_args();
+        let last = args
+            .iter()
+            .rposition(|argument| argument == "-api-version")
+            .expect("-api-version present");
+        assert_eq!(
+            args[last + 1],
+            "2.0",
+            "the free-form value must be the effective one: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_free_form_jvm_target_outranks_the_typed_facet_target() {
+        let tree = crate::project::testing::TempTree::new("kotlin-free-form-target");
+        let iml = tree.write(
+            "app/app.iml",
+            r#"<module type="JAVA_MODULE" version="4">
+                 <component name="FacetManager">
+                   <facet type="kotlin-language" name="Kotlin">
+                     <configuration version="5" useProjectSettings="false">
+                       <compilerSettings>
+                         <option name="additionalArguments" value="-jvm-target 21" />
+                       </compilerSettings>
+                       <compilerArguments>
+                         <stringArguments>
+                           <stringArg name="jvmTarget" arg="25" />
+                         </stringArguments>
+                       </compilerArguments>
+                     </configuration>
+                   </facet>
+                 </component>
+                 <component name="NewModuleRootManager" LANGUAGE_LEVEL="JDK_17">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                 </component>
+               </module>"#,
+        );
+        let modules = parse_module_with_exports(
+            &iml,
+            &tree.root,
+            &HashMap::new(),
+            None,
+            None,
+            &KotlinSettings::default(),
+        )
+        .unwrap()
+        .0;
+        assert_eq!(modules[0].jvm_target.as_deref(), Some("21"));
+    }
+
+    /// `useProjectSettings="true"` means exactly that.
+    #[test]
+    fn a_facet_can_defer_to_the_project_settings() {
+        let tree = crate::project::testing::TempTree::new("kotlin-facet-defer");
+        let iml = tree.write("app/app.iml", &kotlin_facet_iml("true"));
+        let project = KotlinSettings {
+            jvm_target: Some("21".to_string()),
+            additional_arguments: vec!["-progressive".to_string()],
+            ..KotlinSettings::default()
+        };
+        let modules = parse_module_with_exports(
+            &iml,
+            &tree.root,
+            &HashMap::new(),
+            None,
+            Some("17"),
+            &project,
+        )
+        .unwrap()
+        .0;
+        assert_eq!(modules[0].kotlinc_args, vec!["-progressive".to_string()]);
+        // The module declares `LANGUAGE_LEVEL="JDK_17"`, and with the facet deferring there is no
+        // facet target to outrank it. `Module::jvm_target` serves both compilers, and a module's own
+        // declaration is a stronger signal than a project-wide default.
+        assert_eq!(modules[0].jvm_target.as_deref(), Some("17"));
+    }
+
+    /// A module with no Kotlin facet inherits the project settings.
+    #[test]
+    fn a_module_without_a_facet_inherits_the_project_settings() {
+        let tree = crate::project::testing::TempTree::new("kotlin-no-facet");
+        let iml = tree.write("app/app.iml", app_iml());
+        let project = KotlinSettings {
+            additional_arguments: vec!["-Xjvm-default=all".to_string()],
+            ..KotlinSettings::default()
+        };
+        let modules =
+            parse_module_with_exports(&iml, &tree.root, &HashMap::new(), None, None, &project)
+                .unwrap()
+                .0;
+        assert_eq!(
+            modules[0].kotlinc_args,
+            vec!["-Xjvm-default=all".to_string()]
+        );
+    }
+
+    /// Test source sets carry the same compiler configuration as their production sibling.
+    #[test]
+    fn the_test_source_set_carries_the_same_arguments() {
+        let tree = crate::project::testing::TempTree::new("kotlin-facet-test");
+        // A real facet, so this covers the override path reaching BOTH source sets rather than only
+        // the project-settings path.
+        let iml = tree.write("app/app.iml", &kotlin_facet_iml("false"));
+        let project = KotlinSettings {
+            additional_arguments: vec!["-project-only".to_string()],
+            ..KotlinSettings::default()
+        };
+        let modules =
+            parse_module_with_exports(&iml, &tree.root, &HashMap::new(), None, None, &project)
+                .unwrap()
+                .0;
+        assert!(modules.len() >= 2, "the fixture must produce main and test");
+        for module in &modules {
+            assert!(
+                module
+                    .kotlinc_args
+                    .contains(&"-Xjvm-default=all".to_string()),
+                "{:?} must carry the facet's arguments: {:?}",
+                module.id,
+                module.kotlinc_args
+            );
+        }
     }
 
     #[test]
