@@ -23,15 +23,46 @@ Arguments go through a Bazel param file in `multiline` format, referenced as `@f
 krusty's CLI reads. Long classpaths and thousands of sources therefore never hit the OS argument
 limit.
 
-NOT a persistent worker yet. Every action starts a fresh krusty process, which is affordable because
-krusty is a native binary with no JVM to warm up, but it does not yet match the worker protocol of
-intellij-community's own `jvm-inc-builder` (`--flagfile=`, `--out`/`--abi-out`/`--kotlin-cri-out`,
-`--srcs`/`--cp`/`--friends`, `supports-multiplex-workers`). Two things must land before that form is
-useful: krusty has no Java front end, so a target mixing `.java` and `.kt` sources cannot be built by
-this rule at all, and no ABI jar is produced (`compile_jar` is the full jar).
+Set `use_worker = True` to run krusty as a Bazel PERSISTENT WORKER instead of one process per
+action. The worker speaks the argument surface of intellij-community's own `jvm-inc-builder`
+(`--out`/`--abi-out`/`--kotlin-cri-out`, `--srcs`/`--cp`/`--friends`, `--jvm_default`,
+`--x_no_param_assertions`, …), so a `jvm_library` target's existing options carry over unchanged, and
+it keeps its decoded classpath warm across requests.
+
+Two limits hold in both modes. krusty has no Java front end, so a target mixing `.java` and `.kt`
+sources cannot be built by this rule at all — the worker REFUSES such a request rather than emitting
+a jar missing those classes. And no reduced ABI jar is produced: `--abi-out` receives a copy of the
+full jar, so a dependent rebuilds on any change rather than only on an ABI change.
 """
 
 load("@rules_java//java:defs.bzl", "JavaInfo")
+
+def _worker_arguments(ctx, output_jar, abi_jar, compile_jars):
+    """The `jvm-inc-builder` vocabulary, which krusty's `--persistent_worker` mode parses.
+
+    Deliberately NOT krusty's own command line: speaking the builder's surface is what lets a target
+    move between the two compilers without rewriting its options.
+    """
+    args = ctx.actions.args()
+    args.set_param_file_format("multiline")
+    args.use_param_file("--flagfile=%s", use_always = True)
+
+    args.add("--target_label", ctx.label)
+    args.add("--kotlin_module_name", ctx.attr.module_name or ctx.label.name)
+    args.add("--out", output_jar)
+    args.add("--abi-out", abi_jar)
+    if ctx.attr.jvm_target:
+        args.add("--jvm_target", ctx.attr.jvm_target)
+
+    # Every Kotlin source is a `.kt`: `srcs` rejects anything else, so the worker's Java refusal
+    # cannot trigger from this rule — it guards the surface, not this caller.
+    args.add_all("--srcs", ctx.files.srcs)
+    args.add_all("--cp", compile_jars)
+
+    # `--java-count 0` is stated rather than omitted: it is how the builder says "no Java in this
+    # action", and saying it explicitly documents that this rule never has any.
+    args.add("--java-count", "0")
+    return args
 
 def _krusty_jvm_library_impl(ctx):
     output_jar = ctx.actions.declare_file(ctx.label.name + ".jar")
@@ -65,15 +96,37 @@ def _krusty_jvm_library_impl(ctx):
     # Sources last: krusty treats a non-flag argument as a source path.
     args.add_all(ctx.files.srcs)
 
-    ctx.actions.run(
-        mnemonic = "KrustyCompile",
-        progress_message = "Compiling %%{label} with krusty (%d source(s))" % len(ctx.files.srcs),
-        executable = ctx.executable._krusty,
-        arguments = [args],
-        inputs = depset(ctx.files.srcs, transitive = [compile_jars]),
-        outputs = [output_jar],
-        env = ctx.attr.env,
-    )
+    outputs = [output_jar]
+    if ctx.attr.use_worker:
+        # A worker's outputs are DECLARED, so every one must be written or bazel fails the action —
+        # which is why krusty writes an abi jar and a cri file even though it has nothing distinct to
+        # put in them.
+        abi_jar = ctx.actions.declare_file(ctx.label.name + ".abi.jar")
+        outputs.append(abi_jar)
+        ctx.actions.run(
+            mnemonic = "KrustyCompile",
+            progress_message = "Compiling %%{label} with krusty worker (%d source(s))" % len(ctx.files.srcs),
+            executable = ctx.executable._krusty,
+            arguments = [_worker_arguments(ctx, output_jar, abi_jar, compile_jars)],
+            inputs = depset(ctx.files.srcs, transitive = [compile_jars]),
+            outputs = outputs,
+            env = ctx.attr.env,
+            execution_requirements = {
+                "supports-workers": "1",
+                # krusty's worker speaks line-delimited JSON, not the protobuf protocol.
+                "requires-worker-protocol": "json",
+            },
+        )
+    else:
+        ctx.actions.run(
+            mnemonic = "KrustyCompile",
+            progress_message = "Compiling %%{label} with krusty (%d source(s))" % len(ctx.files.srcs),
+            executable = ctx.executable._krusty,
+            arguments = [args],
+            inputs = depset(ctx.files.srcs, transitive = [compile_jars]),
+            outputs = outputs,
+            env = ctx.attr.env,
+        )
 
     return [
         DefaultInfo(files = depset([output_jar])),
@@ -115,6 +168,11 @@ krusty_jvm_library = rule(
         ),
         "kotlinc_opts": attr.string_list(
             doc = "Additional kotlinc flags, passed through verbatim.",
+        ),
+        "use_worker": attr.bool(
+            doc = "Run krusty as a Bazel persistent worker, speaking jvm-inc-builder's argument " +
+                  "surface, instead of one process per action.",
+            default = False,
         ),
         "neverlink": attr.bool(
             doc = "Provide this library for compilation only, never at runtime.",
