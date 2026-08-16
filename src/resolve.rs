@@ -8492,8 +8492,89 @@ fn collect_signatures_with_cp_impl(
 
     table.libraries = libraries;
     table.class_names = class_names;
+    break_supertype_cycles(&mut table, files, diags);
     table.finish_module_mutation();
     table
+}
+
+/// Report a class whose supertype chain reaches itself, and CUT the chain.
+///
+/// A cyclic hierarchy is ill-formed source — kotlinc answers `object Foo : Foo()` with "cycle in
+/// supertypes and/or containing declarations detected" — but krusty's walkers are recursive, and a
+/// cycle sent one of them into unbounded recursion until the stack was exhausted. The process died
+/// on a SIGBUS with no diagnostic at all, which is how it presented on 13 modules of
+/// intellij-community: a same-named import that does not resolve leaves the supertype bound to the
+/// declaration itself.
+///
+/// Individual walkers carry their own `seen` sets where they were known to need them; cutting the
+/// link here means none of them can meet a cycle in the first place, including the ones that never
+/// grew a guard.
+fn break_supertype_cycles(table: &mut SymbolTable, files: &[File], diags: &mut DiagSink) {
+    let cyclic: Vec<TypeName> = table
+        .classes
+        .iter()
+        .filter(|(internal, sig)| sig.source_decl.is_some() && reaches_itself(table, **internal))
+        .map(|(internal, _)| *internal)
+        .collect();
+    for internal in cyclic {
+        if let Some(sig) = table.classes.get(&internal) {
+            // Point at the offending declaration, near where kotlinc points (it names the supertype
+            // itself: `open class B : C()` → the column of `C`). A signature that carries no source
+            // declaration — an `object`'s, among others — falls back to the file start; the message
+            // and the file are still right, only the column is not.
+            let file = sig.source_file;
+            let span = sig
+                .source_decl
+                .and_then(|declaration| {
+                    let file = files.get(file as usize)?;
+                    match file.decl(declaration) {
+                        // A supertype written WITHOUT parentheses is a `TypeRef` and carries its own
+                        // span, which is where kotlinc points. A called one (`: Foo()`) is parsed
+                        // into `base_class`, a bare name with no span, so the class declaration's
+                        // span stands in — still the offending declaration, one column off.
+                        Decl::Class(class) => Some(
+                            class
+                                .supertypes
+                                .first()
+                                .map_or(class.span, |supertype| supertype.span),
+                        ),
+                        _ => None,
+                    }
+                })
+                .unwrap_or_else(|| Span::new(0, 0));
+            diags.set_file(file);
+            diags.error(
+                span,
+                "cycle in supertypes and/or containing declarations detected.".to_string(),
+            );
+        }
+        if let Some(sig) = table.classes.get_mut(&internal) {
+            sig.super_internal = None;
+            sig.interfaces = Default::default();
+        }
+    }
+}
+
+/// Does `start`'s supertype chain (superclass and interfaces) come back to `start`?
+fn reaches_itself(table: &SymbolTable, start: TypeName) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![start];
+    let mut first = true;
+    while let Some(current) = stack.pop() {
+        if !first && current == start {
+            return true;
+        }
+        first = false;
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(sig) = table.classes.get(&current) else {
+            continue;
+        };
+        stack.extend(sig.super_internal);
+        stack.extend(sig.interfaces.iter_ids());
+    }
+    false
 }
 
 fn report_conflicting_top_level_overloads(
