@@ -28,6 +28,39 @@ pub(crate) mod property_flags {
     pub const DECLARED_ACCESSOR: u64 = 70;
 }
 
+/// The `Type` a `vararg` parameter RECORDS: `Array<out E>`, not the invariant `Array<E>` the
+/// checker carries.
+///
+/// A `vararg` accepts any subtype of its element, and kotlinc writes that covariance into the
+/// recorded array's `Argument.projection`. A primitive specialized array (`vararg xs: Int` →
+/// `IntArray`) has no type argument at all and is recorded unchanged. The element's own record stays
+/// unprojected — it travels separately as `ValueParameter.vararg_element_type`.
+pub(crate) fn vararg_recorded_type(ty: crate::types::Ty) -> crate::types::Ty {
+    use crate::types::Ty;
+    let Ty::Obj(name, args) = ty else { return ty };
+    match args.first().copied() {
+        Some(element) if ty.is_reference_array() && !matches!(element, Ty::OutProjection(_)) => {
+            Ty::obj_args_name(name, &[Ty::out_projection(element)])
+        }
+        _ => ty,
+    }
+}
+
+/// Whether a signature position forces the declaration to record an explicit
+/// `JvmMethodSignature.desc` because its JVM descriptor is not recoverable from the recorded Kotlin
+/// type.
+///
+/// A reader maps a `Type`'s CLASS NAME through a flat table (`kotlin/Int` → `I`,
+/// `kotlin/collections/List` → `Ljava/util/List;`, `kotlin/IntArray` → `[I`). `kotlin/Array` has no
+/// entry: its descriptor depends on the type ARGUMENT (`Array<String>` → `[Ljava/lang/String;`),
+/// which a name-keyed table cannot express. So kotlinc records the descriptor for any signature
+/// holding one anywhere — parameter, extension receiver, or return — a `vararg` of a reference
+/// element included, since that is recorded as an `Array`. Only the OUTERMOST classifier counts: an
+/// array nested inside another type (`List<Array<String>>`) is erased away before the descriptor.
+pub(crate) fn descriptor_needs_recording(ty: crate::types::Ty) -> bool {
+    ty.non_null().is_reference_array()
+}
+
 pub(crate) fn serialize_string_table_types(records: &[Pb], local_names: &[u32]) -> Pb {
     let mut out = Pb::new();
     let mut i = 0;
@@ -64,6 +97,49 @@ pub(crate) fn serialize_string_table_types(records: &[Pb], local_names: &[u32]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::types::Ty;
+
+    #[test]
+    fn a_reference_vararg_records_an_out_projected_array() {
+        let array = Ty::obj_args("kotlin/Array", &[Ty::String]);
+        assert_eq!(
+            vararg_recorded_type(array),
+            Ty::obj_args("kotlin/Array", &[Ty::out_projection(Ty::String)])
+        );
+        // Idempotent: an already-projected argument is not double-wrapped.
+        assert_eq!(
+            vararg_recorded_type(vararg_recorded_type(array)),
+            vararg_recorded_type(array)
+        );
+    }
+
+    #[test]
+    fn a_primitive_vararg_array_is_recorded_unchanged() {
+        // `vararg xs: Int` is an `IntArray` — no type argument, so nothing to project.
+        let ints = Ty::obj("kotlin/IntArray");
+        assert_eq!(vararg_recorded_type(ints), ints);
+    }
+
+    #[test]
+    fn only_a_reference_array_forces_a_recorded_descriptor() {
+        // `kotlin/Array`'s descriptor depends on its argument, so it must be recorded — through a
+        // `?` as well. Everything a name-keyed table maps needs nothing.
+        assert!(descriptor_needs_recording(Ty::obj_args(
+            "kotlin/Array",
+            &[Ty::String]
+        )));
+        assert!(descriptor_needs_recording(Ty::nullable(Ty::obj_args(
+            "kotlin/Array",
+            &[Ty::String]
+        ))));
+        assert!(!descriptor_needs_recording(Ty::obj("kotlin/IntArray")));
+        assert!(!descriptor_needs_recording(Ty::Int));
+        assert!(!descriptor_needs_recording(Ty::obj_args(
+            "kotlin/collections/List",
+            &[Ty::obj_args("kotlin/Array", &[Ty::String])]
+        )));
+    }
 
     #[test]
     fn string_table_types_merge_only_plain_record_runs() {

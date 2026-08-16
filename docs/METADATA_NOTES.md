@@ -207,3 +207,56 @@ expanded arguments whether it is declared in this module or on the classpath.
 
 Only the ARGUMENT spellings are recovered. A node's own abbreviation always belongs to the use site,
 which names the alias itself.
+
+## `JvmMethodSignature.desc` — when the descriptor must be recorded
+
+`Function.methodSignature` (extension f100) carries `{f1 = name, f2 = desc}`, both independently
+optional. kotlinc omits `desc` whenever a reader can DERIVE the JVM descriptor from the recorded
+Kotlin types, and records it when it cannot. Derivation maps each `Type`'s CLASS NAME through a flat
+table (`kotlin/Int` -> `I`, `kotlin/collections/List` -> `Ljava/util/List;`, `kotlin/IntArray` ->
+`[I`). `kotlin/Array` has no entry there: its descriptor depends on the type ARGUMENT
+(`Array<String>` -> `[Ljava/lang/String;`), which a name-keyed table cannot express.
+
+So an `Array` in ANY signature position — value parameter, extension receiver, or return — forces
+`desc`. Measured against kotlinc 2.4.10 (`fun` in a file facade; class members and constructors
+behave the same):
+
+| declaration | `desc` recorded |
+| --- | --- |
+| `fun take(xs: Array<Payload>): Int` | `([Lapp/Payload;)I` |
+| `fun make(n: Int): Array<String>` | `(I)[Ljava/lang/String;` |
+| `fun Array<String>.count2(): Int` | `([Ljava/lang/String;)I` |
+| `fun maybe(xs: Array<String>?): Int` | `([Ljava/lang/String;)I` |
+| `fun many(vararg xs: Payload): Int` | `([Lapp/Payload;)I` |
+| `fun sum(vararg xs: Int): Int` | none (`IntArray` maps on its own) |
+| `fun ints(xs: IntArray): Int` | none |
+| `fun nested(xs: List<Array<String>>): Int` | none (the array erases away) |
+
+The rule is the ARRAY, not the `vararg`: a `vararg` of a reference element needs `desc` only because
+it is recorded as an `Array`. `metadata::descriptor_needs_recording` is the single predicate; the
+suspend CPS shape and a signature mentioning a type parameter force `desc` for their own reasons.
+Covered by `tests/metadata_array_signature_e2e.rs` (byte-identity vs kotlinc).
+
+### A `vararg` records `Array<out E>`
+
+The recorded `ValueParameter.type` of a `vararg` is `Array<out E>`, not the invariant `Array<E>` the
+checker carries — the array's `Argument.projection` is `1` (OUT). The element travels separately and
+UNPROJECTED as `ValueParameter.vararg_element_type` (f4). `metadata::vararg_recorded_type` applies
+the projection at the encode seam only, so nothing upstream of metadata sees a type source never
+wrote. A primitive specialized array has no type argument and is recorded unchanged.
+
+## Class supertypes: only what source declared
+
+`Class.supertype` (f6) lists the DECLARED supertypes, superclass first. An undeclared `kotlin/Any`
+is never recorded — `class Holder<T>(val t: T) : Iface` writes one supertype record, not two.
+
+This is a trap for a generic class: its supertype list comes from the recorded generic signature
+(`ir.class_signature(..).supers`), which ALWAYS materializes the superclass position because a JVM
+class `Signature` attribute must name a superclass, holding `kotlin/Any` when none was declared. The
+metadata emitter drops that implicit entry (`jvm/ir_emit.rs`), leaving both the generic and the
+non-generic shape with a superclass slot exactly when one was declared.
+
+`DeclaredSpellings::supertype_spellings(has_declared_superclass)` aligns the typealias spellings to
+that list. The flag cannot be inferred from the spellings themselves: a declared superclass that
+named no alias spells nothing, yet still occupies the slot, so only the emitter knows. Getting it
+wrong shifts every abbreviation onto the neighbouring supertype.
