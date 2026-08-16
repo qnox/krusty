@@ -1222,7 +1222,83 @@ impl std::ops::Deref for ClassSig {
     }
 }
 
+struct DeclaredCallableClassHeader {
+    internal: TypeName,
+    source_file: u32,
+    source_decl: DeclId,
+    visibility: Visibility,
+    flags: ClassFlags,
+    methods: MethodMap,
+    member_ext_funs: HashMap<String, Vec<MemberExtFunSig>>,
+    companion_internal: Option<TypeName>,
+    direct_supertypes: crate::types::TypeNameList,
+    type_parameters: crate::types::TypeParameters<Vec<Ty>>,
+    captured_type_parameters: crate::types::TypeParameters<Vec<Ty>>,
+}
+
 impl ClassSig {
+    /// A source classifier header used while its properties and inferred-return members are still
+    /// being collected. Declared callable signatures are already complete semantic candidates, so
+    /// publishing them here lets initializer inference use the ordinary module symbol source and
+    /// overload selector. The authoritative class pass replaces this header with the complete
+    /// signature before checking or lowering.
+    fn with_declared_callable_headers(header: DeclaredCallableClassHeader) -> Self {
+        let DeclaredCallableClassHeader {
+            internal,
+            source_file,
+            source_decl,
+            visibility,
+            flags,
+            methods,
+            member_ext_funs,
+            companion_internal,
+            direct_supertypes,
+            type_parameters,
+            captured_type_parameters,
+        } = header;
+        Self {
+            internal,
+            source_file,
+            source_decl: Some(source_decl),
+            visibility,
+            props: Vec::new(),
+            declared_props: HashMap::new(),
+            constants: HashMap::new(),
+            member_ext_props: HashMap::new(),
+            member_ext_funs,
+            has_primary_ctor: false,
+            ctor_params: Vec::new(),
+            ctor_param_shapes: Vec::new(),
+            ctor_param_names: Vec::new(),
+            ctor_vararg: None,
+            methods,
+            source_methods: HashMap::new(),
+            flags,
+            inner_of: None,
+            companion_internal,
+            lateinit_props: Default::default(),
+            // Header inference only needs the semantic hierarchy, not the class/interface JVM
+            // partition. Publishing every direct parent here keeps inherited candidate traversal
+            // on the common provider path; the complete signature restores the representation split.
+            interfaces: direct_supertypes,
+            interface_type_args: Vec::new(),
+            callable_signature: None,
+            super_internal: None,
+            super_type_args: Vec::new(),
+            super_ctor_params: Vec::new(),
+            ctor_defaults: Vec::new(),
+            secondary_ctors: Vec::new(),
+            type_parameters,
+            captured_type_parameters,
+            metadata_captured_type_parameters: Vec::new(),
+            generic_props: HashMap::new(),
+            nullable_tparam_props: HashMap::new(),
+            generic_property_shapes: HashMap::new(),
+            value_field: None,
+            generic_methods: HashMap::new(),
+        }
+    }
+
     pub fn type_params(&self) -> &Vec<String> {
         &self.type_parameters.type_params
     }
@@ -5718,27 +5794,6 @@ fn collect_signatures_with_cp_impl(
         ty_of_ref_with(r, classes, tparams, &mut DiagSink::new())
     };
 
-    // Top-level function return types (explicit annotations only), collected first so a property
-    // initializer `val v = f()` can infer its type from `f`'s return type regardless of decl order.
-    let mut fun_rets: HashMap<String, Ty> = HashMap::new();
-    for (i, file) in files.iter().enumerate() {
-        diags.set_file(i as u32);
-        let class_names = &file_class_names[i];
-        for &d in &file.decls {
-            if let Decl::Fun(f) = file.decl(d) {
-                if f.receiver.is_none() {
-                    if let Some(r) = &f.ret {
-                        let tp =
-                            TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &|n| {
-                                class_names.get(n)
-                            });
-                        fun_rets.insert(f.name.clone(), ty_of_ref(r, class_names, &tp, diags));
-                    }
-                }
-            }
-        }
-    }
-
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
     let mut declaration_annotation_resolution_attempts = std::collections::HashSet::new();
@@ -5989,7 +6044,6 @@ fn collect_signatures_with_cp_impl(
                                     InferenceSource::file(file, i as u32),
                                     *e,
                                     &class_names,
-                                    &fun_rets,
                                     &this_scope,
                                     &*libraries,
                                     &table,
@@ -6777,7 +6831,6 @@ fn collect_signatures_with_cp_impl(
                                                 InferenceSource::file(file, i as u32),
                                                 expression,
                                                 &class_names,
-                                                &fun_rets,
                                                 &init_scope,
                                                 &*libraries,
                                                 &table,
@@ -6814,7 +6867,6 @@ fn collect_signatures_with_cp_impl(
                                                     InferenceSource::file(file, i as u32),
                                                     expression,
                                                     &class_names,
-                                                    &fun_rets,
                                                     &init_scope,
                                                     &*libraries,
                                                     &table,
@@ -6846,6 +6898,150 @@ fn collect_signatures_with_cp_impl(
                         };
                         Some(type_name(&class_internal(file, &companion.name)))
                     });
+                    // Publish explicitly typed members before any property/getter initializer asks
+                    // for them. This is not a spelling-to-return shortcut: the temporary class
+                    // header is consumed through ModuleSymbols, so overload selection, generic
+                    // binding, visibility, and receiver priority are identical to the checker path.
+                    let header_type_parameters = crate::types::TypeParameters::new(
+                        c.type_params
+                            .iter()
+                            .map(|source| {
+                                symbolic_ctp
+                                    .bound(source)
+                                    .ty_param_name()
+                                    .unwrap_or(source)
+                                    .to_string()
+                            })
+                            .collect(),
+                        c.type_params
+                            .iter()
+                            .map(|source| {
+                                symbolic_ctp
+                                    .bound(source)
+                                    .ty_param_bound()
+                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
+                            })
+                            .collect(),
+                        c.type_param_variances.clone(),
+                    );
+                    let header_captured_type_parameters = crate::types::TypeParameters::invariant(
+                        captured_parameters
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect(),
+                        captured_parameters
+                            .iter()
+                            .map(|(_, bound)| *bound)
+                            .collect(),
+                    );
+                    let (declared_methods, declared_member_extensions) =
+                        declared_member_callable_headers(
+                            &DeclaredMemberHeaderContext {
+                                file,
+                                classes: &class_names,
+                                class_tparams: &ctp,
+                                symbolic_class_tparams: &symbolic_ctp,
+                                compilation_id: table.compilation_id,
+                                source_file: i as u32,
+                                libraries: &*libraries,
+                            },
+                            c,
+                            d,
+                            diags,
+                        );
+                    table.insert_class_sig(
+                        type_name(&internal),
+                        ClassSig::with_declared_callable_headers(DeclaredCallableClassHeader {
+                            internal: type_name(&internal),
+                            source_file: i as u32,
+                            source_decl: d,
+                            visibility: c.visibility,
+                            flags: source_class_flags(c),
+                            methods: declared_methods,
+                            member_ext_funs: declared_member_extensions,
+                            companion_internal: direct_companion,
+                            direct_supertypes: source_direct_supertypes
+                                .get(&type_name(&internal))
+                                .cloned()
+                                .unwrap_or_default()
+                                .into(),
+                            type_parameters: header_type_parameters,
+                            captured_type_parameters: header_captured_type_parameters,
+                        }),
+                    );
+                    if let Some(companion_decl) = c.companion {
+                        if let (Some(companion_internal), Decl::Class(companion)) =
+                            (direct_companion, file.decl(companion_decl))
+                        {
+                            if !table.classes.contains_key(&companion_internal) {
+                                let companion_tparams = TParams::from_decl_with(
+                                    &companion.type_params,
+                                    &companion.type_param_bounds,
+                                    &|name| class_names.get(name),
+                                );
+                                let symbolic_companion_tparams = TParams::symbolic_from_decl_with(
+                                    &companion.type_params,
+                                    &companion.type_param_bounds,
+                                    &|name| class_names.get(name),
+                                )
+                                .alpha_renamed_declaration(
+                                    &companion.type_params,
+                                    table.compilation_id,
+                                    i as u32,
+                                    companion.span.lo,
+                                );
+                                let (methods, extensions) = declared_member_callable_headers(
+                                    &DeclaredMemberHeaderContext {
+                                        file,
+                                        classes: &class_names,
+                                        class_tparams: &companion_tparams,
+                                        symbolic_class_tparams: &symbolic_companion_tparams,
+                                        compilation_id: table.compilation_id,
+                                        source_file: i as u32,
+                                        libraries: &*libraries,
+                                    },
+                                    companion,
+                                    companion_decl,
+                                    diags,
+                                );
+                                let type_parameters = crate::types::TypeParameters::new(
+                                    companion.type_params.clone(),
+                                    companion
+                                        .type_params
+                                        .iter()
+                                        .map(|parameter| {
+                                            symbolic_companion_tparams
+                                                .bound(parameter)
+                                                .ty_param_bound()
+                                                .unwrap_or_else(|| {
+                                                    Ty::nullable(Ty::obj("kotlin/Any"))
+                                                })
+                                        })
+                                        .collect(),
+                                    companion.type_param_variances.clone(),
+                                );
+                                table.insert_class_sig(
+                                    companion_internal,
+                                    ClassSig::with_declared_callable_headers(
+                                        DeclaredCallableClassHeader {
+                                            internal: companion_internal,
+                                            source_file: i as u32,
+                                            source_decl: companion_decl,
+                                            visibility: companion.visibility,
+                                            flags: source_class_flags(companion),
+                                            methods,
+                                            member_ext_funs: extensions,
+                                            companion_internal: None,
+                                            direct_supertypes: Default::default(),
+                                            type_parameters,
+                                            captured_type_parameters:
+                                                crate::types::TypeParameters::default(),
+                                        },
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     let lexical_companion =
                         crate::symbol_resolver::lexical_enclosing_classifier_names(
                             type_name(&internal),
@@ -6921,7 +7117,6 @@ fn collect_signatures_with_cp_impl(
                                         member_inference_source,
                                         de,
                                         &class_names,
-                                        &fun_rets,
                                         &property_scope,
                                         &*libraries,
                                         &table,
@@ -6944,7 +7139,6 @@ fn collect_signatures_with_cp_impl(
                                         member_inference_source,
                                         *g,
                                         &class_names,
-                                        &fun_rets,
                                         &property_scope,
                                         &*libraries,
                                         &table,
@@ -6960,6 +7154,7 @@ fn collect_signatures_with_cp_impl(
                                             span: bp.span,
                                             implicit_classifier,
                                             implicit_value,
+                                            implicit_instance: Some(member_this),
                                         });
                                         deferred_inference = true;
                                     }
@@ -6978,7 +7173,6 @@ fn collect_signatures_with_cp_impl(
                                             member_inference_source,
                                             expression,
                                             &class_names,
-                                            &fun_rets,
                                             &property_scope,
                                             &*libraries,
                                             &table,
@@ -6994,6 +7188,7 @@ fn collect_signatures_with_cp_impl(
                                                 span: bp.span,
                                                 implicit_classifier,
                                                 implicit_value,
+                                                implicit_instance: Some(member_this),
                                             });
                                             deferred_inference = true;
                                         }
@@ -7014,7 +7209,6 @@ fn collect_signatures_with_cp_impl(
                                             member_inference_source,
                                             init,
                                             &class_names,
-                                            &fun_rets,
                                             &property_scope,
                                             &*libraries,
                                             &table,
@@ -7224,7 +7418,6 @@ fn collect_signatures_with_cp_impl(
                                             InferenceSource::file(file, i as u32),
                                             expression,
                                             &class_names,
-                                            &fun_rets,
                                             &[],
                                             &*libraries,
                                             &table,
@@ -7237,57 +7430,6 @@ fn collect_signatures_with_cp_impl(
                             }
                         }
                         sup = bc.base_class.clone();
-                    }
-                    // Sibling/inherited method returns (explicit annotations) so a method with an inferred
-                    // expression body can resolve a call to another method of this class or a superclass
-                    // (`fun b() = a()` where `a(): Int`). Own methods take precedence over a superclass's.
-                    let mut local_rets = fun_rets.clone();
-                    let mut sup_m = c.base_class.clone();
-                    let mut gm = 0;
-                    while let Some(bn) = sup_m {
-                        gm += 1;
-                        if gm > 32 {
-                            break;
-                        }
-                        let Some(bc) = file
-                            .decls
-                            .iter()
-                            .filter_map(|&d| match file.decl(d) {
-                                Decl::Class(x) => Some(x),
-                                _ => None,
-                            })
-                            .find(|x| x.name == bn)
-                        else {
-                            break;
-                        };
-                        // A base method's return type references the BASE class's type parameters
-                        // (`abstract fun f(): T` in `A<T>`), NOT the subclass's — resolve under the
-                        // base's own params (erased), extended with the method's own (`fun <U> m(): U`).
-                        let bctp = TParams::erased(&bc.type_params);
-                        for m in &bc.methods {
-                            if let Some(r) = &m.ret {
-                                let mtp = bctp.extended_with(
-                                    &m.type_params,
-                                    &m.type_param_bounds,
-                                    &|n| class_names.get(n),
-                                );
-                                local_rets.insert(
-                                    m.name.clone(),
-                                    ty_of_ref_silent(r, &class_names, &mtp),
-                                );
-                            }
-                        }
-                        sup_m = bc.base_class.clone();
-                    }
-                    for m in &c.methods {
-                        if let Some(r) = &m.ret {
-                            let mtp =
-                                ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
-                                    class_names.get(n)
-                                });
-                            local_rets
-                                .insert(m.name.clone(), ty_of_ref_silent(r, &class_names, &mtp));
-                        }
                     }
                     let mut methods: MethodMap = MethodMap::new();
                     let mut member_ext_funs: HashMap<String, Vec<MemberExtFunSig>> = HashMap::new();
@@ -7327,7 +7469,6 @@ fn collect_signatures_with_cp_impl(
                                         member_inference_source,
                                         *e,
                                         &class_names,
-                                        &local_rets,
                                         &scope,
                                         &*libraries,
                                         &table,
@@ -8110,7 +8251,6 @@ fn collect_signatures_with_cp_impl(
                                         .with_implicit_value(Some(recv_ty)),
                                     *g,
                                     &class_names,
-                                    &fun_rets,
                                     &context_scope,
                                     &*libraries,
                                     &table,
@@ -8209,8 +8349,7 @@ fn collect_signatures_with_cp_impl(
                         match p.declared_ty() {
                             Some(r) => ty_of_ref(r, &class_names, &property_tparams, diags),
                             None => {
-                                let dt =
-                                    infer_lit_ty(file, de, &class_names, &fun_rets, &*libraries);
+                                let dt = infer_lit_ty(file, de, &class_names, &*libraries);
                                 delegated_getvalue_ret_for_signature(
                                     file,
                                     &table,
@@ -8231,7 +8370,6 @@ fn collect_signatures_with_cp_impl(
                                     InferenceSource::file(file, i as u32),
                                     *g,
                                     &class_names,
-                                    &fun_rets,
                                     &context_scope,
                                     &*libraries,
                                     &table,
@@ -8244,7 +8382,6 @@ fn collect_signatures_with_cp_impl(
                                         InferenceSource::file(file, i as u32),
                                         expression,
                                         &class_names,
-                                        &fun_rets,
                                         &context_scope,
                                         &*libraries,
                                         &table,
@@ -8319,7 +8456,6 @@ fn collect_signatures_with_cp_impl(
 
     finish_member_property_inference(
         files,
-        &fun_rets,
         &*libraries,
         &mut table,
         &mut pending_member_properties,
@@ -8329,7 +8465,6 @@ fn collect_signatures_with_cp_impl(
     finish_top_level_computed_property_inference(
         files,
         &file_class_names,
-        &fun_rets,
         &*libraries,
         &mut table,
         diags,
@@ -9546,7 +9681,6 @@ fn infer_lit_ty(
     file: &File,
     e: ExprId,
     class_names: &ClassNames,
-    fun_rets: &HashMap<String, Ty>,
     src: &dyn SemanticPlatform,
 ) -> Ty {
     let scope = function_import_scope_with(file, src.platform_default_import_packages(), src);
@@ -9605,9 +9739,10 @@ fn infer_lit_ty(
         },
         implicit_classifier: None,
         implicit_value: None,
+        implicit_instance: None,
         callable_ref: &|_, _, _| None,
     };
-    infer_lit_ty_p(file, e, class_names, fun_rets, &[], src, &env)
+    infer_lit_ty_p(file, e, class_names, &[], src, &env)
 }
 
 fn delegated_getvalue_ret_for_signature(
@@ -9769,6 +9904,9 @@ struct InferEnv<'a> {
     implicit_classifier: Option<TypeName>,
     /// Nearest lexical singleton receiver whose ordinary members are visible in this declaration.
     implicit_value: Option<Ty>,
+    /// The enclosing class instance denoted by an explicit `this` expression. Keeping it as a scope
+    /// value lets `this.m()` and bare `m()` feed the same receiver type into symbol selection.
+    implicit_instance: Option<Ty>,
     /// Exact callable-reference function shape from the federated module/library symbol record.
     /// The boolean says the receiver syntax names a classifier; object classifiers remain bound.
     callable_ref: &'a dyn Fn(Ty, &str, bool) -> Option<Ty>,
@@ -9808,7 +9946,6 @@ fn infer_top_level_property_expr(
     source: InferenceSource<'_>,
     expression: ExprId,
     class_names: &ClassNames,
-    fun_rets: &HashMap<String, Ty>,
     context_scope: &[(String, Ty, bool)],
     src: &dyn SemanticPlatform,
     table: &SymbolTable,
@@ -9823,15 +9960,7 @@ fn infer_top_level_property_expr(
                 .map(|(name, (ty, is_var, _))| (name.clone(), *ty, *is_var)),
         )
         .collect::<Vec<_>>();
-    infer_lit_ty_scoped(
-        source,
-        expression,
-        class_names,
-        fun_rets,
-        &props,
-        src,
-        table,
-    )
+    infer_lit_ty_scoped(source, expression, class_names, &props, src, table)
 }
 
 /// A member computed getter whose first-pass inference hit `Error`, kept for the post-walk retry
@@ -9849,6 +9978,7 @@ struct PendingMemberProperty {
     span: Span,
     implicit_classifier: Option<TypeName>,
     implicit_value: Option<Ty>,
+    implicit_instance: Option<Ty>,
 }
 
 /// Retry unannotated MEMBER expression getters whose first-pass inference hit `Error` because a
@@ -9858,7 +9988,6 @@ struct PendingMemberProperty {
 /// count, so dependency chains converge and self/mutual cycles stay `Error`.
 fn finish_member_property_inference(
     files: &[File],
-    fun_rets: &HashMap<String, Ty>,
     src: &dyn SemanticPlatform,
     table: &mut SymbolTable,
     pending: &mut Vec<PendingMemberProperty>,
@@ -9887,10 +10016,10 @@ fn finish_member_property_inference(
             let inferred = infer_lit_ty_scoped(
                 InferenceSource::file(&files[entry.file_index], entry.file_index as u32)
                     .with_implicit_classifier(entry.implicit_classifier)
-                    .with_implicit_value(entry.implicit_value),
+                    .with_implicit_value(entry.implicit_value)
+                    .with_implicit_instance(entry.implicit_instance),
                 entry.expression,
                 &entry.class_names,
-                fun_rets,
                 &entry.scope,
                 src,
                 table,
@@ -9937,7 +10066,6 @@ fn finish_member_property_inference(
 fn finish_top_level_computed_property_inference(
     files: &[File],
     file_class_names: &[ClassNames],
-    fun_rets: &HashMap<String, Ty>,
     src: &dyn SemanticPlatform,
     table: &mut SymbolTable,
     diags: &mut DiagSink,
@@ -9996,7 +10124,6 @@ fn finish_top_level_computed_property_inference(
                     InferenceSource::file(file, file_index as u32),
                     *getter,
                     &file_class_names[file_index],
-                    fun_rets,
                     &context_scope,
                     src,
                     table,
@@ -10065,7 +10192,6 @@ fn infer_lit_ty_scoped(
     source: InferenceSource<'_>,
     e: ExprId,
     class_names: &ClassNames,
-    fun_rets: &HashMap<String, Ty>,
     props: &[(String, Ty, bool)],
     src: &dyn SemanticPlatform,
     table: &SymbolTable,
@@ -10186,19 +10312,30 @@ fn infer_lit_ty_scoped(
                         )
                         .and_then(crate::symbol_resolver::Symbol::call_return)
                 });
-                if implicit.is_some() {
-                    implicit
-                } else {
-                    callable_resolver
-                        .select_symbol(
-                            crate::symbol_resolver::SymRecv::TopLevel,
-                            name,
-                            args,
-                            type_args,
-                        )
-                        .and_then(crate::symbol_resolver::Symbol::top_level_call)
-                        .map(|call| call.ret)
-                }
+                implicit
+                    .or_else(|| {
+                        implicit_value.and_then(|value| {
+                            callable_resolver
+                                .select_symbol(
+                                    crate::symbol_resolver::SymRecv::ImplicitValue(value),
+                                    name,
+                                    args,
+                                    type_args,
+                                )
+                                .and_then(crate::symbol_resolver::Symbol::call_return)
+                        })
+                    })
+                    .or_else(|| {
+                        callable_resolver
+                            .select_symbol(
+                                crate::symbol_resolver::SymRecv::TopLevel,
+                                name,
+                                args,
+                                type_args,
+                            )
+                            .and_then(crate::symbol_resolver::Symbol::top_level_call)
+                            .map(|call| call.ret)
+                    })
             }
             Some(receiver) => callable_resolver
                 .select_symbol(
@@ -10250,9 +10387,10 @@ fn infer_lit_ty_scoped(
         classifier_property: &classifier_property,
         implicit_classifier,
         implicit_value,
+        implicit_instance,
         callable_ref: &callable_ref,
     };
-    infer_lit_ty_p(file, e, class_names, fun_rets, props, src, &env)
+    infer_lit_ty_p(file, e, class_names, props, src, &env)
 }
 
 /// Extract the compile-time value of a source literal after its semantic type has been established.
@@ -10306,7 +10444,6 @@ fn infer_lit_ty_p(
     file: &File,
     e: ExprId,
     class_names: &ClassNames,
-    fun_rets: &HashMap<String, Ty>,
     props: &[(String, Ty, bool)],
     src: &dyn SemanticPlatform,
     env: &InferEnv,
@@ -10437,7 +10574,7 @@ fn infer_lit_ty_p(
                             .cloned()
                             .map(|(name, ty)| (name, ty, false)),
                     );
-                    infer_lit_ty_p(file, *body, class_names, fun_rets, &body_props, src, env)
+                    infer_lit_ty_p(file, *body, class_names, &body_props, src, env)
                 }
             };
             if ret == Ty::Error {
@@ -10464,6 +10601,10 @@ fn infer_lit_ty_p(
                 props
                     .iter()
                     .find_map(|(pn, t, _)| (pn == n).then_some(*t))
+                    // An explicit extension receiver is a lexical `this` binding in `props` and
+                    // therefore wins above. Only an otherwise-unbound `this` denotes the enclosing
+                    // class instance carried by the member scope.
+                    .or_else(|| (n == "this").then_some(env.implicit_instance).flatten())
                     .or_else(|| {
                         class_names
                             .get(n.as_str())
@@ -10500,7 +10641,7 @@ fn infer_lit_ty_p(
             }
             // Property read (`s.length`, `list.size`, `vc.value`). Use the scoped resolver so an
             // imported extension property such as `Char.code` can resolve through its getter.
-            let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, env);
+            let rt = infer_lit_ty_p(file, *receiver, class_names, props, src, env);
             if let Some(ret) = (env.property)(rt, name) {
                 return ret;
             }
@@ -10518,13 +10659,13 @@ fn infer_lit_ty_p(
             Ty::Error
         }
         Expr::Index { array, indices } => {
-            let receiver = infer_lit_ty_p(file, *array, class_names, fun_rets, props, src, env);
+            let receiver = infer_lit_ty_p(file, *array, class_names, props, src, env);
             if let Some(element) = receiver.array_elem() {
                 return element;
             }
             let argument_types = indices
                 .iter()
-                .map(|index| infer_lit_ty_p(file, *index, class_names, fun_rets, props, src, env))
+                .map(|index| infer_lit_ty_p(file, *index, class_names, props, src, env))
                 .collect::<Vec<_>>();
             if argument_types.contains(&Ty::Error) {
                 return Ty::Error;
@@ -10534,14 +10675,12 @@ fn infer_lit_ty_p(
         }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
-            UnOp::Neg | UnOp::Plus => {
-                infer_lit_ty_p(file, *operand, class_names, fun_rets, props, src, env)
-            }
+            UnOp::Neg | UnOp::Plus => infer_lit_ty_p(file, *operand, class_names, props, src, env),
         },
         Expr::Binary { op, lhs, rhs, .. } => {
             let (lt, rt) = (
-                infer_lit_ty_p(file, *lhs, class_names, fun_rets, props, src, env),
-                infer_lit_ty_p(file, *rhs, class_names, fun_rets, props, src, env),
+                infer_lit_ty_p(file, *lhs, class_names, props, src, env),
+                infer_lit_ty_p(file, *rhs, class_names, props, src, env),
             );
             match op {
                 BinOp::Lt
@@ -10613,7 +10752,6 @@ fn infer_lit_ty_p(
                                             file,
                                             *argument,
                                             class_names,
-                                            fun_rets,
                                             props,
                                             src,
                                             env,
@@ -10676,7 +10814,7 @@ fn infer_lit_ty_p(
                     // reached when the simpler probe returned `None`, so it never overrides an inference.
                     let arg_tys: Vec<Ty> = args
                         .iter()
-                        .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, env))
+                        .map(|a| infer_lit_ty_p(file, *a, class_names, props, src, env))
                         .collect();
                     crate::trace_compiler!(
                         "signature_inference",
@@ -10728,13 +10866,6 @@ fn infer_lit_ty_p(
                 // `x.toString()`): resolve the return type through the FEDERATED symbol source (the same
                 // classpath/stdlib resolution the full checker uses) — NO stdlib symbol names hardcoded.
                 Expr::Member { receiver, name } => {
-                    // `this.method()` — a method of the CURRENT module's class; the federated source
-                    // doesn't carry the module's own (in-progress) signatures, so use the rets map.
-                    if matches!(file.expr(*receiver), Expr::Name(r) if r == "this") {
-                        if let Some(ret) = fun_rets.get(name.as_str()) {
-                            return *ret;
-                        }
-                    }
                     // A FULLY-QUALIFIED constructor (`java.util.concurrent.CopyOnWriteArrayList<
                     // Item>()`, `pkg.Outer.Nested()`): when the WHOLE callee path names a
                     // classifier, this is the qualified spelling of the simple-name constructor arm
@@ -10750,7 +10881,7 @@ fn infer_lit_ty_p(
                     }
                     let arg_tys: Vec<Ty> = args
                         .iter()
-                        .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, env))
+                        .map(|a| infer_lit_ty_p(file, *a, class_names, props, src, env))
                         .collect();
                     let arg_kinds = call_arg_kinds(file, args, &arg_tys);
                     if call_args_selectable(file, args, &arg_tys) {
@@ -10764,8 +10895,7 @@ fn infer_lit_ty_p(
                             }
                         }
                     }
-                    let recv_ty =
-                        infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, env);
+                    let recv_ty = infer_lit_ty_p(file, *receiver, class_names, props, src, env);
                     crate::trace_compiler!(
                         "signature_inference",
                         "member call={name} receiver={recv_ty:?} args={arg_tys:?} selectable={}",
@@ -10807,8 +10937,8 @@ fn infer_lit_ty_p(
             else_branch: Some(eb),
             ..
         } => {
-            let t = infer_lit_ty_p(file, *then_branch, class_names, fun_rets, props, src, env);
-            let e = infer_lit_ty_p(file, *eb, class_names, fun_rets, props, src, env);
+            let t = infer_lit_ty_p(file, *then_branch, class_names, props, src, env);
+            let e = infer_lit_ty_p(file, *eb, class_names, props, src, env);
             common_lit_ty(t, e)
         }
         // A `when` expression body — the common type of all arm bodies. Requires an explicit `else` arm
@@ -10819,7 +10949,7 @@ fn infer_lit_ty_p(
             }
             let mut acc: Option<Ty> = None;
             for a in arms {
-                let bt = infer_lit_ty_p(file, a.body, class_names, fun_rets, props, src, env);
+                let bt = infer_lit_ty_p(file, a.body, class_names, props, src, env);
                 if bt == Ty::Error {
                     return Ty::Error;
                 }
@@ -10834,16 +10964,16 @@ fn infer_lit_ty_p(
         // tracked here, so a trailing referring to a local infers `Error` (safe skip).
         Expr::Block {
             trailing: Some(t), ..
-        } => infer_lit_ty_p(file, *t, class_names, fun_rets, props, src, env),
+        } => infer_lit_ty_p(file, *t, class_names, props, src, env),
         // A range value (`val r = 1..10`, `0 until n`, `4 downTo 1`) — the matching stdlib range type
         // (mirrors the checker's `RangeTo` typing), so a range-typed property's type infers.
         Expr::RangeTo { lo, hi, .. } => {
-            let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props, src, env);
-            let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src, env);
+            let lt = infer_lit_ty_p(file, *lo, class_names, props, src, env);
+            let rt = infer_lit_ty_p(file, *hi, class_names, props, src, env);
             Ty::range_value_type(lt, rt).unwrap_or(Ty::Error)
         }
         Expr::NotNull { operand } => {
-            let ty = infer_lit_ty_p(file, *operand, class_names, fun_rets, props, src, env);
+            let ty = infer_lit_ty_p(file, *operand, class_names, props, src, env);
             if ty == Ty::Null {
                 Ty::Nothing
             } else {
@@ -10869,8 +10999,7 @@ fn infer_lit_ty_p(
                     return (env.callable_ref)(Ty::obj_name(internal), name, true)
                         .unwrap_or(Ty::Error);
                 }
-                let receiver_ty =
-                    infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, env);
+                let receiver_ty = infer_lit_ty_p(file, *receiver, class_names, props, src, env);
                 return (env.callable_ref)(receiver_ty, name, false).unwrap_or(Ty::Error);
             }
             if let Some(internal) = class_names.get_class(name) {
@@ -11321,6 +11450,110 @@ fn member_signature(
         contract: None,
         plugin_expression: None,
     }
+}
+
+/// Normalize the explicitly typed callable headers of one source classifier into the same
+/// [`Signature`] families consumed by [`ModuleSymbols`](crate::module_symbols::ModuleSymbols).
+/// This is the declaration-header half of class signature collection: bodies and inferred returns
+/// stay deferred, while overloads, generic shapes, defaults, visibility, and source identities are
+/// already authoritative enough for another declaration's initializer to select a call.
+struct DeclaredMemberHeaderContext<'a> {
+    file: &'a File,
+    classes: &'a ClassNames,
+    class_tparams: &'a TParams,
+    symbolic_class_tparams: &'a TParams,
+    compilation_id: u64,
+    source_file: u32,
+    libraries: &'a dyn SymbolSource,
+}
+
+fn declared_member_callable_headers(
+    context: &DeclaredMemberHeaderContext<'_>,
+    class: &ClassDecl,
+    declaration: DeclId,
+    diags: &mut DiagSink,
+) -> (MethodMap, HashMap<String, Vec<MemberExtFunSig>>) {
+    let DeclaredMemberHeaderContext {
+        file,
+        classes,
+        class_tparams,
+        symbolic_class_tparams,
+        compilation_id,
+        source_file,
+        libraries,
+    } = context;
+    let mut methods = MethodMap::new();
+    let mut extensions: HashMap<String, Vec<MemberExtFunSig>> = HashMap::new();
+    for (method_index, method) in class.methods.iter().enumerate() {
+        let Some(return_ref) = method.ret.as_ref() else {
+            continue;
+        };
+        let method_tparams =
+            class_tparams.extended_with(&method.type_params, &method.type_param_bounds, &|name| {
+                classes.get(name)
+            });
+        let ret = ty_of_ref(return_ref, classes, &method_tparams, diags);
+        let mut signature = member_signature(
+            file,
+            method,
+            ret,
+            classes,
+            &method_tparams,
+            *source_file,
+            crate::libraries::SourceMember::Class {
+                file: *source_file,
+                owner: declaration.0,
+                method: method_index as u32,
+            },
+            *libraries,
+            diags,
+        );
+        if class.is_interface() && matches!(method.body, FunBody::None) {
+            signature.flags = signature.flags.with_is_abstract(true);
+        }
+        if !method.type_params.is_empty() || !class.type_params.is_empty() {
+            let symbolic_method_tparams = symbolic_class_tparams
+                .symbolic_extended_with(&method.type_params, &method.type_param_bounds, &|name| {
+                    classes.get(name)
+                })
+                .alpha_renamed_declaration(
+                    &method.type_params,
+                    *compilation_id,
+                    *source_file,
+                    method.signature_span.lo,
+                );
+            signature.generic_sig = Some(source_generic_signature_from_tparams(
+                method,
+                classes,
+                &symbolic_method_tparams,
+                signature.ret,
+                None,
+                diags,
+            ));
+        }
+        if let Some(receiver_ty) = method
+            .receiver
+            .as_ref()
+            .map(|receiver| ty_of_ref(receiver, classes, &method_tparams, diags))
+        {
+            extensions
+                .entry(method.name.clone())
+                .or_default()
+                .push(MemberExtFunSig {
+                    receiver_ty,
+                    physical_receiver: receiver_ty,
+                    physical_params: signature.params.clone(),
+                    signature,
+                    physical_name: method.name.clone(),
+                });
+        } else {
+            methods
+                .entry(method.name.clone())
+                .or_default()
+                .push(signature);
+        }
+    }
+    (methods, extensions)
 }
 
 /// The function's own type parameter that an INFERRED return type resolves to, read off the
