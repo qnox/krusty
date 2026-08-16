@@ -4786,7 +4786,7 @@ fn constructed_outside(ir: &IrFile, fq: &str) -> bool {
         .exprs
         .iter()
         .enumerate()
-        .filter(|(_, e)| matches!(e, IrExpr::New { internal, .. } if internal.render() == fq))
+        .filter(|(_, e)| matches!(e, IrExpr::New { internal, .. } if internal.matches(fq)))
         .map(|(id, _)| id as crate::ir::ExprId)
         .collect();
     if constructions.is_empty() {
