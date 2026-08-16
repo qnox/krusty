@@ -817,10 +817,7 @@ fn lower_file_at_reporting_impl(
                 .iter()
                 .filter(|p| is_backing_field_prop(p))
                 .map(|p| {
-                    let ty =
-                        p.ty.as_ref()
-                            .map(|_| resolved_prop_ty(&p.name))
-                            .unwrap_or_else(|| info.ty(p.init.unwrap()));
+                    let ty = resolved_prop_ty(&p.name);
                     // A declared `T?` keeps its nullability — the resolver's ClassSig type is the
                     // stored value type, which does not carry it.
                     let ty = if p.ty.as_ref().is_some_and(|r| r.nullable()) {

@@ -577,6 +577,16 @@ pub struct Signature {
     pub plugin_expression: Option<crate::libraries::PluginExpressionDeclaration>,
 }
 
+/// A literal `null` is an expression-only sentinel. Once inference publishes it as a declaration
+/// type, Kotlin's semantic type is the nullable bottom type `Nothing?`.
+fn inferred_declaration_ty(ty: Ty) -> Ty {
+    if ty == Ty::Null {
+        Ty::nullable(Ty::Nothing)
+    } else {
+        ty
+    }
+}
+
 impl Signature {
     /// Source value parameters, excluding the leading context parameters supplied implicitly by the
     /// call site.
@@ -585,6 +595,7 @@ impl Signature {
     }
 
     fn set_inferred_return(&mut self, ret: Ty) -> bool {
+        let ret = inferred_declaration_ty(ret);
         // Collection can recover an exact symbolic return directly from the declaration (for
         // example `fun <T> use(f: () -> T) = f()`). A later body pass may observe only that value's
         // erased bound. Update the physical/checking return, but never replace a declaration-backed
@@ -1471,6 +1482,7 @@ fn module_member_lambda_params(
 
 impl ClassSig {
     fn set_inferred_method_return(&mut self, name: &str, params: &[Ty], ret: Ty) -> bool {
+        let ret = inferred_declaration_ty(ret);
         let mut changed = false;
         if let Some(signature) = self.methods.get_mut(name).and_then(|overloads| {
             overloads
@@ -6095,6 +6107,11 @@ fn collect_signatures_with_cp_impl(
                             }
                         }
                     };
+                    let ret = if f.ret.is_none() {
+                        inferred_declaration_ty(ret)
+                    } else {
+                        ret
+                    };
                     let vararg_index = f.params.iter().position(|p| p.is_vararg);
                     let vararg = vararg_index.is_some();
                     // Trailing params with defaults may be omitted by callers (positional only).
@@ -7232,6 +7249,11 @@ fn collect_signatures_with_cp_impl(
                                     None => Ty::Error,
                                 },
                             }
+                        };
+                        let property_ty = if bp.declared_ty().is_none() {
+                            inferred_declaration_ty(property_ty)
+                        } else {
+                            property_ty
                         };
                         let storage_ty = bp.explicit_backing_field.as_ref().map(|field| {
                             field
@@ -8435,11 +8457,7 @@ fn collect_signatures_with_cp_impl(
                     // `null` is the expression type used by applicability, while an inferred
                     // declaration `val x = null` has Kotlin type `Nothing?`. Declaration symbols
                     // must never publish the literal-only `Null` sentinel.
-                    let ty = if inferred_ty == Ty::Null {
-                        Ty::nullable(Ty::Nothing)
-                    } else {
-                        inferred_ty
-                    };
+                    let ty = inferred_declaration_ty(inferred_ty);
                     // Computed getters are diagnosed only after the bounded module-wide retry below:
                     // unlike an eager initializer, a getter may legally reference a later declaration.
                     if ty == Ty::Error && p.init.is_some() && p.declared_ty().is_none() {
@@ -10069,6 +10087,7 @@ fn finish_member_property_inference(
             if inferred == Ty::Error {
                 return true;
             }
+            let inferred = inferred_declaration_ty(inferred);
             changed = true;
             if let Some(sig) = table.class_by_type_name_mut(entry.owner) {
                 if let Some(property) = sig.declared_props.get_mut(&entry.prop_name) {
@@ -10173,6 +10192,7 @@ fn finish_top_level_computed_property_inference(
                 if inferred == Ty::Error {
                     continue;
                 }
+                let inferred = inferred_declaration_ty(inferred);
                 let source = (file_index as u32, declaration.0);
                 let updated = table
                     .source_props
@@ -16036,7 +16056,7 @@ fn preinfer_returns_pass_with_owners(
                     internal_name,
                     property.name.clone(),
                     extension_index,
-                    inferred,
+                    inferred_declaration_ty(inferred),
                 ));
                 pre.this_labels.pop();
             }
@@ -16499,7 +16519,7 @@ fn check_file_at_impl_mode(
                 sigs.iter_mut()
                     .find(|s| s.source_file == Some(file) && s.source_decl == Some(DeclId(decl)))
             }) {
-                sig.ret = ret;
+                sig.set_inferred_return(ret);
             }
         }
         for ((file, decl, name), ret) in inferred_ext_fun_rets {
@@ -16511,7 +16531,7 @@ fn check_file_at_impl_mode(
                     })
                 })
             }) {
-                sig.ret = ret;
+                sig.set_inferred_return(ret);
             }
         }
         for ((internal, name, params), ret) in inferred_method_rets {
@@ -16520,7 +16540,7 @@ fn check_file_at_impl_mode(
                 .and_then(|c| c.methods.get_mut(&name))
                 .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
             {
-                sig.ret = ret;
+                sig.set_inferred_return(ret);
             }
         }
         for ((internal, name, receiver, params), ret) in inferred_member_ext_fun_rets {
@@ -16533,7 +16553,7 @@ fn check_file_at_impl_mode(
                     })
                 })
             {
-                signature.signature.ret = ret;
+                signature.signature.set_inferred_return(ret);
             }
         }
     }
@@ -50623,7 +50643,7 @@ impl<'a> Checker<'a> {
                         self.this_labels.pop();
                     }
                     self.this_extension_receiver = previous_extension_receiver;
-                    inferred
+                    inferred_declaration_ty(inferred)
                 }
                 _ => Ty::Unit,
             }
