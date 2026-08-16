@@ -6057,3 +6057,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration returns `Object`. This matches kotlinc for top-level, member, local, module, and
   classpath declarations without origin-specific descriptor paths.
   Tests: `tests/nothing_descriptor_e2e.rs`.
+
+- **A construction's argument labels map onto parameter slots.** A constructor's parameter shapes
+  live in DECLARATION order while its arguments are written in source order, and labels reorder them
+  (`Conv(g = …, f = …)`). The parameter an argument fills is therefore a mapping, never its written
+  position: reading the shapes by position hands each lambda another parameter's function type,
+  which compiles perfectly well and throws `ClassCastException` at run time — with nothing generic
+  in sight, so this is not a generics rule. Constructors from local, module, and classpath providers
+  are already normalized into one classifier record. Their early lambda expectations now consume
+  that record and the ordinary callable argument mapper—the same named/default/vararg/trailing-lambda
+  rules used for final candidate selection—instead of maintaining a constructor-only mapping.
+  Tests: `tests/construction_argument_labels_e2e.rs`.

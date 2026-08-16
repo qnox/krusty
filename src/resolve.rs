@@ -43182,103 +43182,56 @@ impl<'a> Checker<'a> {
         ))
     }
 
-    /// The constructor parameter shapes each argument of `Name(args)` is typed against: per
-    /// parameter, its type and whether that type is a RECEIVER function type (`Scope.() -> Unit`,
-    /// whose lambda binds `this`). Federated over both declaration origins — a module class answers
-    /// from its own signature (the same-file AST supplying the receiver marks its `Ty` erases), a
-    /// compiled class from the `LibraryType` constructor of the same arity, whose marks were restored
-    /// from `@Metadata`. Before this, only the module origin answered, so a lambda passed to a
-    /// compiled receiver-lambda constructor got no implicit `this` and a bare member call in it was
-    /// "expression is not callable".
+    /// The constructor parameter shape each argument of `Name(args)` is typed against, in SOURCE
+    /// argument order. The normalized classifier record supplies constructors for every declaration
+    /// origin, and the ordinary callable mapper supplies named/default/vararg/trailing-lambda slots.
+    /// No constructor-only or provider-specific mapping is permitted here.
     fn construction_argument_expectations(
         &self,
         internal: TypeName,
         arity: usize,
+        arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<Vec<Option<(Ty, bool)>>> {
-        if let Some(cls) = self.syms.class_by_type_name(internal) {
-            let recv_flags = self
-                .source_class_decl_by_internal(internal)
-                .map(|class| {
-                    class
-                        .props
-                        .iter()
-                        .map(|parameter| parameter.ty.fun_has_receiver())
-                        .collect()
-                })
-                .unwrap_or_else(|| Self::semantic_lambda_receiver_flags(&cls.ctor_params));
-            let mut candidates = Vec::new();
-            if cls.ctor_params.len() == arity {
-                candidates.push(
-                    cls.ctor_params
-                        .iter()
-                        .enumerate()
-                        .map(|(i, parameter)| {
-                            (*parameter, recv_flags.get(i).copied().unwrap_or(false))
-                        })
-                        .collect::<Vec<_>>(),
-                );
-            }
-            candidates.extend(
-                cls.secondary_ctors
-                    .iter()
-                    .filter(|parameters| parameters.len() == arity)
-                    .map(|parameters| {
-                        parameters
-                            .iter()
-                            .copied()
-                            .map(|parameter| (parameter, false))
-                            .collect::<Vec<_>>()
-                    }),
-            );
-            let first = candidates.first()?;
-            return Some(
-                (0..arity)
-                    .map(|slot| {
-                        let expectation = first[slot];
-                        candidates
-                            .iter()
-                            .all(|candidate| candidate[slot] == expectation)
-                            .then_some(expectation)
-                    })
-                    .collect(),
-            );
-        }
         let classifier = self.resolved_type_name(internal)?;
-        // Arity alone must also decide WHETHER a constructor can answer: this runs before overload
-        // selection, so with two same-arity constructors the first one's parameter shapes would be
-        // imposed on a call meant for the other — typing a lambda against a receiver it does not have.
-        // Answer only when the arity identifies one constructor; otherwise the lambda keeps the
-        // expected-type-free shape it had before this federation.
         let candidates = classifier
             .constructors
             .iter()
-            .filter(|member| member.params.len() == arity)
-            .collect::<Vec<_>>();
-        let first = *candidates.first()?;
-        Some(
-            (0..arity)
-                .map(|slot| {
-                    let expectation = (
-                        first.params[slot],
-                        first
-                            .call_sig
-                            .lambda_receiver_params
-                            .get(slot)
-                            .copied()
-                            .unwrap_or(false),
-                    );
-                    candidates
-                        .iter()
-                        .all(|candidate| {
-                            candidate.params[slot] == expectation.0
-                                && candidate
+            .filter_map(|constructor| {
+                let slots = call_argument_parameter_indices(
+                    arity,
+                    constructor.params.len(),
+                    arg_names,
+                    trailing_lambda,
+                    &constructor.call_sig,
+                )?;
+                Some(
+                    slots
+                        .into_iter()
+                        .map(|slot| {
+                            (
+                                constructor.params[slot],
+                                constructor
                                     .call_sig
                                     .lambda_receiver_params
                                     .get(slot)
                                     .copied()
-                                    .unwrap_or(false)
-                                    == expectation.1
+                                    .unwrap_or(false),
+                            )
                         })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let first = candidates.first()?;
+        Some(
+            first
+                .iter()
+                .enumerate()
+                .map(|(source, &expectation)| {
+                    candidates
+                        .iter()
+                        .all(|candidate| candidate[source] == expectation)
                         .then_some(expectation)
                 })
                 .collect(),
@@ -47511,7 +47464,12 @@ impl<'a> Checker<'a> {
                     && self.resolver().top_level_candidates(&fname).is_empty()
                 {
                     bare_classifier.and_then(|internal| {
-                        self.construction_argument_expectations(internal, args.len())
+                        self.construction_argument_expectations(
+                            internal,
+                            args.len(),
+                            arg_names.as_deref(),
+                            self.file.call_has_trailing_lambda.contains(&call.0),
+                        )
                     })
                 } else {
                     None
