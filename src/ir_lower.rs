@@ -26,11 +26,11 @@ use crate::frontend::{
     SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
 use crate::ir::{
-    Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
-    IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp, IrfFlags,
+    Callee, ClassId, ExprId, FnParamInfo, IrAnnotationConstruction, IrBinOp, IrCatch, IrClass,
+    IrConst, IrCtorArg, IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp, IrfFlags,
 };
 use crate::kt_string::KtString;
-use crate::libraries::{map_call_args, InlineKind, SemanticPlatform};
+use crate::libraries::{map_call_args, InlineKind, LibraryMember, SemanticPlatform};
 use crate::names::{property_getter_name, property_setter_name};
 use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, RuntimeCtor, RuntimeOp,
@@ -147,16 +147,6 @@ pub fn lower_file_reporting(
     bail: &std::cell::RefCell<String>,
 ) -> Option<IrFile> {
     lower_file_at_reporting(file, 0, info, syms, runtime, bail)
-}
-
-/// Whether this file constructs `internal` as an annotation instance (`A("x")`), which is what decides
-/// that its synthetic implementation class is emitted at all. kotlinc generates one implementation per
-/// construction site and nothing for an annotation that is only declared.
-fn annotation_is_constructed(info: &FrontendTypeInfo, internal: &str) -> bool {
-    let owner = type_name(internal);
-    info.resolved_constructors
-        .values()
-        .any(|constructor| constructor.owner() == owner)
 }
 
 /// Lower a checked file with its module file index. Multi-file drivers must use this so declaration ids
@@ -1205,28 +1195,6 @@ fn lower_file_at_reporting_impl(
             // has its own lowering, which already carries them.
             if let Some(captures) = info.local_class_captures_by_class.get(&d) {
                 lo.local_class_captures.insert(id, captures.clone());
-            }
-            // For an `annotation class` this file CONSTRUCTS, also emit the synthetic IMPLEMENTATION
-            // class (kotlinc's `…$annotationImpl`) implementing the annotation interface + the
-            // `java.lang.annotation.Annotation` contract, so `A(args)` can construct an annotation
-            // instance. The backend generates the whole impl from `fields` (see
-            // `emit_annotation_impl_class`).
-            //
-            // Only when constructed. kotlinc emits an implementation per CONSTRUCTION SITE and none at
-            // all for an annotation that is merely declared — the overwhelmingly common case — so
-            // emitting one per declaration adds a class file to every module that declares an
-            // annotation and can never match kotlinc's output.
-            if c.is_annotation() && annotation_is_constructed(info, &internal) {
-                let mut impl_class = lo.ir.classes[id as usize].clone();
-                impl_class.fq_name = type_name(&format!("{internal}$annotationImpl"));
-                impl_class.is_annotation = false;
-                impl_class.annotation_impl_of = Some(type_name(&internal));
-                impl_class.is_source_declared = false;
-                impl_class.interfaces = vec![type_name(&internal)].into();
-                impl_class.superclass = type_name("kotlin/Any");
-                impl_class.supertypes = vec![];
-                impl_class.methods = vec![];
-                lo.ir.add_class(impl_class);
             }
             let mut methods: HashMap<String, Vec<(u32, u32, Ty)>> = HashMap::new();
             let mut method_fids = Vec::new();
@@ -3638,16 +3606,6 @@ fn lower_file_at_reporting_impl(
                     // Only register when EVERY default lowered — a partial set would emit a stub that fills
                     // some slots with a zero placeholder (a miscompile); bail to the no-stub status quo.
                     if all_ok {
-                        // An `annotation class` is constructed through its synthetic IMPL class
-                        // (`…$annotationImpl`), which carries the same constructor — so the default
-                        // overload must be registered for the impl too, or a call omitting a default
-                        // targets an `<init>(…, int, DefaultConstructorMarker)` nothing emits.
-                        if c.is_annotation() && annotation_is_constructed(info, &internal) {
-                            lo.ir.insert_class_ctor_defaults(
-                                &format!("{internal}$annotationImpl"),
-                                defaults.clone(),
-                            );
-                        }
                         lo.ir.insert_class_ctor_defaults(&internal, defaults);
                     }
                 }
@@ -6609,12 +6567,60 @@ impl<'a> Lower<'a> {
             }
         };
         let internal = self.ir.classes[class as usize].fq_name_id();
-        Some(self.ir.add_expr(IrExpr::New {
+        let construction = self.ir.add_expr(IrExpr::New {
             internal,
             args,
             ctor_params,
             ctor_desc: None,
-        }))
+        });
+        self.record_annotation_construction(construction, internal)?;
+        Some(construction)
+    }
+
+    /// Attach the normalized annotation declaration shape to one ordinary construction identity.
+    /// `IrExpr::New` remains the sole construction node; target backends consume this sparse fact only
+    /// when their runtime cannot instantiate an annotation interface directly.
+    fn record_annotation_construction(
+        &mut self,
+        construction: ExprId,
+        owner: TypeName,
+    ) -> Option<()> {
+        let model = self.syms.class_model(owner)?;
+        let Some(members) = model.annotation_members else {
+            return Some(());
+        };
+        if members.len() != model.constructor_params.len() {
+            return self
+                .bail("selected annotation constructor has an incomplete declaration shape");
+        }
+        let mut defaults = self
+            .ir
+            .class_ctor_defaults_name(owner)
+            .cloned()
+            .unwrap_or_else(|| vec![None; members.len()]);
+        if !model.constructor_defaults.is_empty() {
+            defaults.resize(members.len(), None);
+            for (index, value) in model.constructor_defaults.iter().enumerate() {
+                let Some(value) = value else { continue };
+                let slot = defaults.get_mut(index)?;
+                if slot.is_none() {
+                    *slot = Some(ctor_default_to_ir(&mut self.ir, self.runtime, value)?);
+                }
+            }
+        }
+        self.ir.annotation_constructions.insert(
+            construction,
+            IrAnnotationConstruction {
+                interface: owner,
+                members: members
+                    .into_iter()
+                    .map(|(name, ty)| (name, ty_to_ir(stored_value_ty(ty))))
+                    .collect(),
+                defaults,
+                enclosing_class: self.cur_class,
+            },
+        );
+        Some(())
     }
 
     fn emit_new_external(
@@ -6624,6 +6630,53 @@ impl<'a> Lower<'a> {
         args: Vec<u32>,
     ) -> u32 {
         self.ir.new_external(internal.as_ref(), ctor_desc, args)
+    }
+
+    fn emit_checked_new_external(
+        &mut self,
+        owner: TypeName,
+        ctor_desc: impl Into<String>,
+        args: Vec<u32>,
+    ) -> Option<u32> {
+        let construction = self.ir.add_expr(IrExpr::New {
+            internal: owner,
+            args,
+            ctor_params: None,
+            ctor_desc: Some(ctor_desc.into()),
+        });
+        self.record_annotation_construction(construction, owner)?;
+        Some(construction)
+    }
+
+    /// Realize one checker-selected classpath constructor from normalized declaration facts.
+    /// A missing classfile descriptor is not a classifier kind: metadata-backed ordinary classes
+    /// derive it from their physical parameters, while an actual value class carries its semantic
+    /// underlying type and remains deferred to the platform value-class pass.
+    fn emit_selected_library_new(
+        &mut self,
+        owner: TypeName,
+        member: &LibraryMember,
+        args: Vec<u32>,
+    ) -> Option<u32> {
+        if let Some(underlying) = self
+            .syms
+            .class_model(owner)
+            .and_then(|class| class.value_underlying)
+        {
+            return Some(self.ir.add_expr(IrExpr::New {
+                internal: owner,
+                args,
+                ctor_params: Some(vec![ty_to_ir(underlying)]),
+                ctor_desc: None,
+            }));
+        }
+        let descriptor = if member.descriptor.is_empty() {
+            self.runtime
+                .method_descriptor(&member.physical_params, Ty::Unit)?
+        } else {
+            member.descriptor.clone()
+        };
+        self.emit_checked_new_external(owner, descriptor, args)
     }
 
     fn lower_resolved_source_constructor(
@@ -8985,7 +9038,7 @@ impl<'a> Lower<'a> {
                     return Some(self.wrap_arg_prelude(new, prelude));
                 }
                 let descriptor = self.runtime.method_descriptor(&invoke_params, Ty::Unit)?;
-                let new = self.emit_new_external(&internal, descriptor, lowered);
+                let new = self.emit_checked_new_external(owner, descriptor, lowered)?;
                 Some(self.wrap_arg_prelude(new, prelude))
             }
             ResolvedConstructor::Plain {
@@ -8994,10 +9047,6 @@ impl<'a> Lower<'a> {
                 args,
                 ..
             } => {
-                let value_underlying = self
-                    .syms
-                    .class_model(owner)
-                    .and_then(|class| class.value_underlying);
                 let (mut lowered, prelude) = if member.call_sig.vararg {
                     self.lower_library_member_vararg_args(
                         call,
@@ -9029,19 +9078,7 @@ impl<'a> Lower<'a> {
                 if let Some(outer) = outer {
                     lowered.insert(0, self.expr(outer)?);
                 }
-                // A value-class ctor is marked by an EMPTY descriptor: emit a `New` carrying the ctor
-                // parameter TYPES so the value-class pass realizes `constructor-impl` (arg supplied) or
-                // `constructor-impl$default` (arg omitted). A value class is single-field, so use its
-                // DECLARED underlying as the sole param — `member.params` reflects the CALL arity (empty
-                // for a no-arg defaulted `Vid()`), which would wrongly pick the arg-less `constructor-impl`.
-                if member.descriptor.is_empty() {
-                    let params = value_underlying
-                        .map(|underlying| vec![ty_to_ir(underlying)])
-                        .unwrap_or_else(|| tys_to_ir(&member.params));
-                    let new = self.ir.new_cross_file(&internal, params, lowered);
-                    return Some(self.wrap_arg_prelude(new, prelude));
-                }
-                let new = self.emit_new_external(&internal, member.descriptor, lowered);
+                let new = self.emit_selected_library_new(owner, &member, lowered)?;
                 Some(self.wrap_arg_prelude(new, prelude))
             }
             ResolvedConstructor::PlainSlots {
@@ -9050,11 +9087,11 @@ impl<'a> Lower<'a> {
                 slots,
                 ..
             } => {
-                let value_underlying = self
+                if self
                     .syms
                     .class_model(owner)
-                    .and_then(|class| class.value_underlying);
-                if member.descriptor.is_empty() {
+                    .is_some_and(|class| class.value_underlying.is_some())
+                {
                     // An opaque constructor application carries only the supplied source arguments.
                     // Its platform pass owns omitted-default realization (`constructor-impl$default`
                     // for a JVM value class), so no placeholder is part of this IR call.
@@ -9064,10 +9101,7 @@ impl<'a> Lower<'a> {
                     if let Some(outer) = outer {
                         lowered.insert(0, self.expr(outer)?);
                     }
-                    let params = value_underlying
-                        .map(|underlying| vec![ty_to_ir(underlying)])
-                        .unwrap_or_else(|| tys_to_ir(&member.params));
-                    let new = self.ir.new_cross_file(&internal, params, lowered);
+                    let new = self.emit_selected_library_new(owner, &member, lowered)?;
                     return Some(self.wrap_arg_prelude(new, prelude));
                 }
                 let (mut lowered, prelude) = self.lower_call_slot_args_source_order_with_element(
@@ -9082,7 +9116,7 @@ impl<'a> Lower<'a> {
                 if let Some(outer) = outer {
                     lowered.insert(0, self.expr(outer)?);
                 }
-                let new = self.emit_new_external(&internal, member.descriptor, lowered);
+                let new = self.emit_selected_library_new(owner, &member, lowered)?;
                 Some(self.wrap_arg_prelude(new, prelude))
             }
             ResolvedConstructor::Synthetic {
@@ -9116,7 +9150,7 @@ impl<'a> Lower<'a> {
                     lowered.push(self.emit_const(IrConst::Int(mask)));
                 }
                 lowered.push(self.emit_const(IrConst::Null));
-                let new = self.emit_new_external(&internal, ctor.descriptor, lowered);
+                let new = self.emit_checked_new_external(owner, ctor.descriptor, lowered)?;
                 Some(self.wrap_arg_prelude(new, prelude))
             }
         }
@@ -9179,20 +9213,6 @@ impl<'a> Lower<'a> {
             return self.emit_new(class, lowered, None);
         }
 
-        let class = if self.ir.classes[class as usize].is_annotation {
-            let implementation = format!(
-                "{}$annotationImpl",
-                self.ir.classes[class as usize].fq_name()
-            );
-            self.ir
-                .classes
-                .iter()
-                .position(|class| class.fq_name_matches(&implementation))
-                .map(|index| index as u32)
-                .unwrap_or(class)
-        } else {
-            class
-        };
         let value_class = value_underlying.is_some();
         if !omitted.is_empty() || !default_masks.is_empty() {
             let internal = self.ir.classes[class as usize].fq_name();
@@ -23663,28 +23683,6 @@ impl<'a> Lower<'a> {
                     &context_params,
                     &context_args,
                 );
-            }
-            // Reading an annotation member (`a.x`, `a` typed as the annotation interface): the JVM
-            // accessor is the bare member name `x()` (not `getX`), dispatched by `invokeinterface`.
-            if let Ty::Obj(internal, _) = self.info.ty(receiver) {
-                if let Some(field) = self
-                    .ir
-                    .classes
-                    .iter()
-                    .find(|c| c.fq_name_id() == internal && c.is_annotation)
-                    .and_then(|c| c.fields.iter().find(|f| f.name == *name))
-                {
-                    let descriptor = format!("(){}", self.runtime.ir_type_descriptor(field.ty)?);
-                    let a = self.expr(receiver)?;
-                    return Some(self.emit_virtual_call(
-                        internal.to_string(),
-                        name.clone(),
-                        descriptor,
-                        true,
-                        a,
-                        vec![],
-                    ));
-                }
             }
             // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / ... selected by the checker.
             if let Some(lc) = self.info.resolved_constant(e) {

@@ -78,6 +78,7 @@ pub fn run_backend_passes_with_metadata(
         &resolve_class_name,
         jvm_plugin_type_descriptor,
     );
+    crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
     // property declaration and semantic initializer; this pass selects the outer-static realization.
     crate::jvm::companion::lower_companion_properties(ir);

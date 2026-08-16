@@ -1324,6 +1324,11 @@ pub(crate) struct ClassModel {
     pub type_parameters: Vec<String>,
     pub constructor_params: Vec<Ty>,
     pub constructor_param_shapes: Vec<Ty>,
+    /// Annotation members in constructor order. `Some(empty)` denotes a marker annotation; `None`
+    /// denotes an ordinary classifier. Providers normalize every declaration origin into this shape.
+    pub annotation_members: Option<Vec<(String, Ty)>>,
+    /// File-independent constructor defaults parallel to [`Self::constructor_params`].
+    pub constructor_defaults: Vec<Option<CtorDefaultValue>>,
 }
 
 /// The symbolic declaration shape of a generic member method.
@@ -2813,6 +2818,15 @@ impl SymbolTable {
                     .iter()
                     .map(|(shape, _)| *shape)
                     .collect(),
+                annotation_members: class.is_annotation().then(|| {
+                    class
+                        .ctor_param_names
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .zip(class.ctor_params.iter().copied())
+                        .collect()
+                }),
+                constructor_defaults: class.ctor_defaults.clone(),
             });
         }
         let class = self.libraries.classifier(owner)?;
@@ -2826,6 +2840,19 @@ impl SymbolTable {
             type_parameters: class.type_params.clone(),
             constructor_param_shapes: constructor_params.clone(),
             constructor_params,
+            annotation_members: class.annotation_application().map(|application| {
+                application
+                    .parameters
+                    .names
+                    .into_iter()
+                    .zip(application.parameters.types)
+                    .collect()
+            }),
+            constructor_defaults: class
+                .constructors
+                .first()
+                .map(|constructor| constructor.default_values.clone())
+                .unwrap_or_default(),
         })
     }
 
@@ -6767,7 +6794,11 @@ fn collect_signatures_with_cp_impl(
                                     storage_ty: None,
                                     visibility: property.visibility,
                                     is_const: false,
-                                    getter_name: property_getter_name(&property.name),
+                                    getter_name: if c.is_annotation() {
+                                        property.name.clone()
+                                    } else {
+                                        property_getter_name(&property.name)
+                                    },
                                     setter_name: property
                                         .is_var
                                         .then(|| property_setter_name(&property.name)),
@@ -6775,7 +6806,7 @@ fn collect_signatures_with_cp_impl(
                                         .is_var
                                         .then_some(property.visibility),
                                     has_custom_getter: false,
-                                    is_abstract: false,
+                                    is_abstract: c.is_annotation(),
                                     is_open: property.is_open,
                                     context_params: Vec::new(),
                                     source_member: Some(
@@ -41942,46 +41973,48 @@ impl<'a> Checker<'a> {
                 // The inherited declaration still owns the physical accessor/field shape; its erased
                 // return must not overwrite the selected logical property type.
                 let ty = property.ty;
-                let (getter, context_access) =
-                    if let Some(declaration) = property.property.as_ref() {
-                        if declaration.context_count == 0 {
-                            (
-                                (field.is_none() && !declaration.getter.descriptor.is_empty())
-                                    .then(|| {
-                                        crate::symbol_resolver::ResolvedMember::from_callable(
-                                            receiver,
-                                            declaration.getter.clone(),
-                                            false,
-                                        )
-                                    }),
-                                None,
-                            )
-                        } else {
-                            let context_types = declaration
-                                .getter
-                                .params
-                                .get(..declaration.context_count)
-                                .ok_or(PropertyReadAmbiguity::MissingContext)?;
-                            let context_args = self
-                                .select_context_arguments(scope, context_types)
-                                .ok_or(PropertyReadAmbiguity::MissingContext)?;
-                            let mut getter = crate::symbol_resolver::ResolvedMember::from_callable(
-                                receiver,
-                                declaration.getter.clone(),
-                                false,
-                            );
-                            getter.member.context_count = declaration.context_count;
-                            (
-                                Some(getter),
-                                Some(Box::new(ResolvedPropertyAccess {
-                                    property: declaration.clone(),
-                                    context_args,
-                                })),
-                            )
-                        }
+                let (getter, context_access) = if let Some(declaration) = property.property.as_ref()
+                {
+                    if declaration.context_count == 0 {
+                        (
+                            (field.is_none()
+                                && (!declaration.getter.descriptor.is_empty()
+                                    || declaration.getter.name != property_getter_name(name)))
+                            .then(|| {
+                                crate::symbol_resolver::ResolvedMember::from_callable(
+                                    receiver,
+                                    declaration.getter.clone(),
+                                    false,
+                                )
+                            }),
+                            None,
+                        )
                     } else {
-                        (None, None)
-                    };
+                        let context_types = declaration
+                            .getter
+                            .params
+                            .get(..declaration.context_count)
+                            .ok_or(PropertyReadAmbiguity::MissingContext)?;
+                        let context_args = self
+                            .select_context_arguments(scope, context_types)
+                            .ok_or(PropertyReadAmbiguity::MissingContext)?;
+                        let mut getter = crate::symbol_resolver::ResolvedMember::from_callable(
+                            receiver,
+                            declaration.getter.clone(),
+                            false,
+                        );
+                        getter.member.context_count = declaration.context_count;
+                        (
+                            Some(getter),
+                            Some(Box::new(ResolvedPropertyAccess {
+                                property: declaration.clone(),
+                                context_args,
+                            })),
+                        )
+                    }
+                } else {
+                    (None, None)
+                };
                 return Ok(Some(PropertyReadSelection::Member(Box::new(
                     PropertyReadMemberSelection {
                         name: name.to_string(),

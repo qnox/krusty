@@ -10856,6 +10856,25 @@ impl<'a> Emitter<'a> {
             code.arraylength();
             return;
         }
+        // A checker-selected accessor spelling is more specific than a declaration-shape default.
+        // This covers any provider whose physical accessor is non-conventional (annotation members,
+        // `@JvmName`, value-class mangling) without an origin or classifier-kind branch.
+        if let Some((name, physical)) = stamped {
+            return self.emit_realized_property_read(
+                operation.receiver,
+                PropertyAccess::Accessor {
+                    owner: operation.owner.to_string(),
+                    name: name.clone(),
+                    descriptor: method_descriptor(&[], ir_ty_to_jvm(physical)),
+                    is_static: false,
+                    is_interface: operation.interface
+                        || self.bodies.owner_is_interface(operation.owner),
+                },
+                operation.ty,
+                false,
+                code,
+            );
+        }
         if let Some((access, exact_field)) = self.selected_local_property_read_access(
             operation.owner,
             operation.name,
@@ -10875,12 +10894,10 @@ impl<'a> Emitter<'a> {
             .unwrap_or_else(|| PropertyAccess::Accessor {
                 owner: operation.owner.to_string(),
                 // A sibling source class has no classfile in `bodies`, so this is the only realization
-                // that cannot read the exact JVM accessor spelling from a declaration. The JVM
-                // value-class pass records a mangled spelling for that case; ordinary properties keep
-                // the Kotlin getter convention. The semantic IR node itself remains target-neutral.
-                name: stamped
-                    .map(|(name, _)| name.clone())
-                    .unwrap_or_else(|| crate::names::property_getter_name(operation.name)),
+                // that cannot read the exact JVM accessor spelling from a declaration. Exact selected
+                // spellings returned above; an unstamped ordinary property keeps Kotlin's convention.
+                // The semantic IR node itself remains target-neutral.
+                name: crate::names::property_getter_name(operation.name),
                 // The logical property type is intentionally retained on the node for the surrounding
                 // expression. Its call boundary instead uses the most specific declaration fact: a JVM
                 // value-class realization when present, otherwise the semantic declaration type. Without

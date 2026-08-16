@@ -1,5 +1,6 @@
 //! JVM class-file reading, writing, and bytecode emission (all JVM-specific code).
 
+mod annotation_constructions;
 pub mod backend;
 pub mod bridges;
 pub mod classfile;
