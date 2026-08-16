@@ -12042,19 +12042,15 @@ impl ResolvedSuperCall {
         }
     }
 
-    /// `owner` is the supertype the call dispatches through: `invokespecial` must name it. A member
-    /// selected from a classifier that declares no owner of its own (`java.lang.Object`'s members,
-    /// reached through the implicit `Any` supertype) still dispatches through that supertype.
     fn classpath(
         receiver: ImplicitReceiverSelection,
         member: crate::libraries::LibraryMember,
-        owner: TypeName,
     ) -> Option<Self> {
         let interface = member.is_interface();
         let source_member = member.source_member;
         Some(Self {
             receiver,
-            owner: member.owner.unwrap_or(owner),
+            owner: member.owner?,
             name: member.name,
             params: member.params,
             ret: member.ret,
@@ -21145,8 +21141,7 @@ impl<'a> Checker<'a> {
                 })
             } else {
                 let member = self.select_property_member(Ty::obj_name(owner), name)?;
-                let mut target =
-                    ResolvedSuperCall::classpath(receiver.clone(), member.member, owner)?;
+                let mut target = ResolvedSuperCall::classpath(receiver.clone(), member.member)?;
                 target.owner = owner;
                 target.interface = interface;
                 Some(target)
@@ -44547,16 +44542,16 @@ impl<'a> Checker<'a> {
                     };
                     if let Some(internal) = dispatch_receiver.ty.obj_internal() {
                         let declared = self.syms.class_by_type_name(internal);
-                        // Every class extends `Any` — realized as `java.lang.Object` — even when it
-                        // declares only interfaces or no supertype at all. Without that implicit base
-                        // `super.equals(…)`/`super.hashCode()`/`super.toString()` had nowhere to
-                        // resolve; kotlinc calls `java/lang/Object` there, and so must the invokespecial
-                        // krusty emits. An INTERFACE has no such base: `super` in one names a
-                        // superinterface, which the branch below resolves.
-                        let sup = declared.and_then(|c| c.super_internal).or_else(|| {
+                        let declared_super = declared.and_then(|c| c.super_internal);
+                        // Every class has the semantic root `Any`, even when its source header names
+                        // only interfaces or nothing at all. Keep that language identity in the
+                        // checker: the selected provider member carries its target's physical owner
+                        // (`java/lang/Object` on JVM) into lowering. An interface has no implicit
+                        // class-super dispatch; its explicit superinterfaces are handled below.
+                        let sup = declared_super.or_else(|| {
                             declared
                                 .filter(|c| !c.is_interface())
-                                .map(|_| crate::types::type_name("java/lang/Object"))
+                                .map(|_| crate::types::wk::any())
                         });
                         // The base spelled WITH its declared type arguments (`ArrayList<Int>`) — a
                         // classpath member query is receiver-coupled, so these are what recover a
@@ -44599,12 +44594,16 @@ impl<'a> Checker<'a> {
                             }) {
                                 let ret = m.ret;
                                 if let Some(mut target) =
-                                    ResolvedSuperCall::classpath(dispatch_receiver.clone(), m, sup)
+                                    ResolvedSuperCall::classpath(dispatch_receiver.clone(), m)
                                 {
                                     // `invokespecial` must name the DIRECT superclass. JVM method
                                     // resolution continues from there to the inherited declaration;
                                     // naming the declaration's indirect interface is verifier-invalid.
-                                    target.owner = sup;
+                                    // With an implicit `Any`, there is no source-owned direct class
+                                    // identity to substitute: retain the provider's physical owner.
+                                    if declared_super.is_some() {
+                                        target.owner = sup;
+                                    }
                                     target.interface = false;
                                     self.resolved_super_calls.insert(call, target);
                                 } else {

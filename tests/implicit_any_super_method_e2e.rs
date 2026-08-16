@@ -10,7 +10,34 @@
 //! `fleet.fastutil` `IntOpenHashSet`, which is declared `: MutableIntSet` and calls `super.equals`;
 //! the reference server reports nothing there.
 
+use std::fs;
+
 use super::common;
+
+const EMISSION_SOURCE: &str = "interface Marker\n\
+class Probe : Marker {\n\
+\x20   fun same(other: Any?): Boolean = super.equals(other)\n\
+\x20   fun identityHash(): Int = super.hashCode()\n\
+\x20   fun identityText(): String = super.toString()\n\
+}\n";
+
+fn object_super_targets(disassembly: &str) -> Vec<&str> {
+    disassembly
+        .lines()
+        .filter(|line| line.contains("invokespecial"))
+        .filter_map(|line| line.split("// Method ").nth(1))
+        .filter(|target| {
+            [
+                "java/lang/Object.equals:",
+                "java/lang/Object.hashCode:",
+                "java/lang/Object.toString:",
+            ]
+            .iter()
+            .any(|method| target.starts_with(method))
+        })
+        .map(str::trim)
+        .collect()
+}
 
 #[test]
 fn super_equals_and_hash_code_resolve_with_only_an_interface_supertype() {
@@ -42,4 +69,45 @@ fun box(): String {\n\
 \x20   return if (text.startsWith(\"Bare@\")) \"OK\" else \"fail:\" + text\n\
 }\n";
     common::expect_box_ok_with_stdlib(source, "IASM2");
+}
+
+#[test]
+fn implicit_any_super_dispatch_matches_kotlinc_physical_targets() {
+    let classes = common::expect_classes_with_stdlib(EMISSION_SOURCE, "IASMEmit");
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "Probe")
+        .expect("krusty emitted Probe");
+    let dir = common::scratch_dir().expect("scratch dir");
+    let krusty_class = dir.join("Probe.class");
+    fs::write(&krusty_class, bytes).expect("write krusty class");
+    let krusty = common::javap(&["-c", "-p", &krusty_class.to_string_lossy()])
+        .expect("pooled javap available");
+
+    let reference = dir.join("kotlinc");
+    fs::create_dir_all(&reference).expect("create kotlinc output");
+    let source = dir.join("IASMEmit.kt");
+    fs::write(&source, EMISSION_SOURCE).expect("write kotlinc source");
+    let args = vec![
+        "-d".to_string(),
+        reference.to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = common::kotlinc_compile(&args).expect("kotlinc available");
+    assert_eq!(code, 0, "kotlinc rejected the reference source: {stderr}");
+    let reference_class = reference.join("Probe.class");
+    let kotlinc = common::javap(&["-c", "-p", &reference_class.to_string_lossy()])
+        .expect("pooled javap available");
+
+    let expected = vec![
+        "java/lang/Object.equals:(Ljava/lang/Object;)Z",
+        "java/lang/Object.hashCode:()I",
+        "java/lang/Object.toString:()Ljava/lang/String;",
+    ];
+    assert_eq!(object_super_targets(&krusty), expected);
+    assert_eq!(
+        object_super_targets(&krusty),
+        object_super_targets(&kotlinc)
+    );
+    fs::remove_dir_all(dir).expect("remove scratch dir");
 }
