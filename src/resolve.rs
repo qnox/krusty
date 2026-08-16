@@ -48035,7 +48035,30 @@ impl<'a> Checker<'a> {
                     self.qualifier(scope, QualifierInput::Root(&fname)),
                     Ok(ResolvedQualifier::Value)
                 ) {
-                    (format!("unresolved function '{fname}'"), None)
+                    // The callee names a VALUE that carries no `invoke`: the name resolved, so this is
+                    // kotlinc's FUNCTION_EXPECTED, which reports the expression and its type. A value
+                    // whose own type could not be determined has already been diagnosed, so fall back
+                    // to the unresolved form rather than naming an error type.
+                    // Reuse the callee's recorded type when the tower already typed it; typing it a
+                    // second time would repeat any diagnostic its own resolution reports.
+                    let recorded = self.expr_types[callee.0 as usize];
+                    let value = if recorded == Ty::Error {
+                        self.expr(scope, callee)
+                    } else {
+                        recorded
+                    };
+                    if value == Ty::Error {
+                        (format!("unresolved reference '{fname}'."), None)
+                    } else {
+                        (
+                            format!(
+                                "expression '{fname}' of type '{}' cannot be invoked as a function. \
+                                 Function 'invoke()' is not found.",
+                                value.source_name()
+                            ),
+                            None,
+                        )
+                    }
                 } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
                 {
                     (
@@ -52841,7 +52864,9 @@ fun box(): String {
 "#,
         );
         assert!(
-            errs.iter().any(|e| e.contains("unresolved function 'Foo'")),
+            errs.iter().any(|e| e
+                == "expression 'Foo' of type 'Int' cannot be invoked as a function. \
+                    Function 'invoke()' is not found."),
             "expected local value to shadow class constructor, got {errs:?}"
         );
     }

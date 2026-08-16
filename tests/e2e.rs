@@ -560,6 +560,8 @@ mod front_end_errors_more_e2e;
 mod full_form_destructuring_e2e;
 #[path = "fun_interface_value_class_e2e.rs"]
 mod fun_interface_value_class_e2e;
+#[path = "function_expected_e2e.rs"]
+mod function_expected_e2e;
 #[path = "function_type_is_e2e.rs"]
 mod function_type_is_e2e;
 #[path = "function_type_supertype_e2e.rs"]
