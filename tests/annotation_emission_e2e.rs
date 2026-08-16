@@ -554,7 +554,7 @@ fn a_java_annotation_without_value_requires_named_arguments() {
     let diagnostics = common::front_end_diagnostics(rejected, &classpath, Some(jdk.as_path()));
     assert_eq!(
         diagnostics,
-        ["only named arguments are available for this annotation"]
+        ["only named arguments are available for Java annotations."]
     );
 
     let base = std::env::temp_dir().join(format!(
@@ -606,7 +606,7 @@ fn a_java_scalar_value_accepts_only_its_own_positional_argument() {
     let rejected = "import jl.Single\n@Single(\"ok\", \"bad\")\nclass Rejected\n";
     assert_eq!(
         common::front_end_diagnostics(rejected, &classpath, Some(jdk.as_path())),
-        ["only named arguments are available for this annotation"]
+        ["only named arguments are available for Java annotations."]
     );
 
     let base = std::env::temp_dir().join(format!(

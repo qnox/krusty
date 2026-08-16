@@ -28183,7 +28183,7 @@ impl<'a> Checker<'a> {
             if name.is_none() && !permitted {
                 self.diags.error(
                     self.span(argument),
-                    "only named arguments are available for this annotation".to_string(),
+                    "only named arguments are available for Java annotations.".to_string(),
                 );
                 forbidden_positional = true;
             }
@@ -34884,7 +34884,7 @@ impl<'a> Checker<'a> {
                         TopLevelPropertySelection::MissingContext => {
                             self.diags.error(
                                 self.span(e),
-                                format!("No context argument for property '{n}' found."),
+                                format!("No context argument for '{n}' found."),
                             );
                             Ty::Error
                         }
@@ -38459,7 +38459,8 @@ impl<'a> Checker<'a> {
                 self.diags.error(
                     span,
                     format!(
-                        "'hasNext()' must return Boolean, but returns '{}'",
+                        "the 'iterator().hasNext()' function of the loop range must return \
+                         'Boolean', but returns '{}'.",
                         has_next.ret().source_name()
                     ),
                 );
@@ -41513,10 +41514,8 @@ impl<'a> Checker<'a> {
                 return Ty::Error;
             }
             Err(PropertyReadAmbiguity::MissingContext) => {
-                self.diags.error(
-                    span,
-                    format!("No context argument for property '{name}' found."),
-                );
+                self.diags
+                    .error(span, format!("No context argument for '{name}' found."));
                 return Ty::Error;
             }
             Ok(None) => {}
@@ -41704,7 +41703,7 @@ impl<'a> Checker<'a> {
                     Err(PropertyReadAmbiguity::MissingContext) => {
                         self.diags.error(
                             self.span(expression),
-                            format!("No context argument for property '{name}' found."),
+                            format!("No context argument for '{name}' found."),
                         );
                         return Some(Ty::Error);
                     }
@@ -49127,9 +49126,7 @@ impl<'a> Checker<'a> {
                                     None if self.syms.context_prop_names.contains(&name) => {
                                         self.diags.error(
                                             target_span,
-                                            format!(
-                                                "No context argument for property '{name}' found."
-                                            ),
+                                            format!("No context argument for '{name}' found."),
                                         );
                                     }
                                     None => {
@@ -49257,14 +49254,14 @@ impl<'a> Checker<'a> {
             let Some(context_types) = setter.params.get(..property.context_count) else {
                 self.diags.error(
                     target_span,
-                    format!("No context argument for property '{name}' found."),
+                    format!("No context argument for '{name}' found."),
                 );
                 return;
             };
             let Some(context_args) = self.select_context_arguments(scope, context_types) else {
                 self.diags.error(
                     target_span,
-                    format!("No context argument for property '{name}' found."),
+                    format!("No context argument for '{name}' found."),
                 );
                 return;
             };
@@ -49493,7 +49490,7 @@ impl<'a> Checker<'a> {
                             else {
                                 self.diags.error(
                                     target_span,
-                                    format!("No context argument for property '{name}' found."),
+                                    format!("No context argument for '{name}' found."),
                                 );
                                 return;
                             };
@@ -49502,7 +49499,7 @@ impl<'a> Checker<'a> {
                             else {
                                 self.diags.error(
                                     target_span,
-                                    format!("No context argument for property '{name}' found."),
+                                    format!("No context argument for '{name}' found."),
                                 );
                                 return;
                             };

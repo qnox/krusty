@@ -5874,3 +5874,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests:
   `tests/annotation_class_element_e2e.rs::a_java_class_element_accepts_a_class_literal`,
   `…::the_emitted_class_constants_match_kotlinc`.
+
+- **A context argument is missing for a CALLABLE, and a loop's `hasNext` belongs to its iterator.**
+  The emitted diagnostics below are checked directly against kotlinc; extracted templates are only
+  audit leads. krusty stores each lowercase-first and the LSP boundary sentence-cases it back.
+  kotlinc reports `No context argument for '{0}' found.` whether
+  the callable is a function or a property — there is no "for property" variant — and the loop
+  range's boolean check is reported as `The 'iterator().hasNext()' function of the loop range must
+  return 'Boolean', but returns '{0}'.`, because the offending declaration is reached through the
+  range's `iterator()`, not written at the call site. A Java `@interface` whose elements are
+  named-only reports `Only named arguments are available for Java annotations.`, naming the reason
+  the positional form is unavailable.
+  Tests: `tests/context_and_loop_wording_e2e.rs`, `tests/annotation_emission_e2e.rs`.

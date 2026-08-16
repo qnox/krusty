@@ -334,6 +334,8 @@ mod const_read_inline_e2e;
 mod const_val_e2e;
 #[path = "construction_default_arg_e2e.rs"]
 mod construction_default_arg_e2e;
+#[path = "context_and_loop_wording_e2e.rs"]
+mod context_and_loop_wording_e2e;
 #[path = "context_function_type_e2e.rs"]
 mod context_function_type_e2e;
 #[path = "context_local_fun_e2e.rs"]
