@@ -10856,30 +10856,15 @@ impl<'a> Emitter<'a> {
             code.arraylength();
             return;
         }
-        // A checker-selected accessor spelling is more specific than a declaration-shape default.
-        // This covers any provider whose physical accessor is non-conventional (annotation members,
-        // `@JvmName`, value-class mangling) without an origin or classifier-kind branch.
-        if let Some((name, physical)) = stamped {
-            return self.emit_realized_property_read(
-                operation.receiver,
-                PropertyAccess::Accessor {
-                    owner: operation.owner.to_string(),
-                    name: name.clone(),
-                    descriptor: method_descriptor(&[], ir_ty_to_jvm(physical)),
-                    is_static: false,
-                    is_interface: operation.interface
-                        || self.bodies.owner_is_interface(operation.owner),
-                },
-                operation.ty,
-                false,
-                code,
-            );
-        }
-        if let Some((access, exact_field)) = self.selected_local_property_read_access(
-            operation.owner,
-            operation.name,
-            operation.field,
-        ) {
+        // An exact field identity wins before any accessor realization.
+        if operation.field.is_some() {
+            let (access, exact_field) = self
+                .selected_local_property_read_access(
+                    operation.owner,
+                    operation.name,
+                    operation.field,
+                )
+                .expect("a selected property field must have a JVM realization");
             return self.emit_realized_property_read(
                 operation.receiver,
                 access,
@@ -10888,31 +10873,59 @@ impl<'a> Emitter<'a> {
                 code,
             );
         }
-        let access = self
+        // A source declaration from this compilation supplies the invocation shape; a checker-selected
+        // spelling refines only its otherwise-conventional accessor name.
+        if let Some(access) = self.declared_property_read_access(
+            operation.owner,
+            operation.name,
+            stamped.map(|(name, _)| name.as_str()),
+            operation.interface,
+        ) {
+            return self.emit_realized_property_read(
+                operation.receiver,
+                access,
+                operation.ty,
+                false,
+                code,
+            );
+        }
+        // A loaded classfile supplies the authoritative JVM realization, including static value-class
+        // accessors. The selected spelling intentionally carries no duplicate invocation shape.
+        if let Some(access) = self
             .bodies
             .property_read_access(operation.owner, operation.name)
-            .unwrap_or_else(|| PropertyAccess::Accessor {
-                owner: operation.owner.to_string(),
-                // A sibling source class has no classfile in `bodies`, so this is the only realization
-                // that cannot read the exact JVM accessor spelling from a declaration. Exact selected
-                // spellings returned above; an unstamped ordinary property keeps Kotlin's convention.
-                // The semantic IR node itself remains target-neutral.
-                name: crate::names::property_getter_name(operation.name),
-                // The logical property type is intentionally retained on the node for the surrounding
-                // expression. Its call boundary instead uses the most specific declaration fact: a JVM
-                // value-class realization when present, otherwise the semantic declaration type. Without
-                // that split a generic `getA(): Object` can be called as `getA(): A`, or a mangled
-                // `getId-…(): String` as `getId-…(): Id`; both are invalid descriptors.
-                descriptor: method_descriptor(
-                    &[],
-                    ir_ty_to_jvm(&stored_value_ty(*physical.unwrap_or(operation.ty))),
-                ),
-                is_static: false,
-                // Resolution carries source-module shape because a sibling class is not in `bodies`.
-                // For classpath owners the body reader remains authoritative.
-                is_interface: operation.interface
-                    || self.bodies.owner_is_interface(operation.owner),
-            });
+        {
+            return self.emit_realized_property_read(
+                operation.receiver,
+                access,
+                operation.ty,
+                false,
+                code,
+            );
+        }
+        let access = PropertyAccess::Accessor {
+            owner: operation.owner.to_string(),
+            // A sibling source class has no classfile in `bodies`, so this is the only realization
+            // that cannot read the exact JVM accessor spelling from a declaration. Exact selected
+            // spellings returned above; an unstamped ordinary property keeps Kotlin's convention.
+            // The semantic IR node itself remains target-neutral.
+            name: stamped
+                .map(|(name, _)| name.clone())
+                .unwrap_or_else(|| crate::names::property_getter_name(operation.name)),
+            // The logical property type is intentionally retained on the node for the surrounding
+            // expression. Its call boundary instead uses the most specific declaration fact: a JVM
+            // value-class realization when present, otherwise the semantic declaration type. Without
+            // that split a generic `getA(): Object` can be called as `getA(): A`, or a mangled
+            // `getId-…(): String` as `getId-…(): Id`; both are invalid descriptors.
+            descriptor: method_descriptor(
+                &[],
+                ir_ty_to_jvm(&stored_value_ty(*physical.unwrap_or(operation.ty))),
+            ),
+            is_static: false,
+            // Resolution carries source-module shape because a sibling class is not in `bodies`.
+            // For classpath owners the body reader remains authoritative.
+            is_interface: operation.interface || self.bodies.owner_is_interface(operation.owner),
+        };
         self.emit_realized_property_read(operation.receiver, access, operation.ty, false, code)
     }
 
@@ -11212,9 +11225,12 @@ impl<'a> Emitter<'a> {
         &self,
         owner: &str,
         name: &str,
+        selected_accessor: Option<&str>,
+        selected_interface: bool,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
         let class = self.ir.classes.iter().find(|c| c.fq_name_matches(owner))?;
+        let interface = class.is_interface || selected_interface;
         // A property that DECLARES an accessor (computed, delegated, or `field`-using) is always read
         // through it — the accessor is user code, and a direct field load would skip it. Only a plain
         // backing-field property may be read directly, and only from inside the declaring class.
@@ -11227,7 +11243,7 @@ impl<'a> Emitter<'a> {
                 name: f.name.clone(),
                 descriptor: method_descriptor(&f.params, ir_ty_to_jvm(&f.ret)),
                 is_static: f.is_static,
-                is_interface: class.is_interface,
+                is_interface: interface,
             });
         }
         let field = class
@@ -11239,6 +11255,7 @@ impl<'a> Emitter<'a> {
         // spelling (stamped by the value-class pass), and the synthesizer emits the same one.
         let accessor_name = declared
             .and_then(|p| p.getter_jvm_name.clone())
+            .or_else(|| selected_accessor.map(str::to_string))
             .unwrap_or_else(|| crate::names::property_getter_name(name));
         // The accessor's descriptor comes from the accessor ITSELF, not from the field: an accessor may
         // return something the field's declared type does not spell (an erased generic, a value class's
@@ -11260,7 +11277,7 @@ impl<'a> Emitter<'a> {
                 name: accessor.name.clone(),
                 descriptor: method_descriptor(&[], ir_ty_to_jvm(&accessor.ret)),
                 is_static: false,
-                is_interface: class.is_interface,
+                is_interface: interface,
             });
         }
         // A private property reached from outside its class goes through the synthetic bridge; there is no
@@ -11286,7 +11303,7 @@ impl<'a> Emitter<'a> {
                 name: accessor_name,
                 descriptor: method_descriptor(&[], ir_ty_to_jvm(&stored_value_ty(ty))),
                 is_static: false,
-                is_interface: class.is_interface,
+                is_interface: interface,
             });
         };
         // Outside the declaring class the backing field is private, so the read goes through the
@@ -11302,7 +11319,7 @@ impl<'a> Emitter<'a> {
                         .unwrap_or_else(|| ir_ty_to_jvm(&field.ty)),
                 ),
                 is_static: false,
-                is_interface: class.is_interface,
+                is_interface: interface,
             });
         }
         Some(PropertyAccess::Field {
@@ -11364,7 +11381,7 @@ impl<'a> Emitter<'a> {
                 true,
             ));
         }
-        self.declared_property_read_access(owner, name)
+        self.declared_property_read_access(owner, name, None, false)
             .map(|access| (access, false))
     }
 
