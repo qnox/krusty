@@ -3180,6 +3180,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `_ => false` fallthrough on a LAMBDA argument in `return m.map { … }`, bailing the state machine; a lambda
   argument is a value (its body is a separate impl function, not a `return` of the suspend fn) so it is now
   a leaf there (varargs recurse into their elements). Test: `tests/suspend_collection_hof_e2e.rs`.
+- **A top-level property's backing field carries its generic `Signature`.** A top-level `val xs:
+  List<String>` becomes a static field of the FILE FACADE, whose field table is built by
+  `emit_statics` rather than the class-field path — so it dropped the `Signature` the same property
+  declared inside a class already carried, and a consumer read `java.util.List` where kotlinc
+  records `Ljava/util/List<Ljava/lang/String;>;`. The rule is the class path's: a type with type
+  arguments carries its full generic signature, a type without carries none. Its ACCESSORS carry the
+  same signature (`getXs()` → `()Ljava/util/List<Ljava/lang/String;>;`, `setXs` →
+  `(Ljava/util/List<Ljava/lang/String;>;)V`), interned between the accessor's descriptor and its
+  nullability annotation — kotlinc reaches it before the body's field cluster, so seeding it later
+  would shift every following pool entry. Tests:
+  `tests/generic_signature_e2e.rs::top_level_property_field_gets_its_generic_signature` and
+  `::top_level_property_accessors_get_their_generic_signatures`.
+
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell
   `java/util/List`) at every depth, so signature-derived resolution canonicalized `fun items():

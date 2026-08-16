@@ -2015,13 +2015,15 @@ fn seed_plain_class_pool(
     // A field's generic `Signature`: a bare type parameter (`val a: T` → `TT;`), else a parameterized
     // concrete type (`List<String>`). Disjoint — a field is one or the other.
     let field_sig_of = |f: &crate::ir::IrField| -> Option<String> {
-        ir.field_signatures(fq_name)
+        let type_parameter = ir
+            .field_signatures(fq_name)
             .and_then(|fs| {
                 fs.iter()
                     .find(|(name, _)| name == &f.name)
-                    .map(|(_, tp)| format!("T{tp};"))
+                    .map(|(_, parameter)| parameter.as_str())
             })
-            .or_else(|| parameterized_sig(formatter, &f.ty))
+            .or(f.type_param.as_deref());
+        property_jvm_signatures(formatter, &f.ty, type_parameter).field
     };
     let ctor_sig = ctor_signature;
     let field_sigs: Vec<Option<String>> = c.fields.iter().map(field_sig_of).collect();
@@ -4001,6 +4003,7 @@ fn emit_statics(
 ) {
     // Statics OWNED by a specific class (a companion `const val`) are emitted on that class, not the
     // facade — see `emit_owned_consts`.
+    let signature_formatter = JvmSignatureFormatter::new(env);
     let facade_statics: Vec<&crate::ir::IrStatic> =
         ir.statics.iter().filter(|s| s.is_facade_owned()).collect();
     if facade_statics.is_empty() {
@@ -4018,6 +4021,10 @@ fn emit_statics(
             0x001A // PRIVATE | STATIC | FINAL
         };
         let desc = ir_type_desc(&s.ty);
+        // A PARAMETERIZED type (`val xs: List<String>`) carries its full generic `Signature`, exactly
+        // as the same property declared inside a class does — the facade's field table is a different
+        // emitter, and without this a top-level property's element type was lost to erasure.
+        let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
         // backing field.
         let field_ann = (desc.starts_with('L') || desc.starts_with('[')).then(|| {
@@ -4039,7 +4046,14 @@ fn emit_statics(
                 _ => None,
             })
             .flatten();
-        cw.add_field_late(acc, &s.name, &desc, cv, field_ann);
+        cw.add_field_late_sig(
+            acc,
+            &s.name,
+            &desc,
+            signatures.field.as_deref(),
+            cv,
+            field_ann,
+        );
     }
     // Which statics a CLASS body (a different JVM class than the facade) reads/writes — a PRIVATE
     // top-level property has no public accessors, so those references need kotlinc's `access$get<X>$p` /
@@ -4142,9 +4156,18 @@ fn emit_statics(
                 "Lorg/jetbrains/annotations/NotNull;"
             }
         });
+        // The accessors erase the property's type arguments in their descriptors, so each carries the
+        // same generic `Signature` its backing field does — kotlinc signs `getXs()` as
+        // `()Ljava/util/List<Ljava/lang/String;>;` and `setXs(List)` as `(Ljava/util/List<…>;)V`.
+        let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
         let gname = property_getter_name(&s.name);
         cw.reserve_method_name(&gname);
         cw.seed_utf8(&format!("(){desc}"));
+        // kotlinc interns an accessor's `Signature` between its descriptor and its nullability
+        // annotation, BEFORE the body's field cluster.
+        if let Some(signature) = &signatures.getter {
+            cw.seed_utf8(signature);
+        }
         if let Some(a) = acc_ann {
             cw.seed_utf8(a);
         }
@@ -4155,12 +4178,22 @@ fn emit_statics(
         let fref = cw.fieldref(facade, &s.name, &desc);
         g.getstatic(fref, slot_words(jt) as i32);
         emit_return(jt, &mut g);
-        finish_code::<0x0019>(cw, &gname, &format!("(){desc}"), &mut g, 0);
+        finish_code_sig::<0x0019>(
+            cw,
+            &gname,
+            &format!("(){desc}"),
+            &mut g,
+            0,
+            signatures.getter.as_deref(),
+        );
         cw.set_method_nullability(&gname, &format!("(){desc}"), acc_ann, &[None]);
         if s.is_var {
             let sname = property_setter_name(&s.name);
             cw.reserve_method_name(&sname);
             cw.seed_utf8(&format!("({desc})V"));
+            if let Some(signature) = &signatures.setter {
+                cw.seed_utf8(signature);
+            }
             let words = slot_words(jt);
             let mut st = CodeBuilder::new(words);
             // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
@@ -4183,7 +4216,14 @@ fn emit_statics(
             let fref = cw.fieldref(facade, &s.name, &desc);
             st.putstatic(fref, slot_words(jt) as i32);
             st.ret_void();
-            finish_code::<0x0019>(cw, &sname, &format!("({desc})V"), &mut st, words);
+            finish_code_sig::<0x0019>(
+                cw,
+                &sname,
+                &format!("({desc})V"),
+                &mut st,
+                words,
+                signatures.setter.as_deref(),
+            );
             cw.set_method_nullability(&sname, &format!("({desc})V"), None, &[acc_ann]);
             // The setter's value parameter is kotlinc's synthetic `<set-?>`, live for the body.
             cw.set_method_debug(
@@ -4466,6 +4506,16 @@ fn emit_declared_property_accessor(
     let Some(field) = c.fields.get(field_index as usize) else {
         return;
     };
+    let type_parameter = ir
+        .field_signatures(fq_name)
+        .and_then(|signatures| {
+            signatures
+                .iter()
+                .find(|(name, _)| *name == field.name)
+                .map(|(_, parameter)| parameter.as_str())
+        })
+        .or(field.type_param.as_deref());
+    let signatures = property_jvm_signatures(formatter, &field.ty, type_parameter);
     let field_jt = jvm_declared_ty(&field.ty);
     let field_desc = type_descriptor(field_jt);
     let accessor_jt = declared_property_accessor_jvm(ir, property, field);
@@ -4489,12 +4539,7 @@ fn emit_declared_property_accessor(
     if !occupied(&getter, &getter_desc) {
         // Visit the method header before constructing its code. This is especially observable for a
         // setter guard (`<set-?>`) and for a generic accessor Signature.
-        let sig = ir
-            .field_signatures(fq_name)
-            .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
-            .map(|(_, tp)| format!("()T{tp};"))
-            .or_else(|| field.type_param.as_ref().map(|tp| format!("()T{tp};")))
-            .or_else(|| method_parameterized_sig(formatter, &[], &field.ty));
+        let sig = &signatures.getter;
         let getter_ann = (accessor_jt.is_reference() && field.type_param.is_none()).then(|| {
             if property.ty.is_nullable() {
                 "Lorg/jetbrains/annotations/Nullable;"
@@ -4553,14 +4598,7 @@ fn emit_declared_property_accessor(
             .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
         let setter_desc = format!("({accessor_desc})V");
         if !occupied(&setter, &setter_desc) {
-            let sig = ir
-                .field_signatures(fq_name)
-                .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
-                .map(|(_, tp)| format!("(T{tp};)V"))
-                .or_else(|| field.type_param.as_ref().map(|tp| format!("(T{tp};)V")))
-                .or_else(|| {
-                    method_parameterized_sig(formatter, std::slice::from_ref(&field.ty), &Ty::Unit)
-                });
+            let sig = &signatures.setter;
             let setter_ann =
                 (accessor_jt.is_reference() && field.type_param.is_none()).then(|| {
                     if property.ty.is_nullable() {
@@ -4884,11 +4922,12 @@ fn emit_class(
         // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`); a
         // PARAMETERIZED concrete type (`val xs: List<String>`) carries its full generic signature. Both
         // like kotlinc; disjoint (a field is one or the other).
-        let field_sig = ir
+        let type_parameter = ir
             .field_signatures(&fq_name)
             .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
-            .map(|(_, tp)| format!("T{tp};"))
-            .or_else(|| parameterized_sig(&signature_formatter, ty));
+            .map(|(_, parameter)| parameter.as_str())
+            .or(field.type_param.as_deref());
+        let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter).field;
         let physical_name = instance_field_jvm_name(ir, c, field);
         let field_desc = ir_type_desc(ty);
         // Data-class field headers are part of the synthesized-member seed order, while coroutine
@@ -5653,11 +5692,13 @@ fn emit_class(
                 let acc = (if private { 0x0002 } else { 0x0001 })
                     | if field.is_final() { 0x0010 } else { 0 }
                     | 0x0008;
-                let field_sig = ir
+                let type_parameter = ir
                     .field_signatures(&fq_name)
                     .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
-                    .map(|(_, tp)| format!("T{tp};"))
-                    .or_else(|| parameterized_sig(&signature_formatter, &field.ty));
+                    .map(|(_, parameter)| parameter.as_str())
+                    .or(field.type_param.as_deref());
+                let field_sig =
+                    property_jvm_signatures(&signature_formatter, &field.ty, type_parameter).field;
                 let physical_name = instance_field_jvm_name(ir, c, field);
                 cw.add_field_sig(
                     acc,
@@ -6825,9 +6866,22 @@ fn finish_code<const ACCESS: u16>(
     code: &mut CodeBuilder,
     locals: u16,
 ) {
+    finish_code_sig::<ACCESS>(cw, name, desc, code, locals, None);
+}
+
+/// [`finish_code`] for a method that carries a generic `Signature` (a facade accessor for a
+/// parameterized property type — the descriptor erases its type arguments).
+fn finish_code_sig<const ACCESS: u16>(
+    cw: &mut ClassWriter,
+    name: &str,
+    desc: &str,
+    code: &mut CodeBuilder,
+    locals: u16,
+    signature: Option<&str>,
+) {
     code.ensure_locals(locals);
     code.link();
-    cw.add_method(ACCESS, name, desc, code);
+    cw.add_method_sig(ACCESS, name, desc, code, signature);
 }
 
 fn finish_bridge(
@@ -9279,6 +9333,34 @@ fn parameterized_sig(formatter: &JvmSignatureFormatter<'_>, ty: &Ty) -> Option<S
         }
         Ty::Fun(_) => formatter.ty(inner),
         _ => None,
+    }
+}
+
+/// The three JVM generic `Signature` attributes that realize one Kotlin property declaration.
+/// Storage location (instance field, object static, or file-facade static) does not change these
+/// declaration signatures, so every physical emitter consumes this common shape.
+struct JvmPropertySignatures {
+    field: Option<String>,
+    getter: Option<String>,
+    setter: Option<String>,
+}
+
+fn property_jvm_signatures(
+    formatter: &JvmSignatureFormatter<'_>,
+    ty: &Ty,
+    type_parameter: Option<&str>,
+) -> JvmPropertySignatures {
+    if let Some(parameter) = type_parameter {
+        return JvmPropertySignatures {
+            field: Some(format!("T{parameter};")),
+            getter: Some(format!("()T{parameter};")),
+            setter: Some(format!("(T{parameter};)V")),
+        };
+    }
+    JvmPropertySignatures {
+        field: parameterized_sig(formatter, ty),
+        getter: method_parameterized_sig(formatter, &[], ty),
+        setter: method_parameterized_sig(formatter, std::slice::from_ref(ty), &Ty::Unit),
     }
 }
 

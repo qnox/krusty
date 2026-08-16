@@ -22,12 +22,18 @@ fn method_signature(cs: &[(String, Vec<u8>)], facade: &str, name: &str) -> Optio
         .and_then(|m| m.signature.clone())
 }
 
-fn kotlinc_class_signature(src: &str, name: &str) -> String {
-    let output =
-        common::compile_lib_ref("generic_signature", src).expect("reference compiler unavailable");
+fn kotlinc_class(src: &str, name: &str) -> krusty::jvm::classreader::ClassInfo {
+    let build = common::compile_libs_build("generic_signature_reference", &[("G.kt", src)])
+        .expect("reference compiler unavailable");
+    let output = build
+        .reference_out()
+        .expect("reference compiler output unavailable");
     let bytes = std::fs::read(output.join(format!("{name}.class"))).expect("reference class");
-    krusty::jvm::classreader::parse_class(&bytes)
-        .expect("parse reference class")
+    krusty::jvm::classreader::parse_class(&bytes).expect("parse reference class")
+}
+
+fn kotlinc_class_signature(src: &str, name: &str) -> String {
+    kotlinc_class(src, name)
         .signature
         .expect("reference generic signature")
 }
@@ -141,6 +147,88 @@ fn type_parameter_fields_get_field_signatures() {
     };
     assert_eq!(field_sig("a").as_deref(), Some("TA;"));
     assert_eq!(field_sig("b").as_deref(), Some("TB;"));
+}
+
+#[test]
+fn top_level_property_field_gets_its_generic_signature() {
+    // A top-level property's backing field lives on the FILE FACADE, whose field table is emitted by
+    // its own path — it dropped the `Signature` a class field of the same type already carried, so a
+    // consumer read `java.util.List` where kotlinc records `List<String>`. A field whose type has no
+    // type arguments still carries none.
+    let src = "private val xs: List<String> = listOf(\"a\")\n               private val m: Map<String, Int> = mapOf()\n               private val plain: String = \"s\"\n               fun read(): Int = xs.size + m.size + plain.length\n";
+    let cs = classes(src);
+    let reference = kotlinc_class(src, "GKt");
+    let ci = cs
+        .iter()
+        .find(|(n, _)| n.ends_with("GKt"))
+        .and_then(|(_, b)| krusty::jvm::classreader::parse_class(b).ok())
+        .expect("GKt");
+    let field_sig = |name: &str| {
+        ci.fields
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("no field {name}"))
+            .signature
+            .clone()
+    };
+    let reference_field_sig = |name: &str| {
+        reference
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("no reference field {name}"))
+            .signature
+            .clone()
+    };
+    for name in ["xs", "m", "plain"] {
+        assert_eq!(field_sig(name), reference_field_sig(name));
+    }
+    assert_eq!(
+        field_sig("xs").as_deref(),
+        Some("Ljava/util/List<Ljava/lang/String;>;")
+    );
+    assert_eq!(
+        field_sig("m").as_deref(),
+        Some("Ljava/util/Map<Ljava/lang/String;Ljava/lang/Integer;>;")
+    );
+    assert_eq!(field_sig("plain"), None);
+}
+
+#[test]
+fn top_level_property_accessors_get_their_generic_signatures() {
+    // The facade accessors erase the property's type arguments in their descriptors, so each carries
+    // the same generic `Signature` the backing field does — kotlinc signs `getPub()` as
+    // `()Ljava/util/List<Ljava/lang/String;>;` and `setMut(Map)` as `(Ljava/util/Map<…>;)V`.
+    let src = "val pub: List<String> = listOf(\"a\")\n               var mut: Map<String, Int> = mapOf()\n               val plain: String = \"s\"\n";
+    let cs = classes(src);
+    let reference = kotlinc_class(src, "GKt");
+    let reference_method_signature = |name: &str| {
+        reference
+            .methods
+            .iter()
+            .find(|method| method.name == name)
+            .and_then(|method| method.signature.clone())
+    };
+    for name in ["getPub", "getMut", "setMut", "getPlain"] {
+        assert_eq!(
+            method_signature(&cs, "GKt", name),
+            reference_method_signature(name)
+        );
+    }
+    assert_eq!(
+        method_signature(&cs, "GKt", "getPub").as_deref(),
+        Some("()Ljava/util/List<Ljava/lang/String;>;")
+    );
+    assert_eq!(
+        method_signature(&cs, "GKt", "getMut").as_deref(),
+        Some("()Ljava/util/Map<Ljava/lang/String;Ljava/lang/Integer;>;")
+    );
+    assert_eq!(
+        method_signature(&cs, "GKt", "setMut").as_deref(),
+        Some("(Ljava/util/Map<Ljava/lang/String;Ljava/lang/Integer;>;)V")
+    );
+    // A property whose type has no type arguments carries none.
+    assert_eq!(method_signature(&cs, "GKt", "getPlain"), None);
 }
 
 #[test]
