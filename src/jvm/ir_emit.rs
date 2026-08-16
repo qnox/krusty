@@ -9093,7 +9093,7 @@ fn holder_method_signature(
             .collect::<Vec<_>>();
         Ty::obj_args_name(receiver, &arguments)
     };
-    let receiver_signature = formatter.method_ty(&receiver_ty)?;
+    let receiver_signature = formatter.method_ty(&receiver_ty, Wildcards::Declared)?;
     let parameters = method_tail.strip_prefix('(')?;
     Some(format!("{declaration}({receiver_signature}{parameters}"))
 }
@@ -9460,6 +9460,21 @@ fn emit_method_inner_with_holder(
 /// descriptor and the optional generic `Signature` attribute are separate classfile declarations: the
 /// former supplies runtime calling types, while this formatter preserves type parameters, type
 /// arguments, and declaration-site variance for classpath readers.
+/// Whether declaration-site variance becomes a JVM wildcard at the position being formatted.
+///
+/// kotlinc writes those wildcards in PARAMETER positions only: a return type and a field type get the
+/// invariant spelling, at EVERY nesting depth (`fun <U> deep(a: Map<String, List<U>>): Map<String,
+/// List<U>>` signs its parameter `Ljava/util/Map<Ljava/lang/String;+Ljava/util/List<+TU;>;>;` and its
+/// return `Ljava/util/Map<Ljava/lang/String;Ljava/util/List<TU;>;>;`). An explicit `in`/`out`
+/// projection the user wrote is not declaration-site variance and renders in either mode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wildcards {
+    /// A parameter position: realize declaration-site variance as `+`/`-`.
+    Declared,
+    /// A return or field position: spell every argument invariantly.
+    Suppressed,
+}
+
 struct JvmSignatureFormatter<'a> {
     symbols: &'a dyn SymbolSource,
     run: &'a EmitRun,
@@ -9570,26 +9585,33 @@ impl<'a> JvmSignatureFormatter<'a> {
         }
     }
 
-    fn type_argument(&self, declaration: TypeVariance, argument: Ty) -> Option<String> {
+    fn type_argument(
+        &self,
+        declaration: TypeVariance,
+        argument: Ty,
+        wildcards: Wildcards,
+    ) -> Option<String> {
         match argument {
-            Ty::InProjection(inner) => Some(format!("-{}", self.ty(inner)?)),
-            Ty::OutProjection(inner) => Some(format!("+{}", self.ty(inner)?)),
+            Ty::InProjection(inner) => Some(format!("-{}", self.ty_at(inner, wildcards)?)),
+            Ty::OutProjection(inner) => Some(format!("+{}", self.ty_at(inner, wildcards)?)),
             argument => {
                 let mut signature = String::new();
-                if !self.wildcard_is_redundant(declaration, argument)? {
+                if wildcards == Wildcards::Declared
+                    && !self.wildcard_is_redundant(declaration, argument)?
+                {
                     match declaration {
                         TypeVariance::In => signature.push('-'),
                         TypeVariance::Out => signature.push('+'),
                         TypeVariance::Invariant => {}
                     }
                 }
-                signature.push_str(&self.ty(&argument)?);
+                signature.push_str(&self.ty_at(&argument, wildcards)?);
                 Some(signature)
             }
         }
     }
 
-    fn function_ty(&self, signature: &crate::types::FnSig) -> Option<String> {
+    fn function_ty(&self, signature: &crate::types::FnSig, wildcards: Wildcards) -> Option<String> {
         let arity = signature.params.len() + usize::from(signature.suspend);
         if arity > 22 {
             self.run.set_emit_error(format!(
@@ -9599,15 +9621,15 @@ impl<'a> JvmSignatureFormatter<'a> {
         }
         let mut rendered = format!("Lkotlin/jvm/functions/Function{arity}<");
         for parameter in &signature.params {
-            rendered.push_str(&self.type_argument(TypeVariance::In, *parameter)?);
+            rendered.push_str(&self.type_argument(TypeVariance::In, *parameter, wildcards)?);
         }
         if signature.suspend {
             rendered.push_str("-Lkotlin/coroutines/Continuation<-");
-            rendered.push_str(&self.ty(&signature.ret)?);
+            rendered.push_str(&self.ty_at(&signature.ret, wildcards)?);
             rendered.push_str(">;");
             rendered.push_str("+Ljava/lang/Object;");
         } else {
-            rendered.push_str(&self.type_argument(TypeVariance::Out, signature.ret)?);
+            rendered.push_str(&self.type_argument(TypeVariance::Out, signature.ret, wildcards)?);
         }
         rendered.push_str(">;");
         Some(rendered)
@@ -9616,14 +9638,14 @@ impl<'a> JvmSignatureFormatter<'a> {
     /// One parameter or return position in a method `Signature`. Positions without generic structure
     /// use their exact JVM descriptor spelling; structured positions are rendered from the semantic
     /// type. This is a structural choice, not a recovery path after semantic formatting failed.
-    fn method_ty(&self, ty: &Ty) -> Option<String> {
+    fn method_ty(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
         let semantic = match ty {
             Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner,
             ty => ty,
         };
         match semantic {
-            Ty::TyParam(..) | Ty::Fun(_) => self.ty(ty),
-            Ty::Obj(_, arguments) if !arguments.is_empty() => self.ty(ty),
+            Ty::TyParam(..) | Ty::Fun(_) => self.ty_at(ty, wildcards),
+            Ty::Obj(_, arguments) if !arguments.is_empty() => self.ty_at(ty, wildcards),
             Ty::InProjection(_) | Ty::OutProjection(_) | Ty::Null | Ty::Error => {
                 self.run.set_emit_error(format!(
                     "internal: invalid semantic method-signature type {ty:?}"
@@ -9638,9 +9660,14 @@ impl<'a> JvmSignatureFormatter<'a> {
     /// site variance has no classfile equivalent, so the JVM backend realizes it as a wildcard on
     /// each otherwise-unprojected use-site argument. Explicit Kotlin `in`/`out` projections already
     /// carry their own direction and take precedence.
+    /// A type in a PARAMETER position (declaration-site variance becomes a wildcard).
     fn ty(&self, ty: &Ty) -> Option<String> {
+        self.ty_at(ty, Wildcards::Declared)
+    }
+
+    fn ty_at(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
         if let Ty::Nullable(inner) | Ty::PlatformNullable(inner) = ty {
-            return self.ty(inner);
+            return self.ty_at(inner, wildcards);
         }
         if let Ty::TyParam(name, _) = ty {
             return Some(format!(
@@ -9655,9 +9682,9 @@ impl<'a> JvmSignatureFormatter<'a> {
             Ty::String => Some("Ljava/lang/String;".to_string()),
             Ty::Unit => Some("Lkotlin/Unit;".to_string()),
             Ty::Nothing => Some("Lkotlin/Nothing;".to_string()),
-            Ty::InProjection(inner) => Some(format!("-{}", self.ty(inner)?)),
-            Ty::OutProjection(inner) => Some(format!("+{}", self.ty(inner)?)),
-            Ty::Fun(signature) => self.function_ty(signature),
+            Ty::InProjection(inner) => Some(format!("-{}", self.ty_at(inner, wildcards)?)),
+            Ty::OutProjection(inner) => Some(format!("+{}", self.ty_at(inner, wildcards)?)),
+            Ty::Fun(signature) => self.function_ty(signature, wildcards),
             Ty::Obj(owner, arguments) => {
                 let internal = owner.render();
                 let jvm = crate::jvm::names::classfile_internal_name(&internal);
@@ -9666,7 +9693,7 @@ impl<'a> JvmSignatureFormatter<'a> {
                     signature.push('<');
                     for (index, argument) in arguments.iter().enumerate() {
                         let variance = self.declaration_variance(owner, index)?;
-                        signature.push_str(&self.type_argument(variance, *argument)?);
+                        signature.push_str(&self.type_argument(variance, *argument, wildcards)?);
                     }
                     signature.push('>');
                 }
@@ -9686,11 +9713,11 @@ fn jvm_method_signature(
     let mut s = jvm_type_params(formatter, g)?;
     s.push('(');
     for parameter in &g.params {
-        s.push_str(&formatter.method_ty(parameter)?);
+        s.push_str(&formatter.method_ty(parameter, Wildcards::Declared)?);
     }
     s.push(')');
     let ret = g.ret.as_ref().unwrap_or(&f.ret);
-    s.push_str(&formatter.method_ty(ret)?);
+    s.push_str(&formatter.method_ty(ret, Wildcards::Suppressed)?);
     Some(s)
 }
 
@@ -9719,17 +9746,28 @@ fn jvm_class_signature(
 /// The generic `Signature` element for a parameterized concrete type (`List<String>` →
 /// `Ljava/util/List<Ljava/lang/String;>;`); `None` when erasure loses nothing. `T?` unwraps (generics
 /// survive nullability). Bare type parameters are handled separately via `field_signatures`.
+/// A FIELD's generic `Signature`, which follows the return-position rule: no declaration-site
+/// wildcards. A constructor PARAMETER of the same declared type takes them, so it goes through
+/// [`parameterized_sig_at`] with the parameter mode instead.
 fn parameterized_sig(formatter: &JvmSignatureFormatter<'_>, ty: &Ty) -> Option<String> {
+    parameterized_sig_at(formatter, ty, Wildcards::Suppressed)
+}
+
+fn parameterized_sig_at(
+    formatter: &JvmSignatureFormatter<'_>,
+    ty: &Ty,
+    wildcards: Wildcards,
+) -> Option<String> {
     let inner = match ty {
         Ty::Nullable(t) | Ty::PlatformNullable(t) => t,
         t => t,
     };
     match inner {
         Ty::Obj(_, args) if !args.is_empty() => {
-            let sig = formatter.ty(inner)?;
+            let sig = formatter.ty_at(inner, wildcards)?;
             (sig != ir_type_desc(inner)).then_some(sig)
         }
-        Ty::Fun(_) => formatter.ty(inner),
+        Ty::Fun(_) => formatter.ty_at(inner, wildcards),
         _ => None,
     }
 }
@@ -9859,10 +9897,13 @@ fn suspend_method_sig(
         Ty::Nullable(inner) => inner,
         t => t,
     };
-    let ret_arg = formatter.ty(ret)?;
+    // The suspend return travels as `Continuation<-RET>`, a PARAMETER of the erased method, and
+    // kotlinc wildcards inside it: `suspend fun <U> f(): Cont<U>` signs
+    // `(Lkotlin/coroutines/Continuation<-LCont<+TU;>;>;)Ljava/lang/Object;`.
+    let ret_arg = formatter.ty_at(ret, Wildcards::Declared)?;
     let mut s = String::from("(");
     for p in params {
-        s.push_str(&formatter.method_ty(p)?);
+        s.push_str(&formatter.method_ty(p, Wildcards::Declared)?);
     }
     s.push_str("Lkotlin/coroutines/Continuation<-");
     s.push_str(&ret_arg);
@@ -9896,10 +9937,10 @@ fn method_parameterized_sig(
     }
     let mut s = String::from("(");
     for p in params {
-        s.push_str(&formatter.method_ty(p)?);
+        s.push_str(&formatter.method_ty(p, Wildcards::Declared)?);
     }
     s.push(')');
-    s.push_str(&formatter.method_ty(ret)?);
+    s.push_str(&formatter.method_ty(ret, Wildcards::Suppressed)?);
     Some(s)
 }
 
@@ -9929,7 +9970,11 @@ fn class_ctor_generic_sig(
             if let Some((_, tp)) = ftp.and_then(|ftp| ftp.iter().find(|(fp, _)| fp == fname)) {
                 sig.push_str(&format!("T{tp};"));
                 any = true;
-            } else if let Some(ps) = f.and_then(|f| parameterized_sig(formatter, &f.ty)) {
+            } else if let Some(ps) = f.and_then(|f| {
+                // A constructor parameter is a PARAMETER position, even though the same declaration
+                // also backs a field, whose own signature suppresses the wildcards.
+                parameterized_sig_at(formatter, &f.ty, Wildcards::Declared)
+            }) {
                 sig.push_str(&ps);
                 any = true;
             } else {
