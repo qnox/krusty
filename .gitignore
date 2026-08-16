@@ -10,3 +10,5 @@ mutants.out/
 dhat-heap.json
 .idea
 .DS_Store
+__pycache__/
+*.py[cod]
