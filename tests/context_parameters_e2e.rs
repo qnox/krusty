@@ -554,7 +554,7 @@ fn context_function_value_uses_scope() {
 }
 
 #[test]
-fn missing_context_names_the_callable() {
+fn missing_context_names_the_parameter() {
     const SRC: &str = r#"
         // LANGUAGE: +ContextParameters
         class C
@@ -567,7 +567,7 @@ fn missing_context_names_the_callable() {
             std::slice::from_ref(&common::stdlib_jar()),
             Some(common::jdk_modules().as_path()),
         ),
-        vec!["No context argument for 'context(c: C) fun use(): String' found."]
+        vec!["no context argument for 'c: C' found."]
     );
 }
 

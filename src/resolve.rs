@@ -2182,6 +2182,8 @@ pub struct SourcePropertySig {
     pub compile_time_constant: Option<crate::libraries::LibraryConst>,
     pub implicit_integer_coercion: bool,
     pub context_params: Vec<Ty>,
+    /// Source names parallel to `context_params`, retained for diagnostics after resolution.
+    pub context_param_names: Vec<String>,
     pub package: String,
     pub visibility: Visibility,
     pub setter_visibility: Visibility,
@@ -2193,10 +2195,28 @@ pub struct ResolvedPropertyAccess {
     pub context_args: Vec<ResolvedContextArgument>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MissingContextParameter {
+    index: usize,
+    ty: Ty,
+}
+
+impl MissingContextParameter {
+    fn display(self, names: &[String]) -> String {
+        names
+            .get(self.index)
+            .filter(|name| !name.is_empty() && name.as_str() != "_")
+            .map_or_else(
+                || self.ty.source_name(),
+                |name| format!("{name}: {}", self.ty.source_name()),
+            )
+    }
+}
+
 enum TopLevelPropertySelection {
     None,
     Selected(Box<ResolvedPropertyAccess>),
-    MissingContext,
+    MissingContext(MissingContextParameter, Vec<String>),
     Ambiguous,
 }
 
@@ -8267,6 +8287,11 @@ fn collect_signatures_with_cp_impl(
                                 &class_names,
                             ),
                             context_params: context_params.clone(),
+                            context_param_names: p
+                                .context_params
+                                .iter()
+                                .map(|parameter| parameter.name.clone())
+                                .collect(),
                             package: file.package.clone().unwrap_or_default().replace('.', "/"),
                             visibility: p.visibility,
                             setter_visibility: declared_setter_visibility(p)
@@ -22527,6 +22552,7 @@ impl<'a> Checker<'a> {
         ctx_types: &[Ty],
     ) -> Option<Vec<ResolvedContextArgument>> {
         self.select_context_arguments_with_types(scope, ctx_types)
+            .ok()
             .map(|arguments| {
                 arguments
                     .into_iter()
@@ -22539,7 +22565,7 @@ impl<'a> Checker<'a> {
         &self,
         scope: &CheckerScope<'_>,
         ctx_types: &[Ty],
-    ) -> Option<Vec<(ResolvedContextArgument, Ty)>> {
+    ) -> Result<Vec<(ResolvedContextArgument, Ty)>, MissingContextParameter> {
         let matches = |have: Ty, want: Ty| -> bool {
             if have == want {
                 return true;
@@ -22553,11 +22579,13 @@ impl<'a> Checker<'a> {
             }
         };
         let mut out = Vec::with_capacity(ctx_types.len());
-        for &want in ctx_types {
-            let selected = scope.find_context_value(
-                |receiver| matches(receiver, want),
-                |binding| binding.value().is_some_and(|local| matches(local.ty, want)),
-            )?;
+        for (index, &want) in ctx_types.iter().enumerate() {
+            let selected = scope
+                .find_context_value(
+                    |receiver| matches(receiver, want),
+                    |binding| binding.value().is_some_and(|local| matches(local.ty, want)),
+                )
+                .ok_or(MissingContextParameter { index, ty: want })?;
             let (selected, actual) = match selected {
                 ContextValue::ImplicitReceiver {
                     ty,
@@ -22576,7 +22604,10 @@ impl<'a> Checker<'a> {
                     ty,
                 ),
                 ContextValue::Binding { name, shadow_depth } => {
-                    let ty = self.lookup(scope, &name)?.ty;
+                    let ty = self
+                        .lookup(scope, &name)
+                        .ok_or(MissingContextParameter { index, ty: want })?
+                        .ty;
                     (ResolvedContextArgument::Binding { name, shadow_depth }, ty)
                 }
             };
@@ -22586,7 +22617,7 @@ impl<'a> Checker<'a> {
             );
             out.push((selected, actual));
         }
-        Some(out)
+        Ok(out)
     }
 
     fn select_top_level_property(
@@ -22599,7 +22630,7 @@ impl<'a> Checker<'a> {
             .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
             .map(crate::symbol_resolver::Symbol::values)
             .unwrap_or_default();
-        let mut missing_context = false;
+        let mut missing_context = None;
         let mut applicable = Vec::new();
         for property in properties {
             if property.kind != crate::libraries::PropKind::TopLevel
@@ -22611,11 +22642,17 @@ impl<'a> Checker<'a> {
             let context_types = &property.getter.params[..property.context_count];
             let context_args = if context_types.is_empty() {
                 Vec::new()
-            } else if let Some(arguments) = self.select_context_arguments(scope, context_types) {
-                arguments
             } else {
-                missing_context = true;
-                continue;
+                match self.select_context_arguments_with_types(scope, context_types) {
+                    Ok(arguments) => arguments
+                        .into_iter()
+                        .map(|(argument, _)| argument)
+                        .collect(),
+                    Err(missing) => {
+                        missing_context = Some((missing, property.context_param_names.clone()));
+                        continue;
+                    }
+                }
             };
             applicable.push(ResolvedPropertyAccess {
                 property,
@@ -22627,11 +22664,9 @@ impl<'a> Checker<'a> {
             .map(|access| access.property.context_count)
             .max()
         else {
-            return if missing_context {
-                TopLevelPropertySelection::MissingContext
-            } else {
-                TopLevelPropertySelection::None
-            };
+            return missing_context.map_or(TopLevelPropertySelection::None, |(missing, names)| {
+                TopLevelPropertySelection::MissingContext(missing, names)
+            });
         };
         applicable.retain(|access| access.property.context_count == best_count);
         match applicable.as_slice() {
@@ -23052,19 +23087,21 @@ impl<'a> Checker<'a> {
             args,
             argument_names,
         );
-        let Some(shape) = self.contextual_call_shape(
+        let shape = match self.contextual_call_shape_result(
             scope,
             &selected.callable.params,
             &selected.call_sig,
             selected.context_count,
             argument_names,
-        ) else {
-            let display = self
-                .module_source_display(&selected, ret)
-                .unwrap_or_else(|| {
-                    Self::callable_candidate_display(&selected.callable.name, &selected)
-                });
-            return self.report_missing_context(call, display);
+        ) {
+            Ok(shape) => shape,
+            Err(missing) => {
+                return self.report_missing_context_parameter(
+                    call,
+                    missing,
+                    &selected.call_sig.param_names,
+                );
+            }
         };
         if !self.expect_selected_call_args(
             scope,
@@ -27792,6 +27829,21 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn check_operator_declaration(&mut self, function: &FunDecl, ret: Ty) {
+        if function.is_operator()
+            && function.name == "hasNext"
+            && !matches!(ret, Ty::Boolean | Ty::Error)
+        {
+            self.diags.error(
+                function
+                    .operator_span
+                    .expect("an operator function must retain its modifier span"),
+                "'operator' modifier is not applicable to function: must return 'Boolean'."
+                    .to_string(),
+            );
+        }
+    }
+
     fn annotation_shape(&self, internal: TypeName) -> Option<AnnotationShape> {
         let classifier = self.resolver().classifier(internal)?;
         let application = classifier.annotation_application()?;
@@ -28403,6 +28455,7 @@ impl<'a> Checker<'a> {
                 .or_else(|| self.syms.fun_ret_by_erased_params(&f.name, &want));
             self.ret_ty = own_ret.unwrap_or(Ty::Unit);
         }
+        self.check_operator_declaration(f, self.ret_ty);
         // For expression-body functions with no explicit return type, infer the return type from the
         // body expression and write it back to the canonical signature table. Later call resolution and
         // lowering then consume the same `Signature::ret` field as annotated functions.
@@ -30291,6 +30344,7 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Unit
             });
+        self.check_operator_declaration(f, self.ret_ty);
         {
             // Implicit-`this` scope: an extension member resolves `this` to its extension receiver,
             // a plain member to the dispatch receiver.
@@ -30813,6 +30867,22 @@ impl<'a> Checker<'a> {
         self.diags.error(
             self.call_callee_name_span(call),
             format!("No context argument for '{callable}' found."),
+        );
+        Ty::Error
+    }
+
+    fn report_missing_context_parameter(
+        &mut self,
+        call: ExprId,
+        missing: MissingContextParameter,
+        names: &[String],
+    ) -> Ty {
+        self.diags.error(
+            self.call_callee_name_span(call),
+            format!(
+                "no context argument for '{}' found.",
+                missing.display(names)
+            ),
         );
         Ty::Error
     }
@@ -34881,10 +34951,13 @@ impl<'a> Checker<'a> {
                             );
                             Ty::Error
                         }
-                        TopLevelPropertySelection::MissingContext => {
+                        TopLevelPropertySelection::MissingContext(missing, names) => {
                             self.diags.error(
                                 self.span(e),
-                                format!("No context argument for '{n}' found."),
+                                format!(
+                                    "no context argument for '{}' found.",
+                                    missing.display(&names)
+                                ),
                             );
                             Ty::Error
                         }
@@ -40480,7 +40553,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .map(|parameter| crate::symbol_resolver::ty_subst(*parameter, &bindings))
                         .collect::<Vec<_>>();
-                    let Some(context_arguments) =
+                    let Ok(context_arguments) =
                         self.select_context_arguments_with_types(scope, &context_params)
                     else {
                         continue;
@@ -42692,8 +42765,29 @@ impl<'a> Checker<'a> {
         context_count: usize,
         arg_names: Option<&[Option<String>]>,
     ) -> Option<ContextualCallShape> {
+        self.contextual_call_shape_result(
+            scope,
+            semantic_params,
+            call_sig,
+            context_count,
+            arg_names,
+        )
+        .ok()
+    }
+
+    fn contextual_call_shape_result(
+        &self,
+        scope: &CheckerScope<'_>,
+        semantic_params: &[Ty],
+        call_sig: &CallSig,
+        context_count: usize,
+        arg_names: Option<&[Option<String>]>,
+    ) -> Result<ContextualCallShape, MissingContextParameter> {
         if context_count > semantic_params.len() {
-            return None;
+            return Err(MissingContextParameter {
+                index: semantic_params.len(),
+                ty: Ty::Error,
+            });
         }
         let explicitly_named = |parameter: usize| {
             self.file.explicit_context_arguments
@@ -42709,13 +42803,18 @@ impl<'a> Checker<'a> {
         let implicit_indices = (0..context_count)
             .filter(|&parameter| !explicitly_named(parameter))
             .collect::<Vec<_>>();
-        let implicit_args = self.select_context_arguments_with_types(
-            scope,
-            &implicit_indices
-                .iter()
-                .map(|&parameter| semantic_params[parameter])
-                .collect::<Vec<_>>(),
-        )?;
+        let implicit_args = self
+            .select_context_arguments_with_types(
+                scope,
+                &implicit_indices
+                    .iter()
+                    .map(|&parameter| semantic_params[parameter])
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|missing| MissingContextParameter {
+                index: implicit_indices[missing.index],
+                ty: missing.ty,
+            })?;
         let mut context_sources = vec![None; context_count];
         let mut context_actual_types = vec![None; context_count];
         for (parameter, (source, actual)) in implicit_indices.into_iter().zip(implicit_args) {
@@ -42728,7 +42827,7 @@ impl<'a> Checker<'a> {
         let parameter_indices = (context_count..semantic_params.len())
             .chain((0..context_count).filter(|&parameter| explicitly_named(parameter)))
             .collect::<Vec<_>>();
-        Some(ContextualCallShape {
+        Ok(ContextualCallShape {
             params: parameter_indices
                 .iter()
                 .map(|&parameter| semantic_params[parameter])
@@ -45646,7 +45745,7 @@ impl<'a> Checker<'a> {
                             Some(access)
                         }
                         TopLevelPropertySelection::Selected(_)
-                        | TopLevelPropertySelection::MissingContext
+                        | TopLevelPropertySelection::MissingContext(..)
                         | TopLevelPropertySelection::Ambiguous
                         | TopLevelPropertySelection::None => None,
                     }
@@ -49009,7 +49108,7 @@ impl<'a> Checker<'a> {
                 })
                 .or(match &context_property {
                     TopLevelPropertySelection::Selected(property) => Some(property.property.ty),
-                    TopLevelPropertySelection::MissingContext => None,
+                    TopLevelPropertySelection::MissingContext(..) => None,
                     _ => None,
                 })
                 .or_else(|| self.syms.props.get(&name).map(|&(ty, _, _)| ty))
@@ -49106,7 +49205,7 @@ impl<'a> Checker<'a> {
                                 target_span,
                                 format!("overload resolution ambiguity for property '{name}'"),
                             ),
-                            TopLevelPropertySelection::MissingContext
+                            TopLevelPropertySelection::MissingContext(..)
                             | TopLevelPropertySelection::None => {
                                 match self.syms.props.get(&name).copied() {
                                     Some((lty, is_var, _)) => {
@@ -49927,6 +50026,7 @@ impl<'a> Checker<'a> {
                 _ => Ty::Unit,
             }
         };
+        self.check_operator_declaration(f, ret_ty);
 
         // Unique mangled JVM method name (StmtId is file-unique).
         let mangled = format!("$local${}", stmt_id.0);

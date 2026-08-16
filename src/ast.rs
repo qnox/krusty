@@ -750,6 +750,8 @@ pub struct FunDecl {
     pub signature_span: Span,
     /// Exact span of the `override` modifier. Present exactly when [`Self::is_override`] is true.
     pub override_span: Option<Span>,
+    /// Exact span of the `operator` modifier. Present exactly when [`Self::is_operator`] is true.
+    pub operator_span: Option<Span>,
     /// 1-based source line of the `fun` declaration (from `span.lo`), for its `LineNumberTable`.
     /// 0 = unknown (no debug table emitted). Filled by the same parser post-pass as `Class::decl_line`.
     pub decl_line: u32,

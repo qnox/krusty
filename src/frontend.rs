@@ -823,6 +823,7 @@ mod tests {
                                 formals: Vec::new(),
                                 ty: Ty::Int,
                                 context_count: 0,
+                                context_param_names: Vec::new(),
                                 getter: LibraryCallable::library(
                                     internal,
                                     "getMarker",
