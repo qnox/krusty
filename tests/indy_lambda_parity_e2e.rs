@@ -208,39 +208,42 @@ fn indy_lambdas_execute() {
 }
 
 #[test]
-fn class_strategies_fail_without_emitting_fallback_classes() {
-    for (index, flag) in ["-Xlambdas=class", "-Xsam-conversions=class"]
-        .into_iter()
-        .enumerate()
+fn the_class_strategy_emits_a_different_class_set_than_indy() {
+    // Both strategies compile; what distinguishes them is the artifact set, so that is the
+    // assertion. (The class strategy's own behaviour is covered by `class_lambda_e2e`.)
+    let mut counts = Vec::new();
+    for (index, flags) in [
+        ["-Xlambdas=indy", "-Xsam-conversions=indy"],
+        ["-Xlambdas=class", "-Xsam-conversions=class"],
+    ]
+    .into_iter()
+    .enumerate()
     {
-        let work = common::scratch_dir().expect("allocate rejected strategy fixture");
-        let source = work.join(format!("Rejected{index}.kt"));
+        let work = common::scratch_dir().expect("allocate strategy fixture");
+        let source = work.join(format!("Strategy{index}.kt"));
         let output = work.join("out");
-        std::fs::write(&source, "fun value(): () -> Int = { 1 }")
-            .expect("write rejected strategy fixture");
+        std::fs::write(&source, "fun value(): () -> Int = { 1 }").expect("write strategy fixture");
         let result = std::process::Command::new(common::krusty_binary())
-            .args(["-d", output.to_str().expect("UTF-8 output"), flag])
+            .args(["-d", output.to_str().expect("UTF-8 output")])
+            .args(flags)
             .arg(&source)
             .output()
             .expect("run krusty CLI");
-        assert_eq!(
-            result.status.code(),
-            Some(2),
-            "{flag} unexpectedly compiled"
-        );
         assert!(
-            String::from_utf8_lossy(&result.stderr).contains("does not emit"),
-            "{flag} did not explain the rejected shape: {}",
+            result.status.success(),
+            "{flags:?} rejected: {}",
             String::from_utf8_lossy(&result.stderr)
         );
-        let emitted = output.exists()
-            && std::fs::read_dir(&output)
-                .expect("read rejected output")
-                .next()
-                .is_some();
-        assert!(!emitted, "{flag} emitted fallback artifacts");
+        let mut classes = Vec::new();
+        collect_classes(&output, &output, &mut classes);
+        counts.push(classes.len());
         let _ = std::fs::remove_dir_all(work);
     }
+    assert_eq!(
+        counts[1],
+        counts[0] + 1,
+        "the class strategy must add exactly the lambda's own class: {counts:?}"
+    );
 }
 
 #[test]
