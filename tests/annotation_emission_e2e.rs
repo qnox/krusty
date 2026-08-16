@@ -507,6 +507,81 @@ fn secondary_constructor_annotation_reaches_metadata() {
     );
 }
 
+/// An annotated PRIMARY CONSTRUCTOR — `class C @Mark constructor(…)`. The annotation has to reach
+/// both halves: the `<init>` method's `RuntimeVisibleAnnotations` attribute in the class file, and
+/// `Constructor.annotation` (f3) in the metadata. A primary ctor's flags word is OMITTED at its
+/// proto default (6, visibility PUBLIC), so setting `HAS_ANNOTATIONS` has to materialize that
+/// default and write 7 — not OR bit 0 onto the 0 the caller carries.
+#[test]
+fn primary_constructor_annotation_reaches_metadata() {
+    require_identical_class(
+        "primary_ctor_anno",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         annotation class Mark\n\n\
+         class C @Mark constructor(val x: Int)\n",
+    );
+}
+
+/// The same, with ARGUMENTS. The parser previously discarded the primary constructor's annotation
+/// argument expressions (`take_pending_annotation_args` into `_`), so the values had to be carried
+/// as well as the annotation names.
+#[test]
+fn primary_constructor_annotation_arguments_reach_metadata() {
+    require_identical_class(
+        "primary_ctor_anno_args",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         annotation class Mark(val v: String, val n: Int)\n\n\
+         class C @Mark(\"hi\", 3) constructor(val x: Int, val s: String)\n",
+    );
+}
+
+/// An ALL-DEFAULTS primary constructor emits a second declaration the annotation must reach: the
+/// no-arg convenience `<init>()` that stands in for the primary. kotlinc repeats the annotation
+/// there and leaves the `$default` overload between them — being synthetic — without one.
+#[test]
+fn primary_constructor_annotation_reaches_the_no_arg_convenience_ctor() {
+    require_identical_class(
+        "primary_ctor_anno_defaults",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         annotation class Mark\n\n\
+         class C @Mark constructor(val x: Int = 7)\n",
+    );
+}
+
+/// `@Deprecated` on the primary constructor: the classic `Deprecated` ATTRIBUTE (not the annotation)
+/// propagates to the synthetic `$default` overload, so a Java caller reaching the defaulted form is
+/// warned too. kotlinc does the same for a secondary constructor's overload.
+#[test]
+fn deprecated_primary_constructor_marks_its_default_overload() {
+    require_identical_class(
+        "primary_ctor_deprecated",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         class C @Deprecated(\"gone\") constructor(val x: Int = 7)\n",
+    );
+}
+
+/// `DeprecationLevel.HIDDEN` on the primary constructor additionally makes the `<init>`
+/// `ACC_SYNTHETIC` — the mechanism overload resolution reads to stop offering the declaration, and
+/// the reason a hidden deprecation has to survive into the class file rather than only the metadata.
+#[test]
+fn hidden_deprecated_primary_constructor_is_synthetic() {
+    require_identical_class(
+        "primary_ctor_hidden",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         class C @Deprecated(\"gone\", level = DeprecationLevel.HIDDEN) constructor(val x: Int)\n",
+    );
+}
+
 #[test]
 fn hidden_deprecation_matches_kotlinc() {
     // The whole shape a consumer reads back: the annotation with its NAMED `level` argument, the

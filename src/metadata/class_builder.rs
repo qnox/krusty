@@ -170,6 +170,12 @@ pub const SEALED_CTOR_FLAGS: u64 = 4;
 /// `Constructor.flags` (f1) for an `object`'s primary constructor — kotlinc marks it PRIVATE
 /// (visibility bits 1-3 = 1). Instances come only from the static `INSTANCE` field.
 pub const OBJECT_CTOR_FLAGS: u64 = 2;
+/// `Constructor.flags` (f1) for a plain PUBLIC constructor — the proto's DEFAULT, so the field is
+/// omitted at this value and callers pass 0 to mean it. Written explicitly once another bit forces
+/// the field out.
+const PUBLIC_CTOR_FLAGS: u64 = 6;
+/// `Constructor.flags` bit 0 — the declaration carries annotation records.
+const HAS_ANNOTATIONS: u64 = 1;
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE`.
 const DECLARES_DEFAULT_VALUE: u64 = 2;
 
@@ -263,8 +269,20 @@ struct CtorShape<'a> {
 
 fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &TypeParameters) -> Pb {
     let mut ctor = Pb::new();
-    // `HAS_ANNOTATIONS` (bit 0) follows from the records below, exactly like a function's.
-    let flags = shape.flags | u64::from(!shape.annotations.is_empty());
+    // `HAS_ANNOTATIONS` (bit 0) follows from the records below, exactly like a function's. Setting it
+    // forces the flags field to be WRITTEN, so the proto default the caller was relying on has to be
+    // materialized first: a public primary constructor carries 0 here precisely because 6 (visibility
+    // PUBLIC) is the default and the field is omitted at that value — OR-ing bit 0 onto the 0 would
+    // write 1 (visibility INTERNAL) where kotlinc writes 7.
+    let flags = if shape.annotations.is_empty() {
+        shape.flags
+    } else {
+        (if shape.flags == 0 {
+            PUBLIC_CTOR_FLAGS
+        } else {
+            shape.flags
+        }) | HAS_ANNOTATIONS
+    };
     if flags != 0 {
         ctor.field_varint(1, flags); // Constructor.flags = 1
     }
@@ -439,6 +457,9 @@ pub struct ClassTail<'a> {
     pub supertypes: &'a [Ty],
     /// BINARY/RUNTIME-retained annotations attached to the class declaration.
     pub annotations: &'a [crate::ir::AppliedAnnotation],
+    /// BINARY/RUNTIME-retained annotations declared on the PRIMARY constructor — `Constructor.annotation`
+    /// (f3) of the primary record, the counterpart of [`CtorMeta::annotations`] for the secondaries.
+    pub primary_ctor_annotations: &'a [crate::ir::AppliedAnnotation],
 }
 
 impl Default for ClassTail<'_> {
@@ -468,6 +489,7 @@ impl Default for ClassTail<'_> {
             sealed_subclasses: &[],
             supertypes: &[],
             annotations: &[],
+            primary_ctor_annotations: &[],
         }
     }
 }
@@ -593,10 +615,7 @@ pub fn build_class(
                 sig_name: tail.ctor_sig_name,
                 emit_jvm_signature: tail.primary_ctor_jvm_signature,
                 vararg_index: tail.ctor_vararg_index,
-                // A PRIMARY constructor's own annotations (`class C @Anno constructor(…)`) are
-                // dropped before the IR — they reach neither the class file's annotation attribute
-                // nor this record. Nothing to mirror here until lowering carries them.
-                annotations: &[],
+                annotations: tail.primary_ctor_annotations,
             },
             &class_type_parameters,
         )]

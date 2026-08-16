@@ -5626,6 +5626,7 @@ fn build_continuation_class(
         secondary_ctors: vec![],
         has_primary_ctor: true,
         applied_annotations: crate::ir::DeclarationAnnotations::default(),
+        primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
         field_annotations: Vec::new(),
         property_annotations: Vec::new(),
         annotation_retention: None,

@@ -673,6 +673,7 @@ mod tests {
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),
+            primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
             annotation_retention: None,
         }
     }

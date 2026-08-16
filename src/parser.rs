@@ -307,6 +307,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         base_type_args: Vec::new(),
         base_args: Vec::new(),
         primary_ctor_annotations: Some(Vec::new()),
+        primary_ctor_annotation_args: Vec::new(),
         secondary_ctors: Vec::new(),
         span,
         ctor_close_line: 0,
@@ -2538,6 +2539,7 @@ impl<'a> Parser<'a> {
             base_args,
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
+            primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
             decl_line: 0,
@@ -2900,6 +2902,7 @@ impl<'a> Parser<'a> {
             base_args: Vec::new(),
             secondary_ctors,
             primary_ctor_annotations: has_primary_ctor.then_some(Vec::new()),
+            primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
             decl_line: 0,
@@ -3532,6 +3535,7 @@ impl<'a> Parser<'a> {
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         let mut primary_constructor_annotations = Vec::new();
+        let mut primary_constructor_annotation_args = Vec::new();
         // An explicit constructor prefix may continue across physical newlines.
         let mut primary_ctor_visibility = Visibility::Public;
         if self.primary_constructor_header_follows() {
@@ -3542,7 +3546,7 @@ impl<'a> Parser<'a> {
                 // `protected`, the JVM `<init>` access flags).
                 primary_ctor_visibility = visibility_of(&ctor_mods);
                 primary_constructor_annotations = self.take_pending_annotations();
-                let _ = self.take_pending_annotation_args();
+                primary_constructor_annotation_args = self.take_pending_annotation_args();
             }
         }
         let header_ctor_kw = self.at(TokenKind::Ident) && self.keyword_text("constructor");
@@ -3808,6 +3812,7 @@ impl<'a> Parser<'a> {
             // class with secondary ctors and no header ctor has NO primary.
             primary_ctor_annotations: (header_has_primary || secondary_ctors.is_empty())
                 .then_some(primary_constructor_annotations),
+            primary_ctor_annotation_args: primary_constructor_annotation_args,
             secondary_ctors,
             span: Span::new(start.lo, end.hi),
             ctor_close_line: ctor_close_lo,
@@ -4152,6 +4157,7 @@ impl<'a> Parser<'a> {
             base_args: Vec::new(),
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
+            primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
             decl_line: 0,
@@ -4285,6 +4291,7 @@ impl<'a> Parser<'a> {
             base_args,
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
+            primary_ctor_annotation_args: Vec::new(),
             span: Span::new(span.lo, end.hi),
             ctor_close_line: 0,
             decl_line: 0,
@@ -4427,6 +4434,7 @@ impl<'a> Parser<'a> {
             base_args,
             secondary_ctors: Vec::new(),
             primary_ctor_annotations: Some(Vec::new()),
+            primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
             decl_line: 0,

@@ -1859,6 +1859,7 @@ fn build_class_metadata(
             sealed_subclasses: &sealed_refs,
             supertypes: &supertypes,
             annotations: &metadata_annotations,
+            primary_ctor_annotations: &primary_ctor_annotations(c),
         },
     );
     // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
@@ -2029,6 +2030,15 @@ fn instance_field_jvm_name(
     unreachable!("an unused JVM backing-field suffix always exists")
 }
 
+/// The primary constructor's declared annotations in class-file order — RUNTIME-visible first, then
+/// the BINARY-retained invisible ones. The pool seeder and the `@Metadata` mirror both read this
+/// single sequence, so the two halves cannot drift apart.
+fn primary_ctor_annotations(c: &crate::ir::IrClass) -> Vec<crate::ir::AppliedAnnotation> {
+    let (visible, invisible) =
+        crate::jvm::classfile::split_declaration_annotations(&c.primary_ctor_annotations);
+    visible.into_iter().chain(invisible).collect()
+}
+
 fn seed_plain_class_pool(
     formatter: &JvmSignatureFormatter<'_>,
     ir: &IrFile,
@@ -2182,6 +2192,7 @@ fn seed_plain_class_pool(
             }
             entries
         },
+        &primary_ctor_annotations(c),
     );
     // A companion OUTER's `access$…$cp` bridges, `<clinit>`, and hoisted-initializer constants are
     // NOT seeded here: kotlinc interns them at their natural emission position — after the declared
@@ -5502,13 +5513,35 @@ fn emit_class(
             &ctor,
             ctor_signature.as_deref(),
         );
+        // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
+        // `Deprecated` / `ACC_SYNTHETIC` companions a secondary constructor's carry.
+        let primary_annotations = &c.primary_ctor_annotations;
+        if !primary_annotations.is_empty() {
+            let ctor_desc = method_descriptor(&param_tys, Ty::Unit);
+            cw.set_method_annotations("<init>", &ctor_desc, primary_annotations);
+            if primary_annotations.deprecated() {
+                cw.mark_method_deprecated("<init>", &ctor_desc);
+            }
+            if primary_annotations.deprecated_hidden() {
+                cw.set_method_synthetic("<init>", &ctor_desc);
+            }
+        }
         // A default on any primary-ctor parameter → kotlinc's synthetic
         // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
         // defaults, then `invokespecial` the real `<init>`).
         if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
             // (The stub emits its own LineNumberTable — class line, per-fill parameter lines, the
             // ctor's closing-`)` line at `return` — collapsed for single-line declarations.)
-            emit_ctor_default_stub(ir, &fq_name, facade, &param_tys, defaults, &mut cw, env);
+            emit_ctor_default_stub(
+                ir,
+                &fq_name,
+                facade,
+                &param_tys,
+                defaults,
+                c.primary_ctor_annotations.deprecated(),
+                &mut cw,
+                env,
+            );
         }
         // A COMPANION's synthetic marker ctor is emitted LAST, after the instance accessors
         // (kotlinc's member order — see below); every other shape keeps it beside the primary.
@@ -5665,6 +5698,7 @@ fn emit_class(
                 facade,
                 &sc_param_tys,
                 &sc.defaults,
+                sc.annotations.deprecated(),
                 &mut cw,
                 env,
             );
@@ -5809,6 +5843,19 @@ fn emit_class(
                     None,
                     &[("this".to_string(), format!("L{fq_name};"), 0)],
                 );
+                // The convenience ctor STANDS IN for the declared primary, so kotlinc repeats the
+                // primary's declared annotations on it (the `$default` overload between them, being
+                // synthetic, gets none). Their descriptors already interned at the primary.
+                let annotations = &c.primary_ctor_annotations;
+                if !annotations.is_empty() {
+                    cw.set_method_annotations("<init>", "()V", annotations);
+                    if annotations.deprecated() {
+                        cw.mark_method_deprecated("<init>", "()V");
+                    }
+                    if annotations.deprecated_hidden() {
+                        cw.set_method_synthetic("<init>", "()V");
+                    }
+                }
             }
         }
     }
@@ -7633,7 +7680,8 @@ fn emit_annotation_impl_class(
         // constructor nothing emits (`NoSuchMethodError`). kotlinc emits it on the impl class too.
         if let Some(defaults) = ir.class_ctor_defaults(&fq) {
             let param_tys: Vec<Ty> = members.iter().map(|(_, jt)| *jt).collect();
-            emit_ctor_default_stub(ir, &fq, facade, &param_tys, defaults, &mut cw, env);
+            // An annotation class's members carry no declaration annotations of their own.
+            emit_ctor_default_stub(ir, &fq, facade, &param_tys, defaults, false, &mut cw, env);
         }
     }
 
@@ -10327,12 +10375,17 @@ fn emit_facade_default_stub(
 /// is slot 0, the real parameters follow, then the mask + marker; after overwriting each masked slot with
 /// its default it `invokespecial`s the real `<init>`. Access is `PUBLIC | SYNTHETIC` (0x1001), matching
 /// kotlinc. The defaults were lowered in the instance frame (`this` = value 0, params = 1..=n).
+#[allow(clippy::too_many_arguments)]
 fn emit_ctor_default_stub(
     ir: &IrFile,
     owner: &str,
     facade: &str,
     real_params: &[Ty],
     defaults: &[Option<u32>],
+    // Whether the constructor this stub fills defaults for is `@Deprecated`. kotlinc repeats the
+    // classic `Deprecated` attribute (not the annotation) on the synthetic overload, so a Java
+    // caller reaching the defaulted form is warned too.
+    deprecated: bool,
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
@@ -10466,6 +10519,9 @@ fn emit_ctor_default_stub(
     if class_line != 0 {
         lines.dedup_by_key(|(_, line)| *line);
         e.cw.set_method_lines("<init>", &desc, &lines);
+    }
+    if deprecated {
+        e.cw.mark_method_deprecated("<init>", &desc);
     }
 }
 

@@ -526,7 +526,7 @@ struct LateField {
 /// across: `RuntimeVisibleAnnotations` (Kotlin's RUNTIME, the default) then `RuntimeInvisibleAnnotations`
 /// (BINARY). Common IR carries one list per declaration; this boundary is the only place the split
 /// exists. SOURCE-retained applications never reach the IR.
-fn split_declaration_annotations(
+pub(crate) fn split_declaration_annotations(
     annotations: &crate::ir::DeclarationAnnotations,
 ) -> (
     Vec<crate::ir::AppliedAnnotation>,
@@ -1290,6 +1290,9 @@ impl ClassWriter {
         // Entries the `super(…)` call's arguments intern in code order, BEFORE the super `<init>`
         // Methodref (`class Basic : Engine(Cfg(false), "basic")`).
         super_arg_entries: &[SeedSuperArg],
+        // The primary constructor's DECLARED annotations (`class C @Mark constructor(…)`), visible
+        // then invisible — interned at the constructor's own annotation visit.
+        ctor_annotations: &[crate::ir::AppliedAnnotation],
     ) {
         let (ctor_desc, super_ctor_desc) = ctor_descs;
         // Primary constructor: name + descriptor are interned at method entry, before its body.
@@ -1298,6 +1301,12 @@ impl ClassWriter {
         // The ctor's generic Signature (`(Ljava/util/List<Ljava/lang/String;>;)V`) — right after the desc.
         if let Some(s) = sigs.ctor {
             self.cp.utf8(s);
+        }
+        // The constructor's OWN annotations, before the parameter ones: ASM visits `visitAnnotation`
+        // ahead of `visitParameterAnnotation`, so `class C @Mark constructor(val x: Int)` interns
+        // `Lp/Mark;` right after `(I)V` and before the body's `()V`.
+        for annotation in ctor_annotations {
+            let _ = self.encode_annotation(annotation);
         }
         // The `@NotNull`/`@Nullable` annotation type(s), interned at the constructor's PARAMETER
         // annotations (kotlinc visits these before the body) in first-use order over the reference

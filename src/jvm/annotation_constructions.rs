@@ -107,6 +107,7 @@ fn annotation_implementation(
             .map(|(name, ty)| IrField::new(name.clone(), *ty))
             .collect(),
         field_annotations: Vec::new(),
+        primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
         property_annotations: Vec::new(),
         ctor_param_count: members.len() as u32,
         ctor_args: members

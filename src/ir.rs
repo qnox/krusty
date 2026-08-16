@@ -1005,6 +1005,11 @@ pub struct IrClass {
     /// that the property's `JvmPropertySignature` names. Empty for a class whose properties carry
     /// none.
     pub property_annotations: Vec<PropertyAnnotations>,
+    /// User annotations declared on the PRIMARY constructor (`class C @Mark constructor(…)`) — the
+    /// primary-`<init>` analogue of [`IrSecondaryCtor::annotations`], carrying retention per
+    /// application like every other declaration's. Empty for a class with no primary constructor, or
+    /// one that carries none.
+    pub primary_ctor_annotations: DeclarationAnnotations,
     /// For an `annotation class`: its declared Kotlin retention. `None` for every other class. Drives the
     /// meta-annotations the emitter stamps on the annotation interface — kotlinc writes
     /// `@kotlin.annotation.Retention(<declared>)` for an EXPLICIT `@Retention(…)` plus
@@ -2891,6 +2896,7 @@ mod tests {
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
+            primary_ctor_annotations: DeclarationAnnotations::default(),
             annotation_retention: None,
         }
     }

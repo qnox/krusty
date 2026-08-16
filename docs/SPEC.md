@@ -6272,3 +6272,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   everywhere a property is declared — top level, class, object, interface, companion, local, a
   destructuring `val (a, b)`, and a `when` subject binding.
   Tests: `tests/property_initializer_newline_e2e.rs`.
+  PROPERTY annotations now take their own route (below), and the PRIMARY constructor's the one after
+  it. Still DROPPED before the IR, so there is nothing to mirror yet (it needs the class-file side
+  first, not just the metadata record): VALUE-PARAMETER annotations (no
+  `RuntimeVisibleParameterAnnotations` is emitted at all).
+
+- **A primary constructor's own annotations reach both halves.** `class C @Mark constructor(val x: Int)`
+  parsed its annotations but dropped them: the emitted `<init>` carried no annotation attribute and the
+  metadata `Constructor` record none either. The annotation names were already on the AST; their
+  ARGUMENT expressions were discarded at the parse site, so both had to be carried through lowering
+  (the same retention split a function's and a secondary constructor's get). Three placement facts,
+  each verified byte-for-byte against kotlinc 2.4.10:
+  - The flags word is not a plain OR. `Constructor.flags` is OMITTED at its proto default 6
+    (visibility PUBLIC), which krusty represents as 0; setting `HAS_ANNOTATIONS` forces the field to be
+    written, so the omitted default must be MATERIALIZED first — an annotated public primary ctor
+    writes 7, not 1 (which would read back as visibility INTERNAL). A declared `private`/`protected`
+    primary already carries a non-zero word (2 / 4) and just gains the bit.
+  - The annotation type INTERNS at the constructor's own annotation visit, which ASM runs after
+    `visitMethod` and before `visitParameterAnnotation`: `Lp/Mark;` lands between the ctor descriptor
+    and the body's first entry, ahead of any `@NotNull` parameter annotation.
+  - An ALL-DEFAULTS primary constructor has a SECOND declaration to annotate: the no-arg convenience
+    `<init>()` that stands in for it. kotlinc repeats the annotation there; the synthetic `$default`
+    overload between them gets none.
+  Separately, `@Deprecated` on a constructor propagates the classic `Deprecated` ATTRIBUTE (not the
+  annotation) to that synthetic `$default` overload — for SECONDARY constructors too, which krusty had
+  also been omitting. Tests: `tests/annotation_emission_e2e.rs::primary_constructor_annotation_reaches_metadata`
+  (byte-identical to kotlinc), `…::primary_constructor_annotation_arguments_reach_metadata`,
+  `…::primary_constructor_annotation_reaches_the_no_arg_convenience_ctor`,
+  `…::deprecated_primary_constructor_marks_its_default_overload`.
+  Like the property annotations above, these are RECORDED but NOT diagnosed by the checker — krusty's
+  annotation constant folder is narrower than kotlinc's, and reporting from a newly added check would
+  reject sources that compile today.
