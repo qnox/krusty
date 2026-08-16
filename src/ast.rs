@@ -121,6 +121,29 @@ impl BinOp {
         })
     }
 
+    /// How the operator is written in source. Diagnostics name the operator the way the programmer
+    /// typed it (`operator '+' cannot be applied to …`), so the mapping lives here rather than in a
+    /// list at each report site.
+    pub fn source_symbol(self) -> &'static str {
+        match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Rem => "%",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::Lt => "<",
+            BinOp::Le => "<=",
+            BinOp::Gt => ">",
+            BinOp::Ge => ">=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
+            BinOp::RefEq => "===",
+            BinOp::RefNe => "!==",
+        }
+    }
+
     /// Inverse of [`arith_operator_name`](Self::arith_operator_name): the arithmetic operator a
     /// Kotlin operator-function name (`plus`/`minus`/…) desugars from, or `None`.
     pub fn from_arith_operator_name(name: &str) -> Option<BinOp> {

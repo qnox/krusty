@@ -430,7 +430,7 @@ fn inferred_nullable_constructor_type_is_retained_for_member_reads() {
                 .any(|message| message.contains("only safe")
                     || message.contains("nullable receiver")
                     || message.contains("unresolved reference")
-                    || message.contains("operator cannot be applied")),
+                    || message.contains("cannot be applied")),
             "{source}: {diagnostics:?}"
         );
     }

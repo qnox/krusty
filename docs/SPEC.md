@@ -3385,7 +3385,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **`override` must override something (module-closed hierarchies).** With overloads, a same-name
   sibling of a different arity no longer pairs with a supertype method, so an `override` modifier
   is checked explicitly: it must match a supertype member by name + arity, else
-  "'f' overrides nothing" (kotlinc's rejection). Enforced only when the hierarchy is MODULE-closed
+  "'f' overrides nothing." (kotlinc's rejection). Enforced only when the hierarchy is MODULE-closed
   (`hierarchy_is_module_closed`) — a classpath supertype's members are invisible to the walk —
   with `kotlin/Any`'s `toString`/`hashCode`/`equals` exempt. Test:
   `resolver_errors_coverage_e2e::override_with_wrong_signature`.
@@ -5845,3 +5845,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   annotation values remain explicit AST nodes and are diagnosed only if an emitted annotation
   application consumes them—never as fabricated names and never at inert property, field,
   parameter, or local positions. Tests: `tests/annotation_emission_e2e.rs`.
+
+- **Diagnostic text is the Kotlin frontend's own template.** Every message krusty and kotlinc both
+  report is the template compiled into `FirErrorsDefaultMessages`, with its first letter lowercased;
+  the LSP boundary sentence-cases it back, so the CLI and the language server agree with the
+  reference frontend character for character. Concretely: `'break' and 'continue' are only allowed
+  inside loops.`, `multiple vararg parameters are prohibited.`, `'return' is prohibited here.`,
+  `'this' is not defined in this context.`, `'{name}' overrides nothing.`, and — for EVERY binary
+  operator, not just `==`/`!=` — `operator '{op}' cannot be applied to '{left}' and '{right}'.`, with
+  the operator spelled as written via `BinOp::source_symbol`. `scripts/lsp-wording-audit.py` recovers
+  the templates from the language-server jars and reports the remaining divergences.
+  Tests: `tests/diagnostic_wording_e2e.rs`.
