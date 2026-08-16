@@ -348,7 +348,7 @@ fn compose_position(position: TypePosition, variance: crate::types::TypeVariance
 /// never becomes `out X`: reads expose `X`, writes admit `Nothing`, and nested function/class variance
 /// composes with the surrounding position.
 fn specialize_member_type_with_unbound(
-    source: Option<&dyn SymbolSource>,
+    source: &dyn SymbolSource,
     ty: Ty,
     bindings: &GSigBinds,
     position: TypePosition,
@@ -422,7 +422,7 @@ fn specialize_member_type_with_unbound(
         )),
         Ty::Obj(internal, arguments) if !arguments.is_empty() => {
             let variances = source
-                .and_then(|source| source.classifier(internal))
+                .classifier(internal)
                 .map(|classifier| classifier.type_param_variances.clone())
                 .unwrap_or_default();
             Ty::obj_args_name(
@@ -456,7 +456,7 @@ fn specialize_member_type(
     position: TypePosition,
 ) -> Ty {
     specialize_member_type_with_unbound(
-        Some(source),
+        source,
         ty,
         bindings,
         position,
@@ -474,7 +474,7 @@ fn specialize_member_type(
 /// return, lambda input — instantiates through here instead. `signature` supplies `formal_bounds`
 /// for bound-aware reads, since the inline `TyParam` bound is not always populated.
 pub(crate) fn instantiate_slot(
-    source: Option<&dyn SymbolSource>,
+    source: &dyn SymbolSource,
     signature: Option<&GenericSig>,
     ty: Ty,
     bindings: &GSigBinds,
@@ -512,7 +512,7 @@ pub(crate) fn specialize_signature_input_type(
     bindings: &GSigBinds,
 ) -> Ty {
     specialize_member_type_with_unbound(
-        Some(source),
+        source,
         ty,
         bindings,
         TypePosition::In,
@@ -526,7 +526,7 @@ pub(crate) fn specialize_signature_output_type(
     bindings: &GSigBinds,
 ) -> Ty {
     specialize_member_type_with_unbound(
-        Some(source),
+        source,
         ty,
         bindings,
         TypePosition::Out,
@@ -540,7 +540,7 @@ fn specialize_final_signature_output_type(
     bindings: &GSigBinds,
 ) -> Ty {
     specialize_member_type_with_unbound(
-        Some(source),
+        source,
         ty,
         bindings,
         TypePosition::Out,
@@ -554,7 +554,7 @@ pub(crate) fn specialize_signature_receiver_type(
     bindings: &GSigBinds,
 ) -> Ty {
     specialize_member_type_with_unbound(
-        Some(source),
+        source,
         ty,
         bindings,
         TypePosition::Invariant,
@@ -2586,7 +2586,7 @@ fn bind_member_return(
         unify_ty_from_symbols(source, parameter, argument, &mut binds);
     }
     let ret = instantiate_slot(
-        Some(source),
+        source,
         Some(gsig),
         gsig.ret,
         &binds,
@@ -2630,13 +2630,17 @@ fn preserve_receiver_identity_bindings(declared: Ty, actual: Ty, bindings: &mut 
     }
 }
 
-fn specialize_property(mut property: PropertyInfo, receiver: Ty) -> PropertyInfo {
+fn specialize_property(
+    source: &dyn SymbolSource,
+    mut property: PropertyInfo,
+    receiver: Ty,
+) -> PropertyInfo {
     let mut binds = GSigBinds::new();
     if let Some(declared_receiver) = property.receiver {
         unify_ty(declared_receiver, receiver, &mut binds);
     }
     property.ty = instantiate_slot(
-        None,
+        source,
         None,
         property.ty,
         &binds,
@@ -2650,7 +2654,7 @@ fn specialize_property(mut property: PropertyInfo, receiver: Ty) -> PropertyInfo
             .iter()
             .map(|ty| {
                 instantiate_slot(
-                    None,
+                    source,
                     None,
                     *ty,
                     &binds,
@@ -2777,7 +2781,11 @@ fn bind_defaulted_ext_ret_slots(
 /// Unbound formals remain symbolic: this helper shapes a postponed lambda before its body contributes
 /// inference constraints, so erasing `T` to its bound here would turn real evidence from `it` into
 /// `Any` before overload selection runs. Empty for anything else.
-pub(crate) fn function_input_types(sig: Ty, binds: &GSigBinds) -> Vec<Ty> {
+pub(crate) fn function_input_types(
+    source: &dyn SymbolSource,
+    sig: Ty,
+    binds: &GSigBinds,
+) -> Vec<Ty> {
     match sig.non_null() {
         Ty::Fun(fsig) => fsig
             .params
@@ -2786,7 +2794,7 @@ pub(crate) fn function_input_types(sig: Ty, binds: &GSigBinds) -> Vec<Ty> {
             // projected receiver shapes `it` as the approximation, never as `out X` itself.
             .map(|parameter| {
                 instantiate_slot(
-                    None,
+                    source,
                     None,
                     *parameter,
                     binds,
@@ -3365,7 +3373,7 @@ fn record_default_vararg_slot(
     let Some(index) = vararg_index else {
         return;
     };
-    let Some(elem) = params.get(index).and_then(|param| param.array_elem()) else {
+    let Some(elem) = params.get(index).and_then(|param| param.array_read_elem()) else {
         return;
     };
     if args.get(index).copied() != params.get(index).copied() {
@@ -4312,7 +4320,11 @@ impl<'a> SymbolResolver<'a> {
         };
         candidates.retain(|(rank, _)| *rank == nearest);
         match candidates.as_mut_slice() {
-            [(_, property)] => Ok(Some(specialize_property(property.clone(), receiver))),
+            [(_, property)] => Ok(Some(specialize_property(
+                &self.src,
+                property.clone(),
+                receiver,
+            ))),
             _ => Err(AmbiguousExtensionProperty),
         }
     }
@@ -4717,7 +4729,6 @@ impl<'a> SymbolResolver<'a> {
                     .select_extension_property_from_callables(ty, name, &callables)
                     .ok()
                     .flatten()
-                    .map(|property| specialize_property(property, ty))
                     .filter(|property| property.getter.ret.is_read_value_result());
                 // EVERY overload named `name` applicable to the receiver: instance members and operators
                 // (the receiver-aware member query, federated over module + libraries) UNION the in-scope
@@ -4916,7 +4927,7 @@ impl<'a> SymbolResolver<'a> {
                             let whole_array = argument.is_spread();
                             let expected =
                                 if o.call_sig.vararg_index == Some(parameter) && !whole_array {
-                                    declared.array_elem().unwrap_or(declared)
+                                    declared.array_read_elem().unwrap_or(declared)
                                 } else {
                                     declared
                                 };
@@ -5085,7 +5096,7 @@ impl<'a> SymbolResolver<'a> {
                     && (params.len() != arg_tys.len() || arg_tys.last() != params.last());
                 if vararg && !gsig.params.is_empty() {
                     let fixed = gsig.params.len() - 1;
-                    if let Some(inner) = gsig.params[fixed].array_elem() {
+                    if let Some(inner) = gsig.params[fixed].array_read_elem() {
                         vararg_elem = Some(ty_subst(inner, bindings));
                     }
                 }
@@ -5142,7 +5153,7 @@ impl<'a> SymbolResolver<'a> {
         o: &FunctionInfo,
     ) -> Option<LibraryCallable> {
         let binding_receiver = self.extension_binding_receiver(receiver, o);
-        let vparams = logical_value_params(o, binding_receiver, type_args);
+        let vparams = logical_value_params(&self.src, o, binding_receiver, type_args);
         // A `vararg` overload SPREAD over the trailing arguments is NOT a defaulted call — the caller
         // builds the packed array and the physical argument list still ends in it. Comparing raw arity
         // reads `"ab..!!".trimEnd('!', '.')` (2 arguments, 1 array parameter) as an omitted-default call
@@ -5155,7 +5166,7 @@ impl<'a> SymbolResolver<'a> {
             .filter(|&slot| args.len() > slot)
             .and_then(|slot| {
                 let array = *vparams.get(slot)?;
-                let element = array.array_elem()?;
+                let element = array.array_read_elem()?;
                 // Positional arguments beginning at a non-final vararg all belong to that
                 // vararg; later parameters can only be supplied by name. Preserve an array
                 // argument for the already-normalized spread/pass-through shape — sole, or an
@@ -5295,7 +5306,7 @@ impl<'a> SymbolResolver<'a> {
                 // type as well as the array itself.
                 let vararg_element_fits = o.call_sig.vararg_index == Some(index)
                     && param
-                        .array_elem()
+                        .array_read_elem()
                         .is_some_and(|element| self.arg_fits_or_subtype(&element, arg));
                 if !vararg_element_fits && !self.arg_fits_or_subtype(param, arg) {
                     return None;
@@ -5313,7 +5324,8 @@ impl<'a> SymbolResolver<'a> {
                 if let (Some(param), Some(arg)) = (vparams.get(vararg), args.get_mut(vararg)) {
                     if *arg != *param && param.array_elem().is_some() {
                         *arg = *param;
-                        element_form_vararg = param.array_elem().map(|element| (vararg, element));
+                        element_form_vararg =
+                            param.array_read_elem().map(|element| (vararg, element));
                     }
                 }
             }
@@ -5343,7 +5355,7 @@ impl<'a> SymbolResolver<'a> {
             if let Some(index) = o.call_sig.vararg_index {
                 callable.vararg_elem = vparams
                     .get(index)
-                    .and_then(|parameter| parameter.array_elem());
+                    .and_then(|parameter| parameter.array_read_elem());
                 callable.vararg_index = callable.vararg_elem.map(|_| index);
             }
             return Some(callable);
@@ -5515,7 +5527,7 @@ impl<'a> SymbolResolver<'a> {
                 .iter()
                 .map(|parameter| {
                     instantiate_slot(
-                        Some(&self.src),
+                        &self.src,
                         Some(&semantic),
                         *parameter,
                         &bindings,
@@ -5530,7 +5542,7 @@ impl<'a> SymbolResolver<'a> {
                 return None;
             }
             let ret_ty = instantiate_slot(
-                Some(&self.src),
+                &self.src,
                 Some(&semantic),
                 semantic.ret,
                 &bindings,
@@ -5679,7 +5691,7 @@ pub(crate) fn apply_platform_call_parameter_nullability(
             }
         }
         if nullable.get(fixed_len).copied().unwrap_or(false) {
-            if let Some(element) = array.array_elem() {
+            if let Some(element) = array.array_read_elem() {
                 if element.is_reference()
                     && args
                         .get(fixed_len..)
@@ -6996,7 +7008,7 @@ fn select_overload_tracking_with_functions(
                 .iter()
                 .filter_map(|(o, lp)| {
                     let vararg = o.call_sig.vararg_index?.checked_sub(o.context_count)?;
-                    let element = lp.get(vararg)?.array_elem()?;
+                    let element = lp.get(vararg)?.array_read_elem()?;
                     let trailing = usize::from(indexed == IndexedConvention::Set);
                     if vararg + 1 + trailing != lp.len() {
                         return None;
@@ -7053,7 +7065,7 @@ fn select_overload_tracking_with_functions(
         let Some(array) = lp.get(vararg_index).copied() else {
             return false;
         };
-        let Some(elem) = array.array_elem() else {
+        let Some(elem) = array.array_read_elem() else {
             return false;
         };
         args.len() >= vararg_index
@@ -7158,7 +7170,12 @@ fn generic_bounds_admit_slots(
 /// extension's `callable.params` prepend the receiver in the JVM emit shape, so bind the generic signature
 /// to `recv` and drop the leading receiver, preferring each parameter's value-class LOGICAL type over its
 /// erased underlying (`Id` over `kotlin/String`).
-fn logical_value_params(o: &FunctionInfo, recv: Ty, type_args: &[Ty]) -> Vec<Ty> {
+fn logical_value_params(
+    source: &dyn SymbolSource,
+    o: &FunctionInfo,
+    recv: Ty,
+    type_args: &[Ty],
+) -> Vec<Ty> {
     let semantic = o.semantic_signature();
     let mut binds = seeded_gsig_binds(&semantic, type_args);
     if let Some(recv_sig) = semantic.receiver {
@@ -7169,7 +7186,7 @@ fn logical_value_params(o: &FunctionInfo, recv: Ty, type_args: &[Ty]) -> Vec<Ty>
         .iter()
         .map(|parameter| {
             instantiate_slot(
-                None,
+                source,
                 Some(&semantic),
                 *parameter,
                 &binds,
@@ -7233,7 +7250,7 @@ fn logical_call_params(
         .iter()
         .map(|parameter| {
             instantiate_slot(
-                Some(source),
+                source,
                 Some(&signature),
                 *parameter,
                 &bindings,
@@ -7298,7 +7315,7 @@ fn indexed_call_shape(
             let declared = *signature.params.get(parameter)?;
             let whole_array = argument.is_spread();
             let expected = if parameter == vararg && !whole_array {
-                declared.array_elem().unwrap_or(declared)
+                declared.array_read_elem().unwrap_or(declared)
             } else {
                 declared
             };
@@ -8024,7 +8041,7 @@ mod tests {
         let function = Ty::nullable(Ty::fun(vec![Ty::String], Ty::String));
 
         assert_eq!(
-            function_input_types(function, &GSigBinds::new()),
+            function_input_types(&VarianceSource, function, &GSigBinds::new()),
             vec![Ty::String]
         );
     }
@@ -8035,7 +8052,7 @@ mod tests {
         let function = Ty::fun(vec![parameter], Ty::Unit);
 
         assert_eq!(
-            function_input_types(function, &GSigBinds::new()),
+            function_input_types(&VarianceSource, function, &GSigBinds::new()),
             vec![parameter]
         );
     }

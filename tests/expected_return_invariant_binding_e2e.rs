@@ -45,13 +45,15 @@ fn expected_result_fixes_invariant_type_arguments() {
         code, 0,
         "kotlinc rejected the control source: {diagnostics}"
     );
-    let krusty = common::front_end_diagnostics_with_stdlib(SOURCE);
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let krusty =
+        common::front_end_diagnostics(SOURCE, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
     assert!(
         krusty.is_empty(),
         "an expected invariant result must fix the call's type arguments: {krusty:?}"
     );
-    let jdk = common::jdk_modules();
-    let classpath = [common::stdlib_jar()];
+    let classpath = [stdlib];
     let Some(output) =
         common::compile_and_run_box(SOURCE, "InvariantExpectedResult", &classpath, Some(&jdk))
     else {
@@ -75,7 +77,10 @@ fn an_unsatisfiable_expected_result_still_reports_the_mismatch() {
     "#;
     let (code, _) = common::kotlinc_source_result("UnsatisfiableExpectedResult", SOURCE);
     assert_ne!(code, 0, "kotlinc must reject Int bound to Reply<String>");
-    let krusty = common::front_end_diagnostics_with_stdlib(SOURCE);
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let krusty =
+        common::front_end_diagnostics(SOURCE, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
     assert!(
         krusty
             .iter()

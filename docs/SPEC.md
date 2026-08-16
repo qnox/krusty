@@ -4231,11 +4231,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **What a declared classifier publishes as its JVM class `Signature` is decided once, by the
   recorded signature — never by the declaration's kind.** Class, data class, object, interface,
   enum, and enum-entry subclass all obtain their writer from one place, which takes the signature
-  `ir_lower` recorded for a generic declaration, or — for an enum with no recorded signature of its
-  own — the parameterized `java/lang/Enum<E>` supertype every enum has. An enum's recorded signature
-  carries that self argument like any other superclass argument, so `enum class E : I<String>`
-  publishes `Ljava/lang/Enum<LE;>;LI<Ljava/lang/String;>;`; a hand-rolled string beside the writer is
-  what previously erased the arguments of every interface an enum implements. Emitting interfaces through a writer of their own is why `interface Iface<B>`
+  `ir_lower` recorded for a generic declaration or parameterized supertype. The checked class model
+  records an enum's implicit `Enum<E>` self argument even when the enum has no entries, so
+  `enum class E : I<String>` publishes `Ljava/lang/Enum<LE;>;LI<Ljava/lang/String;>;`; a hand-rolled
+  string beside the writer is what previously erased the arguments of every interface an enum
+  implements. Emitting interfaces through a writer of their own is why `interface Iface<B>`
   carried no class `Signature` while `class Klass<B>` did, so every consumer read the interface as a
   raw type. The value interns between the class and superclass names, as ASM visits them.
   Test: `tests/classifier_class_signature_e2e.rs`.

@@ -27795,23 +27795,26 @@ fn class_applied_annotations(
         .collect()
 }
 
-/// Extract the BACKEND-AGNOSTIC generic-signature shape of a generic class (`class Box<T>`), or `None`
-/// for a non-generic class / one with explicit supertypes (whose generic args aren't modeled yet) / an
-/// unsupported bound. The `jvm` backend formats this into the class `Signature` attribute.
+/// Extract the BACKEND-AGNOSTIC generic-signature shape of a declaration that has type parameters or
+/// a parameterized supertype. The checked class model includes implicit language supertypes such as
+/// `Enum<E>`; the JVM backend only formats this recorded shape into a class `Signature` attribute.
 fn class_generic_sig(
     file: &ast::File,
     c: &ast::ClassDecl,
     info: &FrontendTypeInfo,
     syms: &FrontendSymbols,
 ) -> Result<Option<crate::ir::IrGenericSig>, &'static str> {
-    let has_parameterized_supertype =
-        !c.base_type_args.is_empty() || c.supertypes.iter().any(|s| !s.targs.is_empty());
-    if c.type_params.is_empty() && !has_parameterized_supertype {
-        return Ok(None);
-    }
     let class = syms
         .class_by_internal(&class_internal(file, &c.name))
         .ok_or("internal:missing-checked-class-signature")?;
+    let has_parameterized_supertype = !class.super_type_args.is_empty()
+        || class
+            .interface_type_args
+            .iter()
+            .any(|arguments| !arguments.is_empty());
+    if c.type_params.is_empty() && !has_parameterized_supertype {
+        return Ok(None);
+    }
     // A class signature is one semantic declaration. Its own type parameters cannot be omitted merely
     // because the class also has a superclass or interface: metadata, member signatures, and the JVM
     // signature all need the same identities. Supertypes are recorded alongside them, with `Any` first

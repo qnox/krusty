@@ -152,19 +152,7 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // A Java platform type `T!` is the flexible interval `T..T?`: as a source it may be consumed at
     // either bound, and as a target it accepts values admitted by the nullable upper bound.
     if let Ty::PlatformNullable(inner) = sup {
-        // A JAVA array parameter is `Array<(out) T!>!`: Java arrays are covariant, so an
-        // `InternetAddress[]` reaches a `Address[]` slot. Kotlin's own `Array<T>` stays invariant —
-        // only the flexible, Java-sourced spelling carries the projection.
-        let inner = match *inner {
-            Ty::Obj(owner, arguments)
-                if owner.matches("kotlin/Array")
-                    && matches!(arguments, [argument] if argument.projection_inner().is_none()) =>
-            {
-                Ty::obj_args_name(owner, &[Ty::out_projection(arguments[0])])
-            }
-            inner => inner,
-        };
-        return assignable_inner(cx, oracle, sub, Ty::nullable(inner));
+        return assignable_inner(cx, oracle, sub, Ty::nullable(*inner));
     }
     if let Ty::PlatformNullable(inner) = sub {
         return assignable_inner(cx, oracle, *inner, sup)
