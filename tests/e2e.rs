@@ -888,6 +888,8 @@ mod non_field_ctor_metadata_e2e;
 mod not_null_assert_e2e;
 #[path = "nothing_call_branch_e2e.rs"]
 mod nothing_call_branch_e2e;
+#[path = "nothing_descriptor_e2e.rs"]
+mod nothing_descriptor_e2e;
 #[path = "nothing_nullable_e2e.rs"]
 mod nothing_nullable_e2e;
 #[path = "nullable_cast_e2e.rs"]

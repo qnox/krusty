@@ -257,7 +257,12 @@ pub fn type_descriptor(ty: Ty) -> String {
             primitive_array_descriptor(n).unwrap().into()
         }
         Ty::Obj(n, _) => obj_desc(&n.render()),
-        Ty::Null | Ty::Nothing | Ty::Error => obj_desc("kotlin/Any"),
+        // `Nothing` is uninhabited, so no value ever has this descriptor — but it IS written into
+        // signatures (`fun boom(): Nothing`, `fun f(n: Nothing)`, a `Nothing` getter), and kotlinc
+        // writes `java.lang.Void` there, not `Object`. A caller compiled against kotlinc's ABI links
+        // against that descriptor.
+        Ty::Nothing => obj_desc("java/lang/Void"),
+        Ty::Null | Ty::Error => obj_desc("kotlin/Any"),
         Ty::Fun(s) => format!(
             "Lkotlin/jvm/functions/Function{};",
             s.params.len() + usize::from(s.suspend)
