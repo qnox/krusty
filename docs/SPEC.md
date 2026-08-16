@@ -4207,6 +4207,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so the real mismatch is still reported. Tests:
   `tests/expected_return_invariant_binding_e2e.rs`, `symbol_resolver` variance unit regressions.
 
+- **A value never has a projected type; a projected binding is approximated.** Matching a member
+  against a star-projected receiver binds the member's own formal to the PROJECTION — the stdlib
+  `fun <K, V> Map<out K, V>.get(key: K): V?` applied to `Map<*, *>` binds `V` to `out Any?`. The
+  call's value takes the approximation of that capture: `out X` reads as `X`, and an `in`-projected
+  one reads as the FORMAL's own declared bound — `Holder<in String>` whose parameter is `T :
+  CharSequence` reads back a `CharSequence`, because the projection only says a caller may write a
+  `String` there. So `m["k"]` is `Any?`, exactly as kotlinc types it. Only the value's own type is
+  approximated: a returned `List<out X>` is a legal type and stays as declared. The JVM side erases
+  a projection like a type parameter (`out X` → `X`, `in X` → `Object`) rather than treating it as
+  an unrepresentable type — leaving `(out Any?)?` in place produced a `Ty::Error` operand that
+  reached the comparison emitter and aborted the compile. Test:
+  `tests/star_projection_member_read_e2e.rs`.
+
 - **A type parameter is a lexical binding, declared on the rung of the declaration that introduces
   it.** `class C<T>` binds `T` on its CLASS rung, `fun <T> f()` on the function's own rung — one
   namespace (`Ns::Classifier`), different declaring rung — so a parameter retires with its
