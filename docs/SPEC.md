@@ -5931,3 +5931,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `…::a_positional_vararg_element_rejects_an_array_literal`,
   `…::class_literals_inside_an_array_literal_resolve`,
   `…::an_array_literal_in_an_unemitted_position_stays_inert`.
+
+- **Class initializer inference selects declared members through the module symbol source.** A
+  property such as `val parts = split(pattern)` may refer forward to an explicitly typed member,
+  and the member receiver rung outranks a same-named top-level function. Signature collection now
+  publishes those callable headers on the classifier before it infers properties, then replaces the
+  header with the complete class signature. Initializers therefore use the ordinary
+  `ModuleSymbols` candidate family and `SymbolResolver` overload/generic selection for bare calls,
+  explicit `this`, companion receivers, and overloads. The old top-level/member/local
+  `name -> return type` maps and the “selection failed, try a spelling” paths are gone.
+  Tests: `tests/member_property_inference_e2e.rs`.
