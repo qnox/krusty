@@ -4626,6 +4626,9 @@ struct JarPackages {
     packages: HashMap<NameId, PkgEntry>,
     /// Exact internal class names declared by this entry.
     classes: Vec<NameId>,
+    /// Every file-facade class this entry catalogs, across all packages — the membership test that
+    /// stays correct when `@JvmPackageName` puts a facade outside the package it declares.
+    facades: HashSet<NameId>,
     /// Whether the entire entry was catalogued successfully.
     complete: bool,
 }
@@ -4649,8 +4652,20 @@ impl JarPackages {
         self.packages.entry(id).or_default()
     }
 
+    /// Whether this entry catalogs `internal` as a file facade of ANY package. The facade's own JVM
+    /// location cannot answer this: `@JvmPackageName` emits `package kotlin.test`'s facade into
+    /// `kotlin/test/junit5/annotations/`, so deriving the package from the class name would look up
+    /// a package that declares no facades at all.
     fn contains_facade(&self, internal: &str) -> bool {
-        let package = internal.rsplit_once('/').map_or("", |(package, _)| package);
+        let Some(internal) = self.names.get(internal) else {
+            return false;
+        };
+        self.facades.contains(&internal)
+    }
+
+    /// Whether `internal` is one of `package`'s file facades — the location-independent form of "does
+    /// this class carry `package`'s top-level declarations".
+    fn declares_facade(&self, package: &str, internal: &str) -> bool {
         let Some(internal) = self.names.get(internal) else {
             return false;
         };
@@ -4773,6 +4788,7 @@ fn record_kotlin_module(bytes: &[u8], jp: &mut JarPackages) {
             .iter()
             .map(|facade| jp.names.insert(facade))
             .collect::<Vec<_>>();
+        jp.facades.extend(facades.iter().copied());
         jp.packages
             .entry(pkg_id)
             .or_default()
@@ -4913,8 +4929,11 @@ fn build_jar_packages_dir_visited(
                         || !m.multifile_parts.is_empty()
                     {
                         let internal = ci.this_class;
-                        let package = internal.parent().unwrap_or_else(|| type_name(""));
+                        // The DECLARED package, which `@JvmPackageName` divorces from the class
+                        // file's own directory — the same fact `kotlin_module` records for a jar.
+                        let package = ci.declaring_package();
                         let facade_id = crate::types::insert_type_name_in(&jp.names, internal);
+                        jp.facades.insert(facade_id);
                         let entry = jp.entry_mut_name(package);
                         if !entry.facades.contains(&facade_id) {
                             entry.facades.push(facade_id);
@@ -5601,8 +5620,13 @@ fn scan_types_jar_package(
             .name_for_index(entry_id)
             .and_then(class_internal_from_entry)
             .is_some_and(|internal| {
-                internal.rsplit_once('/').map_or("", |(parent, _)| parent) == package
-                    && type_alias_scan_wanted(internal, packages)
+                // A facade the catalog attributes to this package is in scope wherever its class
+                // file sits — `@JvmPackageName` emits `package kotlin.test`'s facade into
+                // `kotlin/test/junit5/annotations/`. The name-shape rung stays for a package whose
+                // facades were never cataloged (an entry with no `kotlin_module`).
+                packages.declares_facade(package, internal)
+                    || (internal.rsplit_once('/').map_or("", |(parent, _)| parent) == package
+                        && is_type_aliases_kt(internal))
             });
         if !wanted {
             continue;

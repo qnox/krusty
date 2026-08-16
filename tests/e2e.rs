@@ -256,6 +256,8 @@ mod classpath_reified_expected_return_e2e;
 mod classpath_reified_inline_toplevel_e2e;
 #[path = "classpath_reified_named_default_vararg_e2e.rs"]
 mod classpath_reified_named_default_vararg_e2e;
+#[path = "classpath_relocated_facade_typealias_e2e.rs"]
+mod classpath_relocated_facade_typealias_e2e;
 #[path = "classpath_runblocking_e2e.rs"]
 mod classpath_runblocking_e2e;
 #[path = "classpath_static_call_inference_e2e.rs"]

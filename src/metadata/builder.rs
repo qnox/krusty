@@ -733,7 +733,8 @@ mod tests {
             &[],
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
-        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/Lib1Kt", &[]);
+        let meta =
+            crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/Lib1Kt", None, &[]);
         let props = meta.package_properties;
         assert_eq!(props.len(), 1);
         assert_eq!(props[0].name, "doubled");
@@ -772,7 +773,8 @@ mod tests {
             &[],
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
-        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", &[]);
+        let meta =
+            crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None, &[]);
         let property = &meta.package_properties[0];
         let signature = property
             .generic_sig
@@ -839,7 +841,8 @@ mod tests {
             &[],
         );
         let d1s: String = d1.iter().map(|&b| b as char).collect();
-        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", &[]);
+        let meta =
+            crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None, &[]);
         let mf = meta
             .package_functions
             .iter()

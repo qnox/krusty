@@ -2135,6 +2135,12 @@ pub struct KotlinMeta {
     /// For a MULTI-FILE FACADE (`@Metadata(k = 4)`): the part class internal names its `d1` lists —
     /// the facade has no declarations of its own. Empty for every other kind.
     pub multifile_parts: Vec<String>,
+    /// `@Metadata`'s `pn`, slashed: the Kotlin package these declarations belong to when
+    /// `@JvmPackageName` relocated the class out of it. `None` — every unrelocated class — means the
+    /// class's own JVM package is the declaring one; read it through
+    /// [`crate::jvm::classreader::ClassInfo::declaring_package`] rather than re-deriving the
+    /// fallback. Held as an option so the overwhelmingly common case costs no allocation.
+    pub package: Option<String>,
 }
 
 impl Default for KotlinMeta {
@@ -2155,6 +2161,7 @@ impl Default for KotlinMeta {
             sealed_subclasses: Vec::new(),
             inline: None,
             multifile_parts: Vec::new(),
+            package: None,
         }
     }
 }
@@ -2194,17 +2201,21 @@ pub fn decode_metadata(
     d2: &[String],
     k: Option<i32>,
     this_class: &str,
+    package_name: Option<&str>,
     methods: &[super::classreader::MethodSig],
 ) -> KotlinMeta {
+    let package = package_name.map(|pn| pn.replace('.', "/"));
     if k == Some(4) {
         return KotlinMeta {
             multifile_parts: d1.to_vec(),
+            package,
             ..KotlinMeta::default()
         };
     }
     if d1.is_empty() {
         return KotlinMeta {
             class_visibility: (k == Some(1)).then_some(crate::types::Visibility::Public),
+            package,
             ..KotlinMeta::default()
         };
     }
@@ -2301,12 +2312,13 @@ pub fn decode_metadata(
         package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[])).into(),
         class_properties,
         package_properties: decode_properties(&ctx, 4, &[], &[]).into(),
-        type_aliases: type_aliases(&ctx, this_class),
+        type_aliases: type_aliases(&ctx, package.as_deref(), this_class),
         constructors: constructors.into(),
         companion_name: companion_name(&ctx),
         sealed_subclasses: sealed_subclasses(&ctx),
         inline: inline_class(&ctx),
         multifile_parts: Vec::new(),
+        package,
     }
 }
 
@@ -2917,7 +2929,11 @@ pub fn class_inline(ci: &ClassInfo) -> Option<&InlineClass> {
 /// underlying type, field 4). This is robust where the older `d2` `$annotations` heuristic was not — a
 /// file facade also carries annotated top-level properties whose `$annotations` markers that heuristic
 /// would misread as aliases.
-fn type_aliases(ctx: &MetaCtx, this_class: &str) -> Vec<MetaTypeAlias> {
+fn type_aliases(ctx: &MetaCtx, package: Option<&str>, this_class: &str) -> Vec<MetaTypeAlias> {
+    // The DECLARING package: `@Metadata`'s `pn` when `@JvmPackageName` moved the facade out of it
+    // (`package kotlin.test` emitted to `kotlin/test/junit5/annotations/AnnotationsKt`), the class's
+    // own JVM package otherwise. Never inferred from where the class file happens to sit.
+    let package = package.unwrap_or_else(|| this_class.rsplit_once('/').map_or("", |(p, _)| p));
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
@@ -2932,14 +2948,14 @@ fn type_aliases(ctx: &MetaCtx, this_class: &str) -> Vec<MetaTypeAlias> {
                     break;
                 };
                 if let Some(alias) = parse_type_alias(body, records, d2) {
-                    // Key the alias by its FULL internal name — its declaring package (the facade's) plus
-                    // the alias's simple name — so `kotlin/collections/ArrayList` is distinct from any other
-                    // package's `ArrayList`. `resolve_type` looks it up by that full name.
-                    let pkg = this_class.rsplit_once('/').map_or("", |(p, _)| p);
-                    let full = if pkg.is_empty() {
+                    // Key the alias by its FULL internal name — its DECLARING package plus the alias's
+                    // simple name — so `kotlin/collections/ArrayList` is distinct from any other
+                    // package's `ArrayList`. `resolve_type` looks it up by that full name, and an
+                    // `import kotlin.test.Test` spells the DECLARED package, never the relocated one.
+                    let full = if package.is_empty() {
                         alias.name.clone()
                     } else {
-                        format!("{pkg}/{}", alias.name)
+                        format!("{package}/{}", alias.name)
                     };
                     out.push(MetaTypeAlias {
                         name: full,

@@ -1036,6 +1036,7 @@ mod tests {
             &metadata.d2,
             Some(metadata.k),
             "a/AKt",
+            None,
             &[],
         );
 
