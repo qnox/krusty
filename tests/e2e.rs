@@ -592,6 +592,8 @@ mod function_type_supertype_e2e;
 mod function_typed_property_e2e;
 #[path = "generic_base_member_type_e2e.rs"]
 mod generic_base_member_type_e2e;
+#[path = "generic_ctor_lambda_targs_e2e.rs"]
+mod generic_ctor_lambda_targs_e2e;
 #[path = "generic_delegate_e2e.rs"]
 mod generic_delegate_e2e;
 #[path = "generic_fn_e2e.rs"]
