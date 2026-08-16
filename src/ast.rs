@@ -1484,6 +1484,11 @@ pub struct File {
     /// Whether signed integer constant expressions may adapt to unsigned parameters explicitly
     /// marked with `kotlin.internal.ImplicitIntegerCoercion`.
     pub implicit_signed_to_unsigned_integer_conversion: bool,
+    /// `+DataClassCopyRespectsConstructorVisibility` (`-Xconsistent-data-class-copy-visibility`):
+    /// a data class's synthesized `copy`/`copy$default` take the primary constructor's visibility
+    /// instead of being unconditionally public. The per-class `kotlin.ConsistentCopyVisibility` /
+    /// `kotlin.ExposedCopyVisibility` annotation overrides are unhandled.
+    pub data_copy_respects_ctor_visibility: bool,
 }
 
 fn retain_default_span(

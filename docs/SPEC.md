@@ -1255,6 +1255,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `disable`. Tests: `tests/jvm_default_mode_e2e.rs` (differential class sets, public method
   realization and holder bytes vs kotlinc, emitted `jvmClassFlags`, behavior parity, and cross-module
   consumption) and the `-jvm-default` parsing tests in `crates/krusty-cli/src/cli.rs`.
+- `-Xconsistent-data-class-copy-visibility` (language feature
+  `DataClassCopyRespectsConstructorVisibility`; also reachable as `-XXLanguage:+…`): a data class's
+  synthesized `copy`/`copy$default` take the PRIMARY CONSTRUCTOR's visibility instead of being
+  unconditionally public. Measured against kotlinc 2.4.10 on
+  `data class D private constructor(val s: String, val n: Int)`: `copy` becomes
+  `ACC_PRIVATE|ACC_FINAL`, loses its `@NotNull` nullability annotations (kotlinc annotates no
+  private method), and drops its `Intrinsics.checkNotNullParameter` entry guards (kotlinc guards
+  only functions reachable from Java — the private body starts directly at `new`); `copy$default`
+  becomes package-private `ACC_STATIC|ACC_SYNTHETIC` and dispatches to `copy` via `invokespecial`
+  (a private member is non-virtual); the `@Metadata` copy `Function.flags` visibility bits go
+  private (0xC6 → 0xC2, byte-equal d1 verified); nothing else changes. krusty routes the flag
+  through `LangFeatures` onto the `File`, and the lowering marks the synthesized `copy` in the same
+  `private_methods`/`internal_methods` sets a declared member uses (and gates its param guards the
+  same way `param_checks_for` gates a declared private member's), so the emitter's existing
+  visibility machinery produces all of the above. An INTERNAL primary ctor records internal copy
+  visibility in `@Metadata` while the JVM method stays public and UNMANGLED — krusty's systemic
+  internal-member convention (no `$module` mangling anywhere yet); kotlinc's `copy$<module>` byte
+  shape is deferred until internal mangling lands module-wide. A PROTECTED primary ctor currently
+  falls back to a public `copy` (kotlinc emits a protected `copy` with a public `copy$default`) —
+  the IR visibility sets model neither, a silent divergence on a rare shape, like a declared
+  `protected fun`. krusty also does not yet ENFORCE the copy's visibility at call sites: an
+  out-of-scope `d.copy()` still compiles where kotlinc reports an error under the flag. The
+  per-class `kotlin.ConsistentCopyVisibility`/`kotlin.ExposedCopyVisibility` annotations are
+  unhandled.
+  Tests: `tests/consistent_copy_visibility_e2e.rs` (normalized `copy`/`copy$default` javap sections
+  differential vs kotlinc with and without the flag, byte-level toggling isolation, internal-ctor
+  pin) plus the flag-modeling tests in `crates/krusty-cli/src/cli.rs` and `src/features.rs`, and the
+  Bazel worker acceptance test in `crates/krusty-cli/src/worker.rs`.
 - `-Xno-param-assertions` / `-Xno-call-assertions`: the two null-check families kotlinc emits, and
   which a build can turn off. Measured against kotlinc 2.4.10:
   * `-Xno-param-assertions` removes every `Intrinsics.checkNotNullParameter` — the guard at the entry
