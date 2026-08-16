@@ -37,7 +37,7 @@ full jar, so a dependent rebuilds on any change rather than only on an ABI chang
 
 load("@rules_java//java:defs.bzl", "JavaInfo")
 
-def _worker_arguments(ctx, output_jar, abi_jar, compile_jars):
+def _worker_arguments(ctx, output_jar, compile_jars):
     """The `jvm-inc-builder` vocabulary, which krusty's `--persistent_worker` mode parses.
 
     Deliberately NOT krusty's own command line: speaking the builder's surface is what lets a target
@@ -50,12 +50,19 @@ def _worker_arguments(ctx, output_jar, abi_jar, compile_jars):
     args.add("--target_label", ctx.label)
     args.add("--kotlin_module_name", ctx.attr.module_name or ctx.label.name)
     args.add("--out", output_jar)
-    args.add("--abi-out", abi_jar)
+    # No `--abi-out`: krusty produces no REDUCED abi jar, so asking for one would only copy the full
+    # jar to a second file that nothing consumes (`JavaInfo.compile_jar` is the output jar).
     if ctx.attr.jvm_target:
         args.add("--jvm_target", ctx.attr.jvm_target)
 
     # Every Kotlin source is a `.kt`: `srcs` rejects anything else, so the worker's Java refusal
     # cannot trigger from this rule — it guards the surface, not this caller.
+    # Every kotlinc flag the target set, forwarded verbatim. Omitting these silently changed the
+    # emitted artifact when `use_worker` was flipped: `-Xjvm-default=all` would stop reaching the
+    # compiler and the jar would grow the `$DefaultImpls` class the target asked not to have.
+    for option in ctx.attr.kotlinc_opts:
+        args.add("--kotlinc-arg", option)
+
     args.add_all("--srcs", ctx.files.srcs)
     args.add_all("--cp", compile_jars)
 
@@ -98,16 +105,11 @@ def _krusty_jvm_library_impl(ctx):
 
     outputs = [output_jar]
     if ctx.attr.use_worker:
-        # A worker's outputs are DECLARED, so every one must be written or bazel fails the action —
-        # which is why krusty writes an abi jar and a cri file even though it has nothing distinct to
-        # put in them.
-        abi_jar = ctx.actions.declare_file(ctx.label.name + ".abi.jar")
-        outputs.append(abi_jar)
         ctx.actions.run(
             mnemonic = "KrustyCompile",
             progress_message = "Compiling %%{label} with krusty worker (%d source(s))" % len(ctx.files.srcs),
             executable = ctx.executable._krusty,
-            arguments = [_worker_arguments(ctx, output_jar, abi_jar, compile_jars)],
+            arguments = [_worker_arguments(ctx, output_jar, compile_jars)],
             inputs = depset(ctx.files.srcs, transitive = [compile_jars]),
             outputs = outputs,
             env = ctx.attr.env,

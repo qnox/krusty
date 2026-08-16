@@ -158,7 +158,19 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 }
                 "--src-jars" => source_jars.extend(values),
                 "--cp" => unit.classpath.extend(values.into_iter().map(PathBuf::from)),
-                "--friends" => unit.friends.extend(values.into_iter().map(PathBuf::from)),
+                // `associates` — the modules whose `internal` declarations this target may see.
+                // krusty has no `-Xfriend-paths`, and it hides classpath `internal` members by
+                // design, so accepting this would fail later with "unresolved" on every internal
+                // reference instead of naming the real cause here.
+                "--friends" => {
+                    if !values.is_empty() {
+                        return Err(Refusal::Unsupported(format!(
+                            "--friends ({}): krusty cannot grant `internal` visibility across \
+                             modules",
+                            values.join(", ")
+                        )));
+                    }
+                }
                 "--opt_in" => unit
                     .kotlinc_args
                     .extend(values.into_iter().map(|value| format!("-opt-in={value}"))),
@@ -248,6 +260,13 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 // krusty emits no call assertions of its own, so its output already matches.
                 unit.inert.push(flag.to_string());
                 index += 1;
+            }
+            // A kotlinc flag forwarded verbatim by the rule (`kotlinc_opts`). Without this the rule
+            // would have to re-spell every option in the worker vocabulary, and anything it could
+            // not spell would silently not reach the compiler.
+            "--kotlinc-arg" => {
+                unit.kotlinc_args.push(value_of(index, flag)?);
+                index += 2;
             }
             "--x_explicit_api" => {
                 let value = value_of(index, flag)?;
@@ -376,18 +395,28 @@ pub fn serve(
         }
     };
     match translate(&arguments).map_err(|refusal| refusal.to_string()) {
-        Ok(unit) => match compile(unit) {
-            Ok(()) => WorkResponse {
-                exit_code: 0,
-                output: String::new(),
-                request_id: request.request_id,
-            },
-            Err(error) => WorkResponse {
-                exit_code: 1,
-                output: error,
-                request_id: request.request_id,
-            },
-        },
+        Ok(unit) => {
+            // Report what was understood but had no effect. `WorkResponse::output` is the channel
+            // bazel prints, and silently dropping an option the target set is the habit this module
+            // exists to avoid.
+            let note = if unit.inert.is_empty() {
+                String::new()
+            } else {
+                format!("krusty: no effect on output: {}\n", unit.inert.join(" "))
+            };
+            match compile(unit) {
+                Ok(()) => WorkResponse {
+                    exit_code: 0,
+                    output: note,
+                    request_id: request.request_id,
+                },
+                Err(error) => WorkResponse {
+                    exit_code: 1,
+                    output: format!("{note}{error}"),
+                    request_id: request.request_id,
+                },
+            }
+        }
         Err(error) => WorkResponse {
             exit_code: 1,
             output: format!("krusty: {error}"),
@@ -654,6 +683,63 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+    }
+
+    /// The rule forwards a target's `kotlinc_opts` as `--kotlinc-arg` each. Without a passthrough
+    /// they reached the compiler in non-worker mode only, so flipping `use_worker` silently changed
+    /// the emitted artifact — `-Xjvm-default=all` would stop applying and the jar would grow the
+    /// `$DefaultImpls` class the target asked not to have.
+    #[test]
+    fn forwarded_kotlinc_flags_reach_the_compiler() {
+        let unit = translate(&args(&[
+            "--kotlinc-arg",
+            "-Xjvm-default=all",
+            "--kotlinc-arg",
+            "-progressive",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("must translate");
+        assert_eq!(
+            unit.kotlinc_args,
+            vec!["-Xjvm-default=all".to_string(), "-progressive".to_string()]
+        );
+    }
+
+    /// `--friends` carries the modules whose `internal` declarations must be visible. krusty has no
+    /// equivalent and hides classpath `internal` members, so accepting it would fail later with
+    /// "unresolved" on every internal reference instead of naming the cause here.
+    #[test]
+    fn associates_are_refused_rather_than_dropped() {
+        let refusal = translate(&args(&[
+            "--friends",
+            "peer.jar",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .unwrap_err();
+        assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+    }
+
+    /// Options understood but without effect are REPORTED, through the channel bazel prints.
+    #[test]
+    fn inert_options_are_reported_in_the_response() {
+        let request = WorkRequest {
+            arguments: args(&["--x_no_call_assertions", "--srcs", "A.kt", "--out", "o.jar"]),
+            request_id: 4,
+            cancel: false,
+        };
+        let response = serve(&request, &|_unit| Ok(()));
+        assert_eq!(response.exit_code, 0);
+        assert!(
+            response.output.contains("--x_no_call_assertions"),
+            "an inert option must be surfaced: {:?}",
+            response.output
+        );
     }
 
     #[test]
