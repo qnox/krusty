@@ -3192,6 +3192,15 @@ fn emit_all_with_class_meta_impl(
         },
     )?;
     let used = env.run.used_lambdas.borrow().clone();
+    // `invokedynamic` was added in class-file version 51 (Java 7). Do not return a version-50 class
+    // containing an opcode that its declared target cannot represent. This check uses the emitter's
+    // discovery result rather than the source/IR lambda count: an inline-only lambda that was fully
+    // spliced emitted no call site and therefore remains valid for the older target.
+    if opts.class_major.is_some_and(|major| major < 51) && !used.is_empty() {
+        env.run
+            .set_emit_error("krusty: invokedynamic requires JVM target 1.7 or newer".to_string());
+        return None;
+    }
     // A MUST-INLINE message lambda whose call-site splice FELL BACK to a real `invokedynamic`
     // (pass 1 recorded the use): its impl was pre-marked `inline_only` on the assumption the splice
     // always succeeds — emitting the reference without the method would be a broken class
