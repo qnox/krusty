@@ -582,6 +582,11 @@ pub struct ClassWriter {
     /// `inner` is actually referenced as a class constant — kotlinc's rule.
     inner_class_candidates: Vec<InnerClassSpec>,
     inner_class_resolver: Option<InnerClassResolver>,
+    /// Internal names of every ANNOTATION type this class applies (class/field/method/parameter).
+    /// An applied annotation appears only as a descriptor string inside the annotation attribute —
+    /// never as a class constant — yet kotlinc still gives a nested one an `InnerClasses` entry, so
+    /// these count as references alongside the pool's class constants.
+    annotation_class_refs: std::collections::HashSet<String>,
     /// Entries for the `PermittedSubclasses` attribute.
     permitted_subclasses: Vec<String>,
     /// Class-file major version to emit (default v52; set via [`ClassWriter::set_major`]).
@@ -665,6 +670,7 @@ impl ClassWriter {
             deprecated_methods: std::collections::HashSet::new(),
             inner_class_candidates: Vec::new(),
             inner_class_resolver: None,
+            annotation_class_refs: std::collections::HashSet::new(),
             permitted_subclasses: Vec::new(),
             major: MAJOR_JAVA8,
             source_file: None,
@@ -1191,6 +1197,9 @@ impl ClassWriter {
             AnnoValue::Enum(ty, name) => {
                 out.push(b'e');
                 let ty = ty.render();
+                // An enum value's TYPE is a reference too: kotlinc records an `InnerClasses` entry
+                // for a nested enum used purely as an annotation argument (verified on 2.4.10).
+                self.annotation_class_refs.insert(ty.clone());
                 let ti = self.cp.utf8(&format!("L{ty};"));
                 u2(out, ti);
                 let ni = self.cp.utf8(name);
@@ -1199,6 +1208,7 @@ impl ClassWriter {
             AnnoValue::Class(internal) => {
                 out.push(b'c');
                 let internal = super::jvm_class_map::to_jvm_type_name(*internal).render();
+                self.annotation_class_refs.insert(internal.clone());
                 let ci = self.cp.utf8(&format!("L{internal};"));
                 u2(out, ci);
             }
@@ -1219,6 +1229,7 @@ impl ClassWriter {
     /// Encode an `annotation` structure: the type descriptor index + its `element_value_pairs`.
     fn ev_annotation(&mut self, out: &mut Vec<u8>, a: &crate::ir::AppliedAnnotation) {
         let internal = a.internal.render();
+        self.annotation_class_refs.insert(internal.clone());
         let ti = self.cp.utf8(&format!("L{internal};"));
         u2(out, ti);
         u2(out, a.values.len() as u16);
@@ -2146,7 +2157,14 @@ impl ClassWriter {
 
     fn resolve_inner_classes(&mut self) {
         if let Some(resolve) = self.inner_class_resolver.clone() {
-            let referenced = self.cp.class_names();
+            // Class constants first, then annotation types (an applied annotation is a reference
+            // even though only its descriptor string reaches the pool). kotlinc's writer sorts the
+            // final table by inner name, so collection order does not leak into the attribute.
+            let mut referenced = self.cp.class_names();
+            let mut annotation_refs: Vec<String> =
+                self.annotation_class_refs.iter().cloned().collect();
+            annotation_refs.sort();
+            referenced.extend(annotation_refs);
             for inner in referenced {
                 if self
                     .inner_class_candidates
@@ -2206,6 +2224,7 @@ impl ClassWriter {
             .filter(|candidate| {
                 candidate.outer.as_deref() == Some(self.internal_name.as_str())
                     || referenced.contains(&candidate.inner)
+                    || self.annotation_class_refs.contains(&candidate.inner)
                     || self.descriptor_mentions(&candidate.inner)
             })
             .map(|candidate| {
