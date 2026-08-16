@@ -6048,10 +6048,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Nothing` into `kotlin/Any` alongside the `Null` and `Error` sentinels, which are not source types
   and stay as they were.
 
-  Two positions still descriptor as `Object` where kotlinc writes `Void`, both because the declared
-  `Nothing` never reaches this path — adding a `Nullable(Nothing)` arm here changes neither, which is
-  how that was established: a PARAMETER (`fun f(n: Nothing)`) and a `Nothing?` RESULT
-  (`fun maybe(): Nothing? = null`).
-  Neither is reachable code — no caller can supply a `Nothing` argument, and the only `Nothing?` value
-  is `null` — but both are ABI, so they remain open.
+  Parameters, fields, and constructor arguments use one declared-slot representation rule:
+  semantic `Nothing` becomes the one-slot reference `java.lang.Void`. Expression lowering still
+  retains non-null `Nothing` as the bottom type so calls returning it terminate control flow.
+  A declared `Nothing?` maps to the same nullable `Void` reference and does not diverge; its only
+  value is `null`. Value-flow lowering keeps the null-only bottom type erased to `Object`, because it
+  can also arise as the inferred result of a generic call such as `choose(null, null)` whose physical
+  declaration returns `Object`. This matches kotlinc for top-level, member, local, module, and
+  classpath declarations without origin-specific descriptor paths.
   Tests: `tests/nothing_descriptor_e2e.rs`.
