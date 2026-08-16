@@ -86,6 +86,39 @@ fn compile_source(mode: JvmDefaultMode, source_text: &str, stem: &str) -> Vec<(S
     classes
 }
 
+fn compile_module_to(
+    mode: JvmDefaultMode,
+    source_text: &str,
+    stem: &str,
+    output: &Path,
+    classpath: Option<&Path>,
+) {
+    let flag = match mode {
+        JvmDefaultMode::Enable => "enable",
+        JvmDefaultMode::NoCompatibility => "no-compatibility",
+        JvmDefaultMode::Disable => "disable",
+    };
+    let source = output
+        .parent()
+        .expect("module output parent")
+        .join(format!("{stem}.kt"));
+    std::fs::write(&source, source_text).expect("write module source");
+    let mut command = std::process::Command::new(common::krusty_binary());
+    command
+        .args(["-d", output.to_str().expect("UTF-8 output")])
+        .arg(format!("-jvm-default={flag}"));
+    if let Some(classpath) = classpath {
+        command.args(["-classpath", classpath.to_str().expect("UTF-8 classpath")]);
+    }
+    let result = command.arg(&source).output().expect("run krusty module");
+    assert!(
+        result.status.success(),
+        "krusty module {stem} failed under {mode:?}: stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 fn compile_reference(flag: &str) -> Vec<(String, Vec<u8>)> {
     let work = common::scratch_dir().expect("allocate kotlinc fixture");
     let source = work.join("I.kt");
@@ -385,4 +418,52 @@ fn a_private_interface_member_stays_private_under_disable() {
         !implementer.iter().any(|(name, _, _)| name == "h"),
         "a private interface member never reaches the class ABI: {implementer:?}"
     );
+}
+
+/// A dependency's declaration and physical realization are one provider record. The consumer's own
+/// `-jvm-default` setting must not reinterpret a classpath interface: ordinary dispatch uses the
+/// inherited class forwarder, `super.f()` and omitted defaults use the exact holder targets published
+/// by the dependency.
+#[test]
+fn a_disable_dependency_is_consumed_through_its_recorded_realizations() {
+    let work = common::scratch_dir().expect("allocate cross-module jvm-default fixture");
+    let library = work.join("library");
+    let application = work.join("application");
+    compile_module_to(
+        JvmDefaultMode::Disable,
+        r#"package dep
+            interface I {
+                val x: Int get() = 3
+                fun f(): String = "I.f"
+                fun g(value: Int = 7): String = "g$value"
+            }
+        "#,
+        "Library",
+        &library,
+        None,
+    );
+    compile_module_to(
+        JvmDefaultMode::NoCompatibility,
+        r#"package app
+            import dep.I
+            class Inherited : I
+            class Explicit : I { override fun f(): String = "E+" + super.f() }
+            fun box(): String {
+                val inherited: I = Inherited()
+                return if (inherited.x == 3 && inherited.f() == "I.f" && inherited.g() == "g7" &&
+                    Explicit().f() == "E+I.f") "OK" else "fail"
+            }
+        "#,
+        "Application",
+        &application,
+        Some(&library),
+    );
+    let mut classes = Vec::new();
+    collect_classes(&library, &library, &mut classes);
+    collect_classes(&application, &application, &mut classes);
+    let box_class = common::find_box_class(&classes).expect("cross-module box class");
+    let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+        .expect("JVM unavailable for cross-module jvm-default test");
+    assert_eq!(result, "OK");
+    let _ = std::fs::remove_dir_all(work);
 }
