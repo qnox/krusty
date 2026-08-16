@@ -8101,13 +8101,19 @@ fn collect_signatures_with_cp_impl(
                                 })
                                 .collect(),
                             super_internal: super_internal_ref,
-                            super_type_args: c
-                                .base_type_args
-                                .iter()
-                                .map(|argument| {
-                                    ty_of_ref(argument, &class_names, &symbolic_ctp, diags)
-                                })
-                                .collect(),
+                            // An `enum class E`'s implicit superclass is the PARAMETERIZED
+                            // `kotlin.Enum<E>`; the declaration writes no argument list, so the
+                            // self argument is recorded here rather than read off the source.
+                            super_type_args: if c.is_enum() {
+                                vec![Ty::obj_name(internal_ref)]
+                            } else {
+                                c.base_type_args
+                                    .iter()
+                                    .map(|argument| {
+                                        ty_of_ref(argument, &class_names, &symbolic_ctp, diags)
+                                    })
+                                    .collect()
+                            },
                             super_ctor_params: Vec::new(),
                             ctor_param_names,
                             ctor_vararg: c.props.iter().position(|p| p.is_vararg),
