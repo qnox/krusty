@@ -178,18 +178,24 @@ pub fn jvm_default_mode(src: &str) -> crate::jvm::ir_emit::JvmDefaultMode {
         .unwrap_or_default()
 }
 
-/// `// JVM_DEFAULT_MODE:` values krusty does not model yet. `enable` and `no-compatibility` are
-/// modelled and are compiled under the mode the test asks for; `disable` asserts a different
-/// class-file shape AND dispatch (every body on `$DefaultImpls`, call sites routed there), so
-/// judging it against what krusty emits would mis-grade — skip.
+/// `// JVM_DEFAULT_MODE:` configurations krusty cannot run soundly.
+///
+/// All three of kotlinc's strategies are emitted WITHIN a compilation. `disable` is not yet modelled
+/// ACROSS one: the class-side forwarders are emitted only for interfaces this compilation declares,
+/// and super/default-argument resolution does not consult a classpath interface's `$DefaultImpls`.
+/// A multi-`// MODULE:` test compiles the interface separately and then reads it back, so judging it
+/// would grade a configuration krusty does not claim. Every `disable` test in the Kotlin corpus is
+/// of that shape today.
 pub fn needs_unmodeled_jvm_default_mode(src: &str) -> bool {
+    let cross_module = src
+        .lines()
+        .any(|l| l.trim_start().starts_with("// MODULE:"));
     src.lines()
         .filter_map(|l| l.trim().strip_prefix("// JVM_DEFAULT_MODE:"))
-        .any(|mode| {
-            !matches!(
-                mode.split_whitespace().next(),
-                Some("enable") | Some("no-compatibility")
-            )
+        .any(|mode| match mode.split_whitespace().next() {
+            Some("enable") | Some("no-compatibility") => false,
+            Some("disable") => cross_module,
+            _ => true,
         })
 }
 
@@ -732,9 +738,27 @@ mod tests {
     }
 
     #[test]
-    fn jvm_default_mode_disable_is_unmodeled() {
+    fn every_kotlinc_jvm_default_mode_is_modelled() {
+        use crate::jvm::ir_emit::JvmDefaultMode;
+        for (directive, expected) in [
+            ("disable", JvmDefaultMode::Disable),
+            ("enable", JvmDefaultMode::Enable),
+            ("no-compatibility", JvmDefaultMode::NoCompatibility),
+        ] {
+            let src = format!("// JVM_DEFAULT_MODE: {directive}\nfun box() = \"OK\"");
+            assert!(
+                !needs_unmodeled_compiler_flag(&src),
+                "{directive} is emitted within a compilation and must run"
+            );
+            assert_eq!(jvm_default_mode(&src), expected);
+        }
+        // `disable` ACROSS modules is not modelled: the forwarders and the holder lookups only see
+        // interfaces this compilation declares.
         assert!(needs_unmodeled_compiler_flag(
-            "// JVM_DEFAULT_MODE: disable\nfun box() = \"OK\""
+            "// JVM_DEFAULT_MODE: disable\n// MODULE: lib\nfun box() = \"OK\""
+        ));
+        assert!(!needs_unmodeled_compiler_flag(
+            "// JVM_DEFAULT_MODE: enable\n// MODULE: lib\nfun box() = \"OK\""
         ));
         // A missing value never silently counts as a modelled mode.
         assert!(needs_unmodeled_compiler_flag(
@@ -746,7 +770,7 @@ mod tests {
     fn one_unmodeled_directive_anywhere_skips_the_test() {
         // A test whose modules pin different modes is only sound to run if EVERY mode is modelled.
         assert!(needs_unmodeled_compiler_flag(
-            "// JVM_DEFAULT_MODE: enable\n// JVM_DEFAULT_MODE: disable\nfun box() = \"OK\""
+            "// JVM_DEFAULT_MODE: enable\n// JVM_DEFAULT_MODE: sideways\nfun box() = \"OK\""
         ));
     }
 

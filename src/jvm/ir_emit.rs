@@ -154,6 +154,10 @@ pub struct EmitEnv<'a> {
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
     signature_symbols: &'a dyn SymbolSource,
+    /// `-jvm-default`. Read at CALL SITES: under `Disable` an interface's `$default` synthetic lives
+    /// on the `$DefaultImpls` holder, not on the interface, so a call that omits a defaulted argument
+    /// must target the holder or it links to a method that does not exist.
+    jvm_default: JvmDefaultMode,
 }
 
 /// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
@@ -198,8 +202,8 @@ fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
 ///     stub). kotlinc also puts a forwarder there for every other member with a body, emits the
 ///     `access$…$jd` bridges, and gives implementing classes forwarder overrides. That gap predates
 ///     `-jvm-default` support and is why `Enable` is not yet claimed as byte-parity.
-///   * `Disable` has no emitter at all, so the CLI refuses the value rather than compiling a
-///     different shape than the build asked for (see [`JvmDefaultMode::is_modelled`]).
+///   * `Disable` is emitted within a compilation; across modules it is not modelled rather than compiling a
+///     different shape than the build asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum JvmDefaultMode {
     /// kotlinc's own default since 2.2 (legacy spelling `-Xjvm-default=all-compatibility`): default
@@ -235,18 +239,6 @@ impl JvmDefaultMode {
             "disable" => Some(Self::Disable),
             _ => None,
         }
-    }
-
-    /// Whether krusty EMITS this mode, as opposed to merely naming it.
-    ///
-    /// `Disable` is named here because the conformance corpus pins it and the metadata flags are
-    /// known, but no emitter produces its shape. A caller that accepted `-jvm-default=disable` and
-    /// compiled anyway would publish `enable` bytecode carrying `disable` metadata: a consumer reads
-    /// the metadata, emits `invokestatic I$DefaultImpls.f(I)` at every call site, and fails at run
-    /// time with `NoSuchMethodError` against a holder that has no such method. Refusing the value is
-    /// the only honest option until the shape is implemented.
-    pub fn is_modelled(self) -> bool {
-        matches!(self, Self::Enable | Self::NoCompatibility)
     }
 
     /// The `jvmClassFlags` (`Class` JvmProtoBuf extension field 104) an interface carries under this
@@ -3091,6 +3083,7 @@ pub fn emit_all(
         run: &run,
         continuation_metadata: &empty_continuation_metadata,
         signature_symbols: &signature_symbols,
+        jvm_default: JvmDefaultMode::default(),
     };
     emit_all_with_class_meta(ir, facade, &env, metadata, &EmitOptions::default(), &|_| {
         None
@@ -3149,6 +3142,7 @@ pub fn emit_all_with_opts_and_metadata(
         run,
         continuation_metadata: metadata.continuations,
         signature_symbols: &signature_symbols,
+        jvm_default: opts.jvm_default,
     };
     emit_all_with_class_meta(ir, facade, &env, metadata.facade, opts, &|_| None)
 }
@@ -5441,6 +5435,12 @@ fn emit_class(
             }
         })
         .flatten();
+    // `-jvm-default=disable`: the interface holds no bodies, so a class that inherits one gets an
+    // explicit override forwarding to the holder. Without these the class does not implement its own
+    // interface and every inherited call is an `AbstractMethodError`.
+    if opts.jvm_default == JvmDefaultMode::Disable {
+        emit_default_impls_forwarders(ir, c, &mut cw, env);
+    }
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
     // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
@@ -7258,12 +7258,31 @@ fn emit_interface_class(
     let mut default_impls: Option<ClassWriter> = None;
     // Whether this compilation publishes the `<Iface>$DefaultImpls` compatibility holder at all.
     let emits_default_impls = opts.jvm_default != JvmDefaultMode::NoCompatibility;
+    // `disable` puts NO body on the interface: every member is abstract and the bodies live on the
+    // holder as statics taking the receiver as parameter 0. The other two modes emit the body here as
+    // a JVM default method.
+    let bodies_on_interface = opts.jvm_default != JvmDefaultMode::Disable;
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
-        if f.body.is_some() {
+        // A STATIC member of an interface is not a default method: a lambda synthetic
+        // (`f$lambda$0`) is a private static helper that stays where it is. Moving it to the holder
+        // prepended a receiver its body never reads, and published it abstract on the interface —
+        // the JVM rejected the result (`VerifyError: Bad type on operand stack`).
+        if f.body.is_some() && (bodies_on_interface || f.is_static) {
             // A default method — concrete instance method on the interface.
             emit_method(ir, fid, &fq_name, facade, &mut cw, !f.is_static, env);
         } else {
+            if f.body.is_some() && !f.is_static {
+                // `disable`: the body moves to the holder as a receiver-first static, and the
+                // interface keeps only the abstract declaration emitted below.
+                let di = default_impls.get_or_insert_with(|| {
+                    let mut w =
+                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
+                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
+                    w
+                });
+                emit_holder_method(ir, fid, &fq_name, facade, di, env);
+            }
             let desc = ir_method_desc(&f.params, &f.ret);
             cw.add_abstract_method_sig(
                 0x0001 | 0x0400,
@@ -7315,7 +7334,11 @@ fn emit_interface_class(
         // it) AND, under a mode that keeps the compatibility holder, a copy on the
         // `<Iface>$DefaultImpls` class (`public final`).
         if let Some(defaults) = ir.param_defaults(fid) {
-            emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, true);
+            // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
+            // sites go to the holder's copy instead.
+            if bodies_on_interface {
+                emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, true);
+            }
             // `-jvm-default=no-compatibility` emits NO `$DefaultImpls` at all. Emitting one anyway
             // would publish a holder class the build says does not exist — a downstream compilation
             // resolving against it links to a class kotlinc would never have produced.
@@ -7821,6 +7844,11 @@ fn emit_enum_class(
     emit_bridges(c, &mut cw);
     // An enum is a VIEW of the same `IrClass` — compute its `@Metadata` (and hence debug tables /
     // annotations) through the shared path, exactly like `emit_class` and `emit_interface_class`.
+    // An `enum class` implementing an interface needs the same holder forwarders an ordinary class
+    // does — it reaches emission through this function, not `emit_class`.
+    if opts.jvm_default == JvmDefaultMode::Disable {
+        emit_default_impls_forwarders(ir, c, &mut cw, env);
+    }
     if let Some(m) = opts
         .emit_class_metadata
         .then(|| build_class_metadata(ir, c, opts))
@@ -7891,6 +7919,192 @@ fn emit_method(
     emit_method_inner(ir, fid, owner, facade, cw, instance, env);
 }
 
+/// Under `-jvm-default=disable`, emit an override on `c` for each inherited interface member whose
+/// body lives on that interface's `$DefaultImpls` holder.
+///
+/// kotlinc emits `public <ret> f(args) { return I$DefaultImpls.f(this, args); }`. A member the class
+/// declares itself is left alone — it already overrides the abstract interface method.
+fn emit_default_impls_forwarders(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    cw: &mut ClassWriter,
+    env: &EmitEnv,
+) {
+    if c.is_interface {
+        return;
+    }
+    // Keyed on the ERASED shape, not the declared one. A class overriding a generic interface member
+    // already carries the erasure bridge (`f(Object)` → `f(String)`); adding a forwarder with that
+    // same erased signature makes two methods with one name and descriptor, and the JVM refuses to
+    // load the class (`ClassFormatError: Duplicate method`).
+    let erased_params = |params: &[Ty]| -> Vec<String> {
+        params
+            .iter()
+            .map(|t| crate::jvm::names::type_descriptor(*t))
+            .collect()
+    };
+    let erased_key = |name: &str, params: &[Ty]| -> (String, String) {
+        (name.to_string(), erased_params(params).concat())
+    };
+    // Every method the class declares itself, by name and erased parameter list.
+    let declared: Vec<(String, Vec<String>)> = c
+        .methods
+        .iter()
+        .map(|fid| {
+            let f = &ir.functions[*fid as usize];
+            (f.name.clone(), erased_params(&jvm_tys(&f.params)))
+        })
+        .collect();
+    // Does the class already implement this interface member?
+    //
+    // Not just an exact descriptor match: a class overriding a member declared on a GENERIC
+    // interface (`I<T>.f(T)` erased to `f(Object)`) declares `f(String)` and carries the erasure
+    // bridge, so a forwarder keyed on the exact erasure would collide with that bridge and the class
+    // would not load. An interface parameter erased to `Object` is therefore satisfied by any
+    // declared parameter — while a genuine overload (`f(String)` beside `f(Int)`) still differs and
+    // keeps its own forwarder.
+    let class_implements = |name: &str, iface_params: &[String]| -> bool {
+        declared.iter().any(|(declared_name, declared_params)| {
+            declared_name == name
+                && declared_params.len() == iface_params.len()
+                && declared_params
+                    .iter()
+                    .zip(iface_params)
+                    .all(|(mine, theirs)| mine == theirs || theirs == "Ljava/lang/Object;")
+        })
+    };
+    // The whole superinterface CLOSURE, not just the direct ones: a body inherited through an
+    // intermediate interface (`class C : B`, `interface B : A`, `A` holding the body) still needs a
+    // forwarder on `C`, or the class does not implement its own interface.
+    let mut pending: Vec<String> = c.interfaces.iter_rendered().collect();
+    let mut seen: std::collections::HashSet<String> = pending.iter().cloned().collect();
+    let mut closure: Vec<&crate::ir::IrClass> = Vec::new();
+    while let Some(interface) = pending.pop() {
+        let Some(iface) = ir
+            .classes
+            .iter()
+            .find(|other| other.is_interface && other.fq_name_matches(&interface))
+        else {
+            continue; // a classpath interface: its holder, if any, was compiled elsewhere
+        };
+        for parent in iface.interfaces.iter_rendered() {
+            if seen.insert(parent.clone()) {
+                pending.push(parent);
+            }
+        }
+        closure.push(iface);
+    }
+    // A member the class inherits from more than one interface is forwarded ONCE, to its MOST
+    // DERIVED declaration. `interface B : A` overriding `A.f` must win over `A` itself; picking
+    // whichever the walk happened to reach first made the answer depend on the order the class
+    // listed its supertypes (`class C : B, D` printed `B.f`, `class C : D, B` printed `A.f`).
+    let derives_from = |candidate: &crate::ir::IrClass, ancestor: &str| -> bool {
+        let mut pending: Vec<String> = candidate.interfaces.iter_rendered().collect();
+        let mut seen: std::collections::HashSet<String> = pending.iter().cloned().collect();
+        while let Some(name) = pending.pop() {
+            if name == ancestor {
+                return true;
+            }
+            let Some(next) = ir
+                .classes
+                .iter()
+                .find(|other| other.is_interface && other.fq_name_matches(&name))
+            else {
+                continue;
+            };
+            for parent in next.interfaces.iter_rendered() {
+                if seen.insert(parent.clone()) {
+                    pending.push(parent);
+                }
+            }
+        }
+        false
+    };
+    let mut forwarded: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    // Most-derived first, so the first declaration reached for a key is the one to forward to.
+    closure.sort_by(|left, right| {
+        if derives_from(left, &right.fq_name()) {
+            std::cmp::Ordering::Less
+        } else if derives_from(right, &left.fq_name()) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    for iface in closure {
+        for &fid in &iface.methods {
+            let f = &ir.functions[fid as usize];
+            if f.body.is_none() {
+                continue;
+            }
+            // A private interface member is not inherited, so it gets no forwarder — publishing one
+            // would put it in the class's public ABI, where kotlinc does not have it.
+            if ir.private_methods.contains(&fid) {
+                continue;
+            }
+            let desc = ir_method_desc(&f.params, &f.ret);
+            let iface_params = erased_params(&jvm_tys(&f.params));
+            let key = erased_key(&f.name, &jvm_tys(&f.params));
+            if class_implements(&f.name, &iface_params) || !forwarded.insert(key) {
+                continue;
+            }
+            let param_tys = jvm_tys(&f.params);
+            let ret = ir_ty_to_jvm(&f.ret);
+            let mut code =
+                CodeBuilder::new(1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>());
+            code.aload(0);
+            let mut slot = 1u16;
+            for ty in &param_tys {
+                match *ty {
+                    Ty::Long => code.lload(slot),
+                    Ty::Double => code.dload(slot),
+                    Ty::Float => code.fload(slot),
+                    t if t.is_reference() => code.aload(slot),
+                    _ => code.iload(slot),
+                }
+                slot += slot_words(*ty);
+            }
+            let mut with_receiver = vec![Ty::obj(&iface.fq_name())];
+            with_receiver.extend_from_slice(&param_tys);
+            let holder_desc = method_descriptor(&with_receiver, ret);
+            let target = cw.methodref(
+                &format!("{}$DefaultImpls", iface.fq_name()),
+                &f.name,
+                &holder_desc,
+            );
+            let argument_words: u16 = with_receiver.iter().map(|t| slot_words(*t)).sum();
+            code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
+            match ret {
+                Ty::Unit => code.ret_void(),
+                Ty::Long => code.lreturn(),
+                Ty::Double => code.dreturn(),
+                Ty::Float => code.freturn(),
+                t if t.is_reference() => code.areturn(),
+                _ => code.ireturn(),
+            }
+            let _ = env;
+            // kotlinc marks a `$DefaultImpls` forwarder ACC_PUBLIC | ACC_BRIDGE (0x0041).
+            // `argument_words` already counts the receiver, so it IS the local count.
+            finish_code::<0x0041>(cw, &f.name, &desc, &mut code, argument_words);
+        }
+    }
+}
+
+/// Emit `fid`'s body as a `$DefaultImpls` static: same code and slot layout as the instance method
+/// (`this` is slot 0), but `public static` and a descriptor whose first parameter is the receiver.
+/// This is the shape `-jvm-default=disable` puts every interface body into.
+fn emit_holder_method(
+    ir: &IrFile,
+    fid: u32,
+    owner: &str,
+    facade: &str,
+    cw: &mut ClassWriter,
+    env: &EmitEnv,
+) {
+    emit_method_inner_with_holder(ir, fid, owner, facade, cw, true, env, Some(owner));
+}
+
 fn emit_method_inner(
     ir: &IrFile,
     fid: u32,
@@ -7899,6 +8113,23 @@ fn emit_method_inner(
     cw: &mut ClassWriter,
     instance: bool,
     env: &EmitEnv,
+) {
+    emit_method_inner_with_holder(ir, fid, owner, facade, cw, instance, env, None);
+}
+
+/// `holder_receiver` is `Some(interface)` when the body is being written onto that interface's
+/// `$DefaultImpls` holder: the code and slots are the instance method's, but the method is `static`
+/// and its descriptor carries the receiver as parameter 0.
+#[allow(clippy::too_many_arguments)]
+fn emit_method_inner_with_holder(
+    ir: &IrFile,
+    fid: u32,
+    owner: &str,
+    facade: &str,
+    cw: &mut ClassWriter,
+    instance: bool,
+    env: &EmitEnv,
+    holder_receiver: Option<&str>,
 ) {
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
@@ -7920,7 +8151,15 @@ fn emit_method_inner(
     // kotlinc's writer visits a method HEADER before its code, so the name, descriptor, generic
     // `Signature` and annotation types precede every constant the body introduces. krusty builds the
     // body first, so reserve those entries here to land them in the same order.
-    let reserved_desc = method_descriptor(&param_tys, ret);
+    let reserved_desc = match holder_receiver {
+        // The holder's static takes the receiver as parameter 0: `f(I)`, `g(I, int)`.
+        Some(receiver) => {
+            let mut with_receiver = vec![Ty::obj(receiver)];
+            with_receiver.extend_from_slice(&param_tys);
+            method_descriptor(&with_receiver, ret)
+        }
+        None => method_descriptor(&param_tys, ret),
+    };
     let signature_formatter = JvmSignatureFormatter::new(env);
     let reserved_sig = method_signature(&signature_formatter, ir, fid, f);
     let ann_of = |t: Ty| -> Option<&'static str> {
@@ -8095,7 +8334,15 @@ fn emit_method_inner(
     // instance method of a *final* class (nothing extends it) is also `final` and can never be
     // overridden, so marking it is safe; in an open/extended class we conservatively leave it
     // non-`final` (a method-level `open`/`override` model would refine this).
-    let access = if instance {
+    let access = if holder_receiver.is_some() {
+        // STATIC, with the member's own visibility: a private interface member's body is a PRIVATE
+        // static on the holder, as kotlinc emits it.
+        if ir.private_methods.contains(&fid) {
+            0x000a // PRIVATE | STATIC
+        } else {
+            0x0009 // PUBLIC | STATIC
+        }
+    } else if instance {
         // kotlinc keeps an `Object`-override (a data class's toString/hashCode/equals) open even in a
         // final class, so honor `open_methods`; otherwise a method of a final class is itself final.
         let final_class = !ir.classes.iter().any(|o| o.superclass_matches(owner));
@@ -9273,6 +9520,8 @@ struct Emitter<'a> {
     /// The per-emit-run accumulators — the deep sites record a used lambda / an emit-or-inline bail
     /// here (formerly thread-locals).
     run: &'a EmitRun,
+    /// `-jvm-default`, so a call site can tell where an interface's `$default` synthetic lives.
+    jvm_default: JvmDefaultMode,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
@@ -9321,6 +9570,7 @@ impl<'a> Emitter<'a> {
             cw,
             bodies: env.bodies,
             run: env.run,
+            jvm_default: env.jvm_default,
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -10540,10 +10790,24 @@ impl<'a> Emitter<'a> {
                             .sum()
                     })
                     .unwrap_or_else(|| slot_words(target) as i32);
-                let m = if is_interface {
-                    self.cw.interface_methodref(&owner, &name, &descriptor)
+                // Under `-jvm-default=disable` an interface carries no executable member, its
+                // `$default` synthetic included: that lives on the holder. A call site still aimed at
+                // the interface links to a method that was never emitted (`NoSuchMethodError`).
+                let holder;
+                let (owner, is_interface) = if self.jvm_default == JvmDefaultMode::Disable
+                    && is_interface
+                    && is_static
+                    && name.ends_with("$default")
+                {
+                    holder = format!("{owner}$DefaultImpls");
+                    (&holder, false)
                 } else {
-                    self.cw.methodref(&owner, &name, &descriptor)
+                    (&owner, is_interface)
+                };
+                let m = if is_interface {
+                    self.cw.interface_methodref(owner, &name, &descriptor)
+                } else {
+                    self.cw.methodref(owner, &name, &descriptor)
                 };
                 if is_static {
                     code.invokestatic(m, words, 0);
@@ -11132,6 +11396,33 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Where a non-virtual call to an interface member must go under `-jvm-default=disable`.
+    ///
+    /// `super.f()` and a call to a private interface member both push the receiver first and then
+    /// `invokespecial` the interface. Under `disable` the interface holds no body, so the call has to
+    /// become `invokestatic <Iface>$DefaultImpls.f(LIface;…)` — the receiver already on the stack is
+    /// exactly the holder static's parameter 0. Returns `None` when the call should stay as it is.
+    fn holder_call(&self, owner: &str, name: &str, descriptor: &str) -> Option<(String, String)> {
+        if self.jvm_default != JvmDefaultMode::Disable {
+            return None;
+        }
+        // Only a member this compilation moved to a holder: a source interface whose method of that
+        // name carries a body. An abstract member stays an interface dispatch.
+        let iface = self
+            .ir
+            .classes
+            .iter()
+            .find(|c| c.is_interface && c.fq_name_matches(owner))?;
+        iface.methods.iter().find(|fid| {
+            let f = &self.ir.functions[**fid as usize];
+            f.name == name && f.body.is_some()
+        })?;
+        let holder_descriptor = descriptor
+            .strip_prefix('(')
+            .map(|rest| format!("(L{owner};{rest}"))?;
+        Some((format!("{owner}$DefaultImpls"), holder_descriptor))
+    }
+
     fn emit_value_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
         match node {
             // `break`/`continue` are `Nothing`-typed: in value position (e.g. `x ?: break`) they diverge
@@ -11514,14 +11805,26 @@ impl<'a> Emitter<'a> {
                     let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
                     let stub_desc = method_descriptor(&stub_params, ret);
                     let stub_name = format!("{name}$default");
-                    // The `$default` stub of an INTERFACE method is a STATIC interface method — referenced
-                    // via an `InterfaceMethodref` constant (a plain `Methodref` is an
-                    // `IncompatibleClassChangeError`), still invoked with `invokestatic`. (kotlinc ALSO
-                    // emits a compatibility copy on `<Iface>$DefaultImpls`; call sites use the interface.)
-                    let m = if is_iface {
-                        self.cw.interface_methodref(&owner, &stub_name, &stub_desc)
+                    // The `$default` stub of an INTERFACE method is a STATIC interface method —
+                    // referenced via an `InterfaceMethodref` constant (a plain `Methodref` is an
+                    // `IncompatibleClassChangeError`), still invoked with `invokestatic`. Under
+                    // `enable`/`no-compatibility` kotlinc puts that stub on the interface and call
+                    // sites use it; under `disable` the interface holds nothing executable and the
+                    // stub exists only on `<Iface>$DefaultImpls`, so a call site aimed at the
+                    // interface would link to a method that was never emitted.
+                    let holder;
+                    let (stub_owner, stub_on_interface) =
+                        if is_iface && self.jvm_default == JvmDefaultMode::Disable {
+                            holder = format!("{owner}$DefaultImpls");
+                            (&holder, false)
+                        } else {
+                            (&owner, is_iface)
+                        };
+                    let m = if stub_on_interface {
+                        self.cw
+                            .interface_methodref(stub_owner, &stub_name, &stub_desc)
                     } else {
-                        self.cw.methodref(&owner, &stub_name, &stub_desc)
+                        self.cw.methodref(stub_owner, &stub_name, &stub_desc)
                     };
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                     return;
@@ -11557,13 +11860,23 @@ impl<'a> Emitter<'a> {
                 );
                 if self.ir.private_methods.contains(&fid) {
                     // A PRIVATE method is non-virtual — `invokespecial` (an interface private method uses an
-                    // `InterfaceMethodref`), so it never dispatches to a same-named override.
-                    let m = if is_iface {
-                        self.cw.interface_methodref(&owner, &name, &desc)
+                    // `InterfaceMethodref`), so it never dispatches to a same-named override. Under
+                    // `disable` the body moved to the holder, and an `invokespecial` naming the
+                    // interface from another class is not even verifiable.
+                    if let Some((holder, holder_desc)) = is_iface
+                        .then(|| self.holder_call(&owner, &name, &desc))
+                        .flatten()
+                    {
+                        let m = self.cw.methodref(&holder, &name, &holder_desc);
+                        code.invokestatic(m, aw + 1, slot_words(ret) as i32);
                     } else {
-                        self.cw.methodref(&owner, &name, &desc)
-                    };
-                    code.invokespecial(m, aw, slot_words(ret) as i32);
+                        let m = if is_iface {
+                            self.cw.interface_methodref(&owner, &name, &desc)
+                        } else {
+                            self.cw.methodref(&owner, &name, &desc)
+                        };
+                        code.invokespecial(m, aw, slot_words(ret) as i32);
+                    }
                 } else if is_iface {
                     // Dispatch through an interface — `invokeinterface I.m`.
                     let m = self.cw.interface_methodref(&owner, &name, &desc);
@@ -11739,15 +12052,29 @@ impl<'a> Emitter<'a> {
                     // A static method declared on an INTERFACE (`@Serializable(with=X) interface I` whose
                     // synthetic `serializer()` is static) needs an InterfaceMethodref constant, even for
                     // `invokestatic` (else `IncompatibleClassChangeError`).
-                    let m = if self
+                    let owner_is_interface = self
                         .ir
                         .classes
                         .iter()
-                        .any(|c| c.fq_name_matches(&facade) && c.is_interface)
+                        .any(|c| c.fq_name_matches(&facade) && c.is_interface);
+                    // `-jvm-default=disable` puts the `$default` synthetic on the holder, not on the
+                    // interface, so a call site aimed at the interface links to a method that was
+                    // never emitted (`NoSuchMethodError` on the first defaulted call).
+                    let holder;
+                    let (target_owner, owner_is_interface) = if self.jvm_default
+                        == JvmDefaultMode::Disable
+                        && owner_is_interface
+                        && name.ends_with("$default")
                     {
-                        self.cw.interface_methodref(&facade, &name, &desc)
+                        holder = format!("{facade}$DefaultImpls");
+                        (&holder, false)
                     } else {
-                        self.cw.methodref(&facade, &name, &desc)
+                        (&facade, owner_is_interface)
+                    };
+                    let m = if owner_is_interface {
+                        self.cw.interface_methodref(target_owner, &name, &desc)
+                    } else {
+                        self.cw.methodref(target_owner, &name, &desc)
                     };
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
@@ -11837,10 +12164,24 @@ impl<'a> Emitter<'a> {
                     // reached when a call omits an interface-declared default) must be an `InterfaceMethodref`
                     // even for `invokestatic` — else the JVM throws `IncompatibleClassChangeError`. Classes
                     // (stdlib facades, the common case) stay `Methodref`.
-                    let m = if self.bodies.owner_is_interface(&owner) {
-                        self.cw.interface_methodref(&owner, &name, &descriptor)
+                    // Under `-jvm-default=disable` the interface carries no `$default` synthetic —
+                    // it lives on the holder — so a call site aimed at the interface would link to a
+                    // method that was never emitted (`NoSuchMethodError` at the first such call).
+                    let owner_is_interface = self.bodies.owner_is_interface(&owner);
+                    let holder;
+                    let (owner, owner_is_interface) = if self.jvm_default == JvmDefaultMode::Disable
+                        && owner_is_interface
+                        && name.ends_with("$default")
+                    {
+                        holder = format!("{owner}$DefaultImpls");
+                        (&holder, false)
                     } else {
-                        self.cw.methodref(&owner, &name, &descriptor)
+                        (&owner, owner_is_interface)
+                    };
+                    let m = if owner_is_interface {
+                        self.cw.interface_methodref(owner, &name, &descriptor)
+                    } else {
+                        self.cw.methodref(owner, &name, &descriptor)
                     };
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
@@ -12072,13 +12413,22 @@ impl<'a> Emitter<'a> {
                     let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                     let ret = ty_from_descriptor_ret(&descriptor);
                     // A diamond `super.f()` to a superinterface DEFAULT method: `invokespecial` on an
-                    // `InterfaceMethodref` (JVM allows a direct-superinterface default this way).
-                    let m = if interface {
-                        self.cw.interface_methodref(&owner, &name, &descriptor)
+                    // `InterfaceMethodref` (JVM allows a direct-superinterface default this way) —
+                    // unless `disable` moved that body to the holder, where it is a plain static.
+                    if let Some((holder, holder_desc)) = interface
+                        .then(|| self.holder_call(&owner, &name, &descriptor))
+                        .flatten()
+                    {
+                        let m = self.cw.methodref(&holder, &name, &holder_desc);
+                        code.invokestatic(m, aw + 1, slot_words(ret) as i32);
                     } else {
-                        self.cw.methodref(&owner, &name, &descriptor)
-                    };
-                    code.invokespecial(m, aw, slot_words(ret) as i32);
+                        let m = if interface {
+                            self.cw.interface_methodref(&owner, &name, &descriptor)
+                        } else {
+                            self.cw.methodref(&owner, &name, &descriptor)
+                        };
+                        code.invokespecial(m, aw, slot_words(ret) as i32);
+                    }
                 }
             },
             IrExpr::TypeOp {
