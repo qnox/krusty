@@ -17402,7 +17402,7 @@ impl<'a> Checker<'a> {
         } else if self.loop_depth == 0 {
             self.diags.error(
                 span,
-                "'break' and 'continue' are only allowed inside a loop.",
+                "'break' and 'continue' are only allowed inside loops.",
             );
         }
     }
@@ -28278,7 +28278,7 @@ impl<'a> Checker<'a> {
         if f.params.iter().filter(|p| p.is_vararg).count() > 1 {
             self.diags.error(
                 f.span,
-                "multiple vararg parameters are not allowed".to_string(),
+                "multiple vararg parameters are prohibited.".to_string(),
             );
         }
         // A `reified` type parameter is only allowed on an `inline` function (kotlinc rejects it
@@ -29414,7 +29414,7 @@ impl<'a> Checker<'a> {
                         };
                         if m.is_override() && !is_any_member(m) && !overrides_super {
                             self.diags
-                                .error(m.span, format!("'{}' overrides nothing", m.name));
+                                .error(m.span, format!("'{}' overrides nothing.", m.name));
                         }
                     }
                 }
@@ -33046,7 +33046,7 @@ impl<'a> Checker<'a> {
             Expr::Return { value, label } => {
                 if !self.return_allowed {
                     self.diags
-                        .error(self.span(e), "'return' is not allowed here");
+                        .error(self.span(e), "'return' is prohibited here.");
                 }
                 let target = match self.return_target(label.as_deref()) {
                     Some(target) => target,
@@ -33148,7 +33148,7 @@ impl<'a> Checker<'a> {
                 self.diags.error(
                     self.span(e),
                     format!(
-                        "operator '{name}' cannot be applied to '{}' and '{}'",
+                        "operator '{name}' cannot be applied to '{}' and '{}'.",
                         lt.source_name(),
                         rt.source_name()
                     ),
@@ -33192,7 +33192,7 @@ impl<'a> Checker<'a> {
                         {
                             self.diags.error(
                                 self.span(e),
-                                "'this' is not defined in this context".to_string(),
+                                "'this' is not defined in this context.".to_string(),
                             );
                             Ty::Error
                         }
@@ -37801,19 +37801,13 @@ impl<'a> Checker<'a> {
 
     fn bin_err(&mut self, op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
         crate::trace_compiler!("resolve", "bin_err op={:?} lt={:?} rt={:?}", op, lt, rt);
-        let message = match op {
-            BinOp::Eq | BinOp::Ne => format!(
-                "operator '{}' cannot be applied to '{}' and '{}'.",
-                if op == BinOp::Eq { "==" } else { "!=" },
-                lt.source_name(),
-                rt.source_name()
-            ),
-            _ => format!(
-                "operator cannot be applied to '{}' and '{}'",
-                lt.source_name(),
-                rt.source_name()
-            ),
-        };
+        // One diagnostic for every binary operator: kotlinc names the operator in all of them.
+        let message = format!(
+            "operator '{}' cannot be applied to '{}' and '{}'.",
+            op.source_symbol(),
+            lt.source_name(),
+            rt.source_name()
+        );
         if matches!(op, BinOp::Eq | BinOp::Ne) {
             self.diags
                 .error_kind(span, DiagnosticKind::IncompatibleEquality, message);
@@ -49648,7 +49642,7 @@ impl<'a> Checker<'a> {
         if !self.return_allowed {
             self.diags.error(
                 self.file.stmt_spans[s.0 as usize],
-                "'return' is not allowed here",
+                "'return' is prohibited here.",
             );
         }
         let Some(target) = self.return_target(label.as_deref()) else {

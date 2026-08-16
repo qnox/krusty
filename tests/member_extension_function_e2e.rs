@@ -334,7 +334,7 @@ fn member_extension_function_resolution() {
                     override fun OtherItem.render(value: String): String = value
                 }
             "#,
-            Some("'render' overrides nothing"),
+            Some("'render' overrides nothing."),
         ),
         (
             "override requires the same value parameter types",
@@ -347,7 +347,7 @@ fn member_extension_function_resolution() {
                     override fun Item.render(value: Int): String = value.toString()
                 }
             "#,
-            Some("'render' overrides nothing"),
+            Some("'render' overrides nothing."),
         ),
     ];
 

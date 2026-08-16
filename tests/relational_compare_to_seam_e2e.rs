@@ -93,7 +93,7 @@ fn relation_with_non_comparable_right_operand_is_rejected() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.contains("operator cannot be applied to 'String' and 'Any'")),
+            .any(|d| d.contains("operator '<' cannot be applied to 'String' and 'Any'.")),
         "`String < Any` must be rejected as an inapplicable operator, got {diagnostics:?}"
     );
 }
