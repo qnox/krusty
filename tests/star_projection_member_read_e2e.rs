@@ -26,9 +26,27 @@ fn a_star_projected_member_read_is_approximated_to_its_bound() {
 
         fun anyMapEquals(a: Any): Boolean = (a as Map<*, *>)["k"] != "v"
 
-        fun bareFirst(l: List<*>): Boolean = l.first() != "x"
+        // A lambda parameter shaped from a projected receiver is an ordinary value slot.
+        fun lambdaEquals(l: List<*>): Boolean = l.any { it == "a" }
+
+        fun lambdaFilter(l: List<*>): Int = l.filter { it == "a" }.size
+
+        // `interface List<out E>` makes the use-site projection redundant, so the member's
+        // in-position takes `Any?` rather than collapsing to `Nothing`.
+        fun selfIndex(l: List<*>): Int = l.indexOf(l.first())
+
+        fun foreignIndex(l: List<*>): Int = l.indexOf("a")
 
         fun branchMerge(l: List<*>): Any? = if (l.size > 0) l.first() else null
+
+        class Cell<T>(val value: T)
+
+        fun <T> unwrap(cell: Cell<T>): T = cell.value
+
+        // The projected argument stays applicable to the parameter it inferred.
+        fun projectedArgument(cell: Cell<*>): Boolean = unwrap(cell) != "x"
+
+        fun bareFirst(l: List<*>): Boolean = l.first() != "x"
 
         fun box(): String {
             val m: Map<String, String> = mapOf("k" to "v")
@@ -41,8 +59,13 @@ fn a_star_projected_member_read_is_approximated_to_its_bound() {
             if (listValue(l) != "a") return "listValue"
             if (!listEquals(l)) return "listEquals"
             if (anyMapEquals(m)) return "anyMapEquals"
-            if (bareFirst(l) != true) return "bareFirst"
+            if (!lambdaEquals(l)) return "lambdaEquals"
+            if (lambdaFilter(l) != 1) return "lambdaFilter"
+            if (selfIndex(l) != 0) return "selfIndex"
+            if (foreignIndex(l) != 0) return "foreignIndex"
             if (branchMerge(l) != "a") return "branchMerge"
+            if (!projectedArgument(Cell("y"))) return "projectedArgument"
+            if (bareFirst(l) != true) return "bareFirst"
             return "OK"
         }
     "#;

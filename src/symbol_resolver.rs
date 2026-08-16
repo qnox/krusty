@@ -266,7 +266,28 @@ fn classifier_bindings(
         .type_params
         .iter()
         .cloned()
-        .zip(receiver.type_args().iter().copied())
+        .zip(
+            receiver
+                .type_args()
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, argument)| {
+                    // Declaration-site variance makes the MATCHING use-site projection redundant:
+                    // `interface List<out E>` means `List<out X>` — and so `List<*>` — simply is
+                    // `List<X>`, so members see the plain argument and `List<*>.indexOf` takes
+                    // `Any?`. An invariant classifier keeps the projection, which is what makes
+                    // `MutableList<*>.add` collapse to `Nothing` and stay prohibited.
+                    match (
+                        classifier.type_param_variances.get(index).copied(),
+                        argument,
+                    ) {
+                        (Some(crate::types::TypeVariance::Out), Ty::OutProjection(inner)) => *inner,
+                        (Some(crate::types::TypeVariance::In), Ty::InProjection(inner)) => *inner,
+                        _ => argument,
+                    }
+                }),
+        )
         .collect()
 }
 
@@ -1729,11 +1750,16 @@ impl CallInferenceConstraints {
         }
         match position {
             ConstraintPosition::Lower => {
-                let merged = merge_inferred_ty_from_symbols(
-                    Some(source),
-                    self.lower.get(name).copied().unwrap_or(Ty::Nothing),
-                    actual,
-                );
+                // A formal's FIRST lower constraint keeps a use-site projection intact (`B<*>`
+                // against `B<T>` binds `T := out Any?` — the stand-in for kotlinc's captured type):
+                // the parameter then substitutes back to the argument's own type, so the call stays
+                // applicable, while the VALUE read out of it is approximated where it is recorded.
+                // A second, concrete constraint merges as before, which strips the projection and
+                // widens — an invariant occurrence then rejects the write, exactly as kotlinc does.
+                let merged = match self.lower.get(name).copied() {
+                    None => actual,
+                    Some(current) => merge_inferred_ty_from_symbols(Some(source), current, actual),
+                };
                 self.lower.insert(name.to_string(), merged);
             }
             ConstraintPosition::Upper => {
@@ -2713,7 +2739,11 @@ pub(crate) fn function_input_types(sig: Ty, binds: &GSigBinds) -> Vec<Ty> {
         Ty::Fun(fsig) => fsig
             .params
             .iter()
-            .map(|parameter| ty_subst_keep_unbound(*parameter, binds))
+            // A lambda PARAMETER is an ordinary value slot: a formal bound to a projection by a
+            // projected receiver shapes `it` as the approximation, never as `out X` itself.
+            .map(|parameter| {
+                approximate_projected_value(*parameter, ty_subst_keep_unbound(*parameter, binds))
+            })
             .collect(),
         _ => Vec::new(),
     }
