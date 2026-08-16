@@ -1721,6 +1721,11 @@ fn build_class_metadata(
             flags: crate::metadata::class_builder::SECONDARY_CTOR_FLAGS,
         })
         .collect();
+    let metadata_annotations: Vec<crate::ir::AppliedAnnotation> = c
+        .applied_annotations
+        .iter()
+        .map(|retained| retained.annotation.clone())
+        .collect();
     let (d1_bytes, d2) = build_class(
         &c.fq_name(),
         &ctor_params,
@@ -1783,7 +1788,7 @@ fn build_class_metadata(
             member_order: &member_order,
             sealed_subclasses: &sealed_refs,
             supertypes: &supertypes,
-            annotations: &c.applied_annotations,
+            annotations: &metadata_annotations,
         },
     );
     // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
@@ -3834,7 +3839,7 @@ fn collect_var_types(ir: &IrFile, roots: impl IntoIterator<Item = u32>) -> HashM
 /// Attach any user annotations recorded for `field` (by name) to the most recently added field.
 fn apply_field_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
     if let Some(fa) = c.field_annotations.iter().find(|fa| fa.field == field) {
-        cw.set_last_field_annotations(&fa.visible, &fa.invisible);
+        cw.set_last_field_annotations(&fa.annotations);
     }
 }
 
@@ -5229,8 +5234,7 @@ fn emit_class(
             &method_descriptor(&sc_param_tys, Ty::Unit),
             None,
             &[],
-            &sc.annotations.visible,
-            &sc.annotations.invisible,
+            &sc.annotations,
         );
         let sc_words: u16 = sc_param_tys.iter().map(|t| slot_words(*t)).sum();
         let mut sctor = CodeBuilder::new(1 + sc_words);
@@ -5350,13 +5354,8 @@ fn emit_class(
         cw.add_method(sc_access, "<init>", &sc_desc, &sctor);
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
-        if !sc.annotations.visible.is_empty() || !sc.annotations.invisible.is_empty() {
-            cw.set_method_annotations(
-                "<init>",
-                &sc_desc,
-                &sc.annotations.visible,
-                &sc.annotations.invisible,
-            );
+        if !sc.annotations.is_empty() {
+            cw.set_method_annotations("<init>", &sc_desc, &sc.annotations);
             if sc.annotations.deprecated() {
                 cw.mark_method_deprecated("<init>", &sc_desc);
             }
@@ -5738,7 +5737,7 @@ fn emit_class(
             cw.set_method_lines("<clinit>", "()V", &clinit_line_entries);
         }
     }
-    cw.set_runtime_annotations(&c.applied_annotations);
+    cw.set_class_annotations(&c.applied_annotations);
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     // An ANONYMOUS class gets kotlinc's minimal k=1 record (LOCAL flags, raw-internal fq_name via
     // the string table's localName marker, supertypes — no members).
@@ -7142,13 +7141,15 @@ fn emit_annotation_class(
         ));
     }
     let kotlin_retention = crate::types::type_name("kotlin/annotation/Retention");
-    meta.extend(
+    cw.set_runtime_annotations(&meta);
+    let user_annotations = crate::ir::DeclarationAnnotations::new(
         c.applied_annotations
             .iter()
-            .filter(|annotation| annotation.internal != kotlin_retention)
-            .cloned(),
+            .filter(|retained| retained.annotation.internal != kotlin_retention)
+            .cloned()
+            .collect(),
     );
-    cw.set_runtime_annotations(&meta);
+    cw.set_class_annotations(&user_annotations);
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
         .then(|| build_class_metadata(ir, c, opts))
         .flatten();
@@ -7741,6 +7742,9 @@ fn emit_interface_class(
         e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
     }
     add_companion_field(&mut cw, c);
+    // A user annotation on an interface is emitted exactly as on a class — kotlinc writes it BEFORE the
+    // `@Metadata` entry, which is the order these queue in.
+    cw.set_class_annotations(&c.applied_annotations);
     // An interface is a VIEW of the same `IrClass` every other kind is — compute its `@Metadata` (and
     // therefore its debug tables/annotations) through the shared path, exactly like `emit_class`.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
@@ -7803,6 +7807,9 @@ fn emit_enum_class(
         access |= 0x0010;
     } // FINAL
     cw.set_access(access);
+    // A user annotation on an enum is emitted exactly as on a class — kotlinc writes it BEFORE the
+    // `@Metadata` entry, which is the order these queue in.
+    cw.set_class_annotations(&c.applied_annotations);
     // Every enum extends the generic `java.lang.Enum<Self>`, so kotlinc emits a class `Signature`
     // (`Ljava/lang/Enum<LSelf;>;` plus a raw `L<itf>;` for each superinterface). The erased
     // descriptor already names `java/lang/Enum`; the Signature carries the `<Self>` type argument.
@@ -8784,8 +8791,7 @@ fn emit_method_inner_with_holder(
         &reserved_desc,
         reserved_sig.as_deref(),
         &ann_types,
-        &declared_annotations.visible,
-        &declared_annotations.invisible,
+        &declared_annotations,
     );
     let mut code = CodeBuilder::new(e.next_slot);
     // kotlinc guards each non-null reference parameter of a visible function with
@@ -8989,7 +8995,7 @@ fn emit_method_inner_with_holder(
     // `ACC_SYNTHETIC`: kotlinc keeps it only for binary compatibility, and a consumer reads both
     // facts (the annotation for resolution, the flag for the JVM) off this realization.
     if let Some(annotations) = ir.function_annotations.get(&fid) {
-        e.cw.set_method_annotations(&f.name, &desc, &annotations.visible, &annotations.invisible);
+        e.cw.set_method_annotations(&f.name, &desc, annotations);
         if annotations.deprecated() {
             e.cw.mark_method_deprecated(&f.name, &desc);
         }

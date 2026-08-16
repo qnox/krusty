@@ -1186,7 +1186,7 @@ fn lower_file_at_reporting_impl(
                 companion_class: None,
                 secondary_ctors: vec![],
                 has_primary_ctor: c.primary_ctor_annotations.is_some() || c.is_annotation(),
-                applied_annotations: class_applied_annotations(c, info),
+                applied_annotations: declaration_annotations(&c.annotations, info),
                 field_annotations: class_field_annotations(c, info),
                 annotation_retention: (c.kind == ast::ClassKind::Annotation).then(|| {
                     syms.annotation_retention(class_identity)
@@ -1489,7 +1489,7 @@ fn lower_file_at_reporting_impl(
                     Err(reason) => return lo.bail(reason),
                 }
                 let annotations = fn_applied_annotations(m, info);
-                if !annotations.visible.is_empty() || !annotations.invisible.is_empty() {
+                if !annotations.is_empty() {
                     lo.ir.function_annotations.insert(fid, annotations);
                 }
                 methods
@@ -2312,7 +2312,7 @@ fn lower_file_at_reporting_impl(
                     param_checks,
                 });
                 let annotations = fn_applied_annotations(f, info);
-                if !annotations.visible.is_empty() || !annotations.invisible.is_empty() {
+                if !annotations.is_empty() {
                     lo.ir.function_annotations.insert(id, annotations);
                 }
                 lo.ext_fun_id_by_sig
@@ -2398,7 +2398,7 @@ fn lower_file_at_reporting_impl(
                     param_checks,
                 });
                 let annotations = fn_applied_annotations(f, info);
-                if !annotations.visible.is_empty() || !annotations.invisible.is_empty() {
+                if !annotations.is_empty() {
                     lo.ir.function_annotations.insert(id, annotations);
                 }
                 lo.fun_ids.insert((f.name.clone(), sig.params.clone()), id);
@@ -4305,7 +4305,7 @@ fn lower_file_at_reporting_impl(
                             companion_class: None,
                             secondary_ctors: vec![],
                             has_primary_ctor: true,
-                            applied_annotations: Vec::new(),
+                            applied_annotations: crate::ir::DeclarationAnnotations::default(),
                             field_annotations: Vec::new(),
                             annotation_retention: None,
                         });
@@ -11043,7 +11043,7 @@ impl<'a> Lower<'a> {
             companion_class: None,
             secondary_ctors: vec![],
             has_primary_ctor: true,
-            applied_annotations: Vec::new(),
+            applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
             annotation_retention: None,
         };
@@ -13275,7 +13275,7 @@ impl<'a> Lower<'a> {
             companion_class: None,
             secondary_ctors: vec![],
             has_primary_ctor: true,
-            applied_annotations: Vec::new(),
+            applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
             annotation_retention: None,
         });
@@ -13421,7 +13421,7 @@ impl<'a> Lower<'a> {
             companion_class: None,
             secondary_ctors: vec![],
             has_primary_ctor: true,
-            applied_annotations: Vec::new(),
+            applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
             annotation_retention: None,
         });
@@ -13665,7 +13665,7 @@ impl<'a> Lower<'a> {
             companion_class: None,
             secondary_ctors: vec![],
             has_primary_ctor: true,
-            applied_annotations: Vec::new(),
+            applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
             annotation_retention: None,
         });
@@ -14379,7 +14379,7 @@ impl<'a> Lower<'a> {
             companion_class: None,
             secondary_ctors: vec![],
             has_primary_ctor: true,
-            applied_annotations: Vec::new(),
+            applied_annotations: crate::ir::DeclarationAnnotations::default(),
             field_annotations: Vec::new(),
             annotation_retention: None,
         });
@@ -27790,97 +27790,61 @@ fn class_field_annotations(
 ) -> Vec<crate::ir::FieldAnnotations> {
     let mut out = Vec::new();
     for e in &c.enum_entries {
-        let mut visible = Vec::new();
-        let mut invisible = Vec::new();
-        for annotation in &e.annotations {
-            let applied = checked_applied_annotation(info, annotation);
-            match applied.retention {
-                crate::types::AnnotationRetention::Default
-                | crate::types::AnnotationRetention::Runtime => {
-                    visible.push(checked_annotation_to_ir(applied))
-                }
-                crate::types::AnnotationRetention::Binary => {
-                    invisible.push(checked_annotation_to_ir(applied))
-                }
-                crate::types::AnnotationRetention::Source => {}
-            }
-        }
-        if !visible.is_empty() || !invisible.is_empty() {
+        let annotations = declaration_annotations(&e.annotations, info);
+        if !annotations.is_empty() {
             out.push(crate::ir::FieldAnnotations {
                 field: e.name.clone(),
-                visible,
-                invisible,
+                annotations,
             });
         }
     }
     out
 }
 
-/// The user annotations applied to a secondary CONSTRUCTOR declaration, split by JVM retention.
-/// Same fold as a function's: a constructor's `@Anno(...)` is the same applied-annotation shape.
-fn ctor_annotations(sc: &ast::SecondaryCtor, info: &FrontendTypeInfo) -> crate::ir::FnAnnotations {
-    let mut out = crate::ir::FnAnnotations::default();
-    for annotation in &sc.annotations {
-        let applied = checked_applied_annotation(info, annotation);
-        match applied.retention {
-            crate::types::AnnotationRetention::Default
-            | crate::types::AnnotationRetention::Runtime => {
-                out.visible.push(checked_annotation_to_ir(applied))
-            }
-            crate::types::AnnotationRetention::Binary => {
-                out.invisible.push(checked_annotation_to_ir(applied))
-            }
-            crate::types::AnnotationRetention::Source => {}
-        }
-    }
-    out
+/// The user annotations applied to a secondary constructor. The same semantic collection is used
+/// for every declaration kind; a backend maps retention to its representation.
+fn ctor_annotations(
+    sc: &ast::SecondaryCtor,
+    info: &FrontendTypeInfo,
+) -> crate::ir::DeclarationAnnotations {
+    declaration_annotations(&sc.annotations, info)
 }
 
-/// The user annotations applied to a FUNCTION declaration, split by JVM retention. Reuses the same
-/// per-annotation fold as fields: a function's `@Anno(...)` is the same applied-annotation shape,
-/// and SOURCE-retained annotations drop out of both.
-fn fn_applied_annotations(f: &ast::FunDecl, info: &FrontendTypeInfo) -> crate::ir::FnAnnotations {
-    let mut out = crate::ir::FnAnnotations::default();
-    for annotation in &f.annotations {
-        let applied = checked_applied_annotation(info, annotation);
-        match applied.retention {
-            crate::types::AnnotationRetention::Default
-            | crate::types::AnnotationRetention::Runtime => {
-                out.visible.push(checked_annotation_to_ir(applied))
-            }
-            crate::types::AnnotationRetention::Binary => {
-                out.invisible.push(checked_annotation_to_ir(applied))
-            }
-            crate::types::AnnotationRetention::Source => {}
-        }
-    }
+/// The user annotations applied to a function declaration.
+fn fn_applied_annotations(
+    f: &ast::FunDecl,
+    info: &FrontendTypeInfo,
+) -> crate::ir::DeclarationAnnotations {
+    let out = declaration_annotations(&f.annotations, info);
     crate::trace_compiler!(
         "annotations",
-        "fn {} annotations visible={} invisible={}",
+        "fn {} retained annotations={}",
         f.name,
-        out.visible.len(),
-        out.invisible.len(),
+        out.len(),
     );
     out
 }
 
-/// The RUNTIME-retained applied annotations on a class declaration, folded for `RuntimeVisibleAnnotations`.
-fn class_applied_annotations(
-    c: &ast::ClassDecl,
+/// Convert checked annotation applications into one backend-agnostic declaration collection. SOURCE
+/// retention intentionally produces no runtime/binary declaration fact; all other retention stays
+/// attached until a backend chooses a physical representation.
+fn declaration_annotations(
+    annotations: &[ast::AnnotationRef],
     info: &FrontendTypeInfo,
-) -> Vec<crate::ir::AppliedAnnotation> {
-    c.annotations
-        .iter()
-        .map(|annotation| checked_applied_annotation(info, annotation))
-        .filter(|annotation| {
-            matches!(
-                annotation.retention,
-                crate::types::AnnotationRetention::Default
-                    | crate::types::AnnotationRetention::Runtime
-            )
-        })
-        .map(checked_annotation_to_ir)
-        .collect()
+) -> crate::ir::DeclarationAnnotations {
+    crate::ir::DeclarationAnnotations::new(
+        annotations
+            .iter()
+            .map(|annotation| checked_applied_annotation(info, annotation))
+            .filter_map(|annotation| match annotation.retention {
+                crate::types::AnnotationRetention::Source => None,
+                retention => Some(crate::ir::RetainedAnnotation {
+                    retention,
+                    annotation: checked_annotation_to_ir(annotation),
+                }),
+            })
+            .collect(),
+    )
 }
 
 /// Extract the BACKEND-AGNOSTIC generic-signature shape of a declaration that has type parameters or
