@@ -30,6 +30,16 @@ fun box(): String {
 }
 "#;
 
+const HOLDER_BYTE_SOURCE: &str = r#"
+interface AuditI<T> {
+    fun echo(value: T): T = value
+    fun text(value: String): String = value
+    val answer: Int get() = 42
+}
+
+class AuditC : AuditI<String>
+"#;
+
 fn class_names(classes: &[(String, Vec<u8>)]) -> Vec<String> {
     let mut names: Vec<String> = classes.iter().map(|(name, _)| name.clone()).collect();
     names.sort();
@@ -58,21 +68,30 @@ fn compile(mode: JvmDefaultMode) -> Vec<(String, Vec<u8>)> {
 }
 
 fn compile_source(mode: JvmDefaultMode, source_text: &str, stem: &str) -> Vec<(String, Vec<u8>)> {
+    compile_sources(mode, &[(stem, source_text)])
+}
+
+fn compile_sources(mode: JvmDefaultMode, sources: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
     let flag = match mode {
         JvmDefaultMode::Enable => "enable",
         JvmDefaultMode::NoCompatibility => "no-compatibility",
         JvmDefaultMode::Disable => "disable",
     };
     let work = common::scratch_dir().expect("allocate krusty fixture");
-    let source = work.join(format!("{stem}.kt"));
     let output = work.join("out");
-    std::fs::write(&source, source_text).expect("write krusty fixture");
-    let result = std::process::Command::new(common::krusty_binary())
+    let source_paths = sources
+        .iter()
+        .map(|(stem, source_text)| {
+            let source = work.join(format!("{stem}.kt"));
+            std::fs::write(&source, source_text).expect("write krusty fixture");
+            source
+        })
+        .collect::<Vec<_>>();
+    let mut command = std::process::Command::new(common::krusty_binary());
+    command
         .args(["-d", output.to_str().expect("UTF-8 output")])
-        .arg(format!("-jvm-default={flag}"))
-        .arg(&source)
-        .output()
-        .expect("run krusty");
+        .arg(format!("-jvm-default={flag}"));
+    let result = command.args(&source_paths).output().expect("run krusty");
     assert!(
         result.status.success(),
         "krusty failed under {mode:?}: stdout={} stderr={}",
@@ -120,11 +139,15 @@ fn compile_module_to(
 }
 
 fn compile_reference(flag: &str) -> Vec<(String, Vec<u8>)> {
+    compile_reference_source(flag, INTERFACE_SOURCE, "I")
+}
+
+fn compile_reference_source(flag: &str, source_text: &str, stem: &str) -> Vec<(String, Vec<u8>)> {
     let work = common::scratch_dir().expect("allocate kotlinc fixture");
-    let source = work.join("I.kt");
+    let source = work.join(format!("{stem}.kt"));
     let output = work.join("out");
     std::fs::create_dir_all(&output).expect("create kotlinc output");
-    std::fs::write(&source, INTERFACE_SOURCE).expect("write kotlinc fixture");
+    std::fs::write(&source, source_text).expect("write kotlinc fixture");
     let args = vec![
         "-d".to_string(),
         output.to_string_lossy().into_owned(),
@@ -216,6 +239,25 @@ fn disable_moves_every_body_to_the_holder() {
             "{class_name} diverges under -jvm-default=disable"
         );
     }
+}
+
+/// The holder is a published ABI class, not an implementation detail. This fixture covers every
+/// attribute that adding its receiver can shift: generic signatures, parameter annotations, local
+/// slots, nested-class metadata, and the synthetic Kotlin metadata record. Exact bytes ensure none
+/// of those silently falls back to a merely executable shape.
+#[test]
+fn the_disable_holder_is_byte_identical_to_kotlinc() {
+    let ours = compile_source(JvmDefaultMode::Disable, HOLDER_BYTE_SOURCE, "Audit");
+    let reference = compile_reference_source("disable", HOLDER_BYTE_SOURCE, "Audit");
+    let ours = ours
+        .iter()
+        .find_map(|(name, bytes)| (name == "AuditI$DefaultImpls").then_some(bytes))
+        .expect("krusty AuditI$DefaultImpls.class");
+    let reference = reference
+        .iter()
+        .find_map(|(name, bytes)| (name == "AuditI$DefaultImpls").then_some(bytes))
+        .expect("kotlinc AuditI$DefaultImpls.class");
+    assert_eq!(ours, reference);
 }
 
 /// The forwarders are what make the artifact correct: without them an implementing class does not
@@ -447,11 +489,76 @@ fn a_disable_dependency_is_consumed_through_its_recorded_realizations() {
         r#"package app
             import dep.I
             class Inherited : I
-            class Explicit : I { override fun f(): String = "E+" + super.f() }
+            class Explicit : I {
+                override val x: Int get() = super.x + 1
+                override fun f(): String = "E+" + super.f()
+            }
             fun box(): String {
                 val inherited: I = Inherited()
                 return if (inherited.x == 3 && inherited.f() == "I.f" && inherited.g() == "g7" &&
-                    Explicit().f() == "E+I.f") "OK" else "fail"
+                    Explicit().x == 4 && Explicit().f() == "E+I.f") "OK" else "fail"
+            }
+        "#,
+        "Application",
+        &application,
+        Some(&library),
+    );
+    let mut classes = Vec::new();
+    collect_classes(&library, &library, &mut classes);
+    collect_classes(&application, &application, &mut classes);
+    let box_class = common::find_box_class(&classes).expect("cross-module box class");
+    let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+        .expect("JVM unavailable for cross-module jvm-default test");
+    assert_eq!(result, "OK");
+    let _ = std::fs::remove_dir_all(work);
+}
+
+/// Sibling files are declarations from the same normalized module provider, not a special IR-only
+/// classifier kind. A class emitted from one file must receive the property forwarder declared by
+/// an interface in another file without searching that class's current-file IR.
+#[test]
+fn a_disable_property_forwarder_crosses_source_files() {
+    let classes = compile_sources(
+        JvmDefaultMode::Disable,
+        &[
+            ("Api", "interface I { val x: Int get() = 4 }"),
+            (
+                "Impl",
+                "class C : I\nfun box(): String { val value: I = C(); return if (value.x == 4) \"OK\" else \"fail\" }",
+            ),
+        ],
+    );
+    let box_class = common::find_box_class(&classes).expect("cross-file box class");
+    let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+        .expect("JVM unavailable for cross-file jvm-default test");
+    assert_eq!(result, "OK");
+}
+
+/// A compatibility holder is not evidence that an interface accessor lives there. Under `enable`
+/// the interface method is concrete and must retain virtual dispatch, including when a consumer is
+/// compiled in another mode. Calling through the interface type therefore reaches the override.
+#[test]
+fn an_enable_dependency_property_keeps_virtual_dispatch() {
+    let work = common::scratch_dir().expect("allocate cross-module jvm-default fixture");
+    let library = work.join("library");
+    let application = work.join("application");
+    compile_module_to(
+        JvmDefaultMode::Enable,
+        r#"package dep
+            interface I { val x: Int get() = 3 }
+        "#,
+        "Library",
+        &library,
+        None,
+    );
+    compile_module_to(
+        JvmDefaultMode::NoCompatibility,
+        r#"package app
+            import dep.I
+            class C : I { override val x: Int get() = 9 }
+            fun box(): String {
+                val value: I = C()
+                return if (value.x == 9) "OK" else "fail: " + value.x
             }
         "#,
         "Application",

@@ -803,6 +803,7 @@ impl LibraryCallable {
             physical_ret,
             descriptor: descriptor.into(),
             suspend: false,
+            is_abstract: false,
             owner_is_interface: false,
             member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,
@@ -901,6 +902,10 @@ pub struct LibraryCallable {
     /// `Continuation` (and a lambda whose body calls one becomes a coroutine state machine). The checker
     /// records this on the resolved callable so the lowerer never re-queries the library for it.
     pub suspend: bool,
+    /// The semantic declaration has no implementation. This lives on the callable handle so
+    /// property accessors and functions expose the same provider-normalized modality; physical JVM
+    /// access flags are only one input at a provider boundary.
+    pub is_abstract: bool,
     /// [`owner`](Self::owner) is an INTERFACE, so the call dispatches with `invokeinterface`. Carried on
     /// the selected callable because the owner's own declaration may not be re-readable at the call
     /// site: a mapped builtin's JVM owner (`java/util/List`) has no class file when no JDK is on the

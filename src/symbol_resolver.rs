@@ -5897,7 +5897,9 @@ impl ResolvedMember {
         member.signature = callable.signature;
         member.generic_sig = callable.generic_sig.map(|signature| *signature);
         member.set_is_interface(callable.owner_is_interface);
+        member.set_is_abstract(callable.is_abstract);
         member.set_suspend(callable.suspend);
+        member.realization = callable.member_realization;
         member.context_count = callable.context_count;
         member.inline = callable.inline;
         member.inline_body_plan = callable.inline_body_plan;
@@ -5989,7 +5991,9 @@ fn member_property_read_from_declaration(
     member.owner = Some(callable.owner);
     member.physical_ret = callable.physical_ret;
     member.set_is_interface(callable.owner_is_interface);
+    member.set_is_abstract(callable.is_abstract);
     member.set_suspend(callable.suspend);
+    member.realization = callable.member_realization;
     member.inline = callable.inline;
     member.visibility = declaration.visibility;
     member.source_member = declaration.source_member;
@@ -8468,6 +8472,7 @@ mod tests {
             physical_ret: Ty::Int,
             descriptor: "(I)I".to_string(),
             suspend: false,
+            is_abstract: false,
             owner_is_interface: false,
             member_realization: crate::libraries::MemberRealization::Dispatch,
             inline: crate::libraries::InlineKind::None,
