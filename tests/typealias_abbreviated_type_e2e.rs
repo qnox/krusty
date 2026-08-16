@@ -376,3 +376,41 @@ fn a_vararg_of_an_aliased_element_still_compiles_and_runs() {
          fun box(): String = if (many(Payload(1), Payload(2)) == 2) \"OK\" else \"fail\"\n",
     );
 }
+
+/// A CLASSPATH alias's own right-hand-side spellings, inherited by a consumer.
+///
+/// `typealias CargoBox = PBox<Cargo, Cargo>` declared in a DEPENDENCY abbreviates both expanded
+/// arguments as `Cargo` at every use site, and `typealias Boxed<T> = PBox<T, T>` used as
+/// `Boxed<Cargo>` does too — the first because the right-hand side spelled the alias, the second
+/// because the use site did and the spelling reaches the expansion through the alias's parameters.
+/// Neither is recoverable from the expansion `Ty` alone: it is fully expanded, so the spellings
+/// come from `Type.abbreviated_type` read back out of the dependency's own metadata.
+#[test]
+fn a_classpath_alias_propagates_its_right_hand_side_spellings() {
+    const LIB: &str = "package dep\n\
+        \n\
+        class Payload(val v: Int)\n\
+        class PBox<A, B>(val a: A, val b: B)\n\
+        typealias Cargo = Payload\n\
+        typealias CargoBox = PBox<Cargo, Cargo>\n\
+        typealias Boxed<T> = PBox<T, T>\n";
+    const SRC: &str = "package app\n\
+        \n\
+        import dep.Boxed\n\
+        import dep.Cargo\n\
+        import dep.CargoBox\n\
+        \n\
+        fun carry(x: CargoBox): CargoBox = x\n\
+        \n\
+        fun boxed(x: Boxed<Cargo>): Boxed<Cargo> = x\n";
+    let Some(result) = common::metadata_diff_against_kotlinc_lib(
+        "DepRhs",
+        &[("Lib.kt", LIB)],
+        SRC,
+        "app/DepRhsKt",
+    ) else {
+        eprintln!("skip (provisioned kotlinc unavailable)");
+        return;
+    };
+    result.unwrap_or_else(|diff| panic!("{diff}"));
+}

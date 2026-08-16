@@ -5436,19 +5436,18 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
-        self.cp
-            .type_alias_expansion(internal)
-            .map(
-                |(target, formals, expansion)| crate::libraries::AliasExpansion {
-                    identity: internal,
-                    target: self.canonical_source_type_name(target),
-                    formals,
-                    // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
-                    // the complete template at the provider boundary so core resolution only sees
-                    // source identities, including inside projections, function types, and nullability.
-                    expansion: canonicalize_jvm_collections(expansion),
-                },
-            )
+        self.cp.type_alias_expansion(internal).map(
+            |(target, formals, expansion, expansion_spelling)| crate::libraries::AliasExpansion {
+                identity: internal,
+                target: self.canonical_source_type_name(target),
+                formals,
+                expansion_spelling,
+                // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
+                // the complete template at the provider boundary so core resolution only sees
+                // source identities, including inside projections, function types, and nullability.
+                expansion: canonicalize_jvm_collections(expansion),
+            },
+        )
     }
 
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {

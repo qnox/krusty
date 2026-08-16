@@ -346,12 +346,18 @@ mod tests {
 
     #[test]
     fn semantic_library_contract_uses_only_symbol_source_and_type_dependencies() {
+        // `spelling` is admitted on the same footing as `contracts`: a leaf data module over
+        // `types` with no resolution or backend machinery behind it. A dependency's `typealias`
+        // spellings have to cross this boundary — they are decoded from its metadata and consumed
+        // when resolving a use site — and they are inert data, which is what this budget protects
+        // against, not what it forbids.
         assert_allowed_crate_modules(
             "src/libraries.rs",
             &[
                 "contracts",
                 "kt_string",
                 "name_tree",
+                "spelling",
                 "symbol_source",
                 "types",
             ],

@@ -12305,14 +12305,32 @@ pub(crate) fn spelling_of_ref(
         // abbreviates both expanded arguments as `Cargo`). A position holding one of the alias's
         // own PARAMETERS instead takes the spelling THIS use site wrote there (`typealias Boxed<T>
         // = PBox<T, T>` spells no alias itself, yet `Boxed<Cargo>` abbreviates both).
-        args: expansion_arg_spellings(expansions.get(&alias), &alias_args_for_expansion),
+        //
+        // A SOURCE alias's template comes from the module's own map; a CLASSPATH alias's comes from
+        // its recorded expansion, whose right-hand-side spellings the metadata decoder recovers
+        // from the dependency's `Type.abbreviated_type`.
+        args: expansion_arg_spellings(
+            expansions
+                .get(&alias)
+                .map(|(rhs, formals, expansion)| (rhs, formals.as_slice(), *expansion))
+                .or_else(|| {
+                    classes.alias_expansion(&spelled.name).map(|classpath| {
+                        (
+                            &classpath.expansion_spelling,
+                            classpath.formals.as_slice(),
+                            classpath.expansion,
+                        )
+                    })
+                }),
+            &alias_args_for_expansion,
+        ),
     }
 }
 
 /// Place a use site's argument spellings into an alias expansion's PARAMETER positions, keeping the
 /// right-hand side's own spelling everywhere else. See the call site for why both sources exist.
 fn expansion_arg_spellings(
-    template: Option<&(Spelled, Vec<String>, Ty)>,
+    template: Option<(&Spelled, &[String], Ty)>,
     use_site: &[Spelled],
 ) -> Vec<Spelled> {
     let Some((rhs, formals, expansion)) = template else {

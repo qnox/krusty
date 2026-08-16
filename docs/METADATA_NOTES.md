@@ -196,19 +196,14 @@ keeps abbreviation off type equality for the same reason). The spelling therefor
   (`fn_declared_spellings`, `class_declared_spellings`, `prop_declared_spellings`), filled at
   lowering — the same mechanism `fn_param_declared_nullable` already used.
 
-### Known remaining gap
+### Reading it back
 
-A **classpath** alias abbreviates itself correctly, but nothing reaches the ARGUMENTS of its
-expansion. `SymbolTable::alias_expansion_spellings` — the table `spelling_of_ref` consults to fill
-those in — is populated only from the compiled module's own `typealias` declarations, so a
-dependency's alias has no entry and its expanded arguments are written unabbreviated. Both
-sub-cases are affected when the alias comes from a dependency:
+A dependency's aliases carry their own spellings, and a consumer inherits them: `parse_type_alias`
+(`src/jvm/metadata.rs`) reads `Type.abbreviated_type` off the alias's `expanded_type` and carries the
+per-argument spellings through `MetaTypeAlias` -> `Classpath::type_alias_expansion` ->
+`AliasExpansion::expansion_spelling`, which `resolve::spelling_of_ref` consults when the alias is not
+one of the compiled module's own. So `typealias CargoBox = PBox<Cargo, Cargo>` abbreviates both
+expanded arguments whether it is declared in this module or on the classpath.
 
-- its right-hand side spelling (`typealias CargoBox = PBox<Cargo, Cargo>`), and
-- a use site's own spelling reaching the expansion through the alias's parameters
-  (`typealias Boxed<T> = PBox<T, T>` used as `Boxed<Cargo>`).
-
-Both are correct when the alias is declared in the module being compiled. Closing this means
-teaching `parse_type_alias` (`src/jvm/metadata.rs`) to read `abbreviated_type` out of the
-dependency's `expanded_type` and carrying it through `MetaTypeAlias` → `AliasExpansion` into that
-same map, alongside the formals and expansion type it already has.
+Only the ARGUMENT spellings are recovered. A node's own abbreviation always belongs to the use site,
+which names the alias itself.
