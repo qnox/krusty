@@ -5914,3 +5914,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type parameter's declared bound — so the unwrapped binding then fails the declared `T : CharSequence`
   constraint. The star's bound has to carry the declared bound before that inference can be fixed.
   Tests: `tests/projected_receiver_extension_e2e.rs`.
+- **An array-literal annotation argument is folded against the element's DECLARED type, never
+  desugared where it is parsed.** Which array `[1, 2]` denotes follows the element it is passed to
+  — `intArrayOf` for an `int[]` element, `arrayOf` for `String[]` — and kotlinc rejects the
+  mismatched factory (`@Arr(xs = arrayOf(1, 2))` is a type error against `int[]`), so the parser
+  cannot choose one. The literal retains its element expressions and they are both CHECKED and folded where
+  the declared type is known. Checking them there is what makes the rest work: nothing else visits
+  those expressions, so a class literal or enum entry inside a literal would never resolve
+  (`ks = [String::class]` was rejected while `ks = arrayOf(String::class)` was not), and an
+  element-typed expectation would silently accept an array. That last case is a VARARG element
+  passed POSITIONALLY, which expects the element type rather than the array: kotlinc rejects
+  `@V([1, 2])` for `byte[] value()`, and folding without checking wrote `I` tags into a `byte[]`
+  element, which throws `AnnotationTypeMismatchException` on read-back. A literal in a position
+  krusty does not emit stays inert. Tests:
+  `tests/annotation_array_literal_e2e.rs::an_array_literal_element_takes_its_declared_array_type`,
+  `…::a_positional_vararg_element_rejects_an_array_literal`,
+  `…::class_literals_inside_an_array_literal_resolve`,
+  `…::an_array_literal_in_an_unemitted_position_stays_inert`.

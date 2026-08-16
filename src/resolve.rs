@@ -28182,6 +28182,18 @@ impl<'a> Checker<'a> {
             Expr::FloatLit(value) => AnnotationValue::Float(*value),
             Expr::BoolLit(value) => AnnotationValue::Boolean(*value),
             Expr::CharLit(value) => AnnotationValue::Char(*value),
+            Expr::AnnotationArrayLiteral(elements) => {
+                // The DECLARED element type decides what these expressions fold to, which is why
+                // the parser retained the literal instead of picking an array factory.
+                let element = expected.map(Ty::non_null).and_then(Ty::array_elem);
+                let elements = elements.clone();
+                AnnotationValue::Array(
+                    elements
+                        .iter()
+                        .map(|&element_expr| self.fold_annotation_value(element_expr, element))
+                        .collect::<Option<Vec<_>>>()?,
+                )
+            }
             Expr::UnsupportedAnnotationArgument(_) => return None,
             // A qualified read is an enum entry (`DeprecationLevel.HIDDEN`) OR a named constant
             // reached through its owner (`Rules.AUTHENTICATED`, a `const val` on a companion).
@@ -28425,7 +28437,6 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let description = match kind {
-                crate::ast::UnsupportedAnnotationArgument::ArrayLiteral => "array-literal",
                 crate::ast::UnsupportedAnnotationArgument::NestedAnnotation => "nested-annotation",
             };
             self.diags.error(
@@ -28495,10 +28506,42 @@ impl<'a> Checker<'a> {
                 } else {
                     *declared
                 };
-            let actual = self.check_annotation_value_expression(scope, argument, expected);
-            self.expect_assignable(expected, actual, self.span(argument), "annotation argument");
+            // An annotation array literal has no type independently of its selected element. Check
+            // each ELEMENT against that declared element type: otherwise a class literal or enum
+            // entry inside one is never resolved, and an element-typed expectation (a vararg element
+            // passed positionally) could accept an array and write the wrong constant tag.
+            self.check_annotation_argument_value(scope, argument, expected);
         }
         true
+    }
+
+    /// Check one annotation argument against its declared type. An array literal has no independent
+    /// factory/type, so each element is checked against the selected element type — RECURSIVELY,
+    /// because the fold recurses too: a literal one level deeper (`xs = [[1, 2]]`) would otherwise
+    /// reach the fold unchecked and write an array where a scalar element belongs.
+    fn check_annotation_argument_value(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+        expected: Ty,
+    ) {
+        if let Expr::AnnotationArrayLiteral(elements) = self.file.expr(argument).clone() {
+            let Some(element_ty) = expected.non_null().array_elem() else {
+                self.expect_assignable(
+                    expected,
+                    Ty::array(Ty::obj("kotlin/Any")),
+                    self.span(argument),
+                    "annotation argument",
+                );
+                return;
+            };
+            for element in elements {
+                self.check_annotation_argument_value(scope, element, element_ty);
+            }
+            return;
+        }
+        let actual = self.check_annotation_value_expression(scope, argument, expected);
+        self.expect_assignable(expected, actual, self.span(argument), "annotation argument");
     }
 
     fn check_annotation_value_expression(
@@ -33351,6 +33394,9 @@ impl<'a> Checker<'a> {
             // is consumed. Keeping it as an error type here avoids inventing a resolvable spelling
             // while leaving non-emitted annotation positions inert.
             Expr::UnsupportedAnnotationArgument(_) => Ty::Error,
+            // Annotation array literals are typed and consumed by `check_annotation_arguments`;
+            // they do not independently participate in ordinary expression inference.
+            Expr::AnnotationArrayLiteral(_) => Ty::Error,
             Expr::NotNull { operand } => {
                 // The value with its non-null type; `T?!!` narrows to `T`.
                 let t = self.expr(scope, operand);

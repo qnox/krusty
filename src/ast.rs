@@ -170,6 +170,10 @@ pub enum Expr {
     /// lone surrogate (`'\uD800'`) is a legal Kotlin `Char` but not a legal Unicode scalar value.
     CharLit(u16),
     NullLit,
+    /// Annotation-only array literal (`[a, b]`). Its declared array type comes from the selected
+    /// annotation element, so the parser retains the element expressions without choosing an
+    /// `arrayOf`/primitive-array factory.
+    AnnotationArrayLiteral(Vec<ExprId>),
     /// Valid annotation-value syntax that the annotation checker cannot model yet. Keeping the
     /// source form as an explicit AST fact lets the annotation-consumption site issue the error;
     /// inert annotation positions are never consumed, and no fabricated name enters resolution.
@@ -321,7 +325,6 @@ pub enum Expr {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedAnnotationArgument {
-    ArrayLiteral,
     NestedAnnotation,
 }
 
@@ -1751,6 +1754,7 @@ impl File {
             | Expr::Continue { .. }
             | Expr::UnsupportedAnnotationArgument(_)
             | Expr::Name(_) => false,
+            Expr::AnnotationArrayLiteral(elements) => elements.iter().any(|&element| fe(element)),
             Expr::CallableRef { receiver, .. } => receiver.is_some_and(&mut *fe),
             Expr::Return { value, .. } => match value {
                 Some(v) => fe(*v),
@@ -2137,11 +2141,18 @@ impl File {
                 None => out.push_str(&format!("'\\u{c:04X}'")),
             },
             Expr::NullLit => out.push_str("null"),
+            Expr::AnnotationArrayLiteral(elements) => {
+                out.push('[');
+                for (index, element) in elements.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    self.write_expr(*element, out);
+                }
+                out.push(']');
+            }
             Expr::UnsupportedAnnotationArgument(kind) => {
                 out.push_str(match kind {
-                    UnsupportedAnnotationArgument::ArrayLiteral => {
-                        "<unsupported annotation array literal>"
-                    }
                     UnsupportedAnnotationArgument::NestedAnnotation => {
                         "<unsupported nested annotation>"
                     }

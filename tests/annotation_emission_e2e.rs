@@ -656,8 +656,9 @@ fn unsupported_annotation_values_are_reported_only_at_consumed_positions() {
     let diagnostics = common::front_end_diagnostics_with_stdlib(source);
     assert_eq!(
         diagnostics,
-        ["array-literal annotation argument is not yet supported"],
-        "only the emitted class annotation is consumed"
+        Vec::<String>::new(),
+        "an array-literal argument is checked against its declared element type, so every one of \
+         these positions compiles as it does under kotlinc"
     );
 }
 
@@ -711,22 +712,17 @@ fn a_java_annotation_array_value_is_a_positional_vararg_only() {
             common::front_end_diagnostics(&main, &classpath, Some(jdk.as_path()))
         );
     }
-    // kotlinc accepts these two, but the parser does not model an array LITERAL argument. It
-    // stands a placeholder in the argument's slot, which fails to resolve WHERE THE ANNOTATION IS
-    // CHECKED — emitting the annotation without the element would be a silent miscompile, while
-    // reporting at parse time would hard-fail the annotation positions krusty never emits.
-    for unsupported in [
+    // An array LITERAL argument retains its elements until the checker can fold them against the
+    // DECLARED element type, so these compile like kotlinc.
+    for accepted in [
         "@Filt(\"a\", tags = [\"t\"])",
         "@Filt(value = [\"a\"], tags = [\"t\"])",
     ] {
-        let main = source(unsupported);
-        let diagnostics = common::front_end_diagnostics(&main, &classpath, Some(jdk.as_path()));
+        let main = source(accepted);
         assert!(
-            diagnostics
-                .iter()
-                .any(|message| message.contains("array-literal annotation argument")),
-            "{unsupported} must report the unmodelled argument, never emit a partial annotation: \
-             {diagnostics:?}"
+            common::compile_in_process(&main, "Main", &classpath, Some(jdk.as_path())).is_some(),
+            "kotlinc accepts {accepted}: {:?}",
+            common::front_end_diagnostics(&main, &classpath, Some(jdk.as_path()))
         );
     }
     for rejected in ["@Filt(tags = \"t\")", "@Filt(value = \"a\")"] {
@@ -739,6 +735,42 @@ fn a_java_annotation_array_value_is_a_positional_vararg_only() {
             "kotlinc rejects {rejected}, so krusty must too: {diagnostics:?}"
         );
     }
+}
+
+#[test]
+fn array_literal_annotation_tags_match_kotlinc() {
+    let java = [(
+        "Arrays.java".into(),
+        "package jl;\n\
+         import java.lang.annotation.*;\n\
+         @Retention(RetentionPolicy.RUNTIME)\n\
+         @Target({ElementType.METHOD})\n\
+         public @interface Arrays {\n\
+         \x20   byte[] bytes(); short[] shorts(); int[] ints(); long[] longs();\n\
+         \x20   float[] floats(); double[] doubles(); char[] chars(); boolean[] booleans();\n\
+         \x20   String[] strings(); Class<?>[] classes();\n\
+         }\n"
+        .into(),
+    )];
+    let (library, _) =
+        common::javac_compile(&java, &[]).expect("javac must compile the array annotation fixture");
+    const SOURCE: &str = "import jl.Arrays\n\
+        class Tagged {\n\
+        \x20 @Arrays(\n\
+        \x20 bytes = [1], shorts = [2], ints = [3], longs = [4L],\n\
+        \x20 floats = [5.0f], doubles = [6.0], chars = ['x'], booleans = [true],\n\
+        \x20 strings = [\"s\"], classes = [String::class])\n\
+        \x20 fun marked() {}\n\
+        }\n";
+
+    require_same_annotations_with(
+        "array_literal_tags",
+        "Arrays.kt",
+        "Tagged",
+        &["marked()"],
+        SOURCE,
+        Some(&library),
+    );
 }
 
 #[test]
