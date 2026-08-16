@@ -149,6 +149,16 @@ pub fn lower_file_reporting(
     lower_file_at_reporting(file, 0, info, syms, runtime, bail)
 }
 
+/// Whether this file constructs `internal` as an annotation instance (`A("x")`), which is what decides
+/// that its synthetic implementation class is emitted at all. kotlinc generates one implementation per
+/// construction site and nothing for an annotation that is only declared.
+fn annotation_is_constructed(info: &FrontendTypeInfo, internal: &str) -> bool {
+    let owner = type_name(internal);
+    info.resolved_constructors
+        .values()
+        .any(|constructor| constructor.owner() == owner)
+}
+
 /// Lower a checked file with its module file index. Multi-file drivers must use this so declaration ids
 /// can be paired with their source file when selecting already-collected signatures.
 pub fn lower_file_at(
@@ -1196,11 +1206,17 @@ fn lower_file_at_reporting_impl(
             if let Some(captures) = info.local_class_captures_by_class.get(&d) {
                 lo.local_class_captures.insert(id, captures.clone());
             }
-            // For an `annotation class`, ALSO emit the synthetic IMPLEMENTATION class (kotlinc's
-            // `…$annotationImpl`) implementing the annotation interface + the `java.lang.annotation.
-            // Annotation` contract, so `A(args)` can construct an annotation instance. The backend
-            // generates the whole impl from `fields` (see `emit_annotation_impl_class`).
-            if c.is_annotation() {
+            // For an `annotation class` this file CONSTRUCTS, also emit the synthetic IMPLEMENTATION
+            // class (kotlinc's `…$annotationImpl`) implementing the annotation interface + the
+            // `java.lang.annotation.Annotation` contract, so `A(args)` can construct an annotation
+            // instance. The backend generates the whole impl from `fields` (see
+            // `emit_annotation_impl_class`).
+            //
+            // Only when constructed. kotlinc emits an implementation per CONSTRUCTION SITE and none at
+            // all for an annotation that is merely declared — the overwhelmingly common case — so
+            // emitting one per declaration adds a class file to every module that declares an
+            // annotation and can never match kotlinc's output.
+            if c.is_annotation() && annotation_is_constructed(info, &internal) {
                 let mut impl_class = lo.ir.classes[id as usize].clone();
                 impl_class.fq_name = type_name(&format!("{internal}$annotationImpl"));
                 impl_class.is_annotation = false;
@@ -3626,7 +3642,7 @@ fn lower_file_at_reporting_impl(
                         // (`…$annotationImpl`), which carries the same constructor — so the default
                         // overload must be registered for the impl too, or a call omitting a default
                         // targets an `<init>(…, int, DefaultConstructorMarker)` nothing emits.
-                        if c.is_annotation() {
+                        if c.is_annotation() && annotation_is_constructed(info, &internal) {
                             lo.ir.insert_class_ctor_defaults(
                                 &format!("{internal}$annotationImpl"),
                                 defaults.clone(),
