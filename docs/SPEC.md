@@ -5695,6 +5695,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`Default` ≠ explicit `Runtime`: kotlinc omits the kotlin stamp when the retention is defaulted).
   Test: `tests/classpath_annotation_emit_e2e.rs` (krusty-built lib by default).
 
+- **A class annotation lands in the attribute its retention selects, for every declaration kind.**
+  A RUNTIME-retained annotation applied to a class goes to the class's `RuntimeVisibleAnnotations`;
+  a BINARY-retained (Kotlin `AnnotationRetention.BINARY`, Java `CLASS`) one goes to
+  `RuntimeInvisibleAnnotations`, which the emitter writes directly after the visible attribute. Both
+  hold for every kind a class file can be — class, object, interface, enum, annotation class — each
+  of which has its own emitter. `@ApiStatus.Internal` is the common case: BINARY-retained, so
+  dropping the invisible attribute silently discarded it. Common IR uses one
+  `DeclarationAnnotations` shape for classes, functions, constructors, and fields; every entry keeps
+  the resolved semantic retention. SOURCE-retained annotations are absent, and the JVM class writer
+  alone partitions the remaining entries into visible and invisible physical attributes.
+  Test: `tests/class_annotation_attributes_e2e.rs` (differential, all five kinds).
+
 - **Top-level function annotations survive into `@Metadata` `Function.annotation` records.** An
   argument-less BINARY/RUNTIME-retained annotation applied to a top-level function is recorded as
   `Function.annotation` (field 12) `Annotation { id }` with the class in the string table's

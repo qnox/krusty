@@ -134,6 +134,8 @@ mod catch_annotation_comma_e2e;
 mod char_literal_diagnostics_e2e;
 #[path = "checker_operator_methods_e2e.rs"]
 mod checker_operator_methods_e2e;
+#[path = "class_annotation_attributes_e2e.rs"]
+mod class_annotation_attributes_e2e;
 #[path = "class_body_e2e.rs"]
 mod class_body_e2e;
 #[path = "class_header_newline_e2e.rs"]

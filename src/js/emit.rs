@@ -671,7 +671,7 @@ mod tests {
             companion_class: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
-            applied_annotations: Vec::new(),
+            applied_annotations: crate::ir::DeclarationAnnotations::default(),
             annotation_retention: None,
         }
     }

@@ -536,6 +536,7 @@ pub struct ClassWriter {
     /// class's single `RuntimeVisibleAnnotations` attribute — `@Metadata` and user annotations both append
     /// here so `finish` writes ONE attribute (two would be invalid per JVMS §4.7.16).
     runtime_annotations: Vec<Vec<u8>>,
+    invisible_annotations: Vec<Vec<u8>>,
     /// `BootstrapMethods` entries: `(method_handle_cp_index, static_argument_cp_indices)`.
     /// The index of an entry here is its `bootstrap_method_attr_index` (referenced by InvokeDynamic).
     bootstrap_methods: Vec<(u16, Vec<u16>)>,
@@ -624,6 +625,7 @@ impl ClassWriter {
             class_attributes: Vec::new(),
             class_signature: None,
             runtime_annotations: Vec::new(),
+            invisible_annotations: Vec::new(),
             bootstrap_methods: Vec::new(),
             class_deprecated: false,
             deprecated_methods: std::collections::HashSet::new(),
@@ -919,18 +921,10 @@ impl ClassWriter {
         });
     }
 
-    /// Attach user annotations to the most recently added field. RUNTIME-retained annotations go to
-    /// `RuntimeVisibleAnnotations`, BINARY-retained to `RuntimeInvisibleAnnotations` — matching kotlinc.
-    pub fn set_last_field_annotations(
-        &mut self,
-        visible: &[crate::ir::AppliedAnnotation],
-        invisible: &[crate::ir::AppliedAnnotation],
-    ) {
-        let vis: Vec<Vec<u8>> = visible.iter().map(|a| self.encode_annotation(a)).collect();
-        let invis: Vec<Vec<u8>> = invisible
-            .iter()
-            .map(|a| self.encode_annotation(a))
-            .collect();
+    /// Attach user annotations to the most recently added field. The JVM representation boundary
+    /// maps semantic retention onto visible/invisible class-file attributes.
+    pub fn set_last_field_annotations(&mut self, annotations: &crate::ir::DeclarationAnnotations) {
+        let (vis, invis) = self.encode_declaration_annotations(annotations);
         if let Some(f) = self.fields.last_mut() {
             f.visible_anns = vis;
             f.invisible_anns = invis;
@@ -942,6 +936,31 @@ impl ClassWriter {
         let mut body = Vec::new();
         self.ev_annotation(&mut body, a);
         body
+    }
+
+    /// Encode retained declaration annotations in class-file attribute order: all visible entries,
+    /// then all invisible entries. Common IR carries no JVM attribute split.
+    fn encode_declaration_annotations(
+        &mut self,
+        annotations: &crate::ir::DeclarationAnnotations,
+    ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        use crate::types::AnnotationRetention;
+        let mut visible = Vec::new();
+        let mut invisible = Vec::new();
+        for retained in annotations.iter() {
+            if matches!(
+                retained.retention,
+                AnnotationRetention::Default | AnnotationRetention::Runtime
+            ) {
+                visible.push(self.encode_annotation(&retained.annotation));
+            }
+        }
+        for retained in annotations.iter() {
+            if matches!(retained.retention, AnnotationRetention::Binary) {
+                invisible.push(self.encode_annotation(&retained.annotation));
+            }
+        }
+        (visible, invisible)
     }
 
     /// Attach a `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) describing the file facade.
@@ -1164,6 +1183,14 @@ impl ClassWriter {
             self.ev_annotation(&mut body, a);
             self.runtime_annotations.push(body);
         }
+    }
+
+    /// Queue user annotations on a class. Semantic retention chooses the physical class-file
+    /// attribute here, once, for every class kind.
+    pub fn set_class_annotations(&mut self, annotations: &crate::ir::DeclarationAnnotations) {
+        let (visible, invisible) = self.encode_declaration_annotations(annotations);
+        self.runtime_annotations.extend(visible);
+        self.invisible_annotations.extend(invisible);
     }
 
     /// Intern helpers exposed for the emitter (Phase 4) to reference pool entries while building code.
@@ -1732,7 +1759,13 @@ impl ClassWriter {
         signature: Option<&str>,
         ann_types: &[&str],
     ) {
-        self.reserve_method_pool_with_annotations(name, desc, signature, ann_types, &[], &[]);
+        self.reserve_method_pool_with_annotations(
+            name,
+            desc,
+            signature,
+            ann_types,
+            &crate::ir::DeclarationAnnotations::default(),
+        );
     }
 
     /// [`Self::reserve_method_pool`] plus the DECLARED annotations' constants. kotlinc interns a
@@ -1747,17 +1780,14 @@ impl ClassWriter {
         desc: &str,
         signature: Option<&str>,
         ann_types: &[&str],
-        visible: &[crate::ir::AppliedAnnotation],
-        invisible: &[crate::ir::AppliedAnnotation],
+        annotations: &crate::ir::DeclarationAnnotations,
     ) {
         self.cp.utf8(name);
         self.cp.utf8(desc);
         if let Some(s) = signature {
             self.cp.utf8(s);
         }
-        for annotation in visible.iter().chain(invisible) {
-            let _ = self.encode_annotation(annotation);
-        }
+        let _ = self.encode_declaration_annotations(annotations);
         for a in ann_types {
             self.cp.utf8(a);
         }
@@ -1902,8 +1932,7 @@ impl ClassWriter {
         &mut self,
         name: &str,
         desc: &str,
-        visible: &[crate::ir::AppliedAnnotation],
-        invisible: &[crate::ir::AppliedAnnotation],
+        annotations: &crate::ir::DeclarationAnnotations,
     ) {
         // Resolve WITHOUT interning first (as `set_method_nullability` does): describing a method
         // that was never emitted must not leave orphan name/descriptor entries in the pool.
@@ -1913,11 +1942,7 @@ impl ClassWriter {
         if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
             return;
         }
-        let vis: Vec<Vec<u8>> = visible.iter().map(|a| self.encode_annotation(a)).collect();
-        let invis: Vec<Vec<u8>> = invisible
-            .iter()
-            .map(|a| self.encode_annotation(a))
-            .collect();
+        let (vis, invis) = self.encode_declaration_annotations(annotations);
         if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
             m.visible_anns = vis;
             // A DECLARED annotation precedes the compiler's own `@NotNull`/`@Nullable` on the
@@ -2366,6 +2391,19 @@ impl ClassWriter {
         } else {
             None
         };
+        // ONE `RuntimeInvisibleAnnotations` for the BINARY-retained class annotations, written directly
+        // after the visible ones — the order kotlinc emits them in.
+        let ria_attr = if !self.invisible_annotations.is_empty() {
+            let name = self.cp.utf8("RuntimeInvisibleAnnotations");
+            let mut body = Vec::new();
+            u2(&mut body, self.invisible_annotations.len() as u16);
+            for a in &self.invisible_annotations {
+                body.extend_from_slice(a);
+            }
+            Some((name, body))
+        } else {
+            None
+        };
         // `BootstrapMethods` — its name interns AFTER `SourceFile`/`RuntimeVisibleAnnotations` (kotlinc's
         // order); handle/argument indices were already interned by `add_bootstrap` during emission.
         let bootstrap_attr = if !self.bootstrap_methods.is_empty() {
@@ -2589,6 +2627,7 @@ impl ClassWriter {
                 sourcefile_attr,
                 deprecated_attr,
                 rva_attr,
+                ria_attr,
                 permitted_attr,
                 bootstrap_attr,
             ]
