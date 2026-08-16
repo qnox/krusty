@@ -3245,6 +3245,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   from a different JVM class, and enumerating only function bodies missed it. `@Metadata` records the declared privacy either way. A SECONDARY constructor's
   visibility is not modeled at all yet (`IrSecondaryCtor` has no visibility). Test:
   `tests/private_constructor_access_e2e.rs`.
+- **A member's `$default` synthetic opens with kotlinc's super-call guard, when its owner can be
+  inherited from.** `super.m()` carrying defaults cannot be dispatched — the stub would re-enter the
+  OVERRIDE through `invokevirtual` — so kotlinc passes a NON-NULL trailing marker at such a call site
+  and the stub throws: `aload <marker>; ifnull L; new UnsupportedOperationException; dup; ldc "Super
+  calls with default arguments not supported in this target, function: <name>"; invokespecial; athrow;
+  L:` with a `same_frame` at `L`. Which owners get it was MEASURED against kotlinc: an `open`,
+  `abstract` or `sealed` class, and an `enum class` (whose entries may carry bodies and so subclass
+  it); NOT a final class — including a `data class`, a nested class, a companion object or a private
+  one — nor an interface's `$DefaultImpls`, nor a file facade, none of which can receive such a
+  `super` call. Test: `tests/default_stub_super_guard_e2e.rs` (differential over every owner shape,
+  plus a run proving an ordinary defaulted call still works with the marker null).
 
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell

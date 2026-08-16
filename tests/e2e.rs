@@ -406,6 +406,8 @@ mod default_args_member_e2e;
 mod default_args_synthetic_e2e;
 #[path = "default_import_resolution_e2e.rs"]
 mod default_import_resolution_e2e;
+#[path = "default_stub_super_guard_e2e.rs"]
+mod default_stub_super_guard_e2e;
 #[path = "deferred_nullable_val_e2e.rs"]
 mod deferred_nullable_val_e2e;
 #[path = "deferred_val_init_e2e.rs"]
