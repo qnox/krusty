@@ -3193,6 +3193,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/generic_signature_e2e.rs::top_level_property_field_gets_its_generic_signature` and
   `::top_level_property_accessors_get_their_generic_signatures`.
 
+- **A boolean tested against `false` takes the single-operand branch.** `!b` lowers to `b == false`,
+  and the compare-against-zero path recognized only the INT literal `0`, so a boolean comparand fell
+  through to the two-operand form: krusty emitted `iconst_0; if_icmpne` where kotlinc emits `ifne`.
+  `false` IS the int `0` in the JVM's int category, so it takes the same branch — every `!` in a
+  program carried the extra instruction, which also shifted every branch offset after it. Test:
+  `tests/compare_to_zero_branch_e2e.rs` (differential, plus a run proving the shorter shape computes
+  the same answers).
+
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell
   `java/util/List`) at every depth, so signature-derived resolution canonicalized `fun items():

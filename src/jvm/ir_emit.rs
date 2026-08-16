@@ -15080,7 +15080,14 @@ impl<'a> Emitter<'a> {
         // branch (`ifeq`/`iflt`/… — kotlinc's form), saving the `iconst_0`. Only the int category; the
         // others compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, which already tests the result vs 0.
         let int_cat = numeric_cmp_int_category(lt, rt);
-        let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
+        // `false` IS the int 0 in the JVM's int category, and `!b` lowers to `b == false`, so it takes
+        // the same single-operand branch kotlinc emits (`ifne`) rather than `iconst_0; if_icmpne`.
+        let zero = |e: u32| {
+            matches!(
+                self.ir.expr(e),
+                IrExpr::Const(IrConst::Int(0)) | IrExpr::Const(IrConst::Boolean(false))
+            )
+        };
         let cmp0_int = if int_cat && zero(rhs) {
             self.emit_value(lhs, code);
             Some(op)
