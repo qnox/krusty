@@ -107,10 +107,10 @@ pub struct DeclaredSpellings {
     /// Per declared type parameter, that parameter's declared upper bounds (`<T : Cargo>`).
     pub type_param_bounds: Vec<Vec<Spelled>>,
     /// Class headers only: the declared SUPERCLASS (`class Sub : Super()`), empty when the class
-    /// declares none. Kept apart from [`Self::supertypes`] because the emitted supertype list does
-    /// not always have a slot for it: a generic class always leads with the superclass position
-    /// (holding `kotlin/Any` when undeclared) while a non-generic one omits that position
-    /// entirely, so only the emitter can align the two lists.
+    /// declares none. Kept apart from [`Self::supertypes`] because the emitted supertype list has a
+    /// slot for it only when a superclass was declared — and a superclass that declared no alias
+    /// spells nothing here, so this field alone cannot say whether that slot exists. Only the
+    /// emitter knows.
     pub superclass: Spelled,
     /// Class headers only: the declared INTERFACES, in declaration order.
     pub supertypes: Vec<Spelled>,
@@ -162,13 +162,13 @@ impl DeclaredSpellings {
 
     /// The spellings for an emitted supertype list, aligned to it.
     ///
-    /// `leads_with_superclass_slot` says whether that list reserves its first position for the
-    /// declared superclass even when none was declared — which a generic class does (the position
-    /// holds `kotlin/Any`) and a non-generic one does not. Getting this wrong shifts every
-    /// abbreviation onto the neighbouring supertype.
-    pub fn supertype_spellings(&self, leads_with_superclass_slot: bool) -> Vec<Spelled> {
-        let superclass = (leads_with_superclass_slot || !self.superclass.is_none())
-            .then(|| self.superclass.clone());
+    /// `has_declared_superclass` says whether that list leads with a superclass, which it does
+    /// exactly when the class declared one — a superclass position is never materialized for an
+    /// undeclared `kotlin/Any`. It cannot be inferred from [`Self::superclass`]: a declared
+    /// superclass that named no `typealias` spells nothing, yet still occupies the slot. Getting
+    /// this wrong shifts every abbreviation onto the neighbouring supertype.
+    pub fn supertype_spellings(&self, has_declared_superclass: bool) -> Vec<Spelled> {
+        let superclass = has_declared_superclass.then(|| self.superclass.clone());
         superclass
             .into_iter()
             .chain(self.supertypes.iter().cloned())
@@ -196,40 +196,44 @@ mod tests {
     }
 
     #[test]
-    fn supertype_spellings_align_with_a_leading_superclass_slot() {
-        // A generic class's emitted supertype list ALWAYS leads with the superclass position,
-        // holding `kotlin/Any` when the class declared none. The spellings must reserve that slot
-        // too, or the first interface's abbreviation lands on `kotlin/Any`.
+    fn an_undeclared_superclass_takes_no_slot_generic_or_not() {
+        // `class Holder<T> : Marker` and `class Holder : Marker` emit the SAME supertype list — the
+        // interface alone. A reserved slot for the undeclared `kotlin/Any` would land the
+        // interface's abbreviation one position early.
         let marker = Spelled::of_alias(crate::types::type_name("app/Marker"));
         let header = DeclaredSpellings {
             superclass: Spelled::default(),
             supertypes: vec![marker.clone()],
             ..DeclaredSpellings::default()
         };
-        let generic = header.supertype_spellings(true);
-        assert_eq!(generic.len(), 2, "the superclass slot is reserved");
-        assert!(
-            generic[0].is_none(),
-            "an undeclared superclass spells nothing"
-        );
-        assert_eq!(generic[1], marker, "the interface keeps its own spelling");
-
-        // A non-generic class omits that position entirely when no superclass was declared.
-        let plain = header.supertype_spellings(false);
-        assert_eq!(plain, vec![marker], "no reserved slot, no shift");
+        assert_eq!(header.supertype_spellings(false), vec![marker]);
     }
 
     #[test]
-    fn a_declared_superclass_leads_both_shapes() {
+    fn a_declared_superclass_leads_even_when_it_spells_no_alias() {
+        // `class Sub : Base(), Marker` with a plain `Base`: the superclass spells nothing, but it
+        // still OCCUPIES the leading position, so `Marker`'s abbreviation must not slide onto it.
+        let marker = Spelled::of_alias(crate::types::type_name("app/Marker"));
+        let header = DeclaredSpellings {
+            superclass: Spelled::default(),
+            supertypes: vec![marker.clone()],
+            ..DeclaredSpellings::default()
+        };
+        let aligned = header.supertype_spellings(true);
+        assert_eq!(aligned.len(), 2, "the declared superclass holds a slot");
+        assert!(aligned[0].is_none(), "a plain superclass spells nothing");
+        assert_eq!(aligned[1], marker, "the interface keeps its own spelling");
+    }
+
+    #[test]
+    fn a_declared_superclass_that_spells_an_alias_leads() {
         let base = Spelled::of_alias(crate::types::type_name("app/Super"));
         let header = DeclaredSpellings {
             superclass: base.clone(),
             supertypes: Vec::new(),
             ..DeclaredSpellings::default()
         };
-        // A DECLARED superclass occupies the leading position under either shape.
-        assert_eq!(header.supertype_spellings(true), vec![base.clone()]);
-        assert_eq!(header.supertype_spellings(false), vec![base]);
+        assert_eq!(header.supertype_spellings(true), vec![base]);
     }
 
     #[test]
