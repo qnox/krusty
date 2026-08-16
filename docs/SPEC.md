@@ -4327,14 +4327,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   CLI and the language server agree with the reference frontend.
   Tests: `tests/diagnostics_match_kotlinc.rs`.
 
-- **A callee that resolves to a non-callable value is FUNCTION_EXPECTED, not an unresolved name.**
-  When `f(...)`'s callee names a local, a parameter, or a property that carries no `invoke`, the name
-  DID resolve, and kotlinc says so by reporting the expression together with its type:
-  `Expression '{0}' of type '{1}' cannot be invoked as a function. Function 'invoke()' is not found.`
-  This is the case a local `val Registry = 1` creates when it shadows a `class Registry`: the
-  constructor is out of scope, but nothing is unresolved. krusty types the callee to name the type;
-  when that type is itself in error the value has already been diagnosed, so the report falls back to
-  the unresolved form rather than naming an error type.
+- **FUNCTION_EXPECTED requires a selected non-callable expression.** A member call such as
+  `holder.count()` first selects `Holder.count: Int`; because that value carries no `invoke`, kotlinc
+  reports `Expression 'count' of type 'Int' cannot be invoked as a function. Function 'invoke()' is
+  not found.` Bare `count()` has different call-tower semantics: a non-callable local, parameter, or
+  property contributes no callable candidate, so an otherwise missing callable is `unresolved
+  reference 'count'.` and a same-named classifier constructor may still win (`val Registry = 1;
+  Registry()` constructs the class). These decisions come from semantic value/callable shapes, never
+  from a spelling-derived function guess or an error-type fallback.
   Tests: `tests/function_expected_e2e.rs`.
 
 ## 8. Success criteria for the PoC
