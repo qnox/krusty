@@ -19856,11 +19856,26 @@ impl<'a> Checker<'a> {
                 }
             }
             if let Some(expected) = expected {
-                if let Some(result_bindings) = crate::symbol_resolver::infer_generic_return_bindings(
-                    &signature,
-                    expected,
-                    |actual, bound| self.receiver_is_assignable(actual, bound),
-                ) {
+                // The expected result also relates through the declared return's supertypes: a Java
+                // factory declared `MutableReply<T>` is seen as `Reply<T>` where `Reply<Any>` is
+                // expected, and only that applied shape can bind `T`.
+                if let Some(result_bindings) =
+                    crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+                        &source,
+                        &signature,
+                        expected,
+                        |actual, bound| self.receiver_is_assignable(actual, bound),
+                    )
+                {
+                    crate::symbol_resolver::widen_invariant_expected_bindings(
+                        &source,
+                        &signature,
+                        type_args.len(),
+                        &mut bindings,
+                        &result_bindings,
+                        expected,
+                        |actual, bound| self.receiver_is_assignable(actual, bound),
+                    );
                     crate::symbol_resolver::merge_generic_upper_bindings(
                         &signature,
                         type_args.len(),
