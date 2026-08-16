@@ -796,8 +796,13 @@ impl<'a> ModuleSymbols<'a> {
             .declared_props
             .get(name)
             .map(|property| {
-                let mut declaration =
-                    source_property(internal, name, property, class.is_interface(), 0);
+                let mut declaration = source_property(
+                    internal,
+                    name,
+                    property,
+                    class.is_interface() || class.is_annotation(),
+                    0,
+                );
                 let template = class
                     .generic_props
                     .get(name)

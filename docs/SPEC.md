@@ -6013,21 +6013,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `name -> return type` maps and the “selection failed, try a spelling” paths are gone.
   Tests: `tests/member_property_inference_e2e.rs`.
 
-- **An annotation's implementation class exists per CONSTRUCTION SITE, not per declaration.** Kotlin
+- **An annotation's implementation class exists per CONSTRUCTING FILE, not per declaration.** Kotlin
   lets an annotation be instantiated (`Marker("x")`), and kotlinc realizes that with a synthetic class
   implementing the annotation interface and `java.lang.annotation.Annotation`. It emits one per
-  construction site, named after the site's enclosing class
-  (`Ann2Kt$annotationImpl$Marker$0`), and emits NOTHING for an annotation that is only declared —
+  annotation per source file, named after the first emitted lexical classifier containing such a call,
+  or the file facade when none does (`Ann2Kt$annotationImpl$pkg_Marker$0`), and emits NOTHING for an
+  annotation that is only declared —
   which is nearly every annotation. krusty emitted one per declaration, named `Marker$annotationImpl`,
-  so any file declaring an annotation carried a class file kotlinc never writes. Emission is now gated
-  on the file actually constructing the annotation, which is what the checker's resolved constructors
-  record.
-
-  Two parts remain open. The per-site NAME is still krusty's (`<Annotation>$annotationImpl`, one per
-  annotation rather than `<EnclosingClass>$annotationImpl$<Annotation>$<index>`), so a file
-  constructing the same annotation from two sites emits one shared implementation. And an annotation
-  used only as an ANNOTATION ARGUMENT (`@Outer(Inner("x"))`) still emits one: the checker records a
-  resolved constructor for it, while kotlinc encodes the nested value directly into the class file and
-  emits nothing. Distinguishing that needs the lowered IR — an annotation application does not lower
-  to a `New` — rather than the checker's constructor table.
+  so any file declaring an annotation carried a class file kotlinc never writes. Common IR now tags the
+  ordinary checked `New` identity with the normalized annotation declaration and lexical scope. The JVM
+  realization pass groups those calls by annotation, emits the implementation at the constructing file,
+  and assigns kotlinc's physical name. An annotation used only as an ANNOTATION ARGUMENT
+  (`@Outer(Inner("x"))`) has no `New`, so it correctly emits no implementation.
   Tests: `tests/annotation_impl_class_e2e.rs`.
