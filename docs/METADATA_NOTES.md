@@ -153,3 +153,91 @@ Encoding chain ✅, schema + builtin table ✅, `UTF8_MODE_MARKER` ✅. **Both r
 `@Metadata` + `META-INF/*.kotlin_module`, Phase 5b) **and** uses krusty's classes via property syntax
 (class `@Metadata` kind=1, Phase 8b). Remaining: richer language surface (data classes, methods in
 bodies, generics, nullability) — each extends these same builders.
+
+## `Type.abbreviatedType` — the source spelling of a declared type
+
+Kotlin records BOTH forms of a declared type: the expanded classifier and, when source spelled a
+`typealias`, the spelling itself. With `typealias Cargo = Payload`, `fun make(c: Cargo): Cargo`
+writes `Type{class_name=Payload, abbreviated_type=Type{type_alias_name=Cargo}}`.
+
+Field numbers below were read off **kotlinc 2.4.10** output, not recalled:
+
+- `Type.abbreviated_type` = **field 13** (length-delimited `Type`).
+- The alias inside it is `Type.type_alias_name` = **field 12** — a varint string-table class id over
+  the descriptor `Lpkg/Alias;`, and it appears INSTEAD of `class_name`, never alongside it.
+  (Third-party writeups commonly give field 10 for `type_alias_name`; that is wrong for 2.4.x.)
+- `abbreviated_type_id` (field 14) is never emitted — kotlinc inlines the message.
+
+Observed rules, each pinned by a fixture in `tests/typealias_abbreviated_type_e2e.rs`:
+
+| source | encoding |
+|---|---|
+| `fun make(c: Cargo): Cargo` | `{class_name=Payload, abbreviated_type={type_alias_name=Cargo}}` |
+| `List<Cargo>` | the abbreviation is on the ARGUMENT's `Type`; `List` carries none — it is PER NODE |
+| `Cargo?` | the abbreviated `Type` REPEATS `nullable` (f3) |
+| `Chain` (`typealias Chain = Cargo`) | only the OUTERMOST alias is recorded — `Chain`, never `Cargo` |
+| `Boxed<Int>` (`= PBox<T,T>`) | expanded takes 2 arguments, abbreviated takes the 1 source wrote |
+| `Handler<Int>` (`= (T) -> String`) | same over a function-type expansion (`kotlin/Function1`) |
+| `CargoBox` (`= PBox<Cargo, Cargo>`) | the RHS spelling propagates: BOTH expanded arguments abbreviate to `Cargo` |
+| `Boxed<Cargo>` (`= PBox<T, T>`) | the USE SITE's spelling reaches the expansion through the alias's parameters — both expanded arguments abbreviate to `Cargo` |
+| `List<out Cargo>` | the abbreviation sits on the type INSIDE the projection wrapper |
+| `import dep.Payload as P` | an import RENAME is not a typealias — NO abbreviation |
+| `(Cargo) -> Cargo` | an INLINE function type abbreviates its components; the arrow node itself spells nothing |
+| `vararg xs: Cargo` | spelled as the ELEMENT, recorded as `Array<Cargo>` — the abbreviation goes on the element and on `vararg_element_type`, never on the array |
+| supertype, type-parameter bound, property type, extension receiver, ctor param, member fn | all carry it |
+
+**Interning order** (what keeps `d2` byte-identical): at every `Type` node — the main one and the
+abbreviated one alike — the classifier reference interns FIRST, then its arguments. The abbreviated
+node interns after the main node's classifier and arguments. Package-member strings intern in
+SOURCE DECLARATION order across kinds, `Package.type_alias` (f5) included, even though f5 is
+written last.
+
+`TypeAlias` itself distinguishes the two forms in the same way:
+
+- `underlying_type` (f4) is the right-hand side **as written** — every node that named an alias is a
+  bare `type_alias_name` reference, recursively, and nothing is abbreviated.
+- `expanded_type` (f6) is that side fully expanded, WITH abbreviations.
+
+The two forms differ in exactly one further place, and it is easy to get backwards: an
+`abbreviated_type`'s OWN arguments are EXPANDED, each carrying its own abbreviation.
+`fun nested(x: Boxed<Cargo>)` writes
+`abbreviated_type = {argument={class_name=Payload, abbreviated_type={type_alias_name=Cargo}}, type_alias_name=Boxed}`
+— not a bare `Cargo` reference. `underlying_type` is the only place the spelling goes all the way
+down.
+
+So `typealias Chain = Cargo` writes `f4 = {type_alias_name=Cargo}` (no `class_name` at all) and
+`f6 = {class_name=Payload, abbreviated_type={type_alias_name=Cargo}}`.
+
+### Implementation
+
+`Ty` is fully expanded and cannot carry the spelling, and it is `Copy + Eq + Hash` and interned, so
+an alias slot on it would split every structural type comparison on pure surface syntax (kotlinc
+keeps abbreviation off type equality for the same reason). The spelling therefore travels beside it:
+
+- `crate::spelling::Spelled` mirrors the `Ty` tree node for node; `DeclaredSpellings` groups one
+  declaration's (return, params, receiver, type-parameter bounds, supertypes).
+- `File::alias_spellings` preserves the pre-expansion node, keyed by the rewritten node's span,
+  because the PARSE SEAM (`expand_fun_type_aliases`) rewrites a same-file alias reference into its
+  target and would otherwise destroy the spelling before resolution ever sees it. It is a side
+  table rather than a `TypeRef` field because `TypeRef` is embedded by value in the expression
+  arena, where the extra eight bytes tripped `Expr`'s size guard — the same reason the spelling is
+  not on `Ty`. A reference to an alias declared elsewhere is never rewritten and keeps its spelling
+  in `TypeRef::name`, so it needs no entry.
+- `resolve::spelling_of_ref` walks a `TypeRef` in parallel with `ty_of_ref_with`, and
+  `collect_declared_spellings` records the results on `SymbolTable::declared_spellings` /
+  `member_spellings`.
+- Class metadata is built from the IR alone, so the spelling reaches it on IR side tables
+  (`fn_declared_spellings`, `class_declared_spellings`, `prop_declared_spellings`), filled at
+  lowering — the same mechanism `fn_param_declared_nullable` already used.
+
+### Reading it back
+
+A dependency's aliases carry their own spellings, and a consumer inherits them: `parse_type_alias`
+(`src/jvm/metadata.rs`) reads `Type.abbreviated_type` off the alias's `expanded_type` and carries the
+per-argument spellings through `MetaTypeAlias` -> `Classpath::type_alias_expansion` ->
+`AliasExpansion::expansion_spelling`, which `resolve::spelling_of_ref` consults when the alias is not
+one of the compiled module's own. So `typealias CargoBox = PBox<Cargo, Cargo>` abbreviates both
+expanded arguments whether it is declared in this module or on the classpath.
+
+Only the ARGUMENT spellings are recovered. A node's own abbreviation always belongs to the use site,
+which names the alias itself.

@@ -1512,6 +1512,23 @@ pub struct IrFile {
     /// the `@NotNull`/`@Nullable` parameter annotations, which DO need the declared nullability, consult
     /// this side-table instead. Empty ⇒ treat every parameter as non-null (the prior behavior).
     pub fn_param_declared_nullable: std::collections::HashMap<u32, Vec<bool>>,
+    /// How SOURCE spelled a member's declared types, by `FunId` — see [`crate::spelling`].
+    ///
+    /// Class `@Metadata` is built from the IR alone (no AST, no `FrontendSymbols`), so a declared
+    /// type's `typealias` spelling reaches it the same way a parameter's declared `?` does: on a
+    /// side table filled at lowering, where the AST member is still in hand. Only members that
+    /// actually spell an alias get an entry.
+    pub fn_declared_spellings: std::collections::HashMap<u32, crate::spelling::DeclaredSpellings>,
+    /// The same, for a CLASS HEADER (supertypes, primary-constructor parameters, type-parameter
+    /// bounds), keyed by the class's fully-qualified name.
+    pub class_declared_spellings:
+        std::collections::HashMap<crate::types::TypeName, crate::spelling::DeclaredSpellings>,
+    /// The same, for a class PROPERTY, keyed by `(class fully-qualified name, property name)` —
+    /// a property has no `FunId` to hang off.
+    pub prop_declared_spellings: std::collections::HashMap<
+        (crate::types::TypeName, String),
+        crate::spelling::DeclaredSpellings,
+    >,
     /// Function ids whose physical `params[0]` realizes an extension receiver. Metadata and JVM
     /// default-argument masks consume this semantic fact directly; neither may infer receiver-ness
     /// from the synthetic `$receiver` parameter spelling.

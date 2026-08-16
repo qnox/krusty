@@ -479,6 +479,11 @@ pub struct AliasExpansion {
     pub formals: Vec<String>,
     /// The target applied to its own arguments, with the alias's parameters as `Ty::TyParam`.
     pub expansion: Ty,
+    /// How the alias's right-hand side SPELLED the arguments it passes to its target — see
+    /// [`crate::spelling`]. A use site inherits these into its expansion, so
+    /// `typealias CargoBox = PBox<Cargo, Cargo>` abbreviates both expanded arguments as `Cargo`
+    /// however it is spelled.
+    pub expansion_spelling: crate::spelling::Spelled,
 }
 
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {

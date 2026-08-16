@@ -1079,6 +1079,11 @@ fn build_class_metadata(
             (
                 property.source_order,
                 PropMeta {
+                    spellings: ir
+                        .prop_declared_spellings
+                        .get(&(c.fq_name_id(), property.name.clone()))
+                        .cloned()
+                        .unwrap_or_default(),
                     name: property.name.clone(),
                     ty: property.ty,
                     is_var: property.is_var,
@@ -1137,6 +1142,7 @@ fn build_class_metadata(
         declared_props.push((
             prop.source_order,
             PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: prop.name.clone(),
                 ty: prop.ty,
                 is_var: prop.is_var,
@@ -1177,6 +1183,11 @@ fn build_class_metadata(
             })
         };
         props.push(PropMeta {
+            spellings: ir
+                .prop_declared_spellings
+                .get(&(c.fq_name_id(), ext.name.clone()))
+                .cloned()
+                .unwrap_or_default(),
             name: ext.name.clone(),
             ty: ext.ty,
             is_var: ext.is_var,
@@ -1436,6 +1447,13 @@ fn build_class_metadata(
                     .map(|ds| ds.iter().skip(recv_offset).map(|d| d.is_some()).collect())
                     .unwrap_or_default();
                 Some(FnMeta {
+                    // How SOURCE spelled this member's declared types — carried on the IR because
+                    // class metadata is built without the AST (see `IrFile::fn_declared_spellings`).
+                    spellings: ir
+                        .fn_declared_spellings
+                        .get(&fid)
+                        .cloned()
+                        .unwrap_or_default(),
                     name: name.to_string(),
                     params: logical_params,
                     ret: metadata_ret,
@@ -1471,6 +1489,7 @@ fn build_class_metadata(
             .iter()
             .enumerate()
             .map(|(i, f)| FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: format!("component{}", i + 1),
                 params: vec![],
                 ret: f.ty,
@@ -1488,6 +1507,7 @@ fn build_class_metadata(
             .collect();
         if synthesizes_copy {
             m.push(FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "copy".into(),
                 params: data_component_fields
                     .iter()
@@ -1507,6 +1527,7 @@ fn build_class_metadata(
             });
         }
         m.push(FnMeta {
+            spellings: crate::spelling::DeclaredSpellings::default(),
             name: "equals".into(),
             params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
             ret: Ty::Boolean,
@@ -1522,6 +1543,7 @@ fn build_class_metadata(
             jvm_sig_name: None,
         });
         m.push(FnMeta {
+            spellings: crate::spelling::DeclaredSpellings::default(),
             name: "hashCode".into(),
             params: vec![],
             ret: Ty::Int,
@@ -1537,6 +1559,7 @@ fn build_class_metadata(
             jvm_sig_name: None,
         });
         m.push(FnMeta {
+            spellings: crate::spelling::DeclaredSpellings::default(),
             name: "toString".into(),
             params: vec![],
             ret: Ty::String,
@@ -1559,6 +1582,7 @@ fn build_class_metadata(
         let u = desc(c.fields[0].ty);
         vec![
             FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "equals".into(),
                 params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
                 ret: Ty::Boolean,
@@ -1574,6 +1598,7 @@ fn build_class_metadata(
                 jvm_sig_name: Some("equals-impl".into()),
             },
             FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "hashCode".into(),
                 params: vec![],
                 ret: Ty::Int,
@@ -1589,6 +1614,7 @@ fn build_class_metadata(
                 jvm_sig_name: Some("hashCode-impl".into()),
             },
             FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "toString".into(),
                 params: vec![],
                 ret: Ty::String,
@@ -1684,12 +1710,23 @@ fn build_class_metadata(
         .filter(|signature| !signature.supers.is_empty())
         .map(|signature| signature.supers.clone())
         .unwrap_or_default();
+    // A generic class's recorded supers ALWAYS lead with the superclass position — holding
+    // `kotlin/Any` when none was declared — while the list built below omits that position
+    // entirely. The header's spellings have to follow whichever shape this is, or every
+    // abbreviation lands on the neighbouring supertype.
+    let leads_with_superclass_slot = !supertypes.is_empty();
     if supertypes.is_empty() {
         if super_internal != "kotlin/Any" {
             supertypes.push(Ty::obj(&super_internal));
         }
         supertypes.extend(c.interfaces.iter_ids().map(Ty::obj_name));
     }
+    let class_spellings = ir
+        .class_declared_spellings
+        .get(&c.fq_name_id())
+        .cloned()
+        .unwrap_or_default();
+    let supertype_spellings = class_spellings.supertype_spellings(leads_with_superclass_slot);
     // DECLARED secondary constructors → `Class.constructor` records (flags 22 = public secondary),
     // described from their recorded source names + SEMANTIC types (fun-type parameters keep their
     // shape — `Cfg.() -> Unit` — where the erased realization is a bare `Function1`). Synthetic
@@ -1734,6 +1771,8 @@ fn build_class_metadata(
         &methods,
         &enum_entry_names,
         &ClassTail {
+            spellings: class_spellings,
+            supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
             captured_type_params: &c.captured_type_params,
