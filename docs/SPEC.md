@@ -4324,11 +4324,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   no constructor, no classifier, no value — the frontend reports its ordinary
   `Unresolved reference '{0}'.`, the same text a bare unresolved name gets. krusty reports it
   lowercase-first (`unresolved reference 'f'.`) and the LSP boundary sentence-cases it, so both the
-  CLI and the language server agree with the reference frontend. The neighbouring case where the
-  callee DOES resolve — to a value that is not callable — is a different kotlinc diagnostic
-  (FUNCTION_EXPECTED: `Expression '{0}' of type '{1}' cannot be invoked as a function. Function
-  'invoke()' is not found.`) and is not covered here.
+  CLI and the language server agree with the reference frontend.
   Tests: `tests/diagnostics_match_kotlinc.rs`.
+
+- **A callee that resolves to a non-callable value is FUNCTION_EXPECTED, not an unresolved name.**
+  When `f(...)`'s callee names a local, a parameter, or a property that carries no `invoke`, the name
+  DID resolve, and kotlinc says so by reporting the expression together with its type:
+  `Expression '{0}' of type '{1}' cannot be invoked as a function. Function 'invoke()' is not found.`
+  This is the case a local `val Registry = 1` creates when it shadows a `class Registry`: the
+  constructor is out of scope, but nothing is unresolved. krusty types the callee to name the type;
+  when that type is itself in error the value has already been diagnosed, so the report falls back to
+  the unresolved form rather than naming an error type.
+  Tests: `tests/function_expected_e2e.rs`.
 
 ## 8. Success criteria for the PoC
 
