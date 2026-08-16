@@ -4232,6 +4232,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   raw type. The value interns between the class and superclass names, as ASM visits them.
   Test: `tests/classifier_class_signature_e2e.rs`.
 
+- **A Java array slot is `Array<(out) T!>!`.** Java arrays are covariant, so a `Sub[]` value reaches
+  a `Base[]` parameter — `setRecipients(type, InternetAddress.parse(to))` passes an
+  `InternetAddress[]` to an `Address[]`, which krusty reported as an unresolved reference because no
+  candidate accepted the argument. The projection belongs to the flexible, Java-sourced spelling
+  alone: Kotlin's own `Array<T>` stays invariant, and `Array<Sub>` is still rejected for an
+  `Array<Base>` parameter, since a store through it would be unchecked. Test:
+  `tests/java_array_covariance_e2e.rs`.
+
 - **A type parameter is a lexical binding, declared on the rung of the declaration that introduces
   it.** `class C<T>` binds `T` on its CLASS rung, `fun <T> f()` on the function's own rung — one
   namespace (`Ns::Classifier`), different declaring rung — so a parameter retires with its
