@@ -6081,3 +6081,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that record and the ordinary callable argument mapper—the same named/default/vararg/trailing-lambda
   rules used for final candidate selection—instead of maintaining a constructor-only mapping.
   Tests: `tests/construction_argument_labels_e2e.rs`.
+
+- **A constructor's own type parameters are substituted before a lambda argument is checked.** A
+  generic class whose constructor takes a function over its type parameters
+  (`class Store<ROOT, DOMAIN>(wrapper: Wrapper<ROOT>, toDomain: (ROOT) -> DOMAIN)`) supplies that
+  parameter as the lambda's expectation, and the expectation is the DECLARATION's template. The type
+  arguments the call already fixes — an explicit `Store<A, B>(…)`, the expected result, and the
+  arguments that are not themselves contextual — are substituted into it first. Handing the lambda
+  the unsubstituted `(ROOT) -> DOMAIN` types its parameter as the erased bound, every member read in
+  the body is "unresolved reference", the failed body then contributes nothing back, and the
+  construction collapses to `Store<Any, Any>` so every later call on the value cascades. Explicit
+  type arguments are applied OVER the inferred ones rather than merged with them: an argument whose
+  own type is still open (`Wrapper("x")`) must not rebind what the call site spelled out.
+
+  Arguments are typed in DEPENDENCY order, not source order: a contextual (lambda) argument is typed
+  after the arguments that can bind the type parameters its own parameters mention, and a lambda's
+  RESULT then binds the parameters that appear nowhere else. `Store(toRoot = { list -> … },
+  toDomain = { dto -> … }, …)` therefore types `toDomain` first, because `DOMAIN` is visible only in
+  that lambda's result. Lambdas whose inputs never become known keep source order. The same semantic
+  substitution applies to ordinary, local, sibling-source, and dependency classifiers, including
+  value-class type arguments; their physical representation remains a backend decision.
+  Tests: `tests/generic_ctor_lambda_targs_e2e.rs`.

@@ -17341,6 +17341,84 @@ struct MemberMappingFailure {
     candidate: crate::libraries::FunctionInfo,
 }
 
+fn ty_param_names_into(ty: Ty, out: &mut Vec<&'static str>) {
+    match ty {
+        Ty::TyParam(name, _) => out.push(name),
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner) => ty_param_names_into(*inner, out),
+        Ty::Obj(_, args) => {
+            for &argument in args {
+                ty_param_names_into(argument, out);
+            }
+        }
+        Ty::Fun(signature) => {
+            for &parameter in &signature.params {
+                ty_param_names_into(parameter, out);
+            }
+            ty_param_names_into(signature.ret, out);
+        }
+        _ => {}
+    }
+}
+
+/// The order a construction's arguments are typed in: every CONTEXTUAL (lambda) argument after the
+/// arguments that can bind the type parameters ITS OWN parameters mention.
+///
+/// `Store(toRoot = { list -> … }, toDomain = { dto -> … }, …)` writes the two lambdas in the order
+/// that does not work: `toRoot: (DOMAIN) -> ROOT` can only be checked once `DOMAIN` is known, and
+/// `DOMAIN` appears nowhere but the RESULT of `toDomain`. Source order would type `list` as the
+/// erased bound and lose the body. Lambdas whose inputs never become known keep source order, so
+/// this only ever moves an argument that had something to gain.
+fn construction_argument_typing_order(is_lambda: &[bool], symbolic: &[Option<Ty>]) -> Vec<usize> {
+    let names_of = |slot: usize, inputs_only: bool| {
+        let mut names = Vec::new();
+        match symbolic.get(slot).copied().flatten() {
+            Some(Ty::Fun(signature)) if inputs_only => {
+                for &parameter in &signature.params {
+                    ty_param_names_into(parameter, &mut names);
+                }
+            }
+            Some(shape) => ty_param_names_into(shape, &mut names),
+            None => {}
+        }
+        names
+    };
+    let mut ordered: Vec<usize> = (0..is_lambda.len()).filter(|&i| !is_lambda[i]).collect();
+    let mut covered: std::collections::HashSet<&'static str> = ordered
+        .iter()
+        .flat_map(|&slot| names_of(slot, false))
+        .collect();
+    let mut remaining: Vec<usize> = (0..is_lambda.len()).filter(|&i| is_lambda[i]).collect();
+    while let Some(position) = remaining.iter().position(|&slot| {
+        names_of(slot, true)
+            .iter()
+            .all(|name| covered.contains(name))
+    }) {
+        let slot = remaining.remove(position);
+        covered.extend(names_of(slot, false));
+        ordered.push(slot);
+    }
+    ordered.extend(remaining);
+    ordered
+}
+
+/// What `Name(args)` types its arguments against when the name denotes a constructible classifier.
+///
+/// Both parameter vectors are in SOURCE-ARGUMENT order — labels have already been mapped onto
+/// declaration slots — so index `i` always describes the `i`th written argument.
+struct ConstructionExpectations {
+    /// Per source argument: the parameter's semantic type and whether that type is a RECEIVER
+    /// function type (`Scope.() -> Unit`, whose lambda binds `this`). `None` where same-arity
+    /// constructors disagree, so the argument keeps its expectation-free shape.
+    params: Vec<Option<(Ty, bool)>>,
+    /// The same parameters with the classifier's own type variables still symbolic, where the
+    /// declaration provides them. This is the template call-site type arguments substitute into.
+    symbolic: Vec<Option<Ty>>,
+    /// The constructed classifier's type parameters, in declaration order.
+    type_params: Vec<String>,
+}
 struct SourceConstructorBindings<'a> {
     bindings: &'a mut [Ty],
     lower: &'a mut [Vec<(Ty, ExprId)>],
@@ -43182,17 +43260,20 @@ impl<'a> Checker<'a> {
         ))
     }
 
-    /// The constructor parameter shape each argument of `Name(args)` is typed against, in SOURCE
-    /// argument order. The normalized classifier record supplies constructors for every declaration
-    /// origin, and the ordinary callable mapper supplies named/default/vararg/trailing-lambda slots.
-    /// No constructor-only or provider-specific mapping is permitted here.
+    /// The constructor shapes each argument of `Name(args)` is typed against, in SOURCE-ARGUMENT
+    /// order. Providers normalize every declaration origin into the classifier's constructor list;
+    /// ordinary callable mapping handles labels, defaults, varargs, and trailing lambdas once.
+    ///
+    /// The symbolic vector is the same mapped parameter list before the classifier's type variables
+    /// are substituted. A slot is exposed only when every applicable constructor agrees, so this
+    /// pre-selection expectation cannot choose an overload.
     fn construction_argument_expectations(
         &self,
         internal: TypeName,
         arity: usize,
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
-    ) -> Option<Vec<Option<(Ty, bool)>>> {
+    ) -> Option<ConstructionExpectations> {
         let classifier = self.resolved_type_name(internal)?;
         let candidates = classifier
             .constructors
@@ -43205,11 +43286,15 @@ impl<'a> Checker<'a> {
                     trailing_lambda,
                     &constructor.call_sig,
                 )?;
+                let symbolic = constructor
+                    .generic_sig
+                    .as_ref()
+                    .filter(|generic| generic.params.len() == constructor.params.len());
                 Some(
                     slots
                         .into_iter()
                         .map(|slot| {
-                            (
+                            let parameter = (
                                 constructor.params[slot],
                                 constructor
                                     .call_sig
@@ -43217,25 +43302,97 @@ impl<'a> Checker<'a> {
                                     .get(slot)
                                     .copied()
                                     .unwrap_or(false),
-                            )
+                            );
+                            let symbolic = symbolic.map(|generic| generic.params[slot]);
+                            (parameter, symbolic)
                         })
                         .collect::<Vec<_>>(),
                 )
             })
             .collect::<Vec<_>>();
         let first = candidates.first()?;
-        Some(
-            first
+        Some(ConstructionExpectations {
+            params: first
                 .iter()
                 .enumerate()
-                .map(|(source, &expectation)| {
+                .map(|(source, &(expectation, _))| {
                     candidates
                         .iter()
-                        .all(|candidate| candidate[source] == expectation)
+                        .all(|candidate| candidate[source].0 == expectation)
                         .then_some(expectation)
                 })
                 .collect(),
-        )
+            symbolic: first
+                .iter()
+                .enumerate()
+                .map(|(source, &(_, symbolic))| {
+                    candidates
+                        .iter()
+                        .all(|candidate| candidate[source].1 == symbolic)
+                        .then_some(symbolic)
+                        .flatten()
+                })
+                .collect(),
+            type_params: classifier.type_params.clone(),
+        })
+    }
+
+    /// Bind the constructed classifier's type parameters from everything known at the call BEFORE a
+    /// contextual (lambda) argument is checked: explicit type arguments, the expected result, and
+    /// the arguments already typed. `actuals` holds `Ty::Error` for a slot not yet typed.
+    ///
+    /// This is the constructor half of ordinary bidirectional inference. Its one consumer is the
+    /// lambda expectation: `Store<ROOT, DOMAIN>(wrapper: Wrapper<ROOT>, toDomain: (ROOT) -> DOMAIN)`
+    /// must hand `{ dto -> … }` a `dto: RootDto`, not the unbound `ROOT` (which erases to its bound
+    /// and fails every member read in the body).
+    fn construction_type_param_binds(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        internal: TypeName,
+        expected: Option<Ty>,
+        plan: &ConstructionExpectations,
+        actuals: &[Ty],
+    ) -> crate::symbol_resolver::GSigBinds {
+        let mut binds = crate::symbol_resolver::GSigBinds::new();
+        if plan.type_params.is_empty() {
+            return binds;
+        }
+        // Explicit type arguments and the expected constructed type are FIXED, not constraints to
+        // merge: an argument whose own type is still open (`Wrapper("x")` for
+        // `Store<RootDto, …>`) must not widen what the call site already establishes. Apply both
+        // after argument inference, with explicit source spelling last.
+        let mut expected_bindings = crate::symbol_resolver::GSigBinds::new();
+        crate::symbol_resolver::constrain_constructor_result(
+            internal,
+            &plan.type_params,
+            expected,
+            &mut expected_bindings,
+        );
+        let mut explicit = crate::symbol_resolver::GSigBinds::new();
+        if let Some(refs) = self.file.call_type_args.get(&call.0).cloned() {
+            for (name, type_ref) in plan.type_params.iter().zip(refs.iter()) {
+                let ty = self.type_ref_ty_silent(scope, type_ref);
+                if ty != Ty::Error {
+                    explicit.insert(name.clone(), ty);
+                }
+            }
+        }
+        for (slot, shape) in plan.symbolic.iter().enumerate() {
+            let (Some(shape), Some(&actual)) = (*shape, actuals.get(slot)) else {
+                continue;
+            };
+            if actual == Ty::Error || !shape.mentions_ty_param() {
+                continue;
+            }
+            crate::symbol_resolver::unify_inferred_ty(shape, actual, &mut binds);
+        }
+        binds.extend(expected_bindings);
+        binds.extend(explicit);
+        // Only this classifier's own parameters may be substituted: unification can pick up
+        // variables belonging to a nested generic argument, and those are not ours to bind.
+        binds.retain(|name, ty| plan.type_params.contains(name) && *ty != Ty::Error);
+        binds
     }
 
     /// The vararg parameter slot of a selected TOP-LEVEL callable, recovered from the candidate set it
@@ -47459,7 +47616,7 @@ impl<'a> Checker<'a> {
                 let this_member_lambda_materialized = implicit_library_ext_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.materialized.clone());
-                let constructor_expectations: Option<Vec<Option<(Ty, bool)>>> = if !self
+                let constructor_expectations: Option<ConstructionExpectations> = if !self
                     .lexical_value_declares(scope, &fname)
                     && self.resolver().top_level_candidates(&fname).is_empty()
                 {
@@ -47486,26 +47643,68 @@ impl<'a> Checker<'a> {
                         .and_then(|internal| self.resolved_type_name(internal))
                         .is_some_and(|classifier| !classifier.constructors.is_empty());
                 let known_sam_signatures = std::cell::RefCell::new(vec![None; args.len()]);
-                let arg_tys: Vec<Ty> = args
+                // A lambda argument is CONTEXTUAL: a constructor parameter's expectation may mention
+                // the constructed class's type parameters, and the concrete arguments are what bind
+                // them. Where that is the case, type the non-lambda arguments first so those
+                // bindings exist by the time a lambda body is checked. Each result is written back
+                // to its own argument position, so the recorded argument types keep source order,
+                // and every other call shape keeps its established source-order checking.
+                let argument_is_lambda: Vec<bool> = args
                     .iter()
-                    .enumerate()
-                    .map(|(i, &a)| {
-                        if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                            crate::trace_compiler!(
+                    .map(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+                    .collect();
+                let argument_order: Vec<usize> =
+                    match constructor_expectations.as_ref().filter(|plan| {
+                        plan.symbolic
+                            .iter()
+                            .flatten()
+                            .any(|shape| shape.mentions_ty_param())
+                    }) {
+                        Some(plan) => {
+                            construction_argument_typing_order(&argument_is_lambda, &plan.symbolic)
+                        }
+                        None => (0..args.len()).collect(),
+                    };
+                let typed_args = std::cell::RefCell::new(vec![Ty::Error; args.len()]);
+                let type_argument = |i: usize, a: ExprId| -> Ty {
+                    if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                        crate::trace_compiler!(
                                 "lambda_apply",
                                 "call={fname} argument={i} top_params={toplevel_lambda_pts:?} top_receivers={toplevel_lambda_recvs:?} member_params={this_member_lambda_pts:?} member_receivers={this_member_lambda_recvs:?} known_params={:?} known_receivers={:?} known_generic={:?}",
                                 known_sig.as_ref().map(|signature| &signature.params),
                                 known_sig.as_ref().map(|signature| &signature.lambda_recv),
                                 known_sig.as_ref().and_then(|signature| signature.generic_sig.as_ref()).map(|signature| &signature.params),
                             );
-                        }
-                        if let Some((Ty::Fun(signature), has_receiver)) = constructor_expectations
-                            .as_ref()
-                            .and_then(|types| types.get(i))
-                            .copied()
-                            .flatten()
-                        {
-                            if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                    }
+                    if let Some((declared, has_receiver)) = constructor_expectations
+                        .as_ref()
+                        .and_then(|plan| plan.params.get(i))
+                        .copied()
+                        .flatten()
+                    {
+                        if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                            // Substitute what the call already fixes — explicit type arguments,
+                            // the expected result, the arguments typed above — into the
+                            // parameter's own template. An unbound `ROOT` erases to its bound,
+                            // which types the lambda's parameter as `Any` and fails every member
+                            // read in the body.
+                            let shaped = constructor_expectations
+                                .as_ref()
+                                .zip(bare_classifier)
+                                .and_then(|(plan, internal)| {
+                                    let shape = (*plan.symbolic.get(i)?)?;
+                                    if !shape.mentions_ty_param() {
+                                        return None;
+                                    }
+                                    let actuals = typed_args.borrow().clone();
+                                    let binds = self.construction_type_param_binds(
+                                        scope, call, internal, expected, plan, &actuals,
+                                    );
+                                    (!binds.is_empty())
+                                        .then(|| crate::types::ty_subst_keep_unbound(shape, &binds))
+                                })
+                                .unwrap_or(declared);
+                            if let Ty::Fun(signature) = shaped {
                                 return self.check_lambda_with_function_type_labeled(
                                     scope,
                                     a,
@@ -47515,200 +47714,199 @@ impl<'a> Checker<'a> {
                                 );
                             }
                         }
-                        if let Some((expected, _)) = constructor_expectations
-                            .as_ref()
-                            .and_then(|types| types.get(i))
-                            .copied()
-                            .flatten()
-                        {
-                            if !matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                                return self.expr_expected(scope, a, expected);
-                            }
+                    }
+                    if let Some((expected, _)) = constructor_expectations
+                        .as_ref()
+                        .and_then(|plan| plan.params.get(i))
+                        .copied()
+                        .flatten()
+                    {
+                        if !matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                            return self.expr_expected(scope, a, expected);
                         }
-                        if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                            if let Some((pt, receiver, signature, is_inline)) =
-                                ordinary_this_member_lambda_shape
-                                    .as_ref()
-                                    .and_then(|shape| {
-                                        shape.param_types.get(i).and_then(Option::as_ref).map(
-                                            |types| {
-                                                (
-                                                    types.clone(),
-                                                    shape.receivers.get(i).copied().flatten(),
-                                                    shape.signatures.get(i).copied().flatten(),
-                                                    shape.is_inline,
-                                                )
-                                            },
-                                        )
-                                    })
-                            {
-                                if let Some(signature) = signature {
-                                    return self.with_lambda_mutation(is_inline, |checker| {
-                                        checker.check_lambda_with_function_type_and_params_labeled(
-                                            scope,
-                                            a,
-                                            signature,
-                                            &pt,
-                                            receiver.is_some(),
-                                            call_fn_name.as_deref(),
-                                        )
-                                    });
-                                }
-                                if let Some(receiver) = receiver {
-                                    return self.with_lambda_mutation(is_inline, |checker| {
-                                        checker.check_lambda_with_receiver_labeled(
-                                            scope,
-                                            a,
-                                            receiver,
-                                            pt.get(1..).unwrap_or_default(),
-                                            call_fn_name.as_deref(),
-                                        )
-                                    });
-                                }
+                    }
+                    if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                        if let Some((pt, receiver, signature, is_inline)) =
+                            ordinary_this_member_lambda_shape
+                                .as_ref()
+                                .and_then(|shape| {
+                                    shape
+                                        .param_types
+                                        .get(i)
+                                        .and_then(Option::as_ref)
+                                        .map(|types| {
+                                            (
+                                                types.clone(),
+                                                shape.receivers.get(i).copied().flatten(),
+                                                shape.signatures.get(i).copied().flatten(),
+                                                shape.is_inline,
+                                            )
+                                        })
+                                })
+                        {
+                            if let Some(signature) = signature {
                                 return self.with_lambda_mutation(is_inline, |checker| {
-                                    checker.check_lambda_with_types_labeled(
-                                        scope,
-                                        a,
-                                        &pt,
-                                        call_fn_name.as_deref(),
-                                    )
-                                });
-                            }
-                        }
-                        if let Some(ref pts) = this_member_lambda_pts {
-                            if pts.get(i).is_some_and(|types| !types.is_empty())
-                                && matches!(self.file.expr(a), Expr::Lambda { .. })
-                            {
-                                let pt = pts[i].clone();
-                                let receiver = this_member_lambda_recvs
-                                    .as_ref()
-                                    .and_then(|receivers| receivers.get(i))
-                                    .copied()
-                                    .flatten();
-                                let inline = this_member_lambda_inline
-                                    && !this_member_lambda_materialized
-                                        .as_ref()
-                                        .and_then(|materialized| materialized.get(i))
-                                        .copied()
-                                        .unwrap_or(false);
-                                if let Some(Ty::Fun(signature)) = this_member_lambda_expected
-                                    .as_ref()
-                                    .and_then(|expected| expected.get(i))
-                                    .copied()
-                                    .flatten()
-                                {
-                                    return self.with_lambda_mutation(inline, |checker| {
-                                        checker.check_lambda_with_function_type_and_params_labeled(
-                                            scope,
-                                            a,
-                                            signature,
-                                            &pt,
-                                            receiver.is_some(),
-                                            call_fn_name.as_deref(),
-                                        )
-                                    });
-                                }
-                                if let Some(receiver) = receiver {
-                                    return self.with_lambda_mutation(inline, |checker| {
-                                        checker.check_lambda_with_receiver_labeled(
-                                            scope,
-                                            a,
-                                            receiver,
-                                            pt.get(1..).unwrap_or_default(),
-                                            call_fn_name.as_deref(),
-                                        )
-                                    });
-                                }
-                                return self.with_lambda_mutation(inline, |checker| {
-                                    checker.check_lambda_with_types_labeled(
-                                        scope,
-                                        a,
-                                        &pt,
-                                        call_fn_name.as_deref(),
-                                    )
-                                });
-                            }
-                        }
-                        // The receiver type for a RECEIVER function-type param (from `@Metadata`), if any.
-                        let recv_i = toplevel_lambda_recvs
-                            .as_ref()
-                            .and_then(|r| r.get(i))
-                            .copied()
-                            .flatten();
-                        let context_count_i = toplevel_lambda_context_counts
-                            .as_ref()
-                            .and_then(|counts| counts.get(i))
-                            .copied()
-                            .unwrap_or_default();
-                        // A selected SAM target is authoritative. Type the lambda once from its
-                        // specialized method signature; syntax-derived lambda shapes are only a
-                        // fallback when overload selection did not produce a SAM expectation.
-                        if let Some(TopLevelSamSelection::Picked(_, _, sam_signatures)) =
-                            top_level_sam.as_ref()
-                        {
-                            if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                                if let Some(Some(signature)) = sam_signatures.get(i) {
-                                    return self.check_lambda_with_sam_signature_labeled(
+                                    checker.check_lambda_with_function_type_and_params_labeled(
                                         scope,
                                         a,
                                         signature,
+                                        &pt,
+                                        receiver.is_some(),
                                         call_fn_name.as_deref(),
-                                    );
-                                }
+                                    )
+                                });
                             }
+                            if let Some(receiver) = receiver {
+                                return self.with_lambda_mutation(is_inline, |checker| {
+                                    checker.check_lambda_with_receiver_labeled(
+                                        scope,
+                                        a,
+                                        receiver,
+                                        pt.get(1..).unwrap_or_default(),
+                                        call_fn_name.as_deref(),
+                                    )
+                                });
+                            }
+                            return self.with_lambda_mutation(is_inline, |checker| {
+                                checker.check_lambda_with_types_labeled(
+                                    scope,
+                                    a,
+                                    &pt,
+                                    call_fn_name.as_deref(),
+                                )
+                            });
                         }
-                        if let Some(ref pts) = toplevel_lambda_pts {
-                            if matches!(self.file.expr(a), Expr::Lambda { .. })
-                                && i < pts.len()
-                            {
-                                // crossinline/noinline materializes a closure; other inline lambdas splice.
-                                let materialized = toplevel_lambda_materialized
+                    }
+                    if let Some(ref pts) = this_member_lambda_pts {
+                        if pts.get(i).is_some_and(|types| !types.is_empty())
+                            && matches!(self.file.expr(a), Expr::Lambda { .. })
+                        {
+                            let pt = pts[i].clone();
+                            let receiver = this_member_lambda_recvs
+                                .as_ref()
+                                .and_then(|receivers| receivers.get(i))
+                                .copied()
+                                .flatten();
+                            let inline = this_member_lambda_inline
+                                && !this_member_lambda_materialized
                                     .as_ref()
-                                    .and_then(|m| m.get(i))
+                                    .and_then(|materialized| materialized.get(i))
                                     .copied()
                                     .unwrap_or(false);
-                                // A RECEIVER function-type param: bind the receiver as the lambda's `this`;
-                                // the rest are value params. Prefer the @Metadata receiver (`recv_i`,
-                                // deterministic — `MutableList` for `buildList`) over `pts[i][0]`, whose
-                                // JVM-`Signature` decode is order-dependent (flakily `java/util/List`, on which
-                                // a `MutableList` extension like `removeLastOrNull` fails to resolve).
-                                let expected_type = toplevel_lambda_expected
-                                    .as_ref()
-                                    .and_then(|types| types.get(i))
-                                    .copied()
-                                    .flatten()
-                                    .or_else(|| {
-                                        let parameter = known_argument_parameters
-                                            .as_ref()
-                                            .and_then(|parameters| parameters.get(i))
-                                            .copied()
-                                            .unwrap_or(i);
-                                        known_sig
-                                            .as_ref()
-                                            .and_then(|signature| signature.generic_sig.as_ref())
-                                            .and_then(|generic| generic.params.get(parameter))
-                                            .copied()
-                                            .map(|expected| {
-                                                crate::symbol_resolver::ty_subst_keep_unbound(
-                                                    expected,
-                                                    &known_generic_bindings,
-                                                )
-                                            })
-                                            .filter(|expected| {
-                                                matches!(expected.non_null(), Ty::Fun(_))
-                                            })
-                                    });
-                                let postponed_formals = toplevel_lambda_formals.as_slice();
-                                let collect_postponed = expected_type.is_some_and(|expected| {
-                                    ty_mentions_param(expected, postponed_formals)
+                            if let Some(Ty::Fun(signature)) = this_member_lambda_expected
+                                .as_ref()
+                                .and_then(|expected| expected.get(i))
+                                .copied()
+                                .flatten()
+                            {
+                                return self.with_lambda_mutation(inline, |checker| {
+                                    checker.check_lambda_with_function_type_and_params_labeled(
+                                        scope,
+                                        a,
+                                        signature,
+                                        &pt,
+                                        receiver.is_some(),
+                                        call_fn_name.as_deref(),
+                                    )
                                 });
-                                if collect_postponed {
-                                    self.postponed_call_constraints
-                                        .push(PostponedCallConstraints::for_formals(
-                                            postponed_formals,
-                                        ));
-                                }
-                                let checked = self.with_lambda_mutation(
+                            }
+                            if let Some(receiver) = receiver {
+                                return self.with_lambda_mutation(inline, |checker| {
+                                    checker.check_lambda_with_receiver_labeled(
+                                        scope,
+                                        a,
+                                        receiver,
+                                        pt.get(1..).unwrap_or_default(),
+                                        call_fn_name.as_deref(),
+                                    )
+                                });
+                            }
+                            return self.with_lambda_mutation(inline, |checker| {
+                                checker.check_lambda_with_types_labeled(
+                                    scope,
+                                    a,
+                                    &pt,
+                                    call_fn_name.as_deref(),
+                                )
+                            });
+                        }
+                    }
+                    // The receiver type for a RECEIVER function-type param (from `@Metadata`), if any.
+                    let recv_i = toplevel_lambda_recvs
+                        .as_ref()
+                        .and_then(|r| r.get(i))
+                        .copied()
+                        .flatten();
+                    let context_count_i = toplevel_lambda_context_counts
+                        .as_ref()
+                        .and_then(|counts| counts.get(i))
+                        .copied()
+                        .unwrap_or_default();
+                    // A selected SAM target is authoritative. Type the lambda once from its
+                    // specialized method signature; syntax-derived lambda shapes are only a
+                    // fallback when overload selection did not produce a SAM expectation.
+                    if let Some(TopLevelSamSelection::Picked(_, _, sam_signatures)) =
+                        top_level_sam.as_ref()
+                    {
+                        if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                            if let Some(Some(signature)) = sam_signatures.get(i) {
+                                return self.check_lambda_with_sam_signature_labeled(
+                                    scope,
+                                    a,
+                                    signature,
+                                    call_fn_name.as_deref(),
+                                );
+                            }
+                        }
+                    }
+                    if let Some(ref pts) = toplevel_lambda_pts {
+                        if matches!(self.file.expr(a), Expr::Lambda { .. }) && i < pts.len() {
+                            // crossinline/noinline materializes a closure; other inline lambdas splice.
+                            let materialized = toplevel_lambda_materialized
+                                .as_ref()
+                                .and_then(|m| m.get(i))
+                                .copied()
+                                .unwrap_or(false);
+                            // A RECEIVER function-type param: bind the receiver as the lambda's `this`;
+                            // the rest are value params. Prefer the @Metadata receiver (`recv_i`,
+                            // deterministic — `MutableList` for `buildList`) over `pts[i][0]`, whose
+                            // JVM-`Signature` decode is order-dependent (flakily `java/util/List`, on which
+                            // a `MutableList` extension like `removeLastOrNull` fails to resolve).
+                            let expected_type = toplevel_lambda_expected
+                                .as_ref()
+                                .and_then(|types| types.get(i))
+                                .copied()
+                                .flatten()
+                                .or_else(|| {
+                                    let parameter = known_argument_parameters
+                                        .as_ref()
+                                        .and_then(|parameters| parameters.get(i))
+                                        .copied()
+                                        .unwrap_or(i);
+                                    known_sig
+                                        .as_ref()
+                                        .and_then(|signature| signature.generic_sig.as_ref())
+                                        .and_then(|generic| generic.params.get(parameter))
+                                        .copied()
+                                        .map(|expected| {
+                                            crate::symbol_resolver::ty_subst_keep_unbound(
+                                                expected,
+                                                &known_generic_bindings,
+                                            )
+                                        })
+                                        .filter(|expected| {
+                                            matches!(expected.non_null(), Ty::Fun(_))
+                                        })
+                                });
+                            let postponed_formals = toplevel_lambda_formals.as_slice();
+                            let collect_postponed = expected_type.is_some_and(|expected| {
+                                ty_mentions_param(expected, postponed_formals)
+                            });
+                            if collect_postponed {
+                                self.postponed_call_constraints
+                                    .push(PostponedCallConstraints::for_formals(postponed_formals));
+                            }
+                            let checked = self.with_lambda_mutation(
                                     toplevel_inline && !materialized,
                                     |c| {
                                         if let Some(Ty::Fun(signature)) = expected_type {
@@ -47770,225 +47968,217 @@ impl<'a> Checker<'a> {
                                         )
                                     },
                                 );
-                                if collect_postponed {
-                                    let inferred = self
-                                        .postponed_call_constraints
-                                        .pop()
-                                        .expect("postponed lambda binding frame");
-                                    crate::trace_compiler!(
-                                        "lambda_apply",
-                                        "call={fname} postponed argument={i} lower={:?} upper={:?}",
-                                        inferred.lower,
-                                        inferred.upper,
-                                    );
-                                    postponed_constraints.merge(inferred);
-                                }
-                                return checked;
-                            }
-                        }
-                        // No JVM `Signature` for this callee (a krusty-emitted module) — but `@Metadata`
-                        // marks this param a RECEIVER function type, so bind `this` to the receiver from
-                        // `@Metadata` (a `Recv.() -> R` param has no value params).
-                        if let Some(recv) = recv_i {
-                            if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                                return self.check_lambda_with_receiver_labeled(
-                                    scope,
-                                    a,
-                                    recv,
-                                    &[],
-                                    call_fn_name.as_deref(),
+                            if collect_postponed {
+                                let inferred = self
+                                    .postponed_call_constraints
+                                    .pop()
+                                    .expect("postponed lambda binding frame");
+                                crate::trace_compiler!(
+                                    "lambda_apply",
+                                    "call={fname} postponed argument={i} lower={:?} upper={:?}",
+                                    inferred.lower,
+                                    inferred.upper,
                                 );
+                                postponed_constraints.merge(inferred);
                             }
+                            return checked;
                         }
-                        // A zero-arg lambda to a NON-public (`@InlineOnly`) inline fn (`require(c){m}`):
-                        // type its body with mutation allowed (the lambda is spliced, so a mutable capture
-                        // is an inline capture, not a `Ref`). After the `repeat`/`pts` branches so those win.
-                        if toplevel_must_inline && matches!(self.file.expr(a), Expr::Lambda { .. })
-                        {
-                            let pt = toplevel_lambda_pts
-                                .as_ref()
-                                .and_then(|pts| pts.get(i))
-                                .cloned()
-                                .unwrap_or_default();
-                            return self.with_lambda_mutation(true, |c| {
-                                c.check_lambda_with_types_labeled(
-                                    scope,
-                                    a,
-                                    &pt,
-                                    call_fn_name.as_deref(),
+                    }
+                    // No JVM `Signature` for this callee (a krusty-emitted module) — but `@Metadata`
+                    // marks this param a RECEIVER function type, so bind `this` to the receiver from
+                    // `@Metadata` (a `Recv.() -> R` param has no value params).
+                    if let Some(recv) = recv_i {
+                        if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                            return self.check_lambda_with_receiver_labeled(
+                                scope,
+                                a,
+                                recv,
+                                &[],
+                                call_fn_name.as_deref(),
+                            );
+                        }
+                    }
+                    // A zero-arg lambda to a NON-public (`@InlineOnly`) inline fn (`require(c){m}`):
+                    // type its body with mutation allowed (the lambda is spliced, so a mutable capture
+                    // is an inline capture, not a `Ref`). After the `repeat`/`pts` branches so those win.
+                    if toplevel_must_inline && matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                        let pt = toplevel_lambda_pts
+                            .as_ref()
+                            .and_then(|pts| pts.get(i))
+                            .cloned()
+                            .unwrap_or_default();
+                        return self.with_lambda_mutation(true, |c| {
+                            c.check_lambda_with_types_labeled(
+                                scope,
+                                a,
+                                &pt,
+                                call_fn_name.as_deref(),
+                            )
+                        });
+                    }
+                    // Reuse the already-computed non-lambda argument type (avoid re-typing).
+                    if let Some(Some(t)) = toplevel_partial.as_ref().and_then(|p| p.get(i)) {
+                        return *t;
+                    }
+                    if let Some(ref sig) = known_sig {
+                        // The PARAMETER index this argument binds — not always the positional `i`:
+                        // a NAMED argument binds its named parameter, and a SYNTACTIC trailing
+                        // lambda always binds the LAST parameter (omitted middles take their
+                        // defaults: `ef("m") { … }` on `ef(msg, chk = null, action)` puts the
+                        // lambda in `action`, not `chk`). Without this the lambda pre-types
+                        // against the WRONG parameter's function shape (arity mismatch).
+                        let pi = known_argument_parameters
+                            .as_ref()
+                            .and_then(|parameters| parameters.get(i))
+                            .copied()
+                            .unwrap_or_else(|| {
+                                if self.file.call_has_trailing_lambda.contains(&call.0)
+                                    && i + 1 == args.len()
+                                {
+                                    sig.params.len() - 1
+                                } else {
+                                    i
+                                }
+                            });
+                        // Callable references are resolved once, with the selected parameter's
+                        // semantic function type as their expected shape. The callable-reference
+                        // resolver owns default/vararg/suspend adaptation for every declaration
+                        // source; argument checking must not run a top-level-only selector first.
+                        let generic_expected = sig
+                            .generic_sig
+                            .as_ref()
+                            .and_then(|generic| generic.params.get(pi))
+                            .copied()
+                            .map(|expected| {
+                                crate::symbol_resolver::ty_subst_keep_unbound(
+                                    expected,
+                                    &known_generic_bindings,
                                 )
                             });
-                        }
-                        // Reuse the already-computed non-lambda argument type (avoid re-typing).
-                        if let Some(Some(t)) = toplevel_partial.as_ref().and_then(|p| p.get(i)) {
-                            return *t;
-                        }
-                        if let Some(ref sig) = known_sig {
-                            // The PARAMETER index this argument binds — not always the positional `i`:
-                            // a NAMED argument binds its named parameter, and a SYNTACTIC trailing
-                            // lambda always binds the LAST parameter (omitted middles take their
-                            // defaults: `ef("m") { … }` on `ef(msg, chk = null, action)` puts the
-                            // lambda in `action`, not `chk`). Without this the lambda pre-types
-                            // against the WRONG parameter's function shape (arity mismatch).
-                            let pi = known_argument_parameters
-                                .as_ref()
-                                .and_then(|parameters| parameters.get(i))
-                                .copied()
-                                .unwrap_or_else(|| {
-                                    if self.file.call_has_trailing_lambda.contains(&call.0)
-                                        && i + 1 == args.len()
-                                    {
-                                        sig.params.len() - 1
-                                    } else {
-                                        i
-                                    }
-                                });
-                            // Callable references are resolved once, with the selected parameter's
-                            // semantic function type as their expected shape. The callable-reference
-                            // resolver owns default/vararg/suspend adaptation for every declaration
-                            // source; argument checking must not run a top-level-only selector first.
-                            let generic_expected = sig
-                                .generic_sig
-                                .as_ref()
-                                .and_then(|generic| generic.params.get(pi))
-                                .copied()
-                                .map(|expected| {
-                                    crate::symbol_resolver::ty_subst_keep_unbound(
-                                        expected,
-                                        &known_generic_bindings,
-                                    )
-                                });
-                            let expected_callable = generic_expected
-                                .filter(|parameter| matches!(parameter, Ty::Fun(_)))
-                                .or_else(|| {
-                                    sig.params
-                                        .get(pi)
-                                        .copied()
-                                        .filter(|parameter| matches!(parameter, Ty::Fun(_)))
-                                });
-                            if matches!(self.file.expr(a), Expr::CallableRef { .. }) {
-                                if let Some(Ty::Fun(_)) = expected_callable {
-                                    let checked = self.expr_expected(
-                                        scope,
-                                        a,
-                                        expected_callable.expect("callable expectation"),
-                                    );
-                                    let semantic_checked = self
-                                        .expression_function_type(scope, a, checked)
-                                        .unwrap_or(checked);
-                                    if let Some(generic) = sig.generic_sig.as_ref() {
-                                        if generic.params.get(pi).is_some() {
-                                            let inferred = crate::symbol_resolver::infer_generic_bindings(
+                        let expected_callable = generic_expected
+                            .filter(|parameter| matches!(parameter, Ty::Fun(_)))
+                            .or_else(|| {
+                                sig.params
+                                    .get(pi)
+                                    .copied()
+                                    .filter(|parameter| matches!(parameter, Ty::Fun(_)))
+                            });
+                        if matches!(self.file.expr(a), Expr::CallableRef { .. }) {
+                            if let Some(Ty::Fun(_)) = expected_callable {
+                                let checked = self.expr_expected(
+                                    scope,
+                                    a,
+                                    expected_callable.expect("callable expectation"),
+                                );
+                                let semantic_checked = self
+                                    .expression_function_type(scope, a, checked)
+                                    .unwrap_or(checked);
+                                if let Some(generic) = sig.generic_sig.as_ref() {
+                                    if generic.params.get(pi).is_some() {
+                                        let inferred =
+                                            crate::symbol_resolver::infer_generic_bindings(
                                                 generic,
                                                 std::iter::once((pi, semantic_checked)),
                                             );
-                                            crate::symbol_resolver::merge_generic_bindings(
-                                                generic,
-                                                explicit_type_args.len(),
-                                                &mut known_generic_bindings,
-                                                inferred,
-                                            );
-                                        }
+                                        crate::symbol_resolver::merge_generic_bindings(
+                                            generic,
+                                            explicit_type_args.len(),
+                                            &mut known_generic_bindings,
+                                            inferred,
+                                        );
                                     }
-                                    return semantic_checked;
                                 }
+                                return semantic_checked;
                             }
-                            // A callable reference also has an ordinary nominal type (`KFunctionN`
-                            // / `KPropertyN`). When the selected parameter is nominal rather than a
-                            // function type, its type arguments still constrain the enclosing call:
-                            // `run(Sample::max) { x, y -> ... }` binds `T1`/`T2` before the following
-                            // lambda is checked. This is the same parameter-vs-argument unification as
-                            // any other value; callable syntax only explains why the argument had to be
-                            // resolved before the rest of the call.
-                            if matches!(self.file.expr(a), Expr::CallableRef { .. }) {
-                                let checked = self.expr(scope, a);
-                                if let Some(generic) = sig.generic_sig.as_ref() {
-                                    let inferred = crate::symbol_resolver::infer_generic_bindings(
-                                        generic,
-                                        std::iter::once((pi, checked)),
-                                    );
-                                    crate::trace_compiler!(
+                        }
+                        // A callable reference also has an ordinary nominal type (`KFunctionN`
+                        // / `KPropertyN`). When the selected parameter is nominal rather than a
+                        // function type, its type arguments still constrain the enclosing call:
+                        // `run(Sample::max) { x, y -> ... }` binds `T1`/`T2` before the following
+                        // lambda is checked. This is the same parameter-vs-argument unification as
+                        // any other value; callable syntax only explains why the argument had to be
+                        // resolved before the rest of the call.
+                        if matches!(self.file.expr(a), Expr::CallableRef { .. }) {
+                            let checked = self.expr(scope, a);
+                            if let Some(generic) = sig.generic_sig.as_ref() {
+                                let inferred = crate::symbol_resolver::infer_generic_bindings(
+                                    generic,
+                                    std::iter::once((pi, checked)),
+                                );
+                                crate::trace_compiler!(
                                         "resolve",
                                         "callable-reference argument call={fname} parameter={pi} declared={:?} nominal={checked:?} inferred={inferred:?}",
                                         generic.params.get(pi),
                                     );
-                                    crate::symbol_resolver::merge_generic_bindings(
-                                        generic,
-                                        explicit_type_args.len(),
-                                        &mut known_generic_bindings,
-                                        inferred,
-                                    );
-                                    crate::trace_compiler!(
+                                crate::symbol_resolver::merge_generic_bindings(
+                                    generic,
+                                    explicit_type_args.len(),
+                                    &mut known_generic_bindings,
+                                    inferred,
+                                );
+                                crate::trace_compiler!(
                                         "lambda_apply",
                                         "call={fname} callable_argument={i} parameter={pi} bindings={known_generic_bindings:?}",
                                     );
-                                }
-                                return checked;
                             }
-                            // A lambda argument to a function-typed parameter. For an `inline fun` the lambda
-                            // is inlined into the caller, so it may capture a mutable local (like the stdlib
-                            // `repeat`/`forEach`). This also covers zero-parameter lambdas (`() -> Unit`),
-                            // whose `lambda_param_types[i]` is empty.
-                            let semantic_parameter = sig
-                                .generic_sig
-                                .as_ref()
-                                .and_then(|generic| generic.params.get(pi))
-                                .map(|parameter| {
-                                    crate::symbol_resolver::ty_subst_keep_unbound(
-                                        *parameter,
-                                        &known_generic_bindings,
-                                    )
-                                })
-                                .or_else(|| sig.params.get(pi).copied());
-                            crate::trace_compiler!(
+                            return checked;
+                        }
+                        // A lambda argument to a function-typed parameter. For an `inline fun` the lambda
+                        // is inlined into the caller, so it may capture a mutable local (like the stdlib
+                        // `repeat`/`forEach`). This also covers zero-parameter lambdas (`() -> Unit`),
+                        // whose `lambda_param_types[i]` is empty.
+                        let semantic_parameter = sig
+                            .generic_sig
+                            .as_ref()
+                            .and_then(|generic| generic.params.get(pi))
+                            .map(|parameter| {
+                                crate::symbol_resolver::ty_subst_keep_unbound(
+                                    *parameter,
+                                    &known_generic_bindings,
+                                )
+                            })
+                            .or_else(|| sig.params.get(pi).copied());
+                        crate::trace_compiler!(
                                 "lambda_apply",
                                 "call={fname} argument={i} mapped_parameter={pi} semantic_parameter={semantic_parameter:?} bindings={known_generic_bindings:?}",
                             );
-                            if let (Some(Ty::Fun(expected_function)), true) = (
-                                semantic_parameter,
-                                matches!(self.file.expr(a), Expr::Lambda { .. }),
-                            ) {
-                                crate::trace_compiler!(
+                        if let (Some(Ty::Fun(expected_function)), true) = (
+                            semantic_parameter,
+                            matches!(self.file.expr(a), Expr::Lambda { .. }),
+                        ) {
+                            crate::trace_compiler!(
                                     "lambda_apply",
                                     "call={fname} lambda_argument={i} parameter={pi} semantic={expected_function:?} bindings={known_generic_bindings:?}",
                                 );
-                                let postponed_formals = sig
-                                    .generic_sig
-                                    .as_ref()
-                                    .map(|generic| generic.formals.as_slice())
-                                    .unwrap_or_default();
-                                let collect_postponed = ty_mentions_param(
-                                    Ty::Fun(expected_function),
-                                    postponed_formals,
+                            let postponed_formals = sig
+                                .generic_sig
+                                .as_ref()
+                                .map(|generic| generic.formals.as_slice())
+                                .unwrap_or_default();
+                            let collect_postponed =
+                                ty_mentions_param(Ty::Fun(expected_function), postponed_formals);
+                            let callee_return_is_fixed =
+                                sig.generic_sig.as_ref().is_none_or(|generic| {
+                                    !ty_mentions_param(expected_function.ret, &generic.formals)
+                                });
+                            // A caller declaration's visible `<T>` is universally quantified
+                            // and therefore a fixed expectation. A symbolic result introduced
+                            // by a surrounding generic call (`getResult(...): B1`) is still an
+                            // inference variable and must remain postponed with that call.
+                            let fixed_expected_return = callee_return_is_fixed
+                                && Self::lambda_return_is_lexically_fixed(
+                                    scope,
+                                    expected_function.ret,
                                 );
-                                let callee_return_is_fixed = sig.generic_sig.as_ref().is_none_or(
-                                    |generic| {
-                                        !ty_mentions_param(
-                                            expected_function.ret,
-                                            &generic.formals,
-                                        )
-                                    },
-                                );
-                                // A caller declaration's visible `<T>` is universally quantified
-                                // and therefore a fixed expectation. A symbolic result introduced
-                                // by a surrounding generic call (`getResult(...): B1`) is still an
-                                // inference variable and must remain postponed with that call.
-                                let fixed_expected_return = callee_return_is_fixed
-                                    && Self::lambda_return_is_lexically_fixed(
-                                        scope,
-                                        expected_function.ret,
-                                    );
-                                if collect_postponed {
-                                    self.postponed_call_constraints
-                                        .push(PostponedCallConstraints::for_formals(
-                                            postponed_formals,
-                                        ));
-                                }
-                                let has_receiver =
-                                    sig.lambda_recv.get(pi).copied().unwrap_or(false);
-                                let checked = self.with_lambda_mutation(sig.is_inline(), |c| {
-                                    if fixed_expected_return {
-                                        return c.check_lambda_with_fixed_function_type_and_params_labeled(
+                            if collect_postponed {
+                                self.postponed_call_constraints
+                                    .push(PostponedCallConstraints::for_formals(postponed_formals));
+                            }
+                            let has_receiver = sig.lambda_recv.get(pi).copied().unwrap_or(false);
+                            let checked = self.with_lambda_mutation(sig.is_inline(), |c| {
+                                if fixed_expected_return {
+                                    return c
+                                        .check_lambda_with_fixed_function_type_and_params_labeled(
                                             scope,
                                             a,
                                             expected_function,
@@ -47996,153 +48186,156 @@ impl<'a> Checker<'a> {
                                             has_receiver,
                                             call_fn_name.as_deref(),
                                         );
-                                    }
-                                    c.check_lambda_with_function_type_labeled(
-                                        scope,
-                                        a,
-                                        expected_function,
-                                        has_receiver,
-                                        call_fn_name.as_deref(),
-                                    )
-                                });
-                                if collect_postponed {
-                                    let inferred = self
-                                        .postponed_call_constraints
-                                        .pop()
-                                        .expect("postponed lambda binding frame");
-                                    crate::trace_compiler!(
-                                        "lambda_apply",
-                                        "call={fname} postponed argument={i} lower={:?} upper={:?}",
-                                        inferred.lower,
-                                        inferred.upper,
-                                    );
-                                    postponed_constraints.merge(inferred);
                                 }
-                                // `expected_function` was specialized with these bindings before the
-                                // lambda was checked. The checked lambda therefore already carries the
-                                // selected parameter shape; substituting it again confuses an outer
-                                // declaration's same-spelled type parameter with the callee's formal
-                                // (`IC<Tcaller>` became `IC<IC<Tcaller>>`).
-                                return checked;
+                                c.check_lambda_with_function_type_labeled(
+                                    scope,
+                                    a,
+                                    expected_function,
+                                    has_receiver,
+                                    call_fn_name.as_deref(),
+                                )
+                            });
+                            if collect_postponed {
+                                let inferred = self
+                                    .postponed_call_constraints
+                                    .pop()
+                                    .expect("postponed lambda binding frame");
+                                crate::trace_compiler!(
+                                    "lambda_apply",
+                                    "call={fname} postponed argument={i} lower={:?} upper={:?}",
+                                    inferred.lower,
+                                    inferred.upper,
+                                );
+                                postponed_constraints.merge(inferred);
                             }
-                            // A lambda argument SAM-converted to a simple `fun interface` parameter:
-                            // type it with the interface abstract method's parameter types so its
-                            // params resolve concretely and the lowered impl matches the SAM descriptor.
-                            if pi < sig.params.len()
-                                && matches!(self.file.expr(a), Expr::Lambda { .. })
-                            {
-                                if let Some(internal) = sig.params[pi].obj_internal() {
-                                    if self.simple_fun_interface_name(internal) {
-                                        let actuals = known_argument_parameters
-                                            .as_ref()
-                                            .zip(toplevel_partial.as_ref())
-                                            .map(|(parameters, partial)| {
-                                                parameters
-                                                    .iter()
-                                                    .copied()
-                                                    .zip(partial.iter().copied())
-                                                    .filter_map(|(parameter, actual)| {
-                                                        actual.map(|actual| (parameter, actual))
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                            })
-                                            .unwrap_or_default();
-                                        if let Some(signature) =
-                                            self.specialized_sam_signature(
-                                                sig,
-                                                pi,
-                                                &actuals,
-                                                &known_generic_bindings,
-                                            )
-                                        {
-                                            crate::trace_compiler!(
+                            // `expected_function` was specialized with these bindings before the
+                            // lambda was checked. The checked lambda therefore already carries the
+                            // selected parameter shape; substituting it again confuses an outer
+                            // declaration's same-spelled type parameter with the callee's formal
+                            // (`IC<Tcaller>` became `IC<IC<Tcaller>>`).
+                            return checked;
+                        }
+                        // A lambda argument SAM-converted to a simple `fun interface` parameter:
+                        // type it with the interface abstract method's parameter types so its
+                        // params resolve concretely and the lowered impl matches the SAM descriptor.
+                        if pi < sig.params.len() && matches!(self.file.expr(a), Expr::Lambda { .. })
+                        {
+                            if let Some(internal) = sig.params[pi].obj_internal() {
+                                if self.simple_fun_interface_name(internal) {
+                                    let actuals = known_argument_parameters
+                                        .as_ref()
+                                        .zip(toplevel_partial.as_ref())
+                                        .map(|(parameters, partial)| {
+                                            parameters
+                                                .iter()
+                                                .copied()
+                                                .zip(partial.iter().copied())
+                                                .filter_map(|(parameter, actual)| {
+                                                    actual.map(|actual| (parameter, actual))
+                                                })
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or_default();
+                                    if let Some(signature) = self.specialized_sam_signature(
+                                        sig,
+                                        pi,
+                                        &actuals,
+                                        &known_generic_bindings,
+                                    ) {
+                                        crate::trace_compiler!(
                                                 "lambda_apply",
                                                 "call={fname} sam_argument={i} parameter={pi} ret={:?} bindings={known_generic_bindings:?}",
                                                 signature.ret,
                                             );
-                                            let checked =
-                                                self.check_lambda_with_sam_signature_labeled(
-                                                    scope,
-                                                    a,
-                                                    &signature,
-                                                    call_fn_name.as_deref(),
-                                                );
-                                            known_sam_signatures.borrow_mut()[i] = Some(signature);
-                                            return checked;
-                                        }
-                                        if let Some(signature) =
-                                            self.semantic_sam_signature(sig.params[pi])
-                                        {
-                                            let params = signature.params.clone();
-                                            known_sam_signatures.borrow_mut()[i] = Some(signature);
-                                            return self.check_lambda_with_types_labeled(
-                                                scope,
-                                                a,
-                                                &params,
-                                                call_fn_name.as_deref(),
-                                            );
-                                        }
+                                        let checked = self.check_lambda_with_sam_signature_labeled(
+                                            scope,
+                                            a,
+                                            &signature,
+                                            call_fn_name.as_deref(),
+                                        );
+                                        known_sam_signatures.borrow_mut()[i] = Some(signature);
+                                        return checked;
+                                    }
+                                    if let Some(signature) =
+                                        self.semantic_sam_signature(sig.params[pi])
+                                    {
+                                        let params = signature.params.clone();
+                                        known_sam_signatures.borrow_mut()[i] = Some(signature);
+                                        return self.check_lambda_with_types_labeled(
+                                            scope,
+                                            a,
+                                            &params,
+                                            call_fn_name.as_deref(),
+                                        );
                                     }
                                 }
                             }
-                            if !self.file.is_spread_arg(a) {
-                                // A lambda passed through an otherwise unconstrained generic slot
-                                // still receives the call's implicit return label (`accept {
-                                // return@accept ... }`). Its erased physical parameter (`Any`) is
-                                // not an expected function type, so preserve the call-site syntax
-                                // while inferring the lambda's own shape.
-                                if let Expr::Lambda { params, body } = self.file.expr(a).clone() {
-                                    return self.expr_inner_lambda(
-                                        scope,
-                                        a,
-                                        None,
-                                        params,
-                                        body,
-                                        call_fn_name.as_deref(),
-                                    );
-                                }
-                                if let Some(parameter) = semantic_parameter {
-                                    let expected = if sig.vararg() && pi + 1 == sig.params.len() {
-                                        parameter.array_read_elem().unwrap_or(Ty::Error)
-                                    } else {
-                                        parameter
-                                    };
-                                    return self.expr_expected(scope, a, expected);
-                                }
+                        }
+                        if !self.file.is_spread_arg(a) {
+                            // A lambda passed through an otherwise unconstrained generic slot
+                            // still receives the call's implicit return label (`accept {
+                            // return@accept ... }`). Its erased physical parameter (`Any`) is
+                            // not an expected function type, so preserve the call-site syntax
+                            // while inferring the lambda's own shape.
+                            if let Expr::Lambda { params, body } = self.file.expr(a).clone() {
+                                return self.expr_inner_lambda(
+                                    scope,
+                                    a,
+                                    None,
+                                    params,
+                                    body,
+                                    call_fn_name.as_deref(),
+                                );
+                            }
+                            if let Some(parameter) = semantic_parameter {
+                                let expected = if sig.vararg() && pi + 1 == sig.params.len() {
+                                    parameter.array_read_elem().unwrap_or(Ty::Error)
+                                } else {
+                                    parameter
+                                };
+                                return self.expr_expected(scope, a, expected);
                             }
                         }
-                        // A spread argument `*a` (`Array<E>`/`XArray`) contributes its ELEMENT type `E`
-                        // to overload resolution and the vararg element check — it behaves like a list of
-                        // `E`-typed varargs; only the lowering differs (the array is passed through). A
-                        // mixed/unsupported spread shape still type-checks here but the lowering skips it.
-                        if self.file.is_spread_arg(a) {
-                            let t = self.expr(scope, a);
-                            if let Some(elem) = t.array_read_elem() {
-                                return elem;
-                            }
+                    }
+                    // A spread argument `*a` (`Array<E>`/`XArray`) contributes its ELEMENT type `E`
+                    // to overload resolution and the vararg element check — it behaves like a list of
+                    // `E`-typed varargs; only the lowering differs (the array is passed through). A
+                    // mixed/unsupported spread shape still type-checks here but the lowering skips it.
+                    if self.file.is_spread_arg(a) {
+                        let t = self.expr(scope, a);
+                        if let Some(elem) = t.array_read_elem() {
+                            return elem;
                         }
-                        // A constructor lambda that no earlier semantic shape supplied remains a
-                        // PROBE until selection. The classifier decision above is provider-neutral;
-                        // other callables retain their established argument checking and lowering.
-                        if defer_unshaped_constructor_lambdas
-                            && matches!(self.file.expr(a), Expr::Lambda { .. })
-                            && self.expr_types[a.0 as usize] == Ty::Error
-                        {
-                            return self.lambda_probe_ty(scope, a).unwrap_or(Ty::Error);
-                        }
-                        if let Expr::Lambda { params, body } = self.file.expr(a).clone() {
-                            return self.expr_inner_lambda(
-                                scope,
-                                a,
-                                None,
-                                params,
-                                body,
-                                call_fn_name.as_deref(),
-                            );
-                        }
-                        self.expr(scope, a)
-                    })
-                    .collect();
+                    }
+                    // A constructor lambda that no earlier semantic shape supplied remains a
+                    // PROBE until selection. The classifier decision above is provider-neutral;
+                    // other callables retain their established argument checking and lowering.
+                    if defer_unshaped_constructor_lambdas
+                        && matches!(self.file.expr(a), Expr::Lambda { .. })
+                        && self.expr_types[a.0 as usize] == Ty::Error
+                    {
+                        return self.lambda_probe_ty(scope, a).unwrap_or(Ty::Error);
+                    }
+                    if let Expr::Lambda { params, body } = self.file.expr(a).clone() {
+                        return self.expr_inner_lambda(
+                            scope,
+                            a,
+                            None,
+                            params,
+                            body,
+                            call_fn_name.as_deref(),
+                        );
+                    }
+                    self.expr(scope, a)
+                };
+                {
+                    let mut type_argument = type_argument;
+                    for &index in &argument_order {
+                        let ty = type_argument(index, args[index]);
+                        typed_args.borrow_mut()[index] = ty;
+                    }
+                }
+                let arg_tys: Vec<Ty> = typed_args.into_inner();
                 let constrained_formals = postponed_constraints
                     .lower
                     .keys()
