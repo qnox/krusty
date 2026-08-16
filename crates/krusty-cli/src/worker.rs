@@ -319,9 +319,17 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             }
             "--x_lambdas" | "--x_sam_conversions" => {
                 let value = value_of(index, flag)?;
-                if value != "indy" {
+                // Both strategies are emitted, so the value is forwarded rather than gated. A third
+                // value would select a shape that does not exist and is still refused.
+                if value != "indy" && value != "class" {
                     return Err(Refusal::Unsupported(format!("{flag} {value}")));
                 }
+                let spelling = if flag == "--x_lambdas" {
+                    "-Xlambdas"
+                } else {
+                    "-Xsam-conversions"
+                };
+                unit.kotlinc_args.push(format!("{spelling}={value}"));
                 index += 2;
             }
             "--x_no_param_assertions" => {
@@ -726,10 +734,25 @@ mod tests {
     /// The class-based lambda strategy is a different class set, so it is refused like any other
     /// shape krusty cannot emit.
     #[test]
-    fn a_non_indy_lambda_strategy_is_refused() {
-        for flag in ["--x_lambdas", "--x_sam_conversions"] {
-            let refusal =
-                translate(&args(&[flag, "class", "--srcs", "A.kt", "--out", "o.jar"])).unwrap_err();
+    fn each_lambda_strategy_reaches_the_compiler() {
+        for (flag, spelling) in [
+            ("--x_lambdas", "-Xlambdas"),
+            ("--x_sam_conversions", "-Xsam-conversions"),
+        ] {
+            for value in ["indy", "class"] {
+                let unit = translate(&args(&[flag, value, "--srcs", "A.kt", "--out", "o.jar"]))
+                    .unwrap_or_else(|refusal| panic!("{flag} {value}: {refusal:?}"));
+                assert!(
+                    unit.kotlinc_args.contains(&format!("{spelling}={value}")),
+                    "{flag} {value} did not reach the compiler: {:?}",
+                    unit.kotlinc_args
+                );
+            }
+            // A value naming no strategy would otherwise compile as one of them.
+            let refusal = translate(&args(&[
+                flag, "nonesuch", "--srcs", "A.kt", "--out", "o.jar",
+            ]))
+            .unwrap_err();
             assert!(
                 matches!(refusal, Refusal::Unsupported(_)),
                 "{flag}: {refusal:?}"

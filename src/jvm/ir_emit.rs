@@ -113,6 +113,40 @@ pub struct EmitRun {
     /// (a `require { … }` message, an inlined `flatMap { … }` body) never emits one, so its standalone
     /// `$lambda$N` method is dead — dropped on the re-emit (kotlinc emits neither it nor its facade).
     used_lambdas: std::cell::RefCell<std::collections::HashSet<u32>>,
+    /// Lambda classes to synthesize for `-Xlambdas=class`, recorded as their `invokedynamic`
+    /// replacement is emitted and drained by the class driver. They cannot be written inline: the
+    /// emitter is mid-way through the ENCLOSING class's writer when it reaches a lambda.
+    lambda_classes: std::cell::RefCell<Vec<LambdaClassPlan>>,
+}
+
+/// One synthetic lambda class to write under [`LambdaMode::Class`].
+///
+/// The lambda body stays where the indy strategy put it — a private static on the enclosing class —
+/// and the synthesized `invoke` delegates to it. kotlinc instead moves the body into `invoke` and
+/// emits no static, so the CLASS SET matches but the enclosing class keeps one extra private method.
+#[derive(Clone, Debug)]
+struct LambdaClassPlan {
+    /// Internal name of the class to write (`LKt$box$plain$1`).
+    internal: String,
+    /// The interface the lambda implements (`kotlin/jvm/functions/Function1`, or a user SAM).
+    iface: String,
+    /// The interface method to implement, with its ERASED descriptor — the slot the JVM dispatches.
+    sam_method: String,
+    sam_desc: String,
+    /// The existing implementation method: `[captures…, lambda params…]`.
+    impl_owner: String,
+    impl_name: String,
+    impl_desc: String,
+    /// Captured values, in implementation-parameter order; empty ⇒ a singleton `INSTANCE`.
+    captures: Vec<Ty>,
+    /// Source-level arity, passed to `kotlin.jvm.internal.Lambda`'s constructor.
+    arity: u32,
+    /// Only a Kotlin function type extends `kotlin/jvm/internal/Lambda`; a user SAM conversion
+    /// extends `java/lang/Object` (kotlinc emits no `FunctionBase` for a non-`FunctionN` target).
+    kotlin_function: bool,
+    /// Whether the body lives on an INTERFACE: a static call to one needs an `InterfaceMethodref`
+    /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
+    owner_is_interface: bool,
 }
 
 impl EmitRun {
@@ -154,6 +188,9 @@ pub struct EmitEnv<'a> {
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
     signature_symbols: &'a dyn SymbolSource,
+    /// The lambda strategy in force (`-Xlambdas`). Carried here rather than read from `EmitOptions`
+    /// at the lambda site because the emitter has the env, not the options.
+    lambdas: LambdaMode,
 }
 
 /// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
@@ -178,6 +215,25 @@ fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
     is_continuation_class(class)
         || class.superclass_matches("kotlin/coroutines/jvm/internal/SuspendLambda")
         || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedSuspendLambda")
+}
+
+/// `-Xlambdas` / `-Xsam-conversions`: how a lambda and a SAM conversion are realized on the JVM.
+///
+/// The two strategies produce different CLASS SETS, so this is an emitter selection rather than an
+/// optimization hint: under `Class` every lambda contributes its own `.class`, and a build that asked
+/// for it and got `Indy` would ship a different artifact list than it declared.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LambdaMode {
+    /// kotlinc's default since 2.0: an `invokedynamic` call site bootstrapped through
+    /// `LambdaMetafactory`, with the body in a private static `$lambda$N` on the enclosing class.
+    #[default]
+    Indy,
+    /// The pre-2.0 strategy, still selected explicitly by 40 of intellij-community's `BUILD.bazel`
+    /// files: one synthetic class per lambda, extending `kotlin.jvm.internal.Lambda` and
+    /// implementing the target interface. A lambda that captures nothing is a singleton held in a
+    /// static `INSTANCE` field; a capturing one is constructed per evaluation with its captures as
+    /// constructor arguments.
+    Class,
 }
 
 /// kotlinc's `-jvm-default` strategy for interface members with bodies — which of the three JVM
@@ -320,6 +376,9 @@ pub struct EmitOptions {
     /// measured past them. A PROPERTY SETTER's `<set-?>` guard has no IR record — it is derived here
     /// from the property's type — so those sites read this flag instead.
     pub param_assertions: bool,
+    /// `-Xlambdas` / `-Xsam-conversions`: which lambda strategy the emitter uses. Per-INVOCATION,
+    /// applied by the backend with [`EmitOptions::with_lambdas`] like [`EmitOptions::with_jvm_default`].
+    pub lambdas: LambdaMode,
     pub inner_class_resolver: Option<InnerClassResolver>,
 }
 
@@ -327,6 +386,12 @@ impl EmitOptions {
     /// Select the `-jvm-default` mode, keeping every other field as configured.
     pub fn with_jvm_default(mut self, mode: JvmDefaultMode) -> Self {
         self.jvm_default = mode;
+        self
+    }
+
+    /// Select the lambda strategy (`-Xlambdas`), keeping every other field as configured.
+    pub fn with_lambdas(mut self, mode: LambdaMode) -> Self {
+        self.lambdas = mode;
         self
     }
 }
@@ -340,6 +405,7 @@ impl Default for EmitOptions {
             emit_class_metadata: true,
             jvm_default: JvmDefaultMode::Enable,
             param_assertions: true,
+            lambdas: LambdaMode::Indy,
             inner_class_resolver: None,
         }
     }
@@ -3091,6 +3157,7 @@ pub fn emit_all(
         run: &run,
         continuation_metadata: &empty_continuation_metadata,
         signature_symbols: &signature_symbols,
+        lambdas: LambdaMode::Indy,
     };
     emit_all_with_class_meta(ir, facade, &env, metadata, &EmitOptions::default(), &|_| {
         None
@@ -3149,6 +3216,7 @@ pub fn emit_all_with_opts_and_metadata(
         run,
         continuation_metadata: metadata.continuations,
         signature_symbols: &signature_symbols,
+        lambdas: opts.lambdas,
     };
     emit_all_with_class_meta(ir, facade, &env, metadata.facade, opts, &|_| None)
 }
@@ -3454,6 +3522,7 @@ fn emit_pass(
             cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
         }
         out.push((facade.to_string(), cw.finish()));
+        out.extend(drain_lambda_classes(env, opts));
     }
     // Each class — with its optional `@Metadata` (the provider returns `None` for the default emit).
     for c in &ir.classes {
@@ -3466,7 +3535,9 @@ fn emit_pass(
         ));
         // An interface's `$DefaultImpls` holder (its `name$default` synthetics), when any exist.
         out.extend(extra);
+        out.extend(drain_lambda_classes(env, opts));
     }
+    out.extend(drain_lambda_classes(env, opts));
     if env.run.inline_bail.borrow().is_some() {
         return None;
     }
@@ -3474,6 +3545,193 @@ fn emit_pass(
         return None; // a value slot was never allocated (malformed IR) — skip, never miscompile
     }
     Some(out)
+}
+
+/// Write one synthetic lambda class for [`LambdaMode::Class`].
+///
+/// Shape, as kotlinc emits it: `final class Outer$fn$N extends kotlin/jvm/internal/Lambda implements
+/// FunctionN`, whose constructor passes the source arity to `Lambda.<init>(I)V`. A non-capturing
+/// lambda additionally gets a `static final INSTANCE` initialized in `<clinit>`; a capturing one
+/// stores each captured value in a field and reads it back in `invoke`.
+///
+/// `invoke` is emitted at the interface's ERASED descriptor only — that is the slot the JVM
+/// dispatches through, so the specialized overload kotlinc also emits is not required for
+/// correctness. Arguments are unboxed into the implementation's physical parameter types and the
+/// result reboxed, exactly as the metafactory's adapter would have done under `indy`.
+fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Vec<u8>) {
+    let super_name = if plan.kotlin_function {
+        "kotlin/jvm/internal/Lambda"
+    } else {
+        "java/lang/Object"
+    };
+    let mut cw = new_writer(&plan.internal, super_name, opts);
+    cw.set_access(0x0030); // ACC_FINAL | ACC_SUPER
+    cw.add_interface(&plan.iface);
+
+    let field_descs: Vec<String> = plan.captures.iter().map(|t| type_descriptor(*t)).collect();
+    for (index, desc) in field_descs.iter().enumerate() {
+        // Captured values never change after construction.
+        cw.add_field(0x0012, &format!("$captured${index}"), desc); // ACC_PRIVATE | ACC_FINAL
+    }
+
+    // <init>: store captures, then delegate to the superclass. `this` plus every capture must be
+    // covered by `max_locals`, or the class fails verification before any of it runs.
+    let capture_words: u16 = plan.captures.iter().map(|t| slot_words(*t)).sum();
+    let mut ctor = CodeBuilder::new(1 + capture_words);
+    let mut slot: u16 = 1;
+    let mut capture_slots = Vec::new();
+    for ty in &plan.captures {
+        capture_slots.push(slot);
+        slot += slot_words(*ty);
+    }
+    ctor.aload(0);
+    if plan.kotlin_function {
+        ctor.push_int(plan.arity as i32, &mut cw);
+        let sup = cw.methodref(super_name, "<init>", "(I)V");
+        ctor.invokespecial(sup, 1, 0);
+    } else {
+        let sup = cw.methodref(super_name, "<init>", "()V");
+        ctor.invokespecial(sup, 0, 0);
+    }
+    for (index, ty) in plan.captures.iter().enumerate() {
+        ctor.aload(0);
+        load_slot(&mut ctor, capture_slots[index], *ty);
+        let field = cw.fieldref(
+            &plan.internal,
+            &format!("$captured${index}"),
+            &field_descs[index],
+        );
+        ctor.putfield(field, slot_words(*ty) as i32 + 1);
+    }
+    ctor.ret_void();
+    let ctor_desc = format!("({})V", field_descs.concat());
+    cw.add_method(0x0000, "<init>", &ctor_desc, &ctor);
+
+    // `invoke` at the interface's erased descriptor — the slot the JVM dispatches through. Captures
+    // come off the fields, the arguments off the frame, and both are converted into the physical
+    // types the implementation method declares.
+    let (sam_params, sam_ret) = crate::jvm::names::parse_method_descriptor(&plan.sam_desc)
+        .unwrap_or_else(|| (Vec::new(), "V"));
+    let (impl_params, impl_ret) =
+        parse_physical_method_desc(&plan.impl_desc).unwrap_or_else(|| (Vec::new(), Ty::Unit));
+    let own_params = impl_params
+        .get(plan.captures.len()..)
+        .unwrap_or(&[])
+        .to_vec();
+    let mut invoke_locals: u16 = 1;
+    let mut arg_slots = Vec::new();
+    for param in &sam_params {
+        arg_slots.push(invoke_locals);
+        invoke_locals += if *param == "J" || *param == "D" { 2 } else { 1 };
+    }
+    let mut invoke = CodeBuilder::new(invoke_locals);
+    for (index, ty) in plan.captures.iter().enumerate() {
+        invoke.aload(0);
+        let field = cw.fieldref(
+            &plan.internal,
+            &format!("$captured${index}"),
+            &field_descs[index],
+        );
+        invoke.getfield(field, slot_words(*ty) as i32);
+    }
+    for (index, physical) in sam_params.iter().enumerate() {
+        let want = own_params.get(index).copied().unwrap_or(Ty::Unit);
+        if *physical == "J" {
+            invoke.lload(arg_slots[index]);
+        } else if *physical == "D" {
+            invoke.dload(arg_slots[index]);
+        } else if *physical == "F" {
+            invoke.fload(arg_slots[index]);
+        } else if descriptor_is_reference(physical) {
+            invoke.aload(arg_slots[index]);
+            let wanted = type_descriptor(want);
+            if !matches!(want, Ty::Unit) && !descriptor_is_reference(&wanted) {
+                // The erased slot carries a wrapper wherever the body wants a scalar.
+                unbox_prim(&mut cw, &mut invoke, want);
+            } else if wanted != *physical {
+                // `Function1.invoke` declares `Object`; the body declares the real type. Under
+                // `indy` the metafactory's adapter inserted this cast — nothing else does here, and
+                // without it the class fails verification on any non-`Object` reference parameter.
+                let internal = wanted
+                    .strip_prefix('L')
+                    .and_then(|rest| rest.strip_suffix(';'))
+                    .map(|name| name.to_string())
+                    .unwrap_or(wanted);
+                let target = cw.class_ref(&internal);
+                invoke.checkcast(target);
+            }
+        } else {
+            invoke.iload(arg_slots[index]);
+        }
+    }
+    let impl_words: i32 = impl_params.iter().map(|t| slot_words(*t) as i32).sum();
+    let impl_ref = if plan.owner_is_interface {
+        cw.interface_methodref(&plan.impl_owner, &plan.impl_name, &plan.impl_desc)
+    } else {
+        cw.methodref(&plan.impl_owner, &plan.impl_name, &plan.impl_desc)
+    };
+    invoke.invokestatic(impl_ref, impl_words, slot_words(impl_ret) as i32);
+    if descriptor_is_reference(sam_ret) && !descriptor_is_reference(&type_descriptor(impl_ret)) {
+        box_prim_free(&mut cw, &mut invoke, impl_ret);
+    }
+    if sam_ret == "V" {
+        invoke.ret_void();
+    } else if descriptor_is_reference(sam_ret) {
+        invoke.areturn();
+    } else {
+        return_primitive(&mut invoke, impl_ret);
+    }
+    // ACC_PUBLIC | ACC_FINAL: the interface slot, implemented once.
+    cw.add_method(0x0011, &plan.sam_method, &plan.sam_desc, &invoke);
+
+    if plan.captures.is_empty() {
+        let instance_desc = format!("L{};", plan.internal);
+        cw.add_field(0x0019, "INSTANCE", &instance_desc); // ACC_PUBLIC | ACC_STATIC | ACC_FINAL
+        let mut clinit = CodeBuilder::new(0);
+        let class_index = cw.class_ref(&plan.internal);
+        clinit.new_obj(class_index);
+        clinit.dup();
+        let ctor_ref = cw.methodref(&plan.internal, "<init>", "()V");
+        clinit.invokespecial(ctor_ref, 0, 0);
+        let field = cw.fieldref(&plan.internal, "INSTANCE", &instance_desc);
+        clinit.putstatic(field, 1);
+        clinit.ret_void();
+        cw.add_method(0x0008, "<clinit>", "()V", &clinit); // ACC_STATIC
+    }
+    (plan.internal.clone(), cw.finish())
+}
+
+/// Take the lambda classes recorded while emitting the class just finished, and write them.
+/// Draining per class keeps a synthetic next to its enclosing class in the output order.
+fn drain_lambda_classes(env: &EmitEnv, opts: &EmitOptions) -> Vec<(String, Vec<u8>)> {
+    let plans: Vec<LambdaClassPlan> = env.run.lambda_classes.borrow_mut().drain(..).collect();
+    plans
+        .iter()
+        .map(|plan| build_lambda_class(plan, opts))
+        .collect()
+}
+
+/// Load a value of `ty` from a local slot — the constructor's capture parameters, which arrive in the
+/// implementation's physical types rather than all as references.
+fn load_slot(code: &mut CodeBuilder, slot: u16, ty: Ty) {
+    match ty {
+        Ty::Long => code.lload(slot),
+        Ty::Double => code.dload(slot),
+        Ty::Float => code.fload(slot),
+        Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => code.iload(slot),
+        _ => code.aload(slot),
+    }
+}
+
+/// Return a primitive result of `ty` (the non-reference SAM return case).
+fn return_primitive(code: &mut CodeBuilder, ty: Ty) {
+    match ty {
+        Ty::Long => code.lreturn(),
+        Ty::Double => code.dreturn(),
+        Ty::Float => code.freturn(),
+        Ty::Unit => code.ret_void(),
+        _ => code.ireturn(),
+    }
 }
 
 /// Whether the JVM backend can represent this IR. The JVM stdlib provides fixed-arity
@@ -8130,7 +8388,19 @@ fn emit_method_inner(
             .iter()
             .any(|o| o.fq_name_matches(owner) && o.is_interface);
         let vis = if ir.private_methods.contains(&fid) {
-            0x0002
+            // Under `-Xlambdas=class` the body is called from the lambda's OWN class, so a private
+            // impl would be an `IllegalAccessError` at the delegating `invoke`. kotlinc has no such
+            // method to place — it moves the body into `invoke` — so package-private here is the
+            // narrowest visibility that keeps the delegation working.
+            // A static interface method must carry exactly one of ACC_PUBLIC / ACC_PRIVATE
+            // (JVMS 4.6), so an interface's impl opens all the way to public instead.
+            let called_from_lambda_class = env.lambdas == LambdaMode::Class
+                && ir.functions[fid as usize].name.contains("$lambda$");
+            match (called_from_lambda_class, owner_is_iface) {
+                (true, true) => 0x0001,
+                (true, false) => 0x0000,
+                (false, _) => 0x0002,
+            }
         } else {
             0x0001
         };
@@ -9300,6 +9570,8 @@ struct Emitter<'a> {
     record_locals: bool,
     /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
     this_uninitialized: bool,
+    /// `-Xlambdas`: `Class` replaces each `invokedynamic` with a synthesized class instantiation.
+    lambdas: LambdaMode,
 }
 
 fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
@@ -9333,6 +9605,7 @@ impl<'a> Emitter<'a> {
             block_depth: 0,
             record_locals: false,
             this_uninitialized: false,
+            lambdas: env.lambdas,
         }
     }
 
@@ -12528,6 +12801,78 @@ impl<'a> Emitter<'a> {
                     .find(|c| c.methods.contains(impl_fn))
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
+                if self.lambdas == LambdaMode::Class {
+                    // `box$lambda$0` names the enclosing declaration and this lambda's index within
+                    // it, which is exactly what the synthetic class name is built from.
+                    let (enclosing, index) = impl_name
+                        .split_once("$lambda$")
+                        .map(|(head, tail)| (head.to_string(), tail.parse::<u32>().unwrap_or(0)))
+                        .unwrap_or_else(|| (impl_name.clone(), 0));
+                    // kotlinc names the class after the declaration the lambda initializes
+                    // (`LKt$box$plain$1`), falling back to a 1-based index among the enclosing
+                    // declaration's lambdas when it initializes nothing (`C$m$1`).
+                    let bound_name = self.ir.exprs.iter().enumerate().find_map(|(id, node)| {
+                        match node {
+                            IrExpr::Variable {
+                                index: value_index,
+                                init: Some(init),
+                                named: true,
+                                ..
+                            } if *init == e => self.ir.value_names.get(value_index).cloned(),
+                            _ => None,
+                        }
+                        .filter(|_| id as u32 != e)
+                    });
+                    let internal = match &bound_name {
+                        Some(name) => format!("{impl_owner}${enclosing}${name}$1"),
+                        None => format!("{impl_owner}${enclosing}${}", index + 1),
+                    };
+                    self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
+                        internal: internal.clone(),
+                        iface: iface.clone(),
+                        sam_method: sam_method.clone(),
+                        sam_desc: sam_desc.clone(),
+                        impl_owner: impl_owner.clone(),
+                        impl_name: impl_name.clone(),
+                        impl_desc: impl_desc.clone(),
+                        captures: cap_tys.to_vec(),
+                        arity: *arity as u32,
+                        kotlin_function: sam.is_none(),
+                        owner_is_interface: self
+                            .ir
+                            .classes
+                            .iter()
+                            .any(|c| c.fq_name_matches(&impl_owner) && c.is_interface),
+                    });
+                    if captures.is_empty() {
+                        // Nothing captured, so every evaluation yields the same instance — kotlinc
+                        // holds it in a static and the call site just reads it.
+                        let field =
+                            self.cw
+                                .fieldref(&internal, "INSTANCE", &format!("L{internal};"));
+                        code.getstatic(field, 1);
+                        let target = self.cw.class_ref(&iface);
+                        code.checkcast(target);
+                    } else {
+                        let class_index = self.cw.class_ref(&internal);
+                        code.new_obj(class_index);
+                        code.dup();
+                        for &c in captures {
+                            self.emit_value(c, code);
+                        }
+                        let cap_descs: String =
+                            cap_tys.iter().map(|t| type_descriptor(*t)).collect();
+                        let cap_words: i32 = cap_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                        let ctor =
+                            self.cw
+                                .methodref(&internal, "<init>", &format!("({cap_descs})V"));
+                        // `arg_words` excludes the receiver, which `invokespecial` accounts for
+                        // itself; counting it here leaves the constructed lambda invisible to
+                        // `max_stack` for the rest of the enclosing method.
+                        code.invokespecial(ctor, cap_words, 0);
+                    }
+                    return;
+                }
                 // kotlinc interns the BOOTSTRAP ARGUMENTS first (erased SAM MethodType, the impl
                 // MethodHandle with its `$lambda$N` refs, the instantiated MethodType), and the
                 // LambdaMetafactory handle only after them — pool order follows that visit.
