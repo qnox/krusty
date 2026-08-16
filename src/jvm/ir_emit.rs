@@ -7335,6 +7335,60 @@ fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
     code.invokevirtual(m, 0, slot_words(t) as i32);
 }
 
+/// The `@java.lang.annotation.Target` mirror for an annotation class whose source declares
+/// `@Target(...)`, or `None` when it declares none — an ABSENT `@Target` and an EMPTY one are
+/// different classfiles (the latter mirrors to `value = []`, and kotlinc emits it).
+///
+/// The Kotlin target set is PROJECTED, not copied: [`crate::types::java_element_type_of_annotation_target`]
+/// maps each target to at most one `ElementType`, Kotlin-only targets drop out, and the survivors are
+/// deduplicated and ordered by `ElementType` declaration order (kotlinc builds an `EnumSet`). The
+/// projection can be empty — a set of only Kotlin-only targets still mirrors to `value = []`, matching
+/// kotlinc; it is the ABSENCE of `@Target` in the source, not an empty projection, that omits it.
+fn java_target_mirror(
+    applied: &crate::ir::DeclarationAnnotations,
+) -> Option<crate::ir::AppliedAnnotation> {
+    let kotlin_target = crate::types::type_name("kotlin/annotation/Target");
+    let declared = applied
+        .iter()
+        .map(|retained| &retained.annotation)
+        .find(|annotation| annotation.internal == kotlin_target)?;
+    let (_, crate::ir::AnnoValue::Array(targets)) = declared
+        .values
+        .iter()
+        .find(|(name, _)| name == "allowedTargets")?
+    else {
+        return None;
+    };
+    let mut elements: Vec<usize> = targets
+        .iter()
+        .filter_map(|target| match target {
+            crate::ir::AnnoValue::Enum(_, name) => {
+                crate::types::java_element_type_of_annotation_target(name)
+            }
+            _ => None,
+        })
+        .collect();
+    elements.sort_unstable();
+    elements.dedup();
+    Some(crate::ir::AppliedAnnotation {
+        internal: crate::types::type_name("java/lang/annotation/Target"),
+        values: vec![(
+            "value".to_string(),
+            crate::ir::AnnoValue::Array(
+                elements
+                    .into_iter()
+                    .map(|element| {
+                        crate::ir::AnnoValue::Enum(
+                            crate::types::type_name("java/lang/annotation/ElementType"),
+                            crate::types::JAVA_ELEMENT_TYPES[element].to_string(),
+                        )
+                    })
+                    .collect(),
+            ),
+        )],
+    })
+}
+
 /// Emit a Kotlin `annotation class` as a JVM ANNOTATION INTERFACE: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT|
 /// ACC_ANNOTATION`, extending `java/lang/annotation/Annotation`, with one `public abstract` accessor per
 /// member (`int x()`, `String s()`) named after the property and returning its type — kotlinc's shape.
@@ -7355,58 +7409,69 @@ fn emit_annotation_class(
         cw.add_abstract_method(0x0401, &field.name, &format!("(){}", type_descriptor(ret)));
         // PUBLIC|ABSTRACT
     }
-    // Retention meta-annotations, matching kotlinc: an EXPLICIT `@Retention(X)` stamps
-    // `kotlin.annotation.Retention(X)` first, and every annotation class carries
-    // `java.lang.annotation.Retention(RUNTIME|CLASS|SOURCE)` (RUNTIME when defaulted) — the java one is
-    // what both the JVM and classpath consumers read the retention back from.
-    let mut meta: Vec<crate::ir::AppliedAnnotation> = Vec::new();
+    // Retention/target meta-annotations, matching kotlinc's ORDER: everything the source declares
+    // comes first, in source order — `kotlin.annotation.Retention(X)` and `kotlin.annotation.Target`
+    // among them — and the JVM mirrors are appended after: `java.lang.annotation.Retention(RUNTIME|
+    // CLASS|SOURCE)` (RUNTIME when defaulted), then `java.lang.annotation.Target`. The java retention
+    // is what both the JVM and classpath consumers read the retention back from.
+    let enum_stamp = |internal: &str, enum_ty: &str, constant: &str| crate::ir::AppliedAnnotation {
+        internal: crate::types::type_name(internal),
+        values: vec![(
+            "value".to_string(),
+            crate::ir::AnnoValue::Enum(crate::types::type_name(enum_ty), constant.to_string()),
+        )],
+    };
+    let mut mirrors: Vec<crate::ir::AppliedAnnotation> = Vec::new();
     if let Some(retention) = c.annotation_retention {
         use crate::ir::AnnoRetention;
-        let enum_stamp =
-            |internal: &str, enum_ty: &str, constant: &str| crate::ir::AppliedAnnotation {
-                internal: crate::types::type_name(internal),
-                values: vec![(
-                    "value".to_string(),
-                    crate::ir::AnnoValue::Enum(
-                        crate::types::type_name(enum_ty),
-                        constant.to_string(),
-                    ),
-                )],
-            };
-        let kotlin_name = match retention {
-            AnnoRetention::Default => None,
-            AnnoRetention::Runtime => Some("RUNTIME"),
-            AnnoRetention::Binary => Some("BINARY"),
-            AnnoRetention::Source => Some("SOURCE"),
-        };
-        if let Some(constant) = kotlin_name {
-            meta.push(enum_stamp(
-                "kotlin/annotation/Retention",
-                "kotlin/annotation/AnnotationRetention",
-                constant,
-            ));
-        }
         let policy = match retention {
             AnnoRetention::Default | AnnoRetention::Runtime => "RUNTIME",
             AnnoRetention::Binary => "CLASS",
             AnnoRetention::Source => "SOURCE",
         };
-        meta.push(enum_stamp(
+        mirrors.push(enum_stamp(
             "java/lang/annotation/Retention",
             "java/lang/annotation/RetentionPolicy",
             policy,
         ));
     }
+    mirrors.extend(java_target_mirror(&c.applied_annotations));
+    // The source's own `@Retention` is REPLACED IN PLACE by the normalized stamp rather than filtered
+    // out and re-appended: the class's `annotation_retention` is the authority for the value, but the
+    // annotation's position among the others is the source's and kotlinc preserves it.
     let kotlin_retention = crate::types::type_name("kotlin/annotation/Retention");
-    cw.set_runtime_annotations(&meta);
+    let kotlin_retention_stamp = c.annotation_retention.and_then(|retention| {
+        use crate::ir::AnnoRetention;
+        let constant = match retention {
+            AnnoRetention::Default => return None,
+            AnnoRetention::Runtime => "RUNTIME",
+            AnnoRetention::Binary => "BINARY",
+            AnnoRetention::Source => "SOURCE",
+        };
+        Some(enum_stamp(
+            "kotlin/annotation/Retention",
+            "kotlin/annotation/AnnotationRetention",
+            constant,
+        ))
+    });
     let user_annotations = crate::ir::DeclarationAnnotations::new(
         c.applied_annotations
             .iter()
-            .filter(|retained| retained.annotation.internal != kotlin_retention)
-            .cloned()
+            .filter_map(|retained| {
+                if retained.annotation.internal != kotlin_retention {
+                    return Some(retained.clone());
+                }
+                kotlin_retention_stamp
+                    .clone()
+                    .map(|annotation| crate::ir::RetainedAnnotation {
+                        retention: retained.retention,
+                        annotation,
+                    })
+            })
             .collect(),
     );
     cw.set_class_annotations(&user_annotations);
+    cw.set_runtime_annotations(&mirrors);
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
         .then(|| build_class_metadata(ir, c, opts))
         .flatten();
