@@ -2779,11 +2779,16 @@ fn lower_file_at_reporting_impl(
                 // function prepends the receiver as parameter 0, so the defaults/names get a leading
                 // receiver slot). Plain top-level functions may also emit a facade `$default` stub; the
                 // JVM backend uses one mask word per 32 parameters, so there is no 31-param cap here.
-                // An EXTENSION fills its omitted defaults at the CALL SITE by REUSING these lowered default
-                // exprs, so restrict it to CONSTANT defaults (a literal carries no function-local value
-                // dependency); a non-constant extension default isn't modeled — skip registration so an
-                // omitted-arg call bails (the file skips, never miscompiles). A plain top-level function
-                // re-lowers its defaults from the AST at the call site, so it accepts any constant-literal.
+                // Registration serves TWO consumers with different safety envelopes:
+                //  * the `$default` STUB, which re-emits these exprs inside its own frame — any
+                //    lowerable default qualifies (`toplevel_default_stub_safe` applies its own gates);
+                //  * same-module CALL-SITE filling of an omitted argument, which inlines only the
+                //    checker's constant default values, never these exprs.
+                // An EXTENSION whose defaults are not all CONSTANT therefore registers STUB-ONLY
+                // (`FnParamInfo::stub_only`): kotlinc emits `name$default` for it — suppressing the
+                // stub is a silent ABI gap (an omitting cross-module/Java caller hits
+                // NoSuchMethodError) — while a same-module omitted-arg call keeps bailing exactly as
+                // when nothing was registered (skip, never miscompile).
                 let const_ok = f.receiver.is_none()
                     || f.params.iter().all(|p| match p.default {
                         Some(d) => is_const_literal(file, d),
@@ -2792,26 +2797,53 @@ fn lower_file_at_reporting_impl(
                 // A `vararg` is allowed alongside defaults: the vararg parameter carries no default
                 // (`$default` passes its array through / the call site packs it), so an omitted-arg
                 // call routes through the stub — or, for an EXTENSION, inlines the constant defaults
-                // at the call site (`const_ok` already restricts extension defaults to constants).
+                // at the call site (`const_ok` restricts that reuse to constants).
                 // A NON-final vararg (`fun topd(vararg s: String, flag: Boolean = false)`) is the
                 // same shape: the parameters after it are reachable only by name and defaulted.
-                if const_ok && f.params.iter().any(|p| p.default.is_some()) {
+                if f.params.iter().any(|p| p.default.is_some()) {
                     let ir_params = lo.ir.functions[fid as usize].params.clone();
                     let recv_off = usize::from(f.receiver.is_some());
-                    let mut defaults: Vec<Option<u32>> = vec![None; recv_off];
-                    for (i, p) in f.params.iter().enumerate() {
-                        match p.default {
-                            Some(d) => {
-                                defaults.push(Some(lo.lower_arg(d, &ir_params[recv_off + i])?))
-                            }
-                            None => defaults.push(None),
-                        }
-                    }
                     let mut names = vec![format!("$this${}", f.name); recv_off];
                     names.extend(f.params.iter().map(|p| p.name.clone()));
-                    lo.ir
-                        .fn_params
-                        .insert(fid, FnParamInfo::defaults(names, defaults));
+                    if const_ok {
+                        let mut defaults: Vec<Option<u32>> = vec![None; recv_off];
+                        for (i, p) in f.params.iter().enumerate() {
+                            match p.default {
+                                Some(d) => {
+                                    defaults.push(Some(lo.lower_arg(d, &ir_params[recv_off + i])?))
+                                }
+                                None => defaults.push(None),
+                            }
+                        }
+                        lo.ir
+                            .fn_params
+                            .insert(fid, FnParamInfo::defaults(names, defaults));
+                    } else {
+                        // Stub-only: ALL defaults must lower or NONE registers — a partial vector
+                        // would emit a stub filling the wrong slots. A failing default must not
+                        // abort the file the way the `?` above does (before the split, this shape
+                        // registered nothing at all): drop the registration and continue, leaving
+                        // the names-only fallback below.
+                        let mut defaults: Vec<Option<u32>> = vec![None; recv_off];
+                        let mut lowered_all = true;
+                        for (i, p) in f.params.iter().enumerate() {
+                            match p.default {
+                                Some(d) => match lo.lower_arg(d, &ir_params[recv_off + i]) {
+                                    Some(e) => defaults.push(Some(e)),
+                                    None => {
+                                        lowered_all = false;
+                                        break;
+                                    }
+                                },
+                                None => defaults.push(None),
+                            }
+                        }
+                        if lowered_all {
+                            lo.ir
+                                .fn_params
+                                .insert(fid, FnParamInfo::stub_only_defaults(names, defaults));
+                        }
+                    }
                 }
                 // Names-only metadata supports named-argument reorder without a default stub.
                 if !lo.ir.fn_params.contains_key(&fid) && !f.params.iter().any(|p| p.is_vararg) {
@@ -12562,7 +12594,11 @@ impl<'a> Lower<'a> {
         }
         // Only when a `$default` synthetic is actually emitted for `fid` (simple defaults, unmangled) —
         // the same gate the emitter uses, so a routed call always has a target and the stub is sound.
-        if !crate::ir::toplevel_default_stub_safe(&self.ir, fid) {
+        // STUB-ONLY registrations (an extension's non-constant defaults) never route a same-module
+        // call: today's behavior there is the bail, kept deliberately (`FnParamInfo::stub_only`).
+        if !crate::ir::toplevel_default_stub_safe(&self.ir, fid)
+            || self.ir.param_defaults_stub_only(fid)
+        {
             return None;
         }
         // Map each source argument onto its parameter slot (label → named position; unlabelled → next
@@ -13552,7 +13588,12 @@ impl<'a> Lower<'a> {
                 _ => return None,
             }
         } else if let Some(fid) = fid {
-            if !crate::ir::toplevel_default_stub_safe(&self.ir, fid) {
+            // Same routing rule as `lower_toplevel_default_call`: the stub must be emitted AND the
+            // registration must not be stub-only (`FnParamInfo::stub_only` keeps same-module
+            // behavior at the pre-registration bail).
+            if !crate::ir::toplevel_default_stub_safe(&self.ir, fid)
+                || self.ir.param_defaults_stub_only(fid)
+            {
                 return None;
             }
             let mut omitted = Vec::new();
