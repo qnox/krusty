@@ -3192,6 +3192,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   would shift every following pool entry. Tests:
   `tests/generic_signature_e2e.rs::top_level_property_field_gets_its_generic_signature` and
   `::top_level_property_accessors_get_their_generic_signatures`.
+- **A `private` classifier is package-private in the class file, for every declaration kind.** The JVM
+  has no class-level `private`, so kotlinc drops `ACC_PUBLIC` and keeps the real visibility in
+  `@Metadata` (and in `InnerClasses` for a nested classifier); `internal` stays `ACC_PUBLIC`, since the
+  module boundary is a Kotlin-only fact. This holds for ordinary, data, sealed, value, object,
+  interface, fun-interface, enum, and annotation forms alike. Their syntax-specific parser arms now
+  publish through one classifier boundary that records visibility; previously only the plain `class`
+  arm did. A local classifier is a measured control: it has no declared visibility and kotlinc keeps
+  its own class flags `ACC_PUBLIC`. Test: `tests/private_classifier_access_e2e.rs`.
 
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell

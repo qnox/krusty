@@ -4704,6 +4704,17 @@ struct SecondaryCtorShape {
     vararg_index: Option<usize>,
 }
 
+/// The `ACC_PUBLIC` bit a class's own access flags carry. A `private` declaration — of ANY kind, at
+/// top level or nested — is package-private in the class file: the JVM has no class-level private,
+/// so kotlinc drops the bit and records the real visibility in `@Metadata` and `InnerClasses`.
+/// `internal` stays public (the module boundary is a Kotlin-only fact).
+fn class_public_bit(ir: &IrFile, c: &crate::ir::IrClass) -> u16 {
+    match ir.class_visibilities.get(&c.fq_name_id()) {
+        Some(crate::types::Visibility::Private) => 0x0000,
+        _ => 0x0001,
+    }
+}
+
 fn emit_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -4843,7 +4854,7 @@ fn emit_class(
     let mut access = if is_continuation {
         0x0020 // SUPER (package-private)
     } else {
-        0x0001 | 0x0020 // PUBLIC | SUPER
+        class_public_bit(ir, c) | 0x0020 // [PUBLIC |] SUPER
     };
     // A SEALED class is abstract (kotlinc: sealed implies no direct instantiation), and an
     // `abstract class` is too — both alongside any class with an abstract (body-less) member.
@@ -7144,7 +7155,8 @@ fn emit_annotation_class(
 ) -> Vec<u8> {
     let fq_name = c.fq_name();
     let mut cw = new_writer(&fq_name, "java/lang/Object", opts);
-    cw.set_access(0x0001 | 0x0200 | 0x0400 | 0x2000); // PUBLIC | INTERFACE | ABSTRACT | ANNOTATION
+    // PUBLIC | INTERFACE | ABSTRACT | ANNOTATION
+    cw.set_access(class_public_bit(ir, c) | 0x0200 | 0x0400 | 0x2000);
     cw.add_interface("java/lang/annotation/Annotation");
     for field in &c.fields {
         let ret = jvm_declared_ty(&field.ty);
@@ -7626,7 +7638,7 @@ fn emit_interface_class(
     let fq_name = c.fq_name();
     let signature_formatter = JvmSignatureFormatter::new(env);
     let mut cw = new_classifier_writer(ir, c, "java/lang/Object", env, opts);
-    cw.set_access(0x0001 | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
+    cw.set_access(class_public_bit(ir, c) | 0x0200 | 0x0400); // [PUBLIC |] INTERFACE | ABSTRACT
     for itf in c.interfaces.iter_rendered() {
         cw.add_interface(&itf);
     }
@@ -7852,7 +7864,7 @@ fn emit_enum_class(
         .iter()
         .any(|&fid| ir.functions[fid as usize].body.is_none());
     let has_subclass = c.enum_entries.iter().any(|e| e.subclass.is_some());
-    let mut access = 0x0001 | 0x0020 | ACC_ENUM; // PUBLIC | SUPER | ENUM
+    let mut access = class_public_bit(ir, c) | 0x0020 | ACC_ENUM; // [PUBLIC |] SUPER | ENUM
     if has_abstract {
         access |= 0x0400;
     } // ABSTRACT

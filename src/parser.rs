@@ -1156,6 +1156,20 @@ impl<'a> Parser<'a> {
     }
 
     // ---- file / decls ----
+    /// Publish a top-level classifier after its syntax-specific parser has filled in kind-specific
+    /// facts. Declaration modifiers belong to the common classifier boundary: visibility and list
+    /// placement must not drift between class, object, data, annotation, enum, and interface arms.
+    fn register_top_level_classifier(
+        &mut self,
+        mut declaration: ClassDecl,
+        modifiers: &[String],
+        declaration_index: usize,
+    ) {
+        declaration.visibility = visibility_of(modifiers);
+        let id = self.file.add_decl(Decl::Class(declaration));
+        self.file.decls.insert(declaration_index, id);
+    }
+
     fn parse_file(&mut self) {
         self.skip_newlines();
         if self.at(TokenKind::KwPackage) {
@@ -1265,8 +1279,7 @@ impl<'a> Parser<'a> {
                     self.bump(); // 'fun'
                     let mut d = self.parse_interface();
                     d.is_fun_interface = true;
-                    let id = self.file.add_decl(Decl::Class(d));
-                    self.file.decls.insert(decls_before, id);
+                    self.register_top_level_classifier(d, &mods, decls_before);
                 }
                 TokenKind::KwFun => {
                     let d = self.parse_fun(&mods);
@@ -1278,9 +1291,7 @@ impl<'a> Parser<'a> {
                     let mut d = self.parse_class();
                     d.modality = modality_from_modifiers(&mods);
                     d.is_value = is_value;
-                    d.visibility = visibility_of(&mods);
-                    let id = self.file.add_decl(Decl::Class(d));
-                    self.file.decls.insert(decls_before, id);
+                    self.register_top_level_classifier(d, &mods, decls_before);
                 }
                 // top-level property: `val`/`var name (: Type)? = init`
                 TokenKind::KwVal | TokenKind::KwVar => {
@@ -1312,8 +1323,7 @@ impl<'a> Parser<'a> {
                         self.parse_class()
                     };
                     d.is_data = true;
-                    let id = self.file.add_decl(Decl::Class(d));
-                    self.file.decls.insert(decls_before, id);
+                    self.register_top_level_classifier(d, &mods, decls_before);
                 }
                 // `object Name { … }` — a singleton (soft keyword `object` + a name).
                 TokenKind::Ident
@@ -1324,8 +1334,7 @@ impl<'a> Parser<'a> {
                             .map_or(false, |t| t.kind == TokenKind::Ident) =>
                 {
                     let d = self.parse_object();
-                    let id = self.file.add_decl(Decl::Class(d));
-                    self.file.decls.insert(decls_before, id);
+                    self.register_top_level_classifier(d, &mods, decls_before);
                 }
                 // `annotation class Name(...)` — emitted as an interface extending
                 // `java/lang/annotation/Annotation` with an accessor per primary-ctor property;
@@ -1340,8 +1349,7 @@ impl<'a> Parser<'a> {
                     self.bump(); // 'annotation'
                     let mut d = self.parse_class();
                     d.kind = ClassKind::Annotation;
-                    let id = self.file.add_decl(Decl::Class(d));
-                    self.file.decls.insert(decls_before, id);
+                    self.register_top_level_classifier(d, &mods, decls_before);
                 }
                 // `enum class Name { A, B, C }` (soft keyword `enum` + `class`).
                 TokenKind::Ident
@@ -1352,8 +1360,7 @@ impl<'a> Parser<'a> {
                             .map_or(false, |t| t.kind == TokenKind::KwClass) =>
                 {
                     let d = self.parse_enum();
-                    let id = self.file.add_decl(Decl::Class(d));
-                    self.file.decls.insert(decls_before, id);
+                    self.register_top_level_classifier(d, &mods, decls_before);
                 }
                 // `interface Name { … }` (soft keyword `interface` + a name). A `sealed interface` carries
                 // `is_sealed` so it serializes as a `SealedClassSerializer` (closed polymorphism), like a
@@ -1369,8 +1376,7 @@ impl<'a> Parser<'a> {
                     if is_sealed {
                         d.modality = crate::ast::Modality::Sealed;
                     }
-                    let id = self.file.add_decl(Decl::Class(d));
-                    self.file.decls.insert(decls_before, id);
+                    self.register_top_level_classifier(d, &mods, decls_before);
                 }
                 // `typealias Name[<T,...>] = Type`
                 TokenKind::Ident if self.keyword_text("typealias") => {
