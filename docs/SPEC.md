@@ -6212,3 +6212,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nothing to mirror yet (each needs the class-file side first, not just the metadata record): a
   PRIMARY constructor's own annotations (`class C @Anno constructor(…)`) and VALUE-PARAMETER
   annotations (no `RuntimeVisibleParameterAnnotations` is emitted at all).
+- **A line break inside a property declaration is a continuation, an explicit `;` is not.** Kotlin's
+  property grammar is `… (':' NL* type)? (NL* '=' NL* expression)?`, so a declaration whose type
+  fills the line may put the type or the initializer on the next one — which is exactly what a
+  formatter does to a long generic type. Ending the declaration at the newline leaves the `=` (or the
+  type) to be read as the start of the next declaration, which is not a recoverable position: the
+  same gap surfaced as four unrelated-looking diagnostics — "object bodies support 'fun', 'val'/'var',
+  and 'init' blocks" once per token of the initializer, the class-body form of it, "expected a
+  top-level declaration", and "expected an expression" for a local. Nothing else in the grammar
+  begins with `=`, so looking past the line breaks cannot swallow anything but this declaration's own
+  initializer. The lexer spells a line break and a `;` as the same token, so the lookahead goes
+  through the helper that stops at a semicolon: `val a: Int; = 1` is two declarations, the second of
+  which is not one, and reading past it would accept what kotlinc rejects. The rule is one rule
+  everywhere a property is declared — top level, class, object, interface, companion, local, a
+  destructuring `val (a, b)`, and a `when` subject binding.
+  Tests: `tests/property_initializer_newline_e2e.rs`.
