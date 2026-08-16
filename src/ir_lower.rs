@@ -1058,6 +1058,33 @@ fn lower_file_at_reporting_impl(
                     .ctor_visibilities
                     .insert(class_identity, c.primary_ctor_visibility);
             }
+            // The class HEADER's source spellings (supertypes, primary-constructor parameters,
+            // type-parameter bounds) and its properties', for `@Metadata`'s `Type.abbreviated_type`.
+            if let Some(header) = syms.declared_spellings.get(&(file_index, d)) {
+                lo.ir
+                    .class_declared_spellings
+                    .insert(class_identity, header.clone());
+            }
+            for (index, property) in c
+                .props
+                .iter()
+                .map(|p| p.name.clone())
+                .chain(c.body_props.iter().map(|p| p.name.clone()))
+                .enumerate()
+            {
+                if let Some(spellings) =
+                    syms.member_spellings
+                        .get(&crate::libraries::SourceMember::ClassProperty {
+                            file: file_index,
+                            owner: d.0,
+                            property: index as u32,
+                        })
+                {
+                    lo.ir
+                        .prop_declared_spellings
+                        .insert((class_identity, property), spellings.clone());
+                }
+            }
             let id = lo.ir.add_class(IrClass {
                 fq_name: type_name(&internal),
                 is_source_declared: true,
@@ -1309,6 +1336,20 @@ fn lower_file_at_reporting_impl(
                 }
                 if let Some(vi) = m.params.iter().position(|p| p.is_vararg) {
                     lo.ir.fn_vararg_index.insert(fid, vi);
+                }
+                // How SOURCE spelled this member's declared types, for `@Metadata`'s
+                // `Type.abbreviated_type` (see `IrFile::fn_declared_spellings`). Class metadata is
+                // built from the IR alone, so — exactly like the declared nullability below — the
+                // spelling has to be copied across here, where the AST member is still in hand.
+                if let Some(spellings) =
+                    syms.member_spellings
+                        .get(&crate::libraries::SourceMember::Class {
+                            file: file_index,
+                            owner: d.0,
+                            method: mi as u32,
+                        })
+                {
+                    lo.ir.fn_declared_spellings.insert(fid, spellings.clone());
                 }
                 // Record the declared nullability of each parameter for `@Metadata`/annotations (see
                 // `IrFile::fn_param_declared_nullable`) — kept off `IrFunction::params` so the mangle

@@ -3,7 +3,7 @@
 //! names use `predefinedIndex` into `JvmNameResolverBase.PREDEFINED_STRINGS` (see METADATA_NOTES.md).
 
 use crate::metadata::type_encoder::{
-    encode_metadata_type_parameter, encode_type, encode_type_parameter,
+    encode_declared_type, encode_metadata_type_parameter, encode_type, encode_type_parameter,
     semantic_named_type_parameters, type_parameters, MetadataTypeParameter, StringTable,
     TypeParameters,
 };
@@ -73,6 +73,11 @@ pub struct FnMeta {
     /// PUBLIC=3); an `internal fun`'s flags word differs from the omitted public-final default (6),
     /// so it is written explicitly and a consuming module enforces the boundary.
     pub visibility: crate::types::Visibility,
+    /// How SOURCE spelled each declared type above. A `typealias` named in the return type, a
+    /// parameter, the receiver, or a type-parameter bound is recorded as `Type.abbreviated_type`
+    /// (field 13) next to its expanded classifier — `Ty` is expanded and cannot carry it. Default
+    /// (everything empty) for a declaration that names no alias, which is nearly all of them.
+    pub spellings: crate::spelling::DeclaredSpellings,
 }
 
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
@@ -84,6 +89,18 @@ const DECLARES_DEFAULT_VALUE_BIT: u64 = 1 << 1;
 /// (`Type.type_parameter` = 7).
 fn type_pb_generic(st: &mut StringTable, t: Ty, tps: &TypeParameters) -> Pb {
     encode_type(st, t, tps).unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
+}
+
+/// [`type_pb_generic`] for a DECLARED type, carrying how source spelled it so a `typealias`
+/// becomes `Type.abbreviated_type` (field 13).
+fn type_pb_declared(
+    st: &mut StringTable,
+    t: Ty,
+    spelled: &crate::spelling::Spelled,
+    tps: &TypeParameters,
+) -> Pb {
+    encode_declared_type(st, t, spelled, tps)
+        .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
 
 /// Serialize a decoded contract as a `Contract` message (`repeated Effect effect` = 1), the exact
@@ -339,7 +356,7 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         f.type_params.iter().map(|(name, _)| name.as_str()),
         semantic_names.into_iter(),
     );
-    let ret = type_pb_generic(st, f.ret, &tps);
+    let ret = type_pb_declared(st, f.ret, &f.spellings.ret, &tps);
     p.field_message(3, &ret); // Function.return_type = 3
     for (id, (tp_name, reified)) in f.type_params.iter().enumerate() {
         let tp = encode_metadata_type_parameter(
@@ -350,6 +367,12 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
                 reified: *reified,
                 variance: crate::types::TypeVariance::Invariant,
                 upper_bounds: f.type_param_bounds.get(id).cloned().unwrap_or_default(),
+                upper_bound_spellings: f
+                    .spellings
+                    .type_param_bounds
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default(),
             },
             &tps,
         )
@@ -359,7 +382,7 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     // Function.receiver_type = 5 (extension functions only) — between return_type and value_parameter,
     // matching kotlinc's ascending field order. Its presence marks the function an extension.
     if let Some(recv) = f.receiver {
-        let rt = type_pb_generic(st, recv, &tps);
+        let rt = type_pb_declared(st, recv, &f.spellings.receiver, &tps);
         p.field_message(5, &rt);
     }
     for (i, (pname, pty)) in f.params.iter().enumerate() {
@@ -370,7 +393,15 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
             vp.field_varint(1, DECLARES_DEFAULT_VALUE_BIT);
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
-        let ty = type_pb_generic(st, *pty, &tps);
+                                                    // A `vararg` parameter is SPELLED as its element (`vararg xs: Cargo`) but RECORDED as the
+                                                    // array, so the element's spelling has to be lifted under the array rather than applied to
+                                                    // it — otherwise the record claims `Array` itself was written as the alias.
+        let declared_spelling = if f.vararg_index == Some(i) {
+            f.spellings.param(i).as_array_element()
+        } else {
+            f.spellings.param(i).clone()
+        };
+        let ty = type_pb_declared(st, *pty, &declared_spelling, &tps);
         vp.field_message(3, &ty); // ValueParameter.type = 3
                                   // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
                                   // kotlinc's declared type stays the array.
@@ -379,7 +410,7 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
                 .array_elem()
                 .or_else(|| pty.type_args().first().copied());
             if let Some(elem) = elem {
-                let et = type_pb_generic(st, elem, &tps);
+                let et = type_pb_declared(st, elem, f.spellings.param(i), &tps);
                 vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
             }
         }
@@ -449,6 +480,16 @@ pub struct PropMeta {
     /// An `internal val`'s public JVM getter must not leak the property: a consuming module reads
     /// the metadata visibility (kotlinc: `internal val` flags `8704` vs public `8710`).
     pub visibility: crate::types::Visibility,
+    /// How SOURCE spelled the declared type and receiver — see [`FnMeta::spellings`].
+    pub spellings: crate::spelling::DeclaredSpellings,
+    /// Whether the property owns a BACKING FIELD. A computed property (`val d get() = 5L`) and
+    /// every extension property have none, and kotlinc then omits the `JvmPropertySignature.field`
+    /// entry entirely rather than recording an empty (derived) one.
+    pub has_backing_field: bool,
+    /// Whether the getter is DECLARED rather than compiler-default. kotlinc records
+    /// `Property.getter_flags` (f7) = 70 — public·final·`isNotDefault` — for a declared getter and
+    /// omits the field for a default one.
+    pub has_declared_getter: bool,
 }
 
 /// A public top-level typealias declaration in package metadata.
@@ -463,6 +504,13 @@ pub struct TypeAliasMeta {
     /// Declared visibility — `TypeAlias.flags` (f1) carries it; elided at the public default so an
     /// `internal typealias` writes an explicit 0 and stays module-bound for consumers.
     pub visibility: crate::types::Visibility,
+    /// How the right-hand side was SPELLED, which decides `underlying_type` (f4) and abbreviates
+    /// `expanded_type` (f6) — see [`crate::spelling`].
+    pub expansion_spelling: crate::spelling::Spelled,
+    /// Position of the declaration in the FILE (see [`PropMeta::decl_order`]). kotlinc interns
+    /// package-member strings in SOURCE DECLARATION order across kinds, so a `typealias` declared
+    /// above a function interns before it even though `Package.type_alias` (f5) is written last.
+    pub decl_order: usize,
 }
 
 fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
@@ -497,9 +545,21 @@ fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
         p.repeated_message(3, &encode_type_parameter(st, index, formal, false));
         // TypeAlias.type_parameter = 3
     }
-    let target = type_pb_generic(st, alias.expansion, &tps);
-    p.field_message(4, &target); // TypeAlias.underlying_type = 4
-    p.field_message(6, &target); // TypeAlias.expanded_type = 6
+    // `underlying_type` (f4) is the right-hand side AS WRITTEN and `expanded_type` (f6) is that
+    // side fully expanded. They coincide only when the right-hand side names a CLASS. When it names
+    // another alias (`typealias Chain = Cargo`), kotlinc writes f4 as a bare
+    // `Type{type_alias_name = Cargo}` — no `class_name` at all — and gives f6 the expanded class
+    // with `Cargo` as its `abbreviated_type`.
+    let underlying = crate::metadata::type_encoder::encode_spelled_type(
+        st,
+        alias.expansion,
+        &alias.expansion_spelling,
+        &tps,
+    )
+    .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"));
+    p.field_message(4, &underlying); // TypeAlias.underlying_type = 4
+    let expanded = type_pb_declared(st, alias.expansion, &alias.expansion_spelling, &tps);
+    p.field_message(6, &expanded); // TypeAlias.expanded_type = 6
     p
 }
 
@@ -521,14 +581,14 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     let mut p = Pb::new();
     p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
     let tps = type_parameters(m.type_params.iter().map(String::as_str));
-    let ret = type_pb_generic(st, m.ty, &tps);
+    let ret = type_pb_declared(st, m.ty, &m.spellings.ret, &tps);
     p.field_message(3, &ret); // Property.return_type = 3
     for (id, name) in m.type_params.iter().enumerate() {
         let tp = encode_type_parameter(st, id, name, false);
         p.repeated_message(4, &tp); // Property.type_parameter = 4
     }
     if let Some(recv) = m.receiver {
-        let rt = type_pb_generic(st, recv, &tps);
+        let rt = type_pb_declared(st, recv, &m.spellings.receiver, &tps);
         p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
     }
     let vis: u64 = match m.visibility {
@@ -555,10 +615,19 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     if pflags != property_flags::DEFAULT {
         p.field_varint(11, pflags); // Property.flags = 11
     }
+    // Property.getter_flags = 7 — emitted only for a DECLARED getter (`isNotDefault`), where it
+    // reads 70 = public·final·isNotDefault. A compiler-default getter omits the field.
+    if m.has_declared_getter {
+        p.field_varint(7, property_flags::DECLARED_ACCESSOR);
+    }
     let mut jvm = Pb::new();
-    jvm.field_message(1, &Pb::new()); // field (empty → derived)
-                                      // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
-                                      // entry alone.
+    // `field` (empty → derived) only when a backing field EXISTS: a computed or extension property
+    // has none, and kotlinc omits the entry rather than recording an empty one.
+    if m.has_backing_field {
+        jvm.field_message(1, &Pb::new());
+    }
+    // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
+    // entry alone.
     if !m.is_const {
         let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
         jvm.field_message(3, &getter);
@@ -582,25 +651,41 @@ pub fn build_package(
     // STRINGS INTERN IN SOURCE DECLARATION ORDER across kinds (a `const val` before a `fun`
     // interns first), while the proto still writes functions (f3) before properties (f4) — so the
     // d2 indices match kotlinc's. Build each sub-message in declaration order, emit by field.
-    let mut build_order: Vec<(usize, bool, usize)> = funcs
+    // Ordering within one `decl_order` slot: a `typealias` carries the index of the declaration it
+    // PRECEDES (it is not itself an entry in the file's declaration arena), so on a tie it interns
+    // first — which is what source order means.
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum Kind {
+        Alias,
+        Function,
+        Property,
+    }
+    let mut build_order: Vec<(usize, Kind, usize)> = funcs
         .iter()
         .enumerate()
-        .map(|(index, f)| (f.decl_order, false, index))
+        .map(|(index, f)| (f.decl_order, Kind::Function, index))
         .chain(
             props
                 .iter()
                 .enumerate()
-                .map(|(index, m)| (m.decl_order, true, index)),
+                .map(|(index, m)| (m.decl_order, Kind::Property, index)),
+        )
+        .chain(
+            aliases
+                .iter()
+                .enumerate()
+                .map(|(index, a)| (a.decl_order, Kind::Alias, index)),
         )
         .collect();
     build_order.sort();
     let mut fn_pbs: Vec<Option<Pb>> = (0..funcs.len()).map(|_| None).collect();
     let mut prop_pbs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
-    for (_, is_prop, index) in build_order {
-        if is_prop {
-            prop_pbs[index] = Some(property_pb(&mut st, &props[index]));
-        } else {
-            fn_pbs[index] = Some(function_pb(&mut st, &funcs[index]));
+    let mut alias_pbs: Vec<Option<Pb>> = (0..aliases.len()).map(|_| None).collect();
+    for (_, kind, index) in build_order {
+        match kind {
+            Kind::Function => fn_pbs[index] = Some(function_pb(&mut st, &funcs[index])),
+            Kind::Property => prop_pbs[index] = Some(property_pb(&mut st, &props[index])),
+            Kind::Alias => alias_pbs[index] = Some(type_alias_pb(&mut st, &aliases[index])),
         }
     }
     for fp in fn_pbs.iter().flatten() {
@@ -609,9 +694,8 @@ pub fn build_package(
     for pp in prop_pbs.iter().flatten() {
         package.repeated_message(4, pp); // Package.property = 4
     }
-    for alias in aliases {
-        let alias = type_alias_pb(&mut st, alias);
-        package.repeated_message(5, &alias); // Package.type_alias = 5
+    for ap in alias_pbs.iter().flatten() {
+        package.repeated_message(5, ap); // Package.type_alias = 5
     }
     let stt = st.serialize_types();
 
@@ -644,6 +728,7 @@ mod tests {
     fn matches_kotlinc_reference_for_f_int_int() {
         let (d1, d2) = build_package(
             &[FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 annotations: Vec::new(),
                 decl_order: 0,
                 jvm_name: None,
@@ -675,6 +760,7 @@ mod tests {
     fn package_property_constant_flag_follows_checked_initializer_fact() {
         fn property(has_constant: bool) -> PropMeta {
             PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 visibility: crate::types::Visibility::Public,
                 name: "answer".into(),
                 ty: Ty::Int,
@@ -685,6 +771,8 @@ mod tests {
                 setter: None,
                 is_const: false,
                 has_constant,
+                has_backing_field: true,
+                has_declared_getter: false,
                 decl_order: 0,
             }
         }
@@ -715,6 +803,7 @@ mod tests {
         let (d1, d2) = build_package(
             &[],
             &[PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 visibility: crate::types::Visibility::Public,
                 name: "doubled".into(),
                 ty: Ty::String,
@@ -727,6 +816,8 @@ mod tests {
                 ),
                 setter: None,
                 is_const: false,
+                has_backing_field: false,
+                has_declared_getter: true,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -757,6 +848,7 @@ mod tests {
         let (d1, d2) = build_package(
             &[],
             &[PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 visibility: crate::types::Visibility::Public,
                 name: "live".into(),
                 ty: t,
@@ -767,6 +859,8 @@ mod tests {
                 setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
                 is_const: false,
                 has_constant: false,
+                has_backing_field: false,
+                has_declared_getter: true,
                 decl_order: 0,
             }],
             &[],
@@ -812,6 +906,7 @@ mod tests {
         };
         let (d1, d2) = build_package(
             &[FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 annotations: Vec::new(),
                 decl_order: 0,
                 jvm_name: None,
@@ -854,6 +949,7 @@ mod tests {
         // return Int + param Int must share one string-table entry (index 1).
         let (_d1, d2) = build_package(
             &[FnMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
                 annotations: Vec::new(),
                 decl_order: 0,
                 jvm_name: None,

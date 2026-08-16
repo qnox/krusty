@@ -209,6 +209,7 @@ mod tests {
             "names",
             "plugins",
             "runtime",
+            "spelling",
             "symbol_resolver",
             "symbol_source",
             "toolchain",

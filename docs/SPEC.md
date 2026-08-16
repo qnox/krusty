@@ -4338,6 +4338,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   from a spelling-derived function guess or an error-type fallback.
   Tests: `tests/function_expected_e2e.rs`.
 
+- **A `typealias` spelled in a DECLARED type survives into `@Metadata`.** A type alias is
+  transparent to every semantic question — `Cargo` and `Payload` are the same type, assignable and
+  comparable without conversion — but Kotlin still records which of the two source WROTE. A declared
+  type (parameter, return, property, receiver, supertype, type-parameter bound, constructor
+  parameter) that names an alias emits the expanded classifier as `Type.class_name` and the spelling
+  as `Type.abbreviated_type` (field 13, whose `Type.type_alias_name` is field 12). This is per TYPE
+  NODE and recursive: `List<Cargo>` abbreviates the argument, not the `List`. Only the OUTERMOST
+  alias of a chain is recorded. An alias in CODE position (`Cargo(7)`) is not a declared type and
+  carries none, and an `import x.Y as Z` rename is not a typealias and carries none either.
+  Consequently the alias identity is surface syntax, never semantics: it is carried BESIDE `Ty` (see
+  `crate::spelling`) precisely so that no type comparison, interner bucket, or hash lookup can split
+  on it. Byte-identity against kotlinc is the definition of correct here, not decode equivalence —
+  the spelling changes the `d2` string table, so a merely "equivalent" encoding is observably
+  different. See `docs/METADATA_NOTES.md` for the wire rules and interning order.
+  Tests: `tests/typealias_abbreviated_type_e2e.rs`.
+
+- **A qualified `typealias` spelling denotes its TARGET, not the alias.** `app.Cargo` and `Cargo`
+  name the same declaration and must resolve identically. A dotted spelling reaches name resolution
+  intact — the parse seam expands only what it can match — and qualified resolution answers it with
+  the alias's own declaration, because an alias declaration IS a name its package contains. That is
+  correct for resolving the NAME and wrong for the TYPE it denotes: an alias is a resolution edge,
+  never a classifier. Resolving it as one made the alias its own type, and the emitted descriptor
+  named `app/Cargo` — a class nothing declares or emits, so the class file would fail to load. The
+  two alias kinds must also agree: a function-type alias has no classifier at all, so the same
+  treatment could only report `unresolved reference`, rejecting valid Kotlin. Both are expanded by
+  matching the alias's own qualified spelling, so neither depends on the alias having a target class.
+  Tests: `tests/typealias_abbreviated_type_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
