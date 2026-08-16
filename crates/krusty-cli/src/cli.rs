@@ -123,14 +123,11 @@ fn apply_jvm_default(
     value: &str,
     parse_value: fn(&str) -> Option<JvmDefaultMode>,
 ) {
-    // An unknown value AND a known-but-unimplemented one are fatal. Merely recording either as an
-    // ignored option would let the driver continue with `Enable`, silently emitting a different
-    // interface shape than the invocation requested.
+    // An unknown value is fatal. Merely recording it as an ignored option would let the driver
+    // continue with `Enable`, silently emitting a different interface shape than the invocation
+    // requested. Every value kotlinc accepts is emitted, so there is no second rejection class.
     match parse_value(value) {
-        Some(mode) if mode.is_modelled() => opts.jvm_default = mode,
-        Some(_) => opts.errors.push(format!(
-            "unsupported {flag} mode '{value}': krusty does not emit that interface shape"
-        )),
+        Some(mode) => opts.jvm_default = mode,
         None => opts
             .errors
             .push(format!("invalid value '{value}' for {flag}")),
@@ -460,26 +457,27 @@ mod tests {
         );
     }
 
-    /// `disable` is a real kotlinc mode krusty does not emit. Accepting it would be a silent
-    /// miscompile: the emitter would produce the `enable` class shape while `@Metadata` announced
-    /// `disable`, and a consumer trusting that metadata routes every call through a `$DefaultImpls`
-    /// method that was never emitted (`NoSuchMethodError` at run time).
+    /// Every value kotlinc accepts selects a shape krusty emits; a value it does not accept is fatal
+    /// rather than quietly compiled as the default, which would hand the build a different interface
+    /// shape than it asked for.
     #[test]
-    fn an_unimplemented_jvm_default_mode_is_refused_not_silently_accepted() {
+    fn an_unknown_jvm_default_value_is_fatal_and_every_real_one_is_accepted() {
         use krusty::jvm::ir_emit::JvmDefaultMode;
-        for flag in ["-jvm-default=disable", "-Xjvm-default=disable"] {
-            let parsed = parse_args(&[flag, "x.kt"]);
-            assert_eq!(
-                parsed.jvm_default,
-                JvmDefaultMode::Enable,
-                "{flag} must not select an unemitted shape"
-            );
-            assert!(
-                parsed.errors.iter().any(|entry| entry.contains("disable")),
-                "{flag} must be reported: {:?}",
-                parsed.errors
-            );
+        for (value, expected) in [
+            ("disable", JvmDefaultMode::Disable),
+            ("enable", JvmDefaultMode::Enable),
+            ("no-compatibility", JvmDefaultMode::NoCompatibility),
+        ] {
+            let parsed = parse_args(&[&format!("-jvm-default={value}"), "x.kt"]);
+            assert_eq!(parsed.jvm_default, expected, "-jvm-default={value}");
+            assert!(parsed.errors.is_empty(), "{value}: {:?}", parsed.errors);
         }
+        let parsed = parse_args(&["-jvm-default=sideways", "x.kt"]);
+        assert!(
+            parsed.errors.iter().any(|entry| entry.contains("sideways")),
+            "an unknown value must fail the invocation: {:?}",
+            parsed.errors
+        );
     }
 
     /// kotlinc's `-X…` flags take their value with `=` only. Consuming a following argument would
