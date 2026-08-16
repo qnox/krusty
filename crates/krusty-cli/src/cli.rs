@@ -200,6 +200,22 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             }
             "-Xno-param-assertions" => opts.no_param_assertions = true,
             "-Xno-call-assertions" => opts.no_call_assertions = true,
+            // `-Xlambdas` / `-Xsam-conversions` select how a lambda and a SAM conversion are
+            // realized. krusty emits `indy` (a `LambdaMetafactory` call site) always, byte-for-byte
+            // as kotlinc does under that value — which is also kotlinc's default and what
+            // intellij-community builds with. `class` asks for synthetic lambda CLASSES instead, a
+            // shape krusty has no emitter for, so it is reported rather than silently compiled as
+            // `indy`: the class set alone differs (one extra class file per lambda).
+            flag if flag.starts_with("-Xlambdas=") || flag.starts_with("-Xsam-conversions=") => {
+                let (name, value) = flag
+                    .split_once('=')
+                    .expect("the guard above already matched an `=`");
+                if value != "indy" {
+                    opts.errors.push(format!(
+                        "{name}={value} selects an output shape krusty does not emit"
+                    ));
+                }
+            }
             "-no-stdlib" => opts.no_stdlib = true,
             "-no-reflect" => opts.no_reflect = true,
             "-no-jdk" => opts.no_jdk = true,
@@ -336,6 +352,8 @@ Common options (kotlinc-compatible):
                         (legacy -Xjvm-default=all | all-compatibility)
   -Xno-param-assertions omit JVM entry guards for non-null parameters
   -Xno-call-assertions  omit JVM assertions on platform-typed call results
+  -Xlambdas=indy        emit lambdas through LambdaMetafactory (class is not supported)
+  -Xsam-conversions=indy emit SAM conversions through LambdaMetafactory
   -help                 print this help and exit
 
 Sources may be .kt files or directories (scanned recursively). Kotlin scripts are not yet compiled.
@@ -370,6 +388,31 @@ mod tests {
         let default = parse_args(&["x.kt"]);
         assert!(!default.no_param_assertions);
         assert!(!default.no_call_assertions);
+    }
+
+    /// `indy` is what krusty emits, so asking for it is honored silently. Any other value asks for a
+    /// shape krusty cannot emit and must be reported — compiling `class` as `indy` would hand the
+    /// build a different set of class files than it asked for.
+    #[test]
+    fn only_the_indy_lambda_strategy_is_accepted_silently() {
+        for flag in ["-Xlambdas=indy", "-Xsam-conversions=indy"] {
+            let parsed = parse_args(&[flag, "x.kt"]);
+            assert!(
+                parsed.ignored.is_empty(),
+                "{flag} matches what krusty emits: {:?}",
+                parsed.ignored
+            );
+            assert!(parsed.errors.is_empty(), "{flag}: {:?}", parsed.errors);
+            assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+        }
+        for flag in ["-Xlambdas=class", "-Xsam-conversions=class"] {
+            let parsed = parse_args(&[flag, "x.kt"]);
+            assert!(
+                parsed.errors.iter().any(|entry| entry.contains("class")),
+                "{flag} must FAIL the compile, not warn: {:?}",
+                parsed.errors
+            );
+        }
     }
 
     #[test]
