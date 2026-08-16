@@ -113,13 +113,23 @@ pub struct EmitRun {
     /// (a `require { … }` message, an inlined `flatMap { … }` body) never emits one, so its standalone
     /// `$lambda$N` method is dead — dropped on the re-emit (kotlinc emits neither it nor its facade).
     used_lambdas: std::cell::RefCell<std::collections::HashSet<u32>>,
+    /// Subset of live closures actually realized with `invokedynamic`. A class-strategy closure still
+    /// keeps its implementation method but does not impose the JVM-7 classfile requirement.
+    used_indy_lambdas: std::cell::RefCell<std::collections::HashSet<u32>>,
     /// Lambda classes to synthesize for `-Xlambdas=class`, recorded as their `invokedynamic`
     /// replacement is emitted and drained by the class driver. They cannot be written inline: the
     /// emitter is mid-way through the ENCLOSING class's writer when it reaches a lambda.
     lambda_classes: std::cell::RefCell<Vec<LambdaClassPlan>>,
-    /// `(impl, name)` of every lambda class already written this file, so a body emitted twice does
-    /// not contribute two classes.
-    lambda_classes_written: std::cell::RefCell<std::collections::HashSet<(u32, String)>>,
+    /// Source/synthetic identity of every lambda class already written this file, paired with its JVM
+    /// owner. A source lambda lowered into multiple constructors still contributes one class.
+    lambda_classes_written:
+        std::cell::RefCell<std::collections::HashSet<(String, LambdaClassIdentity)>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum LambdaClassIdentity {
+    Source(u32),
+    Synthetic(u32),
 }
 
 /// One synthetic lambda class to write under [`LambdaMode::Class`].
@@ -150,10 +160,7 @@ struct LambdaClassPlan {
     /// Whether the body lives on an INTERFACE: a static call to one needs an `InterfaceMethodref`
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
-    /// The lambda's implementation function. IDENTITY: one source lambda has exactly one impl, so
-    /// this is what keeps a body emitted more than once (a property initializer is emitted per
-    /// constructor) from contributing a second class.
-    impl_fn: u32,
+    identity: LambdaClassIdentity,
 }
 
 impl EmitRun {
@@ -199,9 +206,8 @@ pub struct EmitEnv<'a> {
     /// on the `$DefaultImpls` holder, not on the interface, so a call that omits a defaulted argument
     /// must target the holder or it links to a method that does not exist.
     jvm_default: JvmDefaultMode,
-    /// The lambda strategy in force (`-Xlambdas`). Carried here rather than read from `EmitOptions`
-    /// at the lambda site because the emitter has the env, not the options.
-    lambdas: LambdaMode,
+    /// The independently selected plain-lambda and SAM-conversion strategies.
+    lambda_modes: LambdaModes,
 }
 
 /// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
@@ -245,6 +251,25 @@ pub enum LambdaMode {
     /// static `INSTANCE` field; a capturing one is constructed per evaluation with its captures as
     /// constructor arguments.
     Class,
+}
+
+/// JVM realization strategies for the two distinct Kotlin compiler options. Keeping the pair as one
+/// value lets every CLI/backend/emitter boundary forward the same normalized configuration without
+/// parallel booleans or last-option-wins behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LambdaModes {
+    pub lambdas: LambdaMode,
+    pub sam_conversions: LambdaMode,
+}
+
+impl LambdaModes {
+    fn for_sam(self, is_sam: bool) -> LambdaMode {
+        if is_sam {
+            self.sam_conversions
+        } else {
+            self.lambdas
+        }
+    }
 }
 
 /// kotlinc's `-jvm-default` strategy for interface members with bodies — which of the three JVM
@@ -376,9 +401,8 @@ pub struct EmitOptions {
     /// measured past them. A PROPERTY SETTER's `<set-?>` guard has no IR record — it is derived here
     /// from the property's type — so those sites read this flag instead.
     pub param_assertions: bool,
-    /// `-Xlambdas` / `-Xsam-conversions`: which lambda strategy the emitter uses. Per-INVOCATION,
-    /// applied by the backend with [`EmitOptions::with_lambdas`] like [`EmitOptions::with_jvm_default`].
-    pub lambdas: LambdaMode,
+    /// Independent `-Xlambdas` / `-Xsam-conversions` strategies for this invocation.
+    pub lambda_modes: LambdaModes,
     pub inner_class_resolver: Option<InnerClassResolver>,
 }
 
@@ -389,9 +413,9 @@ impl EmitOptions {
         self
     }
 
-    /// Select the lambda strategy (`-Xlambdas`), keeping every other field as configured.
-    pub fn with_lambdas(mut self, mode: LambdaMode) -> Self {
-        self.lambdas = mode;
+    /// Select the independently configured lambda strategies, keeping every other field unchanged.
+    pub fn with_lambda_modes(mut self, modes: LambdaModes) -> Self {
+        self.lambda_modes = modes;
         self
     }
 }
@@ -405,7 +429,7 @@ impl Default for EmitOptions {
             emit_class_metadata: true,
             jvm_default: JvmDefaultMode::Enable,
             param_assertions: true,
-            lambdas: LambdaMode::Indy,
+            lambda_modes: LambdaModes::default(),
             inner_class_resolver: None,
         }
     }
@@ -3183,7 +3207,7 @@ pub fn emit_all(
         continuation_metadata: &empty_continuation_metadata,
         signature_symbols: &signature_symbols,
         jvm_default: JvmDefaultMode::default(),
-        lambdas: LambdaMode::Indy,
+        lambda_modes: LambdaModes::default(),
     };
     emit_all_with_class_meta(ir, facade, &env, metadata, &EmitOptions::default(), &|_| {
         None
@@ -3243,7 +3267,7 @@ pub fn emit_all_with_opts_and_metadata(
         continuation_metadata: metadata.continuations,
         signature_symbols: &signature_symbols,
         jvm_default: opts.jvm_default,
-        lambdas: opts.lambdas,
+        lambda_modes: opts.lambda_modes,
     };
     emit_all_with_class_meta(ir, facade, &env, metadata.facade, opts, &|_| None)
 }
@@ -3279,10 +3303,10 @@ fn emit_all_with_class_meta_impl(
     opts: &EmitOptions,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    // Pass 1 (discovery): emit everything, recording which lambda impls actually get an `invokedynamic`
-    // (`run.used_lambdas`). A lambda spliced by the inliner never emits one — its standalone `$lambda$N`
-    // is dead, and kotlinc emits neither the method nor (for a class-only file) the facade holding it.
+    // Pass 1 (discovery): emit everything, recording live closure implementations and the subset that
+    // actually uses `invokedynamic`. A lambda spliced by the inliner emits neither realization.
     env.run.used_lambdas.borrow_mut().clear();
+    env.run.used_indy_lambdas.borrow_mut().clear();
     let empty = std::collections::HashSet::new();
     let first = emit_pass(
         ir,
@@ -3297,11 +3321,12 @@ fn emit_all_with_class_meta_impl(
         },
     )?;
     let used = env.run.used_lambdas.borrow().clone();
+    let used_indy = env.run.used_indy_lambdas.borrow().clone();
     // `invokedynamic` was added in class-file version 51 (Java 7). Do not return a version-50 class
     // containing an opcode that its declared target cannot represent. This check uses the emitter's
     // discovery result rather than the source/IR lambda count: an inline-only lambda that was fully
     // spliced emitted no call site and therefore remains valid for the older target.
-    if opts.class_major.is_some_and(|major| major < 51) && !used.is_empty() {
+    if opts.class_major.is_some_and(|major| major < 51) && !used_indy.is_empty() {
         env.run
             .set_emit_error("krusty: invokedynamic requires JVM target 1.7 or newer".to_string());
         return None;
@@ -3739,7 +3764,7 @@ fn drain_lambda_classes(env: &EmitEnv, opts: &EmitOptions) -> Vec<(String, Vec<u
         // constructor) while still being one source lambda, and two plans must never resolve to the
         // same class name — the output is a plain list, so a duplicate would silently overwrite the
         // other on disk.
-        if !written.insert((plan.impl_fn, plan.internal.clone())) {
+        if !written.insert((plan.impl_owner.clone(), plan.identity)) {
             continue;
         }
         out.push(build_lambda_class(&plan, opts));
@@ -3768,6 +3793,19 @@ fn return_primitive(code: &mut CodeBuilder, ty: Ty) {
         Ty::Unit => code.ret_void(),
         _ => code.ireturn(),
     }
+}
+
+/// Whether `fid` is the implementation selected for a class-realized closure. This consumes the
+/// explicit IR edge from a lambda to its implementation; generated method spelling is never used as
+/// identity, and mixed `-Xlambdas`/`-Xsam-conversions` modes select only the matching closure kind.
+fn lambda_impl_uses_class_strategy(ir: &IrFile, fid: u32, modes: LambdaModes) -> bool {
+    ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::Lambda { impl_fn, sam, .. }
+                if *impl_fn == fid && modes.for_sam(sam.is_some()) == LambdaMode::Class
+        )
+    })
 }
 
 /// Whether the JVM backend can represent this IR. The JVM stdlib provides fixed-arity
@@ -8903,8 +8941,8 @@ fn emit_method_inner_with_holder(
             // narrowest visibility that keeps the delegation working.
             // A static interface method must carry exactly one of ACC_PUBLIC / ACC_PRIVATE
             // (JVMS 4.6), so an interface's impl opens all the way to public instead.
-            let called_from_lambda_class = env.lambdas == LambdaMode::Class
-                && ir.functions[fid as usize].name.contains("$lambda$");
+            let called_from_lambda_class =
+                lambda_impl_uses_class_strategy(ir, fid, env.lambda_modes);
             match (called_from_lambda_class, owner_is_iface) {
                 (true, true) => 0x0001,
                 (true, false) => 0x0000,
@@ -10083,8 +10121,8 @@ struct Emitter<'a> {
     record_locals: bool,
     /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
     this_uninitialized: bool,
-    /// `-Xlambdas`: `Class` replaces each `invokedynamic` with a synthesized class instantiation.
-    lambdas: LambdaMode,
+    /// Independent realization strategies for plain lambdas and SAM conversions.
+    lambda_modes: LambdaModes,
 }
 
 fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
@@ -10119,7 +10157,7 @@ impl<'a> Emitter<'a> {
             block_depth: 0,
             record_locals: false,
             this_uninitialized: false,
-            lambdas: env.lambdas,
+            lambda_modes: env.lambda_modes,
         }
     }
 
@@ -13314,9 +13352,13 @@ impl<'a> Emitter<'a> {
                 sam,
                 ..
             } => {
-                // This lambda becomes a REAL closure (`invokedynamic` referencing its impl method) — record
-                // it so the dead-lambda pass keeps the impl. An INLINED lambda never reaches this arm.
+                // This lambda becomes a real closure. Record the implementation so the dead-lambda
+                // pass keeps it; separately record only the indy realization for target-version checks.
                 self.run.used_lambdas.borrow_mut().insert(*impl_fn);
+                let lambda_mode = self.lambda_modes.for_sam(sam.is_some());
+                if lambda_mode == LambdaMode::Indy {
+                    self.run.used_indy_lambdas.borrow_mut().insert(*impl_fn);
+                }
                 let f = &self.ir.functions[*impl_fn as usize];
                 let impl_name = f.name.clone();
                 let impl_params = jvm_tys(&f.params);
@@ -13426,31 +13468,38 @@ impl<'a> Emitter<'a> {
                     .find(|c| c.methods.contains(impl_fn))
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
-                if self.lambdas == LambdaMode::Class {
-                    // `box$lambda$0` names the enclosing declaration and this lambda's index within
-                    // it, which is exactly what the synthetic class name is built from.
-                    let (enclosing, index) = impl_name
-                        .split_once("$lambda$")
-                        .map(|(head, tail)| (head.to_string(), tail.parse::<u32>().unwrap_or(0)))
-                        .unwrap_or_else(|| (impl_name.clone(), 0));
-                    // kotlinc names the class after the declaration the lambda initializes
-                    // (`LKt$box$plain$1`), falling back to a 1-based index among the enclosing
-                    // declaration's lambdas when it initializes nothing (`C$m$1`).
-                    let bound_name = self.ir.exprs.iter().enumerate().find_map(|(id, node)| {
-                        match node {
-                            IrExpr::Variable {
-                                index: value_index,
-                                init: Some(init),
-                                named: true,
-                                ..
-                            } if *init == e => self.ir.value_names.get(value_index).cloned(),
-                            _ => None,
-                        }
-                        .filter(|_| id as u32 != e)
-                    });
-                    let internal = match &bound_name {
-                        Some(name) => format!("{impl_owner}${enclosing}${name}$1"),
-                        None => format!("{impl_owner}${enclosing}${}", index + 1),
+                if lambda_mode == LambdaMode::Class {
+                    // Common lowering records the source lambda's stable lexical origin. Consume that
+                    // edge directly: a source lambda lowered into multiple constructors keeps one name
+                    // and identity, and no generated method spelling or value table is searched here.
+                    let origin = self.ir.lambda_origins.get(impl_fn);
+                    let (internal, identity) = if let Some(origin) = origin {
+                        let ordinal = origin.ordinal + 1;
+                        let internal = match &origin.binding_name {
+                            Some(binding) => format!(
+                                "{impl_owner}${}${binding}${ordinal}",
+                                origin.enclosing_name
+                            ),
+                            None => format!("{impl_owner}${}${ordinal}", origin.enclosing_name),
+                        };
+                        (
+                            internal,
+                            LambdaClassIdentity::Source(origin.source_expression),
+                        )
+                    } else {
+                        // Backend-synthesized lambdas have no source expression. Their implementation
+                        // id is already the exact stable identity; its generated name is serialization
+                        // input only for this JVM artifact boundary.
+                        let (enclosing, index) = impl_name
+                            .split_once("$lambda$")
+                            .map(|(head, tail)| {
+                                (head.to_string(), tail.parse::<u32>().unwrap_or(0))
+                            })
+                            .unwrap_or_else(|| (impl_name.clone(), 0));
+                        (
+                            format!("{impl_owner}${enclosing}${}", index + 1),
+                            LambdaClassIdentity::Synthetic(*impl_fn),
+                        )
                     };
                     self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
                         internal: internal.clone(),
@@ -13463,7 +13512,7 @@ impl<'a> Emitter<'a> {
                         captures: cap_tys.to_vec(),
                         arity: *arity as u32,
                         kotlin_function: sam.is_none(),
-                        impl_fn: *impl_fn,
+                        identity,
                         owner_is_interface: self
                             .ir
                             .classes

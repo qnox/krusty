@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use krusty::features::LangFeatures;
 use krusty::jvm::classpath::platform_jdk_modules;
-use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaMode};
+use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaMode, LambdaModes};
 
 pub struct Options {
     /// Output directory or `.jar` (kotlinc `-d`).
@@ -41,8 +41,8 @@ pub struct Options {
     /// `-jvm-default <mode>` (or legacy `-Xjvm-default <mode>`): how an interface's members with
     /// bodies are realized on the JVM.
     pub jvm_default: JvmDefaultMode,
-    /// `-Xlambdas` / `-Xsam-conversions`. `None` ⇒ the emitter's default (`indy`).
-    pub lambdas: Option<LambdaMode>,
+    /// Independently selected `-Xlambdas` / `-Xsam-conversions` strategies.
+    pub lambda_modes: LambdaModes,
     /// `-Xno-param-assertions`: omit the `Intrinsics.checkNotNullParameter` guards kotlinc emits at
     /// the entry of every function reachable from Java.
     pub no_param_assertions: bool,
@@ -72,7 +72,7 @@ impl Default for Options {
             no_jdk: false,
             jvm_target_major: None,
             jvm_default: JvmDefaultMode::default(),
-            lambdas: None,
+            lambda_modes: LambdaModes::default(),
             no_param_assertions: false,
             no_call_assertions: false,
         }
@@ -203,17 +203,25 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             // `-Xlambdas` / `-Xsam-conversions` select how a lambda and a SAM conversion are
             // realized: `indy` is a `LambdaMetafactory` call site (kotlinc's default since 2.0),
             // `class` gives each lambda its own class extending `kotlin.jvm.internal.Lambda`. The
-            // two differ in the emitted class SET, so the value selects an emitter strategy rather
-            // than being advisory. Both flags write the SAME strategy here, so a mixed invocation
-            // resolves to whichever came last; kotlinc lets the two disagree and krusty does not
-            // model that split yet.
+            // two differ in the emitted class SET, so each value selects its own emitter strategy
+            // rather than being advisory.
             flag if flag.starts_with("-Xlambdas=") || flag.starts_with("-Xsam-conversions=") => {
                 let (name, value) = flag
                     .split_once('=')
                     .expect("the guard above already matched an `=`");
                 match value {
-                    "indy" => opts.lambdas = Some(LambdaMode::Indy),
-                    "class" => opts.lambdas = Some(LambdaMode::Class),
+                    "indy" | "class" => {
+                        let mode = if value == "indy" {
+                            LambdaMode::Indy
+                        } else {
+                            LambdaMode::Class
+                        };
+                        if name == "-Xlambdas" {
+                            opts.lambda_modes.lambdas = mode;
+                        } else {
+                            opts.lambda_modes.sam_conversions = mode;
+                        }
+                    }
                     _ => opts.errors.push(format!(
                         "{name}={value} selects an output shape krusty does not emit"
                     )),
@@ -413,8 +421,16 @@ mod tests {
         for flag in ["-Xlambdas=class", "-Xsam-conversions=class"] {
             let parsed = parse_args(&[flag, "x.kt"]);
             assert!(parsed.errors.is_empty(), "{flag}: {:?}", parsed.errors);
-            assert_eq!(parsed.lambdas, Some(LambdaMode::Class), "{flag}");
+            let selected = if flag.starts_with("-Xlambdas") {
+                parsed.lambda_modes.lambdas
+            } else {
+                parsed.lambda_modes.sam_conversions
+            };
+            assert_eq!(selected, LambdaMode::Class, "{flag}");
         }
+        let parsed = parse_args(&["-Xlambdas=class", "-Xsam-conversions=indy", "x.kt"]);
+        assert_eq!(parsed.lambda_modes.lambdas, LambdaMode::Class);
+        assert_eq!(parsed.lambda_modes.sam_conversions, LambdaMode::Indy);
         // A value naming NEITHER strategy still fails: it would otherwise compile as one of them.
         let parsed = parse_args(&["-Xlambdas=nonesuch", "x.kt"]);
         assert!(
