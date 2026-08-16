@@ -2874,6 +2874,38 @@ fn new_writer(internal: &str, super_internal: &str, opts: &EmitOptions) -> Class
     new_writer_generic(internal, None, super_internal, opts)
 }
 
+/// The writer for a DECLARED classifier — class, data class, object, interface, enum, enum-entry
+/// subclass, annotation implementation. Which classifiers publish a JVM class `Signature` is decided
+/// here, once, and never by the declaration's kind at the call site: a generic interface carries one
+/// exactly like a generic class, and an enum carries the one its implicit parameterized superclass
+/// `java/lang/Enum<E>` gives it even when the declaration itself is not generic.
+fn new_classifier_writer(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    super_internal: &str,
+    env: &EmitEnv,
+    opts: &EmitOptions,
+) -> ClassWriter {
+    let internal = c.fq_name();
+    let signature = ir
+        .class_signature(&internal)
+        .and_then(|signature| jvm_class_signature(&JvmSignatureFormatter::new(env), signature))
+        .or_else(|| {
+            // An enum with no entries records no signature of its own, yet still extends the
+            // parameterized `java/lang/Enum<E>`. Key this on the SUPERCLASS, not on the entries:
+            // an entry-less enum is emitted through the ordinary class path.
+            (c.superclass_matches("java/lang/Enum") || c.superclass_matches("kotlin/Enum"))
+                .then(|| format!("Ljava/lang/Enum<L{internal};>;"))
+        });
+    // kotlinc (ASM) visits `(name, signature, superName)`, so the signature VALUE interns between
+    // the two class names — it must reach the writer's constructor, not only `set_signature`.
+    let mut cw = new_writer_generic(&internal, signature.as_deref(), super_internal, opts);
+    if let Some(signature) = &signature {
+        cw.set_signature(signature);
+    }
+    cw
+}
+
 /// [`new_writer`] for a class with a generic `Signature`, so the signature value interns in kotlinc's
 /// position (between the class and superclass names).
 fn new_writer_generic(
@@ -4358,12 +4390,7 @@ fn emit_class(
     let fq_name = c.fq_name();
     let superclass = c.superclass();
     let signature_formatter = JvmSignatureFormatter::new(env);
-    // kotlinc (ASM) visits `(name, signature, superName)`, so a generic class's `Signature` VALUE
-    // interns between the two class names — compute it before the writer exists.
-    let raw_class_sig = ir.class_signature(&fq_name);
-    let jvm_sig =
-        raw_class_sig.and_then(|signature| jvm_class_signature(&signature_formatter, signature));
-    let mut cw = new_writer_generic(&fq_name, jvm_sig.as_deref(), &superclass, opts);
+    let mut cw = new_classifier_writer(ir, c, &superclass, env, opts);
     // A LOCAL class needs an `EnclosingMethod` attribute: without it reflection reads the class as
     // top-level and `simpleName` reports the whole `owner$Local` name instead of `Local`. The
     // enclosing class is the longest `$`-prefix of the name that is itself an emitted class (a local
@@ -4489,15 +4516,12 @@ fn emit_class(
     } // Deprecated attribute (a HIDDEN-deprecated `$$serializer` object)
     crate::trace_compiler!(
         "value_classes",
-        "class {} signature: raw={:?} jvm={:?}",
+        "class {} signature: raw={:?}",
         fq_name,
-        raw_class_sig,
-        jvm_sig
+        ir.class_signature(&fq_name)
     );
-    if let Some(s) = &jvm_sig {
-        cw.set_signature(s);
-    }
-    // (Interface refs were added with the header, before the pool seeding.)
+    // (The class `Signature` was set with the writer; interface refs were added with the header,
+    // before the pool seeding.)
     // A class with a `companion object`: its `public static final Companion` field LEADS the field
     // table (kotlinc's order), before the instance fields and any hoisted statics — but its pool
     // entries intern LATE (the `<clinit>` body's `putstatic` introduces them; the field visit dedups).
@@ -7242,7 +7266,7 @@ fn emit_interface_class(
 ) -> Vec<u8> {
     let fq_name = c.fq_name();
     let signature_formatter = JvmSignatureFormatter::new(env);
-    let mut cw = new_writer(&fq_name, "java/lang/Object", opts);
+    let mut cw = new_classifier_writer(ir, c, "java/lang/Object", env, opts);
     cw.set_access(0x0001 | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
     for itf in c.interfaces.iter_rendered() {
         cw.add_interface(&itf);
@@ -7458,9 +7482,7 @@ fn emit_enum_class(
     let arr_desc = format!("[{self_desc}");
     // An enum extends the PARAMETERIZED `java.lang.Enum<E>`, so it carries a class `Signature` —
     // whose value interns between the class and superclass names, as ASM visits them.
-    let enum_sig = format!("Ljava/lang/Enum<L{fq};>;");
-    let mut cw = new_writer_generic(&fq, Some(&enum_sig), "java/lang/Enum", opts);
-    cw.set_signature(&enum_sig);
+    let mut cw = new_classifier_writer(ir, c, "java/lang/Enum", env, opts);
     // An enum with an abstract member is `ACC_ABSTRACT`; one with any bodied entry (so a subclass
     // extends it) must not be `final`. A plain enum stays `final`.
     let has_abstract = c
@@ -7479,13 +7501,8 @@ fn emit_enum_class(
     // Every enum extends the generic `java.lang.Enum<Self>`, so kotlinc emits a class `Signature`
     // (`Ljava/lang/Enum<LSelf;>;` plus a raw `L<itf>;` for each superinterface). The erased
     // descriptor already names `java/lang/Enum`; the Signature carries the `<Self>` type argument.
-    let mut sig = format!("Ljava/lang/Enum<L{fq};>;");
-    for itf in c.interfaces.iter_rendered() {
-        sig.push('L');
-        sig.push_str(&itf);
-        sig.push(';');
-    }
-    cw.set_signature(&sig);
+    // (The class `Signature` came with the writer, from the recorded signature — a hand-rolled one
+    // here would erase the type arguments of every implemented interface.)
     // Interfaces the enum implements (`enum class E : I`) — without these the JVM rejects an
     // interface-typed call with `IncompatibleClassChangeError`.
     for itf in c.interfaces.iter_rendered() {

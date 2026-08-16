@@ -144,6 +144,8 @@ mod class_metadata_roundtrip;
 mod class_tparam_cast_e2e;
 #[path = "classfile_e2e.rs"]
 mod classfile_e2e;
+#[path = "classifier_class_signature_e2e.rs"]
+mod classifier_class_signature_e2e;
 #[path = "classifier_precedence_e2e.rs"]
 mod classifier_precedence_e2e;
 #[path = "classpath_abstract_obligations_e2e.rs"]
