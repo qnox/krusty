@@ -171,6 +171,21 @@ impl ClassInfo {
         self.this_class.render()
     }
 
+    /// The Kotlin package this class's declarations belong to. `@JvmPackageName` divorces that from
+    /// the class file's own location (`package kotlin.test` emitted to
+    /// `kotlin/test/junit5/annotations/AnnotationsKt`), and only `@Metadata`'s `pn` records it — so
+    /// no caller may split the internal name itself. Falls back to the JVM package, which IS the
+    /// declared one for every unrelocated class.
+    pub fn declaring_package(&self) -> TypeName {
+        match &self.meta.package {
+            Some(package) => crate::types::type_name(package),
+            None => self
+                .this_class
+                .parent()
+                .unwrap_or_else(|| crate::types::type_name("")),
+        }
+    }
+
     pub fn this_class_matches(&self, internal: &str) -> bool {
         self.this_class.matches(internal)
     }
@@ -517,6 +532,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         &attrs.d2.unwrap_or_default(),
         attrs.k,
         &this_class,
+        attrs.pn.as_deref(),
         &methods,
     );
     Ok(ClassInfo {
@@ -542,6 +558,11 @@ struct ClassAttrs {
     /// The `@kotlin.Metadata` `k` (kind) element: 1 class, 2 file facade, 4 multi-file facade,
     /// 5 multi-file part.
     k: Option<i32>,
+    /// The `@kotlin.Metadata` `pn` (package name) element, dotted: the Kotlin package the file
+    /// DECLARES when `@JvmPackageName` relocated its facade class elsewhere (`kotlin.test`, for a
+    /// facade emitted to `kotlin/test/junit5/annotations/AnnotationsKt`). Absent on every
+    /// unrelocated class, where the JVM parent package IS the declared one.
+    pn: Option<String>,
     signature: Option<String>,
     retention: Option<String>,
     inner_classes: Vec<InnerClassRef>,
@@ -638,6 +659,22 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                             if let Some(C::Integer(v)) = cp.get(vi as usize) {
                                 out.k = Some(*v);
                             }
+                        }
+                    } else {
+                        // Unexpected shape — stop parsing this class's attributes rather than desync.
+                        return out;
+                    }
+                    continue;
+                }
+                // `@Metadata`'s `pn` (package name) is a String element (`s` tag, Utf8 constant) —
+                // present only when `@JvmPackageName` moved the facade class out of its declared
+                // Kotlin package, which is exactly when the JVM parent package cannot be used as
+                // the declaring package of the facade's top-level declarations.
+                if is_kotlin_meta && ename == "pn" {
+                    let Ok(tag) = attr.u1() else { break };
+                    if tag == b's' {
+                        if let Ok(vi) = attr.u2() {
+                            out.pn = Some(utf8(vi).to_string());
                         }
                     } else {
                         // Unexpected shape — stop parsing this class's attributes rather than desync.
