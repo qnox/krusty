@@ -359,6 +359,13 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         // its current semantics and records these no-ops for Bazel to print.
                         "-progressive" | "-nowarn" => unit.inert.push(value),
                         "-Xexplicit-api=disable" => unit.inert.push(value),
+                        // kotlinc 2.4.10 (JVM) accepts `-Xwasm-kclass-fqn` with only a "flag is
+                        // not supported by this version of the compiler" warning and emits
+                        // byte-identical output with and without it (measured), so a target
+                        // forwarding it (intellij-community's fleet.multiplatform.shims,
+                        // fleet.util.codepoints) is safe to build. Inert here for Bazel to print;
+                        // deliberately NOT generalized to other `-Xwasm-*` flags.
+                        "-Xwasm-kclass-fqn" => unit.inert.push(value),
                         _ => unit.kotlinc_args.push(value),
                     }
                 }
@@ -459,6 +466,15 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
         return Err(Refusal::Unsupported(format!(
             "compiler option(s) not modeled by krusty: {}",
             parsed.ignored.join(", ")
+        )));
+    }
+    // A warn-and-ignore flag (`-Xwasm-kclass-fqn`) must be intercepted as an INERT value above so
+    // Bazel sees the no-effect note; reaching this parse means a cli.rs addition has no matching
+    // worker arm — refuse rather than accept it with neither kotlinc's warning nor an inert report.
+    if !parsed.unsupported_flag_warnings.is_empty() {
+        return Err(Refusal::Unsupported(format!(
+            "warn-and-ignore option(s) missing a worker inert arm: {}",
+            parsed.unsupported_flag_warnings.join(", ")
         )));
     }
     if !parsed.sources.is_empty() {
@@ -891,6 +907,30 @@ mod tests {
         .expect("must translate");
         assert_eq!(unit.kotlinc_args, vec!["-Xjvm-default=all".to_string()]);
         assert_eq!(unit.inert, vec!["-progressive".to_string()]);
+    }
+
+    /// intellij-community's fleet.multiplatform.shims and fleet.util.codepoints targets forward
+    /// `-Xwasm-kclass-fqn` through `kotlinc_opts`. kotlinc 2.4.10 (JVM) accepts it with a "flag is
+    /// not supported by this version of the compiler" warning and emits byte-identical output with
+    /// and without it (measured), so the worker must accept the request and report the flag as
+    /// inert rather than refuse it.
+    #[test]
+    fn wasm_kclass_fqn_is_accepted_as_inert() {
+        let unit = translate(&args(&[
+            "--kotlinc-arg",
+            "-Xwasm-kclass-fqn",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("a measured-inert kotlinc flag must translate");
+        assert_eq!(unit.inert, vec!["-Xwasm-kclass-fqn".to_string()]);
+        assert!(
+            unit.kotlinc_args.is_empty(),
+            "the flag changes nothing, so nothing is forwarded: {:?}",
+            unit.kotlinc_args
+        );
     }
 
     /// A target-provided compiler flag is safe only when the CLI actually models it. Accepting an
