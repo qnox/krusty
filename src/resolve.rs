@@ -10670,25 +10670,42 @@ impl DeferredInferenceDriver<'_> {
         })
     }
 
-    /// `owner` and its source superclasses, nearest first. Interfaces are not walked: a property
-    /// they declare is abstract and has no initializer to resolve. Bounded by the number of classes
-    /// so a malformed cyclic hierarchy cannot spin here.
+    /// Every classifier whose members `owner`'s body can read by bare name, nearest first: itself,
+    /// its source superclasses, the COMPANION of each, and the same again for each lexically
+    /// enclosing class.
+    ///
+    /// A companion's members are readable unqualified from the class body and from a nested class
+    /// (`companion object { val token = … }` read as `token`), so a chain of superclasses alone
+    /// misses them. Interfaces are not walked: a property they declare is abstract and has no
+    /// initializer to resolve. Bounded by the number of classes so a malformed cyclic hierarchy
+    /// cannot spin here.
     fn owner_chain(&self, owner: TypeName) -> Vec<TypeName> {
-        let mut chain = vec![owner];
-        let mut current = owner;
-        for _ in 0..self.table.classes.len() {
-            let Some(next) = self
-                .table
-                .class_by_type_name(current)
-                .and_then(|signature| signature.super_internal)
-            else {
-                break;
-            };
-            if chain.contains(&next) {
-                break;
+        let mut chain: Vec<TypeName> = Vec::new();
+        let mut lexical = Some(owner);
+        let bound = self.table.classes.len() + 1;
+        for _ in 0..bound {
+            let Some(start) = lexical else { break };
+            let mut current = Some(start);
+            for _ in 0..bound {
+                let Some(class) = current else { break };
+                if chain.contains(&class) {
+                    break;
+                }
+                chain.push(class);
+                let signature = self.table.class_by_type_name(class);
+                if let Some(companion) =
+                    signature.and_then(|signature| signature.companion_internal)
+                {
+                    if !chain.contains(&companion) {
+                        chain.push(companion);
+                    }
+                }
+                current = signature.and_then(|signature| signature.super_internal);
             }
-            chain.push(next);
-            current = next;
+            lexical = self
+                .table
+                .class_by_type_name(start)
+                .and_then(|signature| signature.inner_of);
         }
         chain
     }
@@ -43575,6 +43592,20 @@ impl<'a> Checker<'a> {
         name: &str,
         receiver: ImplicitReceiver,
     ) -> Option<Ty> {
+        // A member read through an IMPLICIT receiver — a companion's property named unqualified
+        // from the class body or a nested class — resolves straight out of the member records, so
+        // it reaches neither the bare-name nor the explicit-receiver seam. An undetermined member
+        // read here would otherwise be taken as the answer.
+        if let Some(resolved) = self
+            .demand_member
+            .filter(|_| {
+                self.lookup_prop_name(receiver.ty, name)
+                    .is_some_and(|property| property.0 == Ty::Pending)
+            })
+            .and_then(|demand| demand(receiver.ty, name))
+        {
+            return Some(self.set(expression, resolved));
+        }
         if let Ty::Obj(internal, _) = receiver.ty {
             if self.lookup_prop_name(receiver.ty, name).is_some() {
                 self.record_source_constant(expression, internal, name);
