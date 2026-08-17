@@ -6623,3 +6623,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier still shadows a HIGHER-precedence alias cross-channel — `typealias Sequence = Long` in
   the file's own package loses to the default-imported `kotlin.sequences.Sequence`. Tests:
   `tests/unimported_cross_package_type_e2e.rs`, `tests/cross_file_typealias_e2e.rs`.
+- **`a ?: b` types a property initializer.** Signature inference — the pass that types a property
+  before full checking — had arms for `if` and `when` but none for the elvis, so the whole
+  initializer inferred nothing and a property written
+  `val HOST = System.getenv("APP_HOST") ?: DEFAULT_HOST`, the ordinary spelling of a configurable
+  constant, could not be typed at all; every later read of it was then reported as an unresolved
+  reference, which is what the gap looked like from the outside. The value is the left side when it
+  is non-null and the right side otherwise, so the type is the two sides' with the LEFT side's
+  nullability discharged — that is exactly what the elvis discharges, and keeping it would type the
+  property nullable and reject the member reads the source makes on it. Only the left side's:
+  `a ?: b` with a nullable `b` stays nullable.
+
+  The two sides must AGREE. Kotlin's type for a mix is their least upper bound — for `Int` and
+  `Double` that is `Comparable<*> & Number`, which the reference compiler emits as `Object`, never as
+  a widened primitive — so reusing the arithmetic promotion that serves the `if`/`when` arms would
+  type `maybeInt() ?: 2.5` as `double`, a field descriptor kotlinc never writes and a different value
+  at runtime. A mix declines instead, which costs an inference on a shape that erases to `Object`
+  anyway.
+
+  A PLATFORM right side (`String!` from a Java method) keeps its flexible type rather than having its
+  nullability discharged: the property would otherwise claim to be non-null, which is a guarantee the
+  declaration never made, and the field carried a `@NotNull` while holding `null` at runtime.
+
+  A right side that never yields a value (`?: throw`, the idiom for a required setting) leaves the
+  left side's own type. That is read at the elvis itself rather than by giving `throw` a type:
+  `Nothing` reaching the `if`, `when`, block and bare-initializer paths lets `val a = throw E()`
+  infer a type and emit a `Ljava/lang/Void;` field, where kotlinc rejects the property with
+  "property type 'Nothing' needs to be specified explicitly". The same holds for `return`, which does
+  not belong in an initializer at all. Either side untypeable still declines: a pass that answers
+  where it should decline suppresses the diagnostic that would have rejected the source, and that is
+  how it and the checker come to disagree.
+  Tests: `tests/elvis_signature_inference_e2e.rs`.

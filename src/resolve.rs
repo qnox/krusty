@@ -11732,6 +11732,61 @@ fn infer_lit_ty_p(
             let rt = infer_lit_ty_p(file, *hi, class_names, props, src, env);
             Ty::range_value_type(lt, rt).unwrap_or(Ty::Error)
         }
+        // `a ?: b` — the value is `a` when it is non-null and `b` otherwise, so the type is the two
+        // sides' with the LEFT side's nullability discharged; that is exactly what the elvis
+        // discharges. Without this arm the whole initializer inferred `Error`, so a property written
+        // `val HOST = System.getenv("APP_HOST") ?: DEFAULT_HOST` — the ordinary spelling of a
+        // configurable constant — could not be typed, and every later read of it was reported as an
+        // unresolved reference.
+        //
+        // The two sides must AGREE. Kotlin's answer for a mix is their least upper bound, which for
+        // `Int` and `Double` is `Comparable<*> & Number` — emitted as `Object`, never as a widened
+        // primitive. The nearest thing to hand, `common_lit_ty`, is arithmetic promotion instead, so
+        // reusing it here would type `maybeInt() ?: 2.5` as `double`: a field descriptor kotlinc
+        // never writes AND a different printed value. Declining costs an inference on a shape that
+        // erases to `Object` anyway.
+        Expr::Elvis { lhs, rhs } => {
+            let left = infer_lit_ty_p(file, *lhs, class_names, props, src, env);
+            if left == Ty::Error {
+                return Ty::Error;
+            }
+            // `?: throw` is the idiom for a required setting. The right side yields no value, so the
+            // type is the left side's without the null it can no longer be. This is read HERE rather
+            // than by giving `throw` a type of its own: `Nothing` reaching the `if`, `when`, block
+            // and bare-initializer paths lets `val a = throw E()` infer a type and emit a field,
+            // where kotlinc rejects the property outright.
+            if matches!(file.expr(*rhs), Expr::Throw { .. }) {
+                return match left {
+                    Ty::Null | Ty::Nothing => Ty::Error,
+                    other => other.non_null(),
+                };
+            }
+            let right = infer_lit_ty_p(file, *rhs, class_names, props, src, env);
+            if right == Ty::Error {
+                return Ty::Error;
+            }
+            match (left, right) {
+                // A left side that is only ever `null` contributes nothing to the type.
+                (Ty::Null, Ty::Null) => Ty::Error,
+                (Ty::Null, other) => other,
+                // A platform right side keeps its flexible type. Stripping it would state that the
+                // property is non-null, which is a guarantee about a value the declaration never
+                // made: `getenv(..) ?: getProperty(..)` is `String!` and can hold null, so the field
+                // would carry a `@NotNull` it violates at runtime.
+                (left, right @ Ty::PlatformNullable(_)) if left.non_null() == right.non_null() => {
+                    right
+                }
+                (left, right) if left.non_null() == right.non_null() => {
+                    // Only the LEFT side's nullability is discharged: a nullable right side is
+                    // still nullable.
+                    match right.is_nullable() {
+                        true => Ty::nullable(right.non_null()),
+                        false => right.non_null(),
+                    }
+                }
+                _ => Ty::Error,
+            }
+        }
         Expr::NotNull { operand } => {
             let ty = infer_lit_ty_p(file, *operand, class_names, props, src, env);
             if ty == Ty::Null {
