@@ -6506,3 +6506,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `nested(arrayOf(), arrayOf("x"))`, and drops the `Long` expectation on `longs(1, 2)` so the
   constants load as widened ints (`iconst_1; i2l`) instead of `lconst_1`.
   Tests: `tests/vararg_lambda_element_shape_e2e.rs`.
+- **A callable's type variable can be bound by a LAMBDA argument's result during signature
+  inference.** A member property's type comes from the signature pre-pass, which asked the resolver
+  only for a call's already-substituted return. A variable reachable solely through a lambda's result
+  — `fun <T, R> Iterable<T>.map(transform: (T) -> R): List<R>` — is erased to its bound by then, so
+  `val items = listOf(dto).map { Item(it.id) }` typed as `List<Any>` and every member read on an
+  element was "unresolved reference"; the same property written as a LOCAL val, or given an explicit
+  type, was fine, because those are typed by the full checker. A lambda argument is contextual: its
+  parameter types come from the callable's own symbolic parameter, and its body's type binds what
+  nothing else can. This is the shaping the constructor path already did, asked of whichever callable
+  the call selects — member, extension, or static are candidate kinds inside selection, never
+  separate operations, so the signature is reported through one accessor. The receiver's own type
+  arguments are applied by the resolver before the signature is handed over (`List<Dto>` answering a
+  `fun <T> Iterable<T>.map` receiver needs the hierarchy walk), leaving the caller exactly the formals
+  its arguments must bind. A labelled call declines — reordering arguments needs parameter names, and
+  binding from the wrong argument is worse than not binding — and a signature whose formals are not
+  all bound keeps whatever the ordinary path inferred.
+  Tests: `tests/lambda_result_type_variable_e2e.rs`.
