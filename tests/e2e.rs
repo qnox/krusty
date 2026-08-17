@@ -502,6 +502,8 @@ mod ext_on_subtype_receiver_e2e;
 mod ext_receiver_tparam_binding_e2e;
 #[path = "extension_default_args_e2e.rs"]
 mod extension_default_args_e2e;
+#[path = "extension_default_stub_e2e.rs"]
+mod extension_default_stub_e2e;
 #[path = "extension_fun_e2e.rs"]
 mod extension_fun_e2e;
 #[path = "extension_property_e2e.rs"]
