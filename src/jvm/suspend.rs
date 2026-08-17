@@ -1657,7 +1657,9 @@ fn hoisted_value_ty(
         IrExpr::New { internal, .. } => Some(Ty::Obj(*internal, &[])),
         // `operand!!` yields its operand's value unchanged (the assert only throws), matching
         // `value_ty`'s treatment in the emitter.
-        IrExpr::NotNullAssert { operand } => hoisted_value_ty(ir, *operand, orig_rets, value_types),
+        IrExpr::NotNullAssert { operand, .. } => {
+            hoisted_value_ty(ir, *operand, orig_rets, value_types)
+        }
         // A value block is an evaluation wrapper, not a distinct value representation. Hoisting its
         // statements collapses the wrapper to the final expression, so a snapshot uses that final
         // expression's exact type. An empty/statement-only block has no value to materialize.
@@ -6424,7 +6426,7 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         | IrExpr::UnitInstance => true,
         IrExpr::TypeOp { arg, .. }
         | IrExpr::ReifiedTypeOp { arg, .. }
-        | IrExpr::NotNullAssert { operand: arg } => box_returns(ir, arg),
+        | IrExpr::NotNullAssert { operand: arg, .. } => box_returns(ir, arg),
         IrExpr::Throw { operand } => box_returns(ir, operand),
         IrExpr::StringConcat(parts) => parts.into_iter().all(|p| box_returns(ir, p)),
         IrExpr::PrimitiveBinOp { lhs, rhs, .. } => box_returns(ir, lhs) && box_returns(ir, rhs),

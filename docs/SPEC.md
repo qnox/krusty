@@ -1389,10 +1389,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     in LineNumberTable`).
   * `-Xno-call-assertions` removes `Intrinsics.checkNotNullExpressionValue` on platform-typed values
     returned by a CLASSPATH Java class — but not the one kotlinc emits for `String.substring`, a
-    mapped builtin, which the flag leaves in place. krusty emits no call assertions of its own
-    (`checkNotNullExpressionValue` appears in the compiler only in the inliner's recognizer), so the
-    option is accepted and recorded but changes no bytes today; a future call-assertion emitter has
-    to gate on it.
+    mapped builtin, which the flag leaves in place. krusty emits those guards (see the
+    platform-narrowing entry below) and honors the flag by rewriting each guard node into its operand
+    before emission (`jvm::ir_emit::strip_call_assertions`), which leaves `x!!` — a SOURCE assertion
+    sharing the same IR node — untouched. The Bazel worker forwards `--x_no_call_assertions` to the
+    compiler rather than reporting it inert.
 
   Both are set per module by intellij-community (`build/compiler-options.bzl`). Tests:
   `tests/no_assertions_flags_e2e.rs`.
@@ -1596,6 +1597,69 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference operand) as `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` — the value
   stays on the stack and the duplicate is consumed by the check, matching kotlinc. On a non-null
   primitive operand it is a no-op (`tests/not_null_assert_e2e.rs`).
+- **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
+  arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
+  a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +
+  `Intrinsics.checkNotNullExpressionValue(Object, String)V` — the same yields-or-throws shape as `x!!`,
+  with the checked expression named in the failure (`getenv(...) must not be null`). Without it the
+  declaration and its `@NotNull` annotation promise something the bytes do not enforce: the null is
+  stored into an `@NotNull` field and surfaces later, in code that trusted the declaration.
+
+  Measured against kotlinc 2.4.10, the GUARDED positions are: a property with an explicit type (member
+  or top-level — the top-level one runs in `<clinit>`), a local with an explicit type, a value
+  argument (including the parameter of a non-null-typed lambda, which is an `invoke` argument), a
+  `return` / expression body, and an assignment to a non-null target. kotlinc does NOT guard: an
+  INFERRED local (`val x = getenv(...)` stays `T!`), a nullable target (`String?`, elvis, `?.`), a
+  `when` subject, a string-template interpolation, or the receiver of a Java member call (`getenv(..).length`
+  NPEs on its own). Guards are recorded by the checker at the narrowing positions
+  (`TypeInfo::platform_narrowings`) and realized by lowering, so both halves are one rule rather than a
+  per-position emitter.
+
+  The failure message is derived from the checked expression, as kotlinc's is: a call of any linkage
+  renders as `<jvm-name>(...)` (a property read of a Java getter is its ACCESSOR, `getName(...)`), and a
+  read resolved to a physical field renders as the bare field name. Where the callee's erased result
+  carries a `checkcast` (a generic Java return), the guard goes UNDER the cast — kotlinc checks what the
+  call produced, then casts the checked value.
+
+  A CONDITIONAL value is checked per branch, not once at the merge: a DECLARED type propagates into an
+  `if`/`when`/elvis, so kotlinc guards inside the branch that produced the platform value, before the
+  merge (nested conditionals included). A value ARGUMENT's expected type does not propagate that way —
+  kotlinc checks the merged value instead — so an argument whose value is a conditional takes the
+  message-less form below. A branch that is a source BLOCK (`if (c) { …; javaCall() }`) is likewise not
+  checked in the branch; a single-expression block is the expression itself and is.
+
+  A public Java INSTANCE field read is guarded like any other platform value and names the field
+  (`value must not be null`), matching kotlinc. Not yet guarded, because the value is not modeled as
+  `T!` today (a front-end gap, not an emitter one): a Java STATIC field read (`System.out` types as
+  `PrintStream`, not `PrintStream!`) and an index-operator result (`javaList[0]`). Also unimplemented:
+  kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, which it emits wherever the
+  narrowed value has no name to report — a plain read of a platform-typed local, a source-block branch,
+  a `try` value, the merged value of a conditional in argument position; and the guard on a non-null
+  Kotlin extension RECEIVER (`getenv(..).trim()`). krusty emits the NAMED form only, so a narrowing it
+  cannot name stays unguarded rather than guarded under an invented name.
+  Tests: `tests/platform_call_assertions_e2e.rs` (per-position `checkNotNullExpressionValue` call-site
+  and message differential vs kotlinc, every guarded position run for its exception and message, and
+  the top-level `<clinit>` repro).
+
+  Measured over the 2.4.10 box corpus (per-file class-byte hashes with and without the guard, 3355
+  files krusty compiles): 46 files change, none flips compile status, and 38 of them place the same
+  guards kotlinc does. (A 47th differs between any two runs of the SAME binary — a pre-existing
+  non-deterministic emission, not a guard.) The 8 that differ all trace to two PRE-EXISTING typing
+  gaps, not to the guard rule — in both directions the guard follows krusty's own type, so it is never
+  wrong, only in a different place than kotlinc's:
+  * A member kotlinc resolves on a Kotlin BUILTIN, which krusty resolves on the mapped Java class and
+    therefore types `T!`: `toString()` reached through a `CharSequence`/`Throwable`/`Comparable`
+    receiver (kotlinc: `kotlin.Any.toString(): String`), `Enum.name` (kotlinc: `kotlin.Enum.name:
+    String`), and `MutableMap.put` (kotlinc's non-null builtin parameters). krusty guards a value
+    kotlinc already knows is non-null (`kt42137.kt`, `kt65197.kt`, `kt15806.kt`,
+    `nestedClassesInAnnotations.kt`, `eagerLambdaAnalysisWithNoExpectedType.kt`,
+    `funWithTypeParameterWithUpperBound.kt`), or skips a narrowing kotlinc's builtin parameter creates
+    (`forInArrayListIndices.kt`).
+  * An INFERRED declaration type: kotlinc commits an expression-body function's inferred return to the
+    NON-NULL bound of a flexible body, so the guard lands inside that function; krusty keeps `T!`
+    there and guards at the caller's declared type instead (`collectionAssignGetMultiIndex.kt`). This
+    is the same modeling gap as an inferred `val a = System.getenv("P")`, which krusty annotates
+    `@Nullable` where kotlinc annotates nothing.
 - `try { … } catch (e: E) { … }` (no `finally`): the body value (and each catch value) is stored into a
   result temp and loaded at the merge, like kotlinc. The protected region covers the body + result
   store; each catch is an exception-table handler whose StackMapTable frame has the caught exception on

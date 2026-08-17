@@ -175,7 +175,8 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .with_class_major(opts.jvm_target_major)
         .with_jvm_default(opts.jvm_default)
         .with_lambda_modes(opts.lambda_modes)
-        .with_param_assertions(!opts.no_param_assertions);
+        .with_param_assertions(!opts.no_param_assertions)
+        .with_call_assertions(!opts.no_call_assertions);
     let outputs = krusty::compiler::emit_checked(
         &analysis.files,
         &stems,

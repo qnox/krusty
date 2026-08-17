@@ -12757,6 +12757,18 @@ pub(crate) struct InheritedMethodConstraint {
 }
 
 /// Result of typechecking a file: the type assigned to every expression node.
+/// Where a PLATFORM value is committed to a declared non-null type, as far as the guard's SHAPE is
+/// concerned. Measured against kotlinc 2.4.10: a declared type propagates into a conditional, so each
+/// branch is checked where it produces its value; a value argument does not, so the merged value is
+/// checked instead — which is why the two are distinguished rather than treated as one position set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlatformNarrowing {
+    /// A property/local with an explicit type, a return, an assignment.
+    Declaration,
+    /// A value argument (including the parameter of a non-null-typed lambda).
+    Argument,
+}
+
 pub struct TypeInfo {
     pub expr_types: Vec<Ty>,
     /// Exact function signature of each callable-reference expression, captured before an expected
@@ -12894,6 +12906,13 @@ pub struct TypeInfo {
     /// element nests the array and can fail only at runtime. Expression ids are file-unique, so the
     /// selected argument itself is a provider-neutral handoff for every callable origin.
     pub resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
+    /// Expressions whose PLATFORM type (`T!`) the source commits to a declared non-null type — a
+    /// property/local with an explicit type, a value argument, a return, an assignment. kotlinc
+    /// guards exactly these positions with a not-null assertion so a Java null fails where it enters
+    /// the non-null world, not later in unrelated code that trusted the declaration. This records the
+    /// SEMANTIC narrowing only; which expression shapes carry a runtime guard, and what its failure
+    /// says, is lowering's decision (a call result names its callee, a plain value read has no name).
+    pub platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
     /// Extension callables the checker resolved for a SYNTHESIZED call that has no source-call `ExprId` —
     /// a destructuring `componentN`, a `for`-loop `iterator`, a `+=` `plusAssign` — keyed by the receiver
     /// expression's `ExprId` (the destructured value / iterable / assignment target) and the operator
@@ -15656,6 +15675,7 @@ fn make_checker<'a>(
         resolved_enum_entries: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
+        platform_narrowings: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
         delegate_getvalue_targets: HashMap::new(),
         delegate_setvalue_targets: HashMap::new(),
@@ -17301,6 +17321,7 @@ fn check_file_at_impl_mode(
         resolved_enum_entries,
         resolved_call_arg_slots,
         resolved_whole_array_vararg_args,
+        platform_narrowings,
         synthetic_ext_calls,
         delegate_getvalue_targets,
         delegate_setvalue_targets,
@@ -17482,6 +17503,7 @@ fn check_file_at_impl_mode(
         resolved_enum_entries,
         resolved_call_arg_slots,
         resolved_whole_array_vararg_args,
+        platform_narrowings,
         synthetic_ext_calls,
         delegate_getvalue_targets,
         delegate_setvalue_targets,
@@ -18079,6 +18101,8 @@ struct Checker<'a> {
     resolved_enum_entries: HashMap<ExprId, TypeName>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
+    /// See [`TypeInfo::platform_narrowings`].
+    platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
     delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     delegate_setvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
@@ -30800,6 +30824,7 @@ impl<'a> Checker<'a> {
             if let Some(declared) = declared {
                 if p.declared_ty().is_some() {
                     let actual = self.expression_type_for_expected(scope, init, it, declared);
+                    self.narrow_platform_value(declared, init, PlatformNarrowing::Declaration);
                     self.expect_assignable(
                         declared,
                         actual,
@@ -31725,6 +31750,7 @@ impl<'a> Checker<'a> {
                         let declared = self.type_ref_ty(entry_scope, r);
                         let it = self.expr_expected(entry_scope, init, declared);
                         let sp = self.value_diagnostic_span(init, it);
+                        self.narrow_platform_value(declared, init, PlatformNarrowing::Declaration);
                         self.expect_assignable(declared, it, sp, "property initializer");
                     }
                     let owner = current_owner.expect("enum class must have a source owner");
@@ -32142,6 +32168,11 @@ impl<'a> Checker<'a> {
                             None => self.expr(scope, init),
                         };
                         if let Some(declared) = declared {
+                            self.narrow_platform_value(
+                                declared,
+                                init,
+                                PlatformNarrowing::Declaration,
+                            );
                             self.expect_assignable(
                                 declared,
                                 it,
@@ -32547,6 +32578,7 @@ impl<'a> Checker<'a> {
             FunBody::Expr(e) => {
                 let t = self.expr_expected(scope, *e, self.ret_ty);
                 let actual = self.expression_type_for_expected(scope, *e, t, self.ret_ty);
+                self.narrow_platform_value(self.ret_ty, *e, PlatformNarrowing::Declaration);
                 self.expect_assignable(self.ret_ty, actual, self.span(*e), "function body");
             }
             FunBody::Block(e) => {
@@ -33399,6 +33431,7 @@ impl<'a> Checker<'a> {
         if call_arg_kind(self.file, argument, actual).adapts_integer_literal_to(expected) {
             return;
         }
+        self.narrow_platform_value(expected, argument, PlatformNarrowing::Argument);
         self.expect_assignable(expected, actual, self.span(argument), "argument");
     }
 
@@ -33846,6 +33879,31 @@ impl<'a> Checker<'a> {
             None => *arg_tys.get(slot)?,
         };
         Some((argument, ty))
+    }
+
+    /// Record that `e`'s PLATFORM type is committed to a declared non-null `expected` here.
+    ///
+    /// A Java value arrives as `T!`, which is usable as both `T` and `T?`; a declared non-null type
+    /// is where the source picks the non-null bound and every later consumer — Kotlin call sites that
+    /// skip null handling, Java nullness checkers reading `@NotNull`, krusty's own smart casts — is
+    /// entitled to rely on it. kotlinc guards exactly this transition (see
+    /// [`TypeInfo::platform_narrowings`]); positions that keep the flexibility (`T?`, another `T!`) or
+    /// unbox into a primitive are left alone, the latter because unboxing already fails on null here.
+    ///
+    /// The expression's RECORDED type is read rather than a caller-supplied one: lowering consumes
+    /// the same `expr_types` entry, so a caller that has already narrowed the type for a diagnostic
+    /// cannot make the two disagree.
+    fn narrow_platform_value(&mut self, expected: Ty, e: ExprId, position: PlatformNarrowing) {
+        if !matches!(self.expr_types[e.0 as usize], Ty::PlatformNullable(_)) {
+            return;
+        }
+        if matches!(expected, Ty::PlatformNullable(_) | Ty::Error)
+            || expected.is_nullable()
+            || !expected.is_reference()
+        {
+            return;
+        }
+        self.platform_narrowings.insert(e, position);
     }
 
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
@@ -50978,6 +51036,7 @@ impl<'a> Checker<'a> {
             Some(d) => {
                 if !deferred {
                     let actual = self.expression_type_for_expected(scope, init, it, d);
+                    self.narrow_platform_value(d, init, PlatformNarrowing::Declaration);
                     self.expect_assignable(
                         d,
                         actual,
@@ -51310,6 +51369,12 @@ impl<'a> Checker<'a> {
             Some(expected) => self.expr_expected(scope, value, expected),
             None => self.expr(scope, value),
         };
+        // One narrowing record for every assignment target below (local, backing field, member or
+        // top-level property): they differ in how the write is lowered, not in the type the assigned
+        // value is committed to.
+        if let Some(expected) = assignment_expected {
+            self.narrow_platform_value(expected, value, PlatformNarrowing::Declaration);
+        }
         if let Some((receiver, owner, ty)) = deferred_property {
             self.expect_assignable(ty, vt, self.value_diagnostic_span(value, vt), "assignment");
             self.stmt_lowers.insert(
@@ -51997,6 +52062,7 @@ impl<'a> Checker<'a> {
             Some(ex) => {
                 let t = self.expr_expected(scope, ex, rt);
                 let actual = self.expression_type_for_expected(scope, ex, t, rt);
+                self.narrow_platform_value(rt, ex, PlatformNarrowing::Declaration);
                 self.expect_assignable(rt, actual, self.span(ex), "return");
             }
             None => {

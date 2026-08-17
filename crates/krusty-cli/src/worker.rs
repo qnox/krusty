@@ -335,8 +335,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 index += 1;
             }
             "--x_no_call_assertions" => {
-                // krusty emits no call assertions of its own, so its output already matches.
-                unit.inert.push(flag.to_string());
+                unit.kotlinc_args.push("-Xno-call-assertions".to_string());
                 index += 1;
             }
             // A kotlinc flag forwarded verbatim by the rule (`kotlinc_opts`). Without this the rule
@@ -739,8 +738,9 @@ mod tests {
             "o.jar",
         ]))
         .unwrap();
-        assert!(crate::cli::parse(unit.kotlinc_args).no_param_assertions);
-        assert!(unit.inert.iter().any(|f| f == "--x_no_call_assertions"));
+        let parsed = crate::cli::parse(unit.kotlinc_args);
+        assert!(parsed.no_param_assertions);
+        assert!(parsed.no_call_assertions);
     }
 
     /// The class-based lambda strategy is a different class set, so it is refused like any other
@@ -1037,14 +1037,21 @@ mod tests {
     #[test]
     fn inert_options_are_reported_in_the_response() {
         let request = WorkRequest {
-            arguments: args(&["--x_no_call_assertions", "--srcs", "A.kt", "--out", "o.jar"]),
+            arguments: args(&[
+                "--x_explicit_api",
+                "disable",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
             request_id: 4,
             cancel: false,
         };
         let response = serve(&request, &|_unit| Ok(()));
         assert_eq!(response.exit_code, 0);
         assert!(
-            response.output.contains("--x_no_call_assertions"),
+            response.output.contains("--x_explicit_api disable"),
             "an inert option must be surfaced: {:?}",
             response.output
         );
