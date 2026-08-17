@@ -6551,3 +6551,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   binding from the wrong argument is worse than not binding — and a signature whose formals are not
   all bound keeps whatever the ordinary path inferred.
   Tests: `tests/lambda_result_type_variable_e2e.rs`.
+- **A checked declaration type containing `<error>` must carry a diagnostic; a cross-file source
+  `typealias` resolves by Kotlin scoping, not module-wide.** Two halves of one invariant break,
+  found on intellij-community's `intellij.kotlin.base.projectModel` (metadata emission panicked
+  `semantic type '<error>' cannot appear in Kotlin metadata` with ZERO diagnostics — the builder's
+  invariant detector, which stays). (1) Signature collection's pass-1 name table maps every
+  top-level class simple name module-wide, so a declared type naming an UNIMPORTED class from
+  another package resolved there while the properly scoped checker (`select_classifier`) produced
+  `Ty::Error` silently; member/constructor shapes then panicked in `@Metadata` encoding and
+  top-level shapes silently COMPILED against the wrong-scope resolution (kotlinc rejects both).
+  `check_declaration_type` (and the property annotation/receiver channel, `type_ref_ty_reported`)
+  now reports `unresolved reference` exactly like `check_type_parameter_bound` — a duplicate of a
+  signature-collection report collapses in the sink. (2) That reporting exposed the true intellij
+  root cause: `typealias KotlinDependencyId = Long` used from a SIBLING file. A same-file alias use
+  is rewritten by the parse seam, and an alias to a CLASS answers through its classifier record,
+  but a primitive-/function-type-target alias has no classifier, so a cross-file use had nothing to
+  resolve through. The checker now probes the collected `source_alias_expansions` under Kotlin
+  scoping — explicit import as the selected root, then the import levels (own package, star
+  imports, defaults) with two distinct hits in one level ambiguous — and substitutes the use-site
+  type arguments into the expansion (`scoped_source_alias_ty`); an unimported foreign-package alias
+  stays unresolved. Use-site projections ride the substituted arguments through
+  `projected_typeref_argument`, so `P<out CharSequence>` keeps its `+` marker in the emitted
+  generic signature (kotlinc-identical) and `P<*>` keeps the same out-projected-upper-bound form
+  the SAME-FILE spelling produces. Cross-file function-type-target aliases still fail in signature
+  collection (pre-existing, unchanged). KNOWN DIVERGENCE (pre-existing, unchanged by this work):
+  kotlinc resolves classifiers and typealiases in ONE namespace level-by-level, but krusty's
+  checker exhausts every classifier channel before this alias probe runs, so a LOWER-precedence
+  classifier still shadows a HIGHER-precedence alias cross-channel — `typealias Sequence = Long` in
+  the file's own package loses to the default-imported `kotlin.sequences.Sequence`. Tests:
+  `tests/unimported_cross_package_type_e2e.rs`, `tests/cross_file_typealias_e2e.rs`.
