@@ -835,7 +835,7 @@ fn members_in_hierarchy(source: &dyn SymbolSource, receiver: Ty, name: &str) -> 
             && declarations.iter().any(|(rank, operator, params)| {
                 *operator
                     && *rank > function.receiver_rank
-                    && params.as_slice() == function.semantic_params()
+                    && params.as_slice() == &*function.semantic_params()
             })
         {
             function.flags.operator = true;
