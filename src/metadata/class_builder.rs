@@ -78,6 +78,11 @@ pub struct PropMeta {
 pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
+    /// Number of LEADING entries in `params` that are context parameters. They ride
+    /// `Function.context_parameter` (field 13) instead of `Function.value_parameter` (field 6), so a
+    /// consuming compiler fills them from the enclosing context rather than demanding them
+    /// positionally. `0` for an ordinary member.
+    pub context_count: usize,
     pub ret: Ty,
     /// Extension-receiver type (`Function.receiver_type` = f5) for a MEMBER EXTENSION
     /// (`class C { operator fun String.invoke(…) }`) — recorded separately from `params` (the
@@ -129,6 +134,7 @@ impl FnMeta {
     /// kotlinc's default and therefore omitted from the proto.
     pub fn plain(name: String, params: Vec<(String, Ty)>, ret: Ty) -> FnMeta {
         FnMeta {
+            context_count: 0,
             name,
             params,
             ret,
@@ -978,7 +984,13 @@ pub fn build_class(
             // f7 AFTER the type and vararg element: kotlinc interns a parameter's annotation class
             // id following that parameter's own name and type.
             append_param_annotations(st, &mut vp, annotations);
-            func.repeated_message(6, &vp); // Function.value_parameter = 6
+            if i < m.context_count {
+                // Leading context parameters → Function.context_parameter = 13 (filled implicitly
+                // by callers), NOT the positional value_parameter list.
+                func.repeated_message(13, &vp);
+            } else {
+                func.repeated_message(6, &vp); // Function.value_parameter = 6
+            }
         }
         // An annotated declaration sets `HAS_ANNOTATIONS` (bit 0) on top of whatever the caller
         // derived — the bit is a function OF the records below, never an independent input.
@@ -1323,6 +1335,7 @@ mod tests {
         let any_q = Ty::nullable(Ty::obj("kotlin/Any"));
         let methods = vec![
             FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "component1".into(),
                 params: vec![],
@@ -1341,6 +1354,7 @@ mod tests {
                 param_annotations: Vec::new(),
             },
             FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "component2".into(),
                 params: vec![],
@@ -1359,6 +1373,7 @@ mod tests {
                 param_annotations: Vec::new(),
             },
             FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "copy".into(),
                 params: vec![("x".into(), Ty::Int), ("y".into(), Ty::String)],
@@ -1377,6 +1392,7 @@ mod tests {
                 param_annotations: Vec::new(),
             },
             FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "equals".into(),
                 params: vec![("other".into(), any_q)],
@@ -1395,6 +1411,7 @@ mod tests {
                 param_annotations: Vec::new(),
             },
             FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "hashCode".into(),
                 params: vec![],
@@ -1413,6 +1430,7 @@ mod tests {
                 param_annotations: Vec::new(),
             },
             FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "toString".into(),
                 params: vec![],

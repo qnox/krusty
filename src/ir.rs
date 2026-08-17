@@ -1581,10 +1581,17 @@ pub struct IrFile {
         (crate::types::TypeName, String),
         crate::spelling::DeclaredSpellings,
     >,
-    /// Function ids whose physical `params[0]` realizes an extension receiver. Metadata and JVM
+    /// Function ids realizing an extension receiver among their physical parameters. Metadata and JVM
     /// default-argument masks consume this semantic fact directly; neither may infer receiver-ness
-    /// from the synthetic `$receiver` parameter spelling.
+    /// from the synthetic `$receiver` parameter spelling. WHERE that receiver sits is
+    /// `fn_context_counts`: Kotlin signs a context extension `(contexts…, receiver, values…)`, so the
+    /// receiver is `params[0]` only when the function declares no `context(…)` clause.
     pub extension_receiver_fns: std::collections::HashSet<u32>,
+    /// Function id → how many of its LEADING physical parameters are context parameters. Class
+    /// `@Metadata` is built from the IR alone, so this is the only carrier telling it to record them
+    /// as `Function.context_parameter` (field 13) rather than as ordinary value parameters — without
+    /// it a consuming compiler demands them positionally. Absent ⇒ none.
+    pub fn_context_counts: std::collections::HashMap<u32, usize>,
     /// Member EXTENSION properties per class (`object Tools { val Int.doubled get() = … }`), keyed by
     /// the declaring class's fq name. Lowering realizes each as accessor METHODS (`getDoubled(I)I`),
     /// which erases property-ness from the IR — class `@Metadata` needs the declaration back: a

@@ -1355,6 +1355,14 @@ fn lower_file_at_reporting_impl(
                 if extension_receiver.is_some() {
                     lo.ir.extension_receiver_fns.insert(fid);
                 }
+                // Class `@Metadata` is built from the IR alone, so the context count has to travel
+                // here or the record publishes context parameters as ordinary value parameters and a
+                // consuming compiler demands them positionally.
+                if sig.context_count > 0 {
+                    lo.ir
+                        .fn_context_counts
+                        .insert(fid, sig.context_count.min(logical_params.len()));
+                }
                 if m.is_operator() {
                     lo.ir.operator_fns.insert(fid);
                 }

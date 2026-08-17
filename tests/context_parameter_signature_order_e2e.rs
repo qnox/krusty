@@ -287,19 +287,27 @@ fn a_context_extension_from_a_kotlinc_dependency_is_callable() {
 }
 
 /// …and the WRITE side of the same boundary: kotlinc itself resolves a context extension out of a
-/// krusty-built dependency. This is the strongest available check that the emitted descriptor and the
-/// emitted `@Metadata` agree with each other AND with the reference compiler's reader, which a
-/// self-consistent (but wrongly ordered) pair of our own would pass.
+/// krusty-built dependency, at top level and as a class member. This is the strongest available check
+/// that the emitted descriptor and the emitted `@Metadata` agree with each other AND with the
+/// reference compiler's reader, which a self-consistent (but wrongly ordered) pair of our own would
+/// pass. The MEMBER case additionally pins that class metadata records its context parameters as
+/// `Function.context_parameter`: published as ordinary value parameters, they are demanded
+/// positionally and kotlinc rejects the call with "no value passed for parameter 'x'".
 #[test]
 fn kotlinc_resolves_a_context_extension_from_a_krusty_dependency() {
     const LIB: &str = "// LANGUAGE: +ContextParameters\n\
         package lib\n\
         class Src\n\
-        context(c: String) fun Src.tag(x: Int): String = c + x\n";
+        context(c: String) fun Src.tag(x: Int): String = c + x\n\
+        class Owner {\n\
+        \x20 context(c: String) fun Src.memExt(x: Int): String = c + x\n\
+        }\n";
     const MAIN: &str = "package use\n\
+        import lib.Owner\n\
         import lib.Src\n\
         import lib.tag\n\
-        fun check(): String = with(\"O\") { Src().tag(1) }\n";
+        fun check(): String = with(\"O\") { Src().tag(1) }\n\
+        fun checkMember(): String = with(Owner()) { with(\"O\") { Src().memExt(1) } }\n";
     let Some(dir) = common::scratch_dir() else {
         eprintln!("skip (Cwrite: scratch filesystem unavailable)");
         return;
