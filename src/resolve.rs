@@ -7382,14 +7382,14 @@ fn collect_signatures_with_cp_impl(
                             match (bp.declared_ty(), &bp.getter) {
                                 (Some(r), _) => ty_of_ref(r, &class_names, &btp, diags),
                                 (None, Some(FunBody::Expr(g))) if !c.is_value => {
-                                    let inferred = infer_lit_ty_scoped(
-                                        member_inference_source,
-                                        *g,
-                                        &class_names,
-                                        &property_scope,
-                                        &*libraries,
-                                        &table,
-                                    );
+                                    // Not typed here. The walk cannot establish this member's
+                                    // checking context — its class's type parameters, dispatch
+                                    // receiver and constructors — so a type produced here can
+                                    // disagree with the one the declaration itself yields, and the
+                                    // walk's answer is the one that gets published. Every
+                                    // implicitly-typed member is resolved from its own declaration
+                                    // afterwards instead.
+                                    let inferred = Ty::Error;
                                     if inferred == Ty::Error && bp.receiver.is_none() {
                                         deferred_properties.push(DeferredProperty {
                                             key: DeclKey::member(
@@ -7402,12 +7402,7 @@ fn collect_signatures_with_cp_impl(
                                             span: bp.span,
                                             expression: Some(*g),
                                             scope: property_scope.clone(),
-                                            kind: DeferredKind::Member(Box::new(MemberContext {
-                                                owner: type_name(&internal),
-                                                implicit_classifier,
-                                                implicit_value,
-                                                implicit_instance: Some(member_this),
-                                            })),
+                                            kind: DeferredKind::Member(type_name(&internal)),
                                         });
                                         deferred_inference = true;
                                     }
@@ -7422,14 +7417,7 @@ fn collect_signatures_with_cp_impl(
                                 }
                                 (None, _) => match bp.init {
                                     Some(expression) => {
-                                        let inferred = infer_lit_ty_scoped(
-                                            member_inference_source,
-                                            expression,
-                                            &class_names,
-                                            &property_scope,
-                                            &*libraries,
-                                            &table,
-                                        );
+                                        let inferred = Ty::Error;
                                         if inferred == Ty::Error && bp.receiver.is_none() {
                                             deferred_properties.push(DeferredProperty {
                                                 key: DeclKey::member(
@@ -7442,14 +7430,7 @@ fn collect_signatures_with_cp_impl(
                                                 span: bp.span,
                                                 expression: Some(expression),
                                                 scope: property_scope.clone(),
-                                                kind: DeferredKind::Member(Box::new(
-                                                    MemberContext {
-                                                        owner: type_name(&internal),
-                                                        implicit_classifier,
-                                                        implicit_value,
-                                                        implicit_instance: Some(member_this),
-                                                    },
-                                                )),
+                                                kind: DeferredKind::Member(type_name(&internal)),
                                             });
                                             deferred_inference = true;
                                         }
@@ -8668,29 +8649,9 @@ fn collect_signatures_with_cp_impl(
                         // for a computed property, from its expression getter body).
                         match (p.declared_ty(), &p.getter) {
                             (Some(r), _) => ty_of_ref(r, &class_names, &property_tparams, diags),
-                            (None, Some(FunBody::Expr(g))) if is_computed => {
-                                infer_top_level_property_expr(
-                                    InferenceSource::file(file, i as u32),
-                                    *g,
-                                    &class_names,
-                                    &context_scope,
-                                    &*libraries,
-                                    &table,
-                                )
-                            }
-                            (None, _) => p
-                                .init
-                                .map(|expression| {
-                                    infer_top_level_property_expr(
-                                        InferenceSource::file(file, i as u32),
-                                        expression,
-                                        &class_names,
-                                        &context_scope,
-                                        &*libraries,
-                                        &table,
-                                    )
-                                })
-                                .unwrap_or(Ty::Error),
+                            // As for members: resolved from the declaration itself afterwards.
+                            (None, Some(FunBody::Expr(_))) if is_computed => Ty::Error,
+                            (None, _) => Ty::Error,
                         }
                     };
                     // `null` is the expression type used by applicability, while an inferred
@@ -10415,31 +10376,6 @@ impl<'a> InferenceSource<'a> {
     }
 }
 
-/// Infer an eager top-level initializer or expression getter against the same value scope. Named
-/// context parameters come first because lightweight name resolution is first-match; they therefore
-/// shadow module properties just as they do in the real checker. Module properties follow so nested
-/// expressions such as `holder.value` and `a.compareTo(b)` do not need call-site-specific branches.
-fn infer_top_level_property_expr(
-    source: InferenceSource<'_>,
-    expression: ExprId,
-    class_names: &ClassNames,
-    context_scope: &[(String, Ty, bool)],
-    src: &dyn SemanticPlatform,
-    table: &SymbolTable,
-) -> Ty {
-    let props = context_scope
-        .iter()
-        .cloned()
-        .chain(
-            table
-                .props
-                .iter()
-                .map(|(name, (ty, is_var, _))| (name.clone(), *ty, *is_var)),
-        )
-        .collect::<Vec<_>>();
-    infer_lit_ty_scoped(source, expression, class_names, &props, src, table)
-}
-
 /// A property whose type comes from its initializer or expression getter and which the signature
 /// walk could not determine, kept with the context that walk gave it.
 ///
@@ -10481,38 +10417,17 @@ enum DeferredKind {
         /// spelling either.
         has_context_params: bool,
     },
-    /// Boxed: a member carries a whole classifier-name scope, and inlining that into every
-    /// top-level entry as dead padding is what the enum-size lint is for.
-    Member(Box<MemberContext>),
-}
-
-/// What a class-body property needs that a top-level one does not.
-struct MemberContext {
-    /// Exact semantic owner, rather than the source/display name used as one symbol-table index.
-    /// Two files may legally declare the same simple class name in different packages; retaining
-    /// the internal identity prevents one declaration's answer from being published onto the other.
-    owner: TypeName,
-    implicit_classifier: Option<TypeName>,
-    implicit_value: Option<Ty>,
-    implicit_instance: Option<Ty>,
+    /// The exact semantic owner, rather than the source/display name used as one symbol-table
+    /// index: two files may legally declare the same simple class name in different packages, and
+    /// an answer must never be published onto the other one.
+    Member(TypeName),
 }
 
 impl DeferredProperty {
-    fn inference_source<'a>(&self, file: &'a File) -> InferenceSource<'a> {
-        let source = InferenceSource::file(file, self.file_index);
-        match &self.kind {
-            DeferredKind::TopLevel { .. } => source,
-            DeferredKind::Member(member) => source
-                .with_implicit_classifier(member.implicit_classifier)
-                .with_implicit_value(member.implicit_value)
-                .with_implicit_instance(member.implicit_instance),
-        }
-    }
-
     fn owner(&self) -> Option<TypeName> {
         match &self.kind {
             DeferredKind::TopLevel { .. } => None,
-            DeferredKind::Member(member) => Some(member.owner),
+            DeferredKind::Member(owner) => Some(*owner),
         }
     }
 
@@ -10591,14 +10506,32 @@ impl DeferredInferenceDriver<'_> {
         self.engine.resolve(key, || {
             let expression = entry.expression?;
             let file_index = entry.file_index as usize;
-            let inferred = infer_lit_ty_scoped_on_demand(
-                entry.inference_source(&self.files[file_index]),
-                expression,
-                &entry.scope,
-                self.table,
-                &|name| self.demand(entry, name),
-                &|receiver, name| self.demand_on_receiver(receiver, name),
-            );
+            let file = &self.files[file_index];
+            let demand = |name: &str| self.demand(entry, name);
+            let demand_member = |receiver: Ty, name: &str| self.demand_on_receiver(receiver, name);
+            let inferred = match entry.kind {
+                DeferredKind::TopLevel { .. } => infer_declaration_ty(
+                    file,
+                    entry.file_index,
+                    DeclId(entry.key.decl),
+                    expression,
+                    self.table,
+                    EngineSeams {
+                        demand: &demand,
+                        demand_member: &demand_member,
+                        rejects: &|name| !self.readable_from(entry, name),
+                    },
+                ),
+                DeferredKind::Member(_) => infer_member_declaration_ty(
+                    file,
+                    entry.file_index,
+                    DeclId(entry.key.decl),
+                    expression,
+                    self.table,
+                    &demand,
+                    &demand_member,
+                ),
+            };
             let inferred = inferred_declaration_ty(inferred);
             (inferred != Ty::Error).then_some(inferred)
         })
@@ -10771,12 +10704,12 @@ fn resolve_deferred_properties(
                     ambiguous.insert(entry.name.clone());
                 }
             }
-            DeferredKind::Member(member) => {
+            DeferredKind::Member(owner) => {
                 if by_member
-                    .insert((member.owner, entry.name.clone()), entry.key)
+                    .insert((*owner, entry.name.clone()), entry.key)
                     .is_some()
                 {
-                    ambiguous_members.insert((member.owner, entry.name.clone()));
+                    ambiguous_members.insert((*owner, entry.name.clone()));
                 }
             }
         }
@@ -10822,8 +10755,25 @@ fn resolve_deferred_properties(
             DeferredKind::TopLevel { .. } => {
                 publish_top_level_property_type(files, table, entry, ty)
             }
-            DeferredKind::Member(member) => {
-                publish_member_property_type(table, member.owner, &entry.name, ty)
+            DeferredKind::Member(owner) => {
+                publish_member_property_type(table, *owner, &entry.name, ty);
+                if let Decl::Class(class) =
+                    files[entry.file_index as usize].decl(DeclId(entry.key.decl))
+                {
+                    if let Some(property) = class
+                        .body_props
+                        .get(entry.key.member as usize)
+                        .filter(|property| property.name == entry.name)
+                    {
+                        publish_member_constant(
+                            &files[entry.file_index as usize],
+                            table,
+                            *owner,
+                            property,
+                            ty,
+                        );
+                    }
+                }
             }
         }
     }
@@ -10884,6 +10834,37 @@ fn publish_member_property_type(table: &mut SymbolTable, owner: TypeName, name: 
     }
 }
 
+/// Record a `const val` member's compile-time value once its type is known.
+///
+/// The value is read THROUGH the type — a `UIntLit` is a long constant under `ULong` and an int
+/// constant otherwise — so collection, which saw only the placeholder, could not compute it.
+fn publish_member_constant(
+    file: &File,
+    table: &mut SymbolTable,
+    owner: TypeName,
+    property: &PropDecl,
+    ty: Ty,
+) {
+    if !property.is_const {
+        return;
+    }
+    let Some(init) = property.init else {
+        return;
+    };
+    let Some(value) = source_literal_constant(file, init, ty) else {
+        return;
+    };
+    let is_singleton = table
+        .class_by_type_name(owner)
+        .is_some_and(ClassSig::is_object);
+    if !is_singleton {
+        return;
+    }
+    if let Some(class) = table.class_by_type_name_mut(owner) {
+        class.constants.insert(property.name.clone(), value);
+    }
+}
+
 /// Infer a declaration initializer's type with a fresh cycle-guard, using `table` to resolve
 /// module-local class properties — the common entry used by signature collection.
 ///
@@ -10899,6 +10880,342 @@ fn infer_lit_ty_scoped(
 ) -> Ty {
     let _ = (class_names, src);
     infer_lit_ty_scoped_on_demand(source, e, props, table, &|_| None, &|_, _| None)
+}
+
+/// Whether `ty` mentions a value class anywhere inside it.
+fn mentions_value_class(table: &SymbolTable, ty: Ty) -> bool {
+    let is_value_class = |internal| {
+        table
+            .class_by_type_name(internal)
+            .map(|class| class.value_field.is_some())
+            .unwrap_or_else(|| {
+                table
+                    .libraries
+                    .classifier(internal)
+                    .is_some_and(|classifier| classifier.value_underlying.is_some())
+            })
+    };
+    if ty.kotlin_class_internal().is_some_and(is_value_class) {
+        return true;
+    }
+    match ty {
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner) => mentions_value_class(table, *inner),
+        Ty::Obj(_, args) => args
+            .iter()
+            .any(|argument| mentions_value_class(table, *argument)),
+        Ty::Fun(signature) => {
+            signature
+                .params
+                .iter()
+                .any(|parameter| mentions_value_class(table, *parameter))
+                || mentions_value_class(table, signature.ret)
+        }
+        _ => false,
+    }
+}
+
+/// Whether an argument of type `actual` could be passed for a parameter declared `parameter`.
+///
+/// Answers YES wherever it cannot tell — a type variable, an erased top, an unresolved type, or a
+/// function type (whose shape this does not compare) all fit — and otherwise asks the ordinary
+/// subtyping relation, so a `Number` parameter accepts an `Int` argument and a `CharSequence` one a
+/// `String`. Comparing classifier IDENTITY instead reads every supertype parameter as a non-fit,
+/// which is exactly the case where the call belongs to the other constructor.
+fn constructor_param_may_take(
+    oracle: &dyn crate::assignable::TypeOracle,
+    actual: Ty,
+    parameter: Ty,
+) -> bool {
+    if parameter == Ty::Error || actual == Ty::Error {
+        return true;
+    }
+    if matches!(parameter, Ty::TyParam(..)) || matches!(actual, Ty::TyParam(..)) {
+        return true;
+    }
+    if matches!(parameter, Ty::Fun(_)) || matches!(actual, Ty::Fun(_)) {
+        return true;
+    }
+    if parameter.non_null() == Ty::obj("kotlin/Any") {
+        return true;
+    }
+    crate::assignable::is_subtype(&crate::assignable::TyCtx::new(), oracle, actual, parameter)
+}
+
+/// Whether a declaration with these parameters could be CALLED with `arity` arguments.
+///
+/// A declared parameter count is not an arity: every default makes a shorter call reachable and a
+/// vararg makes longer ones reachable.
+fn constructor_at_arity(declared: usize, optional: usize, vararg: bool, arity: usize) -> bool {
+    let least = declared.saturating_sub(optional);
+    if vararg {
+        arity + 1 >= least
+    } else {
+        arity >= least && arity <= declared
+    }
+}
+
+fn constructor_params_may_take(
+    oracle: &dyn crate::assignable::TypeOracle,
+    parameters: &[Ty],
+    actuals: &[Option<Ty>],
+) -> bool {
+    parameters
+        .iter()
+        .zip(actuals)
+        .all(|(parameter, actual)| match actual {
+            Some(actual) => constructor_param_may_take(oracle, *actual, *parameter),
+            None => true,
+        })
+}
+
+/// A construction whose call a SECONDARY constructor could own must be published unapplied.
+///
+/// The applied type comes from binding the class's parameters against the PRIMARY constructor.
+/// `class Cell<T>(val value: T, val flag: Boolean) { constructor(n: Int, v: T) }` written
+/// `Cell(5, "tag")` resolves to the secondary one, so binding `T` from the primary's `(T, Boolean)`
+/// gives `Cell<Int>` — a `checkcast` to `Integer` on a `String`, emitted with no diagnostic and
+/// throwing on first read where kotlinc runs. Keeping the classifier raw rejects the program
+/// instead of miscompiling it.
+fn withheld_construction_ty(
+    file: &File,
+    expression: ExprId,
+    expr_types: &[Ty],
+    table: &SymbolTable,
+    ty: Ty,
+) -> Ty {
+    let Ty::Obj(internal, args) = ty else {
+        return ty;
+    };
+    if args.is_empty() {
+        return ty;
+    }
+    let Expr::Call {
+        args: call_args, ..
+    } = file.expr(expression)
+    else {
+        return ty;
+    };
+    let Some(class) = table.class_by_type_name(internal) else {
+        return ty;
+    };
+    if class.secondary_ctors.is_empty() {
+        return ty;
+    }
+    let actuals = call_args
+        .iter()
+        .map(|argument| {
+            expr_types
+                .get(argument.0 as usize)
+                .copied()
+                .filter(|ty| *ty != Ty::Error)
+        })
+        .collect::<Vec<_>>();
+    let arity = call_args.len();
+    let oracle = table.source_constructor_matcher_with(table.libraries.as_ref());
+    let primary = &class.ctor_params;
+    // Every default makes a SHORTER call reach the primary, so a declared parameter count is not an
+    // arity. Ignoring defaults reads an ordinary `C(x)` on `class C<T>(x: T, y: Int = 0)` as a call
+    // the primary cannot take, and withholds a type argument the construction genuinely fixed.
+    let primary_optional = class
+        .ctor_param_names
+        .iter()
+        .filter(|(_, has_default)| *has_default)
+        .count();
+    let primary_fits = constructor_at_arity(
+        primary.len(),
+        primary_optional,
+        class.ctor_vararg.is_some(),
+        arity,
+    ) && constructor_params_may_take(&oracle, primary, &actuals);
+    // A secondary owns the call only where it takes the arity AND its parameters accept the
+    // arguments. Where the primary also fits, the call is the primary's: an applicable primary is
+    // what the applied type was bound from.
+    let secondary_owns = !primary_fits
+        && class.secondary_ctors.iter().any(|parameters| {
+            parameters.len() == arity && constructor_params_may_take(&oracle, parameters, &actuals)
+        });
+    let primary_owns_it = primary_fits
+        || !class
+            .secondary_ctors
+            .iter()
+            .any(|parameters| parameters.len() == arity);
+    if primary_owns_it && !secondary_owns {
+        return ty;
+    }
+    Ty::obj_name(internal)
+}
+
+/// A declaration type that must be published UNAPPLIED, with its type arguments dropped.
+///
+/// A value class reaches its box only where the construction and the declaration are collected
+/// together. Through a declaration in another file the argument is stored unboxed while a read
+/// through the applied type emits a `checkcast`: `val boxed = Box(listOf(Money("1")))` compiles and
+/// then throws `ClassCastException` on the first read, where kotlinc runs. Publishing the raw type
+/// keeps the program rejected instead of miscompiled — the declaration this file can see keeps its
+/// inference, the rest stay unapplied until argument boxing lands.
+fn withheld_declaration_ty(table: &SymbolTable, file_index: u32, ty: Ty) -> Ty {
+    let Ty::Obj(internal, args) = ty else {
+        return ty;
+    };
+    if args.is_empty() {
+        return ty;
+    }
+    let from_this_file = table
+        .class_by_type_name(internal)
+        .is_some_and(|class| class.source_file == file_index);
+    if from_this_file
+        || !args
+            .iter()
+            .any(|argument| mentions_value_class(table, *argument))
+    {
+        return ty;
+    }
+    Ty::obj_name(internal)
+}
+
+/// Whether a declaration typed from this body must DECLINE rather than publish what the checker
+/// computed.
+///
+/// An elvis whose two sides are different numeric primitives is the case. Kotlin's type for such a
+/// mix is their least upper bound — for `Int` and `Double` that is `Comparable<*> & Number`, which
+/// kotlinc emits as `Ljava/lang/Object;` — while the checker's ordinary join promotes, which would
+/// write `D` into the field, the getter and the `@Metadata`: a different value at runtime with
+/// nothing to reveal it. The join stays as it is for expression positions, where nothing is
+/// published; only a DECLARATION has to refuse.
+fn declaration_body_declines(file: &File, expression: ExprId, expr_types: &[Ty]) -> bool {
+    let Expr::Elvis { lhs, rhs } = file.expr(expression) else {
+        return false;
+    };
+    let side = |e: &ExprId| {
+        expr_types
+            .get(e.0 as usize)
+            .copied()
+            .unwrap_or(Ty::Error)
+            .non_null()
+    };
+    let (left, right) = (side(lhs), side(rhs));
+    left.is_numeric() && right.is_numeric() && left != right
+}
+
+/// The engine's seams into one checker run.
+///
+/// Grouped rather than passed one by one: they are three views of a single question — what does the
+/// engine say about a name this declaration reads — and a run either has all three or, for the
+/// authoritative check, none.
+#[derive(Clone, Copy)]
+struct EngineSeams<'a> {
+    /// A name whose declaration has not been typed yet.
+    demand: &'a dyn Fn(&str) -> Option<Ty>,
+    /// The same, for a read through a receiver.
+    demand_member: &'a dyn Fn(Ty, &str) -> Option<Ty>,
+    /// A name this declaration may not read at all, by initialization order.
+    rejects: &'a dyn Fn(&str) -> bool,
+}
+
+/// Type a class-body declaration by running the checker over its OWNING CLASS.
+///
+/// A member's initializer resolves against the class's type parameters, its dispatch receiver, its
+/// sibling members and the constructors in scope — the context `check_class` establishes. A scope
+/// assembled by hand gets constructor selection wrong in ways that compile and then throw:
+/// `class Cell<T>(val value: T, val flag: Boolean) { constructor(n: Int, v: T) }` with
+/// `val cell = Cell(5, "tag")` bound `T` from the PRIMARY constructor and emitted
+/// `Cell<Integer>` for a `Cell<String>`, a `checkcast` that fails on first read where kotlinc runs.
+fn infer_member_declaration_ty(
+    file: &File,
+    file_index: u32,
+    owner: DeclId,
+    expression: ExprId,
+    table: &SymbolTable,
+    demand: &dyn Fn(&str) -> Option<Ty>,
+    demand_member: &dyn Fn(Ty, &str) -> Option<Ty>,
+) -> Ty {
+    let Decl::Class(class) = file.decl(owner) else {
+        return Ty::Error;
+    };
+    let mut scratch = DiagSink::new();
+    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
+    checker.demand_name = Some(&demand);
+    checker.demand_member = Some(&demand_member);
+    checker.inference_only = true;
+    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
+    checker.set_anonymous_lexical_class_context(owner);
+    let root = CheckerScope::root();
+    checker.check_class(&root, class, owner);
+    if checker.inference_incomplete
+        || declaration_body_declines(file, expression, &checker.expr_types)
+    {
+        return Ty::Error;
+    }
+    let inferred = checker
+        .expr_types
+        .get(expression.0 as usize)
+        .copied()
+        .unwrap_or(Ty::Error);
+    let inferred = withheld_declaration_ty(table, file_index, inferred);
+    withheld_construction_ty(file, expression, &checker.expr_types, table, inferred)
+}
+
+/// Type a top-level declaration by running the checker over the DECLARATION, not over a scope
+/// rebuilt by hand.
+///
+/// `check_property` is what establishes a property's checking context — its type parameters, its
+/// context parameters, the backing-field binding, and the postponed-inference frame a lambda
+/// argument resolves against. A scope assembled from a list of `(name, type)` bindings has none of
+/// that, which is why `val derived = base.map { it + 1 }` could not be typed that way: the lambda
+/// had no frame to be postponed into. Running the declaration and then reading the type the checker
+/// recorded for its body is the same thing the reference compiler does when it jumps to an
+/// implicitly-typed declaration.
+fn infer_declaration_ty(
+    file: &File,
+    file_index: u32,
+    declaration: DeclId,
+    expression: ExprId,
+    table: &SymbolTable,
+    engine: EngineSeams<'_>,
+) -> Ty {
+    let EngineSeams {
+        demand,
+        demand_member,
+        rejects,
+    } = engine;
+    let Decl::Property(property) = file.decl(declaration) else {
+        return Ty::Error;
+    };
+    let mut scratch = DiagSink::new();
+    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
+    checker.demand_name = Some(&demand);
+    checker.demand_member = Some(&demand_member);
+    checker.demand_rejects = Some(&rejects);
+    checker.inference_only = true;
+    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
+    checker.set_anonymous_lexical_class_context(declaration);
+    let root = CheckerScope::root();
+    checker.check_property(&root, property, declaration);
+    let inferred = checker
+        .expr_types
+        .get(expression.0 as usize)
+        .copied()
+        .unwrap_or(Ty::Error);
+    // An elvis whose two sides are DIFFERENT numeric primitives declines. Kotlin's type for such a
+    // mix is their least upper bound — for `Int` and `Double` that is `Comparable<*> & Number`,
+    // which kotlinc emits as `Ljava/lang/Object;` — while the checker's ordinary join promotes,
+    // which would write `D` into the field, the getter and the `@Metadata`. That is a different
+    // value at runtime with nothing to reveal it, so refusing to answer is the recoverable choice;
+    // the join stays as it is for expression positions, where nothing is published.
+    if checker.inference_incomplete
+        || declaration_body_declines(file, expression, &checker.expr_types)
+    {
+        return Ty::Error;
+    }
+    let inferred = withheld_declaration_ty(table, file_index, inferred);
+    let inferred = withheld_construction_ty(file, expression, &checker.expr_types, table, inferred);
+    // The declaration's own body is what decides. Diagnostics from this run are discarded: the
+    // authoritative check reports on the declaration later, and reporting here would duplicate
+    // every message or, worse, report one the demand hook was about to make moot.
+    inferred
 }
 
 /// Type one declaration's body with the REAL checker.
@@ -10928,6 +11245,7 @@ fn infer_lit_ty_scoped_on_demand(
     let mut checker = make_checker(file, file_index, None, table, &mut scratch);
     checker.demand_name = Some(&demand);
     checker.demand_member = Some(&demand_member);
+    checker.inference_only = true;
     checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     // Signature inference wants a declaration's type in terms of its own type parameters, not their
     // erasures: a member of `Holder<T>` initialized from `T` is `T`, and erasing it here would write
@@ -10958,10 +11276,13 @@ fn infer_lit_ty_scoped_on_demand(
     // An initializer is not a function body: a `return` in it does not belong to any function, and
     // giving it one would type `val a = return` instead of rejecting it.
     let inferred = checker.with_ret_allowed(Ty::Unit, false, |checker| checker.expr(scope, e));
-    if scratch.has_errors() {
+    let declines =
+        checker.inference_incomplete || declaration_body_declines(file, e, &checker.expr_types);
+    drop(checker);
+    if scratch.has_errors() || declines {
         return Ty::Error;
     }
-    inferred
+    withheld_declaration_ty(table, file_index, inferred)
 }
 
 /// Extract the compile-time value of a source literal after its semantic type has been established.
@@ -14920,6 +15241,9 @@ fn make_checker<'a>(
         syms,
         demand_name: None,
         demand_member: None,
+        demand_rejects: None,
+        inference_only: false,
+        inference_incomplete: false,
         module: crate::module_symbols::ModuleSymbols::for_file(syms, file_index),
         file_index,
         source_files,
@@ -17314,6 +17638,24 @@ struct Checker<'a> {
     /// The same seam for a read THROUGH a receiver, which resolves against the member records
     /// rather than by name.
     demand_member: Option<&'a dyn Fn(Ty, &str) -> Option<Ty>>,
+    /// Whether this checker exists only to determine ONE declaration's type, rather than to check a
+    /// file.
+    inference_only: bool,
+    /// Set when such a run reached a declaration the symbol table does not carry YET — an anonymous
+    /// object declared later in `file.decls` than the declaration being typed, most often.
+    ///
+    /// This is a DECLINE, not a skip: the run cannot determine the type, so it reports no type and
+    /// the declaration is resolved again once collection has finished. Continuing and publishing
+    /// whatever the incomplete table produced is the miscompile this whole area exists to avoid.
+    /// For the authoritative check the same situation stays an assertion, because by then every
+    /// declaration is collected and a miss is a real broken invariant.
+    inference_incomplete: bool,
+    /// Whether the declaration being typed may not read this name AT ALL. An eager initializer runs
+    /// in declaration order, so a module property declared later in the same file has no value yet;
+    /// kotlinc rejects `val eager = later` with "variable 'later' must be initialized". The symbol
+    /// table has no notion of position, so the engine answers that question and the read is reported
+    /// unresolved rather than silently taking the later declaration's type.
+    demand_rejects: Option<&'a dyn Fn(&str) -> bool>,
     expr_types: Vec<Ty>,
     /// Trace-only duplicate-traversal detector. This is deliberately not a semantic cache: normal
     /// builds contain no field or branch, and trace builds report the caller bug to remove.
@@ -30748,9 +31090,14 @@ impl<'a> Checker<'a> {
                 self.this_labels.truncate(label_depth);
             }
             // Secondary constructors: check and record one delegation target before the body.
-            let class_signature = current_owner
-                .and_then(|owner| self.syms.class_by_type_name(owner))
-                .expect("checked class has a collected signature");
+            let collected = current_owner.and_then(|owner| self.syms.class_by_type_name(owner));
+            if collected.is_none() && self.inference_only {
+                // Not yet collected: this run cannot determine the type it was asked for, so it
+                // declines and the declaration is resolved again after collection finishes.
+                self.inference_incomplete = true;
+                return;
+            }
+            let class_signature = collected.expect("checked class has a collected signature");
             let primary_params = class_signature.ctor_params.clone();
             let source_primary_params = primary_params
                 .get(..cl.props.len())
@@ -36075,8 +36422,34 @@ impl<'a> Checker<'a> {
                     );
                     return self.set(e, ty);
                 }
-                if self.syms.context_prop_names.contains(&n) || self.syms.props.contains_key(&n) {
+                if self.demand_rejects.is_some_and(|rejects| rejects(&n)) {
+                    self.diags
+                        .error(self.span(e), format!("unresolved reference '{n}'."));
+                    Ty::Error
+                } else if self.syms.context_prop_names.contains(&n)
+                    || self.syms.props.contains_key(&n)
+                {
                     match self.select_top_level_property(scope, &n) {
+                        // A module property is REGISTERED before its type is known, as a placeholder
+                        // the engine fills in later. Selection therefore succeeds with `Ty::Error`,
+                        // or fails outright, while the declaration is still being resolved — both
+                        // mean "not yet", not "no such property", so both ask the engine.
+                        TopLevelPropertySelection::Selected(property)
+                            if property.property.ty == Ty::Error =>
+                        {
+                            match self.demand_name.and_then(|demand| demand(&n)) {
+                                Some(ty) => {
+                                    self.expr_lowers
+                                        .insert(e, ExprLowering::TopLevelPropertyGet(property));
+                                    ty
+                                }
+                                None => {
+                                    self.expr_lowers
+                                        .insert(e, ExprLowering::TopLevelPropertyGet(property));
+                                    Ty::Error
+                                }
+                            }
+                        }
                         TopLevelPropertySelection::Selected(property) => {
                             let ty = property.property.ty;
                             self.expr_lowers
@@ -36101,9 +36474,16 @@ impl<'a> Checker<'a> {
                             Ty::Error
                         }
                         TopLevelPropertySelection::None => {
-                            self.diags
-                                .error(self.span(e), format!("unresolved reference '{n}'."));
-                            Ty::Error
+                            match self.demand_name.and_then(|demand| demand(&n)) {
+                                Some(ty) => ty,
+                                None => {
+                                    self.diags.error(
+                                        self.span(e),
+                                        format!("unresolved reference '{n}'."),
+                                    );
+                                    Ty::Error
+                                }
+                            }
                         }
                     }
                 } else if let Some((receiver, declared_name)) = self.imported_singleton_member(&n) {
