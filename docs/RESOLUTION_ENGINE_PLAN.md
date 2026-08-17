@@ -101,6 +101,19 @@ the binary path was never exported into the worker shell, so every row was `<rej
 3281 of 7352 files produced a row. The script now asserts full coverage and exits non-zero on a gap,
 because a sweep that silently covers half the corpus reads exactly like a clean one.
 
+## Compile time — base `2da5a640` vs `a9f8e6a3`
+
+735 box-corpus files, one compiler invocation each, 8-way parallel, the two binaries interleaved in
+one session because cross-run drift on this machine is far larger than the effect being measured.
+
+| Round | base | landed |
+| --- | --- | --- |
+| 1 | 101s | 103s |
+| 2 | 106s | 105s |
+
+Within noise. Resolving on demand replaces passes that swept the module repeatedly, so the memo is
+not paying for laziness here; it is removing rounds.
+
 ## PR 3 — Inferred function returns on demand
 
 **Changes** `preinfer_module_returns` to resolve each function's inferred return through the engine
