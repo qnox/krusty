@@ -1594,9 +1594,13 @@ fn build_class_metadata(
                 // `Function.receiver_type` so the record's value parameters are the LOGICAL ones.
                 // Both parameter side tables use the physical IR order. An extension receiver is the
                 // first parameter, while Kotlin metadata exposes it separately from value parameters.
-                let is_ext =
-                    ir.extension_receiver_fns.contains(&fid) && !metadata_params.is_empty();
-                let recv_offset = usize::from(is_ext);
+                // The receiver's physical index is the function's context count, so it is NOT
+                // separable by a leading skip: `(contexts…, receiver, values…)` means the logical
+                // value parameters lie on BOTH sides of it.
+                let member_context_count = ir.fn_context_counts.get(&fid).copied().unwrap_or(0);
+                let is_ext = ir.extension_receiver_fns.contains(&fid)
+                    && member_context_count < metadata_params.len();
+                let receiver_index = is_ext.then_some(member_context_count);
                 let apply_nullable = |i_full: usize, t: crate::types::Ty| {
                     if declared_nullable
                         .and_then(|v| v.get(i_full))
@@ -1608,25 +1612,32 @@ fn build_class_metadata(
                         t
                     }
                 };
-                let receiver = is_ext.then(|| apply_nullable(0, metadata_params[0]));
+                let receiver =
+                    receiver_index.map(|index| apply_nullable(index, metadata_params[index]));
                 let logical_params: Vec<(String, crate::types::Ty)> = metadata_params
-                    [recv_offset..]
                     .iter()
                     .enumerate()
+                    .filter(|(i, _)| receiver_index != Some(*i))
                     .map(|(i, t)| {
-                        // `fn_params` leads with the extension receiver (`$this$<fn>`) when one exists,
-                        // exactly like `param_defaults`; read past that explicitly recorded IR slot.
+                        // `fn_params` records the extension receiver (`$this$<fn>`) at that same
+                        // physical index, exactly like `param_defaults`; both are read positionally.
                         let n = names
-                            .and_then(|ns| ns.get(i + recv_offset).cloned())
+                            .and_then(|ns| ns.get(i).cloned())
                             .unwrap_or_else(|| format!("p{i}"));
-                        (n, apply_nullable(i + recv_offset, *t))
+                        (n, apply_nullable(i, *t))
                     })
                     .collect();
                 // Per-parameter DECLARES_DEFAULT_VALUE — recorded so a cross-module caller may
                 // OMIT a defaulted member argument (the `$default` synthetic realizes the call).
                 let param_defaults: Vec<bool> = ir
                     .param_defaults(fid)
-                    .map(|ds| ds.iter().skip(recv_offset).map(|d| d.is_some()).collect())
+                    .map(|ds| {
+                        ds.iter()
+                            .enumerate()
+                            .filter(|(i, _)| receiver_index != Some(*i))
+                            .map(|(_, d)| d.is_some())
+                            .collect()
+                    })
                     .unwrap_or_default();
                 Some(FnMeta {
                     // How SOURCE spelled this member's declared types — carried on the IR because
@@ -1647,6 +1658,7 @@ fn build_class_metadata(
                     params_have_defaults: false,
                     param_defaults,
                     vararg_index: ir.fn_vararg_index.get(&fid).copied(),
+                    context_count: member_context_count,
                     // The physical descriptor rides along whenever a reader could not derive it from
                     // the proto types: a VC/suspend-rewritten member (`declared`), a signature
                     // mentioning a TYPE PARAMETER (`vararg parts: T` erases to `[Ljava/lang/Object;`
@@ -1692,6 +1704,7 @@ fn build_class_metadata(
             .iter()
             .enumerate()
             .map(|(i, f)| FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: format!("component{}", i + 1),
                 params: vec![],
@@ -1712,6 +1725,7 @@ fn build_class_metadata(
             .collect();
         if synthesizes_copy {
             m.push(FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "copy".into(),
                 params: data_component_fields
@@ -1734,6 +1748,7 @@ fn build_class_metadata(
             });
         }
         m.push(FnMeta {
+            context_count: 0,
             spellings: crate::spelling::DeclaredSpellings::default(),
             name: "equals".into(),
             params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
@@ -1752,6 +1767,7 @@ fn build_class_metadata(
             param_annotations: Vec::new(),
         });
         m.push(FnMeta {
+            context_count: 0,
             spellings: crate::spelling::DeclaredSpellings::default(),
             name: "hashCode".into(),
             params: vec![],
@@ -1770,6 +1786,7 @@ fn build_class_metadata(
             param_annotations: Vec::new(),
         });
         m.push(FnMeta {
+            context_count: 0,
             spellings: crate::spelling::DeclaredSpellings::default(),
             name: "toString".into(),
             params: vec![],
@@ -1795,6 +1812,7 @@ fn build_class_metadata(
         let u = desc(c.fields[0].ty);
         vec![
             FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "equals".into(),
                 params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
@@ -1813,6 +1831,7 @@ fn build_class_metadata(
                 param_annotations: Vec::new(),
             },
             FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "hashCode".into(),
                 params: vec![],
@@ -1831,6 +1850,7 @@ fn build_class_metadata(
                 param_annotations: Vec::new(),
             },
             FnMeta {
+                context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "toString".into(),
                 params: vec![],

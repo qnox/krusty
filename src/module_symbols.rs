@@ -151,11 +151,14 @@ impl<'a> ModuleSymbols<'a> {
                     c.internal_name(),
                     c.is_interface(),
                 );
-                // A member extension is an instance method whose first method parameter is the
-                // extension receiver. Context parameters remain the leading parameters of the
-                // callable's semantic signature, but physically follow that receiver. Publish the
-                // same shape as metadata providers: receiver + (contexts + values).
-                member.params.insert(0, extension.receiver_ty());
+                // A member extension is an instance method carrying the extension receiver among its
+                // method parameters, AFTER the leading context parameters. Publish the same shape as
+                // metadata providers: contexts + receiver + values.
+                let signature = extension.signature();
+                member.params.insert(
+                    signature.context_count.min(member.params.len()),
+                    extension.receiver_ty(),
+                );
                 member.set_is_member_extension(true);
                 member.set_is_operator(extension.signature().is_operator());
                 member.set_is_infix(extension.signature().is_infix());
@@ -549,7 +552,11 @@ impl<'a> ModuleSymbols<'a> {
                     let signature = extension.signature();
                     let receiver = crate::types::ty_subst(extension.receiver_ty(), &bindings);
                     let mut semantic_params = signature.params.clone();
-                    semantic_params.insert(0, receiver);
+                    // Same slot the `generic_sig` below uses: after the leading context parameters.
+                    // The two disagreed, so a context-carrying SAM member extension published a
+                    // physical list and a generic signature that named different receivers.
+                    semantic_params
+                        .insert(signature.context_count.min(semantic_params.len()), receiver);
                     crate::trace_compiler!(
                         "resolve",
                         "  SAM extension declaration {}.{} params={:?} abstract={}",
@@ -896,7 +903,9 @@ pub(crate) fn member_from_signature(
 }
 
 /// Build a top-level / extension `FunctionInfo` from a user [`Signature`]. `receiver` is `Some` for an
-/// extension (prepended to `params`, matching the library convention that `params[0]` is the receiver).
+/// extension, spliced into `params` at the library convention's receiver index — after the leading
+/// context parameters (see [`crate::libraries::extension_receiver_index`]), so `params[0]` is the
+/// receiver only for an extension that declares no `context(…)` clause.
 #[derive(Clone, Copy)]
 struct CallableOwner {
     internal: TypeName,
@@ -917,11 +926,12 @@ fn fn_info(
         is_interface: owner_is_interface,
     } = owner;
     let source_receiver = sig.source_receiver.or(receiver);
-    let mut params: Vec<Ty> = Vec::new();
+    // The extension receiver follows the leading CONTEXT parameters, matching kotlinc's signature
+    // layout `(contexts…, receiver, values…)`; `sig.params` is `(contexts…, values…)`.
+    let mut params: Vec<Ty> = sig.params.clone();
     if let Some(r) = receiver {
-        params.push(r);
+        params.insert(sig.context_count.min(params.len()), r);
     }
-    params.extend(sig.params.iter().copied());
     let callable = LibraryCallable {
         owner,
         name: name.to_string(),

@@ -229,9 +229,10 @@ fn value_class_param_types(
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> Vec<Option<Ty>> {
     let mut out = vec![None; desc_params.len()];
-    // Descriptor layout: [extension receiver] [context params] [value params].
+    // Descriptor layout: [context params] [extension receiver] [value params].
+    let context_count = callable.context_count();
     for (index, parameter) in callable.parameters().enumerate() {
-        let position = usize::from(extension) + index;
+        let position = meta_descriptor_position(index, context_count, extension);
         if position >= kept {
             break;
         }
@@ -1526,30 +1527,43 @@ fn function_parameter_erasure_matches(
     classifier_arity(descriptor) == Some(signature.params.len() + usize::from(signature.suspend))
 }
 
+/// Descriptor slot of the metadata parameter at `index`, where `parameters()` yields the context
+/// parameters first and the value parameters after them. Kotlin signs a context extension
+/// `(contexts…, receiver, values…)`, so only parameters PAST the context prefix are pushed along by
+/// the receiver.
+fn meta_descriptor_position(index: usize, context_count: usize, extension: bool) -> usize {
+    index + usize::from(extension && index >= context_count)
+}
+
 fn meta_callable_aligns(
     f: &super::metadata::MetaFn,
     desc_params: &[Ty],
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
     classifier_arity: &dyn Fn(Ty) -> Option<usize>,
 ) -> Option<(usize, usize)> {
-    let off = f.is_extension() as usize;
-    // Context parameters sit between the (extension) receiver and the value parameters in the
-    // JVM descriptor; metadata keeps them out of `value_parameter` (field 13 instead), so the
-    // aligned descriptor span is receiver + context + value params.
-    let end = off + f.context_count() + f.value_params.len();
+    let extension = f.is_extension();
+    let context_count = f.context_count();
+    // Context parameters LEAD the JVM descriptor, ahead of the extension receiver; metadata keeps
+    // them out of `value_parameter` (field 13 instead), so the aligned descriptor span is
+    // context + receiver + value params and the two groups are not contiguous.
+    let end = usize::from(extension) + context_count + f.value_params.len();
     if end > desc_params.len() {
         return None;
     }
-    let receiver_ok = !f.is_extension()
-        || match f.receiver_class {
-            Some(rc) => meta_param_compat(Some(rc), false, &desc_params[0], value_underlying),
-            None => desc_params[0].is_reference(),
-        };
+    let aligned =
+        |index: usize| &desc_params[meta_descriptor_position(index, context_count, extension)];
+    let receiver_ok = !extension || {
+        let receiver = &desc_params[context_count];
+        match f.receiver_class {
+            Some(rc) => meta_param_compat(Some(rc), false, receiver, value_underlying),
+            None => receiver.is_reference(),
+        }
+    };
     if !receiver_ok
         || !f
             .parameters()
             .enumerate()
-            .zip(&desc_params[off..end])
+            .map(|(index, m)| ((index, m), aligned(index)))
             .all(|((index, m), d)| {
                 let signature_parameter = f
                     .generic_sig
@@ -1570,7 +1584,7 @@ fn meta_callable_aligns(
     let exact = f
         .parameters()
         .enumerate()
-        .zip(&desc_params[off..end])
+        .map(|(index, m)| ((index, m), aligned(index)))
         .filter(|((index, m), d)| {
             let signature_parameter = f
                 .generic_sig
@@ -1659,10 +1673,14 @@ fn metadata_declared_return(function: &super::metadata::MetaFn) -> Option<Ty> {
 
 fn metadata_declared_params(function: &super::metadata::MetaFn) -> Option<Vec<Ty>> {
     let signature = function.generic_sig.as_ref()?;
-    let mut params =
-        Vec::with_capacity(signature.params.len() + usize::from(signature.receiver.is_some()));
-    params.extend(signature.receiver);
-    params.extend(signature.params.iter().copied());
+    let mut params = signature.params.clone();
+    // PHYSICAL order: `(contexts…, receiver, values…)`. `GenericSig::params` is the semantic list
+    // (contexts + values), so the receiver is spliced in at the context count — prepending it would
+    // rebuild the declaration in an order the emitted method does not have, and a call site built
+    // from it targets a descriptor nothing declares.
+    if let Some(receiver) = signature.receiver {
+        params.insert(function.context_count().min(params.len()), receiver);
+    }
     Some(params)
 }
 
