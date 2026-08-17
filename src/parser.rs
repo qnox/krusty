@@ -94,6 +94,8 @@ fn parse_with_features_and_script(
     p.file.explicit_context_arguments = features.has("ExplicitContextArguments");
     p.file.implicit_signed_to_unsigned_integer_conversion =
         features.has("ImplicitSignedToUnsignedIntegerConversion");
+    p.file.data_copy_respects_ctor_visibility =
+        features.has("DataClassCopyRespectsConstructorVisibility");
     let script_scope = is_script.then(|| {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

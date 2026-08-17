@@ -118,6 +118,10 @@ impl LangFeatures {
             self.enable("MultiDollarInterpolation");
             return true;
         }
+        if arg == "-Xconsistent-data-class-copy-visibility" {
+            self.enable("DataClassCopyRespectsConstructorVisibility");
+            return true;
+        }
         false
     }
 }
@@ -168,6 +172,8 @@ mod tests {
         assert!(!g.has("EnableNameBasedDestructuringShortForm"));
         assert!(g.apply_cli_arg("-Xmulti-dollar-interpolation"));
         assert!(g.has("MultiDollarInterpolation"));
+        assert!(g.apply_cli_arg("-Xconsistent-data-class-copy-visibility"));
+        assert!(g.has("DataClassCopyRespectsConstructorVisibility"));
         assert!(!g.apply_cli_arg("foo.kt"));
     }
 

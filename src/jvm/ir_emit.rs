@@ -766,6 +766,44 @@ fn synthesizes_data_class_members(c: &crate::ir::IrClass) -> bool {
     c.is_data && !c.is_singleton()
 }
 
+/// The synthesized `copy` method's IR function id on a data class, if present. The lowering
+/// registers `copy` as an ordinary method, so its visibility (under
+/// `DataClassCopyRespectsConstructorVisibility`) lives in `ir.private_methods`/`ir.internal_methods`
+/// like any declared member's. The parameter-list check keeps a DECLARED same-named overload (a
+/// different signature by necessity — the synthesized one cannot be redeclared) from being mistaken
+/// for the synthesized member, whose params are exactly the primary-ctor property types.
+fn data_copy_fid(ir: &IrFile, c: &crate::ir::IrClass) -> Option<u32> {
+    let n = c.ctor_param_count as usize;
+    c.methods.iter().copied().find(|&fid| {
+        let f = &ir.functions[fid as usize];
+        f.name == "copy"
+            && f.params.len() == n
+            && f.params
+                .iter()
+                .zip(c.fields.iter().take(n))
+                .all(|(p, field)| *p == field.ty)
+    })
+}
+
+/// `Function.flags` for the synthesized `copy`: [`COPY_FN_FLAGS`] (public final SYNTHESIZED member)
+/// with the visibility bits swapped to the copy's actual visibility — the primary constructor's
+/// under `DataClassCopyRespectsConstructorVisibility` (kotlinc 2.4.10: private ctor → 0xC2).
+fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
+    use crate::metadata::class_builder::COPY_FN_FLAGS;
+    let Some(fid) = data_copy_fid(ir, c) else {
+        return COPY_FN_FLAGS;
+    };
+    // INTERNAL=0, PRIVATE=1, PUBLIC=3 in metadata's visibility enum, held in bits 1-3.
+    let visibility: u64 = if ir.private_methods.contains(&fid) {
+        1
+    } else if ir.internal_methods.contains(&fid) {
+        0
+    } else {
+        3
+    };
+    (COPY_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK) | (visibility << 1)
+}
+
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -778,8 +816,8 @@ fn build_class_metadata(
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
         build_class, ClassMemberOrder, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS,
-        COPY_FN_FLAGS, EQUALS_FN_FLAGS, FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS,
-        OBJECT_CTOR_FLAGS, SEALED_CTOR_FLAGS,
+        EQUALS_FN_FLAGS, FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS,
+        SEALED_CTOR_FLAGS,
     };
     if is_coroutine_state_machine(c) {
         return Some(KotlinMetadata {
@@ -1573,7 +1611,7 @@ fn build_class_metadata(
                 type_params: Vec::new(),
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
-                flags: COPY_FN_FLAGS,
+                flags: data_copy_fn_flags(ir, c),
                 params_have_defaults: true,
                 receiver: None,
                 param_defaults: Vec::new(),
@@ -2290,6 +2328,8 @@ fn seed_plain_class_pool(
                 accessors: &data_accessors,
                 hashcode_owners: &hashcode_owners,
                 copy_sig: copy_sig.as_deref(),
+                copy_is_private: data_copy_fid(ir, c)
+                    .is_some_and(|fid| ir.private_methods.contains(&fid)),
                 field_sigs: &field_sigs,
             },
         );
@@ -2793,7 +2833,12 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         let self_ref = format!("L{};", c.fq_name());
         let data_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
         // A `data object` synthesizes no `copy` (see the metadata assembly), so it takes no annotations.
-        if !data_fields.is_empty() {
+        // A PRIVATE `copy` (its ctor's visibility under `DataClassCopyRespectsConstructorVisibility`)
+        // takes none either: kotlinc omits nullability annotations — return and parameters — on the
+        // now-private method.
+        let copy_is_private =
+            data_copy_fid(ir, c).is_some_and(|fid| ir.private_methods.contains(&fid));
+        if !data_fields.is_empty() && !copy_is_private {
             let copy_desc = format!("({}){self_ref}", ctor_field_descs(c));
             // `copy`'s parameters mirror the primary-constructor properties, so each reference param
             // takes the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
@@ -9246,8 +9291,11 @@ fn emit_method_inner_with_holder(
         .unwrap_or_default();
     // kotlinc annotates nullability only on declarations a source caller can reach. A
     // HIDDEN-deprecated one is emitted ACC_SYNTHETIC for binary compatibility alone and carries
-    // neither `@NotNull` nor `@Nullable`.
-    let nullability_annotated = !declared_annotations.deprecated_hidden();
+    // neither `@NotNull` nor `@Nullable`; a PRIVATE method (declared, or a data class's `copy`
+    // under `DataClassCopyRespectsConstructorVisibility`) likewise gets none — the annotations
+    // exist for Java interop, which cannot see it.
+    let nullability_annotated =
+        !declared_annotations.deprecated_hidden() && !ir.private_methods.contains(&fid);
     let ann_types: Vec<&str> = ret_ann
         .into_iter()
         .chain(emitted_param_anns.iter().flatten().copied())
