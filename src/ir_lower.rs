@@ -20988,6 +20988,39 @@ impl<'a> Lower<'a> {
                 }
             };
         }
+        // A `@JvmField` companion `var`: the checker selected the OWNER class's public static field
+        // as the complete write target — `putstatic owner.name`, no setter exists anywhere. A bare
+        // classifier/companion receiver (`C`, `C.Companion` — a recorded `SingletonValue`) runs no
+        // code and is not materialized, but any OTHER receiver expression keeps its effects in
+        // kotlinc's order: receiver, then value, then `putstatic` (measured: `side().v = 7`
+        // evaluates `side()` and pops; the READ of the same shape drops the call entirely).
+        if let Some(StmtLowering::StaticPropertyWrite { owner, name, ty }) =
+            self.info.stmt_lowers.get(&stmt).cloned()
+        {
+            let receiver_effect = if matches!(
+                self.info.expr_lowers.get(&receiver),
+                Some(ExprLowering::SingletonValue(_))
+            ) {
+                None
+            } else {
+                Some(self.expr(receiver)?)
+            };
+            let v = self.lower_arg(value, &ty_to_ir(ty))?;
+            let descriptor = self.runtime.type_descriptor(ty)?;
+            let store = self.ir.add_expr(IrExpr::SetExternalStaticField {
+                owner,
+                name,
+                descriptor,
+                value: v,
+            });
+            return Some(match receiver_effect {
+                Some(effect) => self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![effect],
+                    value: Some(store),
+                }),
+                None => store,
+            });
+        }
         // The checker resolved `recv.name = value` to a member property and said so. Lowering names that
         // property; the store form — a field store, an instance setter, a receiverless one — is the
         // backend's decision, made from the owner's declaration. Mirrors the read in

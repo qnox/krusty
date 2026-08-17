@@ -703,6 +703,49 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   byte-divergent), and the file is written UNCONDITIONALLY: kotlinc emits it with an empty parts
   list for a class-only module, so omitting it diverged the artifact set. Byte-identical against
   kotlinc for both the with-parts and empty shapes (unit tests pin the exact bytes).
+- **`@JvmField` on companion-object properties.** Measured against kotlinc 2.4.10: the property is
+  realized as a PUBLIC static field on the OWNER class (`final` for a `val`, non-final for a `var`;
+  an `internal` declaration still gets a public unmangled field) with NO getter/setter anywhere and
+  no `access$…$cp` bridges; the field carries the property's field-targeted annotations
+  (`Lkotlin/jvm/JvmField;` first, then the nullability annotation) as `RuntimeInvisibleAnnotations`,
+  and the owner's `<clinit>` initializes it after the `Companion` store, in declaration order. On an
+  INTERFACE owner the field hoists onto the interface itself (`public static final`, `<clinit>` =
+  `getstatic $$INSTANCE; putstatic Companion; …; putstatic <field>`), which kotlinc admits only when
+  EVERY companion property is a `public final val` with `@JvmField` — krusty applies the same
+  whole-companion rule and otherwise leaves the ordinary object-style storage. The companion's
+  `@Metadata` property record keeps the `JvmField` annotation, drops the accessor signatures, writes
+  the `var`'s default setter-flags word despite the missing physical setter, and (interface owner
+  only) sets `JvmFlags.IS_MOVED_FROM_INTERFACE_COMPANION` (Property extension f101 = 1). The
+  eligibility is one declaration-level ABI fact (`DeclaredPropertySig::is_jvm_field`, like
+  `is_const`): plain stored `public`/`internal` property with an initializer — no custom accessor,
+  delegate, `lateinit`, `const`, `open`, or `abstract`. Reads/writes from every distance go to the
+  field directly: the checker records `StaticPropertyRead`/`StaticPropertyWrite` against the OWNER
+  (same-file, sibling-file, and companion-instance reads alike), and classpath consumption falls
+  back to the public field hoisted onto the companion's outer class when the companion class file
+  carries neither accessor nor field (`companion_owner_field_access`) — this also fixed writes to a
+  kotlinc-built `@JvmField var`. Hoisted companion statics are no longer registered in
+  `declared_class_statics[owner]`: kotlinc's OWNER metadata carries NO record for a hoisted
+  companion property (the declaration belongs to the companion's metadata alone), and the bogus
+  const-flavored owner record was the last owner-class byte divergence. Byte-identical to kotlinc
+  for owner + companion in the class-owner (val + var), internal-val, and interface-owner shapes
+  (also under `-jvm-default=no-compatibility`); runtime round-trips same-file, cross-file, and
+  cross-module (`tests/jvmfield_companion_e2e.rs`). Ineligible placements FALL BACK TOGETHER: the
+  checker's routing and the JVM pass's hoist consult mirrored eligibility, including the two shapes
+  where they could split — an interface companion MIXING `@JvmField` with a `const val` (the
+  whole-companion check spans const statics too, which live outside `IrClass::properties`) and a
+  VALUE-CLASS-typed `@JvmField val` (the checker declines routing exactly where the pass declines
+  the hoist) — both pinned by fallback runtime tests, since kotlinc rejects those sources but
+  krusty's contract is the ordinary realization. A WRITE's receiver expression keeps its side
+  effects (kotlinc evaluates `side().v = 7`'s receiver, then `pop; putstatic` — measured), while a
+  bare classifier/companion receiver and every READ receiver are dropped (also kotlinc's shape,
+  measured: the read's `getstatic` has no receiver call). The classpath outer-field fallback fires
+  only when the companion's `@Metadata` declares the property AND the accessor that record names is
+  absent from the companion class file (the reader derives conventional accessor names, so record
+  presence alone cannot discriminate). Deliberately NOT implemented: kotlinc's rejection
+  diagnostics (private/lateinit/const/custom-accessor placements simply keep the ordinary
+  realization; kotlinc rejects those sources outright), instance (constructor-property) `@JvmField`,
+  and `@JvmField` on a named `object`'s properties, which keeps the previous private-static +
+  accessor realization.
 - **`@Metadata` writer — the CLASS round-trip (a `@Metadata` on every emitted class, not just the
   facade).** A file facade's `@Metadata` describes that file's TOP-LEVEL declarations only, so krusty
   used to emit nothing at all for a CLASS — and a krusty-compiled class was therefore unreadable by

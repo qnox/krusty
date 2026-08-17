@@ -1287,6 +1287,19 @@ impl IrClass {
         self.fq_name
     }
 
+    /// Whether the property named `name` carries `@JvmField`. The annotation's `@Target` is FIELD,
+    /// so use-site defaulting lands it in [`Self::field_annotations`]; this reads that record — the
+    /// annotation IS the fact, never a re-derivation from the JVM realization.
+    pub fn property_has_jvm_field(&self, name: &str) -> bool {
+        self.field_annotations.iter().any(|fa| {
+            fa.field == name
+                && fa
+                    .annotations
+                    .applications()
+                    .any(|a| a.internal.matches("kotlin/jvm/JvmField"))
+        })
+    }
+
     pub fn fq_name(&self) -> String {
         self.fq_name.render()
     }
@@ -1509,6 +1522,9 @@ pub struct IrFile {
     /// Static indices whose storage was moved from a companion declaration to its outer class by the
     /// JVM companion-storage pass. Common lowering never populates this physical realization table.
     jvm_companion_hoisted_statics: std::collections::HashSet<u32>,
+    /// Statics realized as `@JvmField` public fields (no accessors, no bridges) by the JVM
+    /// companion-storage pass. Always a subset of [`Self::jvm_companion_hoisted_statics`].
+    jvm_field_statics: std::collections::HashSet<u32>,
     /// Exact companion property declaration → its JVM outer-class static realization. The property
     /// index is stable within its declaring class; backend consumers must not recover this edge by
     /// matching the property's spelling against a static field name.
@@ -2278,6 +2294,17 @@ impl IrFile {
 
     pub(crate) fn is_jvm_companion_hoisted_static(&self, index: u32) -> bool {
         self.jvm_companion_hoisted_statics.contains(&index)
+    }
+
+    /// Record/query the `@JvmField` realization of a hoisted companion property: the static IS the
+    /// property's public JVM surface — no accessors, no `access$…$cp` bridges — so every reader and
+    /// writer goes `getstatic`/`putstatic` on the owner directly (kotlinc's shape).
+    pub(crate) fn mark_jvm_field_static(&mut self, index: u32) {
+        self.jvm_field_statics.insert(index);
+    }
+
+    pub(crate) fn is_jvm_field_static(&self, index: u32) -> bool {
+        self.jvm_field_statics.contains(&index)
     }
 
     pub fn param_defaults(&self, fid: u32) -> Option<&Vec<Option<ExprId>>> {

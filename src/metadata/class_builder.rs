@@ -70,6 +70,10 @@ pub struct PropMeta {
     /// [`Self::annotations`] — `JvmPropertySignature.syntheticMethod` (f2). `None` when the property
     /// has no property-targeted annotation.
     pub synthetic_method: Option<(String, String)>,
+    /// kotlinc's `JvmFlags.IS_MOVED_FROM_INTERFACE_COMPANION` (`Property` extension f101 = 1): a
+    /// `@JvmField` property of an INTERFACE's companion, whose backing field was hoisted onto the
+    /// interface itself. A reader uses it to find the field on the interface rather than here.
+    pub moved_from_interface_companion: bool,
 }
 
 /// Member-function descriptor for class metadata (`Class.function` = f9). The JVM signature is usually
@@ -845,6 +849,9 @@ pub fn build_class(
             jvm.field_message(4, setter); // JvmPropertySignature.setter = 4
         }
         prop.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
+        if p.moved_from_interface_companion {
+            prop.field_varint(101, 1); // JvmProtoBuf.flags = 101: IS_MOVED_FROM_INTERFACE_COMPANION
+        }
         prop
     };
 
@@ -1246,6 +1253,7 @@ mod tests {
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
                 synthetic_method: None,
+                moved_from_interface_companion: false,
             })
         };
 
@@ -1307,6 +1315,7 @@ mod tests {
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
                 synthetic_method: None,
+                moved_from_interface_companion: false,
             }],
             &[],
             &[],
@@ -1468,6 +1477,7 @@ mod tests {
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
                 synthetic_method: None,
+                moved_from_interface_companion: false,
             },
             PropMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1488,6 +1498,7 @@ mod tests {
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
                 synthetic_method: None,
+                moved_from_interface_companion: false,
             },
         ];
         let (d1, _d2) = build_class(
@@ -1557,6 +1568,7 @@ mod tests {
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
                 synthetic_method: None,
+                moved_from_interface_companion: false,
             }],
             &[],
             &[],
@@ -1705,6 +1717,7 @@ mod tests {
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
                 synthetic_method: None,
+                moved_from_interface_companion: false,
             }],
             &[],
             &[],
@@ -1761,6 +1774,7 @@ mod tests {
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
                 synthetic_method: None,
+                moved_from_interface_companion: false,
             }],
             &[],
             &[],
@@ -1823,6 +1837,7 @@ mod tests {
                     annotations: Vec::new(),
                     field_annotations: Vec::new(),
                     synthetic_method: None,
+                    moved_from_interface_companion: false,
                 },
                 PropMeta {
                     spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1843,6 +1858,7 @@ mod tests {
                     annotations: Vec::new(),
                     field_annotations: Vec::new(),
                     synthetic_method: None,
+                    moved_from_interface_companion: false,
                 },
             ],
             &[],

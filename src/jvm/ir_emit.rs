@@ -1231,6 +1231,10 @@ fn build_class_metadata(
                     annotations: property_marker_annotations(ir, c, &property.name),
                     field_annotations: property_backing_field_annotations(c, &property.name),
                     synthetic_method: property_marker_signature(ir, c, &property.name),
+                    // kotlinc marks an interface companion's `@JvmField` property record: the
+                    // backing field was MOVED onto the interface itself.
+                    moved_from_interface_companion: companion_of_interface(ir, c)
+                        && jvm_field_static_for(ir, c, property_index),
                 },
             )
         })
@@ -1266,6 +1270,7 @@ fn build_class_metadata(
                 annotations: property_marker_annotations(ir, c, &prop.name),
                 field_annotations: property_backing_field_annotations(c, &prop.name),
                 synthetic_method: property_marker_signature(ir, c, &prop.name),
+                moved_from_interface_companion: false,
             },
         ));
     }
@@ -1314,6 +1319,7 @@ fn build_class_metadata(
             annotations: property_marker_annotations(ir, c, &ext.name),
             field_annotations: Vec::new(),
             synthetic_method: property_marker_signature(ir, c, &ext.name),
+            moved_from_interface_companion: false,
         });
         prop_source_orders.push(
             ir.fn_source_order
@@ -2529,6 +2535,15 @@ fn hoisted_static_for<'a>(
     ir.statics.get(static_id as usize)
 }
 
+/// Whether this companion property's hoisted static is the `@JvmField` realization — a public owner
+/// field with NO companion accessors, so accessor-shaped emission must skip it entirely.
+fn jvm_field_static_for(ir: &IrFile, c: &crate::ir::IrClass, property: usize) -> bool {
+    c.is_companion
+        && ir
+            .jvm_companion_property_static(c.fq_name_id(), property as u32)
+            .is_some_and(|static_id| ir.is_jvm_field_static(static_id))
+}
+
 fn attach_synth_debug_tables(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -2673,8 +2688,9 @@ fn attach_synth_debug_tables(
     // HOISTED companion properties: no companion field, but the delegating accessors get the same
     // debug shape kotlinc gives ordinary accessors (getter: `this` only; a `var` setter also has
     // its `<set-?>` value parameter, guarded when the property type is a non-null reference).
+    // A `@JvmField` property has NO accessors — nothing to describe.
     for (property_index, property) in c.properties.iter().enumerate() {
-        if property.backing_field.is_some() {
+        if property.backing_field.is_some() || jvm_field_static_for(ir, c, property_index) {
             continue;
         }
         let Some(hoisted) = hoisted_static_for(ir, c, property_index) else {
@@ -2713,7 +2729,9 @@ fn attach_synth_debug_tables(
         .iter()
         .enumerate()
         .filter(|(index, s)| {
-            ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
+            ir.is_jvm_companion_hoisted_static(*index as u32)
+                && !ir.is_jvm_field_static(*index as u32)
+                && s.owner_matches(&c.fq_name())
         })
         .map(|(_, s)| s)
     {
@@ -2915,9 +2933,10 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
     }
     // HOISTED companion properties: the delegating accessors annotate like ordinary accessors
-    // (reference getter return; a `var` reference setter's parameter).
+    // (reference getter return; a `var` reference setter's parameter). `@JvmField` emits no
+    // accessors, so there is nothing to annotate (the FIELD's annotations ride the owner class).
     for (property_index, property) in c.properties.iter().enumerate() {
-        if property.backing_field.is_some() {
+        if property.backing_field.is_some() || jvm_field_static_for(ir, c, property_index) {
             continue;
         }
         let Some(hoisted) = hoisted_static_for(ir, c, property_index) else {
@@ -5479,9 +5498,12 @@ fn emit_class(
         // outside `<clinit>` is an IllegalAccessError.
         let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
         // A HOISTED companion property's field is PRIVATE regardless of the property's declared
-        // visibility (kotlinc: every access goes through the accessors/bridges, never the field).
+        // visibility (kotlinc: every access goes through the accessors/bridges, never the field) —
+        // EXCEPT under `@JvmField`, where the PUBLIC field IS the property's whole JVM surface
+        // (kotlinc emits it public even for an `internal` declaration, with no accessors at all).
         let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
-        let acc = if s.visibility.is_private() || hoisted {
+        let jvm_field = ir.is_jvm_field_static(static_index);
+        let acc = if (s.visibility.is_private() || hoisted) && !jvm_field {
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
@@ -5511,6 +5533,23 @@ fn emit_class(
             }
         });
         cw.add_field_late(acc, &s.name, &desc, cv, ann);
+        // A `@JvmField` field carries the property's FIELD-targeted annotations (`JvmField` itself
+        // among them) as `RuntimeInvisibleAnnotations`, BEFORE the nullability entry — kotlinc's
+        // attribute order. The records live on the declaring COMPANION class.
+        if jvm_field {
+            if let Some(annotations) = c
+                .companion_class
+                .and_then(|companion| ir.class_id_by_name(companion))
+                .and_then(|companion| {
+                    ir.classes[companion as usize]
+                        .field_annotations
+                        .iter()
+                        .find(|annotations| annotations.field == s.name)
+                })
+            {
+                cw.set_last_late_field_annotations(&annotations.annotations);
+            }
+        }
     }
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
     // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body
@@ -6110,7 +6149,9 @@ fn emit_class(
         .iter()
         .enumerate()
         .filter(|(index, s)| {
-            ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&fq_name)
+            ir.is_jvm_companion_hoisted_static(*index as u32)
+                && !ir.is_jvm_field_static(*index as u32)
+                && s.owner_matches(&fq_name)
         })
         .map(|(_, s)| s)
     {
@@ -8468,8 +8509,16 @@ fn emit_interface_class(
     }
     // A companion `val` on the interface is a `public static final` field ON THE INTERFACE (interface
     // fields are implicitly static final): a `const val` as a `ConstantValue`, a non-const `val`
-    // initialized in the interface's `<clinit>`. Read as `getstatic C.X`.
-    for s in ir.statics.iter().filter(|s| s.owner_matches(&fq_name)) {
+    // initialized in the interface's `<clinit>`. Read as `getstatic C.X`. A hoisted `@JvmField`
+    // static is NOT visited here: kotlinc's field table puts it after the `Companion` field, with no
+    // `ConstantValue` (its store lives in `<clinit>`), interning at the field-table visit (below).
+    for s in ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(index, s)| s.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32))
+        .map(|(_, s)| s)
+    {
         let desc = ir_type_desc(&s.ty);
         if let Some(cv) = const_value_idx(ir, s.init, &mut cw) {
             cw.add_field_const(0x0019, &s.name, &desc, cv); // PUBLIC | STATIC | FINAL
@@ -8500,7 +8549,21 @@ fn emit_interface_class(
         );
         let mut clinit = CodeBuilder::new(0);
         emit_companion_init(e.cw, &mut clinit, &fq_name, c);
+        // kotlinc maps each hoisted `@JvmField` store to its property's declaration line in the
+        // COMPANION source (the `Companion` alias itself has no entry) — the class-owner shape's
+        // `<clinit>` LineNumberTable, mirrored here.
+        let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
         for s in &clinit_statics {
+            let pc = clinit.bytes.len() as u16;
+            if let Some(&line) = c
+                .companion_class
+                .as_ref()
+                .and_then(|companion| ir.prop_decl_lines.get(&(*companion, s.name.clone())))
+            {
+                if line != 0 {
+                    clinit_lines.push((pc, line));
+                }
+            }
             e.emit_value(s.init, &mut clinit);
             let jt = jvm_declared_ty(&s.ty);
             let fref = e.cw.fieldref(&fq_name, &s.name, &type_descriptor(jt));
@@ -8510,8 +8573,44 @@ fn emit_interface_class(
         clinit.ensure_locals(e.next_slot);
         clinit.link();
         e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+        if !clinit_lines.is_empty() {
+            e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
+        }
     }
     add_companion_field(&mut cw, c);
+    // Hoisted `@JvmField` companion vals: `public static final` fields ON THE INTERFACE, visited
+    // after the `Companion` field (kotlinc's field order), each carrying the property's
+    // FIELD-targeted annotations (`JvmField` among them) before the nullability entry. Their
+    // initializer stores are in `<clinit>` above; no `ConstantValue`.
+    for s in ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(index, s)| s.owner_matches(&fq_name) && ir.is_jvm_field_static(*index as u32))
+        .map(|(_, s)| s)
+    {
+        let desc = ir_type_desc(&s.ty);
+        let ann = (desc.starts_with('L') || desc.starts_with('[')).then(|| {
+            if s.ty.is_nullable() {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
+        cw.add_field_late(0x0019, &s.name, &desc, None, ann);
+        if let Some(annotations) = c
+            .companion_class
+            .and_then(|companion| ir.class_id_by_name(companion))
+            .and_then(|companion| {
+                ir.classes[companion as usize]
+                    .field_annotations
+                    .iter()
+                    .find(|annotations| annotations.field == s.name)
+            })
+        {
+            cw.set_last_late_field_annotations(&annotations.annotations);
+        }
+    }
     // A user annotation on an interface is emitted exactly as on a class — kotlinc writes it BEFORE the
     // `@Metadata` entry, which is the order these queue in.
     cw.set_class_annotations(&c.applied_annotations);
@@ -12628,9 +12727,14 @@ impl<'a> Emitter<'a> {
                 // field on the outer class). Within the owner write the (private) field directly;
                 // from another class — the companion's delegating setter — go through the owner's
                 // PUBLIC synthetic `access$set<X>$cp` bridge (kotlinc's hoisted-companion shape).
+                // A `@JvmField` static is a PUBLIC field with no bridges: every writer goes
+                // `putstatic` directly.
                 if let Some(owner) = self.ir.statics[index as usize].owner {
                     let owner_name = owner.render();
-                    if self.owner == owner_name || !self.ir.is_jvm_companion_hoisted_static(index) {
+                    if self.owner == owner_name
+                        || !self.ir.is_jvm_companion_hoisted_static(index)
+                        || self.ir.is_jvm_field_static(index)
+                    {
                         let fref = self.cw.fieldref(&owner_name, &name, &type_descriptor(jt));
                         code.putstatic(fref, slot_words(jt) as i32);
                     } else {
@@ -13892,10 +13996,14 @@ impl<'a> Emitter<'a> {
                 // A static declaring an OWNER lives on that class, not the facade. Within the owner
                 // read the (private) field directly; from any other class — the companion's
                 // delegating accessors — go through the owner's PUBLIC synthetic `access$get<X>$cp`
-                // bridge, kotlinc's hoisted-companion-property access shape.
+                // bridge, kotlinc's hoisted-companion-property access shape. A `@JvmField` static
+                // is a PUBLIC field with no bridges: every reader goes `getstatic` directly.
                 if let Some(owner) = self.ir.statics[*i as usize].owner {
                     let owner_name = owner.render();
-                    if self.owner == owner_name || !self.ir.is_jvm_companion_hoisted_static(*i) {
+                    if self.owner == owner_name
+                        || !self.ir.is_jvm_companion_hoisted_static(*i)
+                        || self.ir.is_jvm_field_static(*i)
+                    {
                         let fref = self.cw.fieldref(&owner_name, &name, &type_descriptor(jt));
                         code.getstatic(fref, slot_words(jt) as i32);
                     } else {

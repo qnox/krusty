@@ -744,6 +744,8 @@ mod js_backend_e2e;
 mod jvm_default_mode_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]
 mod jvm_name_toplevel_e2e;
+#[path = "jvmfield_companion_e2e.rs"]
+mod jvmfield_companion_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
