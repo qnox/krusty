@@ -1112,7 +1112,10 @@ fn build_class_metadata(
                 })
                 .or_else(|| {
                     backing.and_then(|(_, field)| {
-                        (!visibility.is_private())
+                        // `@JvmField` suppresses the accessor pair entirely, so there is no
+                        // synthesized getter to derive from the backing field — kotlinc records the
+                        // field alone.
+                        (!visibility.is_private() && !is_jvm_field(c, &property.name))
                             .then(|| (default_getter, format!("(){}", desc(field.ty))))
                     })
                 });
@@ -1144,8 +1147,10 @@ fn build_class_metadata(
                 })
                 .or_else(|| {
                     backing.and_then(|(_, field)| {
-                        (!visibility.is_private() && property.is_var)
-                            .then(|| (default_setter, format!("({})V", desc(field.ty))))
+                        (!visibility.is_private()
+                            && property.is_var
+                            && !is_jvm_field(c, &property.name))
+                        .then(|| (default_setter, format!("({})V", desc(field.ty))))
                     })
                 });
             (
@@ -4135,6 +4140,30 @@ fn property_backing_field_annotations(
         .unwrap_or_default()
 }
 
+/// Is this property declared `@JvmField`? The annotation replaces the property's JVM realization
+/// wholesale: kotlinc emits NO `getX()`/`setX()` for it and gives the backing field the PROPERTY's
+/// declared visibility, so every read and write — inside the class and out — is a field access, and
+/// the `@Metadata` record describes only the field.
+///
+/// Read off the resolved application rather than the spelling: `@JvmField` reaches the FIELD use
+/// site by its own declared `@Target` (see `class_field_annotations`), so it is already interned
+/// here under its exact identity, and an unrelated user annotation that happens to be spelled
+/// `JvmField` resolves to a different one.
+///
+/// An OBJECT (including a companion) is excluded. `@JvmField` there means something else again —
+/// kotlinc lifts the storage to a public static on the ENCLOSING class — and krusty realizes an
+/// object's properties through its own singleton/hoisting plan (a private static plus an
+/// `access$get…$cp` bridge), which this instance-field rule would contradict rather than complete.
+/// Bringing objects to parity is separate work; until then they keep the realization they had.
+fn is_jvm_field(c: &crate::ir::IrClass, property: &str) -> bool {
+    !c.is_singleton()
+        && c.field_annotations
+            .iter()
+            .filter(|annotations| annotations.field == property)
+            .flat_map(|annotations| annotations.annotations.applications())
+            .any(|applied| applied.internal.matches("kotlin/jvm/JvmField"))
+}
+
 fn apply_field_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
     if let Some(fa) = c.field_annotations.iter().find(|fa| fa.field == field) {
         cw.set_last_field_annotations(&fa.annotations);
@@ -4793,7 +4822,10 @@ fn emit_declared_property_accessor(
             }
         }
     }
-    if property.is_private || property.getter.is_some() {
+    // `@JvmField` IS the declaration's realization: the field is the property's public face and
+    // kotlinc emits no accessor beside it. Synthesizing one here would advertise a method the
+    // metadata (correctly) never records.
+    if property.is_private || property.getter.is_some() || is_jvm_field(c, &property.name) {
         return;
     }
     let Some(field_index) = property.backing_field else {
@@ -5330,6 +5362,18 @@ fn emit_class(
         // `ACC_PRIVATE` (the default — Kotlin backing fields are private, reached via accessors); a
         // non-private field → `ACC_PUBLIC` (read/written cross-class, e.g. a coroutine continuation's
         // `result`/`label`).
+        //
+        // A `@JvmField` property has no accessor, so the field IS the declaration's visible face and
+        // takes the PROPERTY's declared visibility instead — `protected val` stays `ACC_PROTECTED`,
+        // `internal`/`public` become `ACC_PUBLIC` (Kotlin's `internal` is a module-only fact).
+        let jvm_field_visibility = is_jvm_field(c, name)
+            .then(|| c.properties.iter().find(|p| p.name == *name))
+            .flatten()
+            .map(|property| match property.visibility {
+                crate::types::Visibility::Protected => 0x0004,
+                crate::types::Visibility::Private => 0x0002,
+                _ => 0x0001,
+            });
         let private = field.is_private();
         let acc = if is_continuation {
             // kotlinc's continuation field layout: everything package-private; `result` is SYNTHETIC,
@@ -5340,7 +5384,7 @@ fn emit_class(
                 _ => 0x0000,
             }
         } else {
-            (if private { 0x0002 } else { 0x0001 })
+            jvm_field_visibility.unwrap_or(if private { 0x0002 } else { 0x0001 })
                 | if field.is_final() { 0x0010 } else { 0 }
                 | if static_storage(ir, c) { 0x0008 } else { 0 }
         };
@@ -12050,6 +12094,17 @@ impl<'a> Emitter<'a> {
                 code,
             );
         }
+        // A sibling source file's `@JvmField` property, whose declaration says there IS no accessor.
+        // This must precede the naming-convention fallback below, which would invent one.
+        if let Some(access) = self.module_jvm_field_access(operation.owner, operation.name) {
+            return self.emit_realized_property_read(
+                operation.receiver,
+                access,
+                operation.ty,
+                false,
+                code,
+            );
+        }
         let access = PropertyAccess::Accessor {
             owner: operation.owner.to_string(),
             // A sibling source class has no classfile in `bodies`, so this is the only realization
@@ -12077,6 +12132,32 @@ impl<'a> Emitter<'a> {
         self.emit_realized_property_read(operation.receiver, access, operation.ty, false, code)
     }
 
+    /// The field realization of a `@JvmField` property declared by a class this compilation does NOT
+    /// materialize (a sibling source file's). Lowering recorded the declaration fact, because only it
+    /// can see the module's signatures; the field's owner and descriptor come from that record, never
+    /// from the use site's receiver.
+    fn module_jvm_field_access(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Option<crate::jvm::inline::PropertyAccess> {
+        // Building the key allocates, and the table is empty for every compilation whose sibling
+        // files declare no `@JvmField` — which is nearly all of them.
+        if self.ir.module_jvm_field_properties.is_empty() {
+            return None;
+        }
+        let (declaring, ty) = self
+            .ir
+            .module_jvm_field_properties
+            .get(&(crate::types::type_name(owner), name.to_string()))?;
+        Some(crate::jvm::inline::PropertyAccess::Field {
+            owner: declaring.render(),
+            name: name.to_string(),
+            descriptor: type_descriptor(jvm_declared_ty(ty)),
+            is_static: false,
+        })
+    }
+
     /// Realize `IrExpr::PropertyWrite` — the write analogue of [`Self::emit_property_read`], and the same
     /// sources in the same order: a class this compilation declares, then the owner's class file, then the
     /// JVM naming convention (`set<Name>`).
@@ -12102,6 +12183,9 @@ impl<'a> Emitter<'a> {
                 self.bodies
                     .property_write_access(operation.owner, operation.name)
             })
+            // A sibling source file's `@JvmField` property has no setter to call — before the
+            // naming convention below invents one.
+            .or_else(|| self.module_jvm_field_access(operation.owner, operation.name))
             .unwrap_or_else(|| PropertyAccess::Accessor {
                 owner: operation.owner.to_string(),
                 name: stamped
@@ -12294,7 +12378,7 @@ impl<'a> Emitter<'a> {
         let class = self.ir.classes.iter().find(|c| c.fq_name_matches(owner))?;
         // The write analogue: a declared setter is user code and must not be bypassed.
         let declared = class.properties.iter().find(|p| p.name == name);
-        let direct_field = self.direct_field_access(owner, declared, true);
+        let direct_field = self.direct_field_access(class, declared, true);
         if let Some(declared) = declared.filter(|p| p.needs_access_bridge && self.owner != owner) {
             let ty = declared
                 .backing_field
@@ -12383,7 +12467,7 @@ impl<'a> Emitter<'a> {
         // through it — the accessor is user code, and a direct field load would skip it. Only a plain
         // backing-field property may be read directly, and only from inside the declaring class.
         let declared = class.properties.iter().find(|p| p.name == name);
-        let direct_field = self.direct_field_access(owner, declared, false);
+        let direct_field = self.direct_field_access(class, declared, false);
         if let Some(getter) = declared.and_then(|p| p.getter) {
             let f = &self.ir.functions[getter as usize];
             return Some(PropertyAccess::Accessor {
@@ -12496,13 +12580,19 @@ impl<'a> Emitter<'a> {
     ///   raw field is the realization that at least links.
     /// * a `val` has no SETTER, so a `writable` access to one can only be the deferred initialization
     ///   Kotlin permits in a constructor/`init` block, which kotlinc also emits as a `putfield`.
+    ///
+    /// A `@JvmField` property is reachable this way from ANY class: it has no accessor to call, and
+    /// its field carries the declaration's own visibility rather than Kotlin's default `private`.
     fn direct_field_access(
         &self,
-        owner: &str,
+        class: &crate::ir::IrClass,
         declared: Option<&crate::ir::IrProperty>,
         writable: bool,
     ) -> bool {
-        self.owner == owner
+        if declared.is_some_and(|p| is_jvm_field(class, &p.name)) {
+            return true;
+        }
+        class.fq_name_matches(&self.owner)
             && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
     }
 

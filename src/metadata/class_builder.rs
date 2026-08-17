@@ -739,10 +739,19 @@ pub fn build_class(
         // An accessor's flags word is emitted when it differs from the DEFAULT one, which kotlinc
         // derives from the PROPERTY (its `hasAnnotations` bit included). An annotated property whose
         // getter carries no annotation of its own therefore writes its plain accessor word out.
-        let accessor_flags = property_flags::DEFAULT_ACCESSOR;
+        //
+        // That derivation is `Flags.getAccessorFlags(visibility, modality)` over the PROPERTY's own
+        // word — the two share bits 1-5 — so a `protected`/`internal` declaration's accessors carry
+        // ITS visibility, not the public default (`@Mark protected val` records getter_flags 4, and
+        // an `internal` one records 0). Only the property's `hasAnnotations` bit and its
+        // property-only bits are dropped.
+        let accessor_flags =
+            pflags & (property_flags::VISIBILITY_MASK | property_flags::MODALITY_MASK);
+        // The setter word rides on the DECLARATION being a `var`, not on a JVM setter signature
+        // being recorded: a `@JvmField var` has no setter method at all and still records the word.
         if annotated {
             prop.field_varint(7, accessor_flags); // Property.getter_flags = 7
-            if p.setter.is_some() {
+            if p.is_var {
                 prop.field_varint(8, accessor_flags); // Property.setter_flags = 8
             }
         }
