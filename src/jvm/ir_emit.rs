@@ -1599,8 +1599,8 @@ fn build_class_metadata(
                     // kotlinc records just the name there; an erased shape (`h(): V` → `()I`) is not
                     // derivable and keeps the descriptor.
                     jvm_sig: ((declared.is_some()
-                        && !(!is_suspend
-                            && vc.is_some_and(|(_, p, r)| {
+                        && (is_suspend
+                            || !vc.is_some_and(|(_, p, r)| {
                                 crate::jvm::names::method_descriptor(p, *r)
                                     == crate::jvm::names::method_descriptor(&f.params, f.ret)
                             })))
