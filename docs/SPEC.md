@@ -1582,6 +1582,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
   Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index
   (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, array and size hoisted).
+- **`vararg` and `Array` in `@Metadata`.** A `vararg`'s recorded `ValueParameter.type` is
+  `Array<out E>` — the OUT projection is part of the record, and the unprojected element travels
+  separately as `vararg_element_type`. Independently, `kotlin/Array` in ANY signature position
+  (parameter, extension receiver, return) forces an explicit `JvmMethodSignature.desc`, because a
+  reader derives descriptors by mapping class NAMES through a flat table and an array's descriptor
+  depends on its type argument. The specialized primitive arrays (`IntArray` → `[I`) are in that
+  table and record nothing, so `vararg xs: Int` records no descriptor while `vararg xs: Payload`
+  does. The rule keys off the array, not off `vararg`. Tests:
+  `tests/metadata_array_signature_e2e.rs` (byte-identity vs kotlinc 2.4.10); table in
+  `docs/METADATA_NOTES.md`.
+- **A class records only the supertypes source DECLARED.** An undeclared `kotlin/Any` is never a
+  `Class.supertype`, generic or not — even though a generic class's JVM `Signature` attribute must
+  materialize that superclass position, so the recorded generic signature krusty reuses for the
+  supertype list always leads with it. The metadata emitter drops it. Tests:
+  `a_generic_class_with_no_superclass_lists_only_its_interfaces` in
+  `tests/typealias_abbreviated_type_e2e.rs`.
 - **Classpath Java varargs (`T...`)**: the class reader carries `ACC_VARARGS` into `CallSig::vararg`.
   The shared call-argument lowerer then packs trailing elements into the final array parameter for
   both static and instance calls. An ordinary array parameter remains fixed-arity.
