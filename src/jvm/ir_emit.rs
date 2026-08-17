@@ -1481,8 +1481,17 @@ fn build_class_metadata(
                     // the proto types: a VC/suspend-rewritten member (`declared`), a signature
                     // mentioning a TYPE PARAMETER (`vararg parts: T` erases to `[Ljava/lang/Object;`
                     // — nothing in the record names that), or a vararg (kotlinc records it there
-                    // too). Derivable signatures omit it, kotlinc's usual shape.
-                    jvm_sig: (declared.is_some()
+                    // too). Derivable signatures omit it, kotlinc's usual shape. A value-class
+                    // rewrite that only MANGLED the name still has a derivable descriptor when no
+                    // erasure happened (`f(): V?` stays `()LI$V;` — nullable value classes box), so
+                    // kotlinc records just the name there; an erased shape (`h(): V` → `()I`) is not
+                    // derivable and keeps the descriptor.
+                    jvm_sig: ((declared.is_some()
+                        && !(!is_suspend
+                            && vc.is_some_and(|(_, p, r)| {
+                                crate::jvm::names::method_descriptor(p, *r)
+                                    == crate::jvm::names::method_descriptor(&f.params, f.ret)
+                            })))
                         || ir.fn_vararg_index.contains_key(&fid)
                         || matches!(metadata_ret, crate::types::Ty::TyParam(..))
                         || metadata_params

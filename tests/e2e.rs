@@ -684,6 +684,8 @@ mod interface_delegation_e2e;
 mod interface_delegation_expr_e2e;
 #[path = "interface_factory_function_e2e.rs"]
 mod interface_factory_function_e2e;
+#[path = "interface_nested_classifier_e2e.rs"]
+mod interface_nested_classifier_e2e;
 #[path = "interface_supertype_members_e2e.rs"]
 mod interface_supertype_members_e2e;
 #[path = "internal_classpath_access_e2e.rs"]
@@ -884,6 +886,8 @@ mod nested_try_finally_e2e;
 mod nested_type_scope_e2e;
 #[path = "nested_type_shadowing_e2e.rs"]
 mod nested_type_shadowing_e2e;
+#[path = "nested_value_class_e2e.rs"]
+mod nested_value_class_e2e;
 #[path = "newline_method_chain_e2e.rs"]
 mod newline_method_chain_e2e;
 #[path = "no_assertions_flags_e2e.rs"]
