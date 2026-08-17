@@ -17952,6 +17952,7 @@ struct MemberExtensionPriority {
 }
 
 #[derive(Clone)]
+
 struct MemberExtensionLambdaPlan {
     priority: MemberExtensionPriority,
     score: (usize, std::cmp::Reverse<usize>, bool),
@@ -18491,6 +18492,27 @@ fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
         _ => return None,
     };
     Some(common_result_nullability(a, b, base))
+}
+
+/// Every source of a lambda argument's shape for one member call, decided in ONE place.
+///
+/// These used to be consulted as separate channels at each call site, in a priority order written
+/// out again at every site: a member's expectation, a member extension's parameter types, an
+/// extension's shape, a module member's shape, and a provider member's expectations, first to
+/// answer winning. Writing the order repeatedly is how the orders came to disagree — the member
+/// channel answering first meant `{ entry -> … }` against `Map.forEach` was shaped by the
+/// two-parameter Java `BiConsumer` and the Kotlin extension never got its turn.
+///
+/// Precedence is a WHOLE-CALL decision: once a source member or an extension supplies a shape, an
+/// empty slot is never filled from a different provider's candidate, because two candidates that
+/// cannot both be selected must not contribute expectations to one call.
+struct CallLambdaShaping {
+    /// The selected module member's shape, when a member was selected at all.
+    module: Option<MemberLambdaShape>,
+    /// A member extension's, else an extension's.
+    extension: Option<crate::symbol_resolver::LambdaCallShape>,
+    /// A semantic provider's, consulted only when nothing above answered.
+    provider: Option<Vec<Option<LambdaExpectation>>>,
 }
 
 impl<'a> Checker<'a> {
@@ -34556,6 +34578,98 @@ impl<'a> Checker<'a> {
     }
 
     /// Type safe-call lambda arguments from the selected receiver callable.
+    /// Decide, ONCE, where each lambda argument of a member call gets its shape.
+    ///
+    /// Every source is asked here in one order, rather than each call site repeating the order for
+    /// itself. See [`CallLambdaShaping`] for why the repetition mattered.
+    #[allow(clippy::too_many_arguments)]
+    fn call_lambda_shaping(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        partial: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
+        explicit_type_args: &[Ty],
+        method_sig: Option<&crate::libraries::LibraryMember>,
+        generic_member: Option<&GenericMemberPlan>,
+    ) -> CallLambdaShaping {
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let module = method_sig.and_then(|member| {
+            module_member_lambda_shape(
+                &*self.syms.libraries,
+                member,
+                generic_member,
+                args,
+                arg_names,
+                trailing_lambda,
+                self.member_inline_body_available(member),
+            )
+        });
+        let member_extension = method_sig.is_none().then(|| {
+            self.member_extension_lambda_param_types(
+                scope,
+                MemberExtensionCall {
+                    extension_receiver: receiver,
+                    name,
+                    args,
+                    partial_arg_tys: partial,
+                    arg_names,
+                    explicit_type_args,
+                    trailing_lambda,
+                },
+            )
+        });
+        let extension =
+            member_extension
+                .flatten()
+                .map(|plan| crate::symbol_resolver::LambdaCallShape {
+                    generic_formals: Vec::new(),
+                    param_types: Some(plan.param_types),
+                    expected_types: None,
+                    fixed_expected_types: None,
+                    receivers: plan
+                        .receivers
+                        .iter()
+                        .any(Option::is_some)
+                        .then_some(plan.receivers),
+                    context_counts: None,
+                    materialized: None,
+                    inline: false,
+                });
+        let extension = extension.or_else(|| {
+            self.extension_lambda_shape(
+                scope,
+                receiver,
+                name,
+                (args, partial),
+                arg_names,
+                trailing_lambda,
+                explicit_type_args,
+                None,
+            )
+        });
+        let provider = (module.is_none() && extension.is_none())
+            .then(|| {
+                self.provider_member_lambda_expectations(
+                    scope,
+                    call,
+                    crate::symbol_resolver::SymRecv::Value(receiver),
+                    name,
+                    (args, partial),
+                    explicit_type_args,
+                )
+            })
+            .flatten();
+        CallLambdaShaping {
+            module,
+            extension,
+            provider,
+        }
+    }
+
     fn ext_arg_tys(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -34597,60 +34711,21 @@ impl<'a> Checker<'a> {
                 explicit_type_args,
             },
         );
-        let member_extension_plan = method_sig.is_none().then(|| {
-            self.member_extension_lambda_param_types(
-                scope,
-                MemberExtensionCall {
-                    extension_receiver: receiver,
-                    name,
-                    args,
-                    partial_arg_tys: &partial,
-                    arg_names: arg_names.as_deref(),
-                    explicit_type_args,
-                    trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
-                },
-            )
-        });
-        let member_extension_plan = member_extension_plan.flatten();
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let module_shape = method_sig.and_then(|member| {
-            module_member_lambda_shape(
-                &*self.syms.libraries,
-                member,
-                generic_member.as_ref(),
-                args,
-                arg_names.as_deref(),
-                trailing_lambda,
-                self.member_inline_body_available(member),
-            )
-        });
-        let member_extension_shape =
-            member_extension_plan.map(|plan| crate::symbol_resolver::LambdaCallShape {
-                generic_formals: Vec::new(),
-                param_types: Some(plan.param_types),
-                expected_types: None,
-                fixed_expected_types: None,
-                receivers: plan
-                    .receivers
-                    .iter()
-                    .any(Option::is_some)
-                    .then_some(plan.receivers),
-                context_counts: None,
-                materialized: None,
-                inline: false,
-            });
-        let shape = member_extension_shape.or_else(|| {
-            self.extension_lambda_shape(
-                scope,
-                receiver,
-                name,
-                (args, &partial),
-                arg_names.as_deref(),
-                trailing_lambda,
-                explicit_type_args,
-                None,
-            )
-        });
+        // One decision for the whole call — see `Checker::call_lambda_shaping`.
+        let shaping = self.call_lambda_shaping(
+            scope,
+            call,
+            receiver,
+            name,
+            args,
+            &partial,
+            arg_names.as_deref(),
+            explicit_type_args,
+            method_sig,
+            generic_member.as_ref(),
+        );
+        let module_shape = shaping.module;
+        let shape = shaping.extension;
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
         let expected_types = shape
@@ -34664,17 +34739,7 @@ impl<'a> Checker<'a> {
         // extension supplies a shape, never fill an empty slot from a different provider candidate.
         // This is the qualified path's rule too and keeps two-lambda calls from combining
         // expectations belonging to callables that cannot both be selected.
-        let provider_member_expectations = (module_shape.is_none() && shape.is_none()).then(|| {
-            self.provider_member_lambda_expectations(
-                scope,
-                call,
-                crate::symbol_resolver::SymRecv::Value(receiver),
-                name,
-                (args, &partial),
-                explicit_type_args,
-            )
-        });
-        let provider_member_expectations = provider_member_expectations.flatten();
+        let provider_member_expectations = shaping.provider;
         args.iter()
             .enumerate()
             .map(|(i, &x)| {
