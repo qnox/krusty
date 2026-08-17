@@ -271,7 +271,7 @@ fn package_value_param_defaults_round_trip() {
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[]);
+    let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/HostKt", d1, d2);
 
     let fns = package_functions(&ci);
@@ -316,7 +316,7 @@ fn package_function_type_parameter_bound_round_trips() {
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[]);
+    let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/HostKt", d1, d2);
     let function = package_functions(&ci)
         .iter()
@@ -363,7 +363,7 @@ fn package_extension_receiver_round_trips() {
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[]);
+    let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
 
     let f = package_functions(&ci)
@@ -428,7 +428,7 @@ fn package_receiver_function_type_param_round_trips() {
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[]);
+    let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/NavHostKt", d1, d2);
 
     let f = package_functions(&ci)

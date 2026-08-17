@@ -613,7 +613,8 @@ impl Backend for JvmBackend {
             crate::jvm::ir_emit::strip_param_assertions(&mut ir);
         }
         let emit_opts = emit_opts.with_param_assertions(self.param_assertions);
-        let metadata = facade_package_metadata_with_ir(file, checked.file_index, syms, &ir);
+        let metadata =
+            facade_package_metadata_with_ir(file, checked.file_index, syms, &ir, module_name);
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct. Inline splice failures
         // are reported separately (via `run.inline_bail`): selected inline calls are required to splice,
         // so those are backend errors to fix rather than silent skips.
@@ -708,8 +709,9 @@ pub fn facade_package_metadata_with_ir(
     file_index: u32,
     syms: &FrontendSymbols,
     ir: &crate::ir::IrFile,
+    module_name: &str,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
-    facade_package_metadata_inner(file, file_index, syms, Some(ir))
+    facade_package_metadata_inner(file, file_index, syms, Some(ir), module_name)
 }
 
 fn facade_package_metadata_inner(
@@ -717,6 +719,7 @@ fn facade_package_metadata_inner(
     file_index: u32,
     syms: &FrontendSymbols,
     ir: Option<&crate::ir::IrFile>,
+    module_name: &str,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let mut metas: Vec<crate::metadata::builder::FnMeta> = Vec::new();
     for (decl_order, &d) in file.decls.iter().enumerate() {
@@ -1045,8 +1048,13 @@ fn facade_package_metadata_inner(
         })
         .collect::<Vec<_>>();
     (!metas.is_empty() || !prop_metas.is_empty() || !alias_metas.is_empty()).then(|| {
-        let (d1_bytes, d2) =
-            crate::metadata::builder::build_package(&metas, &prop_metas, &alias_metas);
+        let (d1_bytes, d2) = crate::metadata::builder::build_package(
+            &metas,
+            &prop_metas,
+            &alias_metas,
+            // kotlinc omits `packageModuleName` for the default module `main`, same as classes.
+            (module_name != "main").then_some(module_name),
+        );
         // `d1` is the protobuf payload with one byte per `char` (the constant pool writes it as
         // modified-UTF-8, which the reader decodes back to the same bytes).
         let d1: String = d1_bytes.iter().map(|&b| b as char).collect();
@@ -1180,7 +1188,7 @@ mod tests {
         let mut symbols = collect_signatures(&files, &mut diagnostics);
         prepare_module_symbols(&files, &["A".to_string()], &mut symbols);
 
-        let metadata = facade_package_metadata_inner(&files[0], 0, &symbols, None)
+        let metadata = facade_package_metadata_inner(&files[0], 0, &symbols, None, "main")
             .expect("a package property requires facade metadata");
         let decoded = crate::jvm::metadata::decode_metadata(
             &metadata.d1,

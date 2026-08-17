@@ -328,7 +328,8 @@ pub fn compile_in_process(
     krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
     // The facade `@Metadata` the CLI backend writes (top-level fn/extension records) — without it a
     // SEPARATE compilation reading this output from the classpath cannot resolve extensions.
-    let metadata = krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir);
+    let metadata =
+        krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir, "main");
     // The SHIPPING emit config (per-class `@Metadata`, `SourceFile`, …) — the same definition the CLI
     // backend uses, so this helper can't drift from what `krusty -d …` writes.
     let opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone());
@@ -457,7 +458,8 @@ pub fn compile_in_process_metadata_cp(
     // `compile_in_process` pass it — `None` for a class-only source, so today's byte-identity
     // fixtures are unaffected, and a future fixture mixing a class with top-level functions gets
     // the same facade record a real build would.
-    let metadata = krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir);
+    let metadata =
+        krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir, "main");
     let outputs = krusty::jvm::ir_emit::emit_all_with_opts_and_metadata(
         &ir,
         &facade,
