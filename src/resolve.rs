@@ -10496,9 +10496,44 @@ struct DeferredInferenceDriver<'a> {
     /// sharing a simple name in different packages cannot answer for each other.
     by_member: &'a HashMap<(TypeName, String), DeclKey>,
     source_order: &'a SourceOrderIndex,
+    /// One checker run per CLASS, keyed by its declaration.
+    ///
+    /// A class body is resolved as a whole because its members are: `check_class` types every
+    /// member, so running it once per member both repeats the work and makes a sibling that reads
+    /// the member under computation close a FALSE cycle — `companion object { var backing = 10; val
+    /// DERIVED get() = C.backing * 2 }` declined `backing`, because typing it typed `DERIVED`,
+    /// which demanded `backing` back. One run answers every member of the class.
+    class_runs: std::cell::RefCell<HashMap<DeclKey, Option<ClassRunTypes>>>,
 }
 
 impl DeferredInferenceDriver<'_> {
+    /// The expression types one run over this member's class recorded, computed at most once.
+    fn class_run(
+        &self,
+        entry: &DeferredProperty,
+        demand: &dyn Fn(&str) -> Option<Ty>,
+        demand_member: &dyn Fn(Ty, &str) -> Option<Ty>,
+    ) -> Option<ClassRunTypes> {
+        let owner = DeclKey::declaration(entry.file_index, entry.key.decl);
+        if let Some(cached) = self.class_runs.borrow().get(&owner) {
+            return cached.clone();
+        }
+        // Reserve the slot before running: the run types every member, and one of them reaching
+        // back here must not start a second run of the same class.
+        self.class_runs.borrow_mut().insert(owner, None);
+        let types = infer_class_member_types(
+            &self.files[entry.file_index as usize],
+            entry.file_index,
+            DeclId(entry.key.decl),
+            self.table,
+            demand,
+            demand_member,
+        )
+        .map(std::rc::Rc::new);
+        self.class_runs.borrow_mut().insert(owner, types.clone());
+        types
+    }
+
     fn resolve(&self, key: DeclKey) -> Resolution {
         let Some(entry) = self.deferred.get(&key).copied() else {
             return Resolution::Declined(DeclineReason::Untypeable);
@@ -10522,15 +10557,15 @@ impl DeferredInferenceDriver<'_> {
                         rejects: &|name| !self.readable_from(entry, name),
                     },
                 ),
-                DeferredKind::Member(_) => infer_member_declaration_ty(
-                    file,
-                    entry.file_index,
-                    DeclId(entry.key.decl),
-                    expression,
-                    self.table,
-                    &demand,
-                    &demand_member,
-                ),
+                DeferredKind::Member(_) => self
+                    .class_run(entry, &demand, &demand_member)
+                    .and_then(|types| types.get(expression.0 as usize).copied())
+                    .map(|inferred| {
+                        let inferred =
+                            withheld_declaration_ty(self.table, entry.file_index, inferred);
+                        withheld_construction_ty(file, expression, &[], self.table, inferred)
+                    })
+                    .unwrap_or(Ty::Error),
             };
             let inferred = inferred_declaration_ty(inferred);
             (inferred != Ty::Error).then_some(inferred)
@@ -10588,6 +10623,13 @@ impl DeferredInferenceDriver<'_> {
         if from.scope_binds(name) {
             return None;
         }
+        if self
+            .by_name
+            .get(name)
+            .is_some_and(|key| self.class_run_in_progress(*key))
+        {
+            return None;
+        }
         if !self.readable_from(from, name) {
             return None;
         }
@@ -10604,10 +10646,29 @@ impl DeferredInferenceDriver<'_> {
     /// The index is keyed by the DECLARING owner, so an inherited member is found by walking the
     /// supertypes rather than by a second index that could disagree with the class graph.
     fn demand_member(&self, owner: TypeName, name: &str) -> Option<Ty> {
-        self.owner_chain(owner)
+        let key = *self
+            .owner_chain(owner)
             .into_iter()
-            .find_map(|declaring| self.by_member.get(&(declaring, name.to_string())))
-            .and_then(|key| self.resolve(*key).ty())
+            .find_map(|declaring| self.by_member.get(&(declaring, name.to_string())))?;
+        // A member of the class whose run is IN PROGRESS is being typed by that very run: a sibling
+        // reading it (`val DERIVED get() = C.backing * 2` beside `var backing = 10`) must not ask
+        // the engine for it again, which would re-enter a declaration already being computed and
+        // decline the whole class as recursive. The run resolves it.
+        if self.class_run_in_progress(key) {
+            return None;
+        }
+        self.resolve(key).ty()
+    }
+
+    /// Whether `key`'s class is mid-run.
+    fn class_run_in_progress(&self, key: DeclKey) -> bool {
+        key.member != DeclKey::OWN
+            && matches!(
+                self.class_runs
+                    .borrow()
+                    .get(&DeclKey::declaration(key.file, key.decl)),
+                Some(None)
+            )
     }
 
     /// Whether `owner` or any of its supertypes declares a property spelled `name`, whatever its
@@ -10733,6 +10794,7 @@ fn resolve_deferred_properties(
             by_name: &by_name,
             by_member: &by_member,
             source_order: &source_order,
+            class_runs: std::cell::RefCell::new(HashMap::new()),
         };
         deferred
             .iter()
@@ -11100,6 +11162,9 @@ fn declaration_body_declines(file: &File, expression: ExprId, expr_types: &[Ty])
     left.is_numeric() && right.is_numeric() && left != right
 }
 
+/// Expression types recorded by one checker run over a class.
+type ClassRunTypes = std::rc::Rc<Vec<Ty>>;
+
 /// The engine's seams into one checker run.
 ///
 /// Grouped rather than passed one by one: they are three views of a single question — what does the
@@ -11123,17 +11188,16 @@ struct EngineSeams<'a> {
 /// `class Cell<T>(val value: T, val flag: Boolean) { constructor(n: Int, v: T) }` with
 /// `val cell = Cell(5, "tag")` bound `T` from the PRIMARY constructor and emitted
 /// `Cell<Integer>` for a `Cell<String>`, a `checkcast` that fails on first read where kotlinc runs.
-fn infer_member_declaration_ty(
+fn infer_class_member_types(
     file: &File,
     file_index: u32,
     owner: DeclId,
-    expression: ExprId,
     table: &SymbolTable,
     demand: &dyn Fn(&str) -> Option<Ty>,
     demand_member: &dyn Fn(Ty, &str) -> Option<Ty>,
-) -> Ty {
+) -> Option<Vec<Ty>> {
     let Decl::Class(class) = file.decl(owner) else {
-        return Ty::Error;
+        return None;
     };
     let mut scratch = DiagSink::new();
     let mut checker = make_checker(file, file_index, None, table, &mut scratch);
@@ -11144,18 +11208,19 @@ fn infer_member_declaration_ty(
     checker.set_anonymous_lexical_class_context(owner);
     let root = CheckerScope::root();
     checker.check_class(&root, class, owner);
-    if checker.inference_incomplete
-        || declaration_body_declines(file, expression, &checker.expr_types)
-    {
-        return Ty::Error;
+    if checker.inference_incomplete {
+        return None;
     }
-    let inferred = checker
-        .expr_types
-        .get(expression.0 as usize)
-        .copied()
-        .unwrap_or(Ty::Error);
-    let inferred = withheld_declaration_ty(table, file_index, inferred);
-    withheld_construction_ty(file, expression, &checker.expr_types, table, inferred)
+    let mut types = std::mem::take(&mut checker.expr_types);
+    // A body the declaration rules refuse to publish reads as undetermined here, exactly as it
+    // would from a run of its own.
+    for index in 0..types.len() {
+        let expression = ExprId(index as u32);
+        if declaration_body_declines(file, expression, &types) {
+            types[index] = Ty::Error;
+        }
+    }
+    Some(types)
 }
 
 /// Type a top-level declaration by running the checker over the DECLARATION, not over a scope
