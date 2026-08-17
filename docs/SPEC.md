@@ -6936,3 +6936,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type when the engine gave none.
   Tests: `tests/resolution_order_independence_e2e.rs`, `tests/resolution_cycles_e2e.rs`,
   `src/type_engine.rs` unit tests.
+
+- **A declaration a reference SHADOWS is answered by that declaration or not at all.** Resolving
+  declarations on demand needs an index from a spelling to the declaration it names, and the obvious
+  index — module-wide by simple name — answers references it has no business answering. Three shapes,
+  each measured against kotlinc 2.4.10, each a wrong declared type rather than a diagnostic:
+
+  A read THROUGH a receiver (`other.a`, `this.a`, an implicit companion receiver) never reaches a
+  bare-name hook: it resolves against the symbol table's member records, which hold a placeholder
+  while that member's own type is still being determined. Reading the placeholder as the answer
+  rejected `class Box { val a = Helper.text() }` / `class User { val b = Box().a }` with `Helper` in
+  another file, which kotlinc compiles. The engine fall-through therefore belongs on the member-read
+  path too, not only on the bare name.
+
+  A class body resolves type spellings against its OWN classifier names — its nested classes, its
+  lexical owner's and the ones it inherits, all under their simple spellings — while the file-level
+  projection registers a nested class only under its dotted declared name. Resolving a member's
+  initializer against the file's names declines `class Outer { class Nested; val x = wrap(Nested()) }`,
+  and where a top-level class shares the simple name it silently binds THAT one into the field
+  descriptor and the `@Metadata`.
+
+  A member index keyed by the declaring owner misses an INHERITED member, and falling through to the
+  module index on that miss types the reference from an unrelated declaration: with a top-level
+  `val a: String` and `open class Base { val a: Int }`, `class Derived : Base() { val b = a }` came
+  out `String` where kotlinc writes `private final int b`. A name the owner or any of its supertypes
+  declares shadows the module property, so it is answered from the owner chain or declined — never
+  borrowed from the module.
+  Tests: `tests/resolution_order_independence_e2e.rs`.

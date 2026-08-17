@@ -11,55 +11,86 @@ landed step, and each PR stands on its own.
 
 Tracked here so "what is left" is answerable at any point in the arc.
 
+Four separate retry-to-fixpoint machines approximate demand ordering today, not one. Each PR takes
+one of them, so no PR is a pure addition and none is unreviewably large.
+
 | Symbol | File | Deleted by |
 | --- | --- | --- |
-| `preinfer_module_returns_to_fixpoint` (`for _pass in 0..8`) | `src/resolve.rs` | PR 1 |
-| `preinfer_file_returns_to_fixpoint` | `src/resolve.rs` | PR 1 |
-| `file_may_depend_on_preinfer_names`, `file_has_preinfer_candidates` | `src/resolve.rs` | PR 1 |
-| `infer_lit_ty`, `infer_lit_ty_scoped`, `infer_lit_ty_p` | `src/resolve.rs` | PR 2 |
-| `InferEnv`, `InferenceSource`, `infer_top_level_property_expr` | `src/resolve.rs` | PR 2 |
-| `PendingMemberProperty` + its post-walk retry | `src/resolve.rs` | PR 2 |
-| `top_level_lambda_shape`, `top_level_lambda_shape_in_scope` | `src/resolve.rs` | PR 3 |
-| `module_member_lambda_shape`, `lambda_return_overload_param_types` | `src/resolve.rs` | PR 3 |
-| `provider_member_lambda_expectations` | `src/resolve.rs` | PR 4 |
-| `member_extension_lambda_param_types`, `extension_lambda_shape` | `src/resolve.rs` | PR 4 |
-| `lambda_shape_for_overload` | `src/resolve.rs` | PR 4 |
-| `bind_ext_ret`, `bind_ext_ret_tracking`, `bind_defaulted_ext_ret`, `bind_defaulted_ext_ret_slots` | `src/symbol_resolver.rs` | PR 4 |
-| `merge_generic_bindings`, `merge_generic_bindings_from`, `complete_bottom_constraint_bindings` | `src/symbol_resolver.rs` | PR 4 |
-| `unify_ty`, `unify_ty_from_symbols` as public API (becomes solver-internal) | `src/symbol_resolver.rs` | PR 4 |
-| `is_java` / `has_metadata` / `ctor_params.is_none()` provenance proxies in core | `src/resolve.rs` | PR 5 |
+| `finish_top_level_computed_property_inference` | `src/resolve.rs` | PR 1 ✅ |
+| `PendingMemberProperty` + `finish_member_property_inference` | `src/resolve.rs` | PR 2 ✅ |
+| `preinfer_module_returns_to_fixpoint` (`for _pass in 0..8`) | `src/resolve.rs` | PR 3 |
+| `preinfer_file_returns_to_fixpoint` | `src/resolve.rs` | PR 3 |
+| `file_may_depend_on_preinfer_names`, `file_has_preinfer_candidates` | `src/resolve.rs` | PR 3 |
+| `infer_lit_ty`, `infer_lit_ty_scoped`, `infer_lit_ty_scoped_on_demand`, `infer_lit_ty_p` | `src/resolve.rs` | PR 4 |
+| `InferEnv`, `InferenceSource`, `infer_top_level_property_expr`, `infer_getter_ty` | `src/resolve.rs` | PR 4 |
+| `top_level_lambda_shape`, `top_level_lambda_shape_in_scope` | `src/resolve.rs` | PR 5 |
+| `module_member_lambda_shape`, `lambda_return_overload_param_types` | `src/resolve.rs` | PR 5 |
+| `provider_member_lambda_expectations` | `src/resolve.rs` | PR 6 |
+| `member_extension_lambda_param_types`, `extension_lambda_shape` | `src/resolve.rs` | PR 6 |
+| `lambda_shape_for_overload` | `src/resolve.rs` | PR 6 |
+| `bind_ext_ret`, `bind_ext_ret_tracking`, `bind_defaulted_ext_ret`, `bind_defaulted_ext_ret_slots` | `src/symbol_resolver.rs` | PR 6 |
+| `merge_generic_bindings`, `merge_generic_bindings_from`, `complete_bottom_constraint_bindings` | `src/symbol_resolver.rs` | PR 6 |
+| `unify_ty`, `unify_ty_from_symbols` as public API (becomes solver-internal) | `src/symbol_resolver.rs` | PR 6 |
+| `is_java` / `has_metadata` / `ctor_params.is_none()` provenance proxies in core | `src/resolve.rs` | PR 7 |
 
-## PR 1 — Demand-driven declaration typing
+## PR 1 — Demand-driven declaration typing (landed)
 
-**Adds** `src/type_engine.rs`: `DeclKey`, `ResolutionState { NotStarted, Computing, Resolved(Ty),
-Declined(DeclineReason) }`, the computing stack, the memo, `TypeEngine::declared_type`, and the ONE
+**Added** `src/type_engine.rs`: `DeclKey`, `ResolutionState { Computing, Resolved(Ty),
+Declined(DeclineReason) }`, the computing stack, the loop set, `TypeEngine::resolve`, and the ONE
 decline point.
 
-**Replaces** the pre-inference fixpoint: each declaration needing an inferred type is resolved when
-first asked for, memoised, instead of the file set being swept up to eight times until nothing
-changes.
+**Replaced** the eager, file-argument-order typing of top-level property declarations: a declaration
+the walk cannot type is recorded and resolved afterwards on demand, memoised.
 
-**Deletes** `preinfer_module_returns_to_fixpoint`, `preinfer_file_returns_to_fixpoint`,
-`file_may_depend_on_preinfer_names`, `file_has_preinfer_candidates`.
+**Deleted** `finish_top_level_computed_property_inference`.
 
-**Tests**: `tests/resolution_cycles_e2e.rs` — self (`val a = a`), mutual (`val a = b; val b = a`),
-three-way, and a cycle through a function return; each terminates, declines, and reports at every
-declaration on the loop, matching kotlinc's per-declaration reporting.
+**Decided** (measured against kotlinc 2.4.10, in `SPEC.md`): same-file source order restricts what an
+EAGER initializer may read; a cross-file forward reference is legal; an expression getter is
+executable and may read a later declaration.
 
-## PR 2 — Signature collection asks the engine; the pre-pass typer dies
+**Tests** `tests/resolution_order_independence_e2e.rs` (all permutations, `javap` descriptors,
+kotlinc differential), `tests/resolution_cycles_e2e.rs`, `src/type_engine.rs` unit tests.
 
-**Changes** `collect_signatures` to record implicitly-typed declarations as unresolved slots and ask
-`TypeEngine::declared_type` for them, which runs the REAL checker over the initializer.
+## PR 2 — One queue for every deferred property (landed)
 
-**Deletes** `infer_lit_ty`, `infer_lit_ty_scoped`, `infer_lit_ty_p`, `InferEnv`, `InferenceSource`,
-`infer_top_level_property_expr`, `PendingMemberProperty` and its retry.
+**Changed** class-body property inference to record and resolve through the engine, keyed by
+`DeclKey::member`, in the SAME queue as top-level properties. Two queues cannot both be served: one
+has to run first, so a member waiting on a module property and a module property waiting on a member
+cannot both be answered. `DeferredProperty` carries a `DeferredKind::{TopLevel, Member}` and the
+driver dispatches on it; a member's own class is consulted before the module in `demand`, matching
+the shadowing the walk's scope already recorded.
 
-**Tests**: `tests/resolution_order_independence_e2e.rs` — multi-file fixtures compiled in every
-argument permutation, asserting identical success and identical `javap` field and getter descriptors,
-including the `A.kt`/`B.kt` case; the four SPEC fixtures (elvis, lambda-result variable, module
-extension result, member/extension written arity) run unchanged against the single path.
+**Deleted** `PendingMemberProperty` and `finish_member_property_inference` — the scope-refreshing
+retry whose rounds are bounded by the pending count — and the top-level-before-member ordering PR 1
+had introduced.
 
-## PR 3 — Expected type as an engine input
+**Tests** `a_class_member_reading_another_file_types_the_same_in_either_order`,
+`a_module_property_reading_a_class_member_types_the_same_in_either_order` (both with `javap`
+descriptor assertions across every permutation), `a_cycle_between_a_class_member_and_a_module_property_declines`,
+`a_cycle_between_two_class_members_declines`.
+
+## PR 3 — Inferred function returns on demand
+
+**Changes** `preinfer_module_returns` to resolve each function's inferred return through the engine
+when it is first asked for.
+
+**Deletes** `preinfer_module_returns_to_fixpoint` (`for _pass in 0..8`),
+`preinfer_file_returns_to_fixpoint`, `file_may_depend_on_preinfer_names`,
+`file_has_preinfer_candidates`.
+
+## PR 4 — One expression typer
+
+**Changes** the engine's `compute` to run the REAL checker over the declaration's body and read the
+resulting expression type, replacing the reduced expression grammar of the signature pre-pass. The
+demand seam moves into the checker's name resolution.
+
+**Deletes** `infer_lit_ty`, `infer_lit_ty_scoped`, `infer_lit_ty_scoped_on_demand`, `infer_lit_ty_p`,
+`InferEnv`, `InferenceSource`, `infer_top_level_property_expr`, `infer_getter_ty`.
+
+**Tests** the four SPEC fixtures (elvis, lambda-result variable, module extension result,
+member/extension written arity) run unchanged against the single path.
+
+## PR 5 — Expected type as an engine input
 
 **Adds** `Expected { None, Type(Ty), ContextDependent }` threaded into expression resolution, and
 lambda parameter shaping read off the expected function type at the argument position.
@@ -67,20 +98,20 @@ lambda parameter shaping read off the expected function type at the argument pos
 **Deletes** `top_level_lambda_shape`, `top_level_lambda_shape_in_scope`, `module_member_lambda_shape`,
 `lambda_return_overload_param_types`.
 
-## PR 4 — One candidate set, one solver
+## PR 6 — One candidate set, one solver
 
 **Adds** candidate collection with member/extension/static/top-level as candidate properties, and a
 constraint system solved once, reporting determinacy itself.
 
 **Deletes** the remaining lambda channels and every per-channel binding helper listed above.
 
-## PR 5 — Consumers and the provider boundary
+## PR 7 — Consumers and the provider boundary
 
 **Changes** lowering's type queries and the LSP to ask the engine.
 
 **Deletes** the provenance proxies in core.
 
-## PR 6 — Corpus sweep, perf, SPEC
+## PR 8 — Corpus sweep, perf, SPEC
 
 Whole-corpus byte sweep (two-pass md5, deltas justified against kotlinc), before/after compile-time
 measurement interleaved in one process, and the SPEC entries for everything the arc decided.

@@ -170,6 +170,102 @@ fn a_declaration_read_before_it_is_declared_in_one_file_types_the_same() {
 }
 
 #[test]
+fn a_class_member_reading_another_file_types_the_same_in_either_order() {
+    // A class member asks the same question a top-level property does. It used to be answered by a
+    // separate retry pass that ran AFTER the top-level one, so the two could not both be waiting on
+    // each other; one queue and one memo removes that ordering entirely.
+    assert_order_independent(
+        "member-reads-module",
+        "Holder",
+        &[
+            ("A", "val source = listOf(1, 2, 3)\n"),
+            ("B", "class Holder { val mapped = source.map { it + 1 } }\n"),
+        ],
+    );
+}
+
+#[test]
+fn a_module_property_reading_a_class_member_types_the_same_in_either_order() {
+    // The other direction, which two ordered passes cannot both serve: the module property is
+    // waiting on the member rather than the member on the module property.
+    assert_order_independent(
+        "module-reads-member",
+        "BKt",
+        &[
+            ("A", "object Source { val items = listOf(1, 2, 3) }\n"),
+            ("B", "val doubled = Source.items.map { it * 2 }\n"),
+        ],
+    );
+}
+
+#[test]
+fn a_member_read_through_a_receiver_resolves_the_same_as_a_bare_name() {
+    // A read THROUGH a receiver does not reach the bare-name path: it resolves against the symbol
+    // table's member records, which hold a placeholder while that member's own type is still being
+    // determined. Reading the placeholder as the answer rejected a program kotlinc accepts.
+    assert_order_independent(
+        "member-through-receiver",
+        "User",
+        &[
+            (
+                "A",
+                "class Box  { val a = Helper.text() }\nclass User { val b = Box().a }\n",
+            ),
+            ("B", "object Helper { fun text(): String = \"\" }\n"),
+        ],
+    );
+}
+
+#[test]
+fn a_member_initializer_resolves_its_class_bodys_nested_names() {
+    // A class body extends the file's classifier names with its nested classes under their SIMPLE
+    // spelling; the file-level projection registers a nested class only under its dotted declared
+    // name. Resolving a deferred member against the file's names either fails to find `Nested` or,
+    // worse, silently binds a same-named top-level class into the field descriptor.
+    assert_order_independent(
+        "member-nested-names",
+        "Outer",
+        &[
+            (
+                "A",
+                "class Outer {\n    class Nested\n    val x = Helper.wrap(Nested())\n}\n",
+            ),
+            ("B", "object Helper { fun <T> wrap(t: T): T = t }\n"),
+        ],
+    );
+}
+
+#[test]
+fn an_inherited_member_is_not_answered_by_a_module_property_of_the_same_name() {
+    // The demand index is keyed by the DECLARING owner, so an inherited member is a miss. Falling
+    // through to the module-wide index on that miss typed `Derived.b` from the top-level `a`
+    // (`String`) instead of the inherited one (`Int`) — a wrong field descriptor, not a diagnostic.
+    if !common::stdlib_toolchain_ready() {
+        return;
+    }
+    let classes = compile_ordered(
+        "inherited-vs-module",
+        &[
+            (
+                "A",
+                "val a = Helper.text()\n\
+                 open class Base { val a = Helper.count() }\n\
+                 class Derived : Base() { val b = a }\n",
+            ),
+            (
+                "B",
+                "object Helper { fun text(): String = \"\"\n fun count(): Int = 0 }\n",
+            ),
+        ],
+    );
+    let declarations = member_declarations("inherited-vs-module", "Derived", &classes["Derived"]);
+    assert!(
+        declarations.contains("private final int b;"),
+        "the inherited member decides the type, not the module property: {declarations}"
+    );
+}
+
+#[test]
 fn an_eager_initializer_still_observes_declaration_order_within_its_file() {
     // Resolving on demand must not silently widen the initialization model. An initializer runs in
     // declaration order, so a declaration written LATER IN THE SAME FILE has no value yet: kotlinc
