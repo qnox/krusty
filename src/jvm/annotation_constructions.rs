@@ -122,6 +122,7 @@ fn annotation_implementation(
                 check: None,
             })
             .collect(),
+        ctor_param_annotations: Vec::new(),
         init_body: None,
         pre_super_param_fields: Vec::new(),
         explicit_param_stores: false,

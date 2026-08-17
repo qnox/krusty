@@ -30362,6 +30362,17 @@ impl<'a> Checker<'a> {
         for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
             self.check_annotation_application(scope, annotation, arguments);
         }
+        // VALUE-PARAMETER annotations, recorded but NOT diagnosed — see the member path in
+        // `check_class_member_fun` and the property annotations in `check_class` for why.
+        let diagnostics = self.diags.diags.len();
+        for parameter in &f.params {
+            for (annotation, arguments) in
+                parameter.annotations.iter().zip(&parameter.annotation_args)
+            {
+                self.check_annotation_application(scope, annotation, arguments);
+            }
+        }
+        self.diags.diags.truncate(diagnostics);
         self.check_infix_declaration(f, false);
         let previous_diagnostic_function = self.diagnostic_function.replace((
             f.name.clone(),
@@ -32397,6 +32408,20 @@ impl<'a> Checker<'a> {
         for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
             self.check_annotation_application(scope, annotation, arguments);
         }
+        // VALUE-PARAMETER annotations (`fun f(@Mark a: Int)`) are RECORDED on the same terms as the
+        // property and primary-constructor ones in `check_class`, and silent for the same reason:
+        // krusty's annotation folder is narrower than kotlinc's, and these applications were never
+        // checked before, so a diagnostic raised here would reject sources that compile today. What
+        // folds is recorded and reaches the class file plus `@Metadata`; what does not is dropped.
+        let diagnostics = self.diags.diags.len();
+        for parameter in &f.params {
+            for (annotation, arguments) in
+                parameter.annotations.iter().zip(&parameter.annotation_args)
+            {
+                self.check_annotation_application(scope, annotation, arguments);
+            }
+        }
+        self.diags.diags.truncate(diagnostics);
         let dispatch_this = scope.this_ty();
         let dispatch_extension_receiver = self.this_extension_receiver;
         let extension_receiver = f.receiver.as_ref().map(|r| self.type_ref_ty(scope, r));

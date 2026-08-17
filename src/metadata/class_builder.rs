@@ -12,7 +12,7 @@
 //! builtin types use `predefined_index` (Record.f2); everything else is a verbatim d2 entry.
 
 use crate::metadata::type_encoder::{
-    encode_indexed_type_parameter, encode_metadata_type_parameter, encode_type,
+    encode_annotation, encode_indexed_type_parameter, encode_metadata_type_parameter, encode_type,
     semantic_type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
@@ -118,6 +118,10 @@ pub struct FnMeta {
     /// this record is what a KOTLIN consumer (and `kotlin-reflect`) reads the declaration's
     /// annotations back from. SOURCE-retained annotations never enter this list.
     pub annotations: Vec<crate::ir::AppliedAnnotation>,
+    /// User annotations on each value parameter (`fun f(@Mark a: Int)`), parallel to `params`. Empty
+    /// (or a short list) ⇒ the missing parameters carry none. Recorded regardless of retention:
+    /// `@Metadata` is the Kotlin-level record, so a BINARY-retained annotation appears here too.
+    pub param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>>,
 }
 
 impl FnMeta {
@@ -140,6 +144,7 @@ impl FnMeta {
             jvm_sig_name: None,
             spellings: crate::spelling::DeclaredSpellings::default(),
             annotations: Vec::new(),
+            param_annotations: Vec::new(),
         }
     }
 }
@@ -174,10 +179,56 @@ pub const OBJECT_CTOR_FLAGS: u64 = 2;
 /// omitted at this value and callers pass 0 to mean it. Written explicitly once another bit forces
 /// the field out.
 const PUBLIC_CTOR_FLAGS: u64 = 6;
-/// `Constructor.flags` bit 0 — the declaration carries annotation records.
-const HAS_ANNOTATIONS: u64 = 1;
+/// Bit 0 of both `Constructor.flags` and `ValueParameter.flags` — the declaration (or the parameter)
+/// carries annotation records. kotlinc sets it alongside the records themselves; a reader trusts it.
+pub(crate) const HAS_ANNOTATIONS: u64 = 1;
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE`.
 const DECLARES_DEFAULT_VALUE: u64 = 2;
+/// Append a value parameter's `annotation` records (f7) — one per applied annotation, in DECLARATION
+/// order. `ValueParameter.flags` serializes BEFORE these, so the caller must have already decided
+/// `HAS_ANNOTATIONS` with [`records_annotations`], which agrees with what this writes.
+///
+/// The records are appended AFTER the parameter's type, which is also the order kotlinc interns their
+/// class ids in: a parameter's annotation descriptor lands in `d2` after the parameter's own name.
+pub(crate) fn append_param_annotations(
+    st: &mut StringTable,
+    vp: &mut Pb,
+    annotations: &[crate::ir::AppliedAnnotation],
+) {
+    for annotation in annotations.iter().filter(|a| records_annotation(a)) {
+        let encoded = encode_annotation(st, annotation.internal);
+        vp.field_message(7, &encoded); // ValueParameter.annotation = 7
+    }
+}
+
+/// Whether this applied annotation is recorded in `@Metadata` at all.
+///
+/// An annotation with ARGUMENTS is not: its `Annotation.argument` encoding is a separate value model
+/// (`Annotation.Argument.Value`) that this builder does not write yet, and a record naming the class
+/// with its arguments dropped would describe `@Named()` — a different annotation from the source's
+/// `@Named("hi", 7)`. Omitting it leaves the metadata incomplete but never wrong; the classfile
+/// `Runtime*ParameterAnnotations` attribute carries the full form either way. Same policy as
+/// `ir_lower::eval_anno_value`, which drops a whole annotation rather than emit a partial value set.
+///
+/// The encoding to fill in, measured from kotlinc 2.4.10 for `fun f(@Named("hi", 7) a: Int)` with
+/// `annotation class Named(val v: String, val n: Int)`:
+///   `Annotation.argument` = f2, repeated, each `{ nameId = f1, value = f2 }`;
+///   `Argument.Value` = `{ type = f1 (enum BYTE 0, CHAR 1, SHORT 2, INT 3, LONG 4, FLOAT 5, DOUBLE 6,
+///   BOOLEAN 7, STRING 8, CLASS 9, ENUM 10, ANNOTATION 11, ARRAY 12), intValue = f2 (zigzag sint),
+///   floatValue = f3, doubleValue = f4, stringValue = f5, classId = f6, enumValueId = f7,
+///   annotation = f8, arrayElement = f9 }`. That parameter's `ValueParameter.annotation` is
+///   `3a 16 | 08 07 | 12 08 08 08 12 04 08 08 28 09 | 12 08 08 0a 12 04 08 03 10 0e`
+///   — id 7, then `v` = STRING id 9, then `n` = INT 7 (`10 0e`, zigzag). String ids and the argument
+///   NAMES intern in that same order, after the annotation's own class id.
+pub(crate) fn records_annotation(annotation: &crate::ir::AppliedAnnotation) -> bool {
+    annotation.values.is_empty()
+}
+
+/// Whether a parameter's annotations produce any `@Metadata` record — i.e. whether `HAS_ANNOTATIONS`
+/// belongs in its `flags`.
+pub(crate) fn records_annotations(annotations: &[crate::ir::AppliedAnnotation]) -> bool {
+    annotations.iter().any(records_annotation)
+}
 
 fn property_flags(prop: &PropMeta) -> u64 {
     let visibility = match prop.visibility {
@@ -258,6 +309,8 @@ struct CtorShape<'a> {
     flags: u64,
     param_defaults: &'a [bool],
     param_tparams: &'a [Option<u32>],
+    /// User annotations on each parameter, parallel to `params` (a short list ⇒ the rest carry none).
+    param_annotations: &'a [Vec<crate::ir::AppliedAnnotation>],
     sig_name: Option<&'a str>,
     emit_jvm_signature: bool,
     /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type` (f4),
@@ -288,10 +341,24 @@ fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &Type
     }
     for (i, (pname, pty)) in shape.params.iter().enumerate() {
         let mut vp = Pb::new();
-        // `ValueParameter.flags` (f1) with DECLARES_DEFAULT_VALUE for a param that declares a default —
-        // written before the name, matching kotlinc.
-        if shape.param_defaults.get(i).copied().unwrap_or(false) {
-            vp.field_varint(1, DECLARES_DEFAULT_VALUE);
+        let annotations = shape
+            .param_annotations
+            .get(i)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        // `ValueParameter.flags` (f1) — DECLARES_DEFAULT_VALUE for a param that declares a default,
+        // HAS_ANNOTATIONS when the f7 records below are written. Both precede the name, as kotlinc does.
+        let flags = if shape.param_defaults.get(i).copied().unwrap_or(false) {
+            DECLARES_DEFAULT_VALUE
+        } else {
+            0
+        } | if records_annotations(annotations) {
+            HAS_ANNOTATIONS
+        } else {
+            0
+        };
+        if flags != 0 {
+            vp.field_varint(1, flags);
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
         let ty = type_pb_tp(
@@ -325,6 +392,7 @@ fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &Type
                 vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
             }
         }
+        append_param_annotations(st, &mut vp, annotations);
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
     // The JVM signature INTERNS first (kotlinc's serializer writes the extension before folding the
@@ -415,6 +483,9 @@ pub struct ClassTail<'a> {
     /// Per-primary-constructor-parameter class type-parameter index, for a parameter declared as a
     /// bare type parameter (`class C<T>(val a: T)` → `[Some(0)]`).
     pub ctor_param_tparams: &'a [Option<u32>],
+    /// Per-primary-constructor-parameter user annotations (`class C(@Mark val x: Int)`), parallel to
+    /// `ctor_params`. Empty ⇒ no parameter carries one.
+    pub ctor_param_annotations: &'a [Vec<crate::ir::AppliedAnnotation>],
     /// A `@JvmInline value class`'s sole underlying property `(name, type)` → `Class`
     /// `inlineClassUnderlyingPropertyName` (f17, the name's string-table id) +
     /// `inlineClassUnderlyingType` (f18, an inline `Type`). `None` for an ordinary class.
@@ -475,6 +546,7 @@ impl Default for ClassTail<'_> {
             secondary_ctors: &[],
             ctor_param_defaults: &[],
             ctor_param_tparams: &[],
+            ctor_param_annotations: &[],
             inline_underlying: None,
             ctor_sig_name: None,
             jvm_class_flags: None,
@@ -612,6 +684,7 @@ pub fn build_class(
                 flags: tail.primary_ctor_flags,
                 param_defaults: tail.ctor_param_defaults,
                 param_tparams: &ctor_param_tparams,
+                param_annotations: tail.ctor_param_annotations,
                 sig_name: tail.ctor_sig_name,
                 emit_jvm_signature: tail.primary_ctor_jvm_signature,
                 vararg_index: tail.ctor_vararg_index,
@@ -632,6 +705,7 @@ pub fn build_class(
                 flags: sc.flags,
                 param_defaults: &[],
                 param_tparams: &[],
+                param_annotations: &[],
                 sig_name: None,
                 emit_jvm_signature: true,
                 vararg_index: sc.vararg_index,
@@ -840,8 +914,21 @@ pub fn build_class(
         }
         for (i, (pname, pty)) in m.params.iter().enumerate() {
             let mut vp = Pb::new();
-            if m.params_have_defaults || m.param_defaults.get(i).copied().unwrap_or(false) {
-                vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
+            let annotations = m.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
+            // `ValueParameter.flags` (f1): DECLARES_DEFAULT_VALUE for a defaulted parameter,
+            // HAS_ANNOTATIONS when the f7 records below are written. Both precede the name.
+            let flags =
+                if m.params_have_defaults || m.param_defaults.get(i).copied().unwrap_or(false) {
+                    DECLARES_DEFAULT_VALUE
+                } else {
+                    0
+                } | if records_annotations(annotations) {
+                    HAS_ANNOTATIONS
+                } else {
+                    0
+                };
+            if flags != 0 {
+                vp.field_varint(1, flags); // ValueParameter.flags = 1
             }
             vp.field_varint(2, st.local(pname) as u64);
             // A `vararg` parameter is SPELLED as its element but RECORDED as the array; see the
@@ -888,6 +975,9 @@ pub fn build_class(
                     vp.field_message(4, &et);
                 }
             }
+            // f7 AFTER the type and vararg element: kotlinc interns a parameter's annotation class
+            // id following that parameter's own name and type.
+            append_param_annotations(st, &mut vp, annotations);
             func.repeated_message(6, &vp); // Function.value_parameter = 6
         }
         // An annotated declaration sets `HAS_ANNOTATIONS` (bit 0) on top of whatever the caller
@@ -1248,6 +1338,7 @@ mod tests {
                 jvm_sig: None,
                 jvm_sig_name: None,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1265,6 +1356,7 @@ mod tests {
                 jvm_sig: None,
                 jvm_sig_name: None,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1282,6 +1374,7 @@ mod tests {
                 jvm_sig: None,
                 jvm_sig_name: None,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1299,6 +1392,7 @@ mod tests {
                 jvm_sig: None,
                 jvm_sig_name: None,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1316,6 +1410,7 @@ mod tests {
                 jvm_sig: None,
                 jvm_sig_name: None,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1333,6 +1428,7 @@ mod tests {
                 jvm_sig: None,
                 jvm_sig_name: None,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             },
         ];
         let props = vec![

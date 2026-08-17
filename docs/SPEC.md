@@ -927,6 +927,58 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of `@Target` — they diverge with or without it, which is why the tests in
   `tests/annotation_target_emission_e2e.rs` compare the whole `RuntimeVisibleAnnotations` attribute
   against kotlinc's rather than the whole class file.
+- **A VALUE-PARAMETER annotation is recorded TWICE, and both records are required.** `fun f(@Mark a:
+  Int)` / `class C(@Mark val x: Int)`: kotlinc writes (1) a JVM
+  `Runtime{Visible,Invisible}ParameterAnnotations` attribute on the method or constructor — RUNTIME
+  retention, Kotlin's default, is the *visible* one — and (2) a `@Metadata`
+  `ValueParameter.annotation` record (field 7, an `Annotation { id }` naming a `DESC_TO_CLASS_ID`
+  string-table entry) plus `ValueParameter.flags` bit 0, `HAS_ANNOTATIONS` (so an otherwise-plain
+  annotated parameter writes flags `1`; combined with `DECLARES_DEFAULT_VALUE` it is `3`). Same field
+  number on a `Function`'s and a `Constructor`'s value parameters. krusty emitted NEITHER: the
+  annotations were parsed onto `ast::Param`/`ast::PropParam` and never lowered. Three orderings are
+  part of the contract and were all measured against kotlinc 2.4.10:
+  *(a)* a parameter's annotation class id interns in `d2` AFTER that parameter's own name and type,
+  and before the constructor's `JvmMethodSignature` (f100) strings. This is a per-FIELD rule, not a
+  general "annotations before f100": a DECLARATION-level annotation (`Constructor.annotation` f3,
+  `Function.annotation` f12, `Property.annotation` f14) interns AFTER f100, the opposite way round.
+  Measured together in one fixture — `class C @OnCtor constructor(@OnParam val x: Int)` gives
+  `d2 = [… "x", "", "Lp/OnParam;", "<init>", "(I)V", "Lp/OnCtor;", …]`, the parameter's f7 before the
+  signature strings and the constructor's own f3 after them. So `append_param_annotations` must stay
+  INSIDE the value-parameter loop with `jvm_method_sig` after it; moving either past the other shifts
+  every later `d2` index;
+  *(b)* in the constant pool the annotation DESCRIPTORS land at the method HEADER — after the name,
+  descriptor and generic `Signature`, and before any `Code`/`LocalVariableTable` string — ordered
+  return annotation, then every parameter's RUNTIME-retained type, then per parameter its
+  BINARY-retained types followed by that parameter's synthesized `@NotNull`/`@Nullable`;
+  *(c)* within `RuntimeInvisibleParameterAnnotations` the user annotation precedes the synthesized
+  `@NotNull`, and the whole visible attribute precedes the invisible one;
+  *(d)* `num_parameters` spans the method's PHYSICAL descriptor, not its declared parameter list. A
+  `suspend fun f(@Mark a: Int)` compiles to `f(int, Continuation)`, and kotlinc writes
+  `num_parameters = 2` with an EMPTY entry for the synthesized continuation rather than truncating the
+  attribute at the annotated source parameter. krusty sized it from the source list and wrote `1`,
+  describing a different parameter list; `set_method_param_annotations` now derives the count from the
+  descriptor (`descriptor_param_count`) and pads.
+  The frontend never CHECKED a function's value-parameter annotations on either the top-level
+  (`check_fun`) or the member path, so no application was recorded and lowering had nothing to read;
+  constructor parameters were already recorded and only lacked a consumer. Both function paths now
+  record them on the same terms as the property and primary-constructor annotations — recorded but
+  NOT diagnosed (`diags.truncate` around the loop) — because krusty's folder is narrower than
+  kotlinc's and these applications were never checked before, so a diagnostic here would reject
+  sources kotlinc accepts. Placement follows Kotlin's use-site defaulting rather than a guess: a
+  constructor `val`/`var` parameter's annotation reaches the PARAMETER only when
+  `AnnotationTargets::property_declaration_site` resolves to `ValueParameter`, leaving the property-
+  and field-targeted ones to the marker method and the backing field; a plain function parameter has
+  no such choice. Retention stays SEMANTIC through lowering (one ordered list per parameter) and is
+  split into the two JVM attributes at emission via `split_declaration_annotations`, so the two
+  halves cannot diverge. GAP: an annotation WITH ARGUMENTS is left out of
+  `@Metadata` (`class_builder::records_annotation`) because the `Annotation.Argument.Value` model is
+  not written yet; recording the class with its arguments dropped would describe a DIFFERENT
+  annotation. The classfile attribute carries the full form either way. Tests: the six cases in
+  `tests/annotation_emission_e2e.rs`: member function, constructor property, top-level facade
+  function, and mixed RUNTIME+BINARY+`@NotNull` on one parameter are whole-class byte-identical; a
+  `suspend` function's parameter is asserted on the decoded attributes instead (that shape has an
+  unrelated pre-existing divergence — krusty boxes the `Int` result with `Integer.valueOf` where
+  kotlinc uses `kotlin.coroutines.jvm.internal.Boxing.boxInt`); plus a `@Metadata`-only assertion.
 - **`suspend` function TYPE representation (`suspend (A..) -> R`).** kotlinc realizes it as
   `Function{n+1}<A.., Continuation<R>, Object>` — the arity is the logical parameter count PLUS one (a
   trailing continuation), the result erased to `Object`. krusty historically dropped the `suspend`

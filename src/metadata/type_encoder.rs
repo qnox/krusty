@@ -598,6 +598,14 @@ fn encode_abbreviation(
     Ok(())
 }
 
+/// A metadata `Annotation` message — `id` (f1), the annotation class's string-table entry. Used for
+/// `ValueParameter.annotation` (f7), which records a parameter's `@Anno` uses.
+pub(crate) fn encode_annotation(strings: &mut StringTable, classifier: TypeName) -> Pb {
+    let mut annotation = Pb::new();
+    annotation.field_varint(1, strings.class_id(classifier) as u64);
+    annotation
+}
+
 pub(crate) fn add_extension_function_annotation(message: &mut Pb, strings: &mut StringTable) {
     let annotation_id = strings.class_id(crate::types::type_name("kotlin/ExtensionFunctionType"));
     let mut annotation = Pb::new();

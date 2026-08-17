@@ -1303,6 +1303,21 @@ fn build_class_metadata(
                 .map(|name| (name.clone(), arg.ty, arg.has_default, arg.type_param))
         })
         .collect();
+    // Parallel to `named_ctor_args` (hence the SAME unnamed-parameter filter): the class's
+    // `ctor_param_annotations` covers every `ctor_args` entry, including the synthetic unnamed ones a
+    // metadata constructor record never lists.
+    let named_ctor_param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>> = c
+        .ctor_args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| arg.name.is_some())
+        .map(|(i, _)| {
+            c.ctor_param_annotations
+                .get(i)
+                .map(|anns| anns.iter().map(|a| a.annotation.clone()).collect())
+                .unwrap_or_default()
+        })
+        .collect();
     let ctor_params_with_defaults = if named_ctor_args.is_empty() {
         c.fields
             .iter()
@@ -1418,6 +1433,26 @@ fn build_class_metadata(
         (is_boxed_prim(ret) || params.iter().copied().any(is_boxed_prim))
             .then(|| method_descriptor(params, ret))
     };
+    /// A declared method's per-parameter user annotations for `@Metadata`, truncated/padded to the
+    /// metadata parameter count. The IR table is parallel to `IrFunction::params` (the same convention
+    /// `fn_param_declared_nullable` uses), so an extension member's leading receiver slot lines up.
+    fn declared_param_annotations(
+        ir: &IrFile,
+        fid: u32,
+        arity: usize,
+    ) -> Vec<Vec<crate::ir::AppliedAnnotation>> {
+        let Some(table) = ir.fn_param_annotations.get(&fid) else {
+            return Vec::new();
+        };
+        (0..arity)
+            .map(|i| {
+                table
+                    .get(i)
+                    .map(|anns| anns.iter().map(|a| a.annotation.clone()).collect())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
     let declared_methods = || {
         declared_fids
             .iter()
@@ -1571,6 +1606,9 @@ fn build_class_metadata(
                         .get(&fid)
                         .map(|annotations| annotations.applications().cloned().collect())
                         .unwrap_or_default(),
+                    // `metadata_params` is the DECLARED parameter list (a suspend fn's synthesized
+                    // `Continuation` is already dropped), so the side table lines up with it.
+                    param_annotations: declared_param_annotations(ir, fid, metadata_params.len()),
                 })
             })
             .collect::<Vec<_>>()
@@ -1597,6 +1635,7 @@ fn build_class_metadata(
                 jvm_sig: boxed_fn_sig(&[], f.ty),
                 jvm_sig_name: None,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             })
             .collect();
         if synthesizes_copy {
@@ -1619,6 +1658,7 @@ fn build_class_metadata(
                 jvm_sig: boxed_fn_sig(&field_tys, class_ty),
                 jvm_sig_name: None,
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             });
         }
         m.push(FnMeta {
@@ -1637,6 +1677,7 @@ fn build_class_metadata(
             jvm_sig: None,
             jvm_sig_name: None,
             annotations: Vec::new(),
+            param_annotations: Vec::new(),
         });
         m.push(FnMeta {
             spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1654,6 +1695,7 @@ fn build_class_metadata(
             jvm_sig: None,
             jvm_sig_name: None,
             annotations: Vec::new(),
+            param_annotations: Vec::new(),
         });
         m.push(FnMeta {
             spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1671,6 +1713,7 @@ fn build_class_metadata(
             jvm_sig: None,
             jvm_sig_name: None,
             annotations: Vec::new(),
+            param_annotations: Vec::new(),
         });
         m.extend(declared_methods());
         m
@@ -1695,6 +1738,7 @@ fn build_class_metadata(
                 jvm_sig: Some(format!("({u}Ljava/lang/Object;)Z")),
                 jvm_sig_name: Some("equals-impl".into()),
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1712,6 +1756,7 @@ fn build_class_metadata(
                 jvm_sig: Some(format!("({u})I")),
                 jvm_sig_name: Some("hashCode-impl".into()),
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             },
             FnMeta {
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1729,6 +1774,7 @@ fn build_class_metadata(
                 jvm_sig: Some(format!("({u})Ljava/lang/String;")),
                 jvm_sig_name: Some("toString-impl".into()),
                 annotations: Vec::new(),
+                param_annotations: Vec::new(),
             },
         ]
     } else {
@@ -1890,6 +1936,7 @@ fn build_class_metadata(
             type_param_bounds: class_type_parameters,
             captured_type_params: &c.captured_type_params,
             ctor_param_tparams: &ctor_param_tparams,
+            ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),
             // An `enum class`'s primary ctor is private too — entries are the only instances.
             // A DECLARED constructor visibility (`class C protected constructor(…)`) takes
@@ -2121,6 +2168,29 @@ fn primary_ctor_annotations(c: &crate::ir::IrClass) -> Vec<crate::ir::AppliedAnn
     visible.into_iter().chain(invisible).collect()
 }
 
+/// The USER annotation type descriptors on the constructor parameter that backs `field_index`, for one
+/// retention. `IrClass::ctor_param_annotations` is indexed by CONSTRUCTOR PARAMETER, and only the
+/// `is_field` parameters back a field — so map through that filter rather than assuming the two
+/// indexings coincide (they don't for an inner class's synthetic outer instance, or a plain
+/// non-property parameter).
+fn ctor_param_ann_types(c: &crate::ir::IrClass, field_index: usize, visible: bool) -> Vec<String> {
+    if c.ctor_param_annotations.is_empty() {
+        return Vec::new();
+    }
+    c.ctor_args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| arg.is_field)
+        .nth(field_index)
+        .and_then(|(i, _)| c.ctor_param_annotations.get(i))
+        .map(|annotations| {
+            let (vis, invis) = crate::jvm::classfile::split_declaration_annotations(annotations);
+            let chosen = if visible { vis } else { invis };
+            chosen.iter().map(|a| format!("L{};", a.internal)).collect()
+        })
+        .unwrap_or_default()
+}
+
 fn seed_plain_class_pool(
     formatter: &JvmSignatureFormatter<'_>,
     ir: &IrFile,
@@ -2158,6 +2228,8 @@ fn seed_plain_class_pool(
                 .filter(|_| !statics_storage)
                 .cloned(),
             value_class_ctor: body_value_class_ctors.get(&(i as u32)).cloned(),
+            visible_ann_types: ctor_param_ann_types(c, i, true),
+            invisible_ann_types: ctor_param_ann_types(c, i, false),
         })
         .collect();
     // Generic `Signature`s for PARAMETERIZED-type members (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`).
@@ -2801,8 +2873,8 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         .take(c.ctor_param_count as usize)
         .map(|f| ann(&f.name, f.ty))
         .collect();
+    let ctor_desc = format!("({})V", ctor_field_descs(c));
     if ctor_params.iter().any(|p| p.is_some()) {
-        let ctor_desc = format!("({})V", ctor_field_descs(c));
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
     }
     // HOISTED companion properties: the delegating accessors annotate like ordinary accessors
@@ -2823,6 +2895,24 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         if hoisted.is_var {
             cw.set_method_nullability(&setter, &format!("({pd})V"), None, &[Some(a)]);
         }
+    }
+    // The USER annotations written on the primary-constructor parameters, per property-backed
+    // parameter (the same slots `ctor_params` above describes).
+    if !c.ctor_param_annotations.is_empty() {
+        let user: Vec<crate::ir::DeclarationAnnotations> = c
+            .ctor_args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| arg.is_field)
+            .take(c.ctor_param_count as usize)
+            .map(|(i, _)| {
+                c.ctor_param_annotations
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| crate::ir::DeclarationAnnotations::new(Vec::new()))
+            })
+            .collect();
+        cw.set_method_param_annotations("<init>", &ctor_desc, &user);
     }
     // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
     for f in &c.fields {
@@ -9306,11 +9396,46 @@ fn emit_method_inner_with_holder(
     // exist for Java interop, which cannot see it.
     let nullability_annotated =
         !declared_annotations.deprecated_hidden() && !ir.private_methods.contains(&fid);
-    let ann_types: Vec<&str> = ret_ann
+    // The USER annotations on this function's parameters. kotlinc's writer visits the method's own
+    // annotations, then the whole `RuntimeVisibleParameterAnnotations` attribute, then
+    // `RuntimeInvisible…`, interning each type as it writes it. `reserve_method_pool_with_annotations`
+    // interns the declaration's own annotations first, so the order here is: the return annotation,
+    // every parameter's RUNTIME-retained type, then per parameter its BINARY-retained types followed
+    // by that parameter's synthesized nullability type.
+    let user_param_anns: &[crate::ir::DeclarationAnnotations] = ir
+        .fn_param_annotations
+        .get(&fid)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let split: Vec<(
+        Vec<crate::ir::AppliedAnnotation>,
+        Vec<crate::ir::AppliedAnnotation>,
+    )> = user_param_anns
+        .iter()
+        .map(crate::jvm::classfile::split_declaration_annotations)
+        .collect();
+    let descriptor_of = |a: &crate::ir::AppliedAnnotation| format!("L{};", a.internal);
+    let visible_ann_types: Vec<String> = split
+        .iter()
+        .flat_map(|(visible, _)| visible.iter().map(descriptor_of))
+        .collect();
+    let invisible_ann_types: Vec<Vec<String>> = split
+        .iter()
+        .map(|(_, invisible)| invisible.iter().map(descriptor_of).collect())
+        .collect();
+    let mut ann_types: Vec<&str> = ret_ann
         .into_iter()
-        .chain(emitted_param_anns.iter().flatten().copied())
         .filter(|_| nullability_annotated)
         .collect();
+    ann_types.extend(visible_ann_types.iter().map(String::as_str));
+    for (i, nullability) in emitted_param_anns.iter().enumerate() {
+        if let Some(types) = invisible_ann_types.get(i) {
+            ann_types.extend(types.iter().map(String::as_str));
+        }
+        if nullability_annotated {
+            ann_types.extend(nullability.iter().copied());
+        }
+    }
     e.cw.reserve_method_pool_with_annotations(
         &f.name,
         &reserved_desc,
@@ -9512,6 +9637,10 @@ fn emit_method_inner_with_holder(
         && (ret_ann.is_some() || emitted_param_anns.iter().any(Option::is_some))
     {
         e.cw.set_method_nullability(&f.name, &desc, ret_ann, &emitted_param_anns);
+    }
+    // The USER parameter annotations (their types are already interned, above).
+    if !user_param_anns.is_empty() {
+        e.cw.set_method_param_annotations(&f.name, &desc, user_param_anns);
     }
     if ir.deprecated_methods.contains(&fid) {
         e.cw.mark_method_deprecated(&f.name, &desc);

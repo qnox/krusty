@@ -47,7 +47,12 @@ fn annotation_shapes(
             || trimmed.starts_with("Deprecated:")
             || trimmed.starts_with("RuntimeVisibleAnnotations")
             || trimmed.starts_with("RuntimeInvisibleAnnotations")
+            || trimmed.starts_with("RuntimeVisibleParameterAnnotations")
             || trimmed.starts_with("RuntimeInvisibleParameterAnnotations")
+            // Each `parameter N:` slot, so the attribute's num_parameters is compared too — a
+            // synthesized trailing parameter (a `suspend fun`'s continuation) must still get an
+            // empty slot rather than truncate the attribute.
+            || trimmed.starts_with("parameter ")
             || trimmed.starts_with("0: #")
             || trimmed.starts_with("1: #")
             || trimmed.ends_with('(')
@@ -1271,5 +1276,104 @@ fn a_field_targeted_java_annotation_lands_on_the_backing_field() {
          }
 ",
         Some(library.as_path()),
+    );
+}
+
+// ---- Value-parameter annotations ----------------------------------------------------------------
+//
+// An annotation on a VALUE PARAMETER (`fun f(@Mark a: Int)`) is recorded twice: the JVM
+// `Runtime{Visible,Invisible}ParameterAnnotations` attribute on the method or constructor, and
+// `@Metadata`'s `ValueParameter.annotation` (f7) plus `ValueParameter.flags` bit 0
+// (`HAS_ANNOTATIONS`). krusty emitted neither — the annotations were parsed onto the parameter and
+// never lowered.
+
+const MARK: &str = "@Target(AnnotationTarget.VALUE_PARAMETER)\nannotation class Mark\n";
+
+/// A member function's annotated parameter. Pins that `Lp/Mark;` interns between the method's
+/// descriptor and its `LocalVariableTable` strings, and that the parameter's `HAS_ANNOTATIONS` flag
+/// and f7 record reach `@Metadata`.
+#[test]
+fn member_function_parameter_annotation_is_byte_identical() {
+    require_identical_class(
+        "param_member",
+        "C.kt",
+        "p/C",
+        &format!("package p\n\n{MARK}\nclass C {{\n    fun f(@Mark a: Int): Int = a\n}}\n"),
+    );
+}
+
+/// The same annotation on a primary-CONSTRUCTOR property parameter. Kotlin's use-site defaulting puts
+/// it on the parameter (not the property or the backing field) because `Mark` targets VALUE_PARAMETER,
+/// and `Constructor.value_parameter` carries the record on the same field number a `Function`'s does.
+#[test]
+fn constructor_property_parameter_annotation_is_byte_identical() {
+    require_identical_class(
+        "param_ctor",
+        "C.kt",
+        "p/C",
+        &format!("package p\n\n{MARK}\nclass C(@Mark val x: Int)\n"),
+    );
+}
+
+/// A TOP-LEVEL function's parameter — the file-facade metadata path (`Package.function`), a distinct
+/// builder from the class one.
+#[test]
+fn top_level_function_parameter_annotation_is_byte_identical() {
+    require_identical_class(
+        "param_facade",
+        "Q.kt",
+        "p/QKt",
+        &format!("package p\n\n{MARK}\nfun f(@Mark a: Int): Int = a\n"),
+    );
+}
+
+/// BOTH retentions on one parameter, on a `String` so kotlinc's synthesized `@NotNull` shares it.
+/// Pins three orderings the single-annotation cases cannot see: the visible attribute precedes the
+/// invisible one; within the invisible one the USER annotation precedes `@NotNull`; and the pool
+/// interns the return `@NotNull` first, then every visible parameter type, then the invisible ones.
+#[test]
+fn mixed_retention_parameter_annotations_are_byte_identical() {
+    require_identical_class(
+        "param_mixed",
+        "R.kt",
+        "p/C",
+        &format!(
+            "package p\n\n{MARK}\n             @Target(AnnotationTarget.VALUE_PARAMETER)\n             @Retention(AnnotationRetention.BINARY)\n             annotation class Bin\n\n             class C(@Mark val s: String) {{\n    fun f(@Mark @Bin a: String): String = a\n}}\n"
+        ),
+    );
+}
+
+/// A `suspend` function's annotated parameter. CPS appends a `Continuation` the source never wrote, so
+/// the method's PHYSICAL arity exceeds its declared one — kotlinc sizes `num_parameters` over the whole
+/// descriptor and leaves the synthesized tail slot EMPTY rather than truncating the attribute. krusty
+/// sized it from the source list and wrote `num_parameters = 1` for a two-parameter method.
+///
+/// Asserted on the attributes rather than the whole class: this shape has an unrelated pre-existing
+/// divergence (krusty boxes the `Int` result with `Integer.valueOf`, kotlinc with `Boxing.boxInt`).
+#[test]
+fn suspend_function_parameter_annotation_spans_the_continuation() {
+    require_same_annotations(
+        "param_suspend",
+        "S.kt",
+        "p/C",
+        &["public final java.lang.Object f(int, kotlin.coroutines.Continuation<? super java.lang.Integer>);"],
+        &format!(
+            "package p\n\n{MARK}\nclass C {{\n    suspend fun f(@Mark a: Int): Int = a\n}}\n"
+        ),
+    );
+}
+
+/// The metadata half of the class shape on its own, so a protobuf divergence localizes without
+/// decoding a classfile byte offset. Covers a constructor parameter and a member-function parameter in
+/// one class — the exact shape the `d1` string table has to interleave.
+#[test]
+fn class_parameter_annotations_reach_metadata() {
+    require_same_metadata(
+        "param_metadata",
+        "C.kt",
+        "p/C",
+        &format!(
+            "package p\n\n{MARK}\nclass C(@Mark val x: Int) {{\n    fun f(@Mark a: Int): Int = a\n}}\n"
+        ),
     );
 }

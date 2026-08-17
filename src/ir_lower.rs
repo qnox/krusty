@@ -1085,6 +1085,29 @@ fn lower_file_at_reporting_impl(
                         .insert((class_identity, property), spellings.clone());
                 }
             }
+            // User annotations on the primary-constructor parameters, in `ctor_args` order. The
+            // leading synthetic parameters (an inner class's outer instance, an anonymous object's
+            // captures) are never annotated, so they contribute empty entries that keep the list
+            // aligned. A `val`/`var` parameter goes through Kotlin's use-site defaulting — only an
+            // annotation that lands on `PropertyAnnotationSite::ValueParameter` is a parameter
+            // annotation; the property- and field-targeted ones are already claimed by
+            // `class_property_annotations` / `class_field_annotations`.
+            let synthetic_ctor_params = inner_outer.iter().len() + anonymous_captures.len();
+            let ctor_param_annotations = parameter_annotation_table(
+                synthetic_ctor_params,
+                c.props.iter().map(|p| {
+                    if p.is_property {
+                        property_site_annotations(
+                            &p.annotations,
+                            info,
+                            true,
+                            crate::types::PropertyAnnotationSite::ValueParameter,
+                        )
+                    } else {
+                        value_parameter_annotations(&p.annotations, info)
+                    }
+                }),
+            );
             let id = lo.ir.add_class(IrClass {
                 fq_name: type_name(&internal),
                 is_source_declared: true,
@@ -1180,6 +1203,10 @@ fn lower_file_at_reporting_impl(
                         }
                     }))
                     .collect(),
+                // Parallel to `ctor_args`, so the synthetic leading slots (an inner class's outer
+                // instance, an anonymous object's captures) contribute empty entries before the
+                // declared parameters.
+                ctor_param_annotations: ctor_param_annotations.clone(),
                 init_body: None,
                 // Only a language-level `inner` class needs its enclosing-instance field available to
                 // superclass arguments. Anonymous-object captures are normal constructor fields even
@@ -1363,6 +1390,17 @@ fn lower_file_at_reporting_impl(
                     }
                     nullable.extend(m.params.iter().map(|parameter| parameter.ty.nullable()));
                     lo.ir.fn_param_declared_nullable.insert(fid, nullable);
+                }
+                // User annotations on the declared parameters. An extension member's IR parameter 0 is
+                // its receiver, which cannot be annotated — hence the leading empty slot.
+                let param_annotations = parameter_annotation_table(
+                    usize::from(extension_receiver.is_some()),
+                    m.params
+                        .iter()
+                        .map(|p| value_parameter_annotations(&p.annotations, info)),
+                );
+                if !param_annotations.is_empty() {
+                    lo.ir.fn_param_annotations.insert(fid, param_annotations);
                 }
                 // A `private` method is NON-VIRTUAL: a call to it (even the unqualified `foo()` inside a
                 // sibling default method) must be `invokespecial`, not `invokevirtual`/`invokeinterface` —
@@ -2878,6 +2916,17 @@ fn lower_file_at_reporting_impl(
                     names.extend(f.params.iter().map(|p| p.name.clone()));
                     lo.ir.fn_params.insert(fid, FnParamInfo::names(names));
                 }
+                // User annotations on the declared parameters (an extension's IR parameter 0 is its
+                // receiver, which cannot be annotated — hence the leading empty slot).
+                let param_annotations = parameter_annotation_table(
+                    usize::from(f.receiver.is_some()),
+                    f.params
+                        .iter()
+                        .map(|p| value_parameter_annotations(&p.annotations, info)),
+                );
+                if !param_annotations.is_empty() {
+                    lo.ir.fn_param_annotations.insert(fid, param_annotations);
+                }
                 if f.decl_line != 0 {
                     lo.ir.fn_decl_lines.insert(fid, f.decl_line);
                 }
@@ -4375,6 +4424,7 @@ fn lower_file_at_reporting_impl(
                                 .collect(),
                             ctor_param_count: 0,
                             ctor_args: vec![],
+                            ctor_param_annotations: Vec::new(),
                             init_body: None,
                             pre_super_param_fields: vec![],
                             explicit_param_stores: false,
@@ -11115,6 +11165,7 @@ impl<'a> Lower<'a> {
             fields: ir_fields,
             ctor_param_count: 0,
             ctor_args,
+            ctor_param_annotations: Vec::new(),
             init_body,
             pre_super_param_fields: vec![],
             explicit_param_stores: false,
@@ -13356,6 +13407,7 @@ impl<'a> Lower<'a> {
             fields: vec![],
             ctor_param_count: 0,
             ctor_args: vec![],
+            ctor_param_annotations: Vec::new(),
             init_body: None,
             pre_super_param_fields: vec![],
             explicit_param_stores: false,
@@ -13505,6 +13557,7 @@ impl<'a> Lower<'a> {
             fields: vec![],
             ctor_param_count: 0,
             ctor_args: vec![],
+            ctor_param_annotations: Vec::new(),
             init_body: None,
             pre_super_param_fields: vec![],
             explicit_param_stores: false,
@@ -13753,6 +13806,7 @@ impl<'a> Lower<'a> {
             fields: vec![],
             ctor_param_count: 0,
             ctor_args: vec![],
+            ctor_param_annotations: Vec::new(),
             init_body: None,
             pre_super_param_fields: vec![],
             explicit_param_stores: false,
@@ -14462,6 +14516,7 @@ impl<'a> Lower<'a> {
             fields: vec![],
             ctor_param_count: 0,
             ctor_args: vec![],
+            ctor_param_annotations: Vec::new(),
             init_body: None,
             pre_super_param_fields: vec![],
             explicit_param_stores: false,
@@ -28105,6 +28160,51 @@ fn fn_applied_annotations(
         f.name,
         out.len(),
     );
+    out
+}
+
+/// The retained annotations written directly on a VALUE PARAMETER (`fun f(@Mark a: Int)`).
+///
+/// A function parameter needs none of [`property_site_annotations`]' use-site arbitration: an
+/// annotation written on a parameter that is not also a property IS a parameter annotation, with no
+/// `param` → `property` → `field` choice to make. Like that function, and unlike
+/// [`declaration_annotations`], an application the frontend did not record is DROPPED rather than a
+/// panic — parameter applications were never checked before this, and krusty's constant folder is
+/// narrower than kotlinc's.
+pub(crate) fn value_parameter_annotations(
+    declared: &[ast::AnnotationRef],
+    info: &FrontendTypeInfo,
+) -> crate::ir::DeclarationAnnotations {
+    crate::ir::DeclarationAnnotations::new(
+        declared
+            .iter()
+            .filter_map(|annotation| info.applied_annotation(annotation))
+            .filter_map(|applied| match applied.retention {
+                crate::types::AnnotationRetention::Source => None,
+                retention => Some(crate::ir::RetainedAnnotation {
+                    retention,
+                    annotation: checked_annotation_to_ir(applied),
+                }),
+            })
+            .collect(),
+    )
+}
+
+/// A whole parameter list's annotations, prefixed by `leading` empty entries for the synthetic
+/// parameters the IR puts first (an extension's receiver, an inner class's outer instance). EMPTY when
+/// no parameter carries one — the overwhelmingly common case, which then costs no table entry at all.
+fn parameter_annotation_table(
+    leading: usize,
+    parameters: impl Iterator<Item = crate::ir::DeclarationAnnotations>,
+) -> Vec<crate::ir::DeclarationAnnotations> {
+    let mut out: Vec<crate::ir::DeclarationAnnotations> =
+        std::iter::repeat_with(|| crate::ir::DeclarationAnnotations::new(Vec::new()))
+            .take(leading)
+            .collect();
+    out.extend(parameters);
+    if out.iter().all(crate::ir::DeclarationAnnotations::is_empty) {
+        return Vec::new();
+    }
     out
 }
 

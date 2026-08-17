@@ -149,6 +149,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         jvm_sig: None,
         jvm_sig_name: None,
         annotations: Vec::new(),
+        param_annotations: Vec::new(),
     }];
     let own_names = vec!["U".to_string()];
     let captured = vec![outer];
@@ -209,6 +210,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         jvm_sig: None,
         jvm_sig_name: None,
         annotations: Vec::new(),
+        param_annotations: Vec::new(),
     }];
     let own_names = vec!["V".to_string()];
     let captured = vec![outer, middle];
@@ -270,6 +272,7 @@ fn package_value_param_defaults_round_trip() {
         context_count: 0,
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
+        param_annotations: Vec::new(),
     }];
     let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/HostKt", d1, d2);
@@ -315,6 +318,7 @@ fn package_function_type_parameter_bound_round_trips() {
         context_count: 0,
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
+        param_annotations: Vec::new(),
     }];
     let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/HostKt", d1, d2);
@@ -362,6 +366,7 @@ fn package_extension_receiver_round_trips() {
         context_count: 0,
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
+        param_annotations: Vec::new(),
     }];
     let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
@@ -427,6 +432,7 @@ fn package_receiver_function_type_param_round_trips() {
         context_count: 0,
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
+        param_annotations: Vec::new(),
     }];
     let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/NavHostKt", d1, d2);
