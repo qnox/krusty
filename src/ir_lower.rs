@@ -16794,15 +16794,6 @@ impl<'a> Lower<'a> {
         read
     }
 
-    /// A PRIVATE property NAMED from outside its declaring class has no accessor to call: kotlinc emits
-    /// none for a private property, and the backing field is unreachable from another class file — even
-    /// a lexically enclosed one, since the companion, a nested class and an inlined body are all separate
-    /// classes on the JVM. Such a use is reached through the synthetic `access$…$p` bridge instead.
-    ///
-    /// This sits at the one place every property read and write is CONSTRUCTED, so no naming path can
-    /// forget it. It previously lived on two of the callers, and the `StmtLowering::MemberPropertyWrite`
-    /// path — which preempts them — emitted a call to a `setX` that is never generated
-    /// (`NoSuchMethodError`; box `classes/kt504.kt`, a companion writing its outer class's private `var`).
     /// The two realization facts every property read and write must settle before the node exists,
     /// from ONE walk of the declaration hierarchy:
     ///
