@@ -46,6 +46,16 @@ fn has_low_priority_annotation(annotations: &[AnnotationRef], class_names: &Clas
         .any(|annotation| annotation.matches("kotlin/internal/LowPriorityInOverloadResolution"))
 }
 
+/// Is this property declaration annotated `@JvmField`? Resolved by annotation IDENTITY, like every
+/// other recognized annotation here — a user annotation spelled `JvmField` resolves elsewhere and
+/// must not suppress an accessor.
+fn has_jvm_field_annotation(annotations: &[AnnotationRef], class_names: &ClassNames) -> bool {
+    annotations
+        .iter()
+        .filter_map(|annotation| class_names.get_class(&annotation.name))
+        .any(|annotation| annotation.matches("kotlin/jvm/JvmField"))
+}
+
 fn has_implicit_integer_coercion_annotation(
     annotations: &[AnnotationRef],
     class_names: &ClassNames,
@@ -1103,6 +1113,11 @@ pub struct DeclaredPropertySig {
     /// Keep that ABI fact in the semantic declaration handoff: consumers that only see a module
     /// signature must not mistake the conventional `getter_name` spelling for an emitted accessor.
     pub is_const: bool,
+    /// A `@JvmField` property is realized as a plain (non-private) field and, like a `const val`, has
+    /// NO accessor at all — the annotation suppresses the pair kotlinc would otherwise emit. Carried
+    /// beside `is_const` for the same reason: a consumer that sees only this signature must not take
+    /// the conventional `getter_name`/`setter_name` spellings for methods that exist.
+    pub is_jvm_field: bool,
     pub getter_name: String,
     pub setter_name: Option<String>,
     /// Visibility of the setter declaration. `None` means `val`; a `var` normally inherits the
@@ -6980,6 +6995,10 @@ fn collect_signatures_with_cp_impl(
                                     storage_ty: None,
                                     visibility: property.visibility,
                                     is_const: false,
+                                    is_jvm_field: has_jvm_field_annotation(
+                                        &property.annotations,
+                                        &class_names,
+                                    ),
                                     getter_name: if c.is_annotation() {
                                         property.name.clone()
                                     } else {
@@ -7547,6 +7566,10 @@ fn collect_signatures_with_cp_impl(
                                 storage_ty,
                                 visibility: bp.visibility,
                                 is_const: bp.is_const,
+                                is_jvm_field: has_jvm_field_annotation(
+                                    &bp.annotations,
+                                    &class_names,
+                                ),
                                 getter_name: property_getter_name(&bp.name),
                                 setter_name: bp.is_var.then(|| property_setter_name(&bp.name)),
                                 setter_visibility: declared_setter_visibility(bp),
@@ -16075,6 +16098,7 @@ fn install_anonymous_object_captures(
                     storage_ty: None,
                     visibility: Visibility::Private,
                     is_const: false,
+                    is_jvm_field: false,
                     getter_name: property_getter_name(&capture.name),
                     setter_name: None,
                     setter_visibility: None,
