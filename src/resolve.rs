@@ -10852,7 +10852,7 @@ impl DeferredInferenceDriver<'_> {
                 entry.inference_source(&self.files[file_index]),
                 expression,
                 entry.class_names(&self.file_class_names[file_index]),
-                &self.value_scope(entry),
+                &entry.scope,
                 self.src,
                 self.table,
                 &|name| self.demand(entry, name),
@@ -10861,21 +10861,6 @@ impl DeferredInferenceDriver<'_> {
             let inferred = inferred_declaration_ty(inferred);
             (inferred != Ty::Error).then_some(inferred)
         })
-    }
-
-    /// The value scope the declaration's body resolves names in. The declaration's own scope comes
-    /// first — lightweight name resolution is first-match, so context parameters and class members
-    /// shadow module properties exactly as they do in the checker.
-    fn value_scope(&self, entry: &DeferredProperty) -> Vec<(String, Ty, bool)> {
-        let mut scope = entry.scope.clone();
-        scope.extend(
-            self.table
-                .props
-                .iter()
-                .filter(|(name, _)| self.readable_from(entry, name))
-                .map(|(name, (ty, is_var, _))| (name.clone(), *ty, *is_var)),
-        );
-        scope
     }
 
     /// The type of another declaration this one names, resolving it first if needed.
@@ -10889,6 +10874,29 @@ impl DeferredInferenceDriver<'_> {
     /// keyed by the DECLARING owner, so this declines exactly where the source needs the supertype
     /// walk that signature collection has not done yet.
     fn demand(&self, from: &DeferredProperty, name: &str) -> Option<Ty> {
+        self.demand_declared(from, name)
+            .or_else(|| self.module_property(from, name))
+    }
+
+    /// A module property that already HAS a type. Answered through this hook rather than by copying
+    /// the module's property table into every declaration's value scope: that copy is per
+    /// declaration and the table grows with the module, so it is quadratic in the number of
+    /// declarations being resolved — 2400 forward-referencing properties spent 25s almost entirely
+    /// cloning scope entries. Name resolution here is first-match over the declaration's OWN scope
+    /// and then this, which is the order the copy produced.
+    fn module_property(&self, from: &DeferredProperty, name: &str) -> Option<Ty> {
+        if !self.readable_from(from, name) {
+            return None;
+        }
+        self.table
+            .props
+            .get(name)
+            .map(|(ty, _, _)| *ty)
+            .filter(|ty| *ty != Ty::Error)
+    }
+
+    /// The declaration `name` refers to, resolved now if it has not been typed yet.
+    fn demand_declared(&self, from: &DeferredProperty, name: &str) -> Option<Ty> {
         if let Some(owner) = from.owner() {
             if let Some(ty) = self.demand_member(owner, name) {
                 return Some(ty);
