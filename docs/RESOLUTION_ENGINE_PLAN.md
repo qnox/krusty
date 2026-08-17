@@ -111,8 +111,29 @@ one session because cross-run drift on this machine is far larger than the effec
 | 1 | 101s | 103s |
 | 2 | 106s | 105s |
 
-Within noise. Resolving on demand replaces passes that swept the module repeatedly, so the memo is
-not paying for laziness here; it is removing rounds.
+Within noise.
+
+### Peak memory
+
+Measured with `/usr/bin/time -l`, three synthetic modules of 2400 top-level properties each.
+
+| Workload | base `2da5a640` | landed |
+| --- | --- | --- |
+| 2400 trivially-typed properties — nothing defers, both compile | 38.4 MB / 0.75s | 37.8 MB / 0.75s |
+| 735 real corpus files, per-file — both compile | 101s / 106s | 103s / 105s |
+| 2400 CHAINED properties, every one deferred | rejects: 5920 errors, 0 classes | 121 MB / 22.5s |
+
+On anything the base can compile, cost is unchanged — the memo is not paying for laziness on the
+ordinary path. The third row has no baseline at all: the base cannot compile that module, which is
+the order-dependence bug itself, so its 10s and 102 MB are the cost of producing 5920 errors.
+
+That third row is still worth stating as an absolute: 2400 chained declarations cost 22.5s and
+121 MB, and the curve over 400 / 800 / 1600 / 2400 properties (3.1s / 3.0s / 5.7s / 22.5s) is
+superlinear at the tail. Each resolution rebuilds its own import scope and symbol resolver, which is
+per declaration rather than per module. Copying the module's property table into every declaration's
+value scope — quadratic in the number of declarations — was removed in favour of a lookup hook, worth
+about 10%; the rest of the constant is that per-resolution setup and is the natural thing to attack
+when the engine's `compute` becomes a real checker run.
 
 ## PR 3 — Inferred function returns on demand
 
