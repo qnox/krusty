@@ -1647,11 +1647,6 @@ impl FunctionInfo {
         self.kind == FnKind::Extension
     }
 
-    /// Index of this callable's extension receiver among its physical parameters, if it has one.
-    pub fn receiver_param_index(&self) -> Option<usize> {
-        extension_receiver_index(self.is_extension(), self.context_count)
-    }
-
     pub fn semantic_receiver(&self) -> Option<Ty> {
         self.generic_sig
             .as_ref()

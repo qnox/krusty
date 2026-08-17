@@ -151,11 +151,14 @@ impl<'a> ModuleSymbols<'a> {
                     c.internal_name(),
                     c.is_interface(),
                 );
-                // A member extension is an instance method whose first method parameter is the
-                // extension receiver. Context parameters remain the leading parameters of the
-                // callable's semantic signature, but physically follow that receiver. Publish the
-                // same shape as metadata providers: receiver + (contexts + values).
-                member.params.insert(0, extension.receiver_ty());
+                // A member extension is an instance method carrying the extension receiver among its
+                // method parameters, AFTER the leading context parameters. Publish the same shape as
+                // metadata providers: contexts + receiver + values.
+                let signature = extension.signature();
+                member.params.insert(
+                    signature.context_count.min(member.params.len()),
+                    extension.receiver_ty(),
+                );
                 member.set_is_member_extension(true);
                 member.set_is_operator(extension.signature().is_operator());
                 member.set_is_infix(extension.signature().is_infix());
@@ -547,7 +550,11 @@ impl<'a> ModuleSymbols<'a> {
                     let signature = extension.signature();
                     let receiver = crate::types::ty_subst(extension.receiver_ty(), &bindings);
                     let mut semantic_params = signature.params.clone();
-                    semantic_params.insert(0, receiver);
+                    // Same slot the `generic_sig` below uses: after the leading context parameters.
+                    // The two disagreed, so a context-carrying SAM member extension published a
+                    // physical list and a generic signature that named different receivers.
+                    semantic_params
+                        .insert(signature.context_count.min(semantic_params.len()), receiver);
                     crate::trace_compiler!(
                         "resolve",
                         "  SAM extension declaration {}.{} params={:?} abstract={}",

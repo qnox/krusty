@@ -42760,13 +42760,17 @@ impl<'a> Checker<'a> {
     fn semantic_member_ext_fun(
         member: &crate::libraries::LibraryMember,
     ) -> Option<MemberExtFunSig> {
-        let physical_receiver = member.params.first().copied()?;
+        // The receiver follows the leading context parameters (`(contexts…, receiver, values…)`),
+        // so it is neither `params[0]` nor separable by `split_first`.
+        let context_count = member.context_count.min(member.params.len());
+        let physical_receiver = member.params.get(context_count).copied()?;
         let receiver_ty = member
             .generic_sig
             .as_ref()
             .and_then(|generic| generic.receiver)
             .unwrap_or(physical_receiver);
-        let (_, physical_tail) = member.params.split_first()?;
+        let mut physical_tail = member.params.clone();
+        physical_tail.remove(context_count);
         // Providers may retain backend-only trailing parameters (the JVM provider keeps a suspend
         // Continuation so other consumers can reconstruct the physical method), while a module type
         // shape is already source-semantic. Derive source arity from the provider-neutral call shape

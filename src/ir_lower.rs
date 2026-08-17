@@ -1291,9 +1291,13 @@ fn lower_file_at_reporting_impl(
                 };
                 let ret = sig.ret;
                 let logical_params = sig.params.clone();
-                let mut params = Vec::with_capacity(
-                    logical_params.len() + usize::from(extension_receiver.is_some()),
-                );
+                // A member extension signs like a top-level one: the leading CONTEXT parameters come
+                // first and the extension receiver follows them at `context_count`.
+                let member_recv_index = sig.context_count.min(logical_params.len());
+                let mut params: Vec<_> = logical_params
+                    .iter()
+                    .map(|parameter| ty_to_ir(*parameter))
+                    .collect();
                 if let Some(extension) = extension_receiver.as_ref() {
                     let receiver = extension.receiver_ty();
                     let receiver = if m
@@ -1305,9 +1309,8 @@ fn lower_file_at_reporting_impl(
                     } else {
                         ty_to_ir(receiver)
                     };
-                    params.push(receiver);
+                    params.insert(member_recv_index, receiver);
                 }
-                params.extend(logical_params.iter().map(|parameter| ty_to_ir(*parameter)));
                 let class_nonnull_tps: std::collections::HashSet<String> = c
                     .type_params
                     .iter()
@@ -1318,11 +1321,11 @@ fn lower_file_at_reporting_impl(
                     .collect();
                 let mut param_checks =
                     param_checks_for(m, &logical_params, &c.type_params, &class_nonnull_tps);
-                // A member EXTENSION's receiver is JVM parameter 0 and carries kotlinc's `<this>`
-                // guard ahead of the value parameters' own.
+                // A member EXTENSION's receiver sits at `context_count` and carries kotlinc's
+                // `<this>` guard among the value parameters' own.
                 if let Some(extension) = extension_receiver.as_ref() {
                     param_checks.insert(
-                        0,
+                        member_recv_index.min(param_checks.len()),
                         (!m.visibility.is_private())
                             .then(|| receiver_check_for(m, ty_to_ir(extension.receiver_ty())))
                             .flatten(),
@@ -1383,17 +1386,20 @@ fn lower_file_at_reporting_impl(
                         .as_ref()
                         .is_some_and(|receiver| receiver.nullable())
                 {
-                    let mut nullable =
-                        Vec::with_capacity(m.params.len() + usize::from(m.receiver.is_some()));
+                    let mut nullable: Vec<bool> = m
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.ty.nullable())
+                        .collect();
                     if let Some(receiver) = m.receiver.as_ref() {
-                        nullable.push(receiver.nullable());
+                        nullable.insert(member_recv_index.min(nullable.len()), receiver.nullable());
                     }
-                    nullable.extend(m.params.iter().map(|parameter| parameter.ty.nullable()));
                     lo.ir.fn_param_declared_nullable.insert(fid, nullable);
                 }
-                // User annotations on the declared parameters. An extension member's IR parameter 0 is
-                // its receiver, which cannot be annotated — hence the leading empty slot.
-                let param_annotations = parameter_annotation_table(
+                // User annotations on the declared parameters. An extension member's receiver
+                // cannot be annotated — hence the empty slot at its physical index.
+                let param_annotations = parameter_annotation_table_at(
+                    member_recv_index,
                     usize::from(extension_receiver.is_some()),
                     m.params
                         .iter()
@@ -3081,12 +3087,17 @@ fn lower_file_at_reporting_impl(
                     if m.body_close_line != 0 {
                         lo.ir.fn_close_lines.insert(fid, m.body_close_line);
                     }
-                    lo.ir.fn_params.entry(fid).or_insert_with(|| {
-                        let mut names =
-                            vec![format!("$this${}", m.name); usize::from(m.receiver.is_some())];
-                        names.extend(m.params.iter().map(|parameter| parameter.name.clone()));
-                        FnParamInfo::names(names)
-                    });
+                    let member_names = |receiver_slot: Option<usize>| {
+                        let mut names: Vec<String> = m
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.name.clone())
+                            .collect();
+                        if let Some(slot) = receiver_slot {
+                            names.insert(slot.min(names.len()), format!("$this${}", m.name));
+                        }
+                        names
+                    };
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
@@ -3115,27 +3126,49 @@ fn lower_file_at_reporting_impl(
                                 .get(signature_index)
                                 .cloned()
                         })?;
-                    if let Some(extension) = extension_signature.as_ref() {
+                    // Value ids follow the PHYSICAL parameter order, so the extension `this` is
+                    // bound after the leading context parameters — the slot the registered parameter
+                    // list puts the receiver in.
+                    let member_recv_index = sig.context_count.min(sig.params.len());
+                    if extension_signature.is_some() {
                         lo.scope
                             .push(("$dispatch".to_string(), dispatch_v, Ty::obj(&internal)));
-                        let extension_v = lo.fresh_value();
-                        lo.scope
-                            .push(("this".to_string(), extension_v, extension.receiver_ty()));
                     } else {
                         lo.scope
                             .push(("this".to_string(), dispatch_v, Ty::obj(&internal)));
                     }
-                    for (p, t) in m.params.iter().zip(&sig.params) {
+                    let bind_extension_receiver = |lo: &mut Lower| {
+                        if let Some(extension) = extension_signature.as_ref() {
+                            let extension_v = lo.fresh_value();
+                            lo.scope.push((
+                                "this".to_string(),
+                                extension_v,
+                                extension.receiver_ty(),
+                            ));
+                        }
+                    };
+                    for (index, (p, t)) in m.params.iter().zip(&sig.params).enumerate() {
+                        if index == member_recv_index {
+                            bind_extension_receiver(&mut lo);
+                        }
                         let v = lo.fresh_value();
                         lo.scope.push((p.name.clone(), v, *t));
                     }
+                    if member_recv_index >= m.params.len().min(sig.params.len()) {
+                        bind_extension_receiver(&mut lo);
+                    }
+                    let member_receiver_slot =
+                        extension_signature.as_ref().map(|_| member_recv_index);
+                    lo.ir
+                        .fn_params
+                        .entry(fid)
+                        .or_insert_with(|| FnParamInfo::names(member_names(member_receiver_slot)));
                     // Register parameter defaults (the JVM backend realizes them via the `$default`
                     // stub). Lowered with `this` = value 0 and the params = values 1..=n — the stub's
                     // value layout. `None` for a required parameter.
                     if m.params.iter().any(|p| p.default.is_some()) {
                         let last = m.params.len() - 1;
-                        let receiver_offset = usize::from(extension_signature.is_some());
-                        let mut defaults = vec![None; receiver_offset];
+                        let mut defaults = Vec::new();
                         for (i, (p, t)) in m.params.iter().zip(&sig.params).enumerate() {
                             match p.default {
                                 Some(d) => {
@@ -3151,8 +3184,10 @@ fn lower_file_at_reporting_impl(
                                 None => defaults.push(None),
                             }
                         }
-                        let mut names = vec![format!("$this${}", m.name); receiver_offset];
-                        names.extend(m.params.iter().map(|parameter| parameter.name.clone()));
+                        if let Some(slot) = member_receiver_slot {
+                            defaults.insert(slot.min(defaults.len()), None);
+                        }
+                        let names = member_names(member_receiver_slot);
                         let info = lo
                             .ir
                             .fn_params
@@ -8357,6 +8392,7 @@ impl<'a> Lower<'a> {
             name,
             params,
             physical_params,
+            context_args,
             ret,
             physical_ret,
             inline,
@@ -8390,12 +8426,14 @@ impl<'a> Lower<'a> {
                 *value = self.coerce_argument_value(*value, *logical, ty_to_ir(*physical))?;
             }
         }
-        let mut lowered = Vec::with_capacity(provided.len() + 1);
-        lowered.push(Some(extension_value));
-        lowered.extend(provided.iter().copied());
-        let mut method_params = Vec::with_capacity(physical_params.len() + 1);
-        method_params.push(*physical_receiver);
-        method_params.extend(physical_params.iter().copied());
+        // `provided` is indexed by SOURCE parameter (contexts then values); the emitted method puts
+        // the extension receiver between the two groups, so both the argument list and the parameter
+        // list it is checked against splice it in at the context count.
+        let context_count = context_args.len().min(provided.len());
+        let mut lowered: Vec<Option<u32>> = provided.to_vec();
+        lowered.insert(context_count, Some(extension_value));
+        let mut method_params = physical_params.clone();
+        method_params.insert(context_count, *physical_receiver);
         let (call, emitted_ret) = if let Some((class, index, _, linked_ret)) =
             self.link_local_method(&owner.render(), name, &method_params)
         {

@@ -4656,6 +4656,43 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   matching the alias's own qualified spelling, so neither depends on the alias having a target class.
   Tests: `tests/typealias_abbreviated_type_e2e.rs`.
 
+- **A context parameter precedes the extension receiver in the JVM signature.** Kotlin signs a
+  context extension `(contexts…, receiver, values…)`: `context(c: String) fun Src.plain(x: Int)` is
+  `(Ljava/lang/String;Lrepro/Src;I)Ljava/lang/String;`, and with two contexts
+  `context(c: String, d: Int) fun Src.two(x: Int)` is `(Ljava/lang/String;ILrepro/Src;I)…`. The
+  receiver's index is therefore the CONTEXT COUNT, not zero — `params[0]` is the receiver only for an
+  extension that declares no `context(…)` clause. A context function with no receiver is unaffected,
+  which is why the pure top-level form was already correct. A CLASS-BODY extension signs the same way
+  — its dispatch receiver is `this`, and among the method parameters the context prefix still precedes
+  the extension receiver — but it builds its physical list in a different place, so correcting only
+  the top-level path leaves a half-fixed ABI. krusty modelled the reverse,
+  `(receiver, contexts…, values…)`, and did so symmetrically on both sides of the boundary: it
+  emitted that order and decoded classpath descriptors expecting it. Nothing inside a single krusty
+  compilation could disagree, so every same-module test passed while every context extension was
+  ABI-incompatible with kotlinc in both directions — reading one back from a kotlinc-built dependency
+  took its first context parameter for the receiver, matched no candidate, and fell through to "no
+  supported semantic lowering". This is the layout krusty already used for a context FUNCTION TYPE,
+  whose receiver sits at `params[context_count]`, so declarations and function types now agree.
+  The semantic (receiver-free) parameter list keeps the context prefix and is consequently not a
+  contiguous slice of the physical one, hence `Cow`. Note the metadata `d1`/`d2` string tables still
+  intern the receiver before the context parameter where kotlinc interns the reverse; the records are
+  keyed by protobuf field number, so both compilers read either encoding, and kotlinc resolves a
+  krusty-built context extension. Whole-facade byte identity additionally awaits unrelated gaps
+  (string-concatenation lowering, `SourceDebugExtension`, `JvmMethodSignature` strings in `d2`).
+  Tests: `tests/context_parameter_signature_order_e2e.rs`.
+
+- **A context argument is an inference source and an ordinary boxing site.** The value selected for a
+  context parameter constrains the declaration's type variables like any other argument: in
+  `context(c: T) fun <T> Src.tagged(x: String): T`, `with(42) { Src().tagged("a") }` has type `Int`.
+  Symmetrically, the context prefix must not consume the arguments that follow it — in
+  `context(c: String) fun <T> Src.valued(x: T): T` the WRITTEN argument pins `T`, so zipping a
+  context-inclusive parameter list against the call's arguments shifts every binding by one and
+  leaves `T` open (its members then read as `unresolved reference`). A context parameter typed by a
+  type variable erases to a reference slot, so a primitive context value boxes on the way in exactly
+  like a written argument; omitting that left an `int` in an `Object` slot, which is a `VerifyError`
+  at class load rather than a wrong answer.
+  Tests: `tests/context_parameter_signature_order_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

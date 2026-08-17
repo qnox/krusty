@@ -150,6 +150,53 @@ fn a_context_extension_body_binds_the_receiver_after_the_contexts() {
     );
 }
 
+const MEMBER: &str = r#"package repro
+
+class Src(val n: Int)
+
+class Owner {
+    context(c: String) fun Src.memExt(x: Int): String = c + n + x
+
+    context(c: String) fun plainMem(x: Int): String = c + x
+}
+"#;
+
+/// A CLASS-BODY extension signs the same way: its dispatch receiver is `this`, and among the method
+/// parameters the context prefix still precedes the extension receiver. This path builds its physical
+/// parameter list in a different place from the top-level one, so it stayed receiver-first after the
+/// top-level layout was corrected — a half-fixed ABI rather than a consistent one.
+#[test]
+fn a_member_context_extension_signs_like_a_top_level_one() {
+    let Some((kotlinc, krusty)) = javap_both("Cmem", MEMBER, "repro/Owner") else {
+        eprintln!("skip (Cmem: reference toolchain unavailable)");
+        return;
+    };
+    assert_eq!(
+        descriptors(&krusty),
+        [
+            "()V",
+            "(Ljava/lang/String;Lrepro/Src;I)Ljava/lang/String;",
+            "(Ljava/lang/String;I)Ljava/lang/String;",
+        ]
+    );
+    assert_eq!(descriptors(&krusty), descriptors(&kotlinc));
+}
+
+/// …and it runs: the body reads its receiver and context from the slots the signature assigns them,
+/// and the call site pushes them in that order.
+#[test]
+fn a_member_context_extension_runs() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        package repro\n\
+        class Src(val n: Int)\n\
+        class Owner {\n\
+        \x20 context(c: String) fun Src.memExt(x: Int): String = c + n + x\n\
+        \x20 fun go(): String = with(\"k\") { Src(7).memExt(1) }\n\
+        }\n\
+        fun box(): String = if (Owner().go() == \"k71\") \"OK\" else \"fail\"\n";
+    common::expect_box_ok_files_with_stdlib(&[("main.kt", SRC)], "Main");
+}
+
 const GENERIC: &str = r#"package repro
 
 class Src
