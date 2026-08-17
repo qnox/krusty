@@ -74,6 +74,27 @@ fn a_cycle_through_a_getter_declines() {
 }
 
 #[test]
+fn a_cycle_between_a_class_member_and_a_module_property_declines() {
+    // The loop crosses the boundary the two old retry passes had between them, so neither could see
+    // it whole: one ran to a fixpoint before the other started. One queue makes it an ordinary
+    // cycle.
+    assert_declines(
+        "member-module",
+        &["fromMember"],
+        &["object Holder { val fromModule = fromMember }\nval fromMember = Holder.fromModule\n"],
+    );
+}
+
+#[test]
+fn a_cycle_between_two_class_members_declines() {
+    assert_declines(
+        "two-members",
+        &["a", "b"],
+        &["class Pair { val a get() = b\n val b get() = a }\n"],
+    );
+}
+
+#[test]
 fn a_declaration_reached_twice_without_a_cycle_still_resolves() {
     // Two readers of one declaration is not a loop. Guarding this keeps a cycle check from
     // degenerating into "anything reached more than once declines".
