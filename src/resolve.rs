@@ -34648,7 +34648,39 @@ impl<'a> Checker<'a> {
                 self.member_inline_body_available(member),
             )
         });
-        let member_extension = method_sig.is_none().then(|| {
+        // A CLASSPATH MEMBER outranks an extension, which is Kotlin's rule and not this function's
+        // invention, so its expectations are asked for before any extension is looked up. The big
+        // member-call path has always asked in this order; the safe-call path asked in the other one,
+        // and reconciling them is the point of having one decision here at all. Asking on
+        // `method_sig` rather than on `module` is deliberate: it is the question the member-call path
+        // asks, and the two differ only when a selected member yields no slot mapping at all.
+        //
+        // Nothing ELSE about when a source is consulted changes here. In particular the second
+        // extension carrier stays reachable with a member selected, which it was before, so a
+        // selected member whose parameter is not a function type can still take a shape from an
+        // extension for that argument.
+        let provider = method_sig
+            .is_none()
+            .then(|| {
+                self.provider_member_lambda_expectations(
+                    scope,
+                    call,
+                    crate::symbol_resolver::SymRecv::Value(receiver),
+                    name,
+                    (args, partial),
+                    explicit_type_args,
+                )
+            })
+            .flatten()
+            .filter(|expectations| expectations.iter().any(Option::is_some))
+            // An expectation whose parameter count cannot fit the lambda AS WRITTEN is not an
+            // expectation for this call, whichever source offered it. A destructuring parameter is
+            // ONE written parameter: the parser gives it a single synthetic name and destructures it
+            // in the body.
+            .filter(|expectations| {
+                self.member_expectations_fit_written_lambdas(args, expectations)
+            });
+        let member_extension = (method_sig.is_none() && provider.is_none()).then(|| {
             self.member_extension_lambda_param_types(
                 scope,
                 MemberExtensionCall {
@@ -34680,43 +34712,25 @@ impl<'a> Checker<'a> {
                     inline: false,
                 });
         let extension = extension.or_else(|| {
-            self.extension_lambda_shape(
-                scope,
-                receiver,
-                name,
-                (args, partial),
-                arg_names,
-                trailing_lambda,
-                explicit_type_args,
-                None,
-            )
+            provider
+                .is_none()
+                .then(|| {
+                    self.extension_lambda_shape(
+                        scope,
+                        receiver,
+                        name,
+                        (args, partial),
+                        arg_names,
+                        trailing_lambda,
+                        explicit_type_args,
+                        None,
+                    )
+                })
+                .flatten()
         });
-        // An expectation whose parameter count cannot fit the lambda AS WRITTEN is not an
-        // expectation for this call, whichever source offered it. Carrying that rule from the
-        // provider source it was first written for to the extension source is what starts making the
-        // order between them stop deciding the outcome: a source that cannot fit no longer answers
-        // first merely because it is asked first. It does NOT finish that job — a selected module
-        // member is still unconditional, because `member_extension` is asked only when there is no
-        // selected member at all, so an ill-fitting module shape has no competitor to lose to.
-        // (A destructuring parameter is ONE written parameter: the parser gives it a single synthetic
-        // name and destructures it in the body.)
+        // The same fitness rule, applied to the other carrier. See
+        // [`Self::shape_fits_written_lambdas`] for why the two count parameters differently.
         let extension = extension.filter(|shape| self.shape_fits_written_lambdas(args, shape));
-        let provider = (module.is_none() && extension.is_none())
-            .then(|| {
-                self.provider_member_lambda_expectations(
-                    scope,
-                    call,
-                    crate::symbol_resolver::SymRecv::Value(receiver),
-                    name,
-                    (args, partial),
-                    explicit_type_args,
-                )
-            })
-            .flatten()
-            .filter(|expectations| expectations.iter().any(Option::is_some))
-            .filter(|expectations| {
-                self.member_expectations_fit_written_lambdas(args, expectations)
-            });
         CallLambdaShaping {
             module,
             extension,

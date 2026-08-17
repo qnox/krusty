@@ -109,3 +109,42 @@ fn a_kotlin_map_receiver_is_unaffected() {
         }\n";
     common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "a Kotlin map receiver");
 }
+
+#[test]
+fn a_safe_call_reaches_the_kotlin_extension_by_the_same_rule() {
+    // The `?.` spelling of the first case. The safe-call path used to look up an extension BEFORE
+    // asking a classpath member at all, so it reached the Kotlin `forEach` by ordering rather than
+    // on the merits; it now asks the member first, like the qualified path, and gets past the Java
+    // two-parameter `BiConsumer` only because that expectation cannot fit a lambda written with one
+    // parameter. Nothing else keeps these two spellings agreeing.
+    const MAIN: &str = "package repro\n\
+        val sizes: HashMap<String, Int>? = HashMap()\n\
+        fun total(): Int {\n\
+        \x20   var t = 0\n\
+        \x20   sizes?.forEach { (name, count) -> t += count + name.length }\n\
+        \x20   return t\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   sizes!![\"ab\"] = 3\n\
+        \x20   return if (total() == 5) \"OK\" else \"fail: \" + total()\n\
+        }\n";
+    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "a safe call to the extension");
+}
+
+#[test]
+fn a_safe_call_keeps_the_two_parameter_member_form() {
+    // The converse, so the rule cannot be satisfied by always preferring the extension: written with
+    // two parameters the same safe call must still reach the Java `BiConsumer` member.
+    const MAIN: &str = "package repro\n\
+        val sizes: HashMap<String, Int>? = HashMap()\n\
+        fun total(): Int {\n\
+        \x20   var t = 0\n\
+        \x20   sizes?.forEach { name, count -> t += count + name.length }\n\
+        \x20   return t\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   sizes!![\"ab\"] = 3\n\
+        \x20   return if (total() == 5) \"OK\" else \"fail: \" + total()\n\
+        }\n";
+    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "a safe call to the member form");
+}
