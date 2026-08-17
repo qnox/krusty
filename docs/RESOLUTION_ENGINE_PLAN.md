@@ -69,6 +69,38 @@ had introduced.
 descriptor assertions across every permutation), `a_cycle_between_a_class_member_and_a_module_property_declines`,
 `a_cycle_between_two_class_members_declines`.
 
+## Corpus byte sweep — base `2da5a640` vs `a9f8e6a3`
+
+Two passes over all 7352 files of `target/cache/box-corpus/2.4.10/compiler/testData/codegen/box`,
+each file compiled on its own, per-emitted-class byte md5. The base binary was built in its own
+worktree (its `target/cache` symlinked to the provisioned one) rather than copied: dist discovery is
+relative to the build path, and a copied binary compiles nothing at all.
+
+| Outcome | Count |
+| --- | --- |
+| Files covered, both passes | 7352 / 7352 |
+| Newly REJECTED (regressions) | **0** |
+| Newly accepted | 5 |
+| Classes whose bytes changed | 5, across 2 files — both pre-existing nondeterminism |
+
+The five newly-accepted files are all accepted by kotlinc 2.4.10 as well:
+`evaluate/annotationClassWithInner.kt`, `objects/initializationOrder.kt`,
+`package/initializationOrder.kt`, `regressions/nullabilityForCommonCapturedSupertypes.kt` compile
+cleanly, and `evaluate/intrinsicConst/kt53272.kt` compiles once its own
+`// LANGUAGE: +IntrinsicConstEvaluation` directive is passed — krusty reads that directive out of the
+source, kotlinc takes it on the command line.
+
+The two files with changed bytes — `super/unqualifiedSuper.kt` and
+`traits/interfaceWithNonAbstractFunIndirectGeneric.kt` — are NOT attributable to this work: the BASE
+binary produces four distinct md5s for `unqualifiedSuperKt$box$1.class` across six runs of the same
+input. Emission order is keyed by hash iteration order over the class signature's member maps, which
+is a separate pre-existing defect.
+
+A first version of this sweep reported a perfect clean result while having compiled nothing at all:
+the binary path was never exported into the worker shell, so every row was `<rejected>`, and only
+3281 of 7352 files produced a row. The script now asserts full coverage and exits non-zero on a gap,
+because a sweep that silently covers half the corpus reads exactly like a clean one.
+
 ## PR 3 — Inferred function returns on demand
 
 **Changes** `preinfer_module_returns` to resolve each function's inferred return through the engine
