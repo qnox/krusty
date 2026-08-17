@@ -21315,6 +21315,16 @@ impl<'a> Checker<'a> {
                 &mut bindings,
                 type_args.len(),
             );
+            // An argument can pin a variable to a type its OWN bound forbids (`f(Auth(),
+            // listOf(Login()))` against `<T : Base<T>, C : T>` pins `T = Login`, and `Login` is a
+            // `Base<Cmd>`). The recursive bound is what says where to look for the type the call
+            // actually means; without this the candidate is dropped as violating its own bounds.
+            crate::symbol_resolver::resolve_bound_violating_bindings(
+                Some(&source),
+                &signature,
+                &mut bindings,
+                type_args.len(),
+            );
             if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                 &signature,
                 &bindings,

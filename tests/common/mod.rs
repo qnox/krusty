@@ -2076,6 +2076,31 @@ pub fn expect_box_run_against_ref(tag: &str, lib_src: &str, main: &str) -> Optio
     ))
 }
 
+/// Compile a dependency with the REFERENCE compiler and return its classpath dir, for tests that
+/// need the classpath rather than a `box()` run (a rejection assertion, say).
+#[allow(dead_code)]
+pub fn kotlinc_library(lib_src: &str) -> Option<PathBuf> {
+    kotlinc_lib_out(&[("Lib.kt", lib_src)])
+}
+
+/// Run `main`'s `box()` against a dependency compiled by the REFERENCE compiler.
+///
+/// Unlike [`expect_box_run_against_ref`], which defaults to a krusty-built dependency, this pins the
+/// classpath a real dependency jar presents: class files and `@Metadata` produced by kotlinc. Use it
+/// when the behaviour under test is how krusty READS a dependency declaration.
+#[allow(dead_code)]
+pub fn expect_box_run_against_kotlinc(lib_src: &str, main: &str) -> Option<String> {
+    let libout = kotlinc_lib_out(&[("Lib.kt", lib_src)])?;
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    Some(expect_box_run(
+        main,
+        "Main",
+        &[libout, stdlib],
+        Some(jdk.as_path()),
+    ))
+}
+
 /// [`expect_box_run_against_with_reflect`] with an EXPLICITLY reference-compiled dependency.
 #[allow(dead_code)]
 pub fn expect_box_run_against_with_reflect_ref(

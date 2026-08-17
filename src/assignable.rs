@@ -362,11 +362,11 @@ fn normalized_type_argument(cx: &TyCtx, ty: Ty) -> Ty {
     resolve(cx, ty, ty)
 }
 
-/// The class-identity reach: `sub`'s class is `sup`'s class (canonically) or transitively extends /
-/// Map `sub` through its applied generic hierarchy to the classifier denoted by `sup`. This single walk
-/// serves both erased class reachability and generic argument comparison, so no caller can observe the
-/// class relationship while silently discarding the supertype template.
-fn applied_supertype(oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> Option<Ty> {
+/// Map `sub` through its applied generic hierarchy to the classifier denoted by `sup`, keeping the
+/// type arguments the hierarchy carries (`Login` against `BaseCmd` → `BaseCmd<Cmd>`). This single
+/// walk serves both erased class reachability and generic argument comparison, so no caller can
+/// observe the class relationship while silently discarding the supertype template.
+pub(crate) fn applied_supertype(oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> Option<Ty> {
     let (Some(start), Some(target)) = (sub.kotlin_class_internal(), sup.kotlin_class_internal())
     else {
         return None;
