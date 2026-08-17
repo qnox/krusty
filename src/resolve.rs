@@ -11151,6 +11151,16 @@ fn withheld_declaration_ty(table: &SymbolTable, file_index: u32, ty: Ty) -> Ty {
 /// nothing to reveal it. The join stays as it is for expression positions, where nothing is
 /// published; only a DECLARATION has to refuse.
 fn declaration_body_declines(file: &File, expression: ExprId, expr_types: &[Ty]) -> bool {
+    // A body that never yields a value gives the declaration no type. `val a = throw E()` and
+    // `val a = return` would otherwise infer `Nothing` and emit a `Ljava/lang/Void;` field, where
+    // kotlinc rejects the property outright ("property type 'Nothing' needs to be specified
+    // explicitly"). An elvis whose RIGHT side throws is unaffected: its type is the left side's.
+    if expr_types
+        .get(expression.0 as usize)
+        .is_some_and(|ty| *ty == Ty::Nothing)
+    {
+        return true;
+    }
     let Expr::Elvis { lhs, rhs } = file.expr(expression) else {
         return false;
     };
@@ -11162,6 +11172,12 @@ fn declaration_body_declines(file: &File, expression: ExprId, expr_types: &[Ty])
             .non_null()
     };
     let (left, right) = (side(lhs), side(rhs));
+    // `null ?: throw …` yields the LEFT side, and a bare `null` left becomes `Nothing?` — a
+    // publishable type — so the rule above never sees it. Neither side ever produces a value, so
+    // the declaration has no type; kotlinc rejects it.
+    if right == Ty::Nothing && matches!(left, Ty::Null | Ty::Nothing) {
+        return true;
+    }
     left.is_numeric() && right.is_numeric() && left != right
 }
 
