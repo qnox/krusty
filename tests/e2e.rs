@@ -464,6 +464,8 @@ mod elvis_newline_continuation_e2e;
 mod elvis_nullability_join_e2e;
 #[path = "elvis_return_smartcast_e2e.rs"]
 mod elvis_return_smartcast_e2e;
+#[path = "elvis_signature_inference_e2e.rs"]
+mod elvis_signature_inference_e2e;
 #[path = "empty_loop_body_e2e.rs"]
 mod empty_loop_body_e2e;
 #[path = "enum_body_property_e2e.rs"]
