@@ -3669,6 +3669,24 @@ impl Symbol {
             _ => None,
         }
     }
+    /// The selected callable's own SYMBOLIC signature, its type variables still unbound.
+    ///
+    /// Reported through the same member-or-extension family as [`Self::call_return`]: which physical
+    /// kind answered the call is a realization detail, and a consumer binding a type variable from an
+    /// argument must not have to branch on it.
+    pub fn call_generic_sig(self) -> Option<crate::libraries::GenericSig> {
+        match self {
+            Symbol::Member(f) => match f.call {
+                Some(call) => call.member.generic_sig,
+                None => f
+                    .extension_call
+                    .and_then(|call| call.generic_sig)
+                    .map(|generic| *generic),
+            },
+            Symbol::Instance(member) | Symbol::Companion(member) => member.generic_sig,
+            Symbol::Constructor(_) => None,
+        }
+    }
     /// This name read as a property (`recv.name`).
     pub fn property(self) -> Option<ResolvedMember> {
         match self {
@@ -4786,6 +4804,55 @@ impl<'a> SymbolResolver<'a> {
             // by declaration order and later append `$default` a second time.
             .filter(|function| !function.callable.default_call)
             .collect()
+    }
+
+    /// The symbolic signature of the callable `name(args)` selects, with the RECEIVER's type
+    /// arguments already substituted.
+    ///
+    /// Selection is unchanged; this reports the signature instead of the substituted return, so a
+    /// caller can bind a type variable an argument fixes. Applying the receiver here keeps the
+    /// hierarchy walk (`List<Dto>` answering a `fun <T> Iterable<T>.map` receiver) on this side of
+    /// the boundary — the caller sees a signature whose remaining formals are exactly the ones its
+    /// arguments have to bind.
+    pub(crate) fn call_template(
+        &self,
+        recv: SymRecv,
+        name: &str,
+        args: &[CallArgKind],
+        type_args: &[Ty],
+    ) -> Option<crate::libraries::GenericSig> {
+        let receiver = match recv {
+            SymRecv::Value(ty) | SymRecv::ImplicitValue(ty) => Some(ty),
+            _ => None,
+        };
+        let sig = self
+            .select_symbol(recv, name, args, type_args)?
+            .call_generic_sig()?;
+        let mut binds = GSigBinds::new();
+        if let (Some(shape), Some(actual)) = (sig.receiver, receiver) {
+            if actual != Ty::Error {
+                unify_ty_from_symbols(&self.src, shape, actual, &mut binds);
+            }
+        }
+        let (formals, formal_bounds) = sig
+            .formals
+            .iter()
+            .zip(&sig.formal_bounds)
+            .filter(|(formal, _)| !binds.contains_key(formal.as_str()))
+            .map(|(formal, bounds)| (formal.clone(), bounds.clone()))
+            .unzip();
+        Some(crate::libraries::GenericSig {
+            formals,
+            formal_bounds,
+            receiver: sig.receiver.map(|ty| ty_subst_keep_unbound(ty, &binds)),
+            params: sig
+                .params
+                .iter()
+                .map(|&param| ty_subst_keep_unbound(param, &binds))
+                .collect(),
+            ret: ty_subst_keep_unbound(sig.ret, &binds),
+            return_policy: sig.return_policy,
+        })
     }
 
     pub(crate) fn select_symbol(
