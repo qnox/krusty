@@ -646,6 +646,7 @@ mod tests {
             property_annotations: Vec::new(),
             ctor_param_count: 0,
             ctor_args: Vec::new(),
+            ctor_param_annotations: Vec::new(),
             init_body: None,
             pre_super_param_fields: Vec::new(),
             explicit_param_stores: false,

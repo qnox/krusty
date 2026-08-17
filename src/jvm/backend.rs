@@ -870,6 +870,20 @@ fn facade_package_metadata_inner(
             ret: declared_ret,
             receiver,
             param_defaults: sig.param_defaults.clone(),
+            // The IR table is parallel to the physical parameter list, so an EXTENSION's leading
+            // receiver slot is dropped here — `params` above is the LOGICAL list, receiver excluded.
+            // Same no-IR rule as the declaration annotations above: no IR, no user annotations.
+            param_annotations: ir
+                .and_then(|ir| ir.top_level_function_fids.get(&d.0).map(|fid| (ir, fid)))
+                .and_then(|(ir, fid)| ir.fn_param_annotations.get(fid))
+                .map(|table| {
+                    table
+                        .iter()
+                        .skip(usize::from(receiver.is_some()))
+                        .map(|anns| anns.applications().cloned().collect())
+                        .collect()
+                })
+                .unwrap_or_default(),
             suspend: f.is_suspend(),
             jvm_desc,
             inline: f.is_inline(),
