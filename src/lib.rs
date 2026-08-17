@@ -47,6 +47,7 @@ pub mod synthetics;
 pub mod token;
 pub mod toolchain;
 pub mod trace;
+pub mod type_engine;
 pub mod types;
 mod wide_stack;
 
