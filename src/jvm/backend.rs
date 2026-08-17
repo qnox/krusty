@@ -793,26 +793,40 @@ fn facade_package_metadata_inner(
             .chain(declared_params.iter().copied())
             .chain(std::iter::once(declared_ret))
             .any(crate::metadata::descriptor_needs_recording);
-        let jvm_desc = (f.is_suspend() || mentions_type_parameter || records_an_array).then(|| {
-            let mut p = String::new();
-            if let Some(r) = receiver {
-                p.push_str(&crate::jvm::names::type_descriptor(r));
-            }
-            for t in &sig.params {
-                p.push_str(&crate::jvm::names::type_descriptor(*t));
-            }
-            let ret_desc = if f.is_suspend() {
-                "Ljava/lang/Object;"
-            } else {
-                &crate::jvm::names::type_descriptor(sig.ret)
-            };
-            let cont = if f.is_suspend() {
-                "Lkotlin/coroutines/Continuation;"
-            } else {
-                ""
-            };
-            format!("({p}{cont}){ret_desc}")
-        });
+        // A CONTEXT function keeps the handle too, exactly as kotlinc records one for
+        // `context(c: String) fun Src.plain(x: Int)`. Without it a reader must DERIVE the physical
+        // descriptor from the record, and the receiver's slot — after the context prefix, not before
+        // it — is not recoverable from the proto alone: the derivation rebuilds
+        // `(receiver, contexts…, values…)` and the call targets a method nothing declares.
+        let jvm_desc = (f.is_suspend()
+            || mentions_type_parameter
+            || records_an_array
+            || sig.context_count > 0)
+            .then(|| {
+                let mut p = String::new();
+                // `(contexts…, receiver, values…)` — the receiver follows the context prefix.
+                let receiver_slot = sig.context_count.min(sig.params.len());
+                for t in &sig.params[..receiver_slot] {
+                    p.push_str(&crate::jvm::names::type_descriptor(*t));
+                }
+                if let Some(r) = receiver {
+                    p.push_str(&crate::jvm::names::type_descriptor(r));
+                }
+                for t in &sig.params[receiver_slot..] {
+                    p.push_str(&crate::jvm::names::type_descriptor(*t));
+                }
+                let ret_desc = if f.is_suspend() {
+                    "Ljava/lang/Object;"
+                } else {
+                    &crate::jvm::names::type_descriptor(sig.ret)
+                };
+                let cont = if f.is_suspend() {
+                    "Lkotlin/coroutines/Continuation;"
+                } else {
+                    ""
+                };
+                format!("({p}{cont}){ret_desc}")
+            });
         crate::trace_compiler!(
             "metadata",
             "emit facade metadata function={} params={:?} context={} contract={}",

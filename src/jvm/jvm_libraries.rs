@@ -1825,13 +1825,17 @@ impl JvmLibraries {
                     }
                     let mut logical_params = signature.params.clone();
                     if declaration.is_extension() {
+                        // PHYSICAL order: `(contexts…, receiver, values…)`. `signature.params` is the
+                        // semantic list, so the receiver goes in at the context count — and the
+                        // physical fallback reads that same slot, not slot zero.
+                        let receiver_slot = declaration.context_count().min(logical_params.len());
                         let receiver = signature
                             .receiver
-                            .or_else(|| physical_params.first().copied());
+                            .or_else(|| physical_params.get(receiver_slot).copied());
                         let Some(receiver) = receiver else {
                             continue;
                         };
-                        logical_params.insert(0, receiver);
+                        logical_params.insert(receiver_slot, receiver);
                     }
                     member.params = logical_params;
                     member.ret = signature.ret;

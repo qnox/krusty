@@ -18281,11 +18281,19 @@ impl<'a> Lower<'a> {
                 }
                 // The vararg slot never takes a mask bit: its value is the packed (possibly empty)
                 // array, which the `$default` stub passes straight through.
+                //
+                // Mask bits are numbered over the SOURCE parameters — the context prefix included,
+                // the extension receiver excluded — which is how kotlinc's own stub reads them
+                // (`context(c) fun R.f(x = …, y = …)` tests `mask & 2` for `x`). `slots` indexes only
+                // the written value parameters, so each bit shifts past the contexts.
+                if slots.len() + context_count > 32 {
+                    return None;
+                }
                 let mask: i32 = slots
                     .iter()
                     .enumerate()
                     .filter(|(i, slot)| slot.is_none() && c.vararg_index != Some(*i))
-                    .map(|(i, _)| 1i32 << i)
+                    .map(|(i, _)| 1i32 << (i + context_count))
                     .sum();
                 a.extend(slot_args);
                 self.append_default_mask_marker(&mut a, mask);

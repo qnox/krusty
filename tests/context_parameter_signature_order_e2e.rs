@@ -286,6 +286,29 @@ fn a_context_extension_from_a_kotlinc_dependency_is_callable() {
     }
 }
 
+/// A context extension read back from a KRUSTY-built dependency is callable too, with a written
+/// argument and with an omitted default. This is the direction that does not cross the reference
+/// compiler, so nothing else pins it: krusty's own record omitted the `JvmMethodSignature` handle
+/// that kotlinc records here, and the reader's fallback derivation rebuilt the pre-fix
+/// `(receiver, contexts…, values…)` order — the call then targeted a descriptor the dependency does
+/// not declare, which links but fails at run time rather than at compile time.
+#[test]
+fn a_context_extension_from_a_krusty_dependency_is_callable() {
+    const LIB: &str = "// LANGUAGE: +ContextParameters\n\
+        package lib\n\
+        class Src\n\
+        context(c: String) fun Src.tag(x: Int): String = c + x\n\
+        context(c: String) fun Src.tagged(x: Int = 5): String = c + x\n";
+    const MAIN: &str = "// LANGUAGE: +ContextParameters\n\
+        import lib.Src\n\
+        import lib.tag\n\
+        import lib.tagged\n\
+        fun box(): String = with(\"O\") {\n\
+        \x20 if (Src().tag(1) == \"O1\" && Src().tagged() == \"O5\") \"OK\" else \"fail\"\n\
+        }\n";
+    common::expect_box_ok_against("Cself", LIB, MAIN);
+}
+
 /// …and the WRITE side of the same boundary: kotlinc itself resolves a context extension out of a
 /// krusty-built dependency, at top level and as a class member. This is the strongest available check
 /// that the emitted descriptor and the emitted `@Metadata` agree with each other AND with the

@@ -1673,10 +1673,14 @@ fn metadata_declared_return(function: &super::metadata::MetaFn) -> Option<Ty> {
 
 fn metadata_declared_params(function: &super::metadata::MetaFn) -> Option<Vec<Ty>> {
     let signature = function.generic_sig.as_ref()?;
-    let mut params =
-        Vec::with_capacity(signature.params.len() + usize::from(signature.receiver.is_some()));
-    params.extend(signature.receiver);
-    params.extend(signature.params.iter().copied());
+    let mut params = signature.params.clone();
+    // PHYSICAL order: `(contexts…, receiver, values…)`. `GenericSig::params` is the semantic list
+    // (contexts + values), so the receiver is spliced in at the context count — prepending it would
+    // rebuild the declaration in an order the emitted method does not have, and a call site built
+    // from it targets a descriptor nothing declares.
+    if let Some(receiver) = signature.receiver {
+        params.insert(function.context_count().min(params.len()), receiver);
+    }
     Some(params)
 }
 

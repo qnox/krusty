@@ -4678,7 +4678,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   intern the receiver before the context parameter where kotlinc interns the reverse; the records are
   keyed by protobuf field number, so both compilers read either encoding, and kotlinc resolves a
   krusty-built context extension. Whole-facade byte identity additionally awaits unrelated gaps
-  (string-concatenation lowering, `SourceDebugExtension`, `JvmMethodSignature` strings in `d2`).
+  (string-concatenation lowering, `SourceDebugExtension`, `ACC_VARARGS`).
+
+  Two consequences follow for the RECORD rather than the descriptor. A context function keeps its
+  `JvmMethodSignature` handle, as kotlinc's does: the receiver's slot is not recoverable from the
+  proto alone, so a reader without the handle derives `(receiver, contexts…, values…)` and targets a
+  method nothing declares — a call that links and then fails at run time. And a CLASS member records
+  its context parameters as `Function.context_parameter` (field 13); published as ordinary value
+  parameters they are demanded positionally, and kotlinc rejects the call with
+  "no value passed for parameter". `$default` mask bits are numbered over the SOURCE parameters —
+  context prefix INCLUDED, extension receiver excluded — which is how kotlinc's own stub reads them.
   Tests: `tests/context_parameter_signature_order_e2e.rs`.
 
 - **A context argument is an inference source and an ordinary boxing site.** The value selected for a
