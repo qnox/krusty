@@ -366,3 +366,46 @@ fn reference_bounded_type_param_emits_class_signature() {
         assert_eq!(class_sig(name).as_deref(), Some(kotlinc.as_str()), "{name}");
     }
 }
+
+/// `kotlin.Array<E>` is realized as the JVM ARRAY type, and its `Signature` must spell it that way.
+///
+/// Writing `Lkotlin/Array<Ljava/lang/String;>;` names a class no loader can resolve, so every reader
+/// of the attribute — reflection, a Java consumer, a decompiler — fails on it. Two rules follow, and
+/// this pins both against kotlinc: the element goes inside `[`, and an attribute that merely repeats
+/// the descriptor is omitted (which is what happens once `Array<String>` signs `[Ljava/lang/String;`).
+#[test]
+fn an_array_signs_as_a_jvm_array_or_not_at_all() {
+    const SRC: &str = "fun a(x: Array<String>) {}\n\
+                       fun <T> c(x: Array<T>) {}\n\
+                       fun d(x: Array<Array<String>>) {}\n\
+                       fun e(x: Array<out String>) {}\n";
+    let ours = classes(SRC);
+    for (name, expected) in [
+        // Nothing the descriptor does not already say: no attribute, exactly as kotlinc.
+        ("a", None),
+        // The element is a type VARIABLE, which the descriptor erases — the attribute carries it.
+        ("c", Some("<T:Ljava/lang/Object;>([TT;)V".to_string())),
+        ("d", None),
+        // A `out` projection on an array erases: kotlinc writes no attribute here either.
+        ("e", None),
+    ] {
+        let signature = method_signature(&ours, "GKt", name);
+        assert_eq!(
+            signature, expected,
+            "fun {name}'s Signature attribute must match kotlinc's"
+        );
+        let reference = kotlinc_class(SRC, "GKt")
+            .methods
+            .iter()
+            .find(|m| m.name == name)
+            .and_then(|m| m.signature.clone());
+        assert_eq!(
+            signature, reference,
+            "fun {name} must sign exactly as the reference compiler does"
+        );
+        assert!(
+            !signature.iter().any(|s| s.contains("kotlin/Array")),
+            "a Signature must never name kotlin/Array — no JVM loader resolves it: {signature:?}"
+        );
+    }
+}
