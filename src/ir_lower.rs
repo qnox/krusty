@@ -2389,22 +2389,24 @@ fn lower_file_at_reporting_impl(
                 } else {
                     ty_to_ir(recv_ty)
                 };
-                let mut params = vec![recv_param];
-                params.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
+                // The receiver follows the leading context parameters (kotlinc's layout), so both the
+                // parameter list and the guards parallel to it splice it in at that index.
+                let recv_index = sig.context_count.min(sig.params.len());
+                let mut params: Vec<_> = sig.params.iter().map(|t| stored_value_ty(*t)).collect();
+                params.insert(recv_index, recv_param);
                 let ret = ty_to_ir(sig.ret);
                 let receiver_nullable_type_parameter =
                     recv_ty.is_ty_param() && recv_ty.upper_bound_admits_null();
-                let mut param_checks = vec![(!f.visibility.is_private()
-                    && !recv_ref.nullable()
-                    && !receiver_nullable_type_parameter
-                    && recv_ty.is_reference())
-                .then(|| "<this>".to_string())];
-                param_checks.extend(param_checks_for(
-                    f,
-                    &sig.params,
-                    &[],
-                    &std::collections::HashSet::new(),
-                ));
+                let mut param_checks =
+                    param_checks_for(f, &sig.params, &[], &std::collections::HashSet::new());
+                param_checks.insert(
+                    recv_index,
+                    (!f.visibility.is_private()
+                        && !recv_ref.nullable()
+                        && !receiver_nullable_type_parameter
+                        && recv_ty.is_reference())
+                    .then(|| "<this>".to_string()),
+                );
                 let id = lo.ir.add_fun(IrFunction {
                     name: f.name.clone(),
                     params,
@@ -2441,13 +2443,15 @@ fn lower_file_at_reporting_impl(
                     lo.ir.private_methods.insert(id);
                 }
                 // A generic EXTENSION gets a JVM `Signature` like a generic top-level function, with
-                // the receiver as the leading parameter (kotlinc: `<T:…>(Llib/Core;…)TT;`). A
+                // the receiver after any context parameters (kotlinc: `<T:…>(Llib/Core;…)TT;`). A
                 // consumer's reified-inline SPLICE reads the formal names from exactly this attribute
                 // — without it a krusty-built `inline fun <reified T> Recv.f(…)` cannot bind `T` and
                 // the call falls back to the compiled body, which exists only to throw.
                 match fn_generic_sig(info, f) {
                     Ok(Some(mut signature)) => {
-                        signature.params.insert(0, recv_ty);
+                        signature
+                            .params
+                            .insert(recv_index.min(signature.params.len()), recv_ty);
                         lo.ir.signatures.insert(id, signature);
                     }
                     Ok(None) => {}
@@ -2811,8 +2815,7 @@ fn lower_file_at_reporting_impl(
                 lo.next_value = 0;
                 lo.cur_class = None;
                 lo.cur_fn_suspend = f.is_suspend();
-                let (fid, sig) = if f.receiver.is_some() {
-                    // Extension bodies bind `this` to parameter zero.
+                let (fid, sig, receiver) = if f.receiver.is_some() {
                     let (recv_ty, sig) = syms.source_extension_function(file_index, d)?;
                     let recv_key = recv_ty.erased_recv();
                     let fid = *lo.ext_fun_id_by_sig.get(&(
@@ -2820,24 +2823,38 @@ fn lower_file_at_reporting_impl(
                         f.name.clone(),
                         sig.params.clone(),
                     ))?;
-                    let this_v = lo.fresh_value();
-                    lo.scope.push(("this".to_string(), this_v, recv_ty));
-                    (fid, sig)
+                    (fid, sig, Some(recv_ty))
                 } else {
                     let sig = syms.funs.get(&f.name)?.iter().find(|sig| {
                         sig.source_file == Some(lo.file_index) && sig.source_decl == Some(d)
                     })?;
                     let fid = *lo.fun_ids_by_decl.get(&d)?;
-                    (fid, sig)
+                    (fid, sig, None)
                 };
                 let emitted_reified = emitted_reified_parameters(info, f)?;
                 lo.cur_fn = crate::ir::IrFunctionScope::declared(fid, f.name.clone())
                     .with_emitted_reified_parameters(emitted_reified);
+                // Value ids are allocated in PHYSICAL parameter order, so an extension body binds
+                // `this` after the leading context parameters — the same slot the registered
+                // parameter list puts the receiver in.
+                let recv_index = sig.context_count.min(sig.params.len());
                 let mut param_vals = Vec::new();
-                for (p, t) in f.params.iter().zip(&sig.params) {
+                let bind_receiver = |lo: &mut Lower| {
+                    if let Some(recv_ty) = receiver {
+                        let this_v = lo.fresh_value();
+                        lo.scope.push(("this".to_string(), this_v, recv_ty));
+                    }
+                };
+                for (index, (p, t)) in f.params.iter().zip(&sig.params).enumerate() {
+                    if index == recv_index {
+                        bind_receiver(&mut lo);
+                    }
                     let v = lo.fresh_value();
                     param_vals.push(v);
                     lo.scope.push((p.name.clone(), v, *t));
+                }
+                if recv_index >= f.params.len().min(sig.params.len()) {
+                    bind_receiver(&mut lo);
                 }
                 // Register parameter defaults for a top-level function OR EXTENSION (the latter's IR
                 // function prepends the receiver as parameter 0, so the defaults/names get a leading
@@ -2864,21 +2881,37 @@ fn lower_file_at_reporting_impl(
                 // at the call site (`const_ok` restricts that reuse to constants).
                 // A NON-final vararg (`fun topd(vararg s: String, flag: Boolean = false)`) is the
                 // same shape: the parameters after it are reachable only by name and defaulted.
+                // Both vectors are PHYSICAL: the receiver's slot is spliced in at `recv_index`, so a
+                // declared parameter `i` sits at `i + 1` only once the receiver is behind it.
+                let receiver_slot = f.receiver.is_some().then_some(recv_index);
+                let physical_slot =
+                    |i: usize| i + usize::from(receiver_slot.is_some_and(|r| i >= r));
+                let physical_names = |name: String| {
+                    let mut names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
+                    if let Some(slot) = receiver_slot {
+                        names.insert(slot.min(names.len()), name);
+                    }
+                    names
+                };
                 if f.params.iter().any(|p| p.default.is_some()) {
                     let ir_params = lo.ir.functions[fid as usize].params.clone();
-                    let recv_off = usize::from(f.receiver.is_some());
-                    let mut names = vec![format!("$this${}", f.name); recv_off];
-                    names.extend(f.params.iter().map(|p| p.name.clone()));
-                    if const_ok {
-                        let mut defaults: Vec<Option<u32>> = vec![None; recv_off];
+                    let names = physical_names(format!("$this${}", f.name));
+                    let lower_defaults = |lo: &mut Lower| {
+                        let mut defaults: Vec<Option<u32>> = Vec::new();
                         for (i, p) in f.params.iter().enumerate() {
                             match p.default {
-                                Some(d) => {
-                                    defaults.push(Some(lo.lower_arg(d, &ir_params[recv_off + i])?))
-                                }
+                                Some(d) => defaults
+                                    .push(Some(lo.lower_arg(d, &ir_params[physical_slot(i)])?)),
                                 None => defaults.push(None),
                             }
                         }
+                        if let Some(slot) = receiver_slot {
+                            defaults.insert(slot.min(defaults.len()), None);
+                        }
+                        Some(defaults)
+                    };
+                    if const_ok {
+                        let defaults = lower_defaults(&mut lo)?;
                         lo.ir
                             .fn_params
                             .insert(fid, FnParamInfo::defaults(names, defaults));
@@ -2888,21 +2921,7 @@ fn lower_file_at_reporting_impl(
                         // abort the file the way the `?` above does (before the split, this shape
                         // registered nothing at all): drop the registration and continue, leaving
                         // the names-only fallback below.
-                        let mut defaults: Vec<Option<u32>> = vec![None; recv_off];
-                        let mut lowered_all = true;
-                        for (i, p) in f.params.iter().enumerate() {
-                            match p.default {
-                                Some(d) => match lo.lower_arg(d, &ir_params[recv_off + i]) {
-                                    Some(e) => defaults.push(Some(e)),
-                                    None => {
-                                        lowered_all = false;
-                                        break;
-                                    }
-                                },
-                                None => defaults.push(None),
-                            }
-                        }
-                        if lowered_all {
+                        if let Some(defaults) = lower_defaults(&mut lo) {
                             lo.ir
                                 .fn_params
                                 .insert(fid, FnParamInfo::stub_only_defaults(names, defaults));
@@ -2911,14 +2930,13 @@ fn lower_file_at_reporting_impl(
                 }
                 // Names-only metadata supports named-argument reorder without a default stub.
                 if !lo.ir.fn_params.contains_key(&fid) && !f.params.iter().any(|p| p.is_vararg) {
-                    let recv_off = usize::from(f.receiver.is_some());
-                    let mut names = vec![format!("$this${}", f.name); recv_off];
-                    names.extend(f.params.iter().map(|p| p.name.clone()));
+                    let names = physical_names(format!("$this${}", f.name));
                     lo.ir.fn_params.insert(fid, FnParamInfo::names(names));
                 }
                 // User annotations on the declared parameters (an extension's IR parameter 0 is its
-                // receiver, which cannot be annotated — hence the leading empty slot).
-                let param_annotations = parameter_annotation_table(
+                // receiver, which cannot be annotated — hence the empty slot at its physical index).
+                let param_annotations = parameter_annotation_table_at(
+                    recv_index,
                     usize::from(f.receiver.is_some()),
                     f.params
                         .iter()
@@ -15110,7 +15128,7 @@ impl<'a> Lower<'a> {
                 let inline = callable.inline;
                 let suspend = callable.suspend;
                 let context_count = context_args.len();
-                let context_types = callable.params.get(1..1 + context_count)?.to_vec();
+                let context_types = callable.params.get(..context_count)?.to_vec();
                 let module_owner = match callable.origin {
                     crate::libraries::Origin::Library => {
                         let physical_ret = callable.physical_ret;
@@ -15118,18 +15136,17 @@ impl<'a> Lower<'a> {
                         if physical_params.len() != 1 + context_count + selected_params.len() {
                             return None;
                         }
-                        let receiver_param = physical_params[0];
-                        // A library extension's receiver is its first JVM argument, so realize that
-                        // boundary with the same operation as every written argument.
+                        let (physical_context, receiver_param, physical_explicit) =
+                            split_extension_params(physical_params, context_count)?;
+                        // A library extension's receiver follows its context arguments, so realize
+                        // that boundary with the same operation as every written argument.
                         let receiver = self.coerce_callable_argument_value(
                             recv_v,
                             recv_ty,
                             receiver_param,
                             &callable,
-                            0,
+                            context_count,
                         )?;
-                        let physical_context = &physical_params[1..1 + context_count];
-                        let physical_explicit = &physical_params[1 + context_count..];
                         let (arguments, mut prelude) = match source_expr {
                             Some(call) => {
                                 match self.info.resolved_call_arg_slots.get(&call).cloned() {
@@ -15178,9 +15195,11 @@ impl<'a> Lower<'a> {
                             }
                             None => return None,
                         };
+                        // The receiver EXPRESSION is written first, so it is spilled and evaluated
+                        // first even though its value is pushed after the context arguments.
                         let receiver =
                             self.spill_receiver_before_args(receiver, recv_ty, &mut prelude);
-                        let mut lowered = vec![receiver];
+                        let mut lowered = Vec::with_capacity(physical_params.len());
                         for ((source, &semantic), &physical) in context_args
                             .iter()
                             .zip(&context_types)
@@ -15193,6 +15212,7 @@ impl<'a> Lower<'a> {
                                 ty_to_ir(physical),
                             )?);
                         }
+                        lowered.push(receiver);
                         lowered.extend(arguments);
                         let call = self.emit_library_static_call(callable, lowered, suspend)?;
                         let call = self.wrap_arg_prelude(call, prelude);
@@ -15227,10 +15247,24 @@ impl<'a> Lower<'a> {
                     if params.len() != 1 + context_count + selected_params.len() {
                         return None;
                     }
-                    let receiver_value = self.coerce_argument_value(recv_v, recv_ty, params[0])?;
-                    let context_values =
-                        self.lower_context_argument_values(&context_args, &context_types)?;
-                    let explicit_params = &params[1 + context_count..];
+                    let (physical_context, receiver_param, explicit_params) =
+                        split_extension_params(&params, context_count)?;
+                    let physical_context = physical_context.to_vec();
+                    let receiver_value =
+                        self.coerce_argument_value(recv_v, recv_ty, receiver_param)?;
+                    // A context parameter typed by a type VARIABLE erases to a reference slot, so a
+                    // primitive context value has to box on the way in exactly like a written
+                    // argument. Coercing against the declared semantic type alone left an `int` in an
+                    // `Object` slot — a VerifyError at class load rather than a wrong result.
+                    let mut context_values = Vec::with_capacity(context_count);
+                    for ((source, &semantic), &physical) in context_args
+                        .iter()
+                        .zip(&context_types)
+                        .zip(&physical_context)
+                    {
+                        let value = self.lower_context_argument_value(source, semantic)?;
+                        context_values.push(self.coerce_argument_value(value, semantic, physical)?);
+                    }
                     let (arguments, mut prelude) = match source_expr {
                         Some(call) => match self.info.resolved_call_arg_slots.get(&call).cloned() {
                             // A vararg or omission consumes the selected semantic slots through the
@@ -15269,10 +15303,13 @@ impl<'a> Lower<'a> {
                         }
                         None => return None,
                     };
-                    let receiver_value =
-                        self.spill_receiver_before_args(receiver_value, params[0], &mut prelude);
-                    let mut lowered = vec![receiver_value];
-                    lowered.extend(context_values);
+                    let receiver_value = self.spill_receiver_before_args(
+                        receiver_value,
+                        receiver_param,
+                        &mut prelude,
+                    );
+                    let mut lowered = context_values;
+                    lowered.push(receiver_value);
                     lowered.extend(arguments);
                     let call = self.emit_local_call(fid, lowered);
                     let call = self.record_suspend_call(call, suspend, selected_ret);
@@ -15283,11 +15320,10 @@ impl<'a> Lower<'a> {
                 if physical_params.len() != 1 + context_count + selected_params.len() {
                     return None;
                 }
-                let physical_receiver = physical_params[0];
+                let (physical_context, physical_receiver, physical_explicit) =
+                    split_extension_params(physical_params, context_count)?;
                 let receiver_value =
                     self.coerce_argument_value(recv_v, recv_ty, physical_receiver)?;
-                let physical_context = &physical_params[1..1 + context_count];
-                let physical_explicit = &physical_params[1 + context_count..];
                 let (arguments, mut prelude) = match source_expr {
                     Some(call) => match self.info.resolved_call_arg_slots.get(&call).cloned() {
                         Some(slots) if vararg || slots.iter().any(Option::is_none) => self
@@ -15357,7 +15393,7 @@ impl<'a> Lower<'a> {
                     physical_receiver,
                     &mut prelude,
                 );
-                let mut lowered = vec![receiver_value];
+                let mut lowered = Vec::with_capacity(physical_params.len());
                 for ((source, &semantic), &physical) in context_args
                     .iter()
                     .zip(&context_types)
@@ -15370,6 +15406,7 @@ impl<'a> Lower<'a> {
                         ty_to_ir(physical),
                     )?);
                 }
+                lowered.push(receiver_value);
                 lowered.extend(arguments);
                 let call = if callable.singleton_dispatch.is_some() {
                     self.emit_module_or_library_static_call(callable.clone(), lowered, suspend)?
@@ -18148,12 +18185,33 @@ impl<'a> Lower<'a> {
         } else {
             c.params.clone()
         };
-        let p0 = *physical_params.first().unwrap_or(&rt);
-        let recv = self.coerce_argument_value(recv_ir, rt, p0)?;
+        // `(contexts…, receiver, values…)`: the receiver's slot is the context count, and only the
+        // parameters past it are written at the call site. The context values themselves come from the
+        // CHECKER's selection for this call — this path cannot re-derive them.
+        let context_count = c.context_count.min(c.params.len());
+        let context_args = self.info.resolved_extension_context_args(e).to_vec();
+        if context_args.len() != context_count {
+            return None;
+        }
+        let (context_params, _, explicit_params) =
+            split_extension_params(&c.params, context_count)?;
+        let context_params = context_params.to_vec();
+        let (physical_context, physical_receiver, physical_explicit_params) =
+            split_extension_params(&physical_params, context_count)?;
+        let physical_context = physical_context.to_vec();
+        let recv = self.coerce_argument_value(recv_ir, rt, physical_receiver)?;
         let source_receiver = c.source_receiver;
-        let mut a = vec![recv];
-        let explicit_params = c.params.get(1..)?;
-        let physical_explicit_params = physical_params.get(1..)?;
+        let mut a = Vec::with_capacity(physical_params.len());
+        for ((source, &semantic), &physical) in context_args
+            .iter()
+            .zip(&context_params)
+            .zip(&physical_context)
+        {
+            let value = self.lower_context_argument_value(source, semantic)?;
+            a.push(self.coerce_argument_value(value, semantic, ty_to_ir(physical))?);
+        }
+        let receiver_slot = a.len();
+        a.push(recv);
         let mut arg_prelude = Vec::new();
         // Argument-to-parameter binding is a CHECKER decision. Lowering consumes the same semantic slot
         // handoff for labelled, reordered, positional-default, and trailing-lambda calls; it must not
@@ -18206,8 +18264,9 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        let recv = self.spill_receiver_before_args(a[0], p0, &mut arg_prelude);
-        a[0] = recv;
+        let recv =
+            self.spill_receiver_before_args(a[receiver_slot], physical_receiver, &mut arg_prelude);
+        a[receiver_slot] = recv;
         // For a `<reified T>` extension the backend must SPLICE (its compiled body carries a
         // `reifiedOperationMarker`/`T::class` the JVM can't call directly): bind the callee's reified
         // type-parameter NAMES to the call's explicit type arguments, or — when omitted — to the RECEIVER's
@@ -28197,11 +28256,32 @@ fn parameter_annotation_table(
     leading: usize,
     parameters: impl Iterator<Item = crate::ir::DeclarationAnnotations>,
 ) -> Vec<crate::ir::DeclarationAnnotations> {
-    let mut out: Vec<crate::ir::DeclarationAnnotations> =
-        std::iter::repeat_with(|| crate::ir::DeclarationAnnotations::new(Vec::new()))
-            .take(leading)
-            .collect();
-    out.extend(parameters);
+    parameter_annotation_table_at(0, leading, parameters)
+}
+
+/// Split an extension's PHYSICAL parameter list into `(contexts, receiver, values)`. Kotlin signs a
+/// context extension `(contexts…, receiver, values…)`, so the receiver sits at `context_count` — every
+/// emission branch reads its three spans through this one splitter rather than repeating the
+/// arithmetic, which is how the receiver-first layout survived in some branches and not others.
+fn split_extension_params<T: Copy>(params: &[T], context_count: usize) -> Option<(&[T], T, &[T])> {
+    let (contexts, rest) = params.split_at_checked(context_count)?;
+    let (receiver, values) = rest.split_first()?;
+    Some((contexts, *receiver, values))
+}
+
+/// [`parameter_annotation_table`] with the un-annotatable implicit slots placed at `at` rather than
+/// at the front — an extension receiver sits after the context parameters, which ARE annotatable, so
+/// its empty slot cannot simply lead the table.
+fn parameter_annotation_table_at(
+    at: usize,
+    leading: usize,
+    parameters: impl Iterator<Item = crate::ir::DeclarationAnnotations>,
+) -> Vec<crate::ir::DeclarationAnnotations> {
+    let mut out: Vec<crate::ir::DeclarationAnnotations> = parameters.collect();
+    let at = at.min(out.len());
+    for _ in 0..leading {
+        out.insert(at, crate::ir::DeclarationAnnotations::new(Vec::new()));
+    }
     if out.iter().all(crate::ir::DeclarationAnnotations::is_empty) {
         return Vec::new();
     }

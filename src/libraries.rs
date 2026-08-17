@@ -1615,9 +1615,41 @@ pub struct FunctionInfo {
     pub iterator_protocol_scope: Vec<TypeName>,
 }
 
+/// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
+/// context parameters ahead of it (`context(c: C) fun R.f(x: X)` signs `(C, R, X)`), so the receiver
+/// index is the context count, not zero. Non-extensions have no receiver slot at all.
+pub fn extension_receiver_index(is_extension: bool, context_count: usize) -> Option<usize> {
+    is_extension.then_some(context_count)
+}
+
+/// The LOGICAL parameter list — the physical one with the extension receiver removed and the context
+/// prefix kept. It stays a borrow in the overwhelmingly common receiver-at-zero case (no context
+/// parameters), and only a context extension pays for the splice.
+fn drop_extension_receiver(
+    params: &[Ty],
+    is_extension: bool,
+    context_count: usize,
+) -> Cow<'_, [Ty]> {
+    match extension_receiver_index(is_extension, context_count) {
+        None => Cow::Borrowed(params),
+        Some(0) => Cow::Borrowed(params.get(1..).unwrap_or(&[])),
+        Some(index) if index >= params.len() => Cow::Borrowed(params),
+        Some(index) => {
+            let mut out = params.to_vec();
+            out.remove(index);
+            Cow::Owned(out)
+        }
+    }
+}
+
 impl FunctionInfo {
     pub fn is_extension(&self) -> bool {
         self.kind == FnKind::Extension
+    }
+
+    /// Index of this callable's extension receiver among its physical parameters, if it has one.
+    pub fn receiver_param_index(&self) -> Option<usize> {
+        extension_receiver_index(self.is_extension(), self.context_count)
     }
 
     pub fn semantic_receiver(&self) -> Option<Ty> {
@@ -1627,34 +1659,39 @@ impl FunctionInfo {
             .or(self.receiver)
     }
 
-    pub fn semantic_params(&self) -> &[Ty] {
+    pub fn semantic_params(&self) -> Cow<'_, [Ty]> {
         self.generic_sig.as_ref().map_or_else(
             || {
-                if self.is_extension() {
-                    self.callable.params.get(1..).unwrap_or(&[])
-                } else {
-                    &self.callable.params
-                }
+                drop_extension_receiver(
+                    &self.callable.params,
+                    self.is_extension(),
+                    self.context_count,
+                )
             },
-            |signature| signature.params.as_slice(),
+            |signature| Cow::Borrowed(signature.params.as_slice()),
         )
     }
 
     /// Parameters written at the call site. Extension receivers and leading context parameters are
     /// supplied independently, so neither belongs in source argument mapping.
-    pub fn value_params(&self) -> &[Ty] {
-        let params = self.semantic_params();
-        &params[self.context_count.min(params.len())..]
+    pub fn value_params(&self) -> Cow<'_, [Ty]> {
+        match self.semantic_params() {
+            Cow::Borrowed(params) => Cow::Borrowed(&params[self.context_count.min(params.len())..]),
+            Cow::Owned(mut params) => {
+                params.drain(..self.context_count.min(params.len()));
+                Cow::Owned(params)
+            }
+        }
     }
 
     /// Parameters after overload selection has applied receiver, argument, and expected-result
     /// constraints. Raw declaration parameters remain available through [`Self::semantic_params`].
-    pub fn applied_params(&self) -> &[Ty] {
-        if self.is_extension() {
-            self.callable.params.get(1..).unwrap_or(&[])
-        } else {
-            &self.callable.params
-        }
+    pub fn applied_params(&self) -> Cow<'_, [Ty]> {
+        drop_extension_receiver(
+            &self.callable.params,
+            self.is_extension(),
+            self.context_count,
+        )
     }
 
     pub fn semantic_signature(&self) -> Cow<'_, GenericSig> {

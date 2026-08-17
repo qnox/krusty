@@ -894,7 +894,9 @@ pub(crate) fn member_from_signature(
 }
 
 /// Build a top-level / extension `FunctionInfo` from a user [`Signature`]. `receiver` is `Some` for an
-/// extension (prepended to `params`, matching the library convention that `params[0]` is the receiver).
+/// extension, spliced into `params` at the library convention's receiver index — after the leading
+/// context parameters (see [`crate::libraries::extension_receiver_index`]), so `params[0]` is the
+/// receiver only for an extension that declares no `context(…)` clause.
 #[derive(Clone, Copy)]
 struct CallableOwner {
     internal: TypeName,
@@ -915,11 +917,12 @@ fn fn_info(
         is_interface: owner_is_interface,
     } = owner;
     let source_receiver = sig.source_receiver.or(receiver);
-    let mut params: Vec<Ty> = Vec::new();
+    // The extension receiver follows the leading CONTEXT parameters, matching kotlinc's signature
+    // layout `(contexts…, receiver, values…)`; `sig.params` is `(contexts…, values…)`.
+    let mut params: Vec<Ty> = sig.params.clone();
     if let Some(r) = receiver {
-        params.push(r);
+        params.insert(sig.context_count.min(params.len()), r);
     }
-    params.extend(sig.params.iter().copied());
     let callable = LibraryCallable {
         owner,
         name: name.to_string(),

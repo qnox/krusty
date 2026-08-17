@@ -6440,7 +6440,7 @@ mod tests {
             .iter()
             .find(|function| function.semantic_params().len() == 2)
             .expect("set(T, V)");
-        assert_eq!(set.semantic_params(), [Ty::String, Ty::nullable(Ty::Int)]);
+        assert_eq!(*set.semantic_params(), [Ty::String, Ty::nullable(Ty::Int)]);
 
         assert_eq!(
             crate::symbol_resolver::classifier_callable_signature(
@@ -6607,7 +6607,7 @@ mod tests {
                     && function.semantic_receiver().is_some_and(|receiver| {
                         receiver == Ty::obj("kotlin/ranges/UIntProgression")
                     })
-                    && function.semantic_params() == [Ty::Int]
+                    && *function.semantic_params() == [Ty::Int]
             }),
             "decoded step overloads: {:?}",
             functions

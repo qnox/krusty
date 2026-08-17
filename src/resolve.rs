@@ -12936,11 +12936,19 @@ pub struct ResolvedExtensionCall {
 
 impl ResolvedExtensionCall {
     fn library(callable: crate::libraries::LibraryCallable) -> Self {
+        // `(contexts…, receiver, values…)`: the receiver sits after the context prefix, and only the
+        // values past it are written at the call site. Slicing from a fixed 1 kept the context
+        // parameters in `params`, which no consumer treats as source arguments.
+        let context_count = callable.context_count.min(callable.params.len());
         let receiver = callable
             .source_receiver
-            .or_else(|| callable.params.first().copied())
+            .or_else(|| callable.params.get(context_count).copied())
             .unwrap_or(Ty::Error);
-        let params = callable.params.get(1..).unwrap_or_default().to_vec();
+        let params = callable
+            .params
+            .get(context_count + 1..)
+            .unwrap_or_default()
+            .to_vec();
         let vararg_index = callable.vararg_index;
         Self {
             callable,
@@ -13775,6 +13783,17 @@ impl TypeInfo {
                 Some(&c.callable)
             }
             _ => None,
+        }
+    }
+    /// The in-scope values the checker selected for the leading context parameters of the library
+    /// EXTENSION at call `e`. Paired with [`Self::resolved_extension`]: that path emits the physical
+    /// `(contexts…, receiver, values…)` argument list and cannot re-derive the context sources.
+    pub fn resolved_extension_context_args(&self, e: ExprId) -> &[ResolvedContextArgument] {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::Extension(c)) if matches!(c.callable.origin, Origin::Library) => {
+                &c.context_args
+            }
+            _ => &[],
         }
     }
     /// Whether the source-origin extension selected at `e` is `suspend`.
@@ -19719,7 +19738,8 @@ impl<'a> Checker<'a> {
                 if function.callable.ret == Ty::Nothing {
                     return None;
                 }
-                let value_params = function.semantic_params();
+                let semantic_params = function.semantic_params();
+                let value_params = &*semantic_params;
                 crate::trace_compiler!(
                     "resolve",
                     "extension reference candidate name={name} binding={binding:?} receiver={receiver:?} declared_receiver={declared_receiver:?} params={value_params:?} required={} owner={} descriptor={}",
@@ -19858,7 +19878,7 @@ impl<'a> Checker<'a> {
         } else {
             Vec::new()
         };
-        semantic_params.extend(function.semantic_params());
+        semantic_params.extend(function.semantic_params().iter().copied());
         let function_ty = expected.map_or_else(
             || {
                 Ty::fun_with_shape(
@@ -20201,7 +20221,7 @@ impl<'a> Checker<'a> {
             args,
             DiagnosticFunction {
                 name,
-                params: candidate.semantic_params(),
+                params: &candidate.semantic_params(),
                 param_names: &candidate.call_sig.param_names,
                 param_defaults: &candidate.call_sig.param_defaults,
                 required: candidate.call_sig.required,
@@ -20219,7 +20239,7 @@ impl<'a> Checker<'a> {
     /// extension, never positional parameter zero; declaration origin affects neither shape nor text.
     fn callable_candidate_display(name: &str, function: &crate::libraries::FunctionInfo) -> String {
         let parameters = Self::callable_ref_parameters(
-            function.semantic_params(),
+            &function.semantic_params(),
             &function.call_sig.param_names,
         );
         let suspend = if function.callable.suspend {
@@ -20957,15 +20977,15 @@ impl<'a> Checker<'a> {
                     index != other_index
                         && other.5 == best_cost
                         && self.callable_ref_shape_at_least_as_specific(
-                            other.0.semantic_params(),
+                            &other.0.semantic_params(),
                             other.0.callable.ret,
-                            current.0.semantic_params(),
+                            &current.0.semantic_params(),
                             current.0.callable.ret,
                         )
                         && !self.callable_ref_shape_at_least_as_specific(
-                            current.0.semantic_params(),
+                            &current.0.semantic_params(),
                             current.0.callable.ret,
-                            other.0.semantic_params(),
+                            &other.0.semantic_params(),
                             other.0.callable.ret,
                         )
                 });
@@ -21644,9 +21664,11 @@ impl<'a> Checker<'a> {
             if candidate.is_extension() {
                 let receiver = receiver.or(candidate.receiver)?;
                 candidate.receiver = Some(receiver);
-                candidate.callable.params = std::iter::once(receiver)
-                    .chain(params.iter().copied())
-                    .collect();
+                // PHYSICAL parameters: the receiver goes after the leading context parameters, the
+                // slot `libraries::extension_receiver_index` names.
+                let mut physical = params.clone();
+                physical.insert(candidate.context_count.min(physical.len()), receiver);
+                candidate.callable.params = physical;
             } else {
                 candidate.callable.params = params.clone();
             }
@@ -21929,7 +21951,7 @@ impl<'a> Checker<'a> {
             args,
             DiagnosticFunction {
                 name,
-                params: candidate.semantic_params(),
+                params: &candidate.semantic_params(),
                 param_names: &candidate.call_sig.param_names,
                 param_defaults: &candidate.call_sig.param_defaults,
                 required: candidate.call_sig.required,
@@ -22992,7 +23014,7 @@ impl<'a> Checker<'a> {
             // recording whenever more than one of those features appeared in the same call.
             let shape = self.contextual_call_shape(
                 scope,
-                o.semantic_params(),
+                &o.semantic_params(),
                 &o.call_sig,
                 o.context_count,
                 arg_names,
@@ -23378,15 +23400,15 @@ impl<'a> Checker<'a> {
                 let dominated = unique.iter().enumerate().any(|(other_index, other)| {
                     index != other_index
                         && self.callable_ref_shape_at_least_as_specific(
-                            other.0.semantic_params(),
+                            &other.0.semantic_params(),
                             other.0.callable.ret,
-                            current.0.semantic_params(),
+                            &current.0.semantic_params(),
                             current.0.callable.ret,
                         )
                         && !self.callable_ref_shape_at_least_as_specific(
-                            current.0.semantic_params(),
+                            &current.0.semantic_params(),
                             current.0.callable.ret,
-                            other.0.semantic_params(),
+                            &other.0.semantic_params(),
                             other.0.callable.ret,
                         )
                 });
@@ -26322,7 +26344,7 @@ impl<'a> Checker<'a> {
                     let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
                     let Some(shape) = self.contextual_call_shape(
                         scope,
-                        selected.applied_params(),
+                        &selected.applied_params(),
                         &selected.call_sig,
                         selected.context_count,
                         argument_names,
@@ -26474,7 +26496,7 @@ impl<'a> Checker<'a> {
                     let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
                     let Some(shape) = self.contextual_call_shape(
                         scope,
-                        selected.applied_params(),
+                        &selected.applied_params(),
                         &selected.call_sig,
                         selected.context_count,
                         argument_names,
@@ -37239,7 +37261,7 @@ impl<'a> Checker<'a> {
                         // Only apply the extension when the RIGHT operand actually matches its
                         // parameter type; otherwise this is the builtin (`Int * Int` inside the body
                         // of a `Int.times(V)` extension must NOT re-pick that extension and infer `V`).
-                        if let [p] = fi.value_params() {
+                        if let [p] = &*fi.value_params() {
                             // Match the lowerer's guard (ir_lower Binary extension path): an exact
                             // operand/param match, or a reference subtype. No loose cross-numeric
                             // clause — a numeric-param operator on a primitive is the builtin's job
@@ -39563,7 +39585,7 @@ impl<'a> Checker<'a> {
         let argument_names = self.file.call_arg_names.get(&e.0).map(Vec::as_slice);
         let shape = self.contextual_call_shape(
             scope,
-            selected.applied_params(),
+            &selected.applied_params(),
             &selected.call_sig,
             selected.context_count,
             argument_names,
@@ -44422,7 +44444,7 @@ impl<'a> Checker<'a> {
             let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
             let Some(shape) = self.contextual_call_shape(
                 scope,
-                selected.applied_params(),
+                &selected.applied_params(),
                 &selected.call_sig,
                 selected.context_count,
                 argument_names,
@@ -46955,7 +46977,7 @@ impl<'a> Checker<'a> {
                         self.set(receiver, Ty::obj_name(classifier));
                         let ret = selected.callable.ret;
                         let member = selected.member_with_return(ret);
-                        self.record_selected_sam_arguments(args, selected.applied_params());
+                        self.record_selected_sam_arguments(args, &selected.applied_params());
                         self.resolved_calls
                             .insert(call, ResolvedCall::Companion(member));
                         return ret;
