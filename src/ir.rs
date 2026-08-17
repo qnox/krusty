@@ -1612,6 +1612,9 @@ pub struct IrFile {
     /// so a consumer admits the conventional call form (`recv(args)` for `invoke`, `a[i]` for
     /// `get`, …); the JVM method itself carries no such bit.
     pub operator_fns: std::collections::HashSet<u32>,
+    /// Function ids declared `infix` — `@Metadata` marks `Function.flags` bit 9 (`isInfix`) so a
+    /// consumer admits the `a f b` call form; like `operator`, only metadata carries it.
+    pub infix_fns: std::collections::HashSet<u32>,
     /// Per declared method/function, the user annotations on each SOURCE parameter, parallel to
     /// [`IrFunction::params`] (so an extension's leading receiver slot is present and empty). Absent ⇒
     /// no parameter of that function carries one, the overwhelmingly common case; the JVM emitter and
@@ -1805,6 +1808,11 @@ pub struct IrFile {
     /// FunId → 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` fn's
     /// implicit `return` there in the `LineNumberTable`. Same side-map rationale as `fn_decl_lines`.
     pub fn_close_lines: std::collections::HashMap<u32, u32>,
+    /// FunId → 1-based source line of the DECLARATION itself, never body-rewritten. `fn_decl_lines`
+    /// holds the line the method BODY maps to (an expression body's own line); a `$default` stub's
+    /// LineNumberTable instead points here — the two differ exactly when an expression body starts
+    /// on a later line than the signature. Same side-map rationale as `fn_decl_lines`.
+    pub fn_sig_lines: std::collections::HashMap<u32, u32>,
     /// FunId → the SOURCE BYTE OFFSET of the declaration a class member realizes (a property's
     /// accessors carry the property's offset). kotlinc emits class members in DECLARATION order,
     /// interleaving property accessors among functions; lowering groups them by kind, so the JVM

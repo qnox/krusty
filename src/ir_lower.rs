@@ -1356,6 +1356,9 @@ fn lower_file_at_reporting_impl(
                 if m.is_operator() {
                     lo.ir.operator_fns.insert(fid);
                 }
+                if m.is_infix() {
+                    lo.ir.infix_fns.insert(fid);
+                }
                 if m.is_inline() && m.visibility.is_public() {
                     lo.ir.public_inline_functions.insert(fid);
                 }
@@ -2698,6 +2701,22 @@ fn lower_file_at_reporting_impl(
                     param_checks: vec![None; accessor_params_ir.len()],
                 });
                 lo.ext_prop_get_ids.insert((recv_key, p.name.clone()), gfid);
+                // kotlinc names the accessor's receiver slot `$this$<property>` in its
+                // LocalVariableTable; registering the names (and a decl line, which switches the
+                // emitter's `record_locals` on) is what makes the table exist at all.
+                let mut accessor_names = vec![format!("$this${}", p.name)];
+                accessor_names.extend(
+                    p.context_params
+                        .iter()
+                        .map(|parameter| parameter.name.clone()),
+                );
+                lo.ir
+                    .fn_params
+                    .entry(gfid)
+                    .or_insert_with(|| FnParamInfo::names(accessor_names.clone()));
+                if p.decl_line != 0 {
+                    lo.ir.fn_decl_lines.insert(gfid, p.decl_line);
+                }
                 if p.is_var {
                     let mut setter_params = accessor_params_ir;
                     setter_params.push(pty_ir);
@@ -2711,6 +2730,17 @@ fn lower_file_at_reporting_impl(
                         param_checks: vec![None; setter_params.len()],
                     });
                     lo.ext_prop_set_ids.insert((recv_key, p.name.clone()), sfid);
+                    let mut setter_names = accessor_names;
+                    setter_names.push(ast::setter_param_or_value(
+                        p.setter.as_ref().and_then(|setter| setter.param.as_ref()),
+                    ));
+                    lo.ir
+                        .fn_params
+                        .entry(sfid)
+                        .or_insert_with(|| FnParamInfo::names(setter_names));
+                    if p.decl_line != 0 {
+                        lo.ir.fn_decl_lines.insert(sfid, p.decl_line);
+                    }
                 }
                 continue;
             }
@@ -2931,6 +2961,9 @@ fn lower_file_at_reporting_impl(
                 if f.decl_line != 0 {
                     lo.ir.fn_decl_lines.insert(fid, f.decl_line);
                 }
+                if f.sig_line != 0 {
+                    lo.ir.fn_sig_lines.insert(fid, f.sig_line);
+                }
                 if f.body_close_line != 0 {
                     lo.ir.fn_close_lines.insert(fid, f.body_close_line);
                 }
@@ -3060,6 +3093,9 @@ fn lower_file_at_reporting_impl(
                     // `LocalVariableTable` / `@Metadata`.
                     if m.decl_line != 0 {
                         lo.ir.fn_decl_lines.insert(fid, m.decl_line);
+                    }
+                    if m.sig_line != 0 {
+                        lo.ir.fn_sig_lines.insert(fid, m.sig_line);
                     }
                     if m.body_close_line != 0 {
                         lo.ir.fn_close_lines.insert(fid, m.body_close_line);

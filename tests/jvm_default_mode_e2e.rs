@@ -621,6 +621,58 @@ fn the_disable_holder_is_byte_identical_to_kotlinc() {
     assert_eq!(ours, reference);
 }
 
+/// A bodied interface whose PROPERTY comes FIRST. `AuditI` above declares its property last, which
+/// the old functions-then-accessors grouping happened to reproduce — this fixture is the one that
+/// tells the source-order rule apart from the grouping under `disable`. The holder (published ABI)
+/// must be byte-identical; the interface class still carries a known, unrelated `@Metadata` flags
+/// gap on bodied members (kotlinc marks them OPEN), so its member ORDER is compared through the
+/// classreader instead of whole-file bytes: `getAnswer` before `echo` before `getTail`.
+const PROPERTY_FIRST_SOURCE: &str = r#"
+interface PropFirstI {
+    val answer: Int get() = 42
+    fun echo(value: String): String = value
+    val tail: Int get() = 7
+}
+
+class PropFirstC : PropFirstI
+"#;
+
+#[test]
+fn disable_keeps_property_first_member_order() {
+    let ours = compile_source(JvmDefaultMode::Disable, PROPERTY_FIRST_SOURCE, "PropFirst");
+    let reference = compile_reference_source("disable", PROPERTY_FIRST_SOURCE, "PropFirst");
+    let mine = ours
+        .iter()
+        .find_map(|(name, bytes)| (name == "PropFirstI$DefaultImpls").then_some(bytes))
+        .expect("krusty PropFirstI$DefaultImpls.class");
+    let theirs = reference
+        .iter()
+        .find_map(|(name, bytes)| (name == "PropFirstI$DefaultImpls").then_some(bytes))
+        .expect("kotlinc PropFirstI$DefaultImpls.class");
+    assert_eq!(
+        mine, theirs,
+        "PropFirstI$DefaultImpls bytes diverge under -jvm-default=disable"
+    );
+    // ORDERED method tables (no sort — the order is the assertion).
+    let ordered = |classes: &[(String, Vec<u8>)]| -> Vec<(String, String)> {
+        let bytes = classes
+            .iter()
+            .find_map(|(name, bytes)| (name == "PropFirstI").then_some(bytes))
+            .expect("missing PropFirstI.class");
+        let class = krusty::jvm::classreader::parse_class(bytes).expect("parse PropFirstI.class");
+        class
+            .methods
+            .iter()
+            .map(|method| (method.name.clone(), method.descriptor.clone()))
+            .collect()
+    };
+    assert_eq!(
+        ordered(&ours),
+        ordered(&reference),
+        "PropFirstI member order diverges under -jvm-default=disable"
+    );
+}
+
 /// The forwarders are what make the artifact correct: without them an implementing class does not
 /// implement its own interface, and every inherited call is an `AbstractMethodError` at run time.
 #[test]
