@@ -87,3 +87,73 @@ fun box(): String {
         Some("OK")
     );
 }
+
+/// Class-initialization lambdas take their impl-method prefix from the DECLARATION, not from
+/// whichever function the lowerer visited last: a property initializer uses the property name
+/// (`h$lambda$0`) and an `init` block uses kotlinc's `_init_` (`_init_$lambda$0`), each numbering
+/// its own sequence. Expected names measured against kotlinc 2.4.10. Before the fix these all took
+/// a stale enclosing-function prefix (`member$lambda$0..3`).
+#[test]
+fn class_init_lambda_impl_methods_use_declaration_prefixes() {
+    let src = r#"
+fun use(f: () -> Int) = f()
+
+class Holder {
+    val h: () -> Int = { 4 }
+    var q = 0
+    init {
+        val x = { 9 }
+        q = use(x)
+        q += use { 11 }
+    }
+    fun member(): Int {
+        val m = { 5 }
+        return m()
+    }
+}
+
+fun box(): String {
+    val holder = Holder()
+    val total = holder.h() + holder.q + holder.member()
+    return if (total == 29) "OK" else "fail: $total"
+}
+"#;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classes = common::compile_in_process(
+        src,
+        "InitLambdaPrefix",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    )
+    .expect("class-init lambdas should compile");
+    let bytes = &classes
+        .iter()
+        .find(|(name, _)| name == "Holder")
+        .expect("missing Holder")
+        .1;
+    let class = parse_class(bytes).expect("invalid Holder");
+    let mut names = class
+        .methods
+        .iter()
+        .filter(|method| method.name.contains("$lambda$"))
+        .map(|method| method.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "_init_$lambda$0",
+            "_init_$lambda$1",
+            "h$lambda$0",
+            "member$lambda$0"
+        ],
+        "Holder synthetic lambda methods"
+    );
+
+    let box_class = common::find_box_class(&classes).expect("box method");
+    assert_eq!(
+        common::run_box(&classes, &box_class, &[stdlib]).as_deref(),
+        Some("OK")
+    );
+}
