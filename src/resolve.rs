@@ -21,6 +21,7 @@ use crate::names::{property_getter_name, property_setter_name, COMPANION_OBJECT_
 use crate::spelling::Spelled;
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::SymbolSource;
+use crate::type_engine::{DeclKey, DeclineReason, Resolution, TypeEngine};
 use crate::types::{
     existing_type_name, ty_mentions_param, type_name, type_name_nested_child, wk, Ty, TypeName,
     Visibility,
@@ -6195,6 +6196,9 @@ fn collect_signatures_with_cp_impl(
     // keeps the exact scope of its first pass; retried to a fixpoint after the walk (see
     // [`finish_member_computed_getter_inference`]).
     let mut pending_member_properties: Vec<PendingMemberProperty> = Vec::new();
+    // Top-level properties whose type this walk could not determine, resolved afterwards by the
+    // engine (see [`resolve_deferred_top_level_properties`]).
+    let mut deferred_top_level_properties: Vec<DeferredTopLevelProperty> = Vec::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
@@ -8680,10 +8684,32 @@ fn collect_signatures_with_cp_impl(
                     // declaration `val x = null` has Kotlin type `Nothing?`. Declaration symbols
                     // must never publish the literal-only `Null` sentinel.
                     let ty = inferred_declaration_ty(inferred_ty);
-                    // Computed getters are diagnosed only after the bounded module-wide retry below:
-                    // unlike an eager initializer, a getter may legally reference a later declaration.
-                    if ty == Ty::Error && p.init.is_some() && p.declared_ty().is_none() {
-                        diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
+                    // A property this walk could not type is not an error yet. The declaration it
+                    // reads may live in a file the walk has not reached — signature collection
+                    // visits files in ARGUMENT order — so record it and let the engine resolve it on
+                    // demand once the walk is over. Diagnosing here is what made the answer depend
+                    // on the order the compiler was asked in.
+                    if ty == Ty::Error
+                        && p.declared_ty().is_none()
+                        && p.delegate.is_none()
+                        && (p.init.is_some() || p.getter.is_some())
+                    {
+                        deferred_top_level_properties.push(DeferredTopLevelProperty {
+                            file_index: i as u32,
+                            decl: d.0,
+                            name: p.name.clone(),
+                            span: p.span,
+                            expression: p.init.or(match &p.getter {
+                                Some(FunBody::Expr(getter)) if is_computed => Some(*getter),
+                                // A block getter has no expression the signature pass can read; it
+                                // declines, which is the diagnostic asking for an annotation.
+                                _ => None,
+                            }),
+                            context_scope: context_scope.clone(),
+                            has_context_params: !context_params.is_empty(),
+                            position: p.span.lo,
+                            is_eager: p.init.is_some(),
+                        });
                     }
                     if is_computed {
                         table.computed_props.insert(p.name.clone());
@@ -8736,19 +8762,23 @@ fn collect_signatures_with_cp_impl(
         }
     }
 
+    // Top-level declarations first: a member property that could not be typed during the walk is
+    // commonly waiting on one of these, and asking the engine for them now means the member retry
+    // below sees a resolved module rather than a placeholder.
+    resolve_deferred_top_level_properties(
+        files,
+        &file_class_names,
+        &*libraries,
+        &mut table,
+        &deferred_top_level_properties,
+        diags,
+    );
+
     finish_member_property_inference(
         files,
         &*libraries,
         &mut table,
         &mut pending_member_properties,
-        diags,
-    );
-
-    finish_top_level_computed_property_inference(
-        files,
-        &file_class_names,
-        &*libraries,
-        &mut table,
         diags,
     );
 
@@ -10321,6 +10351,8 @@ fn infer_lit_ty(
         module_object: &|_| None,
         static_classifier_value: &|_, _| None,
         call: &call,
+        // This entry point has no module symbol table, so there is no module declaration to demand.
+        demand: &|_| None,
         property: &|receiver, name| {
             resolver
                 .resolve_symbol(
@@ -10535,6 +10567,16 @@ struct InferEnv<'a> {
     /// the semantic type of a written receiver expression. Member and extension remain candidate
     /// metadata inside selection, not separate operations.
     call: &'a dyn Fn(Option<Ty>, &str, &[CallArgKind], &[Ty]) -> Option<Ty>,
+    /// Resolve a module top-level property whose own type is still being determined, ON DEMAND.
+    ///
+    /// This is the engine seam. Signature collection walks files in argument order, so a property
+    /// initialized from a property declared in a later file — or later in the same file — used to
+    /// see nothing and decline, which made the answer depend on the order the compiler was asked
+    /// in (`krusty A.kt B.kt` compiled, `krusty B.kt A.kt` did not). Reaching this hook resolves the
+    /// referenced declaration first, memoised by [`crate::type_engine::TypeEngine`], so the answer
+    /// is the same whichever declaration is asked for first and a dependency loop declines instead
+    /// of recursing.
+    demand: &'a dyn Fn(&str) -> Option<Ty>,
     /// Read a property from a receiver through the same selected symbol family.
     property: &'a dyn Fn(Ty, &str) -> Option<Ty>,
     /// Return fixed solely by explicit type arguments when positional mapping is unavailable.
@@ -10724,130 +10766,238 @@ fn finish_member_property_inference(
     }
 }
 
-/// Retry unannotated top-level expression getters after every property signature is present. A getter
-/// is an executable body, so Kotlin permits it to read a later declaration (`val first get() = later`),
-/// unlike an eager initializer. Iterating at most once per pending getter resolves finite dependency
-/// chains while guaranteeing that self/mutual cycles terminate as `Error`; diagnostics are emitted only
-/// after the fixed point so a legal forward edge never leaves a stale inference error behind.
-fn finish_top_level_computed_property_inference(
-    files: &[File],
-    file_class_names: &[ClassNames],
-    src: &dyn SemanticPlatform,
-    table: &mut SymbolTable,
-    diags: &mut DiagSink,
-) {
-    let pending_count = files
-        .iter()
-        .flat_map(|file| {
-            file.decls
-                .iter()
-                .map(move |&declaration| (file, declaration))
-        })
-        .filter(|(file, declaration)| {
-            matches!(
-                file.decl(*declaration),
-                Decl::Property(property)
-                    if property.receiver.is_none()
-                        && property.ty.is_none()
-                        && property.init.is_none()
-                        && property.getter.is_some()
-                        && property.delegate.is_none()
-            )
-        })
-        .count();
+/// A top-level property whose type comes from its initializer or expression getter and which the
+/// signature walk could not determine, kept with the context that walk gave it.
+struct DeferredTopLevelProperty {
+    file_index: u32,
+    decl: u32,
+    name: String,
+    span: Span,
+    /// The initializer, or the expression getter body for a computed property. `None` for a
+    /// declaration with nothing typeable to read — a BLOCK getter, which needs an annotation — so
+    /// that it declines through the one decline point and is diagnosed with the rest.
+    expression: Option<ExprId>,
+    /// The declaration's own context parameters, which shadow module properties of the same name.
+    context_scope: Vec<(String, Ty, bool)>,
+    /// Whether the declaration has context parameters. A context property is not reachable by its
+    /// bare name — signature collection files it under `context_prop_names` rather than `props` —
+    /// so it must not answer a demand for that spelling either.
+    has_context_params: bool,
+    /// Source position of the declaration within its file, for the initialization-order rule below.
+    position: u32,
+    /// Whether the type comes from an EAGER initializer rather than an expression getter. The two
+    /// differ in what they may read: a getter is an executable body and may name a declaration
+    /// written later, while an initializer runs in declaration order and may not — kotlinc rejects
+    /// `val eager = later; val later = 1` with "variable 'later' must be initialized" while
+    /// accepting the same pair split across two files.
+    is_eager: bool,
+}
 
-    for _ in 0..pending_count {
-        let mut changed = false;
+/// Which top-level property spellings a declaration at a given position may NOT read, because they
+/// are declared later in its own file.
+///
+/// Only same-FILE order is a restriction: kotlinc accepts the identical forward reference when the
+/// two declarations live in different files (measured on 2.4.10), so this cannot be a module-wide
+/// position comparison.
+#[derive(Default)]
+struct SourceOrderIndex(HashMap<(u32, String), u32>);
+
+impl SourceOrderIndex {
+    fn of(files: &[File]) -> Self {
+        let mut positions = HashMap::new();
         for (file_index, file) in files.iter().enumerate() {
             for &declaration in &file.decls {
                 let Decl::Property(property) = file.decl(declaration) else {
                     continue;
                 };
-                let (None, None, None, Some(FunBody::Expr(getter))) = (
-                    &property.receiver,
-                    &property.ty,
-                    property.init,
-                    &property.getter,
-                ) else {
-                    continue;
-                };
-                if property.delegate.is_some() {
+                if property.receiver.is_some() {
                     continue;
                 }
-                let context_types = table
-                    .source_props
-                    .get(&(file_index as u32, declaration.0))
-                    .map(|signature| signature.context_params.clone())
-                    .unwrap_or_default();
-                let context_scope = property
-                    .context_params
-                    .iter()
-                    .zip(&context_types)
-                    .filter(|(parameter, _)| parameter.name != "_")
-                    .map(|(parameter, ty)| (parameter.name.clone(), *ty, false))
-                    .collect::<Vec<_>>();
-                let inferred = infer_top_level_property_expr(
-                    InferenceSource::file(file, file_index as u32),
-                    *getter,
-                    &file_class_names[file_index],
-                    &context_scope,
-                    src,
-                    table,
-                );
-                if inferred == Ty::Error {
-                    continue;
-                }
-                let inferred = inferred_declaration_ty(inferred);
-                let source = (file_index as u32, declaration.0);
-                let updated = table
-                    .source_props
-                    .get_mut(&source)
-                    .filter(|signature| signature.ty == Ty::Error)
-                    .map(|signature| signature.ty = inferred)
-                    .is_some();
-                if updated {
-                    if context_types.is_empty() {
-                        if let Some(entry) = table.props.get_mut(&property.name) {
-                            entry.0 = inferred;
-                        }
-                    }
-                    changed = true;
-                }
+                positions
+                    .entry((file_index as u32, property.name.clone()))
+                    .or_insert(property.span.lo);
             }
         }
-        if !changed {
-            break;
-        }
+        Self(positions)
     }
 
-    for (file_index, file) in files.iter().enumerate() {
-        diags.set_file(file_index as u32);
-        for &declaration in &file.decls {
-            let Decl::Property(property) = file.decl(declaration) else {
-                continue;
-            };
-            if property.receiver.is_some()
-                || property.ty.is_some()
-                || property.init.is_some()
-                || property.getter.is_none()
-                || property.delegate.is_some()
-            {
-                continue;
-            }
-            let inferred = table
-                .source_props
-                .get(&(file_index as u32, declaration.0))
-                .map(|signature| signature.ty)
-                .or_else(|| table.props.get(&property.name).map(|entry| entry.0))
-                .unwrap_or(Ty::Error);
-            if inferred == Ty::Error {
-                diags.error(
-                    property.span,
-                    format!(
-                        "krusty: cannot infer the type of property '{}'; add an explicit type",
-                        property.name
-                    ),
-                );
+    fn declared_later(&self, file: u32, position: u32, name: &str) -> bool {
+        self.0
+            .get(&(file, name.to_string()))
+            .is_some_and(|declared| *declared > position)
+    }
+}
+
+/// Resolves deferred top-level property types on demand, memoised, with cycles declining.
+///
+/// A borrow of the symbol table, so it is built where it is used rather than kept alive across the
+/// walk; the memo it consults ([`TypeEngine`]) borrows nothing and therefore does outlive it.
+struct TopLevelInferenceDriver<'a> {
+    files: &'a [File],
+    file_class_names: &'a [ClassNames],
+    src: &'a dyn SemanticPlatform,
+    table: &'a SymbolTable,
+    engine: &'a TypeEngine,
+    deferred: &'a HashMap<DeclKey, &'a DeferredTopLevelProperty>,
+    /// Module-wide index from a property's source spelling to its declaration. A name declared by
+    /// more than one deferred property is absent: two declarations of one name are already a
+    /// conflict diagnostic, and guessing between them would type a reference from whichever
+    /// happened to be indexed last.
+    ///
+    /// The index is by SIMPLE NAME across the module, matching `SymbolTable::props`, which is what
+    /// this hook stands in for while a declaration's own type is still being determined. Import
+    /// scoping for module properties is a property of that table, not of this index.
+    by_name: &'a HashMap<String, DeclKey>,
+    source_order: &'a SourceOrderIndex,
+}
+
+impl TopLevelInferenceDriver<'_> {
+    fn resolve(&self, key: DeclKey) -> Resolution {
+        let Some(entry) = self.deferred.get(&key).copied() else {
+            return Resolution::Declined(DeclineReason::Untypeable);
+        };
+        self.engine.resolve(key, || {
+            let expression = entry.expression?;
+            let file_index = entry.file_index as usize;
+            // The declaration's own context parameters come first: lightweight name resolution is
+            // first-match, so they shadow module properties exactly as they do in the checker.
+            let mut props = entry.context_scope.clone();
+            props.extend(
+                self.table
+                    .props
+                    .iter()
+                    .filter(|(name, _)| self.readable_from(entry, name))
+                    .map(|(name, (ty, is_var, _))| (name.clone(), *ty, *is_var)),
+            );
+            let inferred = infer_lit_ty_scoped_on_demand(
+                InferenceSource::file(&self.files[file_index], entry.file_index),
+                expression,
+                &self.file_class_names[file_index],
+                &props,
+                self.src,
+                self.table,
+                &|name| self.demand(entry, name),
+            );
+            let inferred = inferred_declaration_ty(inferred);
+            (inferred != Ty::Error).then_some(inferred)
+        })
+    }
+
+    /// The type of another module property, resolving that declaration first if needed.
+    fn demand(&self, from: &DeferredTopLevelProperty, name: &str) -> Option<Ty> {
+        if !self.readable_from(from, name) {
+            return None;
+        }
+        self.resolve(*self.by_name.get(name)?).ty()
+    }
+
+    /// Whether `from`'s body may read the module property spelled `name` at all. An eager
+    /// initializer runs in declaration order, so a declaration written LATER IN ITS OWN FILE has no
+    /// value yet and must not type it; an expression getter is executable and may.
+    fn readable_from(&self, from: &DeferredTopLevelProperty, name: &str) -> bool {
+        !from.is_eager
+            || !self
+                .source_order
+                .declared_later(from.file_index, from.position, name)
+    }
+}
+
+/// Type the top-level properties the signature walk left undetermined, then publish and diagnose.
+///
+/// The walk visits files in ARGUMENT order, so a property initialized from a declaration in a later
+/// file could not be typed while the walk ran; a getter, being an executable body, may legally read
+/// a later declaration even within one file. Both are the same question — what is this
+/// declaration's type — and both are answered here by the engine, which resolves each declaration
+/// when it is first asked for and remembers the answer. That is what makes `krusty A.kt B.kt` and
+/// `krusty B.kt A.kt` agree, and what makes a dependency loop decline rather than recurse.
+fn resolve_deferred_top_level_properties(
+    files: &[File],
+    file_class_names: &[ClassNames],
+    src: &dyn SemanticPlatform,
+    table: &mut SymbolTable,
+    deferred: &[DeferredTopLevelProperty],
+    diags: &mut DiagSink,
+) {
+    if deferred.is_empty() {
+        return;
+    }
+    let by_key = deferred
+        .iter()
+        .map(|entry| (DeclKey::declaration(entry.file_index, entry.decl), entry))
+        .collect::<HashMap<_, _>>();
+    let mut by_name: HashMap<String, DeclKey> = HashMap::new();
+    let mut ambiguous: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for entry in deferred.iter().filter(|entry| !entry.has_context_params) {
+        let key = DeclKey::declaration(entry.file_index, entry.decl);
+        if by_name.insert(entry.name.clone(), key).is_some() {
+            ambiguous.insert(entry.name.as_str());
+        }
+    }
+    for name in &ambiguous {
+        by_name.remove(*name);
+    }
+    let engine = TypeEngine::new();
+    let source_order = SourceOrderIndex::of(files);
+    let resolutions = {
+        let driver = TopLevelInferenceDriver {
+            files,
+            file_class_names,
+            src,
+            table,
+            engine: &engine,
+            deferred: &by_key,
+            by_name: &by_name,
+            source_order: &source_order,
+        };
+        deferred
+            .iter()
+            .map(|entry| {
+                (
+                    entry,
+                    driver.resolve(DeclKey::declaration(entry.file_index, entry.decl)),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    for (entry, resolution) in resolutions {
+        let Some(ty) = resolution.ty() else {
+            diags.set_file(entry.file_index);
+            diags.error(
+                entry.span,
+                format!(
+                    "krusty: cannot infer the type of property '{}'; add an explicit type",
+                    entry.name
+                ),
+            );
+            continue;
+        };
+        let source = (entry.file_index, entry.decl);
+        let Decl::Property(property) = files[entry.file_index as usize].decl(DeclId(entry.decl))
+        else {
+            continue;
+        };
+        // The compile-time value depends on the type the engine settled on: `source_literal_constant`
+        // reads the literal THROUGH it (a `UIntLit` is a long constant under `ULong` and an int
+        // constant otherwise), so it cannot have been computed while the type was still a placeholder.
+        let compile_time_constant = (!property.is_var)
+            .then(|| {
+                property.init.and_then(|init| {
+                    source_literal_constant(&files[entry.file_index as usize], init, ty)
+                })
+            })
+            .flatten();
+        let published = table
+            .source_props
+            .get_mut(&source)
+            .filter(|signature| signature.ty == Ty::Error)
+            .map(|signature| {
+                signature.ty = ty;
+                signature.compile_time_constant = compile_time_constant.clone();
+                signature.context_params.is_empty()
+            });
+        if published == Some(true) {
+            if let Some(module_property) = table.props.get_mut(&property.name) {
+                module_property.0 = ty;
             }
         }
     }
@@ -10855,6 +11005,9 @@ fn finish_top_level_computed_property_inference(
 
 /// Infer a declaration initializer's type with a fresh cycle-guard, using `table` to resolve
 /// module-local class properties — the common entry used by signature collection.
+///
+/// Reads only what the table already holds. A reference to a module declaration whose own type is
+/// still being determined resolves through [`infer_lit_ty_scoped_on_demand`] instead.
 fn infer_lit_ty_scoped(
     source: InferenceSource<'_>,
     e: ExprId,
@@ -10862,6 +11015,22 @@ fn infer_lit_ty_scoped(
     props: &[(String, Ty, bool)],
     src: &dyn SemanticPlatform,
     table: &SymbolTable,
+) -> Ty {
+    infer_lit_ty_scoped_on_demand(source, e, class_names, props, src, table, &|_| None)
+}
+
+/// As [`infer_lit_ty_scoped`], but a bare name the scope cannot type is handed to `demand`, which
+/// resolves that declaration through the engine and answers with its type. This is what makes the
+/// result independent of the order files were passed in.
+#[allow(clippy::too_many_arguments)]
+fn infer_lit_ty_scoped_on_demand(
+    source: InferenceSource<'_>,
+    e: ExprId,
+    class_names: &ClassNames,
+    props: &[(String, Ty, bool)],
+    src: &dyn SemanticPlatform,
+    table: &SymbolTable,
+    demand: &dyn Fn(&str) -> Option<Ty>,
 ) -> Ty {
     let InferenceSource(file, file_index, implicit_classifier, implicit_value, implicit_instance) =
         source;
@@ -11048,6 +11217,7 @@ fn infer_lit_ty_scoped(
         module_object: &module_object,
         static_classifier_value: &static_classifier_value,
         call: &call,
+        demand,
         property: &property,
         explicit_call_return: &explicit_call_return,
         classifier_call: &classifier_call,
@@ -11309,11 +11479,25 @@ fn infer_lit_ty_p(
         // never mistypes a plain class name (which isn't a value and stays `Error` → the file skips).
         Expr::Name(n) => {
             if matches!(n.as_str(), "Unit" | "kotlin.Unit") {
-                Ty::Unit
-            } else {
-                props
-                    .iter()
-                    .find_map(|(pn, t, _)| (pn == n).then_some(*t))
+                return Ty::Unit;
+            }
+            let scoped = props.iter().find_map(|(pn, t, _)| (pn == n).then_some(*t));
+            // A scope entry that is still `Error` has not been typed YET: it is a module property
+            // whose own inference has not run. Ask the engine for that declaration now instead of
+            // reading the placeholder as a final answer. A name the scope does not carry at all
+            // reaches the same hook — signature collection walks files in argument order, so the
+            // declaration may simply not have been visited.
+            match scoped
+                .filter(|ty| *ty != Ty::Error)
+                .or_else(|| (env.demand)(n))
+            {
+                Some(ty) => ty,
+                // The scope DID bind the name and neither it nor the engine could type it. The
+                // fallbacks below resolve a name the scope never bound; running them here would let
+                // a classifier of the same spelling answer for a shadowing value, which is not what
+                // the source wrote.
+                None if scoped.is_some() => Ty::Error,
+                None => None
                     // An explicit extension receiver is a lexical `this` binding in `props` and
                     // therefore wins above. Only an otherwise-unbound `this` denotes the enclosing
                     // class instance carried by the member scope.
@@ -11335,7 +11519,7 @@ fn infer_lit_ty_p(
                         env.implicit_classifier
                             .and_then(|classifier| (env.classifier_property)(classifier, n))
                     })
-                    .unwrap_or(Ty::Error)
+                    .unwrap_or(Ty::Error),
             }
         }
         Expr::Member { receiver, name } => {
