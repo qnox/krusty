@@ -1387,13 +1387,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `LineNumberTable` start pc counted guards that were no longer emitted, which put the entry past
     the end of the method and made the JVM reject the class outright (`ClassFormatError: Invalid pc
     in LineNumberTable`).
-  * `-Xno-call-assertions` removes `Intrinsics.checkNotNullExpressionValue` on platform-typed values
-    returned by a CLASSPATH Java class — but not the one kotlinc emits for `String.substring`, a
-    mapped builtin, which the flag leaves in place. krusty emits those guards (see the
-    platform-narrowing entry below) and honors the flag by rewriting each guard node into its operand
-    before emission (`jvm::ir_emit::strip_call_assertions`), which leaves `x!!` — a SOURCE assertion
-    sharing the same IR node — untouched. The Bazel worker forwards `--x_no_call_assertions` to the
-    compiler rather than reporting it inert.
+  * `-Xno-call-assertions` removes both narrowing guards — `Intrinsics.checkNotNullExpressionValue`
+    and the message-less `Intrinsics.checkNotNull` — on platform-typed values, but not the one kotlinc
+    emits for `String.substring`, a mapped builtin, which the flag leaves in place. krusty emits those
+    guards (see the platform-narrowing entry below) and honors the flag by rewriting each guard node
+    into its operand before emission (`jvm::ir_emit::strip_call_assertions`), which leaves `x!!` — a
+    SOURCE assertion sharing the same IR node — untouched. The Bazel worker forwards
+    `--x_no_call_assertions` to the compiler rather than reporting it inert.
 
   Both are set per module by intellij-community (`build/compiler-options.bzl`). Tests:
   `tests/no_assertions_flags_e2e.rs`.
@@ -1621,22 +1621,318 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   carries a `checkcast` (a generic Java return), the guard goes UNDER the cast — kotlinc checks what the
   call produced, then casts the checked value.
 
-  A CONDITIONAL value is checked per branch, not once at the merge: a DECLARED type propagates into an
-  `if`/`when`/elvis, so kotlinc guards inside the branch that produced the platform value, before the
-  merge (nested conditionals included). A value ARGUMENT's expected type does not propagate that way —
-  kotlinc checks the merged value instead — so an argument whose value is a conditional takes the
-  message-less form below. A branch that is a source BLOCK (`if (c) { …; javaCall() }`) is likewise not
-  checked in the branch; a single-expression block is the expression itself and is.
+  There are TWO shapes, and which one appears is decided by the checked expression, not the position:
+  a call or a field read has a name and takes the named form above, while anything else — a value
+  block, a conditional's merged result, a plain read of a platform-typed local — takes the message-less
+  `Intrinsics.checkNotNull(Object)V`, which kotlinc emits by materializing the value into a local,
+  checking it, and reloading (`astore t; aload t; checkNotNull; aload t`). `x!!` shares that intrinsic
+  but keeps its own `dup` shape; all three are one IR node ([`ir::NullCheck`]).
 
-  A public Java INSTANCE field read is guarded like any other platform value and names the field
-  (`value must not be null`), matching kotlinc. Not yet guarded, because the value is not modeled as
-  `T!` today (a front-end gap, not an emitter one): a Java STATIC field read (`System.out` types as
-  `PrintStream`, not `PrintStream!`) and an index-operator result (`javaList[0]`). Also unimplemented:
-  kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, which it emits wherever the
-  narrowed value has no name to report — a plain read of a platform-typed local, a source-block branch,
-  a `try` value, the merged value of a conditional in argument position; and the guard on a non-null
-  Kotlin extension RECEIVER (`getenv(..).trim()`). krusty emits the NAMED form only, so a narrowing it
-  cannot name stays unguarded rather than guarded under an invented name.
+  A CONDITIONAL value is checked per branch, not once at the merge: a DECLARED type propagates into an
+  `if`/`when`/elvis/`try`, so the guard sits inside the branch (or `try` arm) that produced the platform
+  value, before the merge, and a branch whose own type is already non-null is not guarded at all. A
+  value ARGUMENT's expected type does not propagate that way — kotlinc checks the merged value instead,
+  which is the message-less shape. A BLOCK is transparent only on the way to another conditional:
+  `if (c) { if (d) javaCall() else "a" }` is checked inside the inner branch and names the call, while
+  `if (c) { javaCall() }` checks the block itself. Because the checker owns this walk, each branch is
+  measured against its own type rather than against the conditional's join.
+
+  A Java FIELD read is a platform value like any other and names the field (`value must not be null`)
+  — instance fields via the classifier shape, statics through the same `java_type_nullability` rule
+  (`System.out` is `PrintStream!`). A non-null Kotlin extension RECEIVER is a declared position too
+  (`getenv(..).trim()` is guarded; a MEMBER call's receiver is not — the invoke itself throws).
+
+  Two members that LOOK Java are not: `toString()` on any receiver is `kotlin.Any.toString(): String`
+  and `Enum.name` is `kotlin.Enum.name: String`, so a class file redeclaring them
+  (`java.lang.CharSequence.toString`, `java.lang.Enum.getName`) must not re-introduce Java's
+  flexibility (`jvm_libraries::kotlin_builtin_declares_non_null`). Without that, krusty guarded values
+  kotlinc knows are non-null.
+
+  One typing difference remains, and it moves a guard rather than dropping one: for an ERASED GENERIC
+  read from a Java class (`javaList[0]`), kotlinc calls the read itself non-null — the guard it emits
+  before the `checkcast` is what makes it so — while krusty keeps `T!` until the value reaches a
+  declared position. Both guard the same value; in `fun f(l: ArrayList<String>) = l[0]` kotlinc guards
+  inside `f` and publishes `@NotNull`, krusty publishes the flexible return and guards at each use. The
+  same rule explains `java.util.Arrays.asList(…)[0]`, where kotlinc's flexible RECEIVER makes the
+  member read flexible and krusty's does not.
+  Tests: `tests/platform_call_assertions_e2e.rs` (per-position `checkNotNullExpressionValue` call-site
+  and message differential vs kotlinc, every guarded position run for its exception and message, and
+  the top-level `<clinit>` repro).
+
+  Measured over the 2.4.10 box corpus (per-file class-byte hashes with and without the guard, 3355
+  files krusty compiles): 14 files change and one of them starts COMPILING that did not before
+  (`valuesInsideEnum.kt`, unblocked by the `Enum.name` typing above). Of the 13 comparable files two
+  need test-harness directives kotlinc cannot be handed directly, eight place exactly the guards
+  kotlinc places, one differs between two runs of the SAME binary (a pre-existing non-deterministic
+  emission, not a guard), and three differ for reasons outside this rule:
+  * `collectionAssignGetMultiIndex.kt` — the erased-generic-read placement described above: kotlinc
+    guards inside the inferred-return `operator fun get`, krusty at its caller.
+  * `forInArrayListIndices.kt` — kotlinc INLINES `lowercase()`, whose stdlib body carries the guard on
+    `java.lang.String.toLowerCase`; krusty calls the function, so the same check runs inside the
+    callee.
+  * `kt17464_linkedMapOf.kt` — the same guard on the same value, with the message spelled
+    `getEntries(...)` rather than kotlinc's `<get-entries>(...)`: krusty's IR does not record whether a
+    classpath property came from a Kotlin declaration or was synthesized from a Java getter, and the
+    JVM spelling is right for the latter.
+
+- `-Xlambdas` / `-Xsam-conversions`: how a lambda and a SAM conversion are realized. krusty emits
+  `indy` — an `invokedynamic` call site bound through `LambdaMetafactory.metafactory` — always, which
+  is kotlinc's own default since 2.0 and what intellij-community builds with. Verified against
+  kotlinc 2.4.10 for a Kotlin function type, a `fun interface`, and a Java SAM (`Runnable`): the same
+  class set (no synthetic lambda class), one `invokedynamic` per lambda, and an identical
+  `BootstrapMethods` table — modulo constant-pool indices, which differ because the two pools differ
+  in size — down to the synthetic implementation-method names (`box$lambda$0`…). The `class` strategy
+  (one synthetic class per lambda) has no emitter, so that value FAILS the compile rather than
+  quietly producing `indy` output: it differs in the class set, not just in instructions. Because
+  `invokedynamic` requires class-file version 51 or newer, a real indy call site under
+  `-jvm-target 1.6` fails the compile without emitting artifacts; fully spliced inline lambdas remain
+  valid because they emit no call site. Tests: `tests/indy_lambda_parity_e2e.rs`.
+- `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
+  constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
+  constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration
+  order, and synthetic `values()`/`valueOf(String)`. `e.ordinal`/`e.name` are `Enum.ordinal()`/
+  `name()`; entry equality is reference identity (`==`). Entry constructor args are constant
+  expressions evaluated in `<clinit>` (branchy args are spilled to `<clinit>` temps).
+- **Enum entries with a body / abstract enum members**: an `abstract fun`/bodied entry makes the enum
+  `ACC_ABSTRACT` (not `final`); each entry with a body (`ENTRY { override fun m() = … }`) is emitted
+  as a synthesized package-private `final` subclass `Enum$ENTRY extends Enum` whose constructor
+  `(String, int, …userArgs)V` delegates to the enum's constructor (made package-private so the
+  subclass can call it) and whose overrides are lowered with the enum's `this`/field scope (so an
+  override may read a constructor `val` as a `getfield` on the enum). The `<clinit>` constructs such
+  an entry as `new Enum$ENTRY(name, ordinal, …)`. An abstract enum member requires every entry to
+  override it (else the file is skipped, never miscompiled); property overrides in an entry body
+  (`override val`) are not yet modeled — skipped.
+- **Every enum classifier has the synthetic `entries: EnumEntries<E>` property.** Resolution selects
+  the enum by semantic type identity, including nested and cross-file classifiers, then carries the
+  exact zero-argument static accessor advertised by that symbol provider into lowering. Source/module
+  and dependency shapes therefore share one target handoff; lowering never reconstructs a call from
+  the declaration origin. If a provider exposes the enum kind but no direct accessor realization, the
+  valid property is typed but rejected before emission with a stable boundary until an alternative
+  cached-mapping realization is implemented.
+- Explicit builtin operator-methods on numeric primitives: `a.plus(b)` ≡ `a + b` (same promotion);
+  `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
+  `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form
+  `a rem b` to a user `operator`/`infix` extension but the *dot* form `a.rem(b)` to the builtin;
+  the parser records infix-call source form so resolver/lowering keep that distinction
+  (`resolver_regression_e2e::primitive_builtin_infix_extension_source_form_matters`,
+  box `infixFunctionOverBuiltinMember.kt`). `mod`/`rangeTo`/`inc`/`dec` unsupported.
+  The bitwise/shift members on `Int`/`Long` (`a.and(b)`/`a or b`, `a.shl(n)`/`a shr n`/`a ushr n`,
+  `a.xor(b)`) and Boolean bitwise members (`b.and(c)`/`or`/`xor`) lower to the corresponding
+  `iand`/`ior`/`ixor`/`ishl`/… intrinsic; shifts take an `Int` count, the others the receiver's own
+  type. `compareTo` and the arithmetic/bitwise/shift members all share `lower_prim_op_method`.
+  A safe call uses that same operation on the non-null receiver value. Krusty collapses an unnecessary
+  safe call on a statically non-null primitive to the qualified operation (and its non-null result),
+  while a genuinely nullable primitive receiver is unboxed through the ordinary argument-coercion
+  path and its result is boxed for the nullable merge. `inv()` (zero-arg) stays a dedicated arm.
+  (`tests/safe_call_primitive_e2e.rs`.)
+- Safe call `a?.b` / `a?.m(args)`: evaluates the receiver once into a temp, then yields the member
+  access when the temp is non-`null`, else `null` — i.e. `{ val t = a; if (t != null) t.b else null }`.
+  Inside the non-null arm the receiver expression is substituted with the temp and re-enters the same
+  qualified-access lowering used by `.`, so source/module members and extensions, classpath members
+  and extensions, primitive intrinsics, array operations, and `kotlin/Any` virtuals do not acquire
+  separate safe-call dispatch tables. Resolution likewise normalizes the receiver to its non-null
+  semantic type before selecting those targets. An applicable member still wins over an extension,
+  including an inherited universal member such as `Any.toString()` when the same-named extension is
+  declared on the receiver's superclass or interface; an inapplicable same-named overload does not
+  veto the applicable member. Whether a primitive arrived boxed from `Int?` or unboxed from `Int` is
+  a lowering representation, not a callable origin. A statically non-null scalar receiver delegates
+  directly to the complete qualified operation; a nullable receiver's merge boxes primitive member
+  results so both branches are references, and composes with Elvis (`a?.m() ?: d`).
+  Primitive conversions, unmodelled builtin methods (`inc`/`dec`/`mod`/`rangeTo`), erased type-parameter
+  receivers, local functions, and function-object `toString`/`hashCode` remain rejected rather than
+  being rebound to a different origin or emitted with the wrong representation.
+  (`tests/safe_call_e2e.rs`, `tests/safe_call_primitive_e2e.rs`,
+  `tests/safe_call_any_member_e2e.rs`.)
+- **Safe call whose scope block diverges — `x?.let { return … }` / `x?.run { throw … }` / `x?.also { … }`
+  / `x?.apply { … }`.** A scope function whose lambda body is a non-local `return` (or `throw`) has block
+  value type `Nothing`, so the whole safe call is `Nothing?` — `null` when the receiver is null, else
+  control leaves via the return/throw and never comes back. For the body-returning scope fns (`let`/`run`)
+  the checker types the safe call as `Ty::nullable(Ty::Nothing)` (parallel to the `Unit?` case for a `Unit`
+  block), a reference type so it is not rejected as a "non-reference result". The receiver-returning scope
+  fns (`also`/`apply`) keep the receiver's (reference) type, so their divergence is invisible to the result
+  type — the lowerer detects it from the block-body type instead. In BOTH cases the lowerer must not model
+  the non-null arm as a value-producing `when` branch: a diverging arm yields no value, and merging it with
+  the `null` arm leaves a `top` on the stack (`VerifyError`). Instead it emits the divergent member as a
+  guarded statement — `{ val t = a; if (t != null) { <member> }; null }` — and yields `null` unconditionally
+  (only observed when `t` was null); the `also`/`apply` inliner additionally drops its unreachable
+  "read the receiver back" tail. This is keyed on the `Nothing` result/block type, not on the scope-function
+  name (the divergence guard is gated only on the call being one of the four scope fns, which run the body
+  exactly once — a collection HOF like `forEach` may run it zero times and is excluded), and reproduces with
+  a plain nullable receiver (no higher-order call involved). The value form (`val r = c?.let { return … }`)
+  types `r` as `Nothing?`, which flows into any reference target. (Only the SAFE-call `?.` form is handled;
+  a non-safe qualified `b.also { return … }` remains unsupported.) (`tests/qq1_safecall_diverging_scope_block_e2e.rs`).
+- **A receiver that can only be `null` — `null?.m()`, `Nothing?`, `Nothing`.** `Nothing` has no non-null
+  value, so a `?.` on a receiver typed `Null`, `Nothing?`, or `Nothing` never invokes the member: the whole
+  safe call is `null`. The lowerer folds it to `{ evaluate receiver; null }` — the receiver still runs for
+  its side effects, and a *diverging* receiver (`boom()?.toString()`) simply terminates there. This is one
+  rule for all three receiver types rather than a special case for the `null` literal; a `Nothing?` receiver
+  has no class internal to look a member up on, so no other lowering could serve it.
+  The fold bypasses member resolution entirely, which is sound only because the CHECKER reports an
+  unresolved member behind `?.` (next bullet). (`tests/safe_call_unresolved_member_e2e.rs`.)
+- **An unresolved member behind `?.` is a checker diagnostic, exactly as for the qualified form.**
+  `s?.thisDoesNotExist()` reports `unresolved reference 'thisDoesNotExist'.` at the member-name span,
+  matching kotlinc. Previously only the PROPERTY spelling (`s?.thisDoesNotExist`) reported — it routes
+  through `check_member` — while the CALL spelling exhausted every callable origin and returned a silent
+  `Ty::Error`. The consequences were that the backend bail ("this construct is not yet supported by the IR
+  backend") did frontend duty for a `String?` receiver, and that `null?.thisDoesNotExist()` compiled clean,
+  because the always-null fold returns before any backend check. The report is guarded by a diagnostic
+  checkpoint so an origin that already reported (a rejected classpath overload, an unmappable labelled call)
+  is not reported twice, and by an EXISTENCE probe (`member_name_exists_on`, shared with the qualified
+  arm's nullable-receiver check) so a member that exists but that this arm merely cannot SELECT stays a
+  silent `Ty::Error`. That distinction is the whole point: `d?.toInt()`, `b?.not()`, `f?.invoke(1)`, and an
+  arity mismatch like `s?.let(1)` are all real Kotlin krusty rejects in the BACKEND, and calling them
+  "unresolved reference" would tell the user their program is wrong. Only a name that exists nowhere on the
+  receiver is a typo. The classpath-less String fallback stores name, parameter shapes, and return in one
+  semantic table: selection matches a complete shape, while the existence guard checks the name alone, so
+  an overload mismatch cannot be mislabeled as a missing member. The same name-only rule covers universal
+  `Any` callables (`toString`/`hashCode`/`equals`) on every receiver and function-value `invoke`; argument
+  count and types never participate in the typo predicate.
+  A second consequence of no longer being silent: the qualified and safe-call arms must agree about what
+  EXISTS, so the classpath-less `String` table (`substring`/`indexOf`/`trimIndent`/`trimMargin`,
+  consulted only when no stdlib is on the classpath) is shared by both. Those names are stdlib EXTENSIONS
+  on `kotlin.String` rather than members of it, so both call forms consult the table LAST — after the
+  ordinary source/classpath extension ladder — and a user's same-named extension wins. The lowerer's
+  constant fold for literal `trimIndent`/`trimMargin` follows the same rule: it runs only when the checker
+  recorded no callable target, never merely because the member name matches.
+  Known gap: the checkpoint is taken after the receiver but before the arguments, so an argument that
+  itself reports (`s?.nope(undefinedVar)`) suppresses the member report — the program is still rejected,
+  with one diagnostic instead of two. (`tests/safe_call_unresolved_member_e2e.rs`.)
+- Lambdas `{ a, b -> … }`: a function type `(A,…) -> R` is the JVM interface
+  `kotlin/jvm/functions/Function{arity}`. A non-capturing lambda compiles to `invokedynamic` bound by
+  `LambdaMetafactory.metafactory` to a synthesized `private static` method `<enclosing>$lambda$<n>`
+  holding the body (with the lambda's real parameter types). The `implMethod` is primitive-specialized
+  (`box$lambda$0(I)I`) while the `instantiatedMethodType` is boxed (`(Integer)Integer`), so the
+  metafactory inserts the box/unbox adapter — matching kotlinc 2.x. Calling a function value `f(args)`
+  goes through `FunctionN.invoke` (`(Object…)Object`): arguments are boxed, the result cast/unboxed to
+  the return type. Only non-capturing lambdas returning a concrete non-`Unit` type, passed to a
+  non-generic function, are supported; capturing lambdas, `Unit`/`Nothing` lambdas (need the
+  `kotlin/Unit` singleton), lambdas inside class methods, and generic/suspend consumers are skipped
+  (`tests/lambda_e2e.rs`, `tests/indy_infra_e2e.rs`).
+- **Implicit `it` in an untyped lambda is lexical, not textual.** When no expected function type has
+  established the lambda's parameters, a parameterless lambda synthesizes `it` only if its body uses
+  that name and no enclosing scope already binds it. Thus `outer?.let { sink.emit { "$it" } }` passes a
+  `Function0` to `emit` and captures the outer `it`; likewise, `{ it }` captures a local named `it`.
+  Typed lambdas still receive and shadow with their expected `Function1` parameter. Overload probing and
+  fallback lambda typing share this decision so they cannot infer different arities
+  (`tests/classpath_object_member_import_e2e.rs`,
+  `tests/nested_lambda_capture_e2e.rs::untyped_lambda_captures_local_named_it`).
+- **Mutable capture**: a local `var` written by a non-inlined lambda (a closure) needs a shared mutable
+  cell so writes are visible to the enclosing scope and vice versa. The lowerer computes this per body by
+  checking whether a lambda captures a `var` from an outer local scope; the JVM realization currently
+  uses a `kotlin/jvm/internal/Ref$XxxRef` holder. An inlined scope function (`let`/`also`/`run`/`apply`)
+  needs no shared cell because its body is inlined, and a closure that writes a *field* (capturing
+  `this`) is still skipped.
+- Classes with **no primary constructor** (`class A { constructor(…) { … } }`): every constructor is a
+  secondary `<init>`. A constructor delegating to `super(…)` (or implicitly, to a no-arg base/`Object`)
+  runs the field initializers + `init {}` blocks (source order) before its own body; one delegating to a
+  sibling `this(…)` runs only its body (the init steps run in the reached `super`-constructor). The
+  parenless base class (`class A : B { constructor(): super() }`) is recovered semantically after
+  parsing: the all-files bootstrap classifies module declarations and the composite symbol source
+  classifies both module and library types, so same-file, other-file, and classpath bases produce the
+  same superclass shape. **Field-initializer default-value elision:** kotlinc omits a field initializer
+  that stores the field's JVM default (`0`/`false`/`null`/`'\0'`, incl. `0.toByte()`), so a value a base
+  constructor's virtual call already wrote survives; krusty does the same (test
+  `secondary_ctor_noprimary_e2e`, corpus `fieldInitializerOptimization`). The delegation `<init>`
+  *target signature* is read live from the (post-`value_classes`-pass) class at emit time, so the lowerer
+  needs no value-class knowledge and a value-class `super(…)` argument erases correctly. A secondary
+  constructor with lowerable defaults emits and calls the synthetic `DefaultConstructorMarker` overload;
+  when that ABI cannot be emitted, the file is skipped rather than calling a nonexistent target.
+  Ambiguous `this(…)`/`super(…)` targets and delegation cycles are diagnosed. Tests:
+  `tests/secondary_ctor_this_sibling_e2e.rs` and `tests/super_to_base_secondary_ctor_e2e.rs`.
+- Constructor references `::A`: lowered like a lambda `{ args -> A(args) }` — a synthesized static
+  impl `(ctor params) -> new A(params)` wrapped in the same `invokedynamic`/`LambdaMetafactory`
+  closure. Only the simple primary-constructor positional case (the reference's arity matches the
+  constructor's field params) is modeled; defaulted/secondary constructors are skipped.
+- Method references `obj::m` (bound) and `Type::m` (unbound): a synthesized static impl
+  `(receiver, args…) -> receiver.m(args)` — bound captures the receiver into the closure (so its
+  arity is the method's), unbound takes the receiver as the first parameter. Only user-class methods
+  (resolvable in the IR class table) and non-`Unit`/`Nothing` returns are modeled.
+- Unbound top-level function references `::foo`: same `invokedynamic`/`LambdaMetafactory` lowering as a
+  lambda, but the impl method handle points directly at the referenced function (no synthesized body).
+  Exception: a `Unit`-returning `::foo` gets a synthesized wrapper `(params) -> { foo(params); Unit }`
+  so the SAM's `invoke` yields the `kotlin/Unit` singleton (a direct `void` handle would adapt to
+  `null`, breaking a `FunctionN` consumer that expects `Unit`).
+  kotlinc instead emits a `kotlin/jvm/internal/FunctionReferenceImpl` subclass carrying reflection
+  metadata, but that class is synthetic and not part of the facade's ABI, so public signatures and the
+  round-trip result match. A function type lowers to the backend-neutral `IrType::Function`; the **JVM
+  backend** maps it to `kotlin/jvm/functions/FunctionN` and enforces the JVM-only fixed-arity limit
+  (`Function0..22`) — higher arities, and bound/object/constructor references, are skipped
+  (`tests/callable_ref_e2e.rs`).
+- Receiver (extension) function types `Recv.() -> R` / `Recv.(A) -> R`: parsed by **folding the
+  receiver in as the first `FunctionN` parameter** — `Recv.() -> R` ≡ `Function1<Recv, R>`,
+  `Recv.(A) -> R` ≡ `Function2<Recv, A, R>` — exactly how Kotlin lowers an extension-function type to
+  `FunctionN`, so the rest of the pipeline sees a plain `(Recv, …) -> R`. This is a **parse**-level
+  decision (`src/parser.rs`, `receiver_function_type_param` test); a call site that invokes such a
+  parameter with an *implicit* receiver (the builder pattern `instructions()` / `recv.block()`) needs
+  receiver-rebinding the checker does not yet model, so those still skip cleanly rather than
+  miscompile (0-FAIL preserved).
+- Labeled loops `l@ for/while/do { … break@l / continue@l }`: the `l@` label is parsed onto the loop
+  (AST + IR carry an `Option<String>` label); the emitter's loop stack keeps each loop's source label, so
+  a `break@l`/`continue@l` targets the nearest enclosing loop carrying `l` (an unlabeled `break`/`continue`
+  still targets the innermost). Works across all loop forms — counted `for`, collection `for-each`,
+  `while`, `do…while` (`LabeledLoops` in `tests/feature_box_e2e.rs`).
+- Not-null assertion `x!!`: yields `x`, throwing a `NullPointerException` if it is null. Compiled (on a
+  reference operand) as `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` — the value
+  stays on the stack and the duplicate is consumed by the check, matching kotlinc. On a non-null
+  primitive operand it is a no-op (`tests/not_null_assert_e2e.rs`).
+- **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
+  arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
+  a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +
+  `Intrinsics.checkNotNullExpressionValue(Object, String)V` — the same yields-or-throws shape as `x!!`,
+  with the checked expression named in the failure (`getenv(...) must not be null`). Without it the
+  declaration and its `@NotNull` annotation promise something the bytes do not enforce: the null is
+  stored into an `@NotNull` field and surfaces later, in code that trusted the declaration.
+
+  Measured against kotlinc 2.4.10, the GUARDED positions are: a property with an explicit type (member
+  or top-level — the top-level one runs in `<clinit>`), a local with an explicit type, a value
+  argument (including the parameter of a non-null-typed lambda, which is an `invoke` argument), a
+  `return` / expression body, and an assignment to a non-null target. kotlinc does NOT guard: an
+  INFERRED local (`val x = getenv(...)` stays `T!`), a nullable target (`String?`, elvis, `?.`), a
+  `when` subject, a string-template interpolation, or the receiver of a Java member call (`getenv(..).length`
+  NPEs on its own). Guards are recorded by the checker at the narrowing positions
+  (`TypeInfo::platform_narrowings`) and realized by lowering, so both halves are one rule rather than a
+  per-position emitter.
+
+  The failure message is derived from the checked expression, as kotlinc's is: a call of any linkage
+  renders as `<jvm-name>(...)` (a property read of a Java getter is its ACCESSOR, `getName(...)`), and a
+  read resolved to a physical field renders as the bare field name. Where the callee's erased result
+  carries a `checkcast` (a generic Java return), the guard goes UNDER the cast — kotlinc checks what the
+  call produced, then casts the checked value.
+
+  There are TWO shapes, and which one appears is decided by the checked expression, not the position:
+  a call or a field read has a name and takes the named form above, while anything else — a value
+  block, a conditional's merged result, a plain read of a platform-typed local — takes the message-less
+  `Intrinsics.checkNotNull(Object)V`, which kotlinc emits by materializing the value into a local,
+  checking it, and reloading (`astore t; aload t; checkNotNull; aload t`). `x!!` shares that intrinsic
+  but keeps its own `dup` shape; all three are one IR node ([`ir::NullCheck`]).
+
+  A CONDITIONAL value is checked per branch, not once at the merge: a DECLARED type propagates into an
+  `if`/`when`/elvis/`try`, so the guard sits inside the branch (or `try` arm) that produced the platform
+  value, before the merge, and a branch whose own type is already non-null is not guarded at all. A
+  value ARGUMENT's expected type does not propagate that way — kotlinc checks the merged value instead,
+  which is the message-less shape. A BLOCK is transparent only on the way to another conditional:
+  `if (c) { if (d) javaCall() else "a" }` is checked inside the inner branch and names the call, while
+  `if (c) { javaCall() }` checks the block itself. Because the checker owns this walk, each branch is
+  measured against its own type rather than against the conditional's join.
+
+  A Java FIELD read is a platform value like any other and names the field (`value must not be null`)
+  — instance fields via the classifier shape, statics through the same `java_type_nullability` rule
+  (`System.out` is `PrintStream!`). A non-null Kotlin extension RECEIVER is a declared position too
+  (`getenv(..).trim()` is guarded; a MEMBER call's receiver is not — the invoke itself throws).
+
+  Two members that LOOK Java are not: `toString()` on any receiver is `kotlin.Any.toString(): String`
+  and `Enum.name` is `kotlin.Enum.name: String`, so a class file redeclaring them
+  (`java.lang.CharSequence.toString`, `java.lang.Enum.getName`) must not re-introduce Java's
+  flexibility (`jvm_libraries::kotlin_builtin_declares_non_null`). Without that, krusty guarded values
+  kotlinc knows are non-null.
+
+  One typing difference remains, and it moves a guard rather than dropping one: for an ERASED GENERIC
+  read from a Java class (`javaList[0]`), kotlinc calls the read itself non-null — the guard it emits
+  before the `checkcast` is what makes it so — while krusty keeps `T!` until the value reaches a
+  declared position. Both guard the same value; in `fun f(l: ArrayList<String>) = l[0]` kotlinc guards
+  inside `f` and publishes `@NotNull`, krusty publishes the flexible return and guards at each use. The
+  same rule explains `java.util.Arrays.asList(…)[0]`, where kotlinc's flexible RECEIVER makes the
+  member read flexible and krusty's does not.
   Tests: `tests/platform_call_assertions_e2e.rs` (per-position `checkNotNullExpressionValue` call-site
   and message differential vs kotlinc, every guarded position run for its exception and message, and
   the top-level `<clinit>` repro).

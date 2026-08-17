@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use crate::ir::{
     Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
+    NullCheck,
 };
 use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
@@ -364,15 +365,15 @@ pub(crate) fn strip_param_assertions(ir: &mut IrFile) {
 
 /// Drop every `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform value.
 ///
-/// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java call's `T!` result is
-/// committed to a declared non-null type. The guard is an expression wrapper, so it is removed by
-/// rewriting the node into its operand's value rather than by clearing a record: `x!!`
-/// ([`IrExpr::NotNullAssert`] with no message) is a SOURCE assertion the flag must leave alone.
+/// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java `T!` value is committed
+/// to a declared non-null type. The guard is an expression wrapper, so it is removed by rewriting the
+/// node into its operand's value rather than by clearing a record: [`NullCheck::Source`] (`x!!`) is a
+/// SOURCE assertion the flag must leave alone, and it shares this node.
 pub(crate) fn strip_call_assertions(ir: &mut IrFile) {
     for expr in &mut ir.exprs {
         if let IrExpr::NotNullAssert {
             operand,
-            message: Some(_),
+            check: NullCheck::Named(_) | NullCheck::Unnamed,
         } = expr
         {
             *expr = IrExpr::Block {
@@ -14408,28 +14409,54 @@ impl<'a> Emitter<'a> {
                 // function, which the front end forbids.
                 unreachable!("CurrentContinuation must be resolved by the CPS pass before emit")
             }
-            IrExpr::NotNullAssert { operand, message } => {
+            IrExpr::NotNullAssert { operand, check } => {
+                // A platform value narrowed to a declared non-null type names the checked expression
+                // in its failure (`getenv(...) must not be null`) when it has a name; `x!!` and a
+                // nameless narrowing use the one-argument form. The named shapes consume a duplicate
+                // and leave the value in place; the nameless narrowing materializes the value into a
+                // local and reloads it, which is what kotlinc emits where no `dup` source exists.
+                if matches!(check, NullCheck::Unnamed) {
+                    let jt = self.value_ty(*operand);
+                    self.emit_value(*operand, code);
+                    let slot = self.next_slot;
+                    self.next_slot += slot_words(jt);
+                    code.astore(slot);
+                    code.aload(slot);
+                    let m = self.cw.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "checkNotNull",
+                        "(Ljava/lang/Object;)V",
+                    );
+                    code.invokestatic(m, 1, 0);
+                    code.aload(slot);
+                    return;
+                }
                 self.emit_value(*operand, code);
                 code.dup();
-                // A platform value narrowed to a declared non-null type names the checked expression
-                // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
-                // one-argument form. Both consume the duplicate and leave the value in place.
-                let m = match message {
-                    Some(message) => {
-                        code.push_string(message, self.cw);
+                let m = match check {
+                    NullCheck::Named(name) => {
+                        code.push_string(name, self.cw);
                         self.cw.methodref(
                             "kotlin/jvm/internal/Intrinsics",
                             "checkNotNullExpressionValue",
                             "(Ljava/lang/Object;Ljava/lang/String;)V",
                         )
                     }
-                    None => self.cw.methodref(
+                    _ => self.cw.methodref(
                         "kotlin/jvm/internal/Intrinsics",
                         "checkNotNull",
                         "(Ljava/lang/Object;)V",
                     ),
                 };
-                code.invokestatic(m, if message.is_some() { 2 } else { 1 }, 0);
+                code.invokestatic(
+                    m,
+                    if matches!(check, NullCheck::Named(_)) {
+                        2
+                    } else {
+                        1
+                    },
+                    0,
+                );
             }
             IrExpr::LateinitCheck { operand, name } => {
                 // A `lateinit var` local read: throw `UninitializedPropertyAccessException` while the slot

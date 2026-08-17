@@ -93,6 +93,45 @@ fun t(): Int = 0
 fun conditionalArgument(c: Boolean): Int =
     takesNonNull(if (c) System.getenv("KRUSTY_ABSENT_19") else "x")
 
+fun tryValue(): Int {
+    val v: String = try { System.getenv("KRUSTY_ABSENT_20") } catch (e: RuntimeException) { "x" }
+    return v.length
+}
+
+fun platformLocalRead(): Int {
+    val platform = System.getenv("KRUSTY_ABSENT_21")
+    val narrowed: String = platform
+    return narrowed.length
+}
+
+fun extensionReceiver(): Int = System.getenv("KRUSTY_ABSENT_22").trim().length
+
+fun staticField(): Int {
+    val separator: String = java.io.File.separator
+    return separator.length
+}
+
+fun inferredReturn() = System.getenv("KRUSTY_ABSENT_23")
+
+fun useInferredReturn(): Int {
+    val v: String = inferredReturn()
+    return v.length
+}
+
+enum class Level { O }
+
+fun erasedGenericRead(l: java.util.ArrayList<String>): Int {
+    val first: String = l[0]
+    return first.length
+}
+
+fun builtinMembers(level: Level, text: CharSequence, error: Throwable): Int {
+    val name: String = level.name
+    val rendered: String = text.toString()
+    val message: String = error.toString()
+    return name.length + rendered.length + message.length
+}
+
 fun box(): String = "OK"
 "#;
 
@@ -206,10 +245,12 @@ fn run(classes: &[(String, Vec<u8>)]) -> String {
     common::run_box(classes, &box_class, &stdlib).expect("JVM unavailable")
 }
 
-/// Every NAMED guard — `Intrinsics.checkNotNullExpressionValue` — as `(declaring method, message)`. The
-/// message is the `ldc` constant the call site consumes — kotlinc derives it from the checked
-/// expression (`getenv(...)`), so comparing it pins the spelling. Reading the disassembly rather
-/// than the class bytes counts instructions that execute, not leftover constant-pool entries.
+/// Every narrowing guard as `(declaring method, message)`. kotlinc has two shapes: the NAMED
+/// `checkNotNullExpressionValue`, whose `ldc` constant it derives from the checked expression
+/// (`getenv(...)`), and the message-less `checkNotNull` used where the checked expression has no name
+/// — recorded here as `<no message>`. Comparing both pins the shape as well as the position. Reading
+/// the disassembly rather than the class bytes counts instructions that execute, not leftover
+/// constant-pool entries.
 fn assertion_sites(classes: &[(String, Vec<u8>)], tag: &str) -> Vec<(String, String)> {
     let work = common::scratch_dir().expect("allocate javap call-assertion fixture");
     let mut arguments = vec!["-p".to_string(), "-c".to_string()];
@@ -253,6 +294,11 @@ fn assertion_sites(classes: &[(String, Vec<u8>)], tag: &str) -> Vec<(String, Str
                     .clone()
                     .unwrap_or_else(|| "<no preceding constant>".to_string()),
             ));
+        }
+        // `x!!` uses the same intrinsic, but the fixture has none: every occurrence here is a
+        // narrowing kotlinc could not name.
+        if trimmed.contains("Intrinsics.checkNotNull:(Ljava/lang/Object;)V") {
+            sites.push((method.clone(), "<no message>".to_string()));
         }
     }
     // Declaration order is a compiler's own business; which method carries which guard is not.
@@ -318,47 +364,87 @@ fn guarded_positions_match_the_reference_compiler() {
     );
 }
 
-/// kotlinc's OTHER form: where the narrowed value has no name to report — a source-block branch, a
-/// `try` value, the merged value of a conditional in ARGUMENT position — it emits the message-less
-/// `Intrinsics.checkNotNull(Object)V` instead. krusty does not implement that form; this pins the gap
-/// so it is visible (and this assertion fails) the day it is closed.
+/// The message names the checked expression as kotlinc's does: a call renders `<jvm-name>(...)`, a
+/// field read its bare name, and a value with no name carries no message at all.
 #[test]
-fn the_message_less_form_is_not_implemented() {
-    let nameless = |classes: &[(String, Vec<u8>)], tag| {
-        let work = common::scratch_dir().expect("allocate javap fixture");
-        let mut arguments = vec!["-p".to_string(), "-c".to_string()];
-        for (internal, bytes) in classes {
-            let path = work.join(format!("{internal}.class"));
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).expect("create javap input directory");
-            }
-            std::fs::write(&path, bytes).expect("write javap input");
-            arguments.push(path.to_string_lossy().into_owned());
-        }
-        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        let text = common::javap(&borrowed).unwrap_or_else(|| panic!("javap failed for {tag}"));
-        let _ = std::fs::remove_dir_all(work);
-        text.lines()
-            .filter(|line| line.contains("Intrinsics.checkNotNull:(Ljava/lang/Object;)V"))
-            .count()
-    };
+fn every_guarded_message_is_derived_from_the_checked_expression() {
+    let sites = assertion_sites(&positions().krusty, "krusty");
+    assert!(!sites.is_empty(), "the fixture emitted no guard at all");
+    let unexpected: Vec<_> = sites
+        .iter()
+        .filter(|(_, message)| {
+            !matches!(
+                message.as_str(),
+                "getenv(...)"
+                    | "trim(...)"
+                    | "inferredReturn(...)"
+                    | "get(...)"
+                    | "separator"
+                    | "<no message>"
+            )
+        })
+        .collect();
     assert!(
-        nameless(&positions().reference, "kotlinc") >= 2,
-        "the fixture must exercise kotlinc's message-less form"
-    );
-    assert_eq!(
-        nameless(&positions().krusty, "krusty"),
-        0,
-        "krusty emits no message-less guard; `x!!` uses the same intrinsic but is absent here"
+        unexpected.is_empty(),
+        "unexpected guard message: {unexpected:?}"
     );
 }
 
+/// An ERASED GENERIC read from a Java class (`javaList[0]`) is where kotlinc's and krusty's types
+/// still differ: kotlinc calls the read itself non-null — the guard it emits at the read is what
+/// makes it so — while krusty keeps `T!` until the value reaches a declared position. Both guard the
+/// same value, one frame apart, so this pins the placement rather than claiming parity.
 #[test]
-fn every_guarded_message_is_derived_from_the_checked_call() {
-    let sites = assertion_sites(&positions().krusty, "krusty");
-    assert!(!sites.is_empty(), "the fixture emitted no guard at all");
+fn an_inferred_return_from_an_erased_generic_read_guards_at_the_use_site() {
+    const SOURCE: &str = r#"
+fun inferred(l: java.util.ArrayList<String>) = l[0]
+
+fun use(l: java.util.ArrayList<String>): Int {
+    val first: String = inferred(l)
+    return first.length
+}
+
+fun box(): String = "OK"
+"#;
+    let krusty = assertion_sites(
+        &common::expect_classes_with_stdlib(SOURCE, "Inferred"),
+        "krusty",
+    );
+    let reference = assertion_sites(&compile_reference(SOURCE, "Inferred"), "kotlinc");
     assert!(
-        sites.iter().all(|(_, message)| message == "getenv(...)"),
-        "every guarded site in the fixture checks a `System.getenv` result: {sites:?}"
+        reference
+            .iter()
+            .any(|(method, message)| method.contains("inferred") && message == "get(...)"),
+        "kotlinc guards inside the inferred-return function: {reference:?}"
+    );
+    assert!(
+        krusty
+            .iter()
+            .any(|(method, message)| method.contains("use") && message == "inferred(...)"),
+        "krusty guards where the value reaches a declared type: {krusty:?}"
+    );
+}
+
+/// The mapped-builtin members kotlinc resolves to a KOTLIN declaration — `kotlin.Any.toString()`,
+/// `kotlin.Enum.name` — are non-null, so narrowing one is not a narrowing at all and neither
+/// compiler guards it. Pinned separately because getting it wrong emits a guard that always passes,
+/// which the position differential alone would report only as a message mismatch.
+#[test]
+fn a_kotlin_builtin_member_is_not_a_platform_value() {
+    let guarded_builtin_members = |classes: &[(String, Vec<u8>)], tag| {
+        assertion_sites(classes, tag)
+            .into_iter()
+            .filter(|(method, _)| method.contains("builtinMembers"))
+            .count()
+    };
+    assert_eq!(
+        guarded_builtin_members(&positions().reference, "kotlinc"),
+        0,
+        "the reference compiler must treat these as non-null declarations"
+    );
+    assert_eq!(
+        guarded_builtin_members(&positions().krusty, "krusty"),
+        0,
+        "krusty must not guard a member Kotlin declares non-null"
     );
 }

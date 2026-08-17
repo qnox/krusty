@@ -346,6 +346,28 @@ fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>) -> Ty {
     }
 }
 
+/// Whether a JVM method is the physical face of a Kotlin BUILTIN declaration with a non-null result.
+///
+/// `toString()` is `kotlin.Any.toString(): String` on every receiver, and `java.lang.Enum.getName()`
+/// is `kotlin.Enum.name: String`. Both are redeclared by ordinary class files (`java.lang.Throwable`,
+/// `java.lang.CharSequence`, every enum), which would otherwise make them flexible. The other
+/// universal members (`hashCode`, `equals`, `ordinal`) return primitives and need no entry.
+fn kotlin_builtin_declares_non_null(owner: TypeName, name: &str, params: usize, ret: Ty) -> bool {
+    if params != 0
+        || !ret
+            .non_null()
+            .kotlin_class_internal()
+            .is_some_and(|internal| internal.matches("kotlin/String"))
+    {
+        return false;
+    }
+    match name {
+        "toString" => true,
+        "getName" | "name" => owner.matches("java/lang/Enum") || owner.matches("kotlin/Enum"),
+        _ => false,
+    }
+}
+
 /// Apply Java's unqualified flexibility inside a generic argument without discarding its semantic
 /// wrapper. A declaration variable stays a variable whose bound is flexible; use-site variance stays
 /// a projection whose interior is flexible.
@@ -1771,6 +1793,15 @@ impl JvmLibraries {
                         );
                     }
                     ret = java_type_nullability(ret, m.return_nullability);
+                    // A member a Kotlin BUILTIN declares is not a Java member, whatever class file it
+                    // is physically read from: `kotlin.Any.toString(): String` and
+                    // `kotlin.Enum.name: String` are non-null declarations, so a class file that
+                    // redeclares them (`java.lang.CharSequence.toString`, `java.lang.Enum.getName`)
+                    // must not re-introduce Java's flexibility — kotlinc resolves such a call to the
+                    // builtin and treats its result as non-null.
+                    if kotlin_builtin_declares_non_null(internal_name, &m.name, params.len(), ret) {
+                        ret = ret.non_null();
+                    }
                 }
                 // Kotlin metadata defines the SOURCE declarations. The class file only realizes
                 // those declarations physically. An unmatched method in a Kotlin class is compiler
@@ -3894,6 +3925,14 @@ impl JvmLibraries {
                     .as_ref()
                     .map(|signature| signature.ret)
                     .unwrap_or_else(|| function.ret.apply(getter.ret));
+                // The Java return metadata is re-applied here, so a member the Kotlin BUILTIN
+                // declares (`kotlin.Enum.name: String`) has to be committed again — see
+                // [`kotlin_builtin_declares_non_null`].
+                let ty = if kotlin_builtin_declares_non_null(cn, &getter.name, 0, ty) {
+                    ty.non_null()
+                } else {
+                    ty
+                };
                 getter.ret = ty;
                 overloads.push(PropertyInfo {
                     name: name.to_string(),
@@ -3941,6 +3980,13 @@ impl JvmLibraries {
                         .as_ref()
                         .map(|signature| signature.ret)
                         .unwrap_or_else(|| function.ret.apply(getter.ret));
+                    // As in the mapped-property arm above: a synthetic property whose accessor is a
+                    // Kotlin BUILTIN declaration keeps the builtin's non-null result.
+                    let ty = if kotlin_builtin_declares_non_null(owner, &getter.name, 0, ty) {
+                        ty.non_null()
+                    } else {
+                        ty
+                    };
                     getter.ret = ty;
                     let setter_name = crate::names::property_setter_name(name);
                     let setter = self
@@ -5352,6 +5398,15 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     .and_then(|signature| parse_concrete_field_gsig(signature, &f.descriptor))
                     .map(|ty| self.semanticize_jvm_type(ty))
                     .unwrap_or_else(|| field_desc_to_ty(&f.descriptor));
+                // A field declared by a JAVA class carries Java's flexible nullability, exactly as an
+                // INSTANCE field does (`java_type_nullability` at the shape site): `System.out` is
+                // `PrintStream!`, so committing it to a non-null type is a narrowing kotlinc guards. A
+                // Kotlin class's static keeps the nullability its metadata already stated.
+                let ty = if ci.meta.is_present() {
+                    ty
+                } else {
+                    java_type_nullability(ty, f.nullability)
+                };
                 let constant = f.const_value.as_ref().map(|value| LibraryConst {
                     ty,
                     value: Self::library_const(value),

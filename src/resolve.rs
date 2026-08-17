@@ -12912,7 +12912,7 @@ pub struct TypeInfo {
     /// the non-null world, not later in unrelated code that trusted the declaration. This records the
     /// SEMANTIC narrowing only; which expression shapes carry a runtime guard, and what its failure
     /// says, is lowering's decision (a call result names its callee, a plain value read has no name).
-    pub platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
+    pub platform_narrowings: std::collections::HashSet<ExprId>,
     /// Extension callables the checker resolved for a SYNTHESIZED call that has no source-call `ExprId` —
     /// a destructuring `componentN`, a `for`-loop `iterator`, a `+=` `plusAssign` — keyed by the receiver
     /// expression's `ExprId` (the destructured value / iterable / assignment target) and the operator
@@ -15675,7 +15675,7 @@ fn make_checker<'a>(
         resolved_enum_entries: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
-        platform_narrowings: HashMap::new(),
+        platform_narrowings: std::collections::HashSet::new(),
         synthetic_ext_calls: HashMap::new(),
         delegate_getvalue_targets: HashMap::new(),
         delegate_setvalue_targets: HashMap::new(),
@@ -18102,7 +18102,7 @@ struct Checker<'a> {
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     /// See [`TypeInfo::platform_narrowings`].
-    platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
+    platform_narrowings: std::collections::HashSet<ExprId>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
     delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     delegate_setvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
@@ -33894,16 +33894,88 @@ impl<'a> Checker<'a> {
     /// the same `expr_types` entry, so a caller that has already narrowed the type for a diagnostic
     /// cannot make the two disagree.
     fn narrow_platform_value(&mut self, expected: Ty, e: ExprId, position: PlatformNarrowing) {
-        if !matches!(self.expr_types[e.0 as usize], Ty::PlatformNullable(_)) {
-            return;
-        }
         if matches!(expected, Ty::PlatformNullable(_) | Ty::Error)
             || expected.is_nullable()
             || !expected.is_reference()
         {
             return;
         }
-        self.platform_narrowings.insert(e, position);
+        // A DECLARED type propagates into a conditional, so each branch is checked where it produces
+        // its value (measured: kotlinc guards inside the taken branch, before the merge, and a branch
+        // whose own type is already non-null is not guarded at all). A value ARGUMENT's expected type
+        // does not propagate that way — kotlinc checks the merged value.
+        if position == PlatformNarrowing::Declaration {
+            match self.file.expr(e) {
+                Expr::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    let (then_branch, else_branch) = (*then_branch, *else_branch);
+                    self.narrow_platform_branch(expected, then_branch);
+                    if let Some(else_branch) = else_branch {
+                        self.narrow_platform_branch(expected, else_branch);
+                    }
+                    return;
+                }
+                Expr::When { arms, .. } => {
+                    for body in arms.iter().map(|arm| arm.body).collect::<Vec<_>>() {
+                        self.narrow_platform_branch(expected, body);
+                    }
+                    return;
+                }
+                // The left side of an elvis is the value the test proved non-null; only the right
+                // side commits a platform value here.
+                Expr::Elvis { rhs, .. } => {
+                    let rhs = *rhs;
+                    self.narrow_platform_branch(expected, rhs);
+                    return;
+                }
+                Expr::Try { body, catches, .. } => {
+                    let arms: Vec<ExprId> = std::iter::once(*body)
+                        .chain(catches.iter().map(|catch| catch.body))
+                        .collect();
+                    for arm in arms {
+                        self.narrow_platform_branch(expected, arm);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if matches!(self.expr_types[e.0 as usize], Ty::PlatformNullable(_)) {
+            self.platform_narrowings.insert(e);
+        }
+    }
+
+    /// One branch of a conditional in a declared position. A BLOCK is transparent only on the way to
+    /// another conditional: measured against kotlinc, `if (c) { if (d) javaCall() else "a" }` is
+    /// checked inside the inner branch while `if (c) { javaCall() }` checks the block itself.
+    fn narrow_platform_branch(&mut self, expected: Ty, branch: ExprId) {
+        if let Expr::Block {
+            trailing: Some(trailing),
+            ..
+        } = self.file.expr(branch)
+        {
+            let trailing = *trailing;
+            if self.expression_is_conditional(trailing) {
+                self.narrow_platform_branch(expected, trailing);
+                return;
+            }
+        }
+        self.narrow_platform_value(expected, branch, PlatformNarrowing::Declaration);
+    }
+
+    /// Whether an expression is a conditional, or a block that exists only to hold one.
+    fn expression_is_conditional(&self, e: ExprId) -> bool {
+        match self.file.expr(e) {
+            Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } | Expr::Try { .. } => true,
+            Expr::Block {
+                trailing: Some(trailing),
+                ..
+            } => self.expression_is_conditional(*trailing),
+            _ => false,
+        }
     }
 
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
@@ -39679,6 +39751,14 @@ impl<'a> Checker<'a> {
                     None,
                 );
             } else {
+                // An extension's receiver is a declared position like any other: a platform value
+                // committed to a non-null receiver is guarded, which is what kotlinc emits (a MEMBER
+                // call's receiver is not — the invoke itself throws).
+                self.narrow_platform_value(
+                    selected_receiver,
+                    receiver_expression,
+                    PlatformNarrowing::Declaration,
+                );
                 self.expect_assignable(
                     selected_receiver,
                     rt,

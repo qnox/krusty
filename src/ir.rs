@@ -112,6 +112,21 @@ pub enum Callee {
     },
 }
 
+/// Which not-null assertion an [`IrExpr::NotNullAssert`] is, which is also its JVM shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NullCheck {
+    /// The source assertion `x!!`: `dup` + `Intrinsics.checkNotNull(Object)V`.
+    Source,
+    /// A PLATFORM value (`T!`) committed to a declared non-null type, where the checked expression
+    /// has a name kotlinc reports: `dup` + `ldc <name>` +
+    /// `Intrinsics.checkNotNullExpressionValue(Object, String)V`.
+    Named(String),
+    /// The same narrowing where the checked expression has NO name — a value block, a conditional's
+    /// merged result, a plain value read. kotlinc materializes the value into a local, checks it, and
+    /// reloads: `astore t; aload t; Intrinsics.checkNotNull(Object)V; aload t`.
+    Unnamed,
+}
+
 /// A compile-time constant (`IrConst` in Kotlin IR).
 #[derive(Clone, Debug, PartialEq)]
 pub enum IrConst {
@@ -462,17 +477,12 @@ pub enum IrExpr {
         params: Vec<Ty>,
         ret: Ty,
     },
-    /// The not-null assertion `operand!!` — yields `operand`, throwing if it is null. On the JVM this
-    /// is `kotlin/jvm/internal/Intrinsics.checkNotNull` applied to a duplicate of the value.
-    ///
-    /// `message` is set instead for the assertion a PLATFORM value (`T!`) gets when it is committed
-    /// to a declared non-null type: the same yields-or-throws semantics, but with the checked
-    /// expression's rendering (`getenv(...)`) carried into the failure, so the JVM form is
-    /// `Intrinsics.checkNotNullExpressionValue(value, message)`. Every pass treats the two alike —
-    /// only the emitted intrinsic and the `-X` option that removes it differ.
+    /// A not-null assertion: yields `operand`, throwing if it is null. Which assertion it is — the
+    /// source `operand!!` or the one a narrowed PLATFORM value gets — is [`NullCheck`]; every pass
+    /// treats them alike, and only the emitted intrinsic and the `-X` option that removes it differ.
     NotNullAssert {
         operand: ExprId,
-        message: Option<String>,
+        check: NullCheck,
     },
     /// A `lateinit` read: yields `operand`, throwing `UninitializedPropertyAccessException(name)` if it
     /// is still null. Emitted as `<operand>; dup; ifnonnull L; ldc name;
