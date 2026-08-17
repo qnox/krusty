@@ -3015,6 +3015,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   top-level type (`class Foo; class Outer { class Foo }`), ALL resolvers consistently pick the top-level
   (the signature-collection scope insert is skipped when the simple name already resolves), so the checker
   and codegen never disagree. Test: `tests/nested_type_scope_e2e.rs`.
+- **A classifier nested in an INTERFACE scopes exactly like one nested in a class.** `interface C {
+  class K; fun g(): K? }` is accepted by kotlinc: `K` is in scope for the interface's own member
+  signatures (and `C.K` from outside). The interface body parser previously hoisted a nested
+  classifier only when it was itself an interface, an annotation, or an implementor of the enclosing
+  interface — a plain nested `class`/`enum class`/`object` was parsed and silently DROPPED, so both
+  the member reference and the qualified outside reference read as unresolved (the exact shape of
+  intellij's `plugins/textmate/core` `interface Constants { enum class StringKey … }`). Interface
+  bodies now use the same `parse_and_register_nested_classifier` funnel as class/object bodies; the
+  historical reason for the drop (a nested helper calling a PRIVATE interface member) is handled by
+  the existing `access$` bridge synthesis and runs correctly
+  (`interface_nested_classifier_e2e::interface_nested_class_calls_private_interface_member`). Byte
+  parity with kotlinc holds for the minimal shape (`C` and `C$K`). Test:
+  `tests/interface_nested_classifier_e2e.rs`.
+- **A NESTED `value class` carries the full inline-class identity.** Three independent pieces, each
+  wrong separately: (1) the shared nested-classifier funnel never set `is_value` — only TOP-LEVEL
+  registration read the `value`/`inline` modifier — so `class C { @JvmInline value class V(val x:
+  Int) }` registered as a PLAIN class and miscompiled (public `<init>`, identity `equals`, no
+  `constructor-impl`/`box-impl`; a pre-existing hole for class owners that interface owners inherited
+  when they stopped dropping nested classifiers); (2) the value-class mangle hashes the declared
+  Kotlin FqName exactly as kotlinc spells it — dots throughout, so internal `I$V` hashes as `I.V`
+  (`fun f(): V?` in `interface I` → `f--MlldnU`, not the `$`-spelled `f-IBQktzQ`); (3) a
+  `JvmMethodSignature` in `@Metadata` records its name and desc INDEPENDENTLY, like kotlinc's
+  serializer: the name only when a realization renamed the method (mangle/`@JvmName`), the desc only
+  when the proto types don't pin the JVM descriptor — a mangled member whose value class BOXES
+  (nullable `V?` return) is name-only; an ERASED shape (`h(): V` → `()I`) keeps the desc. Owner
+  classes are byte-identical to kotlinc; the value-class BODY itself has a pre-existing member-ORDER
+  divergence (top-level ones diverge identically), so its test asserts the ABI surface. Test:
+  `tests/nested_value_class_e2e.rs`.
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a

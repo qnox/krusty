@@ -1777,17 +1777,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Hoist nested interfaces and supported interface subclasses.
-    fn register_interface_nested(&mut self, iface: &str, modifiers: &[String]) {
-        let start = self.file.decls.len();
-        let nested = self.parse_nested_type_decl();
-        let implements = nested.supertypes.iter().any(|s| s.name == iface)
-            || nested.base_class.as_deref() == Some(iface);
-        if nested.is_interface() || nested.is_annotation() || implements {
-            self.register_hoisted_nested_classifier(iface, start, nested, modifiers);
-        }
-    }
-
     fn parse_nested_type_decl(&mut self) -> ClassDecl {
         match self.kind() {
             TokenKind::KwClass => self.parse_class(),
@@ -3464,6 +3453,14 @@ impl<'a> Parser<'a> {
 
         if nested.kind == ClassKind::Class {
             nested.modality = modality_from_modifiers(modifiers);
+            // `value class` (and the legacy `inline class` spelling) — like top-level registration,
+            // `value`/`inline` is a MODIFIER consumed into `modifiers` before the `class` keyword.
+            // Without this a nested value class registers as a PLAIN class and miscompiles: a public
+            // `<init>` instead of `constructor-impl`/`box-impl`, identity `equals`, and unmangled
+            // member names at use sites.
+            nested.is_value = modifiers
+                .iter()
+                .any(|modifier| modifier == "inline" || modifier == "value");
         }
         if is_inner && supports_inner {
             nested.inner_of = Some(outer.to_string());
@@ -4062,6 +4059,14 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let imods = self.parse_member_decl_prefix();
+                // Nested classifiers (`class`/`object`/`interface`/`enum class`/…) share the class-body
+                // registration funnel: a nested classifier's identity comes from its lexical owner, not
+                // the kind of the enclosing declaration, so `interface C { class K; fun g(): K? }`
+                // hoists `C.K` exactly like a class owner would (kotlinc accepts these members).
+                // Interfaces provide no enclosing instance, so `inner` is unsupported here.
+                if self.parse_and_register_nested_classifier(&name, &imods, false) {
+                    continue;
+                }
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
@@ -4077,30 +4082,6 @@ impl<'a> Parser<'a> {
                             self.diags.error(p.span, "krusty: interface properties with an initializer/getter are not supported");
                         }
                         body_props.push(p);
-                    }
-                    // A sealed interface's nested SUBCLASSES (`sealed interface I { data object O : I;
-                    // data class C(…) : I }`) — hoist each to a top-level `I.O`/`I.C` (internal `I$O`/`I$C`),
-                    // like a nested type in a class body. Only a nested type that IMPLEMENTS the enclosing
-                    // interface is hoisted: a plain nested helper (`interface B { class Z { … b.priv() } }`)
-                    // may call a private interface member through a synthetic accessor krusty doesn't
-                    // synthesize, so those are still dropped (the file skips) rather than miscompiled.
-                    TokenKind::KwClass => {
-                        self.register_interface_nested(&name, &imods);
-                    }
-                    TokenKind::Ident
-                        if self.keyword_text_any(&["object", "interface"])
-                            || (self.keyword_text_any(&[
-                                "data",
-                                "enum",
-                                "annotation",
-                                "value",
-                            ]) && self.t.get(self.i + 1).map_or(false, |t| {
-                                // `data class` / `enum class` / … and also `data object` (Kotlin 1.9).
-                                t.kind == TokenKind::KwClass
-                                    || self.token_keyword_text(*t, "object")
-                            })) =>
-                    {
-                        self.register_interface_nested(&name, &imods);
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {

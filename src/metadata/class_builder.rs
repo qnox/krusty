@@ -990,13 +990,21 @@ pub fn build_class(
         // The `JvmMethodSignature` (f100) INTERNS before the annotations even though it SERIALIZES
         // after them — kotlinc's serializer writes the extension first, so a suspend member's
         // descriptor precedes `Lp/Mark;` in d2. Build both, then append in field order.
-        let sig = m
-            .jvm_sig
-            .as_ref()
-            // desc only (name derivable) unless a mangled realization renamed the method — a boxed
-            // nullable-primitive signature kotlinc records because the proto types alone don't pin
-            // the JVM descriptor.
-            .map(|sig| jvm_method_sig(st, m.jvm_sig_name.as_deref(), sig));
+        // Each half is independent, like kotlinc's serializer: the NAME rides along only when a
+        // realization renamed the method (value-class mangle, `@JvmName`), the DESC only when the
+        // proto types alone don't pin the JVM descriptor (erasure, boxed nullable primitive). A
+        // mangled member with a derivable descriptor (`f(): V?` — nullable value classes box) is
+        // name-only; a renamed-and-erased one carries both.
+        let sig = (m.jvm_sig.is_some() || m.jvm_sig_name.is_some()).then(|| {
+            let mut p = Pb::new();
+            if let Some(n) = m.jvm_sig_name.as_deref() {
+                p.field_varint(1, st.local(n) as u64); // JvmMethodSignature.name = 1
+            }
+            if let Some(d) = m.jvm_sig.as_deref() {
+                p.field_varint(2, st.local(d) as u64); // JvmMethodSignature.desc = 2
+            }
+            p
+        });
         // Function.annotation = 12 — the applied annotations, each an `Annotation.id` (f1) naming the
         // annotation class through the string table's `DESC_TO_CLASS_ID` form, plus its arguments.
         let annotations: Vec<Pb> = m
