@@ -2842,6 +2842,20 @@ fn bind_ext_ret(
     args: &[Ty],
     targs: &[Ty],
 ) -> Ty {
+    bind_ext_ret_tracking(source, gsig, receiver, args, targs).0
+}
+
+/// [`bind_ext_ret`] plus the bindings it made. A caller that reports the result as a TYPE — rather
+/// than emitting a call with it — needs to know whether the arguments actually determined the
+/// variables: an unbound one silently specializes to its bound, and `Any` is indistinguishable from
+/// a legitimately-inferred `Any` once the binding is discarded.
+fn bind_ext_ret_tracking(
+    source: &dyn SymbolSource,
+    gsig: &GenericSig,
+    receiver: Ty,
+    args: &[Ty],
+    targs: &[Ty],
+) -> (Ty, GSigBinds) {
     let mut binds = seeded_gsig_binds(gsig, targs);
     if let Some(recv_sig) = gsig.receiver {
         unify_ty(recv_sig, receiver, &mut binds);
@@ -2853,7 +2867,60 @@ fn bind_ext_ret(
     // A projection is a generic-argument constraint, never an expression value. Consume it while
     // materializing the selected callable's output: `Iterable<out Range>.first()` returns `Range`,
     // not the invalid top-level type `out Range`.
-    specialize_final_signature_output_type(source, gsig.ret, &binds)
+    let ret = specialize_final_signature_output_type(source, gsig.ret, &binds);
+    (ret, binds)
+}
+
+/// Whether the receiver and arguments PIN every type variable the signature declares to one
+/// concrete type.
+///
+/// Presence in the binding map is not the question. A variable can be "bound" to ITSELF — a `T?`
+/// receiver unified against a `T?` declaration self-binds — and it can be bound TWICE to types that
+/// disagree (`fun <T> Src.pick(a: T, b: T)` called with a `String` and an `Int`), where the first
+/// argument wins and the join is never taken. Both produce a confident-looking type that the full
+/// checker will not agree with, and a caller reporting one as a property's inferred type makes the
+/// compiler contradict itself. Emission is unaffected either way: an unbound variable erases to its
+/// bound, which is exactly what the call site emits.
+fn extension_bindings_are_determinate(
+    semantic: &GenericSig,
+    receiver: Ty,
+    args: &[Ty],
+    binds: &GSigBinds,
+) -> bool {
+    // Deliberately STRUCTURAL: `unify_ty` without a source performs no hierarchy walk and no SAM
+    // conversion, so a constraint that needs one (an `Iterable<T>` parameter answered by a `List<
+    // String>`) simply does not bind here and the call reports nothing. That is the safe direction —
+    // it costs an inferred type, never an incorrect one.
+    let names_a_variable = |ty: Ty| crate::types::ty_mentions_any_param(ty);
+    if semantic.formals.iter().any(|formal| {
+        binds
+            .get(formal.as_str())
+            .is_none_or(|&bound| names_a_variable(bound))
+    }) {
+        return false;
+    }
+    // Unify each position on its own: a formal reached from two positions must reach the same type
+    // from both, which the accumulated map cannot show once the first binding has taken.
+    let mut settled: GSigBinds = GSigBinds::new();
+    let positions = semantic
+        .receiver
+        .map(|shape| (shape, receiver))
+        .into_iter()
+        .chain(semantic.params.iter().copied().zip(args.iter().copied()));
+    for (shape, actual) in positions {
+        let mut one = GSigBinds::new();
+        unify_ty(shape, actual, &mut one);
+        for (formal, bound) in one {
+            if let Some(&previous) = settled.get(formal.as_str()) {
+                if previous != bound {
+                    return false;
+                }
+            } else {
+                settled.insert(formal, bound);
+            }
+        }
+    }
+    true
 }
 
 fn specialized_extension_return(lib: &dyn SemanticPlatform, o: &FunctionInfo, inferred: Ty) -> Ty {
@@ -3610,6 +3677,14 @@ pub struct MemberFacets {
     /// `args`/`type_args` (default/vararg-aware; admits `@InlineOnly` splice candidates), ready for the emit
     /// seam. A same-module extension is `None` (it emits through the module path, not a library callable).
     pub extension_call: Option<LibraryCallable>,
+    /// The RESULT of invoking the selected extension, for every declaration origin.
+    ///
+    /// [`Self::extension_call`] is an emit handle, and a same-module extension emits through the
+    /// module path rather than as a library callable, so it is absent there — but the semantic
+    /// result of the call is the same question for all origins and is answered here. Without it a
+    /// consumer asking only "what does this name return on this receiver" had to know which provider
+    /// declared the callable, which is a provenance test standing in for a semantic one.
+    pub extension_result: Option<Ty>,
     pub extension_property: Option<PropertyInfo>,
 }
 
@@ -3664,7 +3739,9 @@ impl Symbol {
         match self {
             Symbol::Member(f) => match f.call {
                 Some(call) => Some(call.ret),
-                None => f.extension_call.map(|call| call.ret),
+                // The emit handle first (it carries the call-site realization), then the result the
+                // selection itself produced — the only answer a same-module extension has.
+                None => f.extension_call.map(|call| call.ret).or(f.extension_result),
             },
             _ => None,
         }
@@ -3815,6 +3892,23 @@ pub struct ResolvedPropertySetter {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AmbiguousExtensionProperty;
+
+/// The emit-independent facts about a selected extension call. One computation feeds both the
+/// callable the backend emits and the type the front end reports, so the two cannot disagree.
+struct ExtensionCallShape {
+    vparams: Vec<Ty>,
+    args: Vec<Ty>,
+    spread_slot: Option<(usize, Ty)>,
+    /// The call supplies every value parameter; a defaulted call binds its return differently.
+    exact: bool,
+    ret: Ty,
+    /// Every type variable the overload declares was bound by the receiver or an argument. When it
+    /// is false the return is still the right thing to EMIT — an unbound variable erases to its
+    /// bound, which is what the call site produces — but it is not a type worth reporting as a
+    /// property's inferred type, because `Any`-from-failed-inference and a genuine `Any` are then
+    /// indistinguishable.
+    determined: bool,
+}
 
 impl<'a> SymbolResolver<'a> {
     pub fn new(lib: &'a dyn SemanticPlatform) -> Self {
@@ -4918,6 +5012,7 @@ impl<'a> SymbolResolver<'a> {
                     .as_ref()
                     .filter(|selected| selected.is_extension())
                     .filter(|selected| !matches!(selected.callable.origin, Origin::Module { .. }));
+
                 let extension_call = selected_extension.as_ref().and_then(|overload| {
                     let semantic_params = overload.semantic_params();
                     let arg_tys = args
@@ -4932,6 +5027,20 @@ impl<'a> SymbolResolver<'a> {
                         .collect::<Vec<_>>();
                     self.build_extension_callable(name, ty, &arg_tys, type_args, overload)
                 });
+                // The emit handle is origin-filtered; the RESULT is not. Selection has already chosen
+                // this overload, and which provider declared it does not change what it returns —
+                // but the handle answers first when it exists, so only ask when it cannot.
+                let extension_result = extension_call
+                    .is_none()
+                    .then(|| {
+                        selected_call
+                            .as_ref()
+                            .filter(|selected| selected.is_extension())
+                            .and_then(|overload| {
+                                self.extension_call_result(ty, args, type_args, overload)
+                            })
+                    })
+                    .flatten();
                 crate::trace_compiler!(
                     "resolve",
                     "extension symbol name={name} receiver={ty:?} selected={} realized={}",
@@ -4975,6 +5084,7 @@ impl<'a> SymbolResolver<'a> {
                     && property_ref.is_none()
                     && overloads.is_empty()
                     && extension_call.is_none()
+                    && extension_result.is_none()
                     && extension_property.is_none()
                 {
                     return None;
@@ -4989,6 +5099,7 @@ impl<'a> SymbolResolver<'a> {
                     overloads,
                     top_level_call: None,
                     extension_call,
+                    extension_result,
                     extension_property,
                 })))
             }
@@ -5049,6 +5160,7 @@ impl<'a> SymbolResolver<'a> {
                     overloads,
                     top_level_call,
                     extension_call: None,
+                    extension_result: None,
                     extension_property: None,
                 })))
             }
@@ -5357,14 +5469,23 @@ impl<'a> SymbolResolver<'a> {
     /// fact — an `inline` function has no `$default` synthetic (kotlinc materializes defaults by inlining),
     /// so it becomes a MUST-INLINE splice; a non-`inline` one binds the `name$default` synthetic (the
     /// backend appends placeholders + a bit-mask).
-    pub(crate) fn build_extension_callable(
+    /// Everything about a call to a selected extension overload that is independent of HOW the call
+    /// is emitted: the binding receiver, the context-stripped value parameters, the argument list
+    /// normalized for a spread, and the resulting type.
+    ///
+    /// The result must be computed exactly once. Recomputing it beside the emit builder produced two
+    /// definitions of "what does this extension return" that drifted immediately: a `vararg`
+    /// extension zipped its arguments against the ARRAY parameter, so `Src().firstOf("a", "bb")`
+    /// never bound `T` and typed the property `Any` — the class then carried `Ljava/lang/Object;`
+    /// where kotlinc writes `Ljava/lang/String;`, which a downstream module cannot use, and no box
+    /// test could see it because the program still ran.
+    fn extension_call_shape(
         &self,
-        name: &str,
         receiver: Ty,
         args: &[Ty],
         type_args: &[Ty],
         o: &FunctionInfo,
-    ) -> Option<LibraryCallable> {
+    ) -> ExtensionCallShape {
         let binding_receiver = self.extension_binding_receiver(receiver, o);
         let vparams = logical_value_params(&self.src, o, binding_receiver, type_args);
         // A `vararg` overload SPREAD over the trailing arguments is NOT a defaulted call — the caller
@@ -5397,13 +5518,72 @@ impl<'a> SymbolResolver<'a> {
         let spread_slot = spread.as_ref().map(|(_, slot, elem)| (*slot, *elem));
         let args: &[Ty] = spread.as_ref().map_or(args, |(a, _, _)| a.as_slice());
         if vparams.len() == args.len() {
-            let c = &o.callable;
             let semantic = o.semantic_signature();
-            let ret_ty = bind_ext_ret(&self.src, &semantic, binding_receiver, args, type_args);
+            let (ret_ty, binds) =
+                bind_ext_ret_tracking(&self.src, &semantic, binding_receiver, args, type_args);
             let ret_ty2 = specialized_extension_return(self.lib, o, ret_ty);
+            let determined =
+                extension_bindings_are_determinate(&semantic, binding_receiver, args, &binds);
+            return ExtensionCallShape {
+                vparams,
+                args: args.to_vec(),
+                spread_slot,
+                exact: true,
+                ret: ret_ty2,
+                determined,
+            };
+        }
+        // Defaulted call — omitted trailing/middle params. Bind the return with default-aware alignment.
+        let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
+        let ret_ty = specialized_extension_return(
+            self.lib,
+            o,
+            bind_defaulted_ext_ret(
+                &self.src,
+                o,
+                binding_receiver,
+                args,
+                type_args,
+                trailing_lambda,
+            ),
+        );
+        ExtensionCallShape {
+            vparams,
+            args: args.to_vec(),
+            spread_slot,
+            exact: false,
+            ret: ret_ty,
+            // A defaulted or vararg call aligns its arguments differently for the emit form; the
+            // default-aware binder answers what to emit, not whether inference succeeded, so a
+            // generic overload reached this way reports nothing.
+            determined: o.semantic_signature().formals.is_empty(),
+        }
+    }
+
+    pub(crate) fn build_extension_callable(
+        &self,
+        name: &str,
+        receiver: Ty,
+        args: &[Ty],
+        type_args: &[Ty],
+        o: &FunctionInfo,
+    ) -> Option<LibraryCallable> {
+        let shape = self.extension_call_shape(receiver, args, type_args, o);
+        let ExtensionCallShape {
+            vparams,
+            spread_slot,
+            exact,
+            ret: ret_ty,
+            ..
+        } = &shape;
+        let spread_slot = *spread_slot;
+        let args: &[Ty] = &shape.args;
+        if *exact {
+            let c = &o.callable;
+            let ret_ty2 = *ret_ty;
             crate::trace_compiler!(
                 "resolve",
-                "bind_extension_callable {}.{} gsig={} type_args={type_args:?} ret_ty={ret_ty:?} -> {ret_ty2:?}",
+                "bind_extension_callable {}.{} gsig={} type_args={type_args:?} ret={ret_ty2:?}",
                 c.owner.render(),
                 c.name,
                 o.generic_sig.is_some()
@@ -5420,20 +5600,7 @@ impl<'a> SymbolResolver<'a> {
             }
             return Some(c);
         }
-        // Defaulted call — omitted trailing/middle params. Bind the return with default-aware alignment.
-        let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
-        let ret_ty = specialized_extension_return(
-            self.lib,
-            o,
-            bind_defaulted_ext_ret(
-                &self.src,
-                o,
-                binding_receiver,
-                args,
-                type_args,
-                trailing_lambda,
-            ),
-        );
+        let ret_ty = *ret_ty;
         // Prefer a real `name$default` synthetic when it exists — even for an `inline` function. Many
         // `inline` stdlib/coroutine functions (`Mutex.withLock`) also emit a `$default` callable (the
         // `$$forInline` variant is what kotlinc splices); calling `$default` threads the `Continuation`
@@ -5458,7 +5625,7 @@ impl<'a> SymbolResolver<'a> {
                 c.vararg_elem = Some(element);
                 c.vararg_index = Some(slot);
             } else if !o.flags.suspend {
-                record_default_vararg_slot(&mut c, o.call_sig.vararg_index, &vparams, args);
+                record_default_vararg_slot(&mut c, o.call_sig.vararg_index, vparams, args);
             }
             return Some(c);
         }
@@ -5475,6 +5642,36 @@ impl<'a> SymbolResolver<'a> {
             return Some(callable);
         }
         None
+    }
+
+    /// The type a call to this selected extension overload produces.
+    ///
+    /// This is the return half of [`Self::build_extension_callable`] without the emit half: the same
+    /// binding receiver, the same generic binding from the arguments, the same specialization. It is
+    /// well defined for every origin, whereas the callable that CARRIES it exists only where the
+    /// call emits through a library declaration.
+    fn extension_call_result(
+        &self,
+        receiver: Ty,
+        args: &[CallArgKind],
+        type_args: &[Ty],
+        overload: &FunctionInfo,
+    ) -> Option<Ty> {
+        // The SAME shape the emit handle is built from — the argument normalization a `vararg` or a
+        // defaulted call needs is part of what the call returns, not part of how it is emitted.
+        let semantic_params = overload.semantic_params();
+        let arg_tys = args
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                semantic_params
+                    .get(index)
+                    .copied()
+                    .map_or_else(|| argument.ty(), |parameter| argument.type_for(parameter))
+            })
+            .collect::<Vec<_>>();
+        let shape = self.extension_call_shape(receiver, &arg_tys, type_args, overload);
+        shape.determined.then_some(shape.ret)
     }
 
     fn extension_binding_receiver(&self, receiver: Ty, overload: &FunctionInfo) -> Ty {

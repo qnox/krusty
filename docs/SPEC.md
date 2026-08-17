@@ -6654,3 +6654,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   where it should decline suppresses the diagnostic that would have rejected the source, and that is
   how it and the checker come to disagree.
   Tests: `tests/elvis_signature_inference_e2e.rs`.
+- **A same-module extension reports the RESULT of its call like any other origin.** Overload
+  selection already found and chose a module-declared extension, but the facet carrying a call's
+  result was an EMIT handle — a library callable — and a same-module extension emits through the
+  module path instead, so it was dropped there by a test on the declaration's origin. Asking "what
+  does this name return on this receiver" then answered nothing, and a member property initialized
+  through such a call could not be typed at all ("cannot infer the type of property"); the same call
+  in a local val was fine, because the full checker reaches it another way. The emit handle is
+  genuinely origin-specific and stays so — it describes how the call is realized — but the result is
+  the same question for every origin and is now reported alongside it, bound from the receiver and
+  the arguments by the same computation the handle uses, so the two cannot drift apart. A consumer
+  asking what a call RETURNS no longer branches on which provider declared the callable, which was a
+  provenance test standing in for a semantic one; the emit handle itself stays origin-specific,
+  because how a call is realized genuinely differs between a module and a dependency.
+
+  The result is reported only when the call's own receiver and arguments DETERMINED it. A `vararg`,
+  defaulted or context-parameter call aligns its arguments differently for the emit form, and a type
+  variable left unbound there specializes to its bound — reporting that would write
+  `Ljava/lang/Object;` into the field, the getter and the metadata where kotlinc writes the real
+  type, which a downstream module cannot consume and no box test can catch, since the program still
+  runs. Those calls keep the earlier "cannot infer the type of property" instead: refusing to answer
+  is recoverable, a wrong answer is not.
+  Tests: `tests/module_extension_signature_result_e2e.rs`.
