@@ -10496,44 +10496,9 @@ struct DeferredInferenceDriver<'a> {
     /// sharing a simple name in different packages cannot answer for each other.
     by_member: &'a HashMap<(TypeName, String), DeclKey>,
     source_order: &'a SourceOrderIndex,
-    /// One checker run per CLASS, keyed by its declaration.
-    ///
-    /// A class body is resolved as a whole because its members are: `check_class` types every
-    /// member, so running it once per member both repeats the work and makes a sibling that reads
-    /// the member under computation close a FALSE cycle — `companion object { var backing = 10; val
-    /// DERIVED get() = C.backing * 2 }` declined `backing`, because typing it typed `DERIVED`,
-    /// which demanded `backing` back. One run answers every member of the class.
-    class_runs: std::cell::RefCell<HashMap<DeclKey, Option<ClassRunTypes>>>,
 }
 
 impl DeferredInferenceDriver<'_> {
-    /// The expression types one run over this member's class recorded, computed at most once.
-    fn class_run(
-        &self,
-        entry: &DeferredProperty,
-        demand: &dyn Fn(&str) -> Option<Ty>,
-        demand_member: &dyn Fn(Ty, &str) -> Option<Ty>,
-    ) -> Option<ClassRunTypes> {
-        let owner = DeclKey::declaration(entry.file_index, entry.key.decl);
-        if let Some(cached) = self.class_runs.borrow().get(&owner) {
-            return cached.clone();
-        }
-        // Reserve the slot before running: the run types every member, and one of them reaching
-        // back here must not start a second run of the same class.
-        self.class_runs.borrow_mut().insert(owner, None);
-        let types = infer_class_member_types(
-            &self.files[entry.file_index as usize],
-            entry.file_index,
-            DeclId(entry.key.decl),
-            self.table,
-            demand,
-            demand_member,
-        )
-        .map(std::rc::Rc::new);
-        self.class_runs.borrow_mut().insert(owner, types.clone());
-        types
-    }
-
     fn resolve(&self, key: DeclKey) -> Resolution {
         let Some(entry) = self.deferred.get(&key).copied() else {
             return Resolution::Declined(DeclineReason::Untypeable);
@@ -10557,15 +10522,18 @@ impl DeferredInferenceDriver<'_> {
                         rejects: &|name| !self.readable_from(entry, name),
                     },
                 ),
-                DeferredKind::Member(_) => self
-                    .class_run(entry, &demand, &demand_member)
-                    .and_then(|types| types.get(expression.0 as usize).copied())
-                    .map(|inferred| {
-                        let inferred =
-                            withheld_declaration_ty(self.table, entry.file_index, inferred);
-                        withheld_construction_ty(file, expression, &[], self.table, inferred)
-                    })
-                    .unwrap_or(Ty::Error),
+                DeferredKind::Member(_) => infer_class_member_ty(
+                    file,
+                    entry.file_index,
+                    DeclId(entry.key.decl),
+                    expression,
+                    self.table,
+                    EngineSeams {
+                        demand: &demand,
+                        demand_member: &demand_member,
+                        rejects: &|name| !self.readable_from(entry, name),
+                    },
+                ),
             };
             let inferred = inferred_declaration_ty(inferred);
             (inferred != Ty::Error).then_some(inferred)
@@ -10623,13 +10591,6 @@ impl DeferredInferenceDriver<'_> {
         if from.scope_binds(name) {
             return None;
         }
-        if self
-            .by_name
-            .get(name)
-            .is_some_and(|key| self.class_run_in_progress(*key))
-        {
-            return None;
-        }
         if !self.readable_from(from, name) {
             return None;
         }
@@ -10650,25 +10611,7 @@ impl DeferredInferenceDriver<'_> {
             .owner_chain(owner)
             .into_iter()
             .find_map(|declaring| self.by_member.get(&(declaring, name.to_string())))?;
-        // A member of the class whose run is IN PROGRESS is being typed by that very run: a sibling
-        // reading it (`val DERIVED get() = C.backing * 2` beside `var backing = 10`) must not ask
-        // the engine for it again, which would re-enter a declaration already being computed and
-        // decline the whole class as recursive. The run resolves it.
-        if self.class_run_in_progress(key) {
-            return None;
-        }
         self.resolve(key).ty()
-    }
-
-    /// Whether `key`'s class is mid-run.
-    fn class_run_in_progress(&self, key: DeclKey) -> bool {
-        key.member != DeclKey::OWN
-            && matches!(
-                self.class_runs
-                    .borrow()
-                    .get(&DeclKey::declaration(key.file, key.decl)),
-                Some(None)
-            )
     }
 
     /// Whether `owner` or any of its supertypes declares a property spelled `name`, whatever its
@@ -10794,7 +10737,6 @@ fn resolve_deferred_properties(
             by_name: &by_name,
             by_member: &by_member,
             source_order: &source_order,
-            class_runs: std::cell::RefCell::new(HashMap::new()),
         };
         deferred
             .iter()
@@ -11162,9 +11104,6 @@ fn declaration_body_declines(file: &File, expression: ExprId, expr_types: &[Ty])
     left.is_numeric() && right.is_numeric() && left != right
 }
 
-/// Expression types recorded by one checker run over a class.
-type ClassRunTypes = std::rc::Rc<Vec<Ty>>;
-
 /// The engine's seams into one checker run.
 ///
 /// Grouped rather than passed one by one: they are three views of a single question — what does the
@@ -11180,47 +11119,92 @@ struct EngineSeams<'a> {
     rejects: &'a dyn Fn(&str) -> bool,
 }
 
-/// Type a class-body declaration by running the checker over its OWNING CLASS.
+/// Type ONE class-body declaration in its class's checking context.
 ///
-/// A member's initializer resolves against the class's type parameters, its dispatch receiver, its
-/// sibling members and the constructors in scope — the context `check_class` establishes. A scope
-/// assembled by hand gets constructor selection wrong in ways that compile and then throw:
-/// `class Cell<T>(val value: T, val flag: Boolean) { constructor(n: Int, v: T) }` with
-/// `val cell = Cell(5, "tag")` bound `T` from the PRIMARY constructor and emitted
-/// `Cell<Integer>` for a `Cell<String>`, a `checkcast` that fails on first read where kotlinc runs.
-fn infer_class_member_types(
+/// `check_class` validates members against the types the symbol table already holds; it does not
+/// recompute them, so running it while those types are placeholders leaves every initializer
+/// `Ty::Error` with no diagnostic to show for it. What a member's body actually needs is the
+/// context its class establishes — the class's type parameters, the dispatch receiver and `this`
+/// labels, and its sibling members as scoped properties — and then ordinary expression resolution,
+/// which is what the enclosing declaration would give it.
+fn infer_class_member_ty(
     file: &File,
     file_index: u32,
     owner: DeclId,
+    expression: ExprId,
     table: &SymbolTable,
-    demand: &dyn Fn(&str) -> Option<Ty>,
-    demand_member: &dyn Fn(Ty, &str) -> Option<Ty>,
-) -> Option<Vec<Ty>> {
+    engine: EngineSeams<'_>,
+) -> Ty {
+    let EngineSeams {
+        demand,
+        demand_member,
+        rejects,
+    } = engine;
     let Decl::Class(class) = file.decl(owner) else {
-        return None;
+        return Ty::Error;
     };
     let mut scratch = DiagSink::new();
     let mut checker = make_checker(file, file_index, None, table, &mut scratch);
-    checker.demand_name = Some(&demand);
-    checker.demand_member = Some(&demand_member);
+    checker.demand_name = Some(demand);
+    checker.demand_member = Some(demand_member);
+    checker.demand_rejects = Some(rejects);
     checker.inference_only = true;
     checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     checker.set_anonymous_lexical_class_context(owner);
+    let Some(internal) = checker
+        .same_package_class(&class.name)
+        .map(ClassSig::internal_name)
+    else {
+        return Ty::Error;
+    };
+    // The dispatch rung carries the APPLIED type (`C<T>`, not the raw `C`), which is what member
+    // bodies resolve against.
+    let class_tparams = TParams::symbolic_from_decl_with(
+        &class.type_params,
+        &class.type_param_bounds,
+        &class_internal_resolver(checker.syms),
+    )
+    .alpha_renamed_declaration(
+        &class.type_params,
+        checker.syms.compilation_id,
+        file_index,
+        class.span.lo,
+    );
+    let dispatch = Ty::obj_args_name(
+        internal,
+        &class
+            .type_params
+            .iter()
+            .map(|name| class_tparams.bound(name))
+            .collect::<Vec<_>>(),
+    );
     let root = CheckerScope::root();
-    checker.check_class(&root, class, owner);
-    if checker.inference_incomplete {
-        return None;
+    let dispatch_scope = root.child(ScopeKind::Function {
+        receiver: Some(dispatch),
+    });
+    let scope = &dispatch_scope;
+    scope.declare_tparams(&class.type_params, &class_tparams, |_| false);
+    checker
+        .this_labels
+        .extend(class_receiver_labels(class, checker.syms, Some(dispatch)));
+    let properties = checker.scoped_properties(scope, internal);
+    for property in &properties {
+        checker.declare_scoped_property(scope, property, true);
     }
-    let mut types = std::mem::take(&mut checker.expr_types);
-    // A body the declaration rules refuse to publish reads as undetermined here, exactly as it
-    // would from a run of its own.
-    for index in 0..types.len() {
-        let expression = ExprId(index as u32);
-        if declaration_body_declines(file, expression, &types) {
-            types[index] = Ty::Error;
-        }
+    let inferred =
+        checker.with_ret_allowed(Ty::Unit, false, |checker| checker.expr(scope, expression));
+    let declines = checker.inference_incomplete
+        || declaration_body_declines(file, expression, &checker.expr_types);
+    let types = std::mem::take(&mut checker.expr_types);
+    drop(checker);
+    // Diagnostics are NOT the signal here. Resolving one member reaches siblings whose own types
+    // are still placeholders, so this run reports errors the authoritative check will not; the type
+    // the expression itself got is what decides.
+    if declines {
+        return Ty::Error;
     }
-    Some(types)
+    let inferred = withheld_declaration_ty(table, file_index, inferred);
+    withheld_construction_ty(file, expression, &types, table, inferred)
 }
 
 /// Type a top-level declaration by running the checker over the DECLARATION, not over a scope
