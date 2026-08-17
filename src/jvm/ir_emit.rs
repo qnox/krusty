@@ -10887,6 +10887,21 @@ impl<'a> JvmSignatureFormatter<'a> {
             Ty::InProjection(inner) => Some(format!("-{}", self.ty_at(inner, wildcards)?)),
             Ty::OutProjection(inner) => Some(format!("+{}", self.ty_at(inner, wildcards)?)),
             Ty::Fun(signature) => self.function_ty(signature, wildcards),
+            // `kotlin.Array<E>` has no JVM class: its realization is the ARRAY type `[E`, and that is
+            // how a signature must spell it. Writing `Lkotlin/Array<…>;` names a class no loader can
+            // resolve, so any reader of the attribute (reflection, a Java consumer, a decompiler)
+            // fails on it. kotlinc writes `[` + the element's signature — and, since a signature that
+            // adds nothing over the descriptor is omitted entirely, `Array<String>` ends up with no
+            // attribute at all while `Array<T>` keeps `[TT;`.
+            Ty::Obj(owner, arguments) if owner.matches("kotlin/Array") && arguments.len() == 1 => {
+                // The element's own variance is not written: a JVM array type has no argument list to
+                // put it on. `Array<out String>` erases to `[Ljava/lang/String;`, as kotlinc emits.
+                let element = match &arguments[0] {
+                    Ty::InProjection(inner) | Ty::OutProjection(inner) => inner,
+                    argument => argument,
+                };
+                Some(format!("[{}", self.ty_at(element, wildcards)?))
+            }
             Ty::Obj(owner, arguments) => {
                 let internal = owner.render();
                 let jvm = crate::jvm::names::classfile_internal_name(&internal);
@@ -11033,6 +11048,21 @@ fn member_semantic_signature(params: &[Ty], ret: Ty) -> Option<String> {
 }
 
 fn method_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    fid: u32,
+    f: &crate::ir::IrFunction,
+) -> Option<String> {
+    let signature = method_signature_shape(formatter, ir, fid, f)?;
+    // A `Signature` attribute exists to say what the DESCRIPTOR cannot — a type variable, a type
+    // argument, a wildcard. One that spells the descriptor back carries nothing, and kotlinc omits it:
+    // `fun a(x: Array<String>)` signs `([Ljava/lang/String;)V`, which is already its descriptor, so
+    // the attribute is absent. (Only equality is tested, so a shape whose descriptor is computed
+    // differently — suspend, value-class mangling — simply keeps its attribute.)
+    (signature != ir_method_desc(&f.params, &f.ret)).then_some(signature)
+}
+
+fn method_signature_shape(
     formatter: &JvmSignatureFormatter<'_>,
     ir: &IrFile,
     fid: u32,
