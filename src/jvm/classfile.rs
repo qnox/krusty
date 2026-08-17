@@ -3630,12 +3630,28 @@ impl CodeBuilder {
         }
     }
     pub fn push_float(&mut self, v: f32, cw: &mut ClassWriter) {
-        let i = cw.const_float(v);
-        self.ldc(i); // float is one slot
+        // kotlinc (ASM `InstructionAdapter`) emits the short const ops for the EXACT bit patterns
+        // of 0.0f/1.0f/2.0f — a bit test, so `-0.0f` (sign bit set) stays an `ldc` constant.
+        match v.to_bits() {
+            0x0000_0000 => self.op(0x0b, 1), // fconst_0
+            0x3f80_0000 => self.op(0x0c, 1), // fconst_1
+            0x4000_0000 => self.op(0x0d, 1), // fconst_2
+            _ => {
+                let i = cw.const_float(v);
+                self.ldc(i); // float is one slot
+            }
+        }
     }
     pub fn push_double(&mut self, v: f64, cw: &mut ClassWriter) {
-        let i = cw.const_double(v);
-        self.op_u2(0x14, i, 2); // ldc2_w
+        // Same bit-pattern rule as `push_float`; doubles only have `dconst_0`/`dconst_1`.
+        match v.to_bits() {
+            0x0000_0000_0000_0000 => self.op(0x0e, 2), // dconst_0
+            0x3ff0_0000_0000_0000 => self.op(0x0f, 2), // dconst_1
+            _ => {
+                let i = cw.const_double(v);
+                self.op_u2(0x14, i, 2); // ldc2_w
+            }
+        }
     }
     pub fn push_string(&mut self, s: &str, cw: &mut ClassWriter) {
         let i = cw.const_string(s);

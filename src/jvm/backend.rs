@@ -888,6 +888,7 @@ fn facade_package_metadata_inner(
             jvm_desc,
             inline: f.is_inline(),
             operator: f.is_operator(),
+            infix: f.is_infix(),
             type_params: f
                 .type_params
                 .iter()

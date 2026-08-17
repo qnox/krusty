@@ -757,7 +757,14 @@ pub struct FunDecl {
     pub operator_span: Option<Span>,
     /// 1-based source line of the `fun` declaration (from `span.lo`), for its `LineNumberTable`.
     /// 0 = unknown (no debug table emitted). Filled by the same parser post-pass as `Class::decl_line`.
+    ///
+    /// NOTE: for an EXPRESSION body the post-pass rewrites this to the expression's line (kotlinc
+    /// maps the method's entry there); the unrewritten declaration line lives in [`Self::sig_line`].
     pub decl_line: u32,
+    /// 1-based source line of the declaration ITSELF (`span.lo`), never body-rewritten. kotlinc maps
+    /// a `$default` stub's entry pc to this line, which differs from [`Self::decl_line`] exactly when
+    /// an expression body starts on a later line than the signature. Filled by the same post-pass.
+    pub sig_line: u32,
     /// 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` function's implicit
     /// `return` to this line in the `LineNumberTable`. 0 = unknown / expression body. Filled by the
     /// same parser post-pass as `decl_line`.

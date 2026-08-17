@@ -1085,14 +1085,6 @@ pub fn build_class(
         })
         .collect();
 
-    // Class.annotation = f25. Build after members so annotation names/values follow accessor
-    // signatures in the shared string table, matching kotlinc's declaration order.
-    let annotation_msgs: Vec<Pb> = tail
-        .annotations
-        .iter()
-        .map(|annotation| crate::metadata::builder::annotation_pb(&mut st, annotation))
-        .collect();
-
     // A `@JvmInline value class`'s underlying property name + type (`Class` f17/f18). Interned with the
     // members (before the companion/nested tail) so the d2 order matches kotlinc.
     let inline_underlying: Option<(u32, Pb)> = tail
@@ -1110,8 +1102,18 @@ pub fn build_class(
         .iter()
         .map(|d| st.class_id_from_desc(d))
         .collect();
-    // The module name (f101) interns LAST — kotlinc places it at the end of d2.
+    // The module name (f101) interns after the sealed ids — kotlinc places it after every
+    // structural string.
     let module_idx = tail.module_name.map(|m| st.local(m));
+    // Class.annotation = f25. kotlinc interns the annotation strings LAST of all — after nested +
+    // companion names, sealed subclass ids, and the module name (measured on 2.4.10: an annotated
+    // class under `-module-name` puts the module string BEFORE the annotation descriptor) — even
+    // though the `annotation` FIELD serializes before all of those.
+    let annotation_msgs: Vec<Pb> = tail
+        .annotations
+        .iter()
+        .map(|annotation| crate::metadata::builder::annotation_pb(&mut st, annotation))
+        .collect();
 
     // Assemble the `Class` message in FIELD order: f1 flags, f3 fq_name, f4 companionObjectName,
     // f6 supertype, f7 nestedClassName (packed repeated int32), f8 ctors, f9 functions, f10 properties,

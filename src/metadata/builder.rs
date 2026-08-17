@@ -48,6 +48,9 @@ pub struct FnMeta {
     /// in metadata; omitting it makes a consuming Kotlin module reject indexed/call conventions even
     /// though the facade's JVM method is present.
     pub operator: bool,
+    /// `infix fun` — sets `Function.flags` `IS_INFIX` (bit 9). Same metadata-only story as
+    /// `operator`: without it a consumer rejects the `a then b` call form.
+    pub infix: bool,
     /// Declared type parameters in order `(name, reified)` — emitted as the `Function.type_parameter`
     /// table (field 4); their indices are the `Type.type_parameter` ids used by generic
     /// receiver/parameter/return types and `is`-conclusions in the contract.
@@ -328,8 +331,8 @@ pub(crate) fn annotation_pb(st: &mut StringTable, annotation: &crate::ir::Applie
 fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     let mut p = Pb::new();
     // Function.flags = 9 — emitted only when non-default (`6` = public final is the proto default).
-    // Bit 13 = IS_SUSPEND, bit 10 = IS_INLINE, bit 8 = IS_OPERATOR; the visibility bits ride along
-    // (final modality = 0).
+    // Bit 13 = IS_SUSPEND, bit 10 = IS_INLINE, bit 9 = IS_INFIX, bit 8 = IS_OPERATOR; the
+    // visibility bits ride along (final modality = 0).
     // The field is elided at the public-final default (6) — an `internal fun`'s 0 is explicit.
     let vis: u64 = match f.visibility {
         crate::types::Visibility::Internal => 0,
@@ -341,6 +344,7 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         | (vis << 1)
         | (u64::from(f.suspend) << 13)
         | (u64::from(f.inline) << 10)
+        | (u64::from(f.infix) << 9)
         | (u64::from(f.operator) << 8);
     p.field_varint(2, st.local(&f.name) as u64); // Function.name = 2
                                                  // The function's type-parameter table (Function.type_parameter = 4): indices are the
@@ -781,6 +785,7 @@ mod tests {
                 contract: None,
                 inline: false,
                 operator: false,
+                infix: false,
                 type_params: Vec::new(),
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
@@ -822,6 +827,7 @@ mod tests {
                 contract: None,
                 inline: false,
                 operator: false,
+                infix: false,
                 type_params: Vec::new(),
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
@@ -1021,6 +1027,7 @@ mod tests {
                 jvm_desc: Some("(LRefinement;Ljava/lang/Object;)Z".into()),
                 inline: true,
                 operator: false,
+                infix: false,
                 type_params: vec![("T".into(), false), ("R".into(), true)],
                 semantic_type_params: vec!["T".into(), "R".into()],
                 type_param_bounds: Vec::new(),
@@ -1065,6 +1072,7 @@ mod tests {
                 contract: None,
                 inline: false,
                 operator: false,
+                infix: false,
                 type_params: Vec::new(),
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),

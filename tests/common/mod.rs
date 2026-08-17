@@ -409,6 +409,19 @@ pub fn compile_in_process_metadata_cp(
     stem: &str,
     cp_jars: &[PathBuf],
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    compile_in_process_metadata_cp_module(src, stem, cp_jars, "main")
+}
+
+/// [`compile_in_process_metadata_cp`] under an explicit module name (kotlinc `-module-name`), for
+/// byte-identity fixtures where the `@Metadata` module-name string participates in the payload —
+/// e.g. its d2 intern position relative to class annotation strings.
+#[allow(dead_code)]
+pub fn compile_in_process_metadata_cp_module(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    module_name: &str,
+) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
     use krusty::frontend::{check_file, collect_signatures_with_cp};
     use krusty::jvm::ir_emit::EmitRun;
@@ -443,12 +456,12 @@ pub fn compile_in_process_metadata_cp(
         &mut ir,
         file,
         &facade,
-        "main",
+        module_name,
         &syms,
         &mut continuation_metadata,
     )
     .ok()?;
-    let mut opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone());
+    let mut opts = krusty::jvm::backend::shipping_emit_options(stem, module_name, None, cp.clone());
     // This differential helper tests the metadata writer itself, so keep that feature enabled even
     // when `KRUSTY_NO_CLASS_METADATA` asks shipping callers to omit it for a diagnostic bisect. All
     // other fields still come from the shared shipping constructor and therefore cannot drift.
@@ -459,7 +472,7 @@ pub fn compile_in_process_metadata_cp(
     // fixtures are unaffected, and a future fixture mixing a class with top-level functions gets
     // the same facade record a real build would.
     let metadata =
-        krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir, "main");
+        krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir, module_name);
     let outputs = krusty::jvm::ir_emit::emit_all_with_opts_and_metadata(
         &ir,
         &facade,
@@ -3264,6 +3277,45 @@ pub fn metadata_diff_against_kotlinc_cp(
     let reference = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
 
     let classes = compile_in_process_metadata_cp(src, name, cp_jars)
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let (_, actual) = classes
+        .iter()
+        .find(|(n, _)| n == class)
+        .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    Some(compare_kotlin_metadata(name, class, actual, &reference))
+}
+
+/// [`metadata_diff_against_kotlinc_cp`] with BOTH sides compiled under an explicit module name
+/// (kotlinc `-module-name <name>`). The module-name string is part of the `@Metadata` payload —
+/// `classModuleName`/`packageModuleName` (f101) plus its d2 intern position — so fixtures probing
+/// it cannot ride the default-module helper, which elides the string entirely.
+#[allow(dead_code)]
+pub fn metadata_diff_against_kotlinc_module(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+    module_name: &str,
+) -> Option<Result<(), String>> {
+    let dir = scratch_dir()?;
+    let kref = dir.join("ref");
+    std::fs::create_dir_all(&kref).ok()?;
+    let src_path = dir.join(format!("{name}.kt"));
+    std::fs::write(&src_path, src).ok()?;
+    let args = vec![
+        "-d".to_string(),
+        kref.to_string_lossy().into_owned(),
+        "-module-name".to_string(),
+        module_name.to_string(),
+        src_path.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = kotlinc_compile(&args)?;
+    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+    let reference = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
+
+    let classes = compile_in_process_metadata_cp_module(src, name, cp_jars, module_name)
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     let (_, actual) = classes
         .iter()

@@ -6745,3 +6745,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   runs. Those calls keep the earlier "cannot infer the type of property" instead: refusing to answer
   is recoverable, a wrong answer is not.
   Tests: `tests/module_extension_signature_result_e2e.rs`.
+- **Six byte-parity rules measured off intellij's `icons-api` module (kotlinc 2.4.10).**
+  (1) Float/double constants use the short ops for the EXACT bit patterns of 0.0f/1.0f/2.0f
+  (`fconst_0/1/2`) and 0.0/1.0 (`dconst_0/1`) — a bit test, so `-0.0` keeps its `ldc`/`ldc2_w`,
+  mirroring what `push_int` already did for integers. (2) `infix fun` publishes `Function.flags`
+  bit 9 (`IS_INFIX`) in `@Metadata` — facade and class member alike; without it a consuming module
+  rejects the `a f b` call form (the flag exists nowhere else). (3) A class's `@Metadata` d2 has
+  a fixed intern tail: members, nested-class names, companion, sealed subclass ids, module name,
+  and the class ANNOTATION strings LAST — even though `Class.annotation` (f25) serializes before
+  most of those fields. (4) A `$default` stub's one-entry LineNumberTable points at the
+  DECLARATION line (`fun …`), while the real method maps to its expression body's line — the two
+  differ exactly when the body starts on a later line than the signature (`fn_sig_lines` vs the
+  body-attributed `fn_decl_lines`). (5) A top-level extension property's accessors carry a
+  LocalVariableTable naming the receiver `$this$<property>` (plus context params and the setter's
+  value parameter) — the same shape extension functions already had. (6) An interface emits its
+  members in SOURCE order, a property's accessors at the property's declared position (getter
+  before setter), synthesized members trailing — not functions-then-accessors.
+  Residues deliberately left open: a block-bodied extension-property SETTER still misses kotlinc's
+  closing-brace LineNumberTable entry, reference-receiver accessors miss the
+  `Intrinsics.checkNotNullParameter` prologue (moot under `-Xno-param-assertions`), and FILE
+  FACADES still group property accessors after functions (the interface rule likely extends there).
+  Tests: `tests/iconsapi_byte_residue_e2e.rs`.
