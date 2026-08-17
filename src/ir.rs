@@ -2117,6 +2117,31 @@ impl IrFile {
             .get(&crate::types::type_name(internal))
     }
 
+    /// Whether the class's declared type parameter `name` admits `null` — an unbounded `<T>` (implicitly
+    /// `Any?`) or one whose every declared upper bound is nullable. kotlinc treats a value typed by a
+    /// NON-null-bounded parameter as an ordinary non-null reference, so its field, accessors and
+    /// constructor parameter carry `@NotNull` and its parameters are null-checked.
+    ///
+    /// Reads the RESOLVED bounds recorded in the class's generic signature; `Ty::upper_bound_admits_null`
+    /// walks a bound that is itself a parameter (`<A : Cargo, B : A>`). `true` when the class declares no
+    /// generic signature — a non-generic class has no such parameter to ask about.
+    pub fn class_type_param_admits_null(&self, internal: &str, name: &str) -> bool {
+        self.class_signatures
+            .get(&crate::types::type_name(internal))
+            .and_then(|signature| {
+                signature
+                    .type_params
+                    .iter()
+                    .find(|parameter| parameter.name == name)
+            })
+            .is_none_or(|parameter| {
+                !parameter
+                    .bounds
+                    .iter()
+                    .any(|(bound, _)| !bound.upper_bound_admits_null())
+            })
+    }
+
     /// Record the JVM owner a data-class field's `hashCode()` dispatches on (see `data_hashcode_owners`).
     pub fn set_data_hashcode_owner(&mut self, class_internal: &str, field: &str, owner: String) {
         self.data_hashcode_owners
