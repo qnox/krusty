@@ -496,6 +496,7 @@ mod tests {
 
     fn type_shape(is_public: bool) -> LibraryType {
         LibraryType {
+            is_kotlin: true,
             access: if is_public {
                 crate::libraries::ClassifierAccess::Public
             } else {

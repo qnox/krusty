@@ -2081,6 +2081,12 @@ impl ResolvedSymbols {
 #[derive(Clone)]
 pub struct LibraryType {
     pub access: ClassifierAccess,
+    /// This classifier is a KOTLIN declaration: a current-module class, or a classpath class whose
+    /// class file carries `@Metadata`. A Java classifier (no metadata) is `false`. `-jvm-default`
+    /// compatibility emission reads this: a Kotlin interface's concrete member participates in the
+    /// default-method compatibility surface (bridges/forwarders), while a JAVA default method never
+    /// does — kotlinc emits no forwarder for `java.util.function.Function.andThen`.
+    pub is_kotlin: bool,
     /// Source file that declares this classifier in the current compilation module. Dependency and
     /// platform classifiers leave it unset. Core accessibility uses this for top-level `private`.
     pub source_file: Option<u32>,
@@ -2221,6 +2227,9 @@ impl LibraryType {
     /// query whose answer could disagree with the record.
     pub fn declaration_header() -> Self {
         Self {
+            // The header commits existence only; the provider's full record supplies the real
+            // declaration facts, this one included.
+            is_kotlin: false,
             access: ClassifierAccess::Public,
             source_file: None,
             is_nested: false,
@@ -2802,6 +2811,7 @@ mod tests {
 
     fn ty_with<F: FnOnce(&mut super::LibraryType)>(f: F) -> super::LibraryType {
         let mut t = super::LibraryType {
+            is_kotlin: true,
             access: super::ClassifierAccess::Public,
             source_file: None,
             is_nested: false,

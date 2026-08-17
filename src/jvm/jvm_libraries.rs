@@ -2602,6 +2602,7 @@ impl JvmLibraries {
                 named_parameter_lists.push(java_annotation_parameter_list(&ci)?);
             }
             Some(LibraryType {
+                is_kotlin: has_kotlin_metadata,
                 access: if let Some(visibility) = ci.meta.class_visibility {
                     visibility.into()
                 } else {
@@ -3396,6 +3397,8 @@ fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
         })
         .collect();
     Some(LibraryType {
+        // A mapped builtin is a KOTLIN declaration; its physical class is merely absent.
+        is_kotlin: true,
         access: crate::libraries::ClassifierAccess::Public,
         source_file: None,
         is_nested: false,
@@ -3459,6 +3462,8 @@ fn builtin_library_type(
         .copied()
         .find(|supertype| matches!(supertype, Ty::Fun(_)));
     LibraryType {
+        // Builtins are Kotlin declarations (`.kotlin_builtins` is compiled Kotlin metadata).
+        is_kotlin: true,
         access,
         source_file: None,
         is_nested,

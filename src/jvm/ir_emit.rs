@@ -284,12 +284,12 @@ impl LambdaModes {
 /// | `NoCompatibility` | default methods | absent | nothing | 1 |
 /// | `Disable` | all abstract | the real bodies, receiver as parameter 0 | forwarders (`invokestatic`) | absent |
 ///
-/// What krusty EMITS today is narrower than that table, which describes kotlinc:
-///   * `NoCompatibility` matches — default methods on the interface, no holder, no class forwarders.
-///   * `Enable` emits the holder ONLY for a member with default parameter values (its `$default`
-///     stub). kotlinc also puts a forwarder there for every other member with a body, emits the
-///     `access$…$jd` bridges, and gives implementing classes forwarder overrides. That gap predates
-///     `-jvm-default` support and is why `Enable` is not yet claimed as byte-parity.
+/// krusty emits that full table:
+///   * `NoCompatibility` — default methods on the interface, no holder, no class forwarders.
+///   * `Enable` — default methods plus the compatibility surface: the `access$…$jd` bridges, holder
+///     statics forwarding to them (`@Deprecated`, holder bytes differential-tested), a thin
+///     `$default` holder forward, `invokespecial` forwarder overrides on implementing classes, and
+///     the republished surface on sub-interfaces for inherited defaults.
 ///   * `Disable` emits holder bodies and implementing-class forwarders. A dependency compiled in
 ///     that mode publishes those holder methods as its declarations' exact physical realizations,
 ///     so a consumer does not reinterpret the dependency from its own mode.
@@ -883,12 +883,15 @@ fn build_class_metadata(
     // name of a property called `value` but takes parameters no getter has — swallowing it by name
     // alone dropped its Function record from `@Metadata`, and a consumer could then not resolve
     // the delegate operator.
-    let mut getter_names = std::collections::HashSet::new();
-    let mut setter_names = std::collections::HashSet::new();
-    for name in c
+    // Accessor spellings map to the PROPERTY TYPE's descriptor: a declared function that merely
+    // shares the getter name but has a different return (`val x: String` beside
+    // `fun getX(): Int`) is a real Function record, not the accessor — the JVM holds both.
+    let mut getter_names: std::collections::HashMap<String, String> = Default::default();
+    let mut setter_names: std::collections::HashMap<String, String> = Default::default();
+    for (name, ty) in c
         .fields
         .iter()
-        .map(|f| f.name.as_str())
+        .map(|f| (f.name.as_str(), f.ty))
         // A HOISTED companion property has no companion field, but its delegating accessors are
         // ordinary IR methods — they realize the Property record, never a Function one.
         .chain(
@@ -898,12 +901,23 @@ fn build_class_metadata(
                 .filter(|(property, p)| {
                     p.backing_field.is_none() && hoisted_static_for(ir, c, *property).is_some()
                 })
-                .map(|(_, p)| p.name.as_str()),
+                .map(|(_, p)| (p.name.as_str(), p.ty)),
+        )
+        // An INTERFACE property's accessor is a real default-method `IrFunction` (there is no
+        // backing field to derive its name from), but it realizes the Property record — kotlinc
+        // emits no Function entry for `getX` of `val x: Int get() = 1`, and a kotlinc consumer
+        // reading both reports "inherited platform declarations clash" on every implementer.
+        .chain(
+            c.is_interface
+                .then(|| c.properties.iter().map(|p| (p.name.as_str(), p.ty)))
+                .into_iter()
+                .flatten(),
         )
     {
         let (getter, setter) = accessor_jvm_names(c, name);
-        getter_names.insert(getter);
-        setter_names.insert(setter);
+        let descriptor = crate::jvm::names::type_descriptor(jvm_declared_ty(&ty));
+        getter_names.insert(getter, descriptor.clone());
+        setter_names.insert(setter, descriptor);
     }
     // Member-extension-PROPERTY accessors are described as `Property` records (below), never as
     // functions — kotlinc emits no `Function` record for `getDoubled` of `val Int.doubled`.
@@ -929,8 +943,17 @@ fn build_class_metadata(
             }
             let function = &ir.functions[fid as usize];
             let n = &function.name;
-            let accessor_shaped = (getter_names.contains(n) && function.params.is_empty())
-                || (setter_names.contains(n) && function.params.len() == 1);
+            let accessor_shaped = (function.params.is_empty()
+                && getter_names.get(n).is_some_and(|descriptor| {
+                    crate::jvm::names::type_descriptor(jvm_declared_ty(&function.ret))
+                        == *descriptor
+                }))
+                || (function.params.len() == 1
+                    && matches!(function.ret, Ty::Unit)
+                    && setter_names.get(n).is_some_and(|descriptor| {
+                        crate::jvm::names::type_descriptor(jvm_declared_ty(&function.params[0]))
+                            == *descriptor
+                    }));
             !accessor_shaped && !data_method_names.contains(n) && !value_method_names.contains(n)
         })
         .collect();
@@ -8248,6 +8271,11 @@ fn emit_interface_class(
     // holder as statics taking the receiver as parameter 0. The other two modes emit the body here as
     // a JVM default method.
     let bodies_on_interface = opts.jvm_default != JvmDefaultMode::Disable;
+    // `enable` additionally publishes the compatibility surface next to each default method: an
+    // `access$<name>$jd` bridge on the interface (emitted after every member, kotlinc's order) and a
+    // holder forward per non-private body.
+    let enable_compat = opts.jvm_default == JvmDefaultMode::Enable;
+    let mut jd_bridge_fids: Vec<u32> = Vec::new();
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
         // A STATIC member of an interface is not a default method: a lambda synthetic
@@ -8257,6 +8285,68 @@ fn emit_interface_class(
         if f.body.is_some() && (bodies_on_interface || f.is_static) {
             // A default method — concrete instance method on the interface.
             emit_method(ir, fid, &fq_name, facade, &mut cw, !f.is_static, env);
+            // A PRIVATE default stays a plain private instance method: kotlinc gives it no bridge,
+            // no holder entry, and no forwarders anywhere (measured: an interface whose only body
+            // is private has NO `$DefaultImpls` at all). A synthesized erasure bridge or an
+            // inline-only lambda impl is not a source member either.
+            if enable_compat
+                && !f.is_static
+                && !ir.private_methods.contains(&fid)
+                && !ir.bridge_methods.contains(&fid)
+                && !ir.inline_only_fns.contains(&fid)
+            {
+                jd_bridge_fids.push(fid);
+                let di = default_impls.get_or_insert_with(|| {
+                    let mut w =
+                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
+                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
+                    w
+                });
+                let member_desc = ir_method_desc(&f.params, &f.ret);
+                let signature = holder_method_signature(
+                    &signature_formatter,
+                    ir,
+                    c.fq_name,
+                    method_signature(&signature_formatter, ir, fid, f).as_deref(),
+                    &member_desc,
+                );
+                // Annotation selection reads the SEMANTIC member types when recorded — `f.ret` is
+                // already erased, and an erased `T` return must not read as `@NotNull Object`.
+                let (semantic_params, semantic_ret) = match ir.member_semantic_sigs.get(&fid) {
+                    Some((params, ret)) => (params.clone(), *ret),
+                    None => (jd_declared_param_tys(ir, fid), f.ret),
+                };
+                let guards = if opts.param_assertions {
+                    f.param_checks.clone()
+                } else {
+                    Vec::new()
+                };
+                emit_jd_holder_forward(
+                    di,
+                    c.fq_name,
+                    &f.name,
+                    &jvm_tys(&f.params),
+                    &semantic_params,
+                    ir.param_names(fid).unwrap_or(&[]),
+                    &guards,
+                    jvm_declared_ty(&f.ret),
+                    semantic_ret,
+                    signature.as_deref(),
+                    // A property accessor has no `fn_decl_lines` entry — its line lives on the
+                    // property declaration it realizes.
+                    ir.fn_decl_lines.get(&fid).copied().unwrap_or_else(|| {
+                        c.properties
+                            .iter()
+                            .find(|property| {
+                                let (getter, setter) = accessor_jvm_names(c, &property.name);
+                                getter == f.name || setter == f.name
+                            })
+                            .map(|property| property.decl_line)
+                            .unwrap_or(0)
+                    }),
+                    JdHolderTarget::AccessBridge,
+                );
+            }
         } else {
             if f.body.is_some() && !f.is_static {
                 // `disable`: the body moves to the holder as a receiver-first static, and the
@@ -8335,9 +8425,32 @@ fn emit_interface_class(
                     w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
                     w
                 });
-                emit_default_stub(ir, fid, &fq_name, facade, di, defaults, env, true);
+                if enable_compat {
+                    // The interface owns the real default application; the holder's copy is a
+                    // thin synthetic forward to it (kotlinc's `enable` shape).
+                    emit_default_stub_forward(ir, fid, &fq_name, di);
+                } else {
+                    emit_default_stub(ir, fid, &fq_name, facade, di, defaults, env, true);
+                }
             }
         }
+    }
+    // The `access$…$jd` bridges follow every declared member (kotlinc's order): declared bodies
+    // first, then the republished surface for inherited defaults this interface does not redeclare.
+    for &fid in &jd_bridge_fids {
+        let f = &ir.functions[fid as usize];
+        emit_jd_access_bridge(
+            &mut cw,
+            c.fq_name,
+            c.decl_line,
+            &f.name,
+            &jvm_tys(&f.params),
+            ir.param_names(fid).unwrap_or(&[]),
+            jvm_declared_ty(&f.ret),
+        );
+    }
+    if enable_compat {
+        emit_inherited_default_surface(ir, c, &mut cw, &mut default_impls, opts, env);
     }
     let emitted_default_impls = default_impls.is_some();
     if let Some(mut di) = default_impls {
@@ -8938,6 +9051,95 @@ fn emit_method(
 ///
 /// kotlinc emits `public <ret> f(args) { return I$DefaultImpls.f(this, args); }`. A member the class
 /// declares itself is left alone — it already overrides the abstract interface method.
+/// How an implementing class's compatibility forwarder reaches the inherited interface body.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ForwarderDispatch {
+    /// `invokestatic` on a `$DefaultImpls` holder (the `disable` realization, own module or
+    /// dependency).
+    HolderStatic,
+    /// `invokespecial` on a direct superinterface's default method (the `enable` realization).
+    InterfaceSpecial,
+}
+
+/// Whether `candidate` transitively derives from the interface `ancestor`, read through the
+/// symbol-source classifier model (module and classpath providers both expose direct supertypes).
+fn interface_derives_from(
+    symbols: &dyn SymbolSource,
+    candidate: crate::types::TypeName,
+    ancestor: crate::types::TypeName,
+) -> bool {
+    let mut pending = vec![candidate];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(owner) = pending.pop() {
+        if !seen.insert(owner) {
+            continue;
+        }
+        let Some(shape) = symbols.classifier(owner) else {
+            continue;
+        };
+        for parent in shape.supertypes.iter_ids() {
+            if parent == ancestor {
+                return true;
+            }
+            if symbols
+                .classifier(parent)
+                .is_some_and(|parent| parent.is_interface())
+            {
+                pending.push(parent);
+            }
+        }
+    }
+    false
+}
+
+/// The transitive interface closure of the `direct` supertypes, in a TOPOLOGICAL order of the
+/// derives-from DAG: every interface precedes all of its ancestors, so a derived redeclaration
+/// claims a member key before its ancestor's, and incomparable interfaces keep the declaration
+/// order of the `direct` list. (A pairwise comparator was not a total order — incomparable pairs
+/// compared `Equal` inconsistently.) Read entirely through the symbol-source classifier model:
+/// this pass neither searches IR classes nor retries a missing class against another origin.
+fn sorted_interface_closure(
+    symbols: &dyn SymbolSource,
+    direct: Vec<crate::types::TypeName>,
+) -> Vec<(
+    crate::types::TypeName,
+    std::sync::Arc<crate::libraries::LibraryType>,
+)> {
+    // DFS post-order emits ancestors before derived; reversing yields the topological order.
+    fn visit(
+        symbols: &dyn SymbolSource,
+        owner: crate::types::TypeName,
+        seen: &mut std::collections::HashSet<crate::types::TypeName>,
+        out: &mut Vec<(
+            crate::types::TypeName,
+            std::sync::Arc<crate::libraries::LibraryType>,
+        )>,
+    ) {
+        if !seen.insert(owner) {
+            return;
+        }
+        let Some(shape) = symbols
+            .classifier(owner)
+            .filter(|shape| shape.is_interface())
+        else {
+            return;
+        };
+        for parent in shape.supertypes.iter_ids() {
+            visit(symbols, parent, seen, out);
+        }
+        out.push((owner, shape));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    // The direct list is walked reversed and the post-order reversed again, so incomparable
+    // direct supertypes come out in declaration order.
+    for owner in direct.into_iter().rev() {
+        visit(symbols, owner, &mut seen, &mut out);
+    }
+    out.reverse();
+    out
+}
+
 fn emit_default_impls_forwarders(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -8948,59 +9150,10 @@ fn emit_default_impls_forwarders(
         return;
     }
     let symbols = env.signature_symbols;
-    let classifier = |owner| symbols.classifier(owner);
     let derives_from = |candidate: crate::types::TypeName, ancestor: crate::types::TypeName| {
-        let mut pending = vec![candidate];
-        let mut seen = std::collections::HashSet::new();
-        while let Some(owner) = pending.pop() {
-            if !seen.insert(owner) {
-                continue;
-            }
-            let Some(shape) = classifier(owner) else {
-                continue;
-            };
-            for parent in shape.supertypes.iter_ids() {
-                if parent == ancestor {
-                    return true;
-                }
-                if classifier(parent).is_some_and(|parent| parent.is_interface()) {
-                    pending.push(parent);
-                }
-            }
-        }
-        false
+        interface_derives_from(symbols, candidate, ancestor)
     };
-
-    // Read every declaration through the same symbol-source classifier model. Module and classpath
-    // providers both expose direct declarations and direct supertypes; this pass neither searches IR
-    // classes nor retries a missing class against another origin.
-    let mut pending = c.interfaces.iter_ids().collect::<Vec<_>>();
-    let mut seen_interfaces = std::collections::HashSet::new();
-    let mut closure = Vec::new();
-    while let Some(owner) = pending.pop() {
-        if !seen_interfaces.insert(owner) {
-            continue;
-        }
-        let Some(shape) = classifier(owner).filter(|shape| shape.is_interface()) else {
-            continue;
-        };
-        pending.extend(
-            shape
-                .supertypes
-                .iter_ids()
-                .filter(|parent| classifier(*parent).is_some_and(|parent| parent.is_interface())),
-        );
-        closure.push((owner, shape));
-    }
-    closure.sort_by(|(left, _), (right, _)| {
-        if derives_from(*left, *right) {
-            std::cmp::Ordering::Less
-        } else if derives_from(*right, *left) {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    });
+    let closure = sorted_interface_closure(symbols, c.interfaces.iter_ids().collect());
 
     let method_key = |name: &str, params: &[Ty]| {
         (
@@ -9026,6 +9179,54 @@ fn emit_default_impls_forwarders(
                 .map(|bridge| method_key(&bridge.name, &bridge.erased_params)),
         )
         .collect::<std::collections::HashSet<_>>();
+    // A property override is realized as a FIELD-backed or computed accessor synthesized OUTSIDE
+    // `c.methods` (`class Ann : Greeter { override val who = "HR" }` derives `getWho` from the
+    // field). Without these keys the pass emits a forwarder DUPLICATING that accessor —
+    // `ClassFormatError: Duplicate method name` at class-load time. Keyed by FULL descriptor and
+    // recorded only for accessors the class actually EMITS: a `val` has no setter (suppressing an
+    // inherited `setX(I)V` forwarder on its name alone left the class abstract), and a same-name
+    // accessor with a DIFFERENT return coexists with the forwarder on the JVM — kotlinc emits
+    // both `getX()Ljava/lang/String;` (the accessor) and `getX()I` (the forwarder).
+    let mut emitted_accessors: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for (name, ty, has_setter, is_private) in c
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                field.name.as_str(),
+                field.ty,
+                !field.is_final(),
+                field.is_private(),
+            )
+        })
+        .chain(
+            c.properties
+                .iter()
+                .map(|p| (p.name.as_str(), p.ty, p.is_var, p.visibility.is_private())),
+        )
+    {
+        // A private property has no accessors — in-class reads go straight to the field.
+        if is_private {
+            continue;
+        }
+        let (getter, setter) = accessor_jvm_names(c, name);
+        let jt = jvm_declared_ty(&ty);
+        emitted_accessors.insert((getter, method_descriptor(&[], jt)));
+        if has_setter {
+            emitted_accessors.insert((setter, method_descriptor(&[jt], Ty::Unit)));
+        }
+    }
+    // An `invokespecial` interface forwarder must NAME a direct superinterface of this class (the
+    // JVM's rule for interface `super` calls); the body then resolves to the maximally-specific
+    // default. Pick the first DECLARED superinterface through which the winning declaration is
+    // inherited — measured on kotlinc: `class C : D, B` with the override on `B` names `B`, and
+    // `class C : B` with the body up on `A` names `B`, not `A`.
+    let interface_special_target = |declaring: crate::types::TypeName| {
+        c.interfaces
+            .iter_ids()
+            .find(|&direct| direct == declaring || derives_from(direct, declaring))
+    };
     let mut selected = std::collections::HashSet::new();
     let mut write_forwarder = |interface: crate::types::TypeName,
                                name: &str,
@@ -9036,7 +9237,8 @@ fn emit_default_impls_forwarders(
                                semantic_ret: Ty,
                                target_owner: &str,
                                target_name: &str,
-                               target_descriptor: &str| {
+                               target_descriptor: &str,
+                               dispatch: ForwarderDispatch| {
         let desc = method_descriptor(param_tys, ret);
         let mut code = CodeBuilder::new(1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>());
         code.aload(0);
@@ -9051,9 +9253,20 @@ fn emit_default_impls_forwarders(
             }
             slot += slot_words(*ty);
         }
-        let target = cw.methodref(target_owner, target_name, target_descriptor);
         let argument_words = 1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>();
-        code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
+        match dispatch {
+            ForwarderDispatch::HolderStatic => {
+                let target = cw.methodref(target_owner, target_name, target_descriptor);
+                code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
+            }
+            // The interface publishes the body as a DEFAULT method: the forwarder is a Java-style
+            // interface `super` call. The JVM requires the named interface to be a DIRECT
+            // superinterface of this class — the caller selects it.
+            ForwarderDispatch::InterfaceSpecial => {
+                let target = cw.interface_methodref(target_owner, target_name, target_descriptor);
+                code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
+            }
+        }
         match ret {
             Ty::Unit => code.ret_void(),
             Ty::Long => code.lreturn(),
@@ -9090,12 +9303,16 @@ fn emit_default_impls_forwarders(
         };
         let parameter_annotations = semantic_params.iter().copied().map(ann).collect::<Vec<_>>();
         cw.set_method_nullability(name, &desc, ann(semantic_ret), &parameter_annotations);
-        cw.add_inner_class(crate::jvm::classfile::InnerClassSpec {
-            inner: target_owner.to_string(),
-            outer: Some(interface.render()),
-            name: Some("DefaultImpls".to_string()),
-            access: 0x0019,
-        });
+        // Only a holder call makes the class REFERENCE the nested holder; an `invokespecial`
+        // forwarder names the interface alone, and kotlinc records no `InnerClasses` entry for it.
+        if dispatch == ForwarderDispatch::HolderStatic {
+            cw.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+                inner: target_owner.to_string(),
+                outer: Some(interface.render()),
+                name: Some("DefaultImpls".to_string()),
+                access: 0x0019,
+            });
+        }
     };
     for (interface, shape) in closure {
         for member in &shape.members {
@@ -9104,7 +9321,27 @@ fn emit_default_impls_forwarders(
             } else {
                 member.params.clone()
             };
-            let param_tys = jvm_tys(&physical_params);
+            let mut param_tys = jvm_tys(&physical_params);
+            let mut ret = jvm_declared_ty(&member.physical_ret);
+            let mut semantic_params = member.params.clone();
+            let mut param_names = member.call_sig.param_names.clone();
+            let mut semantic_ret = member.ret;
+            // A `suspend` member's PHYSICAL realization is its CPS shape — a trailing
+            // `Continuation` and an `Object` return. The semantic record keeps the declared
+            // params/return, so adjust here or the forwarder declares a method the interface does
+            // not have (and misses the class's own CPS-shaped override in `implemented`). kotlinc
+            // names the parameter `$completion`, annotates it `@NotNull`, and the return
+            // `@Nullable`.
+            if member.suspend() {
+                param_tys.push(Ty::obj("kotlin/coroutines/Continuation"));
+                ret = Ty::obj("java/lang/Object");
+                while param_names.len() < semantic_params.len() {
+                    param_names.push(format!("p{}", param_names.len()));
+                }
+                param_names.push("$completion".to_string());
+                semantic_params.push(Ty::obj("kotlin/coroutines/Continuation"));
+                semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
+            }
             let name = member
                 .physical_name
                 .as_deref()
@@ -9118,15 +9355,22 @@ fn emit_default_impls_forwarders(
             if member.is_abstract()
                 || member.visibility == crate::types::Visibility::Private
                 || implemented.contains(&key)
+                || emitted_accessors
+                    .contains(&(name.to_string(), method_descriptor(&param_tys, ret)))
             {
                 continue;
             }
-            let (target_owner, target_name, holder_desc) = match member.realization {
+            let (target_owner, target_name, target_desc, dispatch) = match member.realization {
                 crate::libraries::MemberRealization::Direct {
                     pass_receiver: true,
                 } => {
                     let Some(owner) = member.owner else { continue };
-                    (owner.render(), name.to_string(), member.descriptor.clone())
+                    (
+                        owner.render(),
+                        name.to_string(),
+                        member.descriptor.clone(),
+                        ForwarderDispatch::HolderStatic,
+                    )
                 }
                 crate::libraries::MemberRealization::Dispatch
                     if env.jvm_default == JvmDefaultMode::Disable
@@ -9137,23 +9381,42 @@ fn emit_default_impls_forwarders(
                     (
                         crate::types::type_name_nested_child(interface, "DefaultImpls").render(),
                         name.to_string(),
-                        ir_method_desc(&with_receiver, &member.physical_ret),
+                        method_descriptor(&with_receiver, ret),
+                        ForwarderDispatch::HolderStatic,
+                    )
+                }
+                // A KOTLIN interface member whose body is a JVM default method on the interface
+                // (this module under `enable`, or a dependency compiled under `enable`/
+                // `no-compatibility`): kotlinc forwards with a Java-style interface `super` call.
+                // A JAVA default method never gets a forwarder, and `no-compatibility` emits none.
+                crate::libraries::MemberRealization::Dispatch
+                    if env.jvm_default != JvmDefaultMode::NoCompatibility
+                        && (member.source_member.is_some() || shape.is_kotlin) =>
+                {
+                    let Some(named) = interface_special_target(interface) else {
+                        continue;
+                    };
+                    (
+                        named.render(),
+                        name.to_string(),
+                        method_descriptor(&param_tys, ret),
+                        ForwarderDispatch::InterfaceSpecial,
                     )
                 }
                 _ => continue,
             };
-            let ret = jvm_declared_ty(&member.physical_ret);
             write_forwarder(
                 interface,
                 name,
                 &param_tys,
-                &member.params,
-                &member.call_sig.param_names,
+                &semantic_params,
+                &param_names,
                 ret,
-                member.ret,
+                semantic_ret,
                 &target_owner,
                 &target_name,
-                &holder_desc,
+                &target_desc,
+                dispatch,
             );
             implemented.insert(key);
         }
@@ -9179,41 +9442,65 @@ fn emit_default_impls_forwarders(
                     if !selected.insert(key.clone())
                         || callable.is_abstract
                         || implemented.contains(&key)
+                        || emitted_accessors.contains(&(
+                            callable.name.clone(),
+                            method_descriptor(&params, ir_ty_to_jvm(&callable.physical_ret)),
+                        ))
                     {
                         continue;
                     }
-                    let (target_owner, target_descriptor) = match callable.member_realization {
-                        crate::libraries::MemberRealization::Direct {
-                            pass_receiver: true,
-                        } => (callable.owner.render(), callable.descriptor.clone()),
-                        crate::libraries::MemberRealization::Dispatch
-                            if env.jvm_default == JvmDefaultMode::Disable
-                                && property.source_member.is_some() =>
-                        {
-                            let mut with_receiver = vec![Ty::obj_name(interface)];
-                            with_receiver.extend_from_slice(&params);
-                            (
-                                crate::types::type_name_nested_child(interface, "DefaultImpls")
-                                    .render(),
-                                method_descriptor(
-                                    &with_receiver,
-                                    ir_ty_to_jvm(&callable.physical_ret),
-                                ),
-                            )
-                        }
-                        _ => continue,
-                    };
+                    let physical_ret = ir_ty_to_jvm(&callable.physical_ret);
+                    let (target_owner, target_descriptor, dispatch) =
+                        match callable.member_realization {
+                            crate::libraries::MemberRealization::Direct {
+                                pass_receiver: true,
+                            } => (
+                                callable.owner.render(),
+                                callable.descriptor.clone(),
+                                ForwarderDispatch::HolderStatic,
+                            ),
+                            crate::libraries::MemberRealization::Dispatch
+                                if env.jvm_default == JvmDefaultMode::Disable
+                                    && property.source_member.is_some() =>
+                            {
+                                let mut with_receiver = vec![Ty::obj_name(interface)];
+                                with_receiver.extend_from_slice(&params);
+                                (
+                                    crate::types::type_name_nested_child(interface, "DefaultImpls")
+                                        .render(),
+                                    method_descriptor(&with_receiver, physical_ret),
+                                    ForwarderDispatch::HolderStatic,
+                                )
+                            }
+                            // A Kotlin accessor realized as a default method on the interface — the
+                            // same interface-`super` forwarder rule as a member function.
+                            crate::libraries::MemberRealization::Dispatch
+                                if env.jvm_default != JvmDefaultMode::NoCompatibility
+                                    && (property.source_member.is_some() || shape.is_kotlin) =>
+                            {
+                                let Some(named) = interface_special_target(interface) else {
+                                    continue;
+                                };
+                                (
+                                    named.render(),
+                                    method_descriptor(&params, physical_ret),
+                                    ForwarderDispatch::InterfaceSpecial,
+                                )
+                            }
+                            _ => continue,
+                        };
                     write_forwarder(
                         interface,
                         &callable.name,
                         &params,
                         &callable.params,
                         &property.context_param_names,
-                        ir_ty_to_jvm(&callable.physical_ret),
+                        physical_ret,
                         callable.ret,
                         &target_owner,
                         &callable.name,
                         &target_descriptor,
+                        dispatch,
                     );
                     implemented.insert(key);
                 }
@@ -9235,6 +9522,476 @@ fn emit_holder_method(
     env: &EmitEnv,
 ) {
     emit_method_inner_with_holder(ir, fid, owner, facade, cw, true, env, Some(receiver));
+}
+
+/// `@NotNull`/`@Nullable` for one semantic type in the `-jvm-default` compatibility surface, the
+/// same selection the implementing-class forwarders use: reference types only, and never a bare
+/// type variable (kotlinc leaves `T`-typed positions unannotated).
+fn jd_nullability_annotation(ty: &Ty) -> Option<&'static str> {
+    if matches!(ty.non_null(), Ty::TyParam(..)) || !ir_ty_to_jvm(ty).is_reference() {
+        None
+    } else if ty.is_nullable() {
+        Some("Lorg/jetbrains/annotations/Nullable;")
+    } else {
+        Some("Lorg/jetbrains/annotations/NotNull;")
+    }
+}
+
+/// A declared member's parameter types with the side-table declared nullability applied, so the
+/// compatibility surface annotates `x: T?` parameters `@Nullable` exactly as the abstract
+/// declaration path does.
+fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
+    let f = &ir.functions[fid as usize];
+    let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
+    f.params
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            if declared_nullable
+                .and_then(|v| v.get(i))
+                .copied()
+                .unwrap_or(false)
+            {
+                Ty::nullable(*t)
+            } else {
+                *t
+            }
+        })
+        .collect()
+}
+
+/// The `access$<name>$jd` bridge kotlinc puts on an `enable`-mode interface for each of its
+/// non-private default methods: a `public static synthetic` whose body makes the NON-VIRTUAL call
+/// (`invokespecial` on the interface's own method) that the `$DefaultImpls` forward and legacy
+/// `super`-callers need. Its `LineNumberTable` is one entry at the invoke instruction, on the
+/// interface's declaration line — measured, not inferred.
+#[allow(clippy::too_many_arguments)]
+fn emit_jd_access_bridge(
+    cw: &mut ClassWriter,
+    interface: crate::types::TypeName,
+    decl_line: u32,
+    member_name: &str,
+    param_tys: &[Ty],
+    param_names: &[String],
+    ret: Ty,
+) {
+    let fq = interface.render();
+    let member_desc = method_descriptor(param_tys, ret);
+    let mut with_receiver = vec![Ty::obj_name(interface)];
+    with_receiver.extend_from_slice(param_tys);
+    let bridge_desc = method_descriptor(&with_receiver, ret);
+    let name = format!("access${member_name}$jd");
+    let argument_words = 1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>();
+    let mut code = CodeBuilder::new(argument_words);
+    code.aload(0);
+    let mut slot = 1u16;
+    for ty in param_tys {
+        load(*ty, slot, &mut code);
+        slot += slot_words(*ty);
+    }
+    if decl_line != 0 {
+        code.mark_line(decl_line);
+    }
+    let target = cw.interface_methodref(&fq, member_name, &member_desc);
+    code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
+    emit_return(ret, &mut code);
+    finish_code::<0x1009>(cw, &name, &bridge_desc, &mut code, argument_words); // PUBLIC | STATIC | SYNTHETIC
+    let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
+    let mut slot = 1u16;
+    for (index, parameter) in param_tys.iter().enumerate() {
+        let parameter_name = param_names
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| format!("p{index}"));
+        locals.push((parameter_name, local_variable_desc(*parameter), slot));
+        slot += slot_words(*parameter);
+    }
+    cw.set_method_debug(&name, &bridge_desc, None, &locals);
+}
+
+/// One `enable`-mode `$DefaultImpls` entry: a `public static` forward that reloads its arguments
+/// and calls the realization `target` (the interface's `access$…$jd` bridge, or — for a member
+/// inherited from a `disable`-compiled dependency — that dependency's own holder static, behind a
+/// `checkcast` to the declaring interface). kotlinc marks the bridge-routed forwards with BOTH the
+/// `Deprecated` attribute and a runtime-visible `@java.lang.Deprecated` (the holder exists only for
+/// legacy consumers), but leaves dependency-holder forwards unmarked — measured on 2.4.10.
+#[allow(clippy::too_many_arguments)]
+fn emit_jd_holder_forward(
+    cw: &mut ClassWriter,
+    interface: crate::types::TypeName,
+    member_name: &str,
+    param_tys: &[Ty],
+    semantic_params: &[Ty],
+    param_names: &[String],
+    guards: &[Option<String>],
+    ret: Ty,
+    semantic_ret: Ty,
+    signature: Option<&str>,
+    decl_line: u32,
+    target: JdHolderTarget<'_>,
+) {
+    let fq = interface.render();
+    let mut with_receiver = vec![Ty::obj_name(interface)];
+    with_receiver.extend_from_slice(param_tys);
+    let desc = method_descriptor(&with_receiver, ret);
+    // Pool order is part of the holder's byte identity: kotlinc (ASM) interns the method name,
+    // descriptor, and Signature at `visitMethod`, then the annotation types, and only then the
+    // code's own constants — seed in that order before building the body.
+    cw.seed_utf8(member_name);
+    cw.seed_utf8(&desc);
+    if let Some(signature) = signature {
+        cw.seed_utf8(signature);
+    }
+    let deprecated = matches!(target, JdHolderTarget::AccessBridge);
+    if deprecated {
+        cw.seed_utf8("Ljava/lang/Deprecated;");
+    }
+    let ret_ann = jd_nullability_annotation(&semantic_ret);
+    if let Some(ann) = ret_ann {
+        cw.seed_utf8(ann);
+    }
+    let mut parameter_annotations = vec![Some("Lorg/jetbrains/annotations/NotNull;")];
+    parameter_annotations.extend(semantic_params.iter().map(jd_nullability_annotation));
+    for ann in parameter_annotations.iter().flatten() {
+        cw.seed_utf8(ann);
+    }
+    let argument_words = 1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>();
+    let mut code = CodeBuilder::new(argument_words);
+    // kotlinc re-emits the `checkNotNullParameter` guard for each guarded parameter (never the
+    // receiver) ahead of the forward, and its LineNumberTable maps the member's line to the
+    // POST-guard pc — the caller clears `guards` under `-Xno-param-assertions`.
+    let mut slot = 1u16;
+    for (index, guard) in guards.iter().enumerate().take(param_tys.len()) {
+        if let Some(parameter_name) = guard {
+            code.aload(slot);
+            code.push_string(parameter_name, cw);
+            let check = cw.methodref(
+                "kotlin/jvm/internal/Intrinsics",
+                "checkNotNullParameter",
+                "(Ljava/lang/Object;Ljava/lang/String;)V",
+            );
+            code.invokestatic(check, 2, 0);
+        }
+        slot += slot_words(param_tys[index]);
+    }
+    if decl_line != 0 {
+        code.mark_line(decl_line);
+    }
+    code.aload(0);
+    if let JdHolderTarget::DependencyHolder { declaring, .. } = &target {
+        let declaring_class = cw.class_ref(&declaring.render());
+        code.checkcast(declaring_class);
+    }
+    let mut slot = 1u16;
+    for ty in param_tys {
+        load(*ty, slot, &mut code);
+        slot += slot_words(*ty);
+    }
+    match target {
+        JdHolderTarget::AccessBridge => {
+            let bridge = cw.interface_methodref(&fq, &format!("access${member_name}$jd"), &desc);
+            code.invokestatic(bridge, argument_words as i32, slot_words(ret) as i32);
+        }
+        JdHolderTarget::DependencyHolder {
+            holder, descriptor, ..
+        } => {
+            let target = cw.methodref(&holder.render(), member_name, descriptor);
+            code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
+        }
+    }
+    emit_return(ret, &mut code);
+    code.ensure_locals(argument_words);
+    code.link();
+    cw.add_method_sig(0x0009, member_name, &desc, &code, signature); // PUBLIC | STATIC
+    let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
+    let mut slot = 1u16;
+    for (index, parameter) in param_tys.iter().enumerate() {
+        let parameter_name = param_names
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| format!("p{index}"));
+        locals.push((parameter_name, local_variable_desc(*parameter), slot));
+        slot += slot_words(*parameter);
+    }
+    // The LineNumberTable came from `mark_line` (at the post-guard pc); fill only the locals here.
+    cw.set_method_debug(member_name, &desc, None, &locals);
+    if deprecated {
+        cw.mark_method_deprecated(member_name, &desc);
+        cw.add_method_visible_marker_annotation(member_name, &desc, "Ljava/lang/Deprecated;");
+    }
+    if ret_ann.is_some() || parameter_annotations.iter().any(Option::is_some) {
+        cw.set_method_nullability(member_name, &desc, ret_ann, &parameter_annotations);
+    }
+}
+
+/// Under `enable`, an interface REPUBLISHES the compatibility surface for every non-abstract,
+/// non-private member it inherits and does not redeclare: kotlinc gives even an empty
+/// `interface B : A` its own `access$f$jd` bridge (an `invokespecial` through B itself, which the
+/// JVM resolves to the inherited default) and a `B$DefaultImpls` holder forwarding to that bridge.
+/// A member inherited from a `disable`-compiled dependency has no default method to bridge to —
+/// its holder entry forwards straight to the dependency's own holder (behind a `checkcast`), with
+/// no `access$…$jd` bridge and no `@Deprecated`, exactly as measured on kotlinc 2.4.10.
+fn emit_inherited_default_surface(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    cw: &mut ClassWriter,
+    default_impls: &mut Option<ClassWriter>,
+    opts: &EmitOptions,
+    env: &EmitEnv,
+) {
+    let symbols = env.signature_symbols;
+    let closure = sorted_interface_closure(symbols, c.interfaces.iter_ids().collect());
+    if closure.is_empty() {
+        return;
+    }
+    let fq_name = c.fq_name();
+    let method_key = |name: &str, params: &[Ty]| {
+        (
+            name.to_string(),
+            params
+                .iter()
+                .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+                .collect::<String>(),
+        )
+    };
+    // A member this interface declares (bodied or abstract) is its own: an abstract redeclaration
+    // suppresses an ancestor's body here exactly as on an implementing class.
+    let mut selected = c
+        .methods
+        .iter()
+        .map(|fid| {
+            let function = &ir.functions[*fid as usize];
+            method_key(&function.name, &jvm_tys(&function.params))
+        })
+        .chain(
+            c.bridges
+                .iter()
+                .map(|bridge| method_key(&bridge.name, &bridge.erased_params)),
+        )
+        .collect::<std::collections::HashSet<_>>();
+    for (interface, shape) in closure {
+        let mut surface = |name: &str,
+                           param_tys: &[Ty],
+                           semantic_params: &[Ty],
+                           param_names: &[String],
+                           physical_ret: Ty,
+                           semantic_ret: Ty,
+                           is_abstract: bool,
+                           visibility: crate::types::Visibility,
+                           realization: crate::libraries::MemberRealization,
+                           owner: Option<crate::types::TypeName>,
+                           descriptor: &str,
+                           cw: &mut ClassWriter,
+                           default_impls: &mut Option<ClassWriter>| {
+            let key = method_key(name, param_tys);
+            // The nearest declaration wins even when it is abstract.
+            if !selected.insert(key) {
+                return;
+            }
+            if is_abstract || visibility == crate::types::Visibility::Private {
+                return;
+            }
+            let target = match realization {
+                // The dependency's `disable` realization: its holder static is the only body.
+                crate::libraries::MemberRealization::Direct {
+                    pass_receiver: true,
+                } => {
+                    let Some(holder) = owner else { return };
+                    JdHolderTarget::DependencyHolder {
+                        declaring: interface,
+                        holder,
+                        descriptor,
+                    }
+                }
+                // A Kotlin default method somewhere above: bridge through this interface itself.
+                crate::libraries::MemberRealization::Dispatch if shape.is_kotlin => {
+                    JdHolderTarget::AccessBridge
+                }
+                // A JAVA default method never joins the Kotlin compatibility surface.
+                _ => return,
+            };
+            if matches!(target, JdHolderTarget::AccessBridge) {
+                emit_jd_access_bridge(
+                    cw,
+                    c.fq_name,
+                    c.decl_line,
+                    name,
+                    param_tys,
+                    param_names,
+                    physical_ret,
+                );
+            }
+            let di = default_impls.get_or_insert_with(|| {
+                let mut w =
+                    new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
+                w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
+                w
+            });
+            if let JdHolderTarget::DependencyHolder {
+                declaring, holder, ..
+            } = &target
+            {
+                // The holder references the dependency's nested holder — kotlinc records BOTH
+                // `InnerClasses` relations on it.
+                di.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+                    inner: holder.render(),
+                    outer: Some(declaring.render()),
+                    name: Some("DefaultImpls".to_string()),
+                    access: 0x0019,
+                });
+            }
+            // The guard set of an inherited member follows its semantic parameter nullability —
+            // the same selection its `@NotNull` parameter annotations use.
+            let guards: Vec<Option<String>> = if opts.param_assertions {
+                semantic_params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, parameter)| {
+                        (jd_nullability_annotation(parameter)
+                            == Some("Lorg/jetbrains/annotations/NotNull;"))
+                        .then(|| {
+                            param_names
+                                .get(index)
+                                .cloned()
+                                .unwrap_or_else(|| format!("p{index}"))
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            emit_jd_holder_forward(
+                di,
+                c.fq_name,
+                name,
+                param_tys,
+                semantic_params,
+                param_names,
+                &guards,
+                physical_ret,
+                semantic_ret,
+                // The promoted generic signature of an inherited member is not reconstructed here
+                // (the declaring classifier's formals are not this interface's); a generic
+                // inherited surface keeps descriptor-only shape. Recorded in docs/SPEC.md.
+                None,
+                c.decl_line,
+                target,
+            );
+        };
+        for member in &shape.members {
+            let physical_params = if member.physical_params.len() == member.params.len() {
+                member.physical_params.clone()
+            } else {
+                member.params.clone()
+            };
+            let name = member
+                .physical_name
+                .as_deref()
+                .unwrap_or(member.name.as_str());
+            let mut param_tys = jvm_tys(&physical_params);
+            let mut physical_ret = jvm_declared_ty(&member.physical_ret);
+            let mut semantic_params = member.params.clone();
+            let mut param_names = member.call_sig.param_names.clone();
+            let mut semantic_ret = member.ret;
+            // A `suspend` member republishes in its CPS shape — trailing `Continuation`
+            // (`$completion`, `@NotNull`) and a `@Nullable Object` return — like the
+            // implementing-class forwarders.
+            if member.suspend() {
+                param_tys.push(Ty::obj("kotlin/coroutines/Continuation"));
+                physical_ret = Ty::obj("java/lang/Object");
+                while param_names.len() < semantic_params.len() {
+                    param_names.push(format!("p{}", param_names.len()));
+                }
+                param_names.push("$completion".to_string());
+                semantic_params.push(Ty::obj("kotlin/coroutines/Continuation"));
+                semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
+            }
+            surface(
+                name,
+                &param_tys,
+                &semantic_params,
+                &param_names,
+                physical_ret,
+                semantic_ret,
+                member.is_abstract(),
+                member.visibility,
+                member.realization,
+                member.owner,
+                &member.descriptor,
+                cw,
+                default_impls,
+            );
+        }
+        for callables in shape.declared_callables.values() {
+            for property in callables.properties() {
+                for (callable, visibility) in
+                    std::iter::once((&property.getter, property.visibility)).chain(
+                        property
+                            .setter
+                            .as_ref()
+                            .map(|setter| (setter, property.setter_visibility)),
+                    )
+                {
+                    surface(
+                        &callable.name,
+                        &jvm_tys(&callable.physical_params),
+                        &callable.params,
+                        &property.context_param_names,
+                        ir_ty_to_jvm(&callable.physical_ret),
+                        callable.ret,
+                        callable.is_abstract,
+                        visibility,
+                        callable.member_realization,
+                        Some(callable.owner),
+                        &callable.descriptor,
+                        cw,
+                        default_impls,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Where an `enable`-mode holder forward sends its call.
+enum JdHolderTarget<'a> {
+    /// The interface's own `access$<name>$jd` bridge (the member is a default method here).
+    AccessBridge,
+    /// A `disable`-compiled dependency's `$DefaultImpls` static — the inherited member has no
+    /// default method anywhere to bridge to.
+    DependencyHolder {
+        declaring: crate::types::TypeName,
+        holder: crate::types::TypeName,
+        descriptor: &'a str,
+    },
+}
+
+/// The holder's `enable`-mode `$default` copy: a thin synthetic forward reloading every stub
+/// argument (receiver, parameters, masks, marker) into one `invokestatic` on the interface's own
+/// `$default` stub — kotlinc's shape: no locals table, a one-entry `LineNumberTable` at the
+/// member's declaration line.
+fn emit_default_stub_forward(ir: &IrFile, fid: u32, owner: &str, cw: &mut ClassWriter) {
+    let f = &ir.functions[fid as usize];
+    let ret = jvm_declared_ty(&f.ret);
+    let stub_params = default_stub_params(ir, fid, Ty::obj(owner));
+    let desc = method_descriptor(&stub_params, ret);
+    let name = format!("{}$default", f.name);
+    let argument_words = stub_params.iter().map(|t| slot_words(*t)).sum::<u16>();
+    let mut code = CodeBuilder::new(argument_words);
+    let mut slot = 0u16;
+    for ty in &stub_params {
+        load(*ty, slot, &mut code);
+        slot += slot_words(*ty);
+    }
+    let target = cw.interface_methodref(owner, &name, &desc);
+    code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
+    emit_return(ret, &mut code);
+    code.ensure_locals(argument_words);
+    code.link();
+    cw.add_method(default_stub_access(ir, fid), &name, &desc, &code);
+    if let Some(&line) = ir.fn_decl_lines.get(&fid) {
+        cw.set_method_lines(&name, &desc, &[(0, line)]);
+    }
 }
 
 /// A moved interface body keeps the source method's generic signature, but `$DefaultImpls` makes
@@ -10464,13 +11221,7 @@ fn emit_default_stub(
     code.ensure_locals(e.next_slot);
     code.link();
 
-    let mut stub_params = vec![owner_ty];
-    stub_params.extend(stub_param_tys.iter().copied());
-    stub_params.extend(std::iter::repeat_n(
-        Ty::Int,
-        default_mask_count(logical_param_count),
-    ));
-    stub_params.push(Ty::obj("java/lang/Object"));
+    let stub_params = default_stub_params(ir, fid, owner_ty);
     let desc = method_descriptor(&stub_params, ret);
     e.cw.add_method(
         default_stub_access(ir, fid),
@@ -10482,6 +11233,38 @@ fn emit_default_stub(
     if let Some(&line) = ir.fn_decl_lines.get(&fid) {
         e.cw.set_method_lines(&format!("{method_name}$default"), &desc, &[(0, line)]);
     }
+}
+
+/// The `$default` stub's physical parameter list, shared by the stub emitter and the holder's
+/// `enable`-mode forward (their descriptors must agree or the forward links to nothing): the
+/// receiver, the declared parameters (a nullable-underlying value-class parameter stays BOXED),
+/// one `int` mask per 32 logical parameters, and the trailing `Object` marker.
+fn default_stub_params(ir: &IrFile, fid: u32, owner_ty: Ty) -> Vec<Ty> {
+    let f = &ir.functions[fid as usize];
+    let real_params = jvm_tys(&f.params);
+    let boxed: HashMap<usize, Ty> = ir
+        .default_stub_boxed_params
+        .get(&fid)
+        .map(|v| v.iter().copied().collect())
+        .unwrap_or_default();
+    let recv_offset = usize::from(ir.extension_receiver_fns.contains(&fid));
+    let logical_param_count = real_params
+        .len()
+        .checked_sub(recv_offset)
+        .expect("an extension receiver is a leading physical parameter");
+    let mut stub_params = vec![owner_ty];
+    stub_params.extend(
+        real_params
+            .iter()
+            .enumerate()
+            .map(|(i, t)| boxed.get(&i).copied().unwrap_or(*t)),
+    );
+    stub_params.extend(std::iter::repeat_n(
+        Ty::Int,
+        default_mask_count(logical_param_count),
+    ));
+    stub_params.push(Ty::obj("java/lang/Object"));
+    stub_params
 }
 
 /// The access flags of a member's `$default` synthetic: kotlinc mirrors the origin's visibility —
