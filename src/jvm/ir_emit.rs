@@ -9084,6 +9084,14 @@ fn emit_enum_class(
             // `serializer()` accessor) — emitting it as an instance method breaks an `E.serializer()`
             // static call (`IncompatibleClassChangeError`).
             emit_method(ir, fid, &fq, facade, &mut cw, !f.is_static, env);
+            // A defaulted member needs its `<name>$default` synthetic here too. The enum writer is a
+            // separate path from `emit_class`, so a member declared `fun m(a: Int = 1)` on an enum
+            // silently had no stub at all — a call omitting the argument had nothing to dispatch to.
+            // Same call as the class path, so the super-call guard rides along: an enum IS
+            // inheritable (an entry body subclasses it), which is why kotlinc guards the stub.
+            if let Some(defaults) = ir.param_defaults(fid) {
+                emit_default_stub(ir, fid, &fq, facade, &mut cw, defaults, env, false);
+            }
         } else {
             // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
             // entry subclasses override it.

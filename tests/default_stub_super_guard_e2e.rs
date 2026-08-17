@@ -118,6 +118,10 @@ data class Dataly(val x: Int) { fun m(a: Int = 1): Int = a }
 object Objectly { fun m(a: Int = 1): Int = a }
 // A wide parameter occupies two slots, so the marker's slot is NOT the parameter count.
 open class Widely { open fun m(a: Long = 1L, b: Double = 2.0, c: String = "s"): String = "$a$b$c" }
+// An ENUM class is inheritable in the only way that matters here — an entry body is a subclass — so
+// kotlinc guards its stub. The enum writer is a separate emission path from the class one, which is
+// why this row exists at all.
+enum class Enumly { A, B; fun m(a: Int = 1): Int = a }
 fun top(a: Int = 1): Int = a
 "#;
 
@@ -135,6 +139,7 @@ fn an_inheritable_owners_default_stub_carries_the_super_guard() {
         ("Dataly", "m$default"),
         ("Objectly", "m$default"),
         ("Widely", "m$default"),
+        ("Enumly", "m$default"),
         ("DefaultsKt", "top$default"),
     ] {
         assert_eq!(
@@ -156,6 +161,13 @@ fn an_inheritable_owners_default_stub_carries_the_super_guard() {
             .any(|line| line.contains("UnsupportedOperationException")),
         "an open class's stub must guard: {guarded:?}"
     );
+    let guarded = method_body(&krusty_dir, "Enumly", "m$default");
+    assert!(
+        guarded
+            .iter()
+            .any(|line| line.contains("UnsupportedOperationException")),
+        "an enum class's stub must guard — an entry body subclasses it: {guarded:?}"
+    );
     for class in ["Finally", "Dataly", "Objectly"] {
         let body = method_body(&krusty_dir, class, "m$default");
         assert!(
@@ -172,10 +184,13 @@ fn an_inheritable_owners_default_stub_carries_the_super_guard() {
 fn a_guarded_stub_still_fills_defaults() {
     let src = r#"
 open class Greeter { open fun greet(name: String = "world", n: Int = 2): String = "$name$n" }
+enum class Mood { CALM, LOUD; fun say(word: String = "hi", n: Int = 2): String = "$word$n" }
 fun box(): String {
     val g = Greeter()
-    return if (g.greet() == "world2" && g.greet("hi") == "hi2" && g.greet(n = 9) == "world9") "OK"
-           else "FAIL"
+    val ok = g.greet() == "world2" && g.greet("hi") == "hi2" && g.greet(n = 9) == "world9"
+    // The enum member routes through the enum writer's own `$default`, which did not exist before.
+    val enumOk = Mood.CALM.say() == "hi2" && Mood.LOUD.say("yo") == "yo2" && Mood.CALM.say(n = 9) == "hi9"
+    return if (ok && enumOk) "OK" else "FAIL"
 }
 "#;
     assert_eq!(
