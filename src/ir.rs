@@ -464,8 +464,15 @@ pub enum IrExpr {
     },
     /// The not-null assertion `operand!!` — yields `operand`, throwing if it is null. On the JVM this
     /// is `kotlin/jvm/internal/Intrinsics.checkNotNull` applied to a duplicate of the value.
+    ///
+    /// `message` is set instead for the assertion a PLATFORM value (`T!`) gets when it is committed
+    /// to a declared non-null type: the same yields-or-throws semantics, but with the checked
+    /// expression's rendering (`getenv(...)`) carried into the failure, so the JVM form is
+    /// `Intrinsics.checkNotNullExpressionValue(value, message)`. Every pass treats the two alike —
+    /// only the emitted intrinsic and the `-X` option that removes it differ.
     NotNullAssert {
         operand: ExprId,
+        message: Option<String>,
     },
     /// A `lateinit` read: yields `operand`, throwing `UninitializedPropertyAccessException(name)` if it
     /// is still null. Emitted as `<operand>; dup; ifnonnull L; ldc name;
@@ -2373,7 +2380,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         }),
         IrExpr::Return(v) => v.iter().for_each(|&v| f(v)),
         IrExpr::TypeOp { arg, .. }
-        | IrExpr::NotNullAssert { operand: arg }
+        | IrExpr::NotNullAssert { operand: arg, .. }
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }

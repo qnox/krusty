@@ -2626,7 +2626,7 @@ pub fn lower_value_classes(
         let mut reach = HashSet::new();
         collect_reachable_scoped(&ir.exprs, &ir.inline_only_fns, root, &mut reach);
         for id in reach {
-            if let IrExpr::NotNullAssert { operand } = &ir.exprs[id as usize] {
+            if let IrExpr::NotNullAssert { operand, .. } = &ir.exprs[id as usize] {
                 match repr_ctx.repr(*operand) {
                     // `X!!` over an UNBOXED primitive-underlying value class is redundant (a primitive
                     // can't be null); kotlinc emits no `checkNotNull`. Strip the assert.
@@ -3756,7 +3756,7 @@ fn unboxed_vc_class(
             _ => None,
         },
         IrExpr::Block { value: Some(v), .. } => unboxed_vc_class(exprs, rets, under, *v, calls),
-        IrExpr::NotNullAssert { operand } if calls => {
+        IrExpr::NotNullAssert { operand, .. } if calls => {
             unboxed_vc_class(exprs, rets, under, *operand, calls)
         }
         _ => None,
@@ -4275,7 +4275,7 @@ fn repr(
             type_operand,
             ..
         } => repr_of_ty(type_operand, under),
-        IrExpr::NotNullAssert { operand } => repr(
+        IrExpr::NotNullAssert { operand, .. } => repr(
             exprs,
             rets,
             fields,
@@ -4696,7 +4696,7 @@ fn is_boxed_vc(
                     x,
                 ) || !matches!(repr(exprs, rets, fields, slots, under, types, physical, field_getters, *arg), Repr::Unboxed(c) if c == x))
         }
-        IrExpr::NotNullAssert { operand } => is_boxed_vc(
+        IrExpr::NotNullAssert { operand, .. } => is_boxed_vc(
             exprs,
             funcs,
             fields,

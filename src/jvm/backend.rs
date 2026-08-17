@@ -264,6 +264,9 @@ pub struct JvmBackend {
     /// Whether to emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions`
     /// clears this).
     param_assertions: bool,
+    /// Whether to emit the `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform
+    /// value (`-Xno-call-assertions` clears this).
+    call_assertions: bool,
 }
 
 impl JvmBackend {
@@ -274,12 +277,20 @@ impl JvmBackend {
             jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
             lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
             param_assertions: true,
+            call_assertions: true,
         }
     }
 
     /// `-Xno-param-assertions` passes `false`: emit no `Intrinsics.checkNotNullParameter` guards.
     pub fn with_param_assertions(mut self, enabled: bool) -> JvmBackend {
         self.param_assertions = enabled;
+        self
+    }
+
+    /// `-Xno-call-assertions` passes `false`: emit no `Intrinsics.checkNotNullExpressionValue` guard
+    /// where a platform value is narrowed to a declared non-null type.
+    pub fn with_call_assertions(mut self, enabled: bool) -> JvmBackend {
+        self.call_assertions = enabled;
         self
     }
 
@@ -611,6 +622,9 @@ impl Backend for JvmBackend {
         // whose start offsets are measured past them — sees the same thing.
         if !self.param_assertions {
             crate::jvm::ir_emit::strip_param_assertions(&mut ir);
+        }
+        if !self.call_assertions {
+            crate::jvm::ir_emit::strip_call_assertions(&mut ir);
         }
         let emit_opts = emit_opts.with_param_assertions(self.param_assertions);
         let metadata =

@@ -19,11 +19,11 @@ use crate::frontend::{
     CompoundAssignmentTarget, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget,
     ExprLowering, FrontendClassModel, FrontendSymbols, FrontendTypeInfo, FunctionImportScope,
     ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InlineCall, InvokeKind,
-    LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
-    ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
-    ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
-    ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
-    SingletonValue, StmtLowering, TopLevelReferenceOwner,
+    LambdaCapture, LambdaInfo, PlatformNarrowing, ReceiverFnValueOrigin, ResolvedCall,
+    ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
+    ResolvedExtensionCall, ResolvedIncDec, ResolvedLocalFunctionCall, ResolvedMember,
+    ResolvedPropertyAccess, ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef,
+    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrAnnotationConstruction, IrBinOp, IrCatch, IrClass,
@@ -22312,6 +22312,160 @@ impl<'a> Lower<'a> {
         Some((var, cond, member))
     }
 
+    /// Guard a lowered value with the not-null assertion kotlinc emits where a PLATFORM value (`T!`)
+    /// is committed to a declared non-null type (the positions the checker recorded in
+    /// [`crate::resolve::TypeInfo::platform_narrowings`]).
+    ///
+    /// The guard names the checked expression in its failure, and only a value with a name gets one:
+    /// kotlinc renders a CALL as `callee(...)` and a FIELD READ as the field's name — which is also
+    /// every shape a platform type can actually arrive through, since flexibility originates at a
+    /// Java member. A narrowing of anything else (a local already holding a platform value) is left
+    /// unguarded rather than guarded under an invented name.
+    fn guard_platform_narrowing(&mut self, e: AstExprId, value: u32) -> u32 {
+        let Some(&position) = self.info.platform_narrowings.get(&e) else {
+            return value;
+        };
+        // A DECLARED type propagates into a conditional, so each branch is checked where it produces
+        // its value; a value argument's expected type does not, and kotlinc checks the merged value
+        // instead — which has no name, so it stays unguarded here (see
+        // [`Self::platform_narrowing_message`]).
+        if position == PlatformNarrowing::Declaration
+            && matches!(
+                self.afile.expr(e),
+                Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. }
+            )
+        {
+            return self.guard_conditional_value(e, value);
+        }
+        self.guard_produced_value(e, value)
+    }
+
+    /// Guard a lowered conditional's branches, in place. The walk passes through the LOWERING's own
+    /// value block — an elvis becomes `{ val t = lhs; if (t != null) t else rhs }` — to reach the
+    /// branches, and a collapsed conditional (`null ?: javaCall()`) is just its one surviving value.
+    fn guard_conditional_value(&mut self, e: AstExprId, value: u32) -> u32 {
+        match &self.ir.exprs[value as usize] {
+            IrExpr::Block {
+                value: Some(tail), ..
+            } => {
+                let tail = *tail;
+                let guarded = self.guard_conditional_value(e, tail);
+                if guarded != tail {
+                    if let IrExpr::Block { value, .. } = &mut self.ir.exprs[value as usize] {
+                        *value = Some(guarded);
+                    }
+                }
+                value
+            }
+            IrExpr::When { branches } => {
+                let branches = branches.clone();
+                let guarded: Vec<(Option<ExprId>, ExprId)> = branches
+                    .iter()
+                    .map(|(condition, branch)| (*condition, self.guard_branch_value(e, *branch)))
+                    .collect();
+                if let IrExpr::When { branches } = &mut self.ir.exprs[value as usize] {
+                    *branches = guarded;
+                }
+                value
+            }
+            _ => self.guard_produced_value(e, value),
+        }
+    }
+
+    /// Guard one branch of a conditional. A nested conditional is checked in ITS branches in turn; a
+    /// branch that is a source BLOCK is left alone, which is what kotlinc does — `if (c) javaCall()`
+    /// is guarded, `if (c) { …; javaCall() }` is not. A single-expression block carries no statements
+    /// and is the expression itself.
+    fn guard_branch_value(&mut self, e: AstExprId, branch: u32) -> u32 {
+        match &self.ir.exprs[branch as usize] {
+            IrExpr::When { .. } => self.guard_conditional_value(e, branch),
+            IrExpr::Block {
+                stmts,
+                value: Some(tail),
+            } if stmts.is_empty() => {
+                let tail = *tail;
+                let guarded = self.guard_branch_value(e, tail);
+                if guarded != tail {
+                    if let IrExpr::Block { value, .. } = &mut self.ir.exprs[branch as usize] {
+                        *value = Some(guarded);
+                    }
+                }
+                branch
+            }
+            IrExpr::Block { .. } => branch,
+            _ => self.guard_produced_value(e, branch),
+        }
+    }
+
+    /// Guard one value where its producing expression leaves it.
+    fn guard_produced_value(&mut self, e: AstExprId, value: u32) -> u32 {
+        // A generic call's erased result carries a `checkcast` to the substituted type. kotlinc
+        // checks what the CALL produced and casts the checked value, so the guard goes UNDER the
+        // cast — not around it.
+        if let IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg,
+            ..
+        } = self.ir.exprs[value as usize]
+        {
+            if let Some(guarded) = self.guarded_platform_value(e, arg) {
+                if let IrExpr::TypeOp { arg, .. } = &mut self.ir.exprs[value as usize] {
+                    *arg = guarded;
+                }
+            }
+            return value;
+        }
+        self.guarded_platform_value(e, value).unwrap_or(value)
+    }
+
+    /// The guarded form of one lowered value, or `None` when its shape has no name to report.
+    fn guarded_platform_value(&mut self, e: AstExprId, value: u32) -> Option<u32> {
+        let message = self.platform_narrowing_message(value)?;
+        crate::trace_compiler!("lower", "platform narrowing guard {e:?} message={message}");
+        Some(self.ir.add_expr(IrExpr::NotNullAssert {
+            operand: value,
+            message: Some(message),
+        }))
+    }
+
+    /// kotlinc's rendering of the checked expression for a platform narrowing guard: `callee(...)`
+    /// for a call of any linkage, and the field's own name where the read resolved to a field.
+    fn platform_narrowing_message(&self, value: u32) -> Option<String> {
+        let named_function = |function: &u32| {
+            self.ir
+                .functions
+                .get(*function as usize)
+                .map(|function| function.name.clone())
+        };
+        let name = match &self.ir.exprs[value as usize] {
+            IrExpr::Call { callee, .. } => match callee {
+                Callee::Static { name, .. }
+                | Callee::Virtual { name, .. }
+                | Callee::Special { name, .. }
+                | Callee::CrossFile { name, .. } => Some(name.clone()),
+                Callee::Local(function) | Callee::LocalDefault(function) => {
+                    named_function(function)
+                }
+                Callee::ClassStatic { function, .. } => named_function(function),
+                Callee::Intrinsic { .. } => None,
+            },
+            IrExpr::MethodCall { class, index, .. } => self
+                .ir
+                .classes
+                .get(*class as usize)
+                .and_then(|class| class.methods.get(*index as usize))
+                .and_then(named_function),
+            // A property read is its ACCESSOR call, which is what kotlinc names — unless resolution
+            // selected a physical field, whose read names the field with no argument list.
+            IrExpr::PropertyRead { name, field, .. } => match field {
+                Some(field) => return Some(field.name.clone()),
+                None => Some(crate::names::property_getter_name(name)),
+            },
+            _ => None,
+        }?;
+        Some(format!("{name}(...)"))
+    }
+
     fn expr(&mut self, e: AstExprId) -> Option<u32> {
         if let Some(ExprLowering::Unavailable { reason }) = self.info.expr_lowers.get(&e) {
             return self.bail(reason);
@@ -22337,6 +22491,9 @@ impl<'a> Lower<'a> {
         // (see [`crate::wide_stack`]; the checker's `expr_with_context` grows the same way).
         let r = crate::wide_stack::on_wide_stack(|| self.expr_inner(e));
         self.expr_depth -= 1;
+        // A platform value committed to a declared non-null type is guarded here, over the lowered
+        // value, so every narrowing position the checker recorded goes through one rule.
+        let r = r.map(|id| self.guard_platform_narrowing(e, id));
         // Record the expression's LOGICAL (source) type verbatim, keyed by its IR id — the value-class
         // pass reads it to recover a value's representation when the IR node alone is ambiguous (a library
         // call's physical `Object` result whose logical type is a value class). VC-agnostic: just the type.
@@ -22507,7 +22664,10 @@ impl<'a> Lower<'a> {
                 }
                 let v = self.expr(operand)?;
                 if self.info.semantic_ty(operand).is_reference() {
-                    let asserted = self.ir.add_expr(IrExpr::NotNullAssert { operand: v });
+                    let asserted = self.ir.add_expr(IrExpr::NotNullAssert {
+                        operand: v,
+                        message: None,
+                    });
                     // `Int?!!` narrows to the unboxed primitive — unbox the wrapper after the null check.
                     let result = self.info.ty(e);
                     if self.has_scalar_value_repr(result) {

@@ -89,7 +89,12 @@ fun directValue(box: p.Box<String>): String = box.value
 fun box(): String {
     val direct: String = directValue(p.StringBox("O"))
     val inherited: String = p.StringBox("K").value
-    val sourceInherited: String = SourceBox().value
+    // `SourceBox()` leaves the Java field null. The field is platform-typed, so a NON-null target
+    // here is a narrowing kotlinc guards — measured: it throws `NullPointerException: value must not
+    // be null` rather than binding null. This case is about the field being READ and executed, so it
+    // keeps the nullable target that admits the null; the guard itself is covered by
+    // `platform_call_assertions_e2e`.
+    val sourceInherited: String? = SourceBox().value
     return if (ShadowBox().value == 7) direct + inherited + sourceInherited else "FAIL"
 }
 "#;

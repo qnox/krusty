@@ -362,6 +362,27 @@ pub(crate) fn strip_param_assertions(ir: &mut IrFile) {
     }
 }
 
+/// Drop every `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform value.
+///
+/// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java call's `T!` result is
+/// committed to a declared non-null type. The guard is an expression wrapper, so it is removed by
+/// rewriting the node into its operand's value rather than by clearing a record: `x!!`
+/// ([`IrExpr::NotNullAssert`] with no message) is a SOURCE assertion the flag must leave alone.
+pub(crate) fn strip_call_assertions(ir: &mut IrFile) {
+    for expr in &mut ir.exprs {
+        if let IrExpr::NotNullAssert {
+            operand,
+            message: Some(_),
+        } = expr
+        {
+            *expr = IrExpr::Block {
+                stmts: Vec::new(),
+                value: Some(*operand),
+            };
+        }
+    }
+}
+
 /// Per-file emission configuration passed explicitly down the emit callgraph and stamped onto every
 /// `ClassWriter` (via [`new_writer`]) so synthetic serializer/companion/DefaultImpls classes inherit
 /// it too. The `Default` is v52 with no `SourceFile`; every path that claims to emit the bytes krusty
@@ -15415,15 +15436,28 @@ impl<'a> Emitter<'a> {
                 // function, which the front end forbids.
                 unreachable!("CurrentContinuation must be resolved by the CPS pass before emit")
             }
-            IrExpr::NotNullAssert { operand } => {
+            IrExpr::NotNullAssert { operand, message } => {
                 self.emit_value(*operand, code);
                 code.dup();
-                let m = self.cw.methodref(
-                    "kotlin/jvm/internal/Intrinsics",
-                    "checkNotNull",
-                    "(Ljava/lang/Object;)V",
-                );
-                code.invokestatic(m, 1, 0);
+                // A platform value narrowed to a declared non-null type names the checked expression
+                // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
+                // one-argument form. Both consume the duplicate and leave the value in place.
+                let m = match message {
+                    Some(message) => {
+                        code.push_string(message, self.cw);
+                        self.cw.methodref(
+                            "kotlin/jvm/internal/Intrinsics",
+                            "checkNotNullExpressionValue",
+                            "(Ljava/lang/Object;Ljava/lang/String;)V",
+                        )
+                    }
+                    None => self.cw.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "checkNotNull",
+                        "(Ljava/lang/Object;)V",
+                    ),
+                };
+                code.invokestatic(m, if message.is_some() { 2 } else { 1 }, 0);
             }
             IrExpr::LateinitCheck { operand, name } => {
                 // A `lateinit var` local read: throw `UninitializedPropertyAccessException` while the slot
@@ -16077,7 +16111,7 @@ impl<'a> Emitter<'a> {
             IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => {
                 self.records_frame(*arg)
             }
-            IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
+            IrExpr::NotNullAssert { operand, .. } => self.records_frame(*operand),
             // A `lateinit` read emits an `ifnonnull` merge frame, so a parent must spill other operands
             // first (else the frame at the join would omit them).
             IrExpr::LateinitCheck { .. } => true,
@@ -17436,7 +17470,7 @@ impl<'a> Emitter<'a> {
                 Ty::obj(&format!("kotlin/jvm/functions/Function{arity}"))
             }
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
-            IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
+            IrExpr::NotNullAssert { operand, .. } => self.value_ty(*operand),
             IrExpr::LateinitCheck { operand, .. } => self.value_ty(*operand),
             IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => Ty::Nothing,
             IrExpr::Vararg { array_type, .. } => ir_ty_to_jvm(array_type),
