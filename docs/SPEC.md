@@ -6431,3 +6431,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ClassCastException`, or silently calls the wrong overload.
   Tests: `tests/nullable_primitive_parameter_name_e2e.rs`,
   `jvm::classpath::fq_tests::metadata_param_matching_boxes_a_nullable_primitive`.
+
+- **A lambda packed into a `vararg` is shaped by the ELEMENT type, not the declared array.** A
+  vararg parameter is declared as its array (`vararg selectors: (T) -> R` is `Array<out (T) -> R>`),
+  but each argument packed into it has the element type. Shaping a lambda argument from the declared
+  parameter therefore asked whether an array is a function type, which it never is, and the lambda
+  was left unshaped: `it` had no type and every member read on it was "unresolved reference". The
+  first argument survived by coincidence — its position matched the parameter's — so the gap
+  presented as "the second lambda onwards". A spread argument (`*selectors`) IS the whole array and
+  keeps the declared type. The element is taken on the lambda path alone: the ordinary argument path
+  reads the same value and takes the element of a final vararg itself, so unwrapping the shared value
+  double-unwraps it for every non-lambda argument, collapsing the expectation to an error type — that
+  rejects `describeAll(if (c) { { it.path } } else { { it.method } })` and
+  `nested(arrayOf(), arrayOf("x"))`, and drops the `Long` expectation on `longs(1, 2)` so the
+  constants load as widened ints (`iconst_1; i2l`) instead of `lconst_1`.
+  Tests: `tests/vararg_lambda_element_shape_e2e.rs`.
