@@ -1377,3 +1377,50 @@ fn class_parameter_annotations_reach_metadata() {
         ),
     );
 }
+
+/// A `KClass<*>` annotation member is `java.lang.Class` in the class file.
+///
+/// The JVM annotation format admits a closed set of element types — primitive, `String`, `Class`,
+/// enum, annotation, or a single-dimension array of those. `Lkotlin/reflect/KClass;` is not among
+/// them, so an annotation declaring one cannot be read reflectively at all and no Java consumer can
+/// use it. kotlinc writes `Class`, keeping the star projection in a `Signature`.
+#[test]
+fn a_kclass_annotation_member_is_a_java_class() {
+    const SRC: &str = "import kotlin.reflect.KClass\n\
+                       annotation class Anno(val k: KClass<*>, val ks: Array<KClass<*>>)\n";
+    let ours = common::expect_compile_in_process(
+        SRC,
+        "Anno",
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    let class = ours
+        .iter()
+        .find_map(|(name, bytes)| (name == "Anno").then_some(bytes))
+        .expect("Anno.class");
+    let parsed = krusty::jvm::classreader::parse_class(class).expect("parse Anno.class");
+    let member = |name: &str| {
+        parsed
+            .methods
+            .iter()
+            .find(|m| m.name == name)
+            .map(|m| (m.descriptor.clone(), m.signature.clone()))
+            .unwrap_or_else(|| panic!("missing member {name}"))
+    };
+    assert_eq!(
+        member("k"),
+        (
+            "()Ljava/lang/Class;".to_string(),
+            Some("()Ljava/lang/Class<*>;".to_string())
+        ),
+        "a KClass member is a Class, with the projection kept in the Signature"
+    );
+    assert_eq!(
+        member("ks"),
+        (
+            "()[Ljava/lang/Class;".to_string(),
+            Some("()[Ljava/lang/Class<*>;".to_string())
+        ),
+        "an Array<KClass<*>> member is a Class[]"
+    );
+}
