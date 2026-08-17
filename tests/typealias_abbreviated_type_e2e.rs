@@ -365,6 +365,21 @@ fn a_generic_class_abbreviates_the_supertype_that_was_spelled() {
     assert_identical("GSuper", SRC, "app/Holder");
 }
 
+/// A GENERIC class with NO declared superclass, implementing an alias-spelled interface. The
+/// emitted supertype list must hold the interface alone — the implicit `kotlin/Any` that fills the
+/// signature's superclass position is a signature artifact, not a metadata supertype — and the
+/// interface's abbreviation must land on it rather than one slot over.
+#[test]
+fn a_generic_class_with_no_superclass_lists_only_its_interfaces() {
+    const SRC: &str = "package app\n\
+        \n\
+        interface Iface\n\
+        typealias Marker = Iface\n\
+        \n\
+        class Holder<T>(val t: T) : Marker\n";
+    assert_identical("GAny", SRC, "app/Holder");
+}
+
 /// An alias spelled INSIDE an inline function type. The arrow node names no alias itself, but its
 /// components do, and a function type's metadata arguments are synthesized (`params… + ret`) rather
 /// than taken from the spelling tree — so the component spellings have to be laid out in that same
@@ -376,12 +391,15 @@ fn aliases_inside_an_inline_function_type_are_abbreviated() {
 }
 
 /// A `vararg` parameter is SPELLED as its element (`vararg xs: Cargo`) but RECORDED as
-/// `Array<Cargo>`, so the element's spelling is lifted under the array rather than applied to it.
-/// Asserted through the lifting itself (`Spelled::as_array_element`, unit-tested in
-/// `crate::spelling`) rather than byte-for-byte: krusty's vararg records already differ from
-/// kotlinc's with or without an alias — the array argument's `out` projection and the
-/// `JvmMethodSignature` are both missing — so a whole-payload comparison here would measure those
-/// pre-existing gaps instead of the abbreviation.
+/// `Array<out Cargo>`, so the element's spelling is lifted under the array rather than applied to
+/// it — and the array argument carries an `out` projection the source never wrote.
+#[test]
+fn a_vararg_of_an_aliased_element_abbreviates_its_element() {
+    let src = format!("{PRELUDE}\nfun many(vararg xs: Cargo): Int = xs.size\n");
+    assert_identical("Many", &src, "app/ManyKt");
+}
+
+/// The same declaration must also RUN.
 #[test]
 fn a_vararg_of_an_aliased_element_still_compiles_and_runs() {
     let src = format!("{PRELUDE}\nfun many(vararg xs: Cargo): Int = xs.size\n");

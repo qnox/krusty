@@ -784,7 +784,16 @@ fn facade_package_metadata_inner(
         // splicers work from the metadata-derived descriptor, and the spurious handle steered
         // krusty's own consumer away from the `$default` splice route. Suspend fns (the CPS form
         // is not derivable) and type-parameter-mentioning signatures keep the handle.
-        let jvm_desc = (f.is_suspend() || mentions_type_parameter).then(|| {
+        // A `kotlin/Array` anywhere in the signature needs the handle too: a reader maps class names
+        // through a flat table that cannot express an array's argument-dependent descriptor, so
+        // kotlinc records it explicitly (see `metadata::descriptor_needs_recording`). This covers
+        // `vararg` of a reference element, which is recorded as an array.
+        let records_an_array = receiver
+            .into_iter()
+            .chain(declared_params.iter().copied())
+            .chain(std::iter::once(declared_ret))
+            .any(crate::metadata::descriptor_needs_recording);
+        let jvm_desc = (f.is_suspend() || mentions_type_parameter || records_an_array).then(|| {
             let mut p = String::new();
             if let Some(r) = receiver {
                 p.push_str(&crate::jvm::names::type_descriptor(r));

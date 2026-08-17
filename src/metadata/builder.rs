@@ -396,12 +396,15 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
                                                     // A `vararg` parameter is SPELLED as its element (`vararg xs: Cargo`) but RECORDED as the
                                                     // array, so the element's spelling has to be lifted under the array rather than applied to
                                                     // it — otherwise the record claims `Array` itself was written as the alias.
-        let declared_spelling = if f.vararg_index == Some(i) {
-            f.spellings.param(i).as_array_element()
+        let (declared_ty, declared_spelling) = if f.vararg_index == Some(i) {
+            (
+                super::vararg_recorded_type(*pty),
+                f.spellings.param(i).as_array_element(),
+            )
         } else {
-            f.spellings.param(i).clone()
+            (*pty, f.spellings.param(i).clone())
         };
-        let ty = type_pb_declared(st, *pty, &declared_spelling, &tps);
+        let ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
         vp.field_message(3, &ty); // ValueParameter.type = 3
                                   // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
                                   // kotlinc's declared type stays the array.

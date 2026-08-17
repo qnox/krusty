@@ -1811,23 +1811,33 @@ fn build_class_metadata(
         .filter(|signature| !signature.supers.is_empty())
         .map(|signature| signature.supers.clone())
         .unwrap_or_default();
-    // A generic class's recorded supers ALWAYS lead with the superclass position — holding
-    // `kotlin/Any` when none was declared — while the list built below omits that position
-    // entirely. The header's spellings have to follow whichever shape this is, or every
-    // abbreviation lands on the neighbouring supertype.
-    let leads_with_superclass_slot = !supertypes.is_empty();
+    // A generic class's recorded supers ALWAYS materialize the superclass position — holding
+    // `kotlin/Any` when none was declared — because a JVM class `Signature` must name a superclass.
+    // `@Metadata` records only the supertypes source DECLARED, so drop that implicit `Any`; leaving
+    // it in shows every consumer a supertype the declaration never wrote. Both shapes then agree:
+    // a superclass slot exists exactly when one was declared.
+    if super_internal == "kotlin/Any"
+        && supertypes
+            .first()
+            .is_some_and(|first| matches!(first, Ty::Obj(n, _) if n.matches("kotlin/Any")))
+    {
+        supertypes.remove(0);
+    }
     if supertypes.is_empty() {
         if super_internal != "kotlin/Any" {
             supertypes.push(Ty::obj(&super_internal));
         }
         supertypes.extend(c.interfaces.iter_ids().map(Ty::obj_name));
     }
+    // The header's spellings have to follow the same shape, or every abbreviation lands on the
+    // neighbouring supertype.
+    let has_declared_superclass = super_internal != "kotlin/Any";
     let class_spellings = ir
         .class_declared_spellings
         .get(&c.fq_name_id())
         .cloned()
         .unwrap_or_default();
-    let supertype_spellings = class_spellings.supertype_spellings(leads_with_superclass_slot);
+    let supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
     // DECLARED secondary constructors → `Class.constructor` records (flags 22 = public secondary),
     // described from their recorded source names + SEMANTIC types (fun-type parameters keep their
     // shape — `Cfg.() -> Unit` — where the erased realization is a bare `Function1`). Synthetic
