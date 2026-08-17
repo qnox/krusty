@@ -809,6 +809,7 @@ mod tests {
                 context_count: 0,
                 vararg_index: None,
                 visibility: crate::types::Visibility::Public,
+                spellings: crate::spelling::DeclaredSpellings::default(),
             }],
             &[],
             &[],
