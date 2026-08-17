@@ -3017,14 +3017,6 @@ impl SymbolTable {
             })
     }
 
-    fn source_class_is_object(&self, internal: TypeName) -> bool {
-        self.classes.get(&internal).is_some_and(ClassSig::is_object)
-            || self
-                .source_class_headers
-                .get(&internal)
-                .is_some_and(|header| header.flags.has(ClassFlags::OBJECT))
-    }
-
     /// The normalized classifier record available before full member signatures are collected.
     /// Early inference uses the same direct-supertype graph as every later hierarchy traversal.
     pub(crate) fn source_class_header_shape(
@@ -7412,7 +7404,6 @@ fn collect_signatures_with_cp_impl(
                                             scope: property_scope.clone(),
                                             kind: DeferredKind::Member(Box::new(MemberContext {
                                                 owner: type_name(&internal),
-                                                class_names: class_names.clone(),
                                                 implicit_classifier,
                                                 implicit_value,
                                                 implicit_instance: Some(member_this),
@@ -7454,7 +7445,6 @@ fn collect_signatures_with_cp_impl(
                                                 kind: DeferredKind::Member(Box::new(
                                                     MemberContext {
                                                         owner: type_name(&internal),
-                                                        class_names: class_names.clone(),
                                                         implicit_classifier,
                                                         implicit_value,
                                                         implicit_instance: Some(member_this),
@@ -8655,7 +8645,14 @@ fn collect_signatures_with_cp_impl(
                         match p.declared_ty() {
                             Some(r) => ty_of_ref(r, &class_names, &property_tparams, diags),
                             None => {
-                                let dt = infer_lit_ty(file, de, &class_names, &*libraries);
+                                let dt = infer_lit_ty_scoped(
+                                    InferenceSource::file(file, i as u32),
+                                    de,
+                                    &class_names,
+                                    &[],
+                                    &*libraries,
+                                    &table,
+                                );
                                 delegated_getvalue_ret_for_signature(
                                     file,
                                     &table,
@@ -8780,14 +8777,12 @@ fn collect_signatures_with_cp_impl(
         }
     }
 
-    resolve_deferred_properties(
-        files,
-        &file_class_names,
-        &*libraries,
-        &mut table,
-        &deferred_properties,
-        diags,
-    );
+    // The engine types a deferred declaration by running the REAL checker over its body, and the
+    // checker resolves classifiers and callables through the table's platform. Install it before
+    // that runs: without it every classpath and built-in name — `Int` included — is unresolved, and
+    // every deferred declaration declines.
+    table.libraries = libraries;
+    resolve_deferred_properties(files, &mut table, &deferred_properties, diags);
 
     table.conflicting_top_level_keys = report_conflicting_top_level_overloads(
         files,
@@ -8968,7 +8963,6 @@ fn collect_signatures_with_cp_impl(
 
     collect_declared_spellings(&mut table, files, &file_class_names);
 
-    table.libraries = libraries;
     table.class_names = class_names;
     break_supertype_cycles(&mut table, files, diags);
     table.finish_module_mutation();
@@ -10320,98 +10314,6 @@ fn assign_op_name(op: BinOp) -> Option<&'static str> {
     })
 }
 
-fn infer_lit_ty(
-    file: &File,
-    e: ExprId,
-    class_names: &ClassNames,
-    src: &dyn SemanticPlatform,
-) -> Ty {
-    let scope = function_import_scope_with(file, src.platform_default_import_packages(), src);
-    let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped(src, &scope);
-    let classifier_call = |classifier, name: &str, args: &[CallArgKind], type_args: &[Ty]| {
-        crate::symbol_resolver::SymbolResolver::new(src)
-            .select_classifier_call(classifier, name, args, type_args)
-            .map(|member| member.ret)
-    };
-    let call =
-        |receiver: Option<Ty>, name: &str, args: &[CallArgKind], type_args: &[Ty]| match receiver {
-            None => resolver
-                .select_symbol(
-                    crate::symbol_resolver::SymRecv::TopLevel,
-                    name,
-                    args,
-                    type_args,
-                )
-                .and_then(crate::symbol_resolver::Symbol::top_level_call)
-                .map(|call| call.ret),
-            Some(receiver) => resolver
-                .select_symbol(
-                    crate::symbol_resolver::SymRecv::Value(receiver),
-                    name,
-                    args,
-                    type_args,
-                )
-                .and_then(crate::symbol_resolver::Symbol::call_return),
-        };
-    let env = InferEnv {
-        up: &|_, _| None,
-        module_object: &|_| None,
-        static_classifier_value: &|_, _| None,
-        call: &call,
-        // This entry point has no module symbol table, so there is no module declaration to demand.
-        demand: &|_| None,
-        property: &|receiver, name| {
-            resolver
-                .resolve_symbol(
-                    crate::symbol_resolver::SymRecv::Value(receiver),
-                    name,
-                    &[],
-                    &[],
-                )
-                .and_then(crate::symbol_resolver::Symbol::property_return)
-        },
-        explicit_call_return: &|name, type_args| {
-            explicit_targ_return_agreement(&resolver, name, type_args)
-        },
-        classifier_call: &classifier_call,
-        classifier_property: &|classifier, name| {
-            resolver
-                .static_field(classifier, name)
-                .map(|field| field.ty)
-                .or_else(|| {
-                    src.classifier(classifier)?
-                        .classifier_property(classifier, name)
-                        .map(|property| property.ty)
-                })
-        },
-        implicit_classifier: None,
-        implicit_value: None,
-        implicit_instance: None,
-        callable_ref: &|_, _, _| None,
-        ctor_template: &|internal, arity, actuals| {
-            constructor_template_of(file, class_names, src, None, internal, arity, actuals)
-        },
-        call_template: &|receiver, name, args, type_args| {
-            selected_call_template(&resolver, receiver, name, args, type_args)
-        },
-        value_class: &|internal| {
-            src.classifier(internal)
-                .is_some_and(|classifier| classifier.value_underlying.is_some())
-        },
-        ctor_shadowed: &|internal, name, args| {
-            construction_shadowed_by_callable(
-                &resolver,
-                companion_of(src, None, internal),
-                |_| false,
-                &call,
-                name,
-                args,
-            )
-        },
-    };
-    infer_lit_ty_p(file, e, class_names, &[], src, &env)
-}
-
 fn delegated_getvalue_ret_for_signature(
     file: &File,
     table: &SymbolTable,
@@ -10480,153 +10382,11 @@ fn select_delegate_operator_return(
     }
 }
 
-/// The return type a top-level call's EXPLICIT type arguments determine on their own, for the
-/// lightweight signature inferer: every top-level overload of `name` must declare exactly
-/// `targs.len()` type parameters, and substituting the arguments into each overload's return must
-/// produce the SAME fully-bound type (`fun <T> build(…): T` with `<C>` → `C`).
-/// `None` — a sound skip to the full checker — when overloads disagree, when a return still
-/// mentions an unbound type parameter (it depends on argument inference), or when the name has no
-/// top-level overloads. Deliberately blind to the argument list: it exists for calls whose
-/// arguments the positional selection cannot map (named arguments out of declared position).
-fn explicit_targ_return_agreement(
-    resolver: &crate::symbol_resolver::SymbolResolver,
-    name: &str,
-    targs: &[Ty],
-) -> Option<Ty> {
-    let overloads = resolver.top_level_candidates(name);
-    let mut agreed: Option<Ty> = None;
-    for overload in (crate::libraries::FunctionSet { overloads }).into_top_level() {
-        let semantic = overload.semantic_signature();
-        if semantic.formals.len() != targs.len() {
-            return None;
-        }
-        let binds: crate::symbol_resolver::GSigBinds = semantic
-            .formals
-            .iter()
-            .cloned()
-            .zip(targs.iter().copied())
-            .collect();
-        let ret = crate::symbol_resolver::ty_subst(semantic.ret, &binds);
-        if ret == Ty::Error || ret.mentions_ty_param() {
-            return None;
-        }
-        match agreed {
-            None => agreed = Some(ret),
-            Some(previous) if previous == ret => {}
-            Some(_) => return None,
-        }
-    }
-    agreed
-}
-
-/// The common type of two branch values for the lightweight signature inferer: identical types
-/// collapse, numeric types widen (`Int`/`Long` → `Long`); anything else is `Error` (so the caller
-/// conservatively skips rather than guessing a supertype). Deliberately narrower than the full
-/// checker's least-upper-bound — it only needs to be SOUND, never complete.
-fn common_lit_ty(a: Ty, b: Ty) -> Ty {
-    if a == b {
-        a
-    } else {
-        Ty::promote(a, b).unwrap_or(Ty::Error)
-    }
-}
-
 fn parameterized_class_literal_type(base: Ty, represented: Ty) -> Ty {
     match base {
         Ty::Obj(internal, []) => Ty::obj_args_name(internal, &[represented]),
         _ => base,
     }
-}
-
-/// Whether a callable other than the named classifier's constructor can answer `name(args)`.
-type CtorShadowedHook<'a> = &'a dyn Fn(TypeName, &str, &[CallArgKind]) -> bool;
-
-/// Select a call from a federated symbol source: `None` receiver is an unqualified call, `Some(ty)`
-/// the semantic type of a written receiver.
-type CallSelector<'a> = &'a dyn Fn(Option<Ty>, &str, &[CallArgKind], &[Ty]) -> Option<Ty>;
-
-/// A generic classifier's primary-constructor template, by classifier and call arity.
-type CtorTemplateHook<'a> =
-    &'a dyn Fn(TypeName, usize, &[Option<Ty>]) -> Option<ConstructorTemplate>;
-
-/// The SYMBOLIC signature of the callable a call selects — its own type variables still unbound.
-/// The selected return type alone cannot say where a variable came from, so a variable that only a
-/// lambda's RESULT can fix (`map`'s `R` in `(T) -> R`) is otherwise never bound.
-type CallTemplateHook<'a> =
-    &'a dyn Fn(Option<Ty>, &str, &[CallArgKind], &[Ty]) -> Option<crate::libraries::GenericSig>;
-
-/// Cross-call environment for [`infer_lit_ty_p`].
-struct InferEnv<'a> {
-    /// Resolve a property of a module class currently being collected, AS SEEN FROM its applied
-    /// receiver (type arguments substituted — `Holder<A>.a` is `A`, not the erased `T`). The
-    /// library source cannot see module-local classes, so a `param.member` initializer needs
-    /// this to infer its type.
-    up: &'a dyn Fn(Ty, &str) -> Option<Ty>,
-    /// Resolve a source spelling to the SAME-MODULE `object` identity (`val h = Helper`). Returning the
-    /// identity—not only a boolean—is essential for explicit imports and package homonyms: the global
-    /// class-name projection cannot recover which singleton value the file actually bound.
-    module_object: &'a dyn Fn(&str) -> Option<TypeName>,
-    /// Resolve a static value declared by a same-module classifier. The lightweight inferer receives
-    /// only the external platform source, so source enum entries need this module-table bridge.
-    static_classifier_value: &'a dyn Fn(TypeName, &str) -> Option<Ty>,
-    /// Select a call from the current file's import-scoped, federated symbol source. `None` is an
-    /// unqualified call and therefore includes the lexical implicit receiver tower; `Some(ty)` is
-    /// the semantic type of a written receiver expression. Member and extension remain candidate
-    /// metadata inside selection, not separate operations.
-    call: &'a dyn Fn(Option<Ty>, &str, &[CallArgKind], &[Ty]) -> Option<Ty>,
-    /// Resolve a module top-level property whose own type is still being determined, ON DEMAND.
-    ///
-    /// This is the engine seam. Signature collection walks files in argument order, so a property
-    /// initialized from a property declared in a later file — or later in the same file — used to
-    /// see nothing and decline, which made the answer depend on the order the compiler was asked
-    /// in (`krusty A.kt B.kt` compiled, `krusty B.kt A.kt` did not). Reaching this hook resolves the
-    /// referenced declaration first, memoised by [`crate::type_engine::TypeEngine`], so the answer
-    /// is the same whichever declaration is asked for first and a dependency loop declines instead
-    /// of recursing.
-    demand: &'a dyn Fn(&str) -> Option<Ty>,
-    /// Read a property from a receiver through the same selected symbol family. A read THROUGH a
-    /// receiver — `other.a`, `this.a`, an implicit companion receiver — never reaches
-    /// [`InferEnv::demand`], so the same engine fall-through is built into this hook and into
-    /// [`InferEnv::up`] where they are constructed, rather than being a third channel here.
-    property: &'a dyn Fn(Ty, &str) -> Option<Ty>,
-    /// Return fixed solely by explicit type arguments when positional mapping is unavailable.
-    explicit_call_return: &'a dyn Fn(&str, &[Ty]) -> Option<Ty>,
-    /// Select a call whose receiver syntax names a classifier against the complete declaration source.
-    classifier_call: &'a dyn Fn(TypeName, &str, &[CallArgKind], &[Ty]) -> Option<Ty>,
-    /// Select a property contributed by the classifier facet (`EnumType.entries`) against the same
-    /// complete declaration source used for calls.
-    classifier_property: &'a dyn Fn(TypeName, &str) -> Option<Ty>,
-    /// Classifier declarations implicitly visible in this expression's lexical member scope. This is
-    /// currently the containing enum while collecting its companion declaration.
-    implicit_classifier: Option<TypeName>,
-    /// Nearest lexical singleton receiver whose ordinary members are visible in this declaration.
-    implicit_value: Option<Ty>,
-    /// The enclosing class instance denoted by an explicit `this` expression. Keeping it as a scope
-    /// value lets `this.m()` and bare `m()` feed the same receiver type into symbol selection.
-    implicit_instance: Option<Ty>,
-    /// Exact callable-reference function shape from the federated module/library symbol record.
-    /// The boolean says the receiver syntax names a classifier; object classifiers remain bound.
-    callable_ref: &'a dyn Fn(Ty, &str, bool) -> Option<Ty>,
-    /// Whether a callable OTHER than the named classifier's constructor can answer `name(args)` — a
-    /// same-named top-level function or a companion `invoke`. The constructor template must not be
-    /// applied then: the call's type arguments would come from a declaration that is not the callee.
-    /// The full checker gates its own constructor expectations the same way.
-    ctor_shadowed: CtorShadowedHook<'a>,
-    /// The constructed classifier's own generic template: its type parameters and the SYMBOLIC
-    /// primary-constructor parameter types that mention them. A generic construction binds its type
-    /// arguments from the call's arguments against this, so a property initialized by
-    /// `Store(wrapper = …, toDomain = { … })` keeps `Store<RootDto, List<Entry>>` instead of the raw
-    /// classifier. Federated over every declaration origin — the file being collected, another file
-    /// of the module, or a dependency — because the shape of the answer is the same for all three.
-    ctor_template: CtorTemplateHook<'a>,
-    /// The selected callable's own generic signature, asked through the SAME selection funnel as
-    /// [`Self::call`]. A lambda argument is contextual: its parameter types come from the callable's
-    /// symbolic parameter, and its body's type binds the variables that appear nowhere else.
-    call_template: CallTemplateHook<'a>,
-    /// Whether a classifier is a `value class`. Its JVM representation is its underlying value, so
-    /// an inferred type ARGUMENT of that class is a shape the emitter does not carry through an
-    /// erased constructor parameter.
-    value_class: &'a dyn Fn(TypeName) -> bool,
 }
 
 /// Source identity for lightweight signature inference. The AST and its module file index are one
@@ -10732,13 +10492,6 @@ struct MemberContext {
     /// Two files may legally declare the same simple class name in different packages; retaining
     /// the internal identity prevents one declaration's answer from being published onto the other.
     owner: TypeName,
-    /// The class body's own classifier names, not the file's. A class body extends the file's names
-    /// with its nested classes, its lexical owner's, and the ones it inherits, all under their
-    /// SIMPLE spellings; the file-level projection registers a nested class only under its dotted
-    /// declared name. Resolving a member's initializer against the file's names therefore either
-    /// fails to find `Nested` or — worse, and silently — binds it to a same-named top-level class,
-    /// writing the wrong class into the field descriptor and the `@Metadata`.
-    class_names: ClassNames,
     implicit_classifier: Option<TypeName>,
     implicit_value: Option<Ty>,
     implicit_instance: Option<Ty>,
@@ -10760,14 +10513,6 @@ impl DeferredProperty {
         match &self.kind {
             DeferredKind::TopLevel { .. } => None,
             DeferredKind::Member(member) => Some(member.owner),
-        }
-    }
-
-    /// The classifier names this declaration's body resolves type spellings against.
-    fn class_names<'a>(&'a self, file_class_names: &'a ClassNames) -> &'a ClassNames {
-        match &self.kind {
-            DeferredKind::TopLevel { .. } => file_class_names,
-            DeferredKind::Member(member) => &member.class_names,
         }
     }
 
@@ -10820,8 +10565,6 @@ impl SourceOrderIndex {
 /// walk; the memo it consults ([`TypeEngine`]) borrows nothing and therefore does outlive it.
 struct DeferredInferenceDriver<'a> {
     files: &'a [File],
-    file_class_names: &'a [ClassNames],
-    src: &'a dyn SemanticPlatform,
     table: &'a SymbolTable,
     engine: &'a TypeEngine,
     deferred: &'a HashMap<DeclKey, &'a DeferredProperty>,
@@ -10851,9 +10594,7 @@ impl DeferredInferenceDriver<'_> {
             let inferred = infer_lit_ty_scoped_on_demand(
                 entry.inference_source(&self.files[file_index]),
                 expression,
-                entry.class_names(&self.file_class_names[file_index]),
                 &entry.scope,
-                self.src,
                 self.table,
                 &|name| self.demand(entry, name),
                 &|receiver, name| self.demand_on_receiver(receiver, name),
@@ -11003,8 +10744,6 @@ impl DeferredInferenceDriver<'_> {
 /// loop decline rather than recurse.
 fn resolve_deferred_properties(
     files: &[File],
-    file_class_names: &[ClassNames],
-    src: &dyn SemanticPlatform,
     table: &mut SymbolTable,
     deferred: &[DeferredProperty],
     diags: &mut DiagSink,
@@ -11055,8 +10794,6 @@ fn resolve_deferred_properties(
     let resolutions = {
         let driver = DeferredInferenceDriver {
             files,
-            file_class_names,
-            src,
             table,
             engine: &engine,
             deferred: &by_key,
@@ -11160,284 +10897,71 @@ fn infer_lit_ty_scoped(
     src: &dyn SemanticPlatform,
     table: &SymbolTable,
 ) -> Ty {
-    infer_lit_ty_scoped_on_demand(
-        source,
-        e,
-        class_names,
-        props,
-        src,
-        table,
-        &|_| None,
-        &|_, _| None,
-    )
+    let _ = (class_names, src);
+    infer_lit_ty_scoped_on_demand(source, e, props, table, &|_| None, &|_, _| None)
 }
 
-/// As [`infer_lit_ty_scoped`], but a bare name the scope cannot type is handed to `demand`, which
-/// resolves that declaration through the engine and answers with its type. This is what makes the
-/// result independent of the order files were passed in.
+/// Type one declaration's body with the REAL checker.
+///
+/// This is the "jump" the resolution engine performs: an implicitly-typed declaration gets its type
+/// by running ordinary body resolution for it, exactly as the reference compiler does
+/// (`ReturnTypeCalculatorWithJump`). There is no second, reduced expression grammar — that is what
+/// made the signature pass and the checker disagree, an elvis or a lambda's result type being typed
+/// by one and not the other.
+///
+/// `demand` and `demand_member` are the engine's seams: a name, or a member read, whose declaration
+/// has not been typed yet resolves through them instead of reading the placeholder the symbol table
+/// still holds. Diagnostics go to a scratch sink — this run exists to produce a type, and the
+/// authoritative check reports on the declaration later.
 #[allow(clippy::too_many_arguments)]
 fn infer_lit_ty_scoped_on_demand(
     source: InferenceSource<'_>,
     e: ExprId,
-    class_names: &ClassNames,
     props: &[(String, Ty, bool)],
-    src: &dyn SemanticPlatform,
     table: &SymbolTable,
     demand: &dyn Fn(&str) -> Option<Ty>,
     demand_member: &dyn Fn(Ty, &str) -> Option<Ty>,
 ) -> Ty {
     let InferenceSource(file, file_index, implicit_classifier, implicit_value, implicit_instance) =
         source;
-    // A member whose own type is still being determined is recorded as a placeholder, so the table
-    // answers `Ty::Error` for it. Ask the engine for that declaration instead of reading the
-    // placeholder — the same fall-through the bare-name path takes.
-    let up = |recv: Ty, name: &str| {
-        table
-            .applied_member_prop_ty(recv, name)
-            .filter(|ty| *ty != Ty::Error)
-            .or_else(|| demand_member(recv, name))
+    let mut scratch = DiagSink::new();
+    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
+    checker.demand_name = Some(&demand);
+    checker.demand_member = Some(&demand_member);
+    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
+    // Signature inference wants a declaration's type in terms of its own type parameters, not their
+    // erasures: a member of `Holder<T>` initialized from `T` is `T`, and erasing it here would write
+    // the bound into the field descriptor.
+    checker.symbolic_signature_inference = false;
+
+    // The enclosing instance, a lexical singleton, or the classifier whose members are visible: all
+    // three are receivers the body may read through implicitly, which the checker models as `this`
+    // rungs rather than as separate lookup channels.
+    let receiver = implicit_instance
+        .or(implicit_value)
+        .or_else(|| implicit_classifier.map(Ty::obj_name));
+    let root = CheckerScope::root();
+    let declaration = root.child(ScopeKind::Function { receiver });
+    let scope = if receiver.is_some() {
+        &declaration
+    } else {
+        &root
     };
-    let module = crate::module_symbols::ModuleSymbols::for_file(table, file_index);
-    let qualifier_source = crate::symbol_source::CompositeSource::new(vec![
-        &module as &dyn SymbolSource,
-        src as &dyn SymbolSource,
-    ]);
-    // Resolve through the same file-aware module binding used by checking/lowering, then read
-    // object-ness from the canonical class signature. `ClassNames::get_class(name)` is a global
-    // simple-name projection and cannot represent an explicit source import when packages contain
-    // homonyms. Candidate spelling remains a syntax concern here; selection stays centralized.
-    let module_object = |name: &str| {
-        let explicit_candidates = file
-            .imports
-            .iter()
-            .filter(|import| import.rsplit('.').next() == Some(name))
-            .filter_map(|import| classifier_path(import, &qualifier_source, None).ok())
-            .collect::<Vec<_>>();
-        table
-            .source_class_identity(
-                file_index,
-                explicit_candidates.iter().copied(),
-                type_name(&class_internal(file, name)),
-                name,
-            )
-            .filter(|internal| table.source_class_is_object(*internal))
-    };
-    let static_classifier_value = |internal: TypeName, name: &str| {
-        table
-            .static_classifier_values
-            .get(&internal)
-            .and_then(|values| values.get(name))
-            .copied()
-    };
-    let imports = function_import_scope_with(file, src.platform_default_import_packages(), src);
-    let callable_resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
-        src, &module, &imports,
-    );
-    let callable_ref = |receiver: Ty, name: &str, classifier_syntax: bool| {
-        use crate::symbol_resolver::{SymRecv, Symbol};
-        if name.is_empty() {
-            let internal = receiver.kotlin_class_internal()?;
-            let classifier = qualifier_source.classifier(internal)?;
-            if let Some(sam) = classifier.sam_method.as_ref() {
-                let parameter = Ty::fun(sam.params.clone(), sam.ret);
-                return Some(Ty::fun(vec![parameter], receiver));
-            }
-            let mut constructors = classifier.constructors.iter();
-            let constructor = constructors.next()?;
-            if constructors.next().is_some() {
-                return None;
-            }
-            return Some(Ty::fun(constructor.params.clone(), receiver));
-        }
-        let Symbol::Member(facets) =
-            callable_resolver.resolve_symbol(SymRecv::Value(receiver), name, &[], &[])?
-        else {
-            return None;
-        };
-        let classifier_is_object = receiver
-            .kotlin_class_internal()
-            .and_then(|internal| qualifier_source.classifier(internal))
-            .is_some_and(|classifier| classifier.is_object());
-        let unbound = classifier_syntax && !classifier_is_object;
-        if let Some(property) = facets.property_ref.as_ref() {
-            let params = unbound.then_some(receiver).into_iter().collect();
-            return Some(Ty::fun(params, property.prop_ty));
-        }
-        if let Some(member) = facets.method_ref.as_ref() {
-            let mut params = unbound.then_some(receiver).into_iter().collect::<Vec<_>>();
-            params.extend(member.params.iter().copied());
-            return Some(if member.suspend() {
-                Ty::fun_suspend(params, member.ret)
-            } else {
-                Ty::fun(params, member.ret)
-            });
-        }
-        if let Some(property) = facets.extension_property_ref() {
-            let params = unbound.then_some(receiver).into_iter().collect();
-            return Some(Ty::fun(params, property.prop_ty));
-        }
-        let mut extensions = facets
-            .overloads
-            .iter()
-            .filter(|function| function.is_extension());
-        let selected = extensions.next()?;
-        if extensions.next().is_some() {
-            return None;
-        }
-        let mut params = unbound.then_some(receiver).into_iter().collect::<Vec<_>>();
-        params.extend(selected.semantic_params().iter().copied());
-        Some(if selected.callable.suspend {
-            Ty::fun_suspend(params, selected.callable.ret)
-        } else {
-            Ty::fun(params, selected.callable.ret)
-        })
-    };
-    let classifier_call = |classifier, name: &str, args: &[CallArgKind], type_args: &[Ty]| {
-        callable_resolver
-            .select_classifier_call(classifier, name, args, type_args)
-            .map(|member| member.ret)
-    };
-    let call = |receiver, name: &str, args: &[CallArgKind], type_args: &[Ty]| {
-        let selected = match receiver {
-            None => {
-                let implicit = implicit_instance.and_then(|instance| {
-                    callable_resolver
-                        .select_symbol(
-                            crate::symbol_resolver::SymRecv::ImplicitValue(instance),
-                            name,
-                            args,
-                            type_args,
-                        )
-                        .and_then(crate::symbol_resolver::Symbol::call_return)
-                });
-                implicit
-                    .or_else(|| {
-                        implicit_value.and_then(|value| {
-                            callable_resolver
-                                .select_symbol(
-                                    crate::symbol_resolver::SymRecv::ImplicitValue(value),
-                                    name,
-                                    args,
-                                    type_args,
-                                )
-                                .and_then(crate::symbol_resolver::Symbol::call_return)
-                        })
-                    })
-                    .or_else(|| {
-                        callable_resolver
-                            .select_symbol(
-                                crate::symbol_resolver::SymRecv::TopLevel,
-                                name,
-                                args,
-                                type_args,
-                            )
-                            .and_then(crate::symbol_resolver::Symbol::top_level_call)
-                            .map(|call| call.ret)
-                    })
-            }
-            Some(receiver) => callable_resolver
-                .select_symbol(
-                    crate::symbol_resolver::SymRecv::Value(receiver),
-                    name,
-                    args,
-                    type_args,
-                )
-                .and_then(crate::symbol_resolver::Symbol::call_return),
-        };
-        crate::trace_compiler!(
-            "signature_inference",
-            "call query={name} receiver={receiver:?} args={args:?} selected={selected:?}",
-        );
-        selected
-    };
-    let property = |receiver: Ty, name: &str| {
-        callable_resolver
-            .resolve_symbol(
-                crate::symbol_resolver::SymRecv::Value(receiver),
-                name,
-                &[],
-                &[],
-            )
-            .and_then(crate::symbol_resolver::Symbol::property_return)
-            .filter(|ty| *ty != Ty::Error)
-            .or_else(|| demand_member(receiver, name))
-    };
-    let explicit_call_return = |name: &str, type_args: &[Ty]| {
-        explicit_targ_return_agreement(&callable_resolver, name, type_args)
-    };
-    let classifier_property = |classifier, name: &str| {
-        callable_resolver
-            .static_field(classifier, name)
-            .map(|field| field.ty)
-            .or_else(|| {
-                qualifier_source
-                    .classifier(classifier)?
-                    .classifier_property(classifier, name)
-                    .map(|property| property.ty)
-            })
-    };
-    let env = InferEnv {
-        up: &up,
-        module_object: &module_object,
-        static_classifier_value: &static_classifier_value,
-        call: &call,
-        demand,
-        property: &property,
-        explicit_call_return: &explicit_call_return,
-        classifier_call: &classifier_call,
-        classifier_property: &classifier_property,
-        implicit_classifier,
-        implicit_value,
-        implicit_instance,
-        callable_ref: &callable_ref,
-        ctor_template: &|internal, arity, actuals| {
-            constructor_template_of(
-                file,
-                class_names,
-                src,
-                Some(table),
-                internal,
-                arity,
-                actuals,
-            )
-        },
-        call_template: &|receiver, name, args, type_args| {
-            selected_call_template(&callable_resolver, receiver, name, args, type_args)
-        },
-        value_class: &|internal| {
-            table
-                .class_by_type_name(internal)
-                .map(|cls| cls.value_field.is_some())
-                .unwrap_or_else(|| {
-                    src.classifier(internal)
-                        .is_some_and(|classifier| classifier.value_underlying.is_some())
-                })
-        },
-        ctor_shadowed: &|internal, name, args| {
-            construction_shadowed_by_callable(
-                &callable_resolver,
-                companion_of(src, Some(table), internal),
-                |companion| {
-                    // An `invoke` EXTENSION on this companion cannot be attributed to a receiver by
-                    // selection while signatures are still being collected, but the module's own
-                    // extension index is keyed by receiver — so ask it about THIS companion rather
-                    // than about the name alone. A plain `fun invoke()` owns nothing here.
-                    table
-                        .ext_funs
-                        .get(CALLABLE_INVOKE_OPERATOR)
-                        .is_some_and(|receivers| {
-                            receivers
-                                .keys()
-                                .any(|receiver| receiver.kotlin_class_internal() == Some(companion))
-                        })
-                },
-                &call,
-                name,
-                args,
-            )
-        },
-    };
-    infer_lit_ty_p(file, e, class_names, props, src, &env)
+    if let Some(receiver) = receiver {
+        checker
+            .this_labels
+            .push((String::new(), receiver, implicit_instance.is_some()));
+    }
+    for (name, ty, is_var) in props {
+        checker.declare(scope, name, *ty, *is_var);
+    }
+    // An initializer is not a function body: a `return` in it does not belong to any function, and
+    // giving it one would type `val a = return` instead of rejecting it.
+    let inferred = checker.with_ret_allowed(Ty::Unit, false, |checker| checker.expr(scope, e));
+    if scratch.has_errors() {
+        return Ty::Error;
+    }
+    inferred
 }
 
 /// Extract the compile-time value of a source literal after its semantic type has been established.
@@ -11485,735 +11009,6 @@ fn source_literal_constant(
         _ => return None,
     };
     Some(LibraryConst { ty, value })
-}
-
-fn infer_lit_ty_p(
-    file: &File,
-    e: ExprId,
-    class_names: &ClassNames,
-    props: &[(String, Ty, bool)],
-    src: &dyn SemanticPlatform,
-    env: &InferEnv,
-) -> Ty {
-    fn call_arg_kinds(file: &File, args: &[ExprId], arg_tys: &[Ty]) -> Vec<CallArgKind> {
-        args.iter()
-            .zip(arg_tys)
-            .map(|(&arg, &ty)| call_arg_kind(file, arg, ty))
-            .collect()
-    }
-    fn call_args_selectable(file: &File, args: &[ExprId], arg_tys: &[Ty]) -> bool {
-        args.iter().zip(arg_tys).all(|(&argument, &ty)| {
-            ty != Ty::Error || matches!(file.expr(argument), Expr::Lambda { .. })
-        })
-    }
-
-    fn type_receiver(
-        file: &File,
-        receiver: ExprId,
-        class_names: &ClassNames,
-        props: &[(String, Ty, bool)],
-        src: &dyn SemanticPlatform,
-    ) -> Option<TypeName> {
-        let mut ast_segments = Vec::new();
-        qualifier_expression_segments(file, receiver, &mut ast_segments).ok()?;
-        let root_name = &ast_segments.first()?.1;
-        // Prefix resolution is committed at the first segment. A scoped value with the same spelling
-        // as a classifier wins, even when the remaining source text could form a valid classifier
-        // path (`val Provider = LocalProvider(); Provider.create(...)`). Do this before consulting the
-        // complete classifier spelling: otherwise signature inference and the checker bind the same
-        // expression to different symbols and the stale inferred property type becomes an expected
-        // type during the real check.
-        if props.iter().any(|(name, _, _)| name == root_name) {
-            return None;
-        }
-        let qualified = ast_segments
-            .iter()
-            .map(|(_, segment)| segment.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
-        if let Some(internal) = class_names.get_class(&qualified) {
-            return Some(internal);
-        }
-        let prefix = if let Some(internal) = class_names.get(root_name) {
-            ResolvedQualifier::Classifier(internal)
-        } else if let Some(classifier) = classifier_identity(
-            src,
-            crate::symbol_source::SymbolNamespace::Package(TypeName::ROOT),
-            root_name,
-        ) {
-            ResolvedQualifier::Classifier(classifier)
-        } else if src.package_exists(TypeName::ROOT, root_name) {
-            ResolvedQualifier::Package(crate::types::type_name_child(TypeName::ROOT, root_name))
-        } else {
-            return None;
-        };
-        let segments = ast_segments.into_iter().skip(1).collect::<Vec<_>>();
-        match walk_qualifier(src, prefix, &segments).ok()? {
-            ResolvedQualifier::Classifier(internal) => Some(internal),
-            ResolvedQualifier::Package(_) | ResolvedQualifier::Value => None,
-        }
-    }
-    match file.expr(e) {
-        Expr::IntLit(_) => Ty::Int,
-        Expr::LongLit(_) => Ty::Long,
-        Expr::UIntLit(_) => Ty::UInt,
-        Expr::ULongLit(_) => Ty::ULong,
-        Expr::DoubleLit(_) => Ty::Double,
-        Expr::FloatLit(_) => Ty::Float,
-        Expr::BoolLit(_) => Ty::Boolean,
-        Expr::CharLit(_) => Ty::Char,
-        Expr::StringLit(_) | Expr::Template(_) => Ty::String,
-        // A `null` literal carries its type like every other literal. Recording `Ty::Null` here lets
-        // the ordinary applicability rules decide whether each selected reference parameter accepts
-        // it, while primitive parameters and ambiguous reference overloads continue to decline. The
-        // full checker uses the same semantic type; no callable or provider needs a null-specific path.
-        Expr::NullLit => Ty::Null,
-        // An anonymous function is self-typed by its declaration. The parser preserves its declared
-        // parameter, context-receiver, extension-receiver, suspend, and return shapes on the lambda
-        // expression; signature collection must consume that same metadata instead of waiting for an
-        // expected type that a bare property initializer does not have (`val f = fun (x: Int) = x`).
-        Expr::Lambda { params, body } if file.anon_fun_lambdas.contains(&e.0) => {
-            let empty_tp = TParams::from_bindings([]);
-            let mut sink = crate::diag::DiagSink::new();
-            let declared = file
-                .lambda_param_types
-                .get(&e.0)
-                .cloned()
-                .unwrap_or_default();
-            let mut parameter_types = params
-                .iter()
-                .enumerate()
-                .map(|(index, _)| {
-                    declared
-                        .get(index)
-                        .and_then(Option::as_ref)
-                        .map(|ty| ty_of_ref(ty, class_names, &empty_tp, &mut sink))
-                        .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-                })
-                .collect::<Vec<_>>();
-            if parameter_types.contains(&Ty::Error) {
-                return Ty::Error;
-            }
-            let body_bindings = params
-                .iter()
-                .cloned()
-                .zip(parameter_types.iter().copied())
-                .collect::<Vec<_>>();
-            let context_count =
-                file.anon_fun_context_count.get(&e.0).copied().unwrap_or(0) as usize;
-            let has_receiver = if let Some(receiver) = file.anon_fun_receivers.get(&e.0) {
-                let receiver = ty_of_ref(receiver, class_names, &empty_tp, &mut sink);
-                if receiver == Ty::Error {
-                    return Ty::Error;
-                }
-                parameter_types.insert(context_count.min(parameter_types.len()), receiver);
-                true
-            } else {
-                false
-            };
-            let ret = match file.anon_fun_ret.get(&e.0) {
-                Some(ret) => ty_of_ref(ret, class_names, &empty_tp, &mut sink),
-                None => {
-                    let mut body_props = props.to_vec();
-                    body_props.extend(
-                        body_bindings
-                            .iter()
-                            .cloned()
-                            .map(|(name, ty)| (name, ty, false)),
-                    );
-                    infer_lit_ty_p(file, *body, class_names, &body_props, src, env)
-                }
-            };
-            if ret == Ty::Error {
-                Ty::Error
-            } else {
-                Ty::fun_with_shape(
-                    parameter_types,
-                    ret,
-                    context_count,
-                    has_receiver,
-                    file.suspend_lambdas.contains(&e.0),
-                )
-            }
-        }
-        // A bare name referring to a property (or `this` — the receiver of an expression-bodied
-        // extension function `fun Int.double() = this * 2`, supplied as a `"this"` scope entry), or a
-        // classpath/stdlib `object` used as a value (`val ctx = EmptyCoroutineContext`): its value is the
-        // singleton, of the object's own type. Only an `object` is a value, so the classpath fallback
-        // never mistypes a plain class name (which isn't a value and stays `Error` → the file skips).
-        Expr::Name(n) => {
-            if matches!(n.as_str(), "Unit" | "kotlin.Unit") {
-                return Ty::Unit;
-            }
-            let scoped = props.iter().find_map(|(pn, t, _)| (pn == n).then_some(*t));
-            // A scope entry that is still `Error` has not been typed YET: it is a module property
-            // whose own inference has not run. Ask the engine for that declaration now instead of
-            // reading the placeholder as a final answer. A name the scope does not carry at all
-            // reaches the same hook — signature collection walks files in argument order, so the
-            // declaration may simply not have been visited.
-            match scoped
-                .filter(|ty| *ty != Ty::Error)
-                .or_else(|| (env.demand)(n))
-            {
-                Some(ty) => ty,
-                // The scope DID bind the name and neither it nor the engine could type it. The
-                // fallbacks below resolve a name the scope never bound; running them here would let
-                // a classifier of the same spelling answer for a shadowing value, which is not what
-                // the source wrote.
-                None if scoped.is_some() => Ty::Error,
-                None => None
-                    // An explicit extension receiver is a lexical `this` binding in `props` and
-                    // therefore wins above. Only an otherwise-unbound `this` denotes the enclosing
-                    // class instance carried by the member scope.
-                    .or_else(|| (n == "this").then_some(env.implicit_instance).flatten())
-                    .or_else(|| {
-                        class_names
-                            .get(n.as_str())
-                            .filter(|internal| {
-                                src.classifier(*internal).is_some_and(|t| t.is_object())
-                            })
-                            .or_else(|| (env.module_object)(n))
-                            .map(Ty::obj_name)
-                    })
-                    .or_else(|| {
-                        env.implicit_value
-                            .and_then(|receiver| (env.up)(receiver, n))
-                    })
-                    .or_else(|| {
-                        env.implicit_classifier
-                            .and_then(|classifier| (env.classifier_property)(classifier, n))
-                    })
-                    .unwrap_or(Ty::Error),
-            }
-        }
-        Expr::Member { receiver, name } => {
-            if let Expr::Name(type_name) = file.expr(*receiver) {
-                if let Some(c) = class_names.library_companion_const(src, type_name, name) {
-                    return c.ty;
-                }
-            }
-            if let Some(field) =
-                type_receiver(file, *receiver, class_names, props, src).and_then(|internal| {
-                    (env.static_classifier_value)(internal, name)
-                        .or_else(|| (env.classifier_property)(internal, name))
-                })
-            {
-                return field;
-            }
-            // Property read (`s.length`, `list.size`, `vc.value`). Use the scoped resolver so an
-            // imported extension property such as `Char.code` can resolve through its getter.
-            let rt = infer_lit_ty_p(file, *receiver, class_names, props, src, env);
-            if let Some(ret) = (env.property)(rt, name) {
-                return ret;
-            }
-            // A property of a module class being collected, invisible to the library source.
-            // The shared applied-receiver substitution gives the type the READ sees (`Holder<A>.a`
-            // is `A`) — not the declaration's erased form.
-            let module_property = (env.up)(rt, name);
-            crate::trace_compiler!(
-                "signature_inference",
-                "property read receiver={rt:?} name={name} module_property={module_property:?}",
-            );
-            if let Some(t) = module_property {
-                return t;
-            }
-            Ty::Error
-        }
-        Expr::Index { array, indices } => {
-            let receiver = infer_lit_ty_p(file, *array, class_names, props, src, env);
-            if let Some(element) = receiver.array_elem() {
-                return element;
-            }
-            let argument_types = indices
-                .iter()
-                .map(|index| infer_lit_ty_p(file, *index, class_names, props, src, env))
-                .collect::<Vec<_>>();
-            if argument_types.contains(&Ty::Error) {
-                return Ty::Error;
-            }
-            let arguments = call_arg_kinds(file, indices, &argument_types);
-            (env.call)(Some(receiver), "get", &arguments, &[]).unwrap_or(Ty::Error)
-        }
-        Expr::Unary { op, operand } => match op {
-            UnOp::Not => Ty::Boolean,
-            UnOp::Neg | UnOp::Plus => infer_lit_ty_p(file, *operand, class_names, props, src, env),
-        },
-        Expr::Binary { op, lhs, rhs, .. } => {
-            let (lt, rt) = (
-                infer_lit_ty_p(file, *lhs, class_names, props, src, env),
-                infer_lit_ty_p(file, *rhs, class_names, props, src, env),
-            );
-            match op {
-                BinOp::Lt
-                | BinOp::Le
-                | BinOp::Gt
-                | BinOp::Ge
-                | BinOp::Eq
-                | BinOp::Ne
-                | BinOp::And
-                | BinOp::Or
-                | BinOp::RefEq
-                | BinOp::RefNe => Ty::Boolean,
-                BinOp::Add if lt == Ty::String || rt == Ty::String => Ty::String,
-                _ => Ty::promote(lt, rt).unwrap_or(Ty::Error),
-            }
-        }
-        // Constructor call `Foo(args)` — infer type from callee name via class_names (seeded from
-        // classpath scan + user-defined classes).
-        Expr::Call { callee, args } => {
-            // Explicit type arguments (`mutableMapOf<String, JsonObject>()`) bind the callee's
-            // type parameters directly: dropping them erases the recorded PROPERTY type to
-            // `MutableMap<Any, Any>` (the full checker keeps them for a local `val`; the
-            // signature phase must too).
-            let call_targs: Vec<Ty> = file
-                .call_type_args
-                .get(&e.0)
-                .filter(|t| !t.is_empty())
-                .map(|targs| {
-                    let empty_tp = TParams::from_bindings([]);
-                    let mut sink = crate::diag::DiagSink::new();
-                    targs
-                        .iter()
-                        .map(|r| ty_of_ref(r, class_names, &empty_tp, &mut sink))
-                        .collect()
-                })
-                .unwrap_or_default();
-            match file.expr(*callee) {
-                Expr::Name(n) => {
-                    // A primitive-array size constructor (`IntArray(n)`, `CharArray(n) { … }`) — a stdlib
-                    // intrinsic the federated probe below doesn't surface as a return type. (`Array(n){}`
-                    // needs the lambda's element type, so it stays with the full checker.)
-                    if let Some(elem) = Ty::primitive_array_element(n) {
-                        return Ty::array(elem);
-                    }
-                    // A JDK/classpath type resolvable by simple name (`val sb = StringBuilder()`).
-                    if let Some(internal) = class_names.get(n.as_str()) {
-                        // Preserve EXPLICIT type arguments on a generic constructor call
-                        // (`ConcurrentHashMap<String, V>()`) so an inferred PROPERTY keeps them — else a
-                        // later indexing / generic-member access on the field erases its element to `Any`.
-                        if !call_targs.is_empty() {
-                            return Ty::Obj(internal, Box::leak(call_targs.into_boxed_slice()));
-                        }
-                        // A generic source constructor derives its applied class type from the
-                        // primary-constructor arguments (`PairBox("x", null)` →
-                        // `PairBox<String?>`). This signature pass uses the same merging unifier as
-                        // full call checking, so later property/getter inference cannot silently
-                        // retain only the first argument's non-null binding.
-                        // An explicit import of this simple name that names something ELSE owns
-                        // the call — an aliased factory (`import other.makeCell as Cell`) reads
-                        // exactly like a construction here. The import map is the file's own text,
-                        // so this holds whether or not the target package has been collected yet.
-                        let imported_elsewhere =
-                            import_map(file).get(n.as_str()).is_some_and(|target| {
-                                type_name(target) != internal
-                                    && class_names.get_class(&target.replace('/', ".")).is_none()
-                            });
-                        // The concrete arguments are typed FIRST, with no expectation — which is
-                        // what this pass would have done for them anyway. Their types are what
-                        // decides whether a constructor other than the primary, or a same-named
-                        // callable, could own this call: a parameter COUNT cannot tell
-                        // `Wrapper("hi")` from the `constructor(list: List<T>, index: Int = 0)`
-                        // that spans the same arity.
-                        let concrete = args
-                            .iter()
-                            .map(|&argument| {
-                                (!matches!(file.expr(argument), Expr::Lambda { .. })).then(|| {
-                                    infer_lit_ty_p(file, argument, class_names, props, src, env)
-                                })
-                            })
-                            .collect::<Vec<_>>();
-                        let template = (!imported_elsewhere)
-                            .then(|| {
-                                (env.ctor_template)(internal, args.len(), &concrete).filter(
-                                    |template| {
-                                        template.params.len() == args.len()
-                                            && template.type_params.len() == template.bounds.len()
-                                    },
-                                )
-                            })
-                            .flatten();
-                        // Labels reorder arguments against the declaration, so the parameter each
-                        // argument fills is a mapping, never its written position.
-                        let argument_slots = template.as_ref().and_then(|template| {
-                            template_argument_slots(
-                                file.call_arg_names.get(&e.0).map(Vec::as_slice),
-                                &template.param_names,
-                                args.len(),
-                            )
-                        });
-                        if let (Some(template), Some(argument_slots)) = (template, argument_slots) {
-                            // A lambda argument is CONTEXTUAL here exactly as it is in full
-                            // checking: its parameter types come from the constructor parameter's
-                            // own template, which the concrete arguments bind. Type the concrete
-                            // arguments first, substitute what they fixed, then infer each lambda
-                            // body under that shape so its RESULT can bind the parameters that
-                            // appear nowhere else (`toDomain: (ROOT) -> DOMAIN`).
-                            let mut bindings = crate::symbol_resolver::GSigBinds::new();
-                            let mut argument_types = vec![Ty::Error; args.len()];
-                            let is_lambda = args
-                                .iter()
-                                .map(|&argument| matches!(file.expr(argument), Expr::Lambda { .. }))
-                                .collect::<Vec<_>>();
-                            let symbolic = argument_slots
-                                .iter()
-                                .map(|&slot| Some(template.params[slot]))
-                                .collect::<Vec<_>>();
-                            for position in
-                                construction_argument_typing_order(&is_lambda, &symbolic)
-                            {
-                                let argument = args[position];
-                                let shape = template.params[argument_slots[position]];
-                                let actual = if is_lambda[position] {
-                                    let shaped =
-                                        crate::types::ty_subst_keep_unbound(shape, &bindings);
-                                    infer_lambda_ty_with_shape(
-                                        file,
-                                        argument,
-                                        shaped,
-                                        class_names,
-                                        props,
-                                        src,
-                                        env,
-                                    )
-                                } else {
-                                    concrete[position].unwrap_or(Ty::Error)
-                                };
-                                argument_types[position] = actual;
-                                if actual != Ty::Error {
-                                    crate::symbol_resolver::unify_inferred_ty(
-                                        shape,
-                                        actual,
-                                        &mut bindings,
-                                    );
-                                }
-                            }
-                            // The template describes the constructor. Ask, with the arguments now
-                            // typed, whether anything else owns this call — a same-named callable
-                            // or a companion `invoke` — and keep the classifier unapplied if so,
-                            // rather than committing type arguments the callee never had.
-                            let shadowed = (env.ctor_shadowed)(
-                                internal,
-                                n,
-                                &call_arg_kinds(file, args, &argument_types),
-                            );
-                            if !shadowed && !argument_types.contains(&Ty::Error) {
-                                let applied = template
-                                    .type_params
-                                    .iter()
-                                    .zip(&template.bounds)
-                                    .map(|(name, &bound)| {
-                                        bindings.get(name).copied().unwrap_or(bound)
-                                    })
-                                    .collect::<Vec<_>>();
-                                // A VALUE CLASS reaches its box only where the construction and the
-                                // declaration are collected together. Through a module or dependency
-                                // declaration the argument is stored unboxed while a read through the
-                                // applied type emits `checkcast` — a class file that does not verify.
-                                // The declaration this file can see keeps its inference; the rest
-                                // stay unapplied until the argument boxing lands.
-                                if !template.from_file
-                                    && applied
-                                        .iter()
-                                        .any(|argument| mentions_value_class(*argument, env))
-                                {
-                                    return Ty::obj_name(internal);
-                                }
-                                return Ty::Obj(internal, Box::leak(applied.into_boxed_slice()));
-                            }
-                        }
-                        return Ty::obj_name(internal);
-                    }
-                    // A GENERIC top-level function whose return type depends on its arguments
-                    // (`arrayOf("a","b")` → `Array<String>`, `mapOf(1 to "x")` → `Map<Int,String>`):
-                    // the return-agreement probe above can't decide it (the erased return is the same
-                    // for every call), so resolve through the SAME federated `SymbolResolver` the full
-                    // checker uses, binding the type parameters from the inferred argument types. Only
-                    // reached when the simpler probe returned `None`, so it never overrides an inference.
-                    let arg_tys: Vec<Ty> = args
-                        .iter()
-                        .map(|a| infer_lit_ty_p(file, *a, class_names, props, src, env))
-                        .collect();
-                    crate::trace_compiler!(
-                        "signature_inference",
-                        "call={n} expression={e:?} args={arg_tys:?} type_args={call_targs:?} names={:?} trailing={}",
-                        file.call_arg_names.get(&e.0),
-                        file.call_has_trailing_lambda.contains(&e.0),
-                    );
-                    if call_args_selectable(file, args, &arg_tys) {
-                        if let Some(ret) = env.implicit_classifier.and_then(|classifier| {
-                            (env.classifier_call)(
-                                classifier,
-                                n,
-                                &call_arg_kinds(file, args, &arg_tys),
-                                &call_targs,
-                            )
-                        }) {
-                            return ret;
-                        }
-                        // Preserve the same syntax-only provenance as member-call inference. A
-                        // property initialized by an imported top-level overload must not resolve
-                        // differently merely because its callable has no explicit receiver.
-                        let arg_kinds = call_arg_kinds(file, args, &arg_tys);
-                        if let Some(ret) = (env.call)(None, n, &arg_kinds, &call_targs) {
-                            crate::trace_compiler!(
-                                "signature_inference",
-                                "call={n} selected positional return={:?}",
-                                ret,
-                            );
-                            return ret;
-                        }
-                    }
-                    // An argument list the positional selection above cannot map — a NAMED argument
-                    // out of its declared position (`build<C>(enabled = true)`), or an argument whose
-                    // type this lightweight pass cannot infer — with EXPLICIT type arguments that by
-                    // themselves determine the return. Bind them into each overload's return; when
-                    // every overload agrees on a fully-bound type, that IS the property's type
-                    // (argument legality stays with the full checker, which maps names itself).
-                    if !call_targs.is_empty() {
-                        if let Some(t) = (env.explicit_call_return)(n, &call_targs) {
-                            crate::trace_compiler!(
-                                "signature_inference",
-                                "call={n} explicit-type return={t:?}",
-                            );
-                            return t;
-                        }
-                    }
-                }
-                // A method/extension call (`n.toLong()`, `s.uppercase()`, `r shl 8` → `r.shl(8)`,
-                // `x.toString()`): resolve the return type through the FEDERATED symbol source (the same
-                // classpath/stdlib resolution the full checker uses) — NO stdlib symbol names hardcoded.
-                Expr::Member { receiver, name } => {
-                    // A FULLY-QUALIFIED constructor (`java.util.concurrent.CopyOnWriteArrayList<
-                    // Item>()`, `pkg.Outer.Nested()`): when the WHOLE callee path names a
-                    // classifier, this is the qualified spelling of the simple-name constructor arm
-                    // above — keep explicit type arguments so an inferred property retains its
-                    // element type instead of failing with "cannot infer". A static/companion call
-                    // (`java.lang.String.valueOf(x)`) never resolves its method segment as a
-                    // classifier and falls through to the receiver-typed paths below.
-                    if let Some(internal) = type_receiver(file, *callee, class_names, props, src) {
-                        if !call_targs.is_empty() {
-                            return Ty::Obj(internal, Box::leak(call_targs.into_boxed_slice()));
-                        }
-                        return Ty::obj_name(internal);
-                    }
-                    let arg_tys: Vec<Ty> = args
-                        .iter()
-                        .map(|a| infer_lit_ty_p(file, *a, class_names, props, src, env))
-                        .collect();
-                    let arg_kinds = call_arg_kinds(file, args, &arg_tys);
-                    if call_args_selectable(file, args, &arg_tys) {
-                        if let Some(ret) = type_receiver(file, *receiver, class_names, props, src)
-                            .and_then(|internal| {
-                                (env.classifier_call)(internal, name, &arg_kinds, &call_targs)
-                            })
-                        {
-                            if ret != Ty::Error {
-                                return ret;
-                            }
-                        }
-                    }
-                    let recv_ty = infer_lit_ty_p(file, *receiver, class_names, props, src, env);
-                    crate::trace_compiler!(
-                        "signature_inference",
-                        "member call={name} receiver={recv_ty:?} args={arg_tys:?} selectable={}",
-                        call_args_selectable(file, args, &arg_tys),
-                    );
-                    if recv_ty != Ty::Error {
-                        if let Some(t) = builtin_bitwise_ret(recv_ty, name, args.len()) {
-                            return t;
-                        }
-                        // Everything else (`s.uppercase()`, `10.toLong()`, library members/extensions):
-                        // resolve the call through the resolver's single discovering entry point.
-                        // Inherited declarations are already collected by its class-model walk.
-                        // Only select an overload when every argument's type is known — an `Error` arg is
-                        // assignable to any parameter, so it could spuriously match the wrong overload and
-                        // infer a type the checker won't agree with. With an unknown arg, skip to the
-                        // agreement-based extension fallback instead.
-                        if call_args_selectable(file, args, &arg_tys) {
-                            let selected = (env.call)(Some(recv_ty), name, &arg_kinds, &call_targs);
-                            crate::trace_compiler!(
-                                "signature_inference",
-                                "member call={name} selected={:?}",
-                                selected,
-                            );
-                            // A type variable the callable reaches only through a lambda's RESULT is
-                            // already erased to its bound in `selected`, so ask the callable's own
-                            // signature and bind it from the shaped lambda body.
-                            if let Some(ret) =
-                                (env.call_template)(Some(recv_ty), name, &arg_kinds, &call_targs)
-                                    .and_then(|generic| {
-                                        generic_call_ret_with_lambdas(
-                                            file,
-                                            e,
-                                            args,
-                                            &arg_tys,
-                                            &generic,
-                                            class_names,
-                                            props,
-                                            src,
-                                            env,
-                                        )
-                                    })
-                            {
-                                return ret;
-                            }
-                            if let Some(ret) = selected {
-                                return ret;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            Ty::Error
-        }
-        // An `if`/`else` expression body (`fun f(x: Int) = if (x > 0) x else -x`): the common type of
-        // the two branches. Needs an `else` to be a value; a branch whose type can't be inferred (e.g. a
-        // block with locals) yields `Error`, so the whole `if` does → safe skip, never a wrong type.
-        Expr::If {
-            then_branch,
-            else_branch: Some(eb),
-            ..
-        } => {
-            let t = infer_lit_ty_p(file, *then_branch, class_names, props, src, env);
-            let e = infer_lit_ty_p(file, *eb, class_names, props, src, env);
-            common_lit_ty(t, e)
-        }
-        // A `when` expression body — the common type of all arm bodies. Requires an explicit `else` arm
-        // (provably exhaustive as a value); any arm whose body type can't be inferred → `Error` (skip).
-        Expr::When { arms, .. } => {
-            if !arms.iter().any(|a| a.conditions.is_empty()) {
-                return Ty::Error;
-            }
-            let mut acc: Option<Ty> = None;
-            for a in arms {
-                let bt = infer_lit_ty_p(file, a.body, class_names, props, src, env);
-                if bt == Ty::Error {
-                    return Ty::Error;
-                }
-                acc = Some(match acc {
-                    None => bt,
-                    Some(p) => common_lit_ty(p, bt),
-                });
-            }
-            acc.unwrap_or(Ty::Error)
-        }
-        // A block expression's value is its trailing expression (`= { … ; value }`). Statements aren't
-        // tracked here, so a trailing referring to a local infers `Error` (safe skip).
-        Expr::Block {
-            trailing: Some(t), ..
-        } => infer_lit_ty_p(file, *t, class_names, props, src, env),
-        // A range value (`val r = 1..10`, `0 until n`, `4 downTo 1`) — the matching stdlib range type
-        // (mirrors the checker's `RangeTo` typing), so a range-typed property's type infers.
-        Expr::RangeTo { lo, hi, .. } => {
-            let lt = infer_lit_ty_p(file, *lo, class_names, props, src, env);
-            let rt = infer_lit_ty_p(file, *hi, class_names, props, src, env);
-            Ty::range_value_type(lt, rt).unwrap_or(Ty::Error)
-        }
-        // `a ?: b` — the value is `a` when it is non-null and `b` otherwise, so the type is the two
-        // sides' with the LEFT side's nullability discharged; that is exactly what the elvis
-        // discharges. Without this arm the whole initializer inferred `Error`, so a property written
-        // `val HOST = System.getenv("APP_HOST") ?: DEFAULT_HOST` — the ordinary spelling of a
-        // configurable constant — could not be typed, and every later read of it was reported as an
-        // unresolved reference.
-        //
-        // The two sides must AGREE. Kotlin's answer for a mix is their least upper bound, which for
-        // `Int` and `Double` is `Comparable<*> & Number` — emitted as `Object`, never as a widened
-        // primitive. The nearest thing to hand, `common_lit_ty`, is arithmetic promotion instead, so
-        // reusing it here would type `maybeInt() ?: 2.5` as `double`: a field descriptor kotlinc
-        // never writes AND a different printed value. Declining costs an inference on a shape that
-        // erases to `Object` anyway.
-        Expr::Elvis { lhs, rhs } => {
-            let left = infer_lit_ty_p(file, *lhs, class_names, props, src, env);
-            if left == Ty::Error {
-                return Ty::Error;
-            }
-            // `?: throw` is the idiom for a required setting. The right side yields no value, so the
-            // type is the left side's without the null it can no longer be. This is read HERE rather
-            // than by giving `throw` a type of its own: `Nothing` reaching the `if`, `when`, block
-            // and bare-initializer paths lets `val a = throw E()` infer a type and emit a field,
-            // where kotlinc rejects the property outright.
-            if matches!(file.expr(*rhs), Expr::Throw { .. }) {
-                return match left {
-                    Ty::Null | Ty::Nothing => Ty::Error,
-                    other => other.non_null(),
-                };
-            }
-            let right = infer_lit_ty_p(file, *rhs, class_names, props, src, env);
-            if right == Ty::Error {
-                return Ty::Error;
-            }
-            match (left, right) {
-                // A left side that is only ever `null` contributes nothing to the type.
-                (Ty::Null, Ty::Null) => Ty::Error,
-                (Ty::Null, other) => other,
-                // A platform right side keeps its flexible type. Stripping it would state that the
-                // property is non-null, which is a guarantee about a value the declaration never
-                // made: `getenv(..) ?: getProperty(..)` is `String!` and can hold null, so the field
-                // would carry a `@NotNull` it violates at runtime.
-                (left, right @ Ty::PlatformNullable(_)) if left.non_null() == right.non_null() => {
-                    right
-                }
-                (left, right) if left.non_null() == right.non_null() => {
-                    // Only the LEFT side's nullability is discharged: a nullable right side is
-                    // still nullable.
-                    match right.is_nullable() {
-                        true => Ty::nullable(right.non_null()),
-                        false => right.non_null(),
-                    }
-                }
-                _ => Ty::Error,
-            }
-        }
-        Expr::NotNull { operand } => {
-            let ty = infer_lit_ty_p(file, *operand, class_names, props, src, env);
-            if ty == Ty::Null {
-                Ty::Nothing
-            } else {
-                ty.non_null()
-            }
-        }
-        Expr::CallableRef { receiver, name } => {
-            if name == "class" {
-                let represented = receiver
-                    .as_ref()
-                    .and_then(|receiver| type_receiver(file, *receiver, class_names, props, src))
-                    .map(Ty::obj_name);
-                return match (src.class_literal_type(), represented) {
-                    (Some(base), Some(represented)) => {
-                        parameterized_class_literal_type(base, represented)
-                    }
-                    (Some(base), None) if receiver.is_some() => base,
-                    _ => Ty::Error,
-                };
-            }
-            if let Some(receiver) = receiver {
-                if let Some(internal) = type_receiver(file, *receiver, class_names, props, src) {
-                    return (env.callable_ref)(Ty::obj_name(internal), name, true)
-                        .unwrap_or(Ty::Error);
-                }
-                let receiver_ty = infer_lit_ty_p(file, *receiver, class_names, props, src, env);
-                return (env.callable_ref)(receiver_ty, name, false).unwrap_or(Ty::Error);
-            }
-            if let Some(internal) = class_names.get_class(name) {
-                if let Some(signature) = (env.callable_ref)(Ty::obj_name(internal), "", true) {
-                    return signature;
-                }
-            }
-            let overloads = crate::libraries::FunctionSet {
-                overloads: crate::symbol_resolver::SymbolResolver::new_import_scoped(
-                    src,
-                    &function_import_scope_with(file, src.platform_default_import_packages(), src),
-                )
-                .top_level_candidates(name),
-            };
-            match overloads.into_single_top_level() {
-                Some(o) => Ty::fun(o.callable.params.clone(), o.callable.ret),
-                _ => Ty::Error,
-            }
-        }
-        _ => Ty::Error,
-    }
 }
 
 fn unify_ty_common(
@@ -16123,6 +14918,8 @@ fn make_checker<'a>(
     Checker {
         file,
         syms,
+        demand_name: None,
+        demand_member: None,
         module: crate::module_symbols::ModuleSymbols::for_file(syms, file_index),
         file_index,
         source_files,
@@ -18505,6 +17302,18 @@ struct Checker<'a> {
     /// single-file checker callers; never retained in semantic signatures or the lowering handoff.
     source_files: Option<&'a [File]>,
     diags: &'a mut DiagSink,
+    /// Resolve a module declaration whose own type is still being determined, ON DEMAND.
+    ///
+    /// Set only when the checker is typing ONE declaration on behalf of the resolution engine
+    /// (`src/type_engine.rs`), which is how an implicitly-typed declaration gets its type: the
+    /// engine jumps to it and runs this checker over its body. A reference to another such
+    /// declaration finds a placeholder in the symbol table, and reading the placeholder as the
+    /// answer declines a program kotlinc accepts, so it is asked for here instead. `None` for
+    /// ordinary file checking, where every declaration already has its type.
+    demand_name: Option<&'a dyn Fn(&str) -> Option<Ty>>,
+    /// The same seam for a read THROUGH a receiver, which resolves against the member records
+    /// rather than by name.
+    demand_member: Option<&'a dyn Fn(Ty, &str) -> Option<Ty>>,
     expr_types: Vec<Ty>,
     /// Trace-only duplicate-traversal detector. This is deliberately not a semantic cache: normal
     /// builds contain no field or branch, and trace builds report the caller bug to remove.
@@ -18780,604 +17589,6 @@ fn construction_argument_typing_order(is_lambda: &[bool], symbolic: &[Option<Ty>
     }
     ordered.extend(remaining);
     ordered
-}
-
-/// A generic classifier's primary-constructor shape, as signature inference consumes it.
-struct ConstructorTemplate {
-    /// Type-parameter identities in declaration order. Their spelling is whatever the supplying
-    /// declaration uses; it only has to agree with [`Self::params`].
-    type_params: Vec<String>,
-    /// Upper bound per type parameter, used for a parameter no argument constrains.
-    bounds: Vec<Ty>,
-    /// Primary-constructor parameter types with [`Self::type_params`] still symbolic, in
-    /// DECLARATION order — a labelled call maps its arguments onto them.
-    params: Vec<Ty>,
-    /// Primary-constructor parameter names, parallel to [`Self::params`].
-    param_names: Vec<String>,
-    /// Whether the template came from the FILE being collected. A value-class type argument is
-    /// carried correctly only there; through a module or dependency declaration the emitter stores
-    /// the argument unboxed while a read through the applied type emits `checkcast`.
-    from_file: bool,
-}
-
-/// Whether something other than `internal`'s constructor can answer `name(args)`.
-///
-/// The signature pass does not perform overload resolution, so a constructor template is only ever
-/// safe where the constructor is the ONLY thing the name can denote. A same-named top-level
-/// function (a factory `fun Cell(n: Int, s: String)`), the same function reached under an import
-/// alias (`import other.makeCell as Cell`), or a companion `invoke` — inherited or declared, in
-/// source or in a dependency — each own the call for at least some argument shapes, and binding the
-/// class's type arguments from a declaration that is not the callee is a wrong applied type, which
-/// surfaces as a checkcast against it rather than as a diagnostic.
-///
-/// The companion question is asked as an ordinary selection against the classifier facet, which is
-/// the one path that already walks inheritance and answers for every declaration origin; the
-/// alternative — reading a companion's own member list — answers only for the shape it was written
-/// against.
-fn construction_shadowed_by_callable(
-    resolver: &crate::symbol_resolver::SymbolResolver<'_>,
-    companion: Option<TypeName>,
-    invoke_extension_on: impl Fn(TypeName) -> bool,
-    call: CallSelector<'_>,
-    name: &str,
-    args: &[CallArgKind],
-) -> bool {
-    // A same-named function only owns the call if it could TAKE it, and that is a SELECTION, not an
-    // arity: `fun Cell(n: Int, m: Int)` beside `class Cell<T>(value: T, flag: Boolean)` shares the
-    // arity of `Cell("tag", false)` and still cannot own it. Ask the same resolver the checker asks.
-    if !resolver.top_level_candidates(name).is_empty() && call(None, name, args, &[]).is_some() {
-        return true;
-    }
-    // A COMPANION claims the name when an `invoke` applies to it: `C(…)` is `C.Companion.invoke(…)`.
-    // A declared or inherited one is an ordinary selection on the companion's own type. An EXTENSION
-    // `invoke` cannot be attributed to a receiver while signatures are still being collected, so its
-    // presence anywhere in the module withdraws the template — while a companion with no `invoke` in
-    // sight (constants, a `serializer()`, a logger: most companions) keeps it.
-    let Some(companion) = companion else {
-        return false;
-    };
-    invoke_extension_on(companion)
-        || call(
-            Some(Ty::obj_name(companion)),
-            CALLABLE_INVOKE_OPERATOR,
-            args,
-            &[],
-        )
-        .is_some()
-}
-
-/// The companion object's own type, where the classifier declares one. Selection against THAT type
-/// is what decides an `invoke`, inherited or declared, for every declaration origin.
-fn companion_of(
-    src: &dyn SemanticPlatform,
-    module: Option<&SymbolTable>,
-    internal: TypeName,
-) -> Option<TypeName> {
-    module
-        .and_then(|table| table.class_by_type_name(internal))
-        .and_then(|cls| cls.companion_internal)
-        .or_else(|| {
-            src.classifier(internal).and_then(|classifier| {
-                classifier
-                    .companion_object
-                    .as_ref()
-                    .map(|(_, companion)| *companion)
-            })
-        })
-}
-
-/// Whether a value class appears ANYWHERE in `ty` — as the type itself, a type argument, an array
-/// element, a function parameter/return, or under a `?`. A nested one (`Box<List<Money>>`) reaches
-/// the same erased constructor parameter as a direct one, so the outermost spelling is not the
-/// question.
-fn mentions_value_class(ty: Ty, env: &InferEnv) -> bool {
-    if ty
-        .kotlin_class_internal()
-        .is_some_and(|internal| (env.value_class)(internal))
-    {
-        return true;
-    }
-    match ty {
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner) => mentions_value_class(*inner, env),
-        Ty::Obj(_, args) => args
-            .iter()
-            .any(|argument| mentions_value_class(*argument, env)),
-        Ty::Fun(signature) => {
-            signature
-                .params
-                .iter()
-                .any(|parameter| mentions_value_class(*parameter, env))
-                || mentions_value_class(signature.ret, env)
-        }
-        _ => false,
-    }
-}
-
-/// Whether a declaration with these parameters could be CALLED with `arity` arguments.
-///
-/// A declared parameter count is not an arity: every default makes a shorter call reachable and a
-/// vararg makes longer ones reachable. Asking "is the length equal" instead answers a call with a
-/// declaration that cannot take it — or withdraws an answer from one that is the only candidate.
-fn callable_at_arity(declared: usize, optional: usize, vararg: bool, arity: usize) -> bool {
-    let lowest = declared
-        .saturating_sub(optional)
-        .saturating_sub(usize::from(vararg));
-    arity >= lowest && (vararg || arity <= declared)
-}
-
-/// Whether a SECONDARY constructor could take a call the primary constructor also fits.
-///
-/// Arity alone cannot separate a vararg candidate from anything: `constructor(vararg parts: String)`
-/// spans every arity, so treating "fits the arity" as "may own the call" hands it a veto over every
-/// construction of the class. Kotlin resolves that overlap in the primary's favour — a candidate
-/// that packs a vararg loses to one that does not — so a vararg secondary withdraws the template
-/// only where the primary itself cannot take the call.
-/// A secondary constructor's shape, as the template rules read it.
-struct SecondaryConstructor<'a> {
-    /// Declared parameter types, in declaration order.
-    parameters: &'a [Ty],
-    /// How many of those declare a default, so a shorter call reaches this constructor.
-    optional: usize,
-    /// Whether the last parameter is a `vararg`, so a longer call reaches it.
-    vararg: bool,
-}
-
-fn secondary_may_own_call(
-    oracle: &dyn crate::assignable::TypeOracle,
-    candidate: SecondaryConstructor<'_>,
-    arity: usize,
-    primary_fits: bool,
-    actuals: &[Option<Ty>],
-) -> bool {
-    let SecondaryConstructor {
-        parameters,
-        optional,
-        vararg,
-    } = candidate;
-    if !callable_at_arity(parameters.len(), optional, vararg, arity) {
-        return false;
-    }
-    // Kotlin's vararg preference decides only between APPLICABLE candidates, so it may set a vararg
-    // secondary aside only where the primary can genuinely take the call — arity AND types.
-    if vararg && primary_fits {
-        return false;
-    }
-    parameters_may_take(oracle, parameters, actuals)
-}
-
-/// Whether an argument of type `actual` could be passed for a parameter declared `parameter`.
-///
-/// Answers YES wherever it cannot tell — a type variable, an erased top, an unresolved type, or a
-/// function type (whose shape the pass does not compare) all fit — and otherwise asks the ordinary
-/// subtyping relation, so a `Number` parameter accepts an `Int` argument and a `CharSequence` one a
-/// `String`. Comparing classifier IDENTITY instead reads every supertype parameter as a non-fit,
-/// which is exactly the case where the call belongs to the other constructor.
-fn may_fit(oracle: &dyn crate::assignable::TypeOracle, actual: Ty, parameter: Ty) -> bool {
-    let (actual, parameter) = (actual.non_null(), parameter.non_null());
-    if actual == Ty::Error
-        || parameter == Ty::Error
-        || parameter.mentions_ty_param()
-        || parameter.is_erased_top()
-        || matches!(parameter, Ty::Fun(_))
-        || matches!(actual, Ty::Fun(_))
-        || actual.kotlin_class_internal().is_none()
-        || parameter.kotlin_class_internal().is_none()
-    {
-        return true;
-    }
-    crate::assignable::is_assignable(&crate::assignable::TyCtx::new(), oracle, actual, parameter)
-}
-
-/// Whether a parameter list could take a call of these argument types.
-fn parameters_may_take(
-    oracle: &dyn crate::assignable::TypeOracle,
-    parameters: &[Ty],
-    actuals: &[Option<Ty>],
-) -> bool {
-    actuals
-        .iter()
-        .zip(parameters)
-        .all(|(actual, parameter)| actual.is_none_or(|actual| may_fit(oracle, actual, *parameter)))
-}
-
-/// The constructor parameter slot each SOURCE argument position fills, from parameter NAMES alone.
-///
-/// The checker maps labels with [`call_argument_parameter_indices`], which reads a `CallSig`. The
-/// signature pass has no `CallSig` — a constructor template carries names — so it asks the same
-/// question with what it has, and answers `None` wherever it cannot: an unknown label, a label
-/// landing on a slot another argument already fills, or a declaration whose names it does not know.
-/// An unlabelled argument fills the slot at its own position, which is Kotlin's rule for the
-/// positional arguments preceding the labels and for a trailing lambda alike.
-fn template_argument_slots(
-    arg_names: Option<&[Option<String>]>,
-    param_names: &[String],
-    arity: usize,
-) -> Option<Vec<usize>> {
-    let identity = || (0..arity).collect::<Vec<_>>();
-    let Some(names) = arg_names else {
-        return Some(identity());
-    };
-    if names.iter().all(Option::is_none) {
-        return Some(identity());
-    }
-    if names.len() != arity || param_names.len() != arity {
-        return None;
-    }
-    let mut slots = Vec::with_capacity(arity);
-    for (position, name) in names.iter().enumerate() {
-        let slot = match name {
-            Some(name) => param_names.iter().position(|parameter| parameter == name)?,
-            None => position,
-        };
-        if slots.contains(&slot) {
-            return None;
-        }
-        slots.push(slot);
-    }
-    Some(slots)
-}
-
-/// The generic constructor template of `internal`, from whichever declaration source has it.
-///
-/// Precedence is a availability rule, not a provenance rule: the file currently being collected is
-/// consulted first because its own classifiers are not published to the module table yet, then the
-/// module table, then the dependency/platform source. Each answers the same shape.
-///
-/// The template describes the PRIMARY constructor, so it answers only when the arity identifies
-/// that constructor: a same-arity secondary constructor (`Cell(5, "tag")` against
-/// `class Cell<T>(value: T, flag: Boolean) { constructor(n: Int, v: T) }`) would otherwise bind the
-/// class's type arguments from the wrong declaration and emit a checkcast against them.
-/// The symbolic signature of whatever callable `name(args)` selects on `receiver`.
-///
-/// Selection itself is unchanged — this asks the same funnel the return-type hook asks and reports
-/// the SIGNATURE instead of the already-substituted result. A generic callable whose type variable
-/// is reachable only through a lambda's result (`fun <T, R> Iterable<T>.map(f: (T) -> R): List<R>`)
-/// cannot be bound from the substituted return, because by then `R` is already `Any`.
-/// The return type of a generic call whose type variables a LAMBDA argument's result can fix.
-///
-/// A lambda argument is contextual: its parameter types come from the callable's own symbolic
-/// parameter, and the type of its body is what binds a variable that appears nowhere else. Reading
-/// the already-substituted return instead sees such a variable as its bound, so
-/// `listOf(dto).map { Item(it.id) }` types as `List<Any>` and every member read on an element is
-/// "unresolved reference". This is the same shaping the constructor path does, asked of the callable
-/// a call selects.
-///
-/// `None` leaves the caller's existing inference untouched — this only ever replaces a result the
-/// binding could complete.
-#[allow(clippy::too_many_arguments)]
-fn generic_call_ret_with_lambdas(
-    file: &File,
-    call: ExprId,
-    args: &[ExprId],
-    arg_tys: &[Ty],
-    generic: &crate::libraries::GenericSig,
-    class_names: &ClassNames,
-    props: &[(String, Ty, bool)],
-    src: &dyn SemanticPlatform,
-    env: &InferEnv,
-) -> Option<Ty> {
-    // Labels reorder arguments against the declaration; without the callable's parameter names this
-    // cannot map them, and a wrong map would bind the variables from the wrong arguments.
-    if file.call_arg_names.contains_key(&call.0) || generic.params.len() != args.len() {
-        return None;
-    }
-    let is_lambda = args
-        .iter()
-        .map(|&argument| matches!(file.expr(argument), Expr::Lambda { .. }))
-        .collect::<Vec<_>>();
-    if !is_lambda.contains(&true) {
-        return None;
-    }
-    // The receiver's own type arguments are already substituted into this signature, so the formals
-    // left are exactly the ones the arguments have to bind.
-    let mut bindings = crate::symbol_resolver::GSigBinds::new();
-    let symbolic = generic
-        .params
-        .iter()
-        .map(|&parameter| Some(parameter))
-        .collect::<Vec<_>>();
-    for position in construction_argument_typing_order(&is_lambda, &symbolic) {
-        let shape = generic.params[position];
-        let actual = if is_lambda[position] {
-            let shaped = crate::types::ty_subst_keep_unbound(shape, &bindings);
-            infer_lambda_ty_with_shape(file, args[position], shaped, class_names, props, src, env)
-        } else {
-            arg_tys[position]
-        };
-        if actual != Ty::Error {
-            crate::symbol_resolver::unify_inferred_ty(shape, actual, &mut bindings);
-        }
-    }
-    // Every formal the signature declares must be bound. A partially bound return is exactly the
-    // `List<Any>` this exists to avoid, and reporting it would overwrite an inference the ordinary
-    // path may have got right.
-    crate::trace_compiler!(
-        "signature_inference",
-        "lambda-bind formals={:?} bindings={bindings:?} ret={:?}",
-        generic.formals,
-        generic.ret,
-    );
-    if generic
-        .formals
-        .iter()
-        .any(|formal| !bindings.contains_key(formal))
-    {
-        return None;
-    }
-    let ret = crate::types::ty_subst_keep_unbound(generic.ret, &bindings);
-    // The formal list says which variables SHOULD have been bound; the result says which actually
-    // were. A type variable surviving into the property's type is never a usable answer — it would
-    // become an expected type spelled as a variable no scope declares — so the result itself is the
-    // condition, not the bookkeeping that produced it.
-    (ret != Ty::Error && !crate::types::ty_mentions_any_param(ret)).then_some(ret)
-}
-
-fn selected_call_template(
-    resolver: &crate::symbol_resolver::SymbolResolver,
-    receiver: Option<Ty>,
-    name: &str,
-    args: &[CallArgKind],
-    type_args: &[Ty],
-) -> Option<crate::libraries::GenericSig> {
-    let recv = match receiver {
-        Some(ty) => crate::symbol_resolver::SymRecv::Value(ty),
-        None => crate::symbol_resolver::SymRecv::TopLevel,
-    };
-    resolver.call_template(recv, name, args, type_args)
-}
-
-fn constructor_template_of(
-    file: &File,
-    class_names: &ClassNames,
-    src: &dyn SemanticPlatform,
-    module: Option<&SymbolTable>,
-    internal: TypeName,
-    arity: usize,
-    actuals: &[Option<Ty>],
-) -> Option<ConstructorTemplate> {
-    // Judging which constructor a call could reach is ordinary subtyping, so it asks the same
-    // federated hierarchy the checker does: the module's declarations over the platform's.
-    let module_symbols = module.map(crate::module_symbols::ModuleSymbols::new);
-    let mut sources: Vec<&dyn SymbolSource> = Vec::new();
-    if let Some(module_symbols) = module_symbols.as_ref() {
-        sources.push(module_symbols);
-    }
-    sources.push(src);
-    let federated = crate::symbol_source::CompositeSource::new(sources);
-    let oracle = crate::symbol_resolver::SourceOracle(&federated);
-    if let Some(class) = file
-        .decls
-        .iter()
-        .find_map(|&declaration| match file.decl(declaration) {
-            Decl::Class(class) if class_names.get(class.name.as_str()) == Some(internal) => {
-                Some(class)
-            }
-            _ => None,
-        })
-    {
-        let mut primary_sink = crate::diag::DiagSink::new();
-        let empty_params = TParams::from_bindings([]);
-        let primary_parameters = class
-            .props
-            .iter()
-            .map(|parameter| {
-                ty_of_ref(&parameter.ty, class_names, &empty_params, &mut primary_sink)
-            })
-            .collect::<Vec<_>>();
-        let primary_fits = callable_at_arity(
-            class.props.len(),
-            class
-                .props
-                .iter()
-                .filter(|parameter| parameter.default.is_some())
-                .count(),
-            class.props.iter().any(|parameter| parameter.is_vararg),
-            arity,
-        ) && parameters_may_take(&oracle, &primary_parameters, actuals);
-        if class.type_params.is_empty()
-            || !primary_fits
-            || class.secondary_ctors.iter().any(|constructor| {
-                let mut sink = crate::diag::DiagSink::new();
-                let empty = TParams::from_bindings([]);
-                let parameters = constructor
-                    .params
-                    .iter()
-                    .map(|parameter| ty_of_ref(&parameter.ty, class_names, &empty, &mut sink))
-                    .collect::<Vec<_>>();
-                secondary_may_own_call(
-                    &oracle,
-                    SecondaryConstructor {
-                        parameters: &parameters,
-                        optional: constructor
-                            .params
-                            .iter()
-                            .filter(|parameter| parameter.default.is_some())
-                            .count(),
-                        vararg: constructor
-                            .params
-                            .iter()
-                            .any(|parameter| parameter.is_vararg),
-                    },
-                    arity,
-                    primary_fits,
-                    actuals,
-                )
-            })
-        {
-            return None;
-        }
-        let resolve = |name: &str| class_names.get(name);
-        let declared =
-            TParams::from_decl_with(&class.type_params, &class.type_param_bounds, &resolve);
-        let symbolic = TParams::from_bindings(
-            class
-                .type_params
-                .iter()
-                .map(|name| (name.clone(), Ty::ty_param(name, declared.bound(name)))),
-        );
-        let mut sink = crate::diag::DiagSink::new();
-        return Some(ConstructorTemplate {
-            params: class
-                .props
-                .iter()
-                .map(|parameter| ty_of_ref(&parameter.ty, class_names, &symbolic, &mut sink))
-                .collect(),
-            param_names: class
-                .props
-                .iter()
-                .map(|parameter| parameter.name.clone())
-                .collect(),
-            bounds: class
-                .type_params
-                .iter()
-                .map(|name| declared.bound(name))
-                .collect(),
-            type_params: class.type_params.clone(),
-            from_file: true,
-        });
-    }
-    if let Some(cls) = module.and_then(|table| table.class_by_type_name(internal)) {
-        // A module signature keeps a secondary constructor's parameter TYPES only, so its defaults
-        // are unknown: a longer parameter list may still answer a shorter call. A trailing array
-        // parameter is the vararg shape. Both unknowns are resolved towards withdrawing.
-        let primary_parameters = cls
-            .ctor_param_shapes
-            .iter()
-            .map(|&(shape, _)| shape)
-            .collect::<Vec<_>>();
-        let primary_fits = callable_at_arity(
-            cls.ctor_param_shapes.len(),
-            cls.ctor_param_names
-                .iter()
-                .filter(|(_, default)| *default)
-                .count(),
-            cls.ctor_vararg.is_some(),
-            arity,
-        ) && parameters_may_take(&oracle, &primary_parameters, actuals);
-        if cls.type_params().is_empty()
-            || !primary_fits
-            || cls.secondary_ctors.iter().any(|parameters| {
-                let vararg = parameters
-                    .last()
-                    .is_some_and(|parameter| parameter.array_elem().is_some());
-                secondary_may_own_call(
-                    &oracle,
-                    SecondaryConstructor {
-                        parameters,
-                        // A module signature keeps parameter TYPES only, so a default cannot be
-                        // told from a required parameter: assume every one may be omitted.
-                        optional: parameters.len(),
-                        vararg,
-                    },
-                    arity,
-                    primary_fits,
-                    actuals,
-                )
-            })
-        {
-            return None;
-        }
-        return Some(ConstructorTemplate {
-            type_params: cls.type_params().clone(),
-            bounds: cls.type_param_bounds().clone(),
-            params: cls
-                .ctor_param_shapes
-                .iter()
-                .map(|&(shape, _)| shape)
-                .collect(),
-            param_names: cls
-                .ctor_param_names
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect(),
-            from_file: false,
-        });
-    }
-    let classifier = src.classifier(internal)?;
-    if classifier.type_params().is_empty() {
-        return None;
-    }
-    // A declared parameter COUNT is not the arity a constructor can be CALLED with: a default makes
-    // every shorter arity reachable and a vararg every longer one. Answer only when exactly one
-    // constructor could take this call, or the template describes a declaration that is not the
-    // callee — which binds the class's type arguments from the wrong parameters.
-    let mut answering = classifier.constructors.iter().filter(|constructor| {
-        callable_at_arity(
-            constructor.params.len(),
-            constructor
-                .call_sig
-                .param_defaults
-                .iter()
-                .filter(|default| **default)
-                .count(),
-            constructor.call_sig.vararg_index.is_some(),
-            arity,
-        )
-    });
-    let constructor = answering.next()?;
-    if answering.next().is_some() || constructor.params.len() != arity {
-        return None;
-    }
-    let generic = constructor.generic_sig.as_ref()?;
-    Some(ConstructorTemplate {
-        bounds: classifier
-            .type_params()
-            .iter()
-            .map(|_| Ty::nullable(Ty::obj("kotlin/Any")))
-            .collect(),
-        type_params: classifier.type_params().clone(),
-        params: generic.params.clone(),
-        param_names: constructor.call_sig.param_names.clone(),
-        from_file: false,
-    })
-}
-
-fn infer_lambda_ty_with_shape(
-    file: &File,
-    lambda: ExprId,
-    shape: Ty,
-    class_names: &ClassNames,
-    props: &[(String, Ty, bool)],
-    src: &dyn SemanticPlatform,
-    env: &InferEnv,
-) -> Ty {
-    let Expr::Lambda { params, body } = file.expr(lambda) else {
-        return Ty::Error;
-    };
-    let Ty::Fun(signature) = shape.non_null() else {
-        return Ty::Error;
-    };
-    if signature.has_receiver
-        || signature.context_count > 0
-        || signature
-            .params
-            .iter()
-            .any(|parameter| *parameter == Ty::Error || parameter.mentions_ty_param())
-    {
-        return Ty::Error;
-    }
-    let names: Vec<String> = if params.len() == signature.params.len() {
-        params.clone()
-    } else if params.is_empty() && signature.params.len() == 1 {
-        vec!["it".to_string()]
-    } else {
-        return Ty::Error;
-    };
-    let mut body_props = props.to_vec();
-    body_props.extend(
-        names
-            .into_iter()
-            .zip(signature.params.iter().copied())
-            .map(|(name, ty)| (name, ty, false)),
-    );
-    let ret = infer_lit_ty_p(file, *body, class_names, &body_props, src, env);
-    if ret == Ty::Error {
-        return Ty::Error;
-    }
-    Ty::fun_with_shape(signature.params.clone(), ret, 0, false, signature.suspend)
 }
 
 /// What `Name(args)` types its arguments against when the name denotes a constructible classifier.
@@ -37959,6 +36170,12 @@ impl<'a> Checker<'a> {
                         })),
                     );
                     ty
+                } else if let Some(ty) = self.demand_name.and_then(|demand| demand(&n)) {
+                    // Every ordinary rung has been tried and none knew the name. When this checker
+                    // is typing one declaration for the resolution engine, that can simply mean the
+                    // declaration it names has not been typed YET — ask for it rather than reporting
+                    // it unresolved.
+                    ty
                 } else {
                     self.diags
                         .error(self.span(e), format!("unresolved reference '{n}'."));
@@ -38361,6 +36578,18 @@ impl<'a> Checker<'a> {
             }
             let rt = self.expr(scope, receiver);
             let declared = self.check_member(scope, rt, &name, self.span(e), Some(e));
+            // A member whose own type is still being determined reads as a placeholder. Ask the
+            // engine for that declaration before accepting the failure. This sits here rather than
+            // inside `check_member`, which is also called speculatively — by `try_member_read` and
+            // `check_member_quietly`, both of which roll their diagnostics back — so a hook there
+            // would fire on every probe of every implicit receiver.
+            let declared = if declared == Ty::Error {
+                self.demand_member
+                    .and_then(|demand| demand(rt, &name))
+                    .map_or(Ty::Error, |ty| self.set(e, ty))
+            } else {
+                declared
+            };
             if self.resolved_constants.contains_key(&e)
                 && !matches!(
                     receiver_qualifier,
