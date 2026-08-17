@@ -86,6 +86,40 @@ pub struct FnMeta {
     pub param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>>,
 }
 
+#[cfg(test)]
+impl FnMeta {
+    /// A plain top-level function: every field at the value a declaration that states nothing extra
+    /// carries. The byte fixtures below build on this with `..FnMeta::plain(..)` and name only the
+    /// fields their case is about, so a field added to `FnMeta` no longer breaks a fixture that does
+    /// not use it.
+    fn plain(name: &str, params: Vec<(String, Ty)>, ret: Ty) -> Self {
+        Self {
+            name: name.into(),
+            params,
+            ret,
+            decl_order: 0,
+            annotations: Vec::new(),
+            receiver: None,
+            param_defaults: Vec::new(),
+            suspend: false,
+            jvm_desc: None,
+            jvm_name: None,
+            inline: false,
+            operator: false,
+            infix: false,
+            type_params: Vec::new(),
+            semantic_type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            contract: None,
+            context_count: 0,
+            vararg_index: None,
+            visibility: crate::types::Visibility::Public,
+            spellings: crate::spelling::DeclaredSpellings::default(),
+            param_annotations: Vec::new(),
+        }
+    }
+}
+
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
 const DECLARES_DEFAULT_VALUE_BIT: u64 = 1 << 1;
 
@@ -770,30 +804,7 @@ mod tests {
     #[test]
     fn matches_kotlinc_reference_for_f_int_int() {
         let (d1, d2) = build_package(
-            &[FnMeta {
-                spellings: crate::spelling::DeclaredSpellings::default(),
-                annotations: Vec::new(),
-                decl_order: 0,
-                jvm_name: None,
-                name: "f".into(),
-                params: vec![("a".into(), Ty::Int)],
-                ret: Ty::Int,
-                receiver: None,
-                param_defaults: Vec::new(),
-                suspend: false,
-                jvm_desc: None,
-                contract: None,
-                inline: false,
-                operator: false,
-                infix: false,
-                type_params: Vec::new(),
-                semantic_type_params: Vec::new(),
-                type_param_bounds: Vec::new(),
-                context_count: 0,
-                vararg_index: None,
-                visibility: crate::types::Visibility::Public,
-                param_annotations: Vec::new(),
-            }],
+            &[FnMeta::plain("f", vec![("a".into(), Ty::Int)], Ty::Int)],
             &[],
             &[],
             None,
@@ -813,30 +824,7 @@ mod tests {
     #[test]
     fn package_module_name_metadata_byte_matches_kotlinc() {
         let (d1, d2) = build_package(
-            &[FnMeta {
-                annotations: Vec::new(),
-                decl_order: 0,
-                jvm_name: None,
-                name: "f".into(),
-                params: vec![("a".into(), Ty::Int)],
-                ret: Ty::Int,
-                receiver: None,
-                param_defaults: Vec::new(),
-                suspend: false,
-                jvm_desc: None,
-                contract: None,
-                inline: false,
-                operator: false,
-                infix: false,
-                type_params: Vec::new(),
-                semantic_type_params: Vec::new(),
-                type_param_bounds: Vec::new(),
-                context_count: 0,
-                vararg_index: None,
-                visibility: crate::types::Visibility::Public,
-                spellings: crate::spelling::DeclaredSpellings::default(),
-                param_annotations: Vec::new(),
-            }],
+            &[FnMeta::plain("f", vec![("a".into(), Ty::Int)], Ty::Int)],
             &[],
             &[],
             Some("mymod"),
@@ -1011,31 +999,20 @@ mod tests {
         };
         let (d1, d2) = build_package(
             &[FnMeta {
-                spellings: crate::spelling::DeclaredSpellings::default(),
-                annotations: Vec::new(),
-                decl_order: 0,
-                jvm_name: None,
-                name: "validate".into(),
-                params: vec![("value".into(), Ty::obj("kotlin/Any"))],
-                ret: Ty::Boolean,
                 receiver: Some(Ty::obj_args(
                     "Refinement",
                     &[Ty::ty_param("T", bound), Ty::ty_param("R", bound)],
                 )),
-                param_defaults: Vec::new(),
-                suspend: false,
                 jvm_desc: Some("(LRefinement;Ljava/lang/Object;)Z".into()),
                 inline: true,
-                operator: false,
-                infix: false,
                 type_params: vec![("T".into(), false), ("R".into(), true)],
                 semantic_type_params: vec!["T".into(), "R".into()],
-                type_param_bounds: Vec::new(),
                 contract: Some(std::sync::Arc::new(contract.clone())),
-                context_count: 0,
-                vararg_index: None,
-                visibility: crate::types::Visibility::Public,
-                param_annotations: Vec::new(),
+                ..FnMeta::plain(
+                    "validate",
+                    vec![("value".into(), Ty::obj("kotlin/Any"))],
+                    Ty::Boolean,
+                )
             }],
             &[],
             &[],
@@ -1058,28 +1035,7 @@ mod tests {
         // return Int + param Int must share one string-table entry (index 1).
         let (_d1, d2) = build_package(
             &[FnMeta {
-                spellings: crate::spelling::DeclaredSpellings::default(),
-                annotations: Vec::new(),
-                decl_order: 0,
-                jvm_name: None,
-                name: "g".into(),
-                params: vec![("x".into(), Ty::Int)],
-                ret: Ty::Int,
-                receiver: None,
-                param_defaults: Vec::new(),
-                suspend: false,
-                jvm_desc: None,
-                contract: None,
-                inline: false,
-                operator: false,
-                infix: false,
-                type_params: Vec::new(),
-                semantic_type_params: Vec::new(),
-                type_param_bounds: Vec::new(),
-                context_count: 0,
-                vararg_index: None,
-                visibility: crate::types::Visibility::Public,
-                param_annotations: Vec::new(),
+                ..FnMeta::plain("g", vec![("x".into(), Ty::Int)], Ty::Int)
             }],
             &[],
             &[],
