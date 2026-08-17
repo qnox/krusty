@@ -5990,7 +5990,10 @@ fn mangling_info(t: &Ty, under: &Under) -> crate::jvm::inline_class::InfoForMang
     };
     crate::jvm::inline_class::InfoForMangling {
         is_value,
-        fq_name: fq_name.replace('/', "."),
+        // kotlinc hashes the declared Kotlin FqName (`pkg.Outer.Inner` — dots throughout), never the
+        // JVM internal spelling, so a NESTED value class converts its `$` separator too: `I$V` must
+        // hash as `I.V` or every member mentioning it gets a different `-<hash>` than kotlinc's.
+        fq_name: fq_name.replace(['/', '$'], "."),
         is_nullable,
     }
 }
