@@ -204,3 +204,55 @@ fn a_nested_annotation_from_the_classpath_uses_the_same_construction_model() {
         Some("OK")
     );
 }
+
+/// The implementation class emits its members in kotlinc's ORDER: the accessors, then `equals`,
+/// `hashCode`, `toString`, and `annotationType()` LAST.
+///
+/// The method table is part of the class file, so emitting `annotationType()` beside the member
+/// accessors diverged from the reference on every annotation that is instantiated. Asserted against
+/// the reference compiler's own order, and the program is RUN so the reordering cannot quietly break
+/// the members it moves past.
+#[test]
+fn the_implementation_emits_members_in_kotlincs_order() {
+    const SRC: &str = "annotation class Simple(val v: Int)\n\
+                       fun make(): Simple = Simple(1)\n\
+                       fun box(): String = if (make().v == 1) \"OK\" else \"FAIL\"\n";
+    let ours = common::expect_compile_in_process(
+        SRC,
+        "Ord",
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    let impl_class = ours
+        .iter()
+        .find(|(name, _)| name.contains("$annotationImpl$"))
+        .map(|(_, bytes)| krusty::jvm::classreader::parse_class(bytes).expect("parse impl"))
+        .expect("the annotation implementation class");
+    let names = impl_class
+        .methods
+        .iter()
+        .map(|m| m.name.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "<init>",
+            "v",
+            "equals",
+            "hashCode",
+            "toString",
+            "annotationType"
+        ],
+        "member order must be kotlinc's"
+    );
+    assert_eq!(
+        common::run_box(
+            &ours,
+            &common::find_box_class(&ours).expect("box class"),
+            &[common::stdlib_jar()]
+        )
+        .as_deref(),
+        Some("OK"),
+        "the reordered implementation must still work"
+    );
+}

@@ -8054,17 +8054,18 @@ fn emit_annotation_impl_class(
         );
     }
 
-    // annotationType(): return <iface>.class.
+    emit_annotation_equals(&mut cw, &fq, iface, &members);
+    emit_annotation_hashcode(&mut cw, &fq, &members);
+    emit_annotation_tostring(&mut cw, &fq, iface, &members);
+    // annotationType(): return <iface>.class. LAST, after the `Object` overrides — kotlinc's member
+    // order, and the method table is part of the class file, so emitting it beside the member
+    // accessors diverged from the reference on every annotation that is instantiated.
     {
         let mut m = CodeBuilder::new(1);
         m.ldc_class(iface, &mut cw);
         m.areturn();
         finish_code::<0x0011>(&mut cw, "annotationType", "()Ljava/lang/Class;", &mut m, 1);
     }
-
-    emit_annotation_equals(&mut cw, &fq, iface, &members);
-    emit_annotation_hashcode(&mut cw, &fq, &members);
-    emit_annotation_tostring(&mut cw, &fq, iface, &members);
     cw.finish()
 }
 
