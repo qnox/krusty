@@ -2219,7 +2219,21 @@ fn lower_file_at_reporting_impl(
                 if c.inner_of.is_some() {
                     return None;
                 }
-                lo.synth_data_members(&internal, id, ctor_param_count as usize, c.is_singleton())?;
+                // `+DataClassCopyRespectsConstructorVisibility`: the synthesized `copy` (and its
+                // `$default` stub) take the PRIMARY constructor's visibility; the default is
+                // kotlinc's unconditional public.
+                let copy_visibility = if file.data_copy_respects_ctor_visibility {
+                    c.primary_ctor_visibility
+                } else {
+                    crate::types::Visibility::Public
+                };
+                lo.synth_data_members(
+                    &internal,
+                    id,
+                    ctor_param_count as usize,
+                    c.is_singleton(),
+                    copy_visibility,
+                )?;
             }
             // A `@JvmInline value class` is emitted as a plain single-field class here (field, `<init>`,
             // getter); the JVM `value_classes` pass synthesizes its unboxed-support members
@@ -11916,13 +11930,15 @@ impl<'a> Lower<'a> {
     }
 
     /// Synthesize a `data class`'s `componentN`/`toString`/`hashCode`/`equals` as IR methods over the
-    /// first `n` (primary-constructor) fields.
+    /// first `n` (primary-constructor) fields. `copy_visibility` is the synthesized `copy`'s Kotlin
+    /// visibility — the primary ctor's under `DataClassCopyRespectsConstructorVisibility`, else Public.
     fn synth_data_members(
         &mut self,
         internal: &str,
         class_id: ClassId,
         n: usize,
         is_object: bool,
+        copy_visibility: crate::types::Visibility,
     ) -> Option<()> {
         let fields: Vec<(String, Ty)> = self.class_info(internal)?.fields[..n].to_vec();
 
@@ -11975,6 +11991,18 @@ impl<'a> Lower<'a> {
                 body,
                 SyntheticMethodIntent::Override,
             ) {
+                // The declared-member visibility model, exactly as a `private`/`internal fun` is
+                // marked: `private` turns the emitted method ACC_PRIVATE (its `$default` stub
+                // package-private, dispatching via `invokespecial`); `internal` stays public on the
+                // JVM — krusty does not mangle internal member functions yet — with only `@Metadata`
+                // carrying the module boundary. `protected` is not modeled by the IR visibility
+                // sets (declared members fall back to public the same way).
+                if copy_visibility.is_private() {
+                    self.ir.private_methods.insert(copy_fid);
+                }
+                if copy_visibility == crate::types::Visibility::Internal {
+                    self.ir.internal_methods.insert(copy_fid);
+                }
                 // Recover each parameter's declared `?` from its IrField (see componentN above) — it
                 // decides the value-class mangle hash and the nullable-erasure of the parameter.
                 for (k, (fname, _)) in fields.iter().enumerate() {
@@ -11989,13 +12017,17 @@ impl<'a> Lower<'a> {
                 // `copy`'s parameters are the primary-ctor properties, so they take the SAME
                 // `checkNotNullParameter` guards kotlinc emits at the constructor — a non-null reference
                 // parameter is null-checked at `copy` entry. Reuse the class's precomputed ctor checks.
-                let mut checks: Vec<Option<String>> = self.ir.classes[class_id as usize]
-                    .ctor_args
-                    .iter()
-                    .map(|a| a.check.clone())
-                    .collect();
-                checks.resize(fields.len(), None);
-                self.ir.functions[copy_fid as usize].param_checks = checks;
+                // A PRIVATE `copy` gets NO guards, exactly as `param_checks_for` gates a declared
+                // private member: kotlinc guards only functions reachable from Java.
+                if !copy_visibility.is_private() {
+                    let mut checks: Vec<Option<String>> = self.ir.classes[class_id as usize]
+                        .ctor_args
+                        .iter()
+                        .map(|a| a.check.clone())
+                        .collect();
+                    checks.resize(fields.len(), None);
+                    self.ir.functions[copy_fid as usize].param_checks = checks;
+                }
                 // Each `copy` parameter defaults to the corresponding receiver property. The `$default`
                 // stub's bit-mask is one `int` per 32 params (multi-mask), so any parameter count works.
                 {

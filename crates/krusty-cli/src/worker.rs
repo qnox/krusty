@@ -121,6 +121,7 @@ fn translate_language_features(
 ) -> Result<(), Refusal> {
     const MODELED: &[&str] = &[
         "ContextParameters",
+        "DataClassCopyRespectsConstructorVisibility",
         "EnableNameBasedDestructuringShortForm",
         "ExplicitBackingFields",
         "ExplicitContextArguments",
@@ -929,6 +930,26 @@ mod tests {
             .unwrap_err();
             assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
         }
+    }
+
+    /// `--x_consistent_data_class_copy_visibility` translates to the kotlinc flag AND the CLI now
+    /// genuinely models it, so the worker's strict `ignored`-must-be-empty gate accepts the request
+    /// (this option previously blocked the intellij fleet.* modules).
+    #[test]
+    fn consistent_copy_visibility_is_accepted() {
+        let unit = translate(&args(&[
+            "--x_consistent_data_class_copy_visibility",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("the option must be accepted, not refused");
+        let parsed = crate::cli::parse(unit.kotlinc_args);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed
+            .features
+            .has("DataClassCopyRespectsConstructorVisibility"));
     }
 
     #[test]
