@@ -809,6 +809,21 @@ impl ClassWriter {
         self.deprecated_methods.insert((n, d));
     }
 
+    /// Append an empty (no-argument) RUNTIME-visible marker annotation to a previously-added method —
+    /// the `@java.lang.Deprecated` kotlinc puts on each `enable`-mode `$DefaultImpls` forward.
+    /// Lookup-only for the method key; the annotation TYPE is interned here (seed it earlier when
+    /// pool order matters). No-op if the method isn't found.
+    pub fn add_method_visible_marker_annotation(&mut self, name: &str, desc: &str, ann_type: &str) {
+        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
+            return;
+        };
+        let ti = self.cp.utf8(ann_type);
+        let ann = vec![(ti >> 8) as u8, ti as u8, 0, 0];
+        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
+            m.visible_anns.push(ann);
+        }
+    }
+
     /// Override the class access flags (e.g. `ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT`).
     pub fn set_access(&mut self, access: u16) {
         self.access = access;

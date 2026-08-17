@@ -8424,6 +8424,7 @@ mod tests {
 
     fn fake_library_type(supertypes: Vec<String>, constructors: Vec<LibraryMember>) -> LibraryType {
         LibraryType {
+            is_kotlin: true,
             access: crate::libraries::ClassifierAccess::Public,
             source_file: None,
             is_nested: false,

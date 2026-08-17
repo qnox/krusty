@@ -1339,9 +1339,48 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   source files and module boundaries; a consumer's own mode never reinterprets a dependency.
   `$DefaultImpls` holder bytes are differential-tested exactly against kotlinc, including their
   generic receiver signatures, parameter annotations, local-variable slots, `InnerClasses`, and
-  synthetic Kotlin metadata. `enable` remains krusty's default but is not yet byte-parity — it
-  emits the holder only for a member with default parameter values, and none of the `access$…$jd`
-  bridges or class forwarders. The box corpus compiles each test under the mode its
+  synthetic Kotlin metadata.
+
+  `enable` (krusty's default) emits the full measured compatibility surface: a `public static
+  synthetic access$<name>$jd` bridge on the interface per non-private body (an `invokespecial` on
+  the interface's own default method; `LineNumberTable` = one entry at the invoke pc on the
+  interface's declaration line), a `$DefaultImpls` holder whose statics FORWARD to those bridges
+  (each carrying the `Deprecated` attribute + a runtime-visible `@java.lang.Deprecated`, the
+  re-emitted `checkNotNullParameter` guards with the line entry at the post-guard pc, the promoted
+  generic signature, `@NotNull`/`@Nullable` annotations, and `$this`-first locals), a `$default`
+  holder copy that is a thin synthetic forward to the interface's own stub, and an `ACC_BRIDGE`
+  forwarder override on every implementing class — an `invokespecial` that must NAME a direct
+  superinterface (the first declared one through which the winning declaration is inherited;
+  measured on the diamond). A sub-interface REPUBLISHES the surface for every inherited default it
+  does not redeclare, even when it declares nothing itself; a member inherited from a
+  `disable`-compiled dependency gets a holder forward straight to that dependency's holder (behind
+  a `checkcast`, without `@Deprecated` or an `access$…$jd` bridge), exactly as measured. Kotlin-ness
+  gates the surface (`LibraryType::is_kotlin`): a JAVA interface's default method never gets a
+  forwarder. The `enable` holder bytes are differential-tested exactly against kotlinc like the
+  `disable` ones, and a kotlinc-compiled `disable` downstream module is compiled AND RUN against a
+  krusty-built `enable` interface — the shape whose forwarders link `invokestatic` against the
+  holder statics the `@Metadata` `jvmClassFlags` = 3 advertises. An interface property accessor is
+  described ONLY by its `Property` metadata record — recording the accessor as a `Function` too
+  made every kotlinc consumer report "inherited platform declarations clash" on each implementer;
+  the accessor match is DESCRIPTOR-aware, so `fun getX(): Int` beside `val x: String` keeps its
+  `Function` record. Forwarder suppression against a class's own property accessors is keyed the
+  same way, on the accessors the class actually EMITS: a `val` never stands in for an inherited
+  `setX(I)V` (dropping that forwarder left the class abstract), and a same-name accessor with a
+  different return coexists with its forwarder, as kotlinc emits both.
+  A `suspend` member's forwarders and republished surface use its CPS shape — a trailing
+  `Continuation` parameter (`$completion`, `@NotNull`) and a `@Nullable Object` return — never the
+  declared signature: a forwarder built from the semantic `s(): Int` names an `s()I` the interface
+  does not have, and the class calls a `NoSuchMethodError` into existence (this also fixed the
+  pre-existing `disable`-mode forwarder shape for a suspend default member).
+  Known remaining gaps, each measured: member ORDER diverges when a property precedes a function
+  (krusty emits accessors after methods, in every mode); the interface's own `$default` stub does
+  not yet carry kotlinc's super-call guard; a REPUBLISHED (inherited) holder forward does not
+  reconstruct the declaring classifier's generic signature (and a suspend forwarder omits kotlinc's
+  `Signature` attribute); a suspend default method lacks kotlinc's `s$suspendImpl` static
+  indirection on the interface (a pre-existing suspend-lowering divergence); and interface member
+  metadata does not yet carry kotlinc's open-modality and accessor flag bytes.
+
+  The box corpus compiles each test under the mode its
   `// JVM_DEFAULT_MODE:` directive pins; every recognized mode runs, including multi-module
   `disable`. Tests: `tests/jvm_default_mode_e2e.rs` (differential class sets, public method
   realization and holder bytes vs kotlinc, emitted `jvmClassFlags`, behavior parity, and cross-module
@@ -1374,6 +1413,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   differential vs kotlinc with and without the flag, byte-level toggling isolation, internal-ctor
   pin) plus the flag-modeling tests in `crates/krusty-cli/src/cli.rs` and `src/features.rs`, and the
   Bazel worker acceptance test in `crates/krusty-cli/src/worker.rs`.
+  realization and holder bytes vs kotlinc for `disable` AND `enable`, emitted `jvmClassFlags`,
+  behavior parity, sub-interface republication, and cross-module consumption in both directions —
+  krusty consuming each dependency mode, and kotlinc consuming a krusty `enable` jar) and the
+  `-jvm-default` parsing tests in `crates/krusty-cli/src/cli.rs`.
 - `-Xno-param-assertions` / `-Xno-call-assertions`: the two null-check families kotlinc emits, and
   which a build can turn off. Measured against kotlinc 2.4.10:
   * `-Xno-param-assertions` removes every `Intrinsics.checkNotNullParameter` — the guard at the entry

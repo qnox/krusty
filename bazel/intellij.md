@@ -25,7 +25,7 @@ them into worker flags, and krusty's `--persistent_worker` parses exactly those:
 | `create_kotlinc_options` | worker flag | krusty |
 | --- | --- | --- |
 | `jvm_default = "no-compatibility"` | `--jvm_default no-compatibility` | default methods, no `$DefaultImpls`, `jvmClassFlags` 1 |
-| `jvm_default = "enable"` | `--jvm_default enable` | default methods, but the `$DefaultImpls` copy ONLY for members with default parameter values — no `access$…$jd` bridges and no class forwarders, so NOT byte-compatible with kotlinc |
+| `jvm_default = "enable"` | `--jvm_default enable` | default methods plus the full compatibility surface: `access$…$jd` bridges on the interface, a `$DefaultImpls` holder whose statics forward to those bridges (`@Deprecated`, byte-tested against kotlinc), and `invokespecial` forwarder overrides on implementing classes |
 | `jvm_default = "disable"` | `--jvm_default disable` | fully abstract interface, bodies on `$DefaultImpls` as receiver-first statics |
 | `x_no_param_assertions` | `--x_no_param_assertions` | no `Intrinsics.checkNotNullParameter` |
 | `x_no_call_assertions` | `--x_no_call_assertions` | inert; krusty emits no call assertions |
