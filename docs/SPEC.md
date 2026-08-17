@@ -1258,7 +1258,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   prefix off the registered defaults and offset the parameter slots; member-`$default` call sites
   subtract the member-extension receiver from the bit index the same way. Interface defaults use the
   mode-selected interface or `$DefaultImpls` realization. More than 31 parameters (kotlinc's
-  multi-`int` mask) remains unmodeled and is skipped, never miscompiled.
+  multi-`int` mask) remains unmodeled and is skipped, never miscompiled. **Stub emission is decoupled
+  from same-module call-site filling**: a top-level EXTENSION with a NON-CONSTANT default
+  (`fun Icon.toSwingIcon(scale: IconScale = IconScale.Default)`) registers its lowered defaults
+  STUB-ONLY (`FnParamInfo::stub_only`) — kotlinc emits `name$default` for it, and suppressing the
+  stub is a silent ABI gap (an omitting cross-module/Java caller gets `NoSuchMethodError`; found
+  byte-verifying intellij's icons-api `SwingIconKt`, krusty 3 methods vs kotlinc 5). A SAME-MODULE
+  omitted-arg call to such an extension still inlines only checker-recorded constant defaults and
+  otherwise bails (skip, never miscompile) — module calls are deliberately not routed through the
+  stub (tests: `extension_default_stub_e2e`).
 - `-jvm-default` (interface members with bodies): kotlinc offers three JVM realizations of the same
   Kotlin source, and the flag changes the CLASS SET, not just method bodies. Measured against
   kotlinc 2.4.10 on an interface with a default getter, a default method, a defaulted parameter and

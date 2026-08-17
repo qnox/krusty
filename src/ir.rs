@@ -1444,6 +1444,13 @@ impl IrStatic {
 pub struct FnParamInfo {
     pub names: Vec<String>,
     pub defaults: Option<Vec<Option<ExprId>>>,
+    /// The registered `defaults` serve only the `$default` STUB (which re-emits them inside the
+    /// stub's own frame) — a CALL SITE must not reuse them to fill an omitted argument. Set for an
+    /// EXTENSION whose defaults are not all constant: kotlinc still emits `name$default` for it (the
+    /// cross-module ABI), while krusty's same-module omitted-arg lowering — which inlines only
+    /// checker-recorded constant defaults — keeps bailing exactly as before the defaults were
+    /// registered (skip, never miscompile).
+    pub stub_only: bool,
 }
 
 impl FnParamInfo {
@@ -1451,6 +1458,7 @@ impl FnParamInfo {
         Self {
             names,
             defaults: None,
+            stub_only: false,
         }
     }
 
@@ -1458,6 +1466,16 @@ impl FnParamInfo {
         Self {
             names,
             defaults: Some(defaults),
+            stub_only: false,
+        }
+    }
+
+    /// [`Self::defaults`] with the stub-only marker set — see [`Self::stub_only`].
+    pub fn stub_only_defaults(names: Vec<String>, defaults: Vec<Option<ExprId>>) -> Self {
+        Self {
+            names,
+            defaults: Some(defaults),
+            stub_only: true,
         }
     }
 }
@@ -2249,6 +2267,11 @@ impl IrFile {
     }
     pub fn has_param_defaults(&self, fid: u32) -> bool {
         self.param_defaults(fid).is_some()
+    }
+    /// Whether `fid`'s registered defaults are STUB-ONLY (see [`FnParamInfo::stub_only`]): call-site
+    /// routing that would evaluate or delegate to them outside the `$default` stub must decline.
+    pub fn param_defaults_stub_only(&self, fid: u32) -> bool {
+        self.fn_params.get(&fid).is_some_and(|info| info.stub_only)
     }
     pub fn param_names(&self, fid: u32) -> Option<&[String]> {
         Some(&self.fn_params.get(&fid)?.names)
