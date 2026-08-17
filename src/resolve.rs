@@ -36407,7 +36407,22 @@ impl<'a> Checker<'a> {
     }
 
     fn expr_inner_name(&mut self, scope: &CheckerScope<'_>, e: ExprId, n: String) -> Ty {
-        let lookup = self.lookup(scope, &n);
+        let mut lookup = self.lookup(scope, &n);
+        // A binding whose type is not determined YET — a sibling member, or one inherited from a
+        // base class, that the engine has not resolved. Ask for it at the READ, where it is
+        // actually needed: resolving every undetermined binding up front costs a full run per
+        // sibling and turns a cycle among them into a decline for members that are individually
+        // fine.
+        if let Some(local) = lookup.as_mut() {
+            if local.ty == Ty::Pending {
+                if let Some(resolved) = self.demand_name.and_then(|demand| demand(&n)) {
+                    local.ty = resolved;
+                    if local.write_ty == Some(Ty::Pending) {
+                        local.write_ty = Some(resolved);
+                    }
+                }
+            }
+        }
         crate::trace_compiler!(
             "name_type",
             "name={n} expression={e:?} span={:?} binding_type={:?} binding_origin={:?} implicit_receivers={:?}",
