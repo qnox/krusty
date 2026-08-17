@@ -34577,8 +34577,48 @@ impl<'a> Checker<'a> {
         resolved
     }
 
-    /// Type safe-call lambda arguments from the selected receiver callable.
-    /// Decide, ONCE, where each lambda argument of a member call gets its shape.
+    /// Whether a shape's parameter counts can fit the lambdas as WRITTEN, the same question
+    /// [`Self::member_expectations_fit_written_lambdas`] asks of a member's expectations.
+    ///
+    /// The two carriers count differently and the difference is the whole content of this function:
+    /// a [`LambdaExpectation`]'s `value_params` has already had the receiver and context parameters
+    /// split off, while a [`LambdaCallShape`]'s `param_types` entry carries the receiver INSIDE it,
+    /// at the front. Consumers read past it with `get(1..)` exactly when `receivers` names one for
+    /// that argument, so this reads it the same way — counting the receiver as a written parameter
+    /// would reject every `R.(X) -> Y` argument, which is the shape most receiver DSLs have.
+    fn shape_fits_written_lambdas(
+        &self,
+        args: &[ExprId],
+        shape: &crate::symbol_resolver::LambdaCallShape,
+    ) -> bool {
+        let Some(param_types) = shape.param_types.as_ref() else {
+            return true;
+        };
+        args.iter()
+            .enumerate()
+            .all(|(index, &argument)| match self.file.expr(argument) {
+                Expr::Lambda { params, .. } => match param_types.get(index) {
+                    Some(offered) if !offered.is_empty() => {
+                        let receiver = shape
+                            .receivers
+                            .as_ref()
+                            .and_then(|receivers| receivers.get(index))
+                            .is_some_and(Option::is_some);
+                        let offered = offered.len() - usize::from(receiver);
+                        match params.is_empty() {
+                            // An implicit `it` names exactly one parameter.
+                            true => offered <= 1,
+                            false => offered == params.len(),
+                        }
+                    }
+                    _ => true,
+                },
+                _ => true,
+            })
+    }
+
+    /// Decide, ONCE, where each lambda argument of a member call gets its shape — including the
+    /// safe-call arguments typed from the selected receiver callable.
     ///
     /// Every source is asked here in one order, rather than each call site repeating the order for
     /// itself. See [`CallLambdaShaping`] for why the repetition mattered.
@@ -34651,6 +34691,16 @@ impl<'a> Checker<'a> {
                 None,
             )
         });
+        // An expectation whose parameter count cannot fit the lambda AS WRITTEN is not an
+        // expectation for this call, whichever source offered it. Carrying that rule from the
+        // provider source it was first written for to the extension source is what starts making the
+        // order between them stop deciding the outcome: a source that cannot fit no longer answers
+        // first merely because it is asked first. It does NOT finish that job — a selected module
+        // member is still unconditional, because `member_extension` is asked only when there is no
+        // selected member at all, so an ill-fitting module shape has no competitor to lose to.
+        // (A destructuring parameter is ONE written parameter: the parser gives it a single synthetic
+        // name and destructures it in the body.)
+        let extension = extension.filter(|shape| self.shape_fits_written_lambdas(args, shape));
         let provider = (module.is_none() && extension.is_none())
             .then(|| {
                 self.provider_member_lambda_expectations(
@@ -34662,7 +34712,11 @@ impl<'a> Checker<'a> {
                     explicit_type_args,
                 )
             })
-            .flatten();
+            .flatten()
+            .filter(|expectations| expectations.iter().any(Option::is_some))
+            .filter(|expectations| {
+                self.member_expectations_fit_written_lambdas(args, expectations)
+            });
         CallLambdaShaping {
             module,
             extension,
