@@ -1315,11 +1315,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class set (no synthetic lambda class), one `invokedynamic` per lambda, and an identical
   `BootstrapMethods` table — modulo constant-pool indices, which differ because the two pools differ
   in size — down to the synthetic implementation-method names (`box$lambda$0`…). The `class` strategy
-  (one synthetic class per lambda) has no emitter, so that value FAILS the compile rather than
-  quietly producing `indy` output: it differs in the class set, not just in instructions. Because
+  (kotlinc's pre-2.0 realization, selected per module by 40 intellij-community `BUILD.bazel` files)
+  is emitted too: each lambda becomes its own class extending `kotlin/jvm/internal/Lambda` — a
+  non-capturing one a static `INSTANCE` singleton, a capturing one constructed per evaluation. The
+  two flags are independent; each selects only its own closure kind. **Synthetic class names match
+  kotlinc's declaration-derived scheme**, taken from the lambda's stable lexical origin recorded at
+  lowering (`IrLambdaOrigin`), never from a generated method spelling or a value-table scan: a lambda
+  initializing a binding is `Owner$fn$binding$1`; in a CLASS-INITIALIZATION context (a property
+  initializer or an `init` block, which lower with an EMPTY enclosing-function scope) the name
+  carries no function segment — `C$prop$1`, `C$local$1`, bare `C$1` for an unbound init-block lambda
+  (empty name segments are dropped, never printed as `C$$1`). Ordinals are counted per RENDERED
+  prefix, not per raw `(enclosing, binding)` context: property `x` (`("x", None)`) and init-local
+  `x` (`("", Some("x"))`) both render `C$x$…`, and kotlinc numbers them as one sequence — `C$x$1`,
+  `C$x$2` — where a raw-context counter would number both `$1` and one class file would silently
+  overwrite the other (`tests/class_lambda_e2e.rs`, the `Collide` fixture, pinned at runtime). A
+  DELEGATED property's initializer is property-scoped the same way (`val z by lazy { … }` →
+  `C$z$…`, impl `z$lambda$0`); one recorded gap: kotlinc numbers that delegate lambda `C$z$2` where
+  krusty emits `C$z$1` — kotlinc's delegate ordinal counts a slot krusty does not model
+  (`tests/class_lambda_e2e.rs::delegated_property_lambda_takes_the_property_name` asserts krusty's
+  deterministic set). The synthetic impl METHOD prefix in
+  that context is a different name: the PROPERTY name for a property initializer (`h$lambda$0`, and
+  same-named declarations share one sequence — `val member` + `fun member` → `member$lambda$0/1`)
+  and kotlinc's `_init_` for an `init` block (`_init_$lambda$0`), never whichever function the
+  lowerer visited last (`tests/lambda_e2e.rs::class_init_lambda_impl_methods_use_declaration_prefixes`). A class property initializer is lowered
+  into EVERY constructor but keeps one source identity, so a multi-constructor class still emits ONE
+  lambda class (dedup by `(impl_owner, source expression)`), exactly as kotlinc does. Because
   `invokedynamic` requires class-file version 51 or newer, a real indy call site under
   `-jvm-target 1.6` fails the compile without emitting artifacts; fully spliced inline lambdas remain
-  valid because they emit no call site. Tests: `tests/indy_lambda_parity_e2e.rs`.
+  valid because they emit no call site, and the check keys on emitted indy sites, so
+  `-Xlambdas=class -Xsam-conversions=class -jvm-target 1.6` compiles (that pairing is the point of
+  the mode) and stamps major version 50. Tests: `tests/indy_lambda_parity_e2e.rs`,
+  `tests/class_lambda_e2e.rs`.
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

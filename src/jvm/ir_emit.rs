@@ -13912,13 +13912,24 @@ impl<'a> Emitter<'a> {
                     let origin = self.ir.lambda_origins.get(impl_fn);
                     let (internal, identity) = if let Some(origin) = origin {
                         let ordinal = origin.ordinal + 1;
-                        let internal = match &origin.binding_name {
-                            Some(binding) => format!(
-                                "{impl_owner}${}${binding}${ordinal}",
-                                origin.enclosing_name
-                            ),
-                            None => format!("{impl_owner}${}${ordinal}", origin.enclosing_name),
-                        };
+                        // A class-initialization origin (a property initializer or an init block)
+                        // has the EMPTY enclosing name — kotlinc emits no function segment there
+                        // (`C$prop$1`, `C$local$1`, `C$1`), so an empty segment is dropped, never
+                        // printed as `C$$1`.
+                        let mut internal = impl_owner.clone();
+                        for segment in [
+                            Some(origin.enclosing_name.as_str()),
+                            origin.binding_name.as_deref(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .filter(|segment| !segment.is_empty())
+                        {
+                            internal.push('$');
+                            internal.push_str(segment);
+                        }
+                        internal.push('$');
+                        internal.push_str(&ordinal.to_string());
                         (
                             internal,
                             LambdaClassIdentity::Source(origin.source_expression),
