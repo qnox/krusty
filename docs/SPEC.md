@@ -2766,6 +2766,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   characters illegal in a JVM class name (`foo.1.0.kt` → `Foo_1_0Kt`, not a `ClassFormatError`). Test:
   `tests/interface_delegation_expr_e2e.rs`.
 
+- **Delegation forwarder ORDER is the delegated interface's declaration order.** kotlinc emits one
+  forwarder per delegated member, in the order the interface declares them; krusty matches. The
+  member set is read out of the semantic symbol table, which keys members by source name in a hash
+  map, so each interface's contribution is ordered by the declaration coordinate (`file`, owner,
+  member index) its signature carries before any forwarder is synthesized. Members with no AST
+  coordinate sort last, by name. Without this the emission order — and with it constant-pool intern
+  order and the emitted bytes — varied with the process's hash seed: the same binary alternated
+  between two byte-different classes for corpus
+  `multiplatform/k2/delegation/delegationToExpectInterface_withNewMembers`, defeating byte-for-byte
+  reproducibility and adding false positives to class-byte sweeps. Super-interface contributions keep
+  their existing breadth-first grouping; ordering applies within each interface. Tests:
+  `tests/interface_delegation_e2e.rs::forwarders_follow_interface_declaration_order`,
+  `…::forwarder_emission_is_byte_deterministic`.
+
 - **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field
   + "K"` / `var v = 1 get() = field + 10 set(value) { field = value * 2 }` — a stored backing field
   AND a custom getter/setter (distinct from a computed property, which has no field, and a plain field,
