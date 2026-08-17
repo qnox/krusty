@@ -6766,3 +6766,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Intrinsics.checkNotNullParameter` prologue (moot under `-Xno-param-assertions`), and FILE
   FACADES still group property accessors after functions (the interface rule likely extends there).
   Tests: `tests/iconsapi_byte_residue_e2e.rs`.
+
+- **A member and an extension of the same name are chosen by the lambda's WRITTEN arity.** A Java
+  method taking a functional interface offers one arity — `Map.forEach(BiConsumer)` is two
+  parameters — while the Kotlin extension of the same name offers another,
+  `Map<out K, V>.forEach(action: (Map.Entry<K, V>) -> Unit)`, which is one. The member's lambda
+  expectation was consulted first, and when it answered, the extension was never shaped at all: a
+  lambda written with ONE parameter was shaped against two, so its parameter stayed untyped and every
+  member read on it was reported as an unresolved reference. A destructuring parameter is one
+  parameter — `{ (key, value) -> … }` binds a single value and destructures it — which is why that
+  spelling failed the same way as `{ entry -> … }` while `{ key, value -> … }` worked. An expectation
+  whose parameter count cannot fit the lambda as written is not an expectation for this call, so the
+  extension still gets its turn; an implicit `it` names exactly one parameter. This decides between
+  candidates by what the source says, not by which provider declared them, so a Kotlin class
+  extending a Java one behaves identically to the Java one.
+  Tests: `tests/member_extension_lambda_arity_e2e.rs`.

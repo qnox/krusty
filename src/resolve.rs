@@ -23232,6 +23232,12 @@ impl<'a> Checker<'a> {
                 .filter(crate::libraries::FunctionInfo::is_extension)
                 .collect(),
         };
+        crate::trace_compiler!(
+            "lambda_shape",
+            "extension inventory={name} receiver={receiver:?} candidates={} ranked={}",
+            fs.overloads.len(),
+            crate::symbol_resolver::ranked_extension_overloads_by_recv(&src, receiver, &fs).len(),
+        );
         for (_, binding_receiver, o) in
             crate::symbol_resolver::ranked_extension_overloads_by_recv(&src, receiver, &fs)
         {
@@ -43554,6 +43560,47 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// Whether a provider member's lambda expectations can shape the lambdas this call WRITES.
+    ///
+    /// A Java method taking a functional interface offers one arity — `Map.forEach(BiConsumer)` is
+    /// two parameters — while the Kotlin extension of the same name offers another,
+    /// `Map<out K, V>.forEach(action: (Map.Entry<K, V>) -> Unit)`, which is one. The member is
+    /// consulted first and, when it answered, the extension was never shaped at all — so
+    /// `{ entry -> … }` and `{ (key, value) -> … }` (a destructuring parameter is ONE parameter)
+    /// were shaped against two, leaving the lambda's parameter untyped and every member read on it
+    /// "unresolved reference". An expectation that cannot fit the written lambda is not an
+    /// expectation for this call, and the extension must still get its turn.
+    ///
+    /// One mismatched lambda discards the expectation for the WHOLE call rather than for its own
+    /// slot. That is deliberate and costs nothing today: a member only reaches here after surviving
+    /// applicability, where Kotlin already demands exact lambda arity, and a slot whose arity krusty
+    /// cannot determine reports `None` — which fits anything — rather than a guess. Per-slot refusal
+    /// is the natural refinement if a call ever needs it.
+    fn member_expectations_fit_written_lambdas(
+        &self,
+        args: &[ExprId],
+        expectations: &[Option<LambdaExpectation>],
+    ) -> bool {
+        args.iter()
+            .enumerate()
+            .all(|(index, &argument)| match self.file.expr(argument) {
+                Expr::Lambda { params, .. } => {
+                    match expectations.get(index).and_then(Option::as_ref) {
+                        Some(expectation) => {
+                            let offered = expectation.value_params.len();
+                            match params.is_empty() {
+                                // An implicit `it` names exactly one parameter.
+                                true => offered <= 1,
+                                false => offered == params.len(),
+                            }
+                        }
+                        None => true,
+                    }
+                }
+                _ => true,
+            })
+    }
+
     fn member_extension_lambda_param_types(
         &self,
         scope: &CheckerScope<'_>,
@@ -47483,6 +47530,9 @@ impl<'a> Checker<'a> {
                         &explicit_type_args,
                     )
                     .filter(|expectations| expectations.iter().any(Option::is_some))
+                    .filter(|expectations| {
+                        self.member_expectations_fit_written_lambdas(args, expectations)
+                    })
                 } else {
                     None
                 };

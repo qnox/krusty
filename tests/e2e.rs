@@ -834,6 +834,8 @@ mod member_extension_default_args_e2e;
 mod member_extension_function_e2e;
 #[path = "member_extension_in_lambda_e2e.rs"]
 mod member_extension_in_lambda_e2e;
+#[path = "member_extension_lambda_arity_e2e.rs"]
+mod member_extension_lambda_arity_e2e;
 #[path = "member_extension_nested_hof_e2e.rs"]
 mod member_extension_nested_hof_e2e;
 #[path = "member_extension_property_e2e.rs"]
