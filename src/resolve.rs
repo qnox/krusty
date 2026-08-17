@@ -10299,6 +10299,9 @@ fn infer_lit_ty(
         ctor_template: &|internal, arity, actuals| {
             constructor_template_of(file, class_names, src, None, internal, arity, actuals)
         },
+        call_template: &|receiver, name, args, type_args| {
+            selected_call_template(&resolver, receiver, name, args, type_args)
+        },
         value_class: &|internal| {
             src.classifier(internal)
                 .is_some_and(|classifier| classifier.value_underlying.is_some())
@@ -10454,6 +10457,12 @@ type CallSelector<'a> = &'a dyn Fn(Option<Ty>, &str, &[CallArgKind], &[Ty]) -> O
 type CtorTemplateHook<'a> =
     &'a dyn Fn(TypeName, usize, &[Option<Ty>]) -> Option<ConstructorTemplate>;
 
+/// The SYMBOLIC signature of the callable a call selects — its own type variables still unbound.
+/// The selected return type alone cannot say where a variable came from, so a variable that only a
+/// lambda's RESULT can fix (`map`'s `R` in `(T) -> R`) is otherwise never bound.
+type CallTemplateHook<'a> =
+    &'a dyn Fn(Option<Ty>, &str, &[CallArgKind], &[Ty]) -> Option<crate::libraries::GenericSig>;
+
 /// Cross-call environment for [`infer_lit_ty_p`].
 struct InferEnv<'a> {
     /// Resolve a property of a module class currently being collected, AS SEEN FROM its applied
@@ -10505,6 +10514,10 @@ struct InferEnv<'a> {
     /// classifier. Federated over every declaration origin — the file being collected, another file
     /// of the module, or a dependency — because the shape of the answer is the same for all three.
     ctor_template: CtorTemplateHook<'a>,
+    /// The selected callable's own generic signature, asked through the SAME selection funnel as
+    /// [`Self::call`]. A lambda argument is contextual: its parameter types come from the callable's
+    /// symbolic parameter, and its body's type binds the variables that appear nowhere else.
+    call_template: CallTemplateHook<'a>,
     /// Whether a classifier is a `value class`. Its JVM representation is its underlying value, so
     /// an inferred type ARGUMENT of that class is a shape the emitter does not carry through an
     /// erased constructor parameter.
@@ -11000,6 +11013,9 @@ fn infer_lit_ty_scoped(
                 arity,
                 actuals,
             )
+        },
+        call_template: &|receiver, name, args, type_args| {
+            selected_call_template(&callable_resolver, receiver, name, args, type_args)
         },
         value_class: &|internal| {
             table
@@ -11619,6 +11635,27 @@ fn infer_lit_ty_p(
                                 "member call={name} selected={:?}",
                                 selected,
                             );
+                            // A type variable the callable reaches only through a lambda's RESULT is
+                            // already erased to its bound in `selected`, so ask the callable's own
+                            // signature and bind it from the shaped lambda body.
+                            if let Some(ret) =
+                                (env.call_template)(Some(recv_ty), name, &arg_kinds, &call_targs)
+                                    .and_then(|generic| {
+                                        generic_call_ret_with_lambdas(
+                                            file,
+                                            e,
+                                            args,
+                                            &arg_tys,
+                                            &generic,
+                                            class_names,
+                                            props,
+                                            src,
+                                            env,
+                                        )
+                                    })
+                            {
+                                return ret;
+                            }
                             if let Some(ret) = selected {
                                 return ret;
                             }
@@ -18483,6 +18520,105 @@ fn template_argument_slots(
 /// that constructor: a same-arity secondary constructor (`Cell(5, "tag")` against
 /// `class Cell<T>(value: T, flag: Boolean) { constructor(n: Int, v: T) }`) would otherwise bind the
 /// class's type arguments from the wrong declaration and emit a checkcast against them.
+/// The symbolic signature of whatever callable `name(args)` selects on `receiver`.
+///
+/// Selection itself is unchanged — this asks the same funnel the return-type hook asks and reports
+/// the SIGNATURE instead of the already-substituted result. A generic callable whose type variable
+/// is reachable only through a lambda's result (`fun <T, R> Iterable<T>.map(f: (T) -> R): List<R>`)
+/// cannot be bound from the substituted return, because by then `R` is already `Any`.
+/// The return type of a generic call whose type variables a LAMBDA argument's result can fix.
+///
+/// A lambda argument is contextual: its parameter types come from the callable's own symbolic
+/// parameter, and the type of its body is what binds a variable that appears nowhere else. Reading
+/// the already-substituted return instead sees such a variable as its bound, so
+/// `listOf(dto).map { Item(it.id) }` types as `List<Any>` and every member read on an element is
+/// "unresolved reference". This is the same shaping the constructor path does, asked of the callable
+/// a call selects.
+///
+/// `None` leaves the caller's existing inference untouched — this only ever replaces a result the
+/// binding could complete.
+#[allow(clippy::too_many_arguments)]
+fn generic_call_ret_with_lambdas(
+    file: &File,
+    call: ExprId,
+    args: &[ExprId],
+    arg_tys: &[Ty],
+    generic: &crate::libraries::GenericSig,
+    class_names: &ClassNames,
+    props: &[(String, Ty, bool)],
+    src: &dyn SemanticPlatform,
+    env: &InferEnv,
+) -> Option<Ty> {
+    // Labels reorder arguments against the declaration; without the callable's parameter names this
+    // cannot map them, and a wrong map would bind the variables from the wrong arguments.
+    if file.call_arg_names.contains_key(&call.0) || generic.params.len() != args.len() {
+        return None;
+    }
+    let is_lambda = args
+        .iter()
+        .map(|&argument| matches!(file.expr(argument), Expr::Lambda { .. }))
+        .collect::<Vec<_>>();
+    if !is_lambda.contains(&true) {
+        return None;
+    }
+    // The receiver's own type arguments are already substituted into this signature, so the formals
+    // left are exactly the ones the arguments have to bind.
+    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+    let symbolic = generic
+        .params
+        .iter()
+        .map(|&parameter| Some(parameter))
+        .collect::<Vec<_>>();
+    for position in construction_argument_typing_order(&is_lambda, &symbolic) {
+        let shape = generic.params[position];
+        let actual = if is_lambda[position] {
+            let shaped = crate::types::ty_subst_keep_unbound(shape, &bindings);
+            infer_lambda_ty_with_shape(file, args[position], shaped, class_names, props, src, env)
+        } else {
+            arg_tys[position]
+        };
+        if actual != Ty::Error {
+            crate::symbol_resolver::unify_inferred_ty(shape, actual, &mut bindings);
+        }
+    }
+    // Every formal the signature declares must be bound. A partially bound return is exactly the
+    // `List<Any>` this exists to avoid, and reporting it would overwrite an inference the ordinary
+    // path may have got right.
+    crate::trace_compiler!(
+        "signature_inference",
+        "lambda-bind formals={:?} bindings={bindings:?} ret={:?}",
+        generic.formals,
+        generic.ret,
+    );
+    if generic
+        .formals
+        .iter()
+        .any(|formal| !bindings.contains_key(formal))
+    {
+        return None;
+    }
+    let ret = crate::types::ty_subst_keep_unbound(generic.ret, &bindings);
+    // The formal list says which variables SHOULD have been bound; the result says which actually
+    // were. A type variable surviving into the property's type is never a usable answer — it would
+    // become an expected type spelled as a variable no scope declares — so the result itself is the
+    // condition, not the bookkeeping that produced it.
+    (ret != Ty::Error && !crate::types::ty_mentions_any_param(ret)).then_some(ret)
+}
+
+fn selected_call_template(
+    resolver: &crate::symbol_resolver::SymbolResolver,
+    receiver: Option<Ty>,
+    name: &str,
+    args: &[CallArgKind],
+    type_args: &[Ty],
+) -> Option<crate::libraries::GenericSig> {
+    let recv = match receiver {
+        Some(ty) => crate::symbol_resolver::SymRecv::Value(ty),
+        None => crate::symbol_resolver::SymRecv::TopLevel,
+    };
+    resolver.call_template(recv, name, args, type_args)
+}
+
 fn constructor_template_of(
     file: &File,
     class_names: &ClassNames,
