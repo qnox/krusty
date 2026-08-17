@@ -24,6 +24,11 @@ pub struct Options {
     pub features: LangFeatures,
     /// Options accepted for compatibility but not acted on (reported once).
     pub ignored: Vec<String>,
+    /// Flags kotlinc itself accepts but warns about ("flag is not supported by this version of the
+    /// compiler") while compiling exactly as if the flag were absent. Unlike `ignored`, these are
+    /// part of kotlinc's accepted surface: the driver prints kotlinc's warning and compilation is
+    /// unchanged. Currently only `-Xwasm-kclass-fqn` — see the match arm for the measured contract.
+    pub unsupported_flag_warnings: Vec<String>,
     /// Invalid or explicitly requested-but-unemittable options. The driver reports these and exits
     /// before compilation rather than silently producing a different artifact.
     pub errors: Vec<String>,
@@ -63,6 +68,7 @@ impl Default for Options {
             module_name: "main".to_string(),
             features: LangFeatures::new(),
             ignored: Vec::new(),
+            unsupported_flag_warnings: Vec::new(),
             errors: Vec::new(),
             print_version: false,
             print_help: false,
@@ -270,6 +276,12 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     JvmDefaultMode::parse_legacy,
                 );
             }
+            // kotlinc 2.4.10 (JVM) ACCEPTS `-Xwasm-kclass-fqn`: it prints `warning: flag is not
+            // supported by this version of the compiler: -Xwasm-kclass-fqn` and produces
+            // byte-identical output with and without the flag (measured). Mirror that contract —
+            // accept, warn, change nothing. Deliberately scoped to this one flag; other `-Xwasm-*`
+            // flags keep falling through to `ignored` until each is measured.
+            flag @ "-Xwasm-kclass-fqn" => opts.unsupported_flag_warnings.push(flag.to_string()),
             "-version" => opts.print_version = true,
             "-help" | "-h" | "-X" => opts.print_help = true,
             flag if IGNORED_WITH_VALUE.contains(&flag) => {
@@ -598,6 +610,26 @@ mod tests {
         assert!(o.ignored.contains(&"-include-runtime".to_string()));
         assert!(o.ignored.contains(&"-language-version".to_string()));
         assert!(o.ignored.contains(&"-Xsomething".to_string()));
+    }
+
+    /// kotlinc 2.4.10 (JVM) accepts `-Xwasm-kclass-fqn` with `warning: flag is not supported by
+    /// this version of the compiler: -Xwasm-kclass-fqn` and produces byte-identical output with and
+    /// without it (measured). The flag must therefore not land in `ignored` (the worker refuses
+    /// requests with ignored options) or `errors`; it is recorded for the warning only.
+    #[test]
+    fn wasm_kclass_fqn_is_warned_not_ignored() {
+        let parsed = parse_args(&["-Xwasm-kclass-fqn", "f.kt"]);
+        assert!(
+            parsed.ignored.is_empty(),
+            "kotlinc accepts the flag, so it must not be reported unsupported: {:?}",
+            parsed.ignored
+        );
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(
+            parsed.unsupported_flag_warnings,
+            vec!["-Xwasm-kclass-fqn".to_string()]
+        );
+        assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
     }
 
     #[test]
