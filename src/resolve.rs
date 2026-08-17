@@ -53090,6 +53090,7 @@ val result = object { fun value(): String = captured }
 
     fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
         crate::libraries::LibraryType {
+            is_kotlin: true,
             access: crate::libraries::ClassifierAccess::Public,
             source_file: None,
             is_nested: false,
@@ -55788,6 +55789,7 @@ fun box(): String {
                     })
                     .collect();
                 std::sync::Arc::new(crate::libraries::LibraryType {
+                    is_kotlin: true,
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     is_nested: false,

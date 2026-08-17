@@ -201,6 +201,367 @@ fn enable_keeps_the_default_impls_compatibility_class() {
     );
 }
 
+/// `enable` is a three-part compatibility surface, all measured against kotlinc: the interface keeps
+/// its default methods and gains a `public static synthetic access$<name>$jd` bridge per
+/// non-private body; the holder's statics FORWARD to those bridges; and every implementing class
+/// gets an `ACC_BRIDGE` forwarder override per inherited default. A shape-level diff of all three
+/// classes catches a member emitted with the right name but the wrong owner, flags, or realization.
+#[test]
+fn enable_public_method_realization_matches_kotlinc() {
+    let ours = compile(JvmDefaultMode::Enable);
+    let reference = compile_reference("enable");
+    for class_name in ["I", "I$DefaultImpls", "C"] {
+        assert_eq!(
+            public_method_shape(&ours, class_name),
+            public_method_shape(&reference, class_name),
+            "{class_name} diverges under -jvm-default=enable"
+        );
+    }
+}
+
+/// The `enable` holder is a published ABI class exactly like the `disable` one: generic receiver
+/// signatures, the `@java.lang.Deprecated` marker kotlinc puts on each forward, parameter
+/// annotations, debug tables, `InnerClasses`, and the synthetic Kotlin metadata record all have to
+/// match, or a consumer compiled against kotlinc's holder reads a different ABI from krusty's.
+#[test]
+fn the_enable_holder_is_byte_identical_to_kotlinc() {
+    let ours = compile_source(JvmDefaultMode::Enable, HOLDER_BYTE_SOURCE, "Audit");
+    let reference = compile_reference_source("enable", HOLDER_BYTE_SOURCE, "Audit");
+    let ours = ours
+        .iter()
+        .find_map(|(name, bytes)| (name == "AuditI$DefaultImpls").then_some(bytes))
+        .expect("krusty AuditI$DefaultImpls.class");
+    let reference = reference
+        .iter()
+        .find_map(|(name, bytes)| (name == "AuditI$DefaultImpls").then_some(bytes))
+        .expect("kotlinc AuditI$DefaultImpls.class");
+    assert_eq!(ours, reference);
+}
+
+/// A sub-interface that declares NOTHING still republishes the compatibility surface for every
+/// default it inherits: its own `access$…$jd` bridge (an `invokespecial` through itself, resolving
+/// to the inherited default method) and its own `$DefaultImpls` holder forwarding to that bridge.
+/// Without these, a legacy consumer naming `B$DefaultImpls.f` links against a class that exists in
+/// kotlinc's output but not krusty's.
+#[test]
+fn an_empty_subinterface_republishes_the_inherited_compat_surface() {
+    const SOURCE: &str =
+        "interface A { fun f(): String = \"A.f\" }\ninterface B : A\nclass C : B\n";
+    let ours = compile_source(JvmDefaultMode::Enable, SOURCE, "Sub");
+    let reference = compile_reference_source("enable", SOURCE, "Sub");
+    assert_eq!(
+        class_names(&ours),
+        class_names(&reference),
+        "class set diverges for an empty sub-interface under -jvm-default=enable"
+    );
+    for class_name in ["B", "B$DefaultImpls", "C"] {
+        assert_eq!(
+            public_method_shape(&ours, class_name),
+            public_method_shape(&reference, class_name),
+            "{class_name} diverges for an empty sub-interface under -jvm-default=enable"
+        );
+    }
+}
+
+/// A `suspend` default member's forwarder must keep the CPS shape: kotlinc's implementing-class
+/// forwarder is `s(Continuation)Object` (`ACC_BRIDGE`), never the semantic `s()I` — a forwarder
+/// built from the declared signature names a method the interface does not have, and the class
+/// then calls a `NoSuchMethodError` into existence. Compared against kotlinc on the class only,
+/// in BOTH modes that forward (the `disable` forwarder shape was broken the same way): the
+/// interface's own `s$suspendImpl` indirection is a separate, pre-existing suspend gap.
+#[test]
+fn a_suspend_default_member_forwarder_keeps_its_cps_shape() {
+    const SOURCE: &str = "interface S1 { suspend fun s(): Int = 1 }\nclass SC : S1\n";
+    for (mode, flag) in [
+        (JvmDefaultMode::Enable, "enable"),
+        (JvmDefaultMode::Disable, "disable"),
+    ] {
+        let ours = compile_source(mode, SOURCE, "Susp");
+        let reference = compile_reference_source(flag, SOURCE, "Susp");
+        assert_eq!(
+            public_method_shape(&ours, "SC"),
+            public_method_shape(&reference, "SC"),
+            "the suspend forwarder shape diverges under -jvm-default={flag}"
+        );
+    }
+}
+
+/// An inherited default whose JVM name collides with a property ACCESSOR of the implementing
+/// class must still get its forwarder unless the accessor IS the override (same full descriptor).
+/// Suppressing by name alone broke both directions, measured on kotlinc: a `val` emits no setter,
+/// so `setX(I)V` still needs its forwarder (dropping it left the class abstract —
+/// `AbstractMethodError` under `disable`); and `getX()Ljava/lang/String;` (the accessor) legally
+/// COEXISTS with the `getX()I` forwarder, since the JVM keys methods on the full descriptor.
+#[test]
+fn a_property_accessor_name_does_not_swallow_an_inherited_default() {
+    for (name, source) in [
+        (
+            "val does not stand in for an inherited setter",
+            "interface I { fun setX(v: Int) { } }\n\
+             class C : I { val x: Int = 1 }\n\
+             fun box(): String { val c: I = C(); c.setX(5); return if (C().x == 1) \"OK\" else \"fail\" }\n",
+        ),
+        (
+            "distinct-return accessor coexists with the forwarder",
+            "interface I { fun getX(): Int = 1 }\n\
+             class C : I { val x: String = \"s\" }\n\
+             fun box(): String { val c: I = C(); return if (c.getX() == 1 && C().x == \"s\") \"OK\" else \"fail\" }\n",
+        ),
+    ] {
+        for mode in [JvmDefaultMode::Disable, JvmDefaultMode::Enable] {
+            let classes = compile_source(mode, source, "T");
+            let box_class = common::find_box_class(&classes)
+                .unwrap_or_else(|| panic!("{name} ({mode:?}): no box class emitted"));
+            let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+                .unwrap_or_else(|| panic!("{name} ({mode:?}): JVM unavailable"));
+            assert_eq!(result, "OK", "{name} under {mode:?}");
+        }
+    }
+}
+
+/// The same inheritance shapes the `disable` table runs, under `enable`: forwarder overrides,
+/// diamond selection, transitive inheritance, and interface `super` calls all change realization
+/// with the mode, and each of these failed at RUN time in some emitter state, not at compile time.
+#[test]
+fn every_inheritance_shape_runs_under_enable() {
+    for (name, source, expected) in [
+        (
+            "direct",
+            "interface I { fun f(): String = \"I.f\" }\n             class C : I\n             fun box(): String = if (C().f() == \"I.f\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+        (
+            "transitive",
+            "interface A { fun f(): String = \"A.f\" }\n             interface B : A\n             class C : B\n             fun box(): String { val c: A = C(); return if (c.f() == \"A.f\") \"OK\" else \"fail\" }\n",
+            "OK",
+        ),
+        (
+            "generic override",
+            "interface I<T> { fun f(t: T): String = \"I.f\" }\n             class C : I<String> { override fun f(t: String): String = \"C.f\" }\n             fun box(): String = if (C().f(\"x\") == \"C.f\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+        (
+            "enum",
+            "interface I { fun f(): String = \"I.f\" }\n             enum class E : I { A, B }\n             fun box(): String = if (E.A.f() == \"I.f\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+        (
+            "super call",
+            "interface I { fun f(): String = \"I.f\" }\n             class C : I { override fun f(): String = \"C+\" + super.f() }\n             fun box(): String = if (C().f() == \"C+I.f\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+        (
+            "overload, one overridden",
+            "interface I { fun f(x: String): String = \"I:$x\"\n                           fun f(x: Int): String = \"I:$x\" }\n             class C : I { override fun f(x: Int): String = \"C:$x\" }\n             fun box(): String { val c: I = C()\n               return if (c.f(\"a\") == \"I:a\" && c.f(1) == \"C:1\") \"OK\" else \"fail\" }\n",
+            "OK",
+        ),
+        (
+            "diamond, most derived wins",
+            "interface A { fun f(): String = \"A.f\" }\n             interface B : A { override fun f(): String = \"B.f\" }\n             interface D : A\n             class C : D, B\n             fun box(): String = if (C().f() == \"B.f\") \"OK\" else \"fail: \" + C().f()\n",
+            "OK",
+        ),
+        (
+            "private member",
+            "interface I { private fun h(): String = \"h\"; fun f(): String = h() + \"!\" }\n             class C : I\n             fun box(): String = if (C().f() == \"h!\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+        (
+            // A sub-interface overriding with an interface `super` call: the body compiles to a
+            // direct `invokespecial A.f` from B's default method, and the class forwards to B.
+            "sub-interface super chain",
+            "interface A { fun f(): String = \"A.f\" }\n             interface B : A { override fun f(): String = \"B+\" + super.f() }\n             class C : B\n             fun box(): String = if (C().f() == \"B+A.f\") \"OK\" else \"fail\"\n",
+            "OK",
+        ),
+    ] {
+        let classes = compile_source(JvmDefaultMode::Enable, source, "T");
+        let box_class = common::find_box_class(&classes)
+            .unwrap_or_else(|| panic!("{name}: no box class emitted"));
+        let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+            .unwrap_or_else(|| panic!("{name}: JVM unavailable for the enable behavior test"));
+        assert_eq!(result, expected, "{name}");
+    }
+}
+
+/// THE risk this mode models: krusty's `enable` metadata advertises the full compatibility
+/// realization (`jvmClassFlags` = 3), and a kotlinc-compiled downstream module in `disable` mode
+/// trusts it — measured, its class forwarders are `invokespecial` on the dependency's default
+/// methods and its omitted-default call sites `invokestatic` the dependency's interface-side
+/// `$default` stub, while the `$DefaultImpls` holder remains the linking surface for
+/// already-compiled legacy consumers. Any advertised piece missing from the jar is a
+/// `NoSuchMethodError` at RUN time in the consumer's build — this test compiles a real kotlinc
+/// consumer against the krusty jar and runs the mixed-compiler program.
+#[test]
+fn a_kotlinc_disable_consumer_links_against_the_krusty_enable_holder() {
+    let work = common::scratch_dir().expect("allocate mixed-compiler jvm-default fixture");
+    let library = work.join("library");
+    let application = work.join("application");
+    compile_module_to(
+        JvmDefaultMode::Enable,
+        r#"package dep
+            interface I {
+                val x: Int get() = 3
+                fun f(): String = "I.f"
+                fun g(value: Int = 7): String = "g$value"
+            }
+        "#,
+        "Library",
+        &library,
+        None,
+    );
+    let app_source = work.join("Application.kt");
+    std::fs::write(
+        &app_source,
+        r#"package app
+            import dep.I
+            class Inherited : I
+            fun box(): String {
+                val inherited: I = Inherited()
+                return if (inherited.x == 3 && inherited.f() == "I.f" && inherited.g() == "g7")
+                    "OK" else "fail"
+            }
+        "#,
+    )
+    .expect("write kotlinc consumer source");
+    std::fs::create_dir_all(&application).expect("create kotlinc consumer output");
+    let args = vec![
+        "-d".to_string(),
+        application.to_string_lossy().into_owned(),
+        "-nowarn".to_string(),
+        "-jvm-default=disable".to_string(),
+        "-classpath".to_string(),
+        library.to_string_lossy().into_owned(),
+        app_source.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = common::kotlinc_compile(&args).expect("reference compiler unavailable");
+    assert_eq!(code, 0, "kotlinc consumer failed: {stderr}");
+    let mut classes = Vec::new();
+    collect_classes(&library, &library, &mut classes);
+    collect_classes(&application, &application, &mut classes);
+    let box_class = common::find_box_class(&classes).expect("mixed-compiler box class");
+    let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+        .expect("JVM unavailable for the mixed-compiler jvm-default test");
+    assert_eq!(result, "OK");
+    let _ = std::fs::remove_dir_all(work);
+}
+
+/// The exact class shape a `disable` consumer emits over an `enable` dependency, measured against
+/// kotlinc on the SAME kotlinc-built dependency (so only the consumer differs): `invokespecial`
+/// forwarders on the implementing class — never `invokestatic` into the dependency's holder,
+/// which serves already-compiled legacy consumers only. The runtime test above cannot see the
+/// difference (both realizations run); this differential pins the shape.
+#[test]
+fn a_disable_consumer_class_shape_over_an_enable_dependency_matches_kotlinc() {
+    let work = common::scratch_dir().expect("allocate consumer-shape fixture");
+    let library = work.join("library");
+    std::fs::create_dir_all(&library).expect("create kotlinc dependency output");
+    let dependency_source = work.join("Library.kt");
+    std::fs::write(
+        &dependency_source,
+        r#"package dep
+            interface I {
+                val x: Int get() = 3
+                fun f(): String = "I.f"
+                fun g(value: Int = 7): String = "g$value"
+            }
+        "#,
+    )
+    .expect("write kotlinc dependency source");
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        library.to_string_lossy().into_owned(),
+        "-nowarn".to_string(),
+        "-jvm-default=enable".to_string(),
+        dependency_source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference compiler unavailable");
+    assert_eq!(code, 0, "kotlinc dependency failed: {stderr}");
+
+    const APP: &str = "package app\nimport dep.I\nclass Inherited : I\n";
+    let ours_dir = work.join("ours");
+    compile_module_to(
+        JvmDefaultMode::Disable,
+        APP,
+        "Application",
+        &ours_dir,
+        Some(&library),
+    );
+    let reference_dir = work.join("reference");
+    std::fs::create_dir_all(&reference_dir).expect("create kotlinc consumer output");
+    let reference_source = work.join("Reference.kt");
+    std::fs::write(&reference_source, APP).expect("write kotlinc consumer source");
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        "-nowarn".to_string(),
+        "-jvm-default=disable".to_string(),
+        "-classpath".to_string(),
+        library.to_string_lossy().into_owned(),
+        reference_source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference compiler unavailable");
+    assert_eq!(code, 0, "kotlinc consumer failed: {stderr}");
+
+    let mut ours = Vec::new();
+    collect_classes(&ours_dir, &ours_dir, &mut ours);
+    let mut reference = Vec::new();
+    collect_classes(&reference_dir, &reference_dir, &mut reference);
+    assert_eq!(
+        public_method_shape(&ours, "app/Inherited"),
+        public_method_shape(&reference, "app/Inherited"),
+        "the disable-consumer class shape over an enable dependency diverges from kotlinc"
+    );
+    let _ = std::fs::remove_dir_all(work);
+}
+
+/// The same consumption story inside krusty: a `disable`-mode module implementing an
+/// `enable`-compiled dependency interface forwards through the dependency's PUBLISHED realization
+/// (`invokespecial` to its default methods), not through a holder shape the consumer's own mode
+/// would have produced.
+#[test]
+fn a_krusty_disable_consumer_uses_the_enable_dependency_defaults() {
+    let work = common::scratch_dir().expect("allocate cross-module jvm-default fixture");
+    let library = work.join("library");
+    let application = work.join("application");
+    compile_module_to(
+        JvmDefaultMode::Enable,
+        r#"package dep
+            interface I {
+                val x: Int get() = 3
+                fun f(): String = "I.f"
+            }
+        "#,
+        "Library",
+        &library,
+        None,
+    );
+    compile_module_to(
+        JvmDefaultMode::Disable,
+        r#"package app
+            import dep.I
+            class Inherited : I
+            class Explicit : I {
+                override fun f(): String = "E+" + super.f()
+            }
+            fun box(): String {
+                val inherited: I = Inherited()
+                return if (inherited.x == 3 && inherited.f() == "I.f" &&
+                    Explicit().f() == "E+I.f") "OK" else "fail"
+            }
+        "#,
+        "Application",
+        &application,
+        Some(&library),
+    );
+    let mut classes = Vec::new();
+    collect_classes(&library, &library, &mut classes);
+    collect_classes(&application, &application, &mut classes);
+    let box_class = common::find_box_class(&classes).expect("cross-module box class");
+    let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+        .expect("JVM unavailable for cross-module jvm-default test");
+    assert_eq!(result, "OK");
+    let _ = std::fs::remove_dir_all(work);
+}
+
 /// The mode intellij-community builds with (`-Xjvm-default=all`). kotlinc emits NO `$DefaultImpls`
 /// at all — a build that links against these classes would resolve a holder that should not exist.
 #[test]

@@ -236,6 +236,7 @@ mod tests {
                     );
                 }
                 Some(std::sync::Arc::new(LibraryType {
+                    is_kotlin: true,
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     is_nested: false,
