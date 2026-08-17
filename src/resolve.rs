@@ -7370,6 +7370,7 @@ fn collect_signatures_with_cp_impl(
                                         name: bp.name.clone(),
                                         span: bp.span,
                                         delegate_of: Some(member_this),
+                                        backing_field: false,
                                         expression: Some(de),
                                         scope: property_scope.clone(),
                                         kind: DeferredKind::Member(type_name(&internal)),
@@ -7401,6 +7402,7 @@ fn collect_signatures_with_cp_impl(
                                             name: bp.name.clone(),
                                             span: bp.span,
                                             delegate_of: None,
+                                            backing_field: false,
                                             expression: Some(*g),
                                             scope: property_scope.clone(),
                                             kind: DeferredKind::Member(type_name(&internal)),
@@ -7430,6 +7432,7 @@ fn collect_signatures_with_cp_impl(
                                                 name: bp.name.clone(),
                                                 span: bp.span,
                                                 delegate_of: None,
+                                                backing_field: false,
                                                 expression: Some(expression),
                                                 scope: property_scope.clone(),
                                                 kind: DeferredKind::Member(type_name(&internal)),
@@ -7453,15 +7456,26 @@ fn collect_signatures_with_cp_impl(
                                 .as_ref()
                                 .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
                                 .or_else(|| {
+                                    // Inferred from the field's own initializer, which needs the
+                                    // class's context; resolved after the walk like every other
+                                    // implicitly-typed body.
                                     bp.init.map(|init| {
-                                        infer_lit_ty_scoped(
-                                            member_inference_source,
-                                            init,
-                                            &class_names,
-                                            &property_scope,
-                                            &*libraries,
-                                            &table,
-                                        )
+                                        deferred_properties.push(DeferredProperty {
+                                            key: DeclKey::member(
+                                                i as u32,
+                                                d.0,
+                                                body_property_index as u32,
+                                            ),
+                                            file_index: i as u32,
+                                            name: bp.name.clone(),
+                                            span: bp.span,
+                                            delegate_of: None,
+                                            backing_field: true,
+                                            expression: Some(init),
+                                            scope: property_scope.clone(),
+                                            kind: DeferredKind::Member(type_name(&internal)),
+                                        });
+                                        Ty::Pending
                                     })
                                 })
                                 .unwrap_or(Ty::Error)
@@ -7475,7 +7489,10 @@ fn collect_signatures_with_cp_impl(
                                 ),
                             );
                         }
-                        if let Some(field_ty) = storage_ty {
+                        // A field whose type the engine has not resolved yet cannot be compared
+                        // against the property's; the authoritative check does it once both are
+                        // known.
+                        if let Some(field_ty) = storage_ty.filter(|ty| *ty != Ty::Pending) {
                             let matcher = table.source_constructor_matcher_with(&*libraries);
                             if !crate::assignable::is_subtype(
                                 &crate::assignable::TyCtx::new(),
@@ -8636,6 +8653,7 @@ fn collect_signatures_with_cp_impl(
                                     name: p.name.clone(),
                                     span: p.span,
                                     delegate_of: Some(Ty::Null),
+                                    backing_field: false,
                                     expression: Some(de),
                                     scope: Vec::new(),
                                     kind: DeferredKind::TopLevel {
@@ -8677,6 +8695,7 @@ fn collect_signatures_with_cp_impl(
                             name: p.name.clone(),
                             span: p.span,
                             delegate_of: None,
+                            backing_field: false,
                             expression: p.init.or(match &p.getter {
                                 Some(FunBody::Expr(getter)) if is_computed => Some(*getter),
                                 // A block getter has no expression the signature pass can read; it
@@ -10400,6 +10419,10 @@ struct DeferredProperty {
     /// declaration's: the declaration's is what the delegate's `getValue` returns, resolved once
     /// the delegate itself is typed.
     delegate_of: Option<Ty>,
+    /// Set when `expression` types the property's explicit BACKING FIELD rather than the property
+    /// itself (`val items: List<String> field = mutableListOf()`). The property's own type is
+    /// declared; only the field's is inferred, and it is published into the storage slot.
+    backing_field: bool,
     /// The value scope the walk resolved this declaration in: context parameters for a top-level
     /// property, the enclosing class's members and lexical values for a member. Entries still
     /// `Ty::Error` are declarations that have not been typed YET and are re-asked through the
@@ -10786,6 +10809,9 @@ fn resolve_deferred_properties(
             DeferredKind::TopLevel { .. } => {
                 publish_top_level_property_type(files, table, entry, ty)
             }
+            DeferredKind::Member(owner) if entry.backing_field => {
+                publish_member_backing_field_type(table, *owner, &entry.name, ty);
+            }
             DeferredKind::Member(owner) => {
                 publish_member_property_type(table, *owner, &entry.name, ty);
                 if let Decl::Class(class) =
@@ -10889,6 +10915,26 @@ fn publish_member_property_type(table: &mut SymbolTable, owner: TypeName, name: 
     };
     if let Some(property) = signature.declared_props.get_mut(name) {
         property.ty = ty;
+    }
+    if let Some(backing) = signature
+        .props
+        .iter_mut()
+        .find(|(property_name, _, _)| property_name == name)
+    {
+        backing.1 = ty;
+    }
+}
+
+/// Write a resolved explicit backing-field type into its owner's signature.
+///
+/// The PROPERTY's type is declared here; only the field's is inferred, so this touches the storage
+/// slot and the backing entry, never `declared_props`.
+fn publish_member_backing_field_type(table: &mut SymbolTable, owner: TypeName, name: &str, ty: Ty) {
+    let Some(signature) = table.class_by_type_name_mut(owner) else {
+        return;
+    };
+    if let Some(property) = signature.declared_props.get_mut(name) {
+        property.storage_ty = Some(ty);
     }
     if let Some(backing) = signature
         .props
