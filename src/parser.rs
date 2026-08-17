@@ -226,7 +226,8 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                 // A class's methods live INSIDE the class decl, not in `decl_arena` — walk them too,
                 // or every member method keeps line 0 and gets no `LineNumberTable`.
                 for m in &mut c.methods {
-                    m.decl_line = body_line(&m.body, line_at(m.span.lo));
+                    m.sig_line = line_at(m.span.lo);
+                    m.decl_line = body_line(&m.body, m.sig_line);
                     m.body_close_line = body_close(&m.body);
                 }
                 for p in &mut c.props {
@@ -242,7 +243,8 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                 }
             }
             Decl::Fun(f) => {
-                f.decl_line = body_line(&f.body, line_at(f.span.lo));
+                f.sig_line = line_at(f.span.lo);
+                f.decl_line = body_line(&f.body, f.sig_line);
                 f.body_close_line = body_close(&f.body);
             }
             // A top-level property's accessors and `<clinit>` store map to its declaration line.
@@ -3054,6 +3056,7 @@ impl<'a> Parser<'a> {
                 annotations,
                 annotation_args,
                 decl_line: 0, // filled by the parser post-pass
+                sig_line: 0,
                 body_close_line: 0,
             };
         }
@@ -3128,6 +3131,7 @@ impl<'a> Parser<'a> {
             annotations,
             annotation_args,
             decl_line: 0, // filled by the parser post-pass
+            sig_line: 0,
             body_close_line: 0,
         }
     }

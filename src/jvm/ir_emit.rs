@@ -566,7 +566,8 @@ fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
 /// `Function.flags` (proto field 9) — ONE bitfield like [`class_metadata_flags`], not a per-shape
 /// constant. Decoded from kotlinc 2.4.0 (copy 198, componentN 454, hashCode/toString 65750, equals
 /// 66006): bit0 hasAnnotations | bits1-3 visibility (PUBLIC=3, PRIVATE=1) | bits4-5 modality
-/// (FINAL=0, OPEN=1, ABSTRACT=2) | bits6-7 memberKind (DECLARATION=0, SYNTHESIZED=3) | bit8 isOperator.
+/// (FINAL=0, OPEN=1, ABSTRACT=2) | bits6-7 memberKind (DECLARATION=0, SYNTHESIZED=3) | bit8
+/// isOperator | bit9 isInfix.
 /// Used for a class's REAL declared members; the data/value-class synthesized sets keep their own
 /// (already kotlinc-verified) constants.
 fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
@@ -592,7 +593,14 @@ fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
     } else {
         0
     };
-    (visibility << 1) | (modality << 4) | operator
+    // `isInfix` (bit 9) — same metadata-only channel as `isOperator`: without it a consumer
+    // rejects the `a f b` call form.
+    let infix: u64 = if ir.infix_fns.contains(&fid) {
+        1 << 9
+    } else {
+        0
+    };
+    (visibility << 1) | (modality << 4) | operator | infix
 }
 
 /// The primary constructor's parameter descriptors. Only the LEADING `ctor_param_count` fields are
@@ -8317,7 +8325,14 @@ fn emit_interface_class(
     // holder forward per non-private body.
     let enable_compat = opts.jvm_default == JvmDefaultMode::Enable;
     let mut jd_bridge_fids: Vec<u32> = Vec::new();
-    for &fid in &c.methods {
+    // kotlinc emits interface members in SOURCE order — a property's accessors sit at the
+    // property's declared position among the functions — while lowering registers declared
+    // functions before property accessors. Sort by the recorded source offset (stable, so a
+    // property's getter stays before its setter); synthesized members without one trail in
+    // registration order, kotlinc's placement for them too.
+    let mut member_fids: Vec<u32> = c.methods.clone();
+    member_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
+    for &fid in &member_fids {
         let f = &ir.functions[fid as usize];
         // A STATIC member of an interface is not a default method: a lambda synthetic
         // (`f$lambda$0`) is a private static helper that stays where it is. Moving it to the holder
@@ -11328,8 +11343,14 @@ fn emit_default_stub(
         &desc,
         &code,
     );
-    // kotlinc gives the synthetic a one-entry LineNumberTable at the function's declaration line.
-    if let Some(&line) = ir.fn_decl_lines.get(&fid) {
+    // kotlinc gives the synthetic a one-entry LineNumberTable at the function's DECLARATION line
+    // (`fn_sig_lines`) — not the body-attributed `fn_decl_lines`, which points at an expression
+    // body's own line when the signature wraps.
+    if let Some(&line) = ir
+        .fn_sig_lines
+        .get(&fid)
+        .or_else(|| ir.fn_decl_lines.get(&fid))
+    {
         e.cw.set_method_lines(&format!("{method_name}$default"), &desc, &[(0, line)]);
     }
 }
@@ -11610,8 +11631,14 @@ fn emit_facade_default_stub(
         &desc,
         &code,
     );
-    // kotlinc gives the synthetic a one-entry LineNumberTable at the function's declaration line.
-    if let Some(&line) = ir.fn_decl_lines.get(&fid) {
+    // kotlinc gives the synthetic a one-entry LineNumberTable at the function's DECLARATION line
+    // (`fn_sig_lines`) — not the body-attributed `fn_decl_lines`, which points at an expression
+    // body's own line when the signature wraps.
+    if let Some(&line) = ir
+        .fn_sig_lines
+        .get(&fid)
+        .or_else(|| ir.fn_decl_lines.get(&fid))
+    {
         e.cw.set_method_lines(&format!("{method_name}$default"), &desc, &[(0, line)]);
     }
 }
