@@ -22,15 +22,13 @@ pub(crate) mod property_flags {
     pub const IS_CONST: u64 = 1 << 11;
     pub const HAS_CONSTANT: u64 = 1 << 13;
     pub const MODALITY_ABSTRACT: u64 = 1 << 5;
+    /// Both modality bits (4-5). Shared by the property word and the accessor word, which is how an
+    /// accessor's default is derived from its property.
+    pub const MODALITY_MASK: u64 = 0b11_0000;
     /// `Property.getter_flags`/`setter_flags` for a DECLARED accessor: public (visibility 3 in bits
     /// 1-3) · final · `isNotDefault` (bit 6). The accessor flag word has its own layout — bit 0
     /// `hasAnnotations`, bits 1-3 visibility, bits 4-5 modality, bit 6 `isNotDefault`.
     pub const DECLARED_ACCESSOR: u64 = 70;
-    /// A plain `public final` accessor's own flags word (`Property.getter_flags`/`setter_flags`).
-    /// kotlinc emits an accessor's word only when it differs from the default it derives FROM THE
-    /// PROPERTY — whose `hasAnnotations` bit rides along — so an annotated property with plain
-    /// accessors writes this value explicitly.
-    pub const DEFAULT_ACCESSOR: u64 = 6;
 }
 
 /// The `Type` a `vararg` parameter RECORDS: `Array<out E>`, not the invariant `Array<E>` the

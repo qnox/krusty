@@ -2003,7 +2003,7 @@ fn lower_file_at_reporting_impl(
                 // kotlinc emits NO accessor for a `private` property (in-class reads go straight to the
                 // field); synthesizing one is an extra public member → an ABI divergence. A reader in
                 // another class — the companion, a nested class, an inlined body — goes through the
-                // synthetic `access$…$p` bridge instead (`mark_private_access_bridge_if_outside`).
+                // synthetic `access$…$p` bridge instead (`note_property_declaration`).
                 // A value class keeps its getter: its unboxed-support synthesis expects one.
                 for (pi, (pname, is_var, visibility, property_ty, source_order, decl_line)) in
                     field_props.iter().enumerate()
@@ -16780,7 +16780,7 @@ impl<'a> Lower<'a> {
         interface: bool,
         field: Option<Box<crate::libraries::InstanceFieldRef>>,
     ) -> u32 {
-        self.mark_private_access_bridge_if_outside(owner, name);
+        self.note_property_declaration(owner, name);
         let read = self.ir.add_expr(IrExpr::PropertyRead {
             receiver,
             owner,
@@ -16794,20 +16794,54 @@ impl<'a> Lower<'a> {
         read
     }
 
-    /// A PRIVATE property NAMED from outside its declaring class has no accessor to call: kotlinc emits
-    /// none for a private property, and the backing field is unreachable from another class file — even
-    /// a lexically enclosed one, since the companion, a nested class and an inlined body are all separate
-    /// classes on the JVM. Such a use is reached through the synthetic `access$…$p` bridge instead.
+    /// The two realization facts every property read and write must settle before the node exists,
+    /// from ONE walk of the declaration hierarchy:
+    ///
+    /// * a PRIVATE property NAMED from outside its declaring class has no accessor to call — kotlinc
+    ///   emits none for a private property, and the backing field is unreachable from another class
+    ///   file, even a lexically enclosed one, since the companion, a nested class and an inlined body
+    ///   are all separate classes on the JVM. Such a use is reached through the synthetic `access$…$p`
+    ///   bridge instead;
+    /// * a `@JvmField` property of a class this file only SEES has no accessor either, and unlike the
+    ///   private case there is nothing to bridge: the backend must load the field. The backend cannot
+    ///   discover that on its own — a sibling-file class is neither in this IR nor in the classpath it
+    ///   reads — so the declaration fact is recorded here for it.
     ///
     /// This sits at the one place every property read and write is CONSTRUCTED, so no naming path can
-    /// forget it. It previously lived on two of the callers, and the `StmtLowering::MemberPropertyWrite`
-    /// path — which preempts them — emitted a call to a `setX` that is never generated
-    /// (`NoSuchMethodError`; box `classes/kt504.kt`, a companion writing its outer class's private `var`).
-    fn mark_private_access_bridge_if_outside(&mut self, owner: TypeName, name: &str) {
-        if let Some((declaring, _, true)) = self.declared_property(owner, name) {
-            if !self.can_access_source_private(declaring) {
-                self.mark_property_access_bridge(declaring, name);
-            }
+    /// forget either. The bridge half previously lived on two of the callers, and the
+    /// `StmtLowering::MemberPropertyWrite` path — which preempts them — emitted a call to a `setX`
+    /// that is never generated (`NoSuchMethodError`; box `classes/kt504.kt`, a companion writing its
+    /// outer class's private `var`).
+    ///
+    /// [`FrontendSymbols::declared_member_prop`] is an uncached hierarchy search, so the two facts
+    /// deliberately share one lookup rather than taking one each.
+    fn note_property_declaration(&mut self, owner: TypeName, name: &str) {
+        let Some((declaring, property)) = self.syms.declared_member_prop(owner, name) else {
+            return;
+        };
+        // `const val` is a static field with no instance accessor, and neither fact describes one —
+        // the same declaration-shape decision [`Self::declared_property`] makes for its callers.
+        if property.is_const {
+            return;
+        }
+        let is_private = property.visibility.is_private();
+        // An OBJECT's (or companion's) `@JvmField` is a STATIC realization krusty plans elsewhere —
+        // see the matching exclusion in `jvm::ir_emit::is_jvm_field`. Recording an instance field for
+        // one would contradict that plan.
+        let module_jvm_field = property.is_jvm_field
+            && !self
+                .syms
+                .class_by_type_name(declaring)
+                .is_none_or(|class| class.is_object())
+            && self.class_info_name(owner).is_none();
+        let field_ty = property.storage_ty.unwrap_or(property.ty);
+        if is_private && !self.can_access_source_private(declaring) {
+            self.mark_property_access_bridge(declaring, name);
+        }
+        if module_jvm_field {
+            self.ir
+                .module_jvm_field_properties
+                .insert((owner, name.to_string()), (declaring, field_ty));
         }
     }
 
@@ -16822,7 +16856,7 @@ impl<'a> Lower<'a> {
         ty: Ty,
         interface: bool,
     ) -> u32 {
-        self.mark_private_access_bridge_if_outside(owner, name);
+        self.note_property_declaration(owner, name);
         let write = self.ir.add_expr(IrExpr::PropertyWrite {
             receiver,
             owner,

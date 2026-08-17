@@ -1640,6 +1640,13 @@ pub struct IrFile {
     /// carrying an `@Metadata` record is decided by its own emit, so a record here cannot assume it does —
     /// unlike a CLASSPATH value class, whose value-class-ness is itself decoded from that record.
     pub module_source_value_classes: std::collections::HashSet<TypeName>,
+    /// `@JvmField` properties of classes this file only SEES (a sibling source file's), keyed by the
+    /// owner named at the use site → `(declaring owner, declared type)`. Such a property has no
+    /// accessor at all, so a backend that fell through to the `get<Name>()` naming convention would
+    /// emit a call to a method the declaration forbids (`NoSuchMethodError`). A class of THIS file
+    /// carries the same fact on its own `IrClass::field_annotations` and needs no entry.
+    pub module_jvm_field_properties:
+        std::collections::HashMap<(TypeName, String), (TypeName, crate::types::Ty)>,
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     synthetic_classes: std::collections::HashSet<TypeName>,
