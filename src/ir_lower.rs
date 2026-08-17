@@ -11805,28 +11805,64 @@ impl<'a> Lower<'a> {
             // enumerated here, so its forwarders would be missing — bail (skip the file) rather than
             // emit a class with un-forwarded abstract methods (an `AbstractMethodError` at runtime).
             let cs = self.syms.class_by_type_name(cur)?;
-            for (n, sigs) in &cs.methods {
-                for s in sigs {
-                    if !methods
-                        .iter()
-                        .any(|(on, op, _, _)| on == n && *op == s.params)
-                    {
-                        methods.push((n.clone(), s.params.clone(), s.ret, s.is_suspend()));
-                    }
+            // `ClassSig` keys members by source name in a hash map, so walking it directly makes the
+            // forwarder emission order — and with it constant-pool intern order and the emitted bytes —
+            // depend on the process's hash seed. Order each interface's contribution by the declaration
+            // coordinate its signature carries, which is also kotlinc's: it emits one forwarder per
+            // delegated member in the interface's declaration order.
+            let mut declared_methods: Vec<(DeclarationOrder, String, Vec<Ty>, Ty, bool)> = cs
+                .methods
+                .iter()
+                .flat_map(|(n, sigs)| {
+                    sigs.iter().map(move |s| {
+                        (
+                            declaration_order(s.source_member),
+                            n.clone(),
+                            s.params.clone(),
+                            s.ret,
+                            s.is_suspend(),
+                        )
+                    })
+                })
+                .collect();
+            declared_methods.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+            for (_, name, params, ret, suspend) in declared_methods {
+                if !methods
+                    .iter()
+                    .any(|(on, op, _, _)| on == &name && *op == params)
+                {
+                    methods.push((name, params, ret, suspend));
                 }
             }
-            for (name, property) in &cs.declared_props {
-                if !properties
-                    .iter()
-                    .any(|(_, inherited_name, _, _, _)| inherited_name == name)
-                {
-                    properties.push((
+            let mut declared_properties: Vec<(
+                DeclarationOrder,
+                TypeName,
+                String,
+                String,
+                Option<String>,
+                Ty,
+            )> = cs
+                .declared_props
+                .iter()
+                .map(|(name, property)| {
+                    (
+                        declaration_order(property.source_member),
                         cur,
                         name.clone(),
                         property.getter_name.clone(),
                         property.setter_name.clone(),
                         property.ty,
-                    ));
+                    )
+                })
+                .collect();
+            // By declaration coordinate, then source name (the tuple's fields 0 and 2).
+            declared_properties.sort_by(|a, b| (a.0, &a.2).cmp(&(b.0, &b.2)));
+            for (_, owner, name, getter_name, setter_name, property_ty) in declared_properties {
+                if !properties
+                    .iter()
+                    .any(|(_, inherited_name, _, _, _)| inherited_name == &name)
+                {
+                    properties.push((owner, name, getter_name, setter_name, property_ty));
                 }
             }
             // Super-interfaces (and any base) are stored by internal name; the module table is keyed by
@@ -28386,6 +28422,35 @@ fn collect_call_sites(
             false
         },
     );
+}
+
+/// Where a member sits in its declaring source file: `(file, owner, member index)`. Members with no
+/// AST coordinate (classpath or compiler-synthesized) share the maximum, sorting last.
+type DeclarationOrder = (u32, u32, u32);
+
+/// The declaration coordinate of a semantic member, for orders that must not depend on the hash
+/// seed of the symbol table the member was read out of.
+fn declaration_order(source_member: Option<crate::libraries::SourceMember>) -> DeclarationOrder {
+    use crate::libraries::SourceMember;
+    match source_member {
+        Some(SourceMember::Class {
+            file,
+            owner,
+            method,
+        }) => (file, owner, method),
+        Some(SourceMember::EnumEntry {
+            file,
+            owner,
+            method,
+            ..
+        }) => (file, owner, method),
+        Some(SourceMember::ClassProperty {
+            file,
+            owner,
+            property,
+        }) => (file, owner, property),
+        None => (u32::MAX, u32::MAX, u32::MAX),
+    }
 }
 
 fn class_internal(file: &ast::File, name: &str) -> String {

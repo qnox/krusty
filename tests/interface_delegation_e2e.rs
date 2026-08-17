@@ -109,6 +109,78 @@ fun box(): String {\n\
     );
 }
 
+/// Source for the forwarder-ORDER tests below: a delegated interface with more than one method, so a
+/// hash-ordered walk of the interface's member table can observe more than one emission order.
+const MULTI_MEMBER_SRC: &str = "interface Base {\n\
+    fun foo(): String\n\
+    fun bar(): String\n\
+}\n\
+class Impl : Base {\n\
+    override fun foo() = \"O\"\n\
+    override fun bar() = \"K\"\n\
+}\n\
+class DelegatedImpl(val d: Base) : Base by d\n\
+fun box(): String {\n\
+    val x = DelegatedImpl(Impl())\n\
+    return x.foo() + x.bar()\n\
+}\n";
+
+/// The names of `DelegatedImpl`'s forwarders, in emission order, from one compile of
+/// [`MULTI_MEMBER_SRC`].
+fn forwarder_order() -> (Vec<String>, Vec<u8>) {
+    let classes = common::expect_classes_with_stdlib(MULTI_MEMBER_SRC, "DelegOrder");
+    let (_, bytes) = classes
+        .iter()
+        .find(|(n, _)| n.ends_with("DelegatedImpl"))
+        .expect("DelegatedImpl emitted");
+    let info = krusty::jvm::classreader::parse_class(bytes).expect("DelegatedImpl parses");
+    let order = info
+        .methods
+        .iter()
+        .filter(|m| m.name == "foo" || m.name == "bar")
+        .map(|m| m.name.clone())
+        .collect();
+    (order, bytes.clone())
+}
+
+/// Delegation forwarders are emitted in the delegated interface's DECLARATION order — kotlinc's order,
+/// and the only one that is stable across processes. Reading the interface's members out of a hash map
+/// made the order (and with it constant-pool intern order and the emitted bytes) depend on the hash
+/// seed.
+#[test]
+fn forwarders_follow_interface_declaration_order() {
+    assert_eq!(
+        forwarder_order().0,
+        vec!["foo".to_string(), "bar".to_string()]
+    );
+}
+
+/// Repeated compiles of the same source emit byte-identical classes. Each compile builds fresh symbol
+/// tables, so a hash-ordered member walk shows up here as differing bytes within a single process.
+#[test]
+fn forwarder_emission_is_byte_deterministic() {
+    let (first_order, first_bytes) = forwarder_order();
+    for i in 1..16 {
+        let (order, bytes) = forwarder_order();
+        assert_eq!(order, first_order, "forwarder order differs on compile {i}");
+        // A pure intern-order flip leaves the class the same SIZE, so name the first differing
+        // offset — the lengths alone would carry no signal in exactly the case this test catches.
+        if bytes != first_bytes {
+            let at = bytes
+                .iter()
+                .zip(&first_bytes)
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| first_bytes.len().min(bytes.len()));
+            panic!(
+                "DelegatedImpl bytes differ on compile {i}: first difference at offset {at} \
+                 ({} vs {} bytes total)",
+                bytes.len(),
+                first_bytes.len()
+            );
+        }
+    }
+}
+
 /// A `val`-param delegate to a PRIMITIVE-instantiated generic interface (`A<Long> by a`) forwards
 /// through its own typed field and is handled correctly. (A non-`val`-param primitive instantiation is
 /// skipped — the erased forwarder mis-boxes an `int` literal as `Integer` for a `Long` parameter.)
