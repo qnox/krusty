@@ -1118,6 +1118,14 @@ pub struct DeclaredPropertySig {
     /// beside `is_const` for the same reason: a consumer that sees only this signature must not take
     /// the conventional `getter_name`/`setter_name` spellings for methods that exist.
     pub is_jvm_field: bool,
+    /// A `@JvmField` COMPANION property in a realizable shape (plain stored `public`/`internal`
+    /// property with an initializer — no custom accessor, delegate, `lateinit`, `const`, `open`, or
+    /// `abstract`). Distinct from [`Self::is_jvm_field`], which records only that the ANNOTATION is
+    /// applied: eligibility to hoist is a second fact, decided where the whole declaration is
+    /// visible, and a consumer must not re-derive it from partial signature fields. The JVM
+    /// realization of an eligible property is a PUBLIC static field on the companion's OWNER class
+    /// with NO accessors, so the conventional `getter_name` spelling names nothing.
+    pub hoists_to_owner_field: bool,
     pub getter_name: String,
     pub setter_name: Option<String>,
     /// Visibility of the setter declaration. `None` means `val`; a `var` normally inherits the
@@ -1138,12 +1146,6 @@ pub struct DeclaredPropertySig {
     pub is_open: bool,
     pub context_params: Vec<Ty>,
     pub source_member: Option<crate::libraries::SourceMember>,
-    /// A `@JvmField` property in a REALIZABLE shape (plain stored `public`/`internal` property with
-    /// an initializer — no custom accessor, delegate, `lateinit`, `const`, `open`, or `abstract`).
-    /// Like [`Self::is_const`], this is an ABI fact of the declaration: the JVM realization is a
-    /// PUBLIC static field on the companion's OWNER class with NO accessors, so a consumer must
-    /// never call the conventional `getter_name` spelling.
-    pub is_jvm_field: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -7029,7 +7031,7 @@ fn collect_signatures_with_cp_impl(
                                     ),
                                     // Instance `@JvmField` (a constructor property) has no
                                     // realized public-field ABI in this backend yet.
-                                    is_jvm_field: false,
+                                    hoists_to_owner_field: false,
                                 },
                             )
                         })
@@ -7598,7 +7600,7 @@ fn collect_signatures_with_cp_impl(
                                 // The full realizable shape is decided HERE, where the whole
                                 // declaration is visible — consumers read one ABI fact, never
                                 // re-derive eligibility from partial signature fields.
-                                is_jvm_field: matches!(
+                                hoists_to_owner_field: matches!(
                                     bp.visibility,
                                     Visibility::Public | Visibility::Internal
                                 ) && bp.init.is_some()
@@ -16236,7 +16238,7 @@ fn install_anonymous_object_captures(
                     is_open: false,
                     context_params: Vec::new(),
                     source_member: None,
-                    is_jvm_field: false,
+                    hoists_to_owner_field: false,
                 },
             );
             class.ctor_params.push(capture.ty);
@@ -44643,7 +44645,7 @@ impl<'a> Checker<'a> {
     fn jvm_field_companion_static(&self, owner: TypeName, name: &str) -> Option<TypeName> {
         let companion = self.syms.class_by_type_name(owner)?;
         let sig = companion.declared_props.get(name)?;
-        if !sig.is_jvm_field {
+        if !sig.hoists_to_owner_field {
             return None;
         }
         // A VALUE-CLASS-typed property never hoists (the JVM pass declines it — the backing field
@@ -44669,7 +44671,7 @@ impl<'a> Checker<'a> {
             .find(|class| class.companion_internal == Some(owner))?;
         if outer.is_interface() {
             let uniform = companion.declared_props.values().all(|sig| {
-                sig.is_jvm_field
+                sig.hoists_to_owner_field
                     && sig.setter_name.is_none()
                     && sig.visibility == Visibility::Public
             });
