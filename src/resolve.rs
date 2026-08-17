@@ -6277,9 +6277,14 @@ fn collect_signatures_with_cp_impl(
                                         .iter()
                                         .position(|p| &p.name == n)
                                         .map(|parameter| params[parameter])
-                                        .unwrap_or(Ty::Unit)
+                                        .unwrap_or(Ty::Pending)
                                 } else {
-                                    Ty::Unit
+                                    // NOT determined. Publishing `Unit` here is a wrong type, not a
+                                    // missing one: every property initialized by a call to this
+                                    // function then takes `Unit` as the answer and reports an
+                                    // "initializer type mismatch: expected 'Unit'" that names the
+                                    // wrong declaration entirely.
+                                    Ty::Pending
                                 }
                             } else {
                                 Ty::Unit
@@ -8767,6 +8772,11 @@ fn collect_signatures_with_cp_impl(
     // every deferred declaration declines.
     table.libraries = libraries;
     resolve_deferred_properties(files, &mut table, &deferred_properties, diags);
+    // Anything still undetermined after resolution keeps the placeholder the walk used before:
+    // `Unit` for a function return nothing asked for. The marker exists so that PROPERTY resolution
+    // cannot consume a wrong `Unit` as an answer; past that point the ordinary return pre-inference
+    // fills these in, and a marker must never reach emission or `@Metadata`.
+    settle_undetermined_returns(&mut table);
 
     table.conflicting_top_level_keys = report_conflicting_top_level_overloads(
         files,
@@ -10526,6 +10536,9 @@ struct DeferredInferenceDriver<'a> {
     /// The same index for class members, keyed by the owner's semantic identity so that two classes
     /// sharing a simple name in different packages cannot answer for each other.
     by_member: &'a HashMap<(TypeName, String), DeclKey>,
+    /// Top-level functions whose return is not determined, by source spelling. A call to one of
+    /// them cannot be answered from the table, so the function is resolved on demand.
+    functions: &'a HashMap<String, (u32, DeclId)>,
     source_order: &'a SourceOrderIndex,
 }
 
@@ -10640,7 +10653,44 @@ impl DeferredInferenceDriver<'_> {
         if !self.readable_from(from, name) {
             return None;
         }
-        self.resolve(*self.by_name.get(name)?).ty()
+        self.by_name
+            .get(name)
+            .and_then(|key| self.resolve(*key).ty())
+            .or_else(|| self.demand_function(name))
+    }
+
+    /// The return of a top-level function whose own body has not been typed yet.
+    ///
+    /// A property initialized by a call to such a function cannot be answered from the table: the
+    /// walk records the return as undetermined, so the function is resolved on demand exactly as a
+    /// property is, and memoised the same way.
+    fn demand_function(&self, name: &str) -> Option<Ty> {
+        let (file_index, declaration) = *self.functions.get(name)?;
+        self.engine
+            .resolve(DeclKey::declaration(file_index, declaration.0), || {
+                infer_function_return_ty(
+                    &self.files[file_index as usize],
+                    file_index,
+                    declaration,
+                    self.table,
+                    EngineSeams {
+                        demand: &|name: &str| self.demand_name_only(name),
+                        demand_member: &|receiver: Ty, name: &str| {
+                            self.demand_on_receiver(receiver, name)
+                        },
+                        rejects: &|_| false,
+                    },
+                )
+            })
+            .ty()
+    }
+
+    /// A module declaration by spelling, without a requesting declaration's ordering rules.
+    fn demand_name_only(&self, name: &str) -> Option<Ty> {
+        self.by_name
+            .get(name)
+            .and_then(|key| self.resolve(*key).ty())
+            .or_else(|| self.demand_function(name))
     }
 
     /// The type of the member `owner` sees under `name`, resolving that declaration first if needed.
@@ -10789,6 +10839,31 @@ fn resolve_deferred_properties(
     for key in &ambiguous_members {
         by_member.remove(key);
     }
+    // Functions whose expression body the walk could not type. Their return reads as undetermined,
+    // and a property initialized by a call to one needs it resolved first.
+    let mut undetermined_functions: HashMap<String, (u32, DeclId)> = HashMap::new();
+    let mut ambiguous_functions: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for (file_index, file) in files.iter().enumerate() {
+        for &declaration in &file.decls {
+            let Decl::Fun(function) = file.decl(declaration) else {
+                continue;
+            };
+            if !function_needs_return_preinfer(function) || function.receiver.is_some() {
+                continue;
+            }
+            if undetermined_functions
+                .insert(function.name.clone(), (file_index as u32, declaration))
+                .is_some()
+            {
+                ambiguous_functions.insert(function.name.clone());
+            }
+        }
+    }
+    // An overloaded spelling cannot be answered by name alone.
+    for name in &ambiguous_functions {
+        undetermined_functions.remove(name);
+    }
     let engine = TypeEngine::new();
     let source_order = SourceOrderIndex::of(files);
     let resolutions = {
@@ -10799,6 +10874,7 @@ fn resolve_deferred_properties(
             deferred: &by_key,
             by_name: &by_name,
             by_member: &by_member,
+            functions: &undetermined_functions,
             source_order: &source_order,
         };
         deferred
@@ -11257,6 +11333,77 @@ struct EngineSeams<'a> {
     demand_member: &'a dyn Fn(Ty, &str) -> Option<Ty>,
     /// A name this declaration may not read at all, by initialization order.
     rejects: &'a dyn Fn(&str) -> bool,
+}
+
+/// Replace any function return still undetermined after resolution with the placeholder the walk
+/// used to publish directly.
+fn settle_undetermined_returns(table: &mut SymbolTable) {
+    for signatures in table.funs.values_mut() {
+        for signature in signatures.iter_mut() {
+            if signature.ret == Ty::Pending {
+                signature.set_inferred_return(Ty::Unit);
+            }
+        }
+    }
+    for overloads in table.ext_funs.values_mut() {
+        for receivers in overloads.values_mut() {
+            for signature in receivers.iter_mut() {
+                if signature.ret == Ty::Pending {
+                    signature.set_inferred_return(Ty::Unit);
+                }
+            }
+        }
+    }
+}
+
+/// Type ONE top-level function's expression body, to answer a call whose return is not determined.
+///
+/// The declaration is run the same way its own inference would run it, so the answer is the one the
+/// function itself yields rather than a guess made at the call site.
+fn infer_function_return_ty(
+    file: &File,
+    file_index: u32,
+    declaration: DeclId,
+    table: &SymbolTable,
+    engine: EngineSeams<'_>,
+) -> Option<Ty> {
+    let Decl::Fun(function) = file.decl(declaration) else {
+        return None;
+    };
+    if !function_needs_return_preinfer(function) {
+        return None;
+    }
+    let mut scratch = DiagSink::new();
+    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
+    checker.demand_name = Some(engine.demand);
+    checker.demand_member = Some(engine.demand_member);
+    checker.inference_only = true;
+    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
+    checker.set_anonymous_lexical_class_context(declaration);
+    let root = CheckerScope::root();
+    let resolve = class_internal_resolver(checker.syms);
+    let declaration_scope = root.child(ScopeKind::Function { receiver: None });
+    let scope = &declaration_scope;
+    scope.declare_tparams(
+        &function.type_params,
+        &TParams::symbolic_from_decl_with(
+            &function.type_params,
+            &function.type_param_bounds,
+            &resolve,
+        ),
+        |name| function.reified_type_params.contains(name),
+    );
+    let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
+    checker.check_fun(scope, function, Some(declaration));
+    checker.symbolic_signature_inference = outer;
+    if checker.inference_incomplete {
+        return None;
+    }
+    let rets = std::mem::take(&mut checker.inferred_fun_rets);
+    drop(checker);
+    rets.get(&(file_index, declaration.0))
+        .copied()
+        .filter(|ty| *ty != Ty::Error && *ty != Ty::Pending)
 }
 
 /// Type ONE class-body declaration in its class's checking context.
@@ -35069,7 +35216,19 @@ impl<'a> Checker<'a> {
                 return self.expr_inner_member(scope, e, receiver, name)
             }
             Expr::Call { callee, args } => {
-                self.check_call(scope, e, callee, &args, self.span(e), expected)
+                let called = self.check_call(scope, e, callee, &args, self.span(e), expected);
+                // The callee's own return may not be determined yet — its body is an expression the
+                // walk could not type. Ask for that declaration rather than taking the marker as
+                // the call's type, which would publish it into whatever this call initializes.
+                if called == Ty::Pending {
+                    if let Expr::Name(name) = self.file.expr(callee) {
+                        let name = name.clone();
+                        if let Some(ty) = self.demand_name.and_then(|demand| demand(&name)) {
+                            return self.set(e, ty);
+                        }
+                    }
+                }
+                called
             }
             Expr::If {
                 cond,
