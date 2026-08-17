@@ -218,8 +218,8 @@ table (`kotlin/Int` -> `I`, `kotlin/collections/List` -> `Ljava/util/List;`, `ko
 (`Array<String>` -> `[Ljava/lang/String;`), which a name-keyed table cannot express.
 
 So an `Array` in ANY signature position — value parameter, extension receiver, or return — forces
-`desc`. Measured against kotlinc 2.4.10 (`fun` in a file facade; class members and constructors
-behave the same):
+`desc`. Measured against kotlinc 2.4.10 (`fun` in a file facade; the same rows measured again as
+class members behave identically):
 
 | declaration | `desc` recorded |
 | --- | --- |
@@ -235,7 +235,26 @@ behave the same):
 The rule is the ARRAY, not the `vararg`: a `vararg` of a reference element needs `desc` only because
 it is recorded as an `Array`. `metadata::descriptor_needs_recording` is the single predicate; the
 suspend CPS shape and a signature mentioning a type parameter force `desc` for their own reasons.
-Covered by `tests/metadata_array_signature_e2e.rs` (byte-identity vs kotlinc).
+
+A PROPERTY's backing field obeys the same rule through `JvmPropertySignature.field`: `val xs:
+Array<String>` records `JvmFieldSignature.desc = [Ljava/lang/String;` (no name — that stays
+derivable), while `val ns: IntArray` records an empty `field` entry like any derivable property. It
+joins the boxed-nullable-primitive and bare-type-parameter arms that record a field descriptor for
+the same "the reader cannot derive this" reason — but unlike those, it is taken from the FIELD
+rather than off the getter's return type, because a `private val` has no getter and kotlinc records
+its descriptor all the same.
+
+The property rule reaches every writer a backing field can travel through, each of which finds the
+field somewhere different: an instance property reads `backing`; a HOISTED companion property has no
+field on its own class (it lives on the outer one) and reads `hoisted_static_for`; a top-level
+property is written by the facade builder from the declared type. kotlinc interns the getter/setter
+strings BEFORE the field descriptor even though the proto writes `field` (f1) first, so the accessor
+messages must be BUILT first and assembled afterwards — the byte-identity rows catch the order.
+
+The facade writer (`metadata/builder.rs`) and the class writer (`metadata/class_builder.rs`) encode
+value parameters through separate code, so both suites carry the rows: the facade path in
+`tests/metadata_array_signature_e2e.rs`, the class-member/constructor/property path in
+`tests/metadata_class_array_signature_e2e.rs` (both byte-identity vs kotlinc).
 
 ### A `vararg` records `Array<out E>`
 
@@ -244,6 +263,21 @@ checker carries — the array's `Argument.projection` is `1` (OUT). The element 
 UNPROJECTED as `ValueParameter.vararg_element_type` (f4). `metadata::vararg_recorded_type` applies
 the projection at the encode seam only, so nothing upstream of metadata sees a type source never
 wrote. A primitive specialized array has no type argument and is recorded unchanged.
+
+A `vararg val xs: E` primary-constructor parameter carries the projection onto the PROPERTY it
+declares: `Property.return_type` is `Array<out E>` as well, because the property IS the parameter.
+The backing field keeps the invariant type — only the recorded type is projected.
+
+### A synthesized default is not a `DECLARES_DEFAULT_VALUE`
+
+krusty synthesizes an empty-array default for a member's trailing `vararg` so an ADAPTED callable
+reference (`C::mv` used as `(Int) -> Unit`) can mask the parameter through the `$default` stub. That
+is an emit-side convenience, not something source wrote, so `ValueParameter.flags` must NOT gain
+DECLARES_DEFAULT_VALUE for it — kotlinc emits no flags field at all there, and advertising one tells
+a cross-module caller it may omit an argument that is in fact required. `IrFile::synthetic_vararg_
+defaults` records which slots are synthetic so the metadata writer subtracts them again. A vararg
+that DECLARES a default (Kotlin permits `vararg xs: String = arrayOf("a")`) keeps both its default
+and the flag.
 
 ## Class supertypes: only what source declared
 

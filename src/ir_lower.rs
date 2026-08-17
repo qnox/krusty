@@ -1468,8 +1468,13 @@ fn lower_file_at_reporting_impl(
                 // used as `(Int) -> Unit`): synthesize an empty-array default for it so the `$default`
                 // stub fills `new T[0]` when the vararg is masked. Merge with any existing defaults.
                 // Normal calls pass every argument (no mask), so this only affects the adapted-reference
-                // path — additive, like kotlinc.
-                if !c.is_interface() && m.params.last().is_some_and(|p| p.is_vararg) {
+                // path — additive, like kotlinc. A vararg that DECLARED its own default keeps it (the
+                // empty array would silently replace what source wrote).
+                if !c.is_interface()
+                    && m.params
+                        .last()
+                        .is_some_and(|p| p.is_vararg && p.default.is_none())
+                {
                     let receiver_offset = usize::from(extension_receiver.is_some());
                     let vi = receiver_offset + m.params.len() - 1;
                     let arr_ty = ty_to_ir(logical_params[m.params.len() - 1]);
@@ -1491,6 +1496,8 @@ fn lower_file_at_reporting_impl(
                         info.names = names;
                         info.defaults = Some(defs);
                         lo.ir.fn_params.insert(fid, info);
+                        // Not a default SOURCE declared — `@Metadata` must not advertise one.
+                        lo.ir.synthetic_vararg_defaults.insert(fid);
                     }
                 }
                 // A method declared without `override` is a FRESH declaration; see

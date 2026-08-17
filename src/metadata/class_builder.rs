@@ -254,9 +254,16 @@ fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &Type
             vp.field_varint(1, DECLARES_DEFAULT_VALUE);
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
+                                                    // A `vararg` RECORDS `Array<out E>` — the covariance a vararg accepts, which source never
+                                                    // wrote. See `metadata::vararg_recorded_type`.
+        let declared_ty = if shape.vararg_index == Some(i) {
+            crate::metadata::vararg_recorded_type(*pty)
+        } else {
+            *pty
+        };
         let ty = type_pb_tp(
             st,
-            *pty,
+            declared_ty,
             shape.param_tparams.get(i).copied().flatten(),
             shape
                 .param_spellings
@@ -741,16 +748,20 @@ pub fn build_class(
                 vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
             }
             vp.field_varint(2, st.local(pname) as u64);
-            // A `vararg` parameter is SPELLED as its element but RECORDED as the array; see the
-            // package-function writer for why the spelling is lifted rather than applied.
-            let declared_spelling = if m.vararg_index == Some(i) {
-                m.spellings.param(i).as_array_element()
+            // A `vararg` parameter is SPELLED as its element but RECORDED as `Array<out E>`; see the
+            // package-function writer for why the spelling is lifted rather than applied, and
+            // `metadata::vararg_recorded_type` for the projection source never wrote.
+            let (declared_ty, declared_spelling) = if m.vararg_index == Some(i) {
+                (
+                    crate::metadata::vararg_recorded_type(*pty),
+                    m.spellings.param(i).as_array_element(),
+                )
             } else {
-                m.spellings.param(i).clone()
+                (*pty, m.spellings.param(i).clone())
             };
             let ty = crate::metadata::type_encoder::encode_declared_type(
                 st,
-                *pty,
+                declared_ty,
                 &declared_spelling,
                 &function_type_parameters,
             )

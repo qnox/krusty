@@ -1662,6 +1662,11 @@ pub struct IrFile {
     /// `@Metadata` must emit `ValueParameter.vararg_element_type` (f4) or a consumer demands one
     /// literal array (`too many arguments`).
     pub fn_vararg_index: std::collections::HashMap<u32, usize>,
+    /// Member functions whose TRAILING `vararg`'s entry in `param_defaults` was SYNTHESIZED (an
+    /// empty array, so an adapted callable reference can mask the parameter) rather than declared.
+    /// `@Metadata` records `DECLARES_DEFAULT_VALUE` only for a default SOURCE wrote — a caller of
+    /// this member may not omit the vararg — so the metadata writer subtracts these slots again.
+    pub synthetic_vararg_defaults: std::collections::HashSet<u32>,
     /// Synthesized classes (function-reference/suspend-conversion adapters) that must be PUBLIC:
     /// they are referenced from a PUBLIC INLINE function's body, whose splice copies the reference
     /// into arbitrary other packages/modules (kotlinc marks such synthetics public for the same
