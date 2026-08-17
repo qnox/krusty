@@ -6905,3 +6905,48 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   candidates by what the source says, not by which provider declared them, so a Kotlin class
   extending a Java one behaves identically to the Java one.
   Tests: `tests/member_extension_lambda_arity_e2e.rs`.
+
+- **A declaration's type does not depend on the order the compiler was asked in.** Signature
+  collection types an implicitly-typed property before full checking, and it walked files in FILE
+  ARGUMENT order, so a property initialized from a declaration the walk had not reached yet could
+  not be typed at all. `A.kt` = `val base = listOf(1, 2, 3)`, `B.kt` = `val derived = base.map { it + 1 }`:
+  `krusty A.kt B.kt` compiled and `krusty B.kt A.kt` reported "cannot infer the type of property
+  'derived'", while kotlinc accepts both and emits identical bytes. Because every read of an
+  untyped property is then reported as an unresolved reference, one such property produced errors
+  across every file that used it, which is what the gap looked like from the outside.
+
+  A declaration whose type the walk cannot determine is no longer an error at that point. It is
+  recorded and resolved afterwards ON DEMAND: asking for a declaration's type resolves it then, and
+  the answer is remembered, so the order declarations are asked for cannot change any of them. This
+  is how the reference compiler is built — `ReturnTypeCalculatorWithJump` types an implicitly-typed
+  declaration by jumping to it and running real body resolution, and
+  `ImplicitBodyResolveComputationSession` holds exactly a memo keyed by declaration, the stack of
+  declarations being computed, and the loops found (verified against the shipped
+  `kotlin-compiler.jar` for 2.4.10). It replaces the retry-to-fixpoint passes that approximated
+  demand ordering by sweeping the module until nothing changed.
+
+  Termination is structural rather than a round budget: a declaration reached while it is already
+  being computed is a cycle, and every declaration on that loop declines — `val a = b; val b = a`,
+  `val a = a`, and a loop closed through an expression getter or across a file boundary all report
+  at each declaration on the loop, as kotlinc does ("type checking has run into a recursive
+  problem"). A declaration on a loop keeps the decline rather than whatever value was computed on
+  top of the recursive answer; publishing that would make the type depend on which member of the
+  loop was asked for first, which is the order dependence being removed. A declaration merely read
+  by two others is not a loop and still resolves.
+
+  Resolving on demand must not widen the INITIALIZATION model, which is a separate question from
+  where a declaration's type comes from. An initializer runs in declaration order, so a declaration
+  written later in the SAME FILE has no value yet and cannot type it — kotlinc rejects
+  `val eager = later` followed by `val later = 1` with "variable 'later' must be initialized" — while
+  the identical pair split across two files is accepted (both measured on 2.4.10). Same-file source
+  order therefore restricts what an eager initializer may read, and only an eager initializer: an
+  expression getter is an executable body and may name a declaration written later, which is why
+  `val early get() = later` types the same whichever of the two is written first. Module-wide
+  position comparison would be wrong, because it would reject the cross-file spelling kotlinc takes.
+
+  Refusing to answer stays recoverable and answering wrongly does not: an inferred declaration type
+  becomes the field descriptor, the getter descriptor and the `@Metadata`, so a wrong one is a
+  miscompile that runs green. One place turns "no answer" into a decline, and no consumer invents a
+  type when the engine gave none.
+  Tests: `tests/resolution_order_independence_e2e.rs`, `tests/resolution_cycles_e2e.rs`,
+  `src/type_engine.rs` unit tests.

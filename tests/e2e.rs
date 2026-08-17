@@ -1056,6 +1056,10 @@ mod reified_inline_splice_ldc_wide_e2e;
 mod relational_compare_to_seam_e2e;
 #[path = "require_check_smartcast_e2e.rs"]
 mod require_check_smartcast_e2e;
+#[path = "resolution_cycles_e2e.rs"]
+mod resolution_cycles_e2e;
+#[path = "resolution_order_independence_e2e.rs"]
+mod resolution_order_independence_e2e;
 #[path = "resolve_parse_deep_coverage_e2e.rs"]
 mod resolve_parse_deep_coverage_e2e;
 #[path = "resolve_parser_diag_coverage_e2e.rs"]
