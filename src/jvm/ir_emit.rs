@@ -3858,6 +3858,32 @@ fn emit_pass(
         }
         emit_method_maybe_rescued(ir, i as u32, facade, facade, &mut cw, false, env, rescued);
         facade_has_method = true;
+        // A PARAMETERLESS `fun main()` is not a JVM entry point on its own: the launcher looks for
+        // `main([Ljava/lang/String;)V`, and the no-arg form is only recognized by JEP 445 (Java 21+
+        // preview, final in 25). kotlinc therefore emits a synthetic bridge that calls it, so the
+        // output runs on any JVM. A declared `fun main(args: Array<String>)` IS the entry point and
+        // gets no bridge; a `suspend fun main` has a continuation parameter after lowering and so is
+        // not parameterless here (its bridge needs the coroutine runner and is not emitted yet).
+        if f.name == "main" && f.params.is_empty() && matches!(f.ret, Ty::Unit) {
+            let mut bridge = CodeBuilder::new(1);
+            let target = cw.methodref(facade, "main", "()V");
+            bridge.invokestatic(target, 0, 0);
+            bridge.ret_void();
+            bridge.ensure_locals(1);
+            bridge.link();
+            cw.add_method(
+                0x1009, // PUBLIC | STATIC | SYNTHETIC
+                "main",
+                "([Ljava/lang/String;)V",
+                &bridge,
+            );
+            cw.set_method_debug(
+                "main",
+                "([Ljava/lang/String;)V",
+                None,
+                &[("args".to_string(), "[Ljava/lang/String;".to_string(), 0)],
+            );
+        }
         if facade_access_bridges.contains(&(i as u32)) {
             let param_tys = jvm_tys(&f.params);
             let ret = jvm_declared_ty(&f.ret);
