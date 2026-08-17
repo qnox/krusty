@@ -40,6 +40,11 @@ fn main() {
     for ig in &opts.ignored {
         eprintln!("krusty: ignoring unsupported option '{ig}'");
     }
+    // kotlinc's own wording, byte for byte (measured on kotlinc 2.4.10 JVM): the flag is accepted,
+    // this warning is printed, and compilation is unchanged.
+    for flag in &opts.unsupported_flag_warnings {
+        eprintln!("warning: flag is not supported by this version of the compiler: {flag}");
+    }
     if opts.sources.is_empty() {
         eprintln!("krusty: no source files. Use -help for usage.");
         std::process::exit(2);
