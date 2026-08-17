@@ -28864,11 +28864,33 @@ impl<'a> Checker<'a> {
     /// Preserve a declaration type's generic variables without changing ordinary expression typing.
     /// The checker already resolved every classifier and projection; lowering consumes this exact
     /// shape for metadata and generic signatures and never decodes the source spelling again.
+    ///
+    /// A checked declaration type containing `<error>` MUST carry a diagnostic: this recorded shape
+    /// flows straight into lowering and `@Metadata` encoding, whose builders treat an error type as
+    /// an internal-invariant panic rather than a fallback. Signature collection can over-resolve a
+    /// bare simple name module-wide (its pass-1 name table ignores packages), so the properly
+    /// scoped resolution failing HERE is the only point that sees the unresolved reference —
+    /// exactly like [`Self::check_type_parameter_bound`]. A duplicate report for a name signature
+    /// collection also diagnosed collapses in the sink (same file, span, and message).
     fn check_declaration_type(&mut self, scope: &CheckerScope<'_>, reference: &TypeRef) -> Ty {
         let declaration = self.type_ref_ty(scope, reference);
+        if declaration.contains_error() {
+            self.report_unresolved_type_ref(scope, reference);
+        }
         self.resolved_declaration_types
             .insert((reference.span.lo, reference.span.hi), declaration);
         declaration
+    }
+
+    /// [`Self::type_ref_ty`] for a declared type outside the recorded-declaration channel (a
+    /// property's annotation/receiver), with the same unresolved-reference reporting contract as
+    /// [`Self::check_declaration_type`] and no `resolved_declaration_types` entry.
+    fn type_ref_ty_reported(&mut self, scope: &CheckerScope<'_>, reference: &TypeRef) -> Ty {
+        let ty = self.type_ref_ty(scope, reference);
+        if ty.contains_error() {
+            self.report_unresolved_type_ref(scope, reference);
+        }
+        ty
     }
 
     /// Resolve a syntactic type without erasing source nullability.
@@ -28894,6 +28916,8 @@ impl<'a> Checker<'a> {
             .and_then(|internal| internal.strip_prefix("__ty/"))
         {
             Ty::from_name(&primitive_alias).unwrap_or(Ty::Error)
+        } else if let Some(t) = self.scoped_source_alias_ty(scope, r) {
+            t
         } else {
             Ty::Error
         };
@@ -28923,6 +28947,94 @@ impl<'a> Checker<'a> {
                 .insert((r.span.lo, r.span.hi), resolved);
         }
         resolved
+    }
+
+    /// The qualified identity of a source `typealias` this file can reach under Kotlin scoping:
+    /// an explicit import names it directly; otherwise the import levels (own package, star
+    /// imports, defaults) are probed in precedence order, two distinct hits in one level being
+    /// ambiguous. Only aliases WITHOUT a classifier record need this channel — an alias to a class
+    /// already resolves through `select_classifier` (its identity answers as a classifier), while a
+    /// primitive- or function-type-target alias has no classifier to record. A SAME-FILE use never
+    /// reaches here either: the parse seam already rewrote it into the target shape.
+    fn scoped_source_alias_identity(&self, name: &str) -> Option<TypeName> {
+        // Dotted/nested spellings resolve through the qualified channels, not this simple-name probe.
+        if name.contains('.') || name.contains('/') {
+            return None;
+        }
+        let declared =
+            |identity: TypeName| self.syms.source_alias_expansions.contains_key(&identity);
+        if let Some(path) = self.imports.get(name) {
+            // An explicit import is the selected root; a miss is final (matching classifier
+            // resolution — it never reopens same-package or star interpretations).
+            return crate::types::existing_type_name(&path.replace('.', "/"))
+                .filter(|&id| declared(id));
+        }
+        for level in &self.import_levels {
+            let mut hit: Option<TypeName> = None;
+            for &package in level {
+                let Some(candidate) = crate::types::existing_type_name_child(package, name)
+                    .filter(|&id| declared(id))
+                else {
+                    continue;
+                };
+                match hit {
+                    None => hit = Some(candidate),
+                    Some(previous) if previous == candidate => {}
+                    // Two distinct alias declarations in one level: ambiguous, kotlinc rejects.
+                    Some(_) => return None,
+                }
+            }
+            if hit.is_some() {
+                return hit;
+            }
+        }
+        None
+    }
+
+    /// Resolve a reference to a scoped source `typealias` (see
+    /// [`Self::scoped_source_alias_identity`]) by substituting the use's type arguments into the
+    /// collected expansion — the cross-file counterpart of the parse seam's same-file rewrite.
+    fn scoped_source_alias_ty(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Option<Ty> {
+        let identity = self.scoped_source_alias_identity(&r.name)?;
+        let (formals, expansion) = self.syms.source_alias_expansions.get(&identity)?.clone();
+        if formals.len() != r.targs.len() {
+            self.diags.error(
+                r.span,
+                format!(
+                    "wrong number of type arguments for type alias '{}': expected {}, found {}.",
+                    r.name,
+                    formals.len(),
+                    r.targs.len()
+                ),
+            );
+            return Some(Ty::Error);
+        }
+        if formals.is_empty() {
+            return Some(expansion);
+        }
+        // Use-site projections ride the substituted argument exactly as on a classifier use
+        // (`projected_typeref_argument`): `P<out T>` must reach the expansion as an out-projection
+        // and `P<*>` as the out-projected upper bound, or the emitted generic signature loses its
+        // variance marker and diverges from the same-file spelling. An alias type parameter cannot
+        // declare a bound (kotlinc rejects it), so a star's upper bound is always `Any?`.
+        let args = r
+            .targs
+            .iter()
+            .map(|argument| {
+                let resolved = if argument.is_star_projection() {
+                    // No operand to resolve; `projected_typeref_argument` discards it for a star.
+                    Ty::Error
+                } else {
+                    self.type_ref_ty(scope, argument)
+                };
+                projected_typeref_argument(argument, resolved, Ty::nullable(Ty::obj("kotlin/Any")))
+            })
+            .collect::<Vec<_>>();
+        let bindings = formals
+            .into_iter()
+            .zip(args)
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        Some(crate::symbol_resolver::ty_subst(expansion, &bindings))
     }
 
     /// The erased signature key of a function, using the type parameters visible in `scope` plus the
@@ -30835,7 +30947,10 @@ impl<'a> Checker<'a> {
         // For an extension property (`val Recv.name: T get() = …`), `this` inside the
         // accessors is the receiver — carried by this rung, which ends before the delegate
         // and the initializer (both evaluated receiver-less at file initialization).
-        let recv_ty = p.receiver.as_ref().map(|r| self.type_ref_ty(scope, r));
+        let recv_ty = p
+            .receiver
+            .as_ref()
+            .map(|r| self.type_ref_ty_reported(scope, r));
         let resolved_property_ty = {
             let context_scope = scope.declaration_function_child(
                 recv_ty,
@@ -30857,8 +30972,11 @@ impl<'a> Checker<'a> {
                     .push((label_index, receiver_span));
                 self.this_extension_receiver = Some(receiver_span);
             }
-            let property_annotation = p.ty.as_ref().map(|r| self.type_ref_ty(scope, r));
-            let getter_annotation = p.getter_ty.as_ref().map(|r| self.type_ref_ty(scope, r));
+            let property_annotation = p.ty.as_ref().map(|r| self.type_ref_ty_reported(scope, r));
+            let getter_annotation = p
+                .getter_ty
+                .as_ref()
+                .map(|r| self.type_ref_ty_reported(scope, r));
             if let (Some(property), Some(getter)) = (property_annotation, getter_annotation) {
                 if property != Ty::Error && getter != Ty::Error && property != getter {
                     self.diags.error(
@@ -36269,6 +36387,7 @@ impl<'a> Checker<'a> {
                 )
                 || default_classifier_internal(&leaf.name).is_some()
                 || typeref_leaf(&leaf, &mut |_| Ty::Error).is_some_and(|ty| ty != Ty::Error)
+                || self.scoped_source_alias_identity(&leaf.name).is_some()
         };
         if !leaf_resolves {
             self.diags

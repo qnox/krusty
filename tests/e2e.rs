@@ -384,6 +384,8 @@ mod cross_file_ctor_default_e2e;
 mod cross_file_inline_call_e2e;
 #[path = "cross_file_operator_e2e.rs"]
 mod cross_file_operator_e2e;
+#[path = "cross_file_typealias_e2e.rs"]
+mod cross_file_typealias_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
 mod ctor_numeric_widening_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
@@ -1262,6 +1264,8 @@ mod typealias_function_type_e2e;
 mod typealias_generic_target_e2e;
 #[path = "typeparam_cast_e2e.rs"]
 mod typeparam_cast_e2e;
+#[path = "unimported_cross_package_type_e2e.rs"]
+mod unimported_cross_package_type_e2e;
 #[path = "unit_as_any_e2e.rs"]
 mod unit_as_any_e2e;
 #[path = "unit_cast_e2e.rs"]
