@@ -11437,6 +11437,7 @@ fn infer_class_member_ty(
     checker.demand_member = Some(demand_member);
     checker.demand_rejects = Some(rejects);
     checker.inference_only = true;
+    checker.symbolic_signature_inference = true;
     checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     checker.set_anonymous_lexical_class_context(owner);
     let Some(internal) = checker
@@ -11540,6 +11541,7 @@ fn infer_declaration_ty(
     checker.demand_member = Some(&demand_member);
     checker.demand_rejects = Some(&rejects);
     checker.inference_only = true;
+    checker.symbolic_signature_inference = true;
     checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     checker.set_anonymous_lexical_class_context(declaration);
     let root = CheckerScope::root();
