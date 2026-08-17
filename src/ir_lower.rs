@@ -224,6 +224,7 @@ fn lower_file_at_reporting_impl(
         cur_fn_suspend: false,
         synthetic_seq_by_owner: HashMap::new(),
         lambda_origin_context: None,
+        lambda_origin_enclosing_override: None,
         lambda_origin_by_source: HashMap::new(),
         lambda_ordinal_by_context: HashMap::new(),
         local_class_captures: HashMap::new(),
@@ -3792,6 +3793,11 @@ fn lower_file_at_reporting_impl(
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
+                    // Class-initialization context: `cur_fn` still names whichever function was
+                    // lowered LAST, and a lambda origin recorded here must not borrow that name.
+                    // kotlinc's class-init lambda names carry no function segment (`C$prop$1`,
+                    // `C$local$1`, `C$1`), so the enclosing scope here is the EMPTY name.
+                    lo.cur_fn = crate::ir::IrFunctionScope::synthetic(String::new());
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3930,8 +3936,14 @@ fn lower_file_at_reporting_impl(
                                 }
                                 // A `var` declared inside the initializer and captured+mutated by a
                                 // closure (`val p = run { var v=…; bar { v=… }; v }`) needs a `Ref` holder.
-                                let val = lo.with_init_shared_cells(init_e, |lo| {
-                                    lo.lower_arg(init_e, &field_ty)
+                                // The property scope names the lambda class (`C$<prop>$1`) and the
+                                // impl method (`<prop>$lambda$0`), as in the secondary-constructor
+                                // and object-literal initializer paths.
+                                let property_name = c.body_props[*i].name.clone();
+                                let val = lo.with_property_lambda_scope(property_name, |lo| {
+                                    lo.with_init_shared_cells(init_e, |lo| {
+                                        lo.lower_arg(init_e, &field_ty)
+                                    })
                                 })?;
                                 lo.ir.classes[class_id as usize].properties[property_index]
                                     .initializer = Some(val);
@@ -3974,14 +3986,16 @@ fn lower_file_at_reporting_impl(
                                     }
                                 }
                                 // A `var` the block declares and a nested closure mutates is `Ref`-boxed.
-                                lo.with_init_shared_cells(*e, |lo| -> Option<()> {
-                                    for s in bs {
-                                        stmts.push(lo.stmt(s)?);
-                                    }
-                                    if let Some(t) = trailing {
-                                        stmts.push(lo.expr(t)?);
-                                    }
-                                    Some(())
+                                lo.with_init_block_lambda_context(|lo| {
+                                    lo.with_init_shared_cells(*e, |lo| -> Option<()> {
+                                        for s in bs {
+                                            stmts.push(lo.stmt(s)?);
+                                        }
+                                        if let Some(t) = trailing {
+                                            stmts.push(lo.expr(t)?);
+                                        }
+                                        Some(())
+                                    })
                                 })?;
                             }
                         }
@@ -4000,63 +4014,73 @@ fn lower_file_at_reporting_impl(
                         let field_ty = lo.ir.classes[class_id as usize].fields[field_idx as usize]
                             .ty
                             .clone();
-                        let val = match lo.info.delegate_provide(p.delegate.unwrap()).cloned() {
-                            None => lo.lower_arg(p.delegate.unwrap(), &field_ty)?,
-                            Some(target) => {
-                                let (
-                                    pv_owner,
-                                    pv_desc,
-                                    pv_ret,
-                                    pv_inline,
-                                    pv_is_ext,
-                                    pv_name,
-                                    pv_interface,
-                                ) = lo.delegate_operator_info(&target)?;
-                                let source_ty = ty_to_ir(lo.info.ty(p.delegate.unwrap()));
-                                let dele = lo.lower_arg(p.delegate.unwrap(), &source_ty)?;
-                                // The same `PropertyReference1Impl` shape the accessors build.
-                                let gname = property_getter_name(&p.name);
-                                let prop_ty = lo
-                                    .class_info(&internal)?
-                                    .methods
-                                    .get(&gname)
-                                    .and_then(|o| o.first())
-                                    .map(|&(_, _, ty)| ty)?;
-                                let prop_sig = lo.property_reference_signature(&gname, prop_ty)?;
-                                let propref_impl = lo.property_reference_impl(1, false)?;
-                                let cls = lo.emit_class_const(internal.clone());
-                                let nm = lo.ir_const_str(p.name.clone());
-                                let sigc = lo.ir_const_str(prop_sig);
-                                let flag = lo.emit_const(IrConst::Int(0));
-                                let pref = lo.emit_new_external(
-                                    propref_impl.internal.clone(),
-                                    propref_impl.ctor_desc.clone(),
-                                    vec![cls, nm, sigc, flag],
-                                );
-                                let this_arg = lo.emit_get_value(this_v);
-                                let call = if pv_is_ext {
-                                    lo.emit_static_call(
-                                        pv_owner,
-                                        pv_name,
-                                        pv_desc,
-                                        pv_inline,
-                                        vec![dele, this_arg, pref],
-                                    )
-                                } else {
-                                    lo.emit_virtual_call(
-                                        pv_owner,
-                                        pv_name,
-                                        pv_desc,
-                                        pv_interface,
-                                        dele,
-                                        vec![this_arg, pref],
-                                    )
-                                };
-                                // The provide return may be erased (`<T> provideDelegate(): D<T>`);
-                                // bridge to the field's stored type as accessors do for `getValue`.
-                                lo.coerce_to_static(call, field_ty, pv_ret)
-                            }
-                        };
+                        // The delegate expression is property-scoped like a plain initializer: its
+                        // lambda (`by lazy { … }`) is `C$<prop>$…`, never the bare `C$<ordinal>`
+                        // family shared with unbound init-block lambdas. (kotlinc numbers delegate
+                        // lambdas `C$<prop>$2` — its delegate ordinals count something krusty does
+                        // not model; the gap is recorded in docs/SPEC.md.)
+                        let val = lo.with_property_lambda_scope(p.name.clone(), |lo| {
+                            Some(
+                                match lo.info.delegate_provide(p.delegate.unwrap()).cloned() {
+                                    None => lo.lower_arg(p.delegate.unwrap(), &field_ty)?,
+                                    Some(target) => {
+                                        let (
+                                            pv_owner,
+                                            pv_desc,
+                                            pv_ret,
+                                            pv_inline,
+                                            pv_is_ext,
+                                            pv_name,
+                                            pv_interface,
+                                        ) = lo.delegate_operator_info(&target)?;
+                                        let source_ty = ty_to_ir(lo.info.ty(p.delegate.unwrap()));
+                                        let dele = lo.lower_arg(p.delegate.unwrap(), &source_ty)?;
+                                        // The same `PropertyReference1Impl` shape the accessors build.
+                                        let gname = property_getter_name(&p.name);
+                                        let prop_ty = lo
+                                            .class_info(&internal)?
+                                            .methods
+                                            .get(&gname)
+                                            .and_then(|o| o.first())
+                                            .map(|&(_, _, ty)| ty)?;
+                                        let prop_sig =
+                                            lo.property_reference_signature(&gname, prop_ty)?;
+                                        let propref_impl = lo.property_reference_impl(1, false)?;
+                                        let cls = lo.emit_class_const(internal.clone());
+                                        let nm = lo.ir_const_str(p.name.clone());
+                                        let sigc = lo.ir_const_str(prop_sig);
+                                        let flag = lo.emit_const(IrConst::Int(0));
+                                        let pref = lo.emit_new_external(
+                                            propref_impl.internal.clone(),
+                                            propref_impl.ctor_desc.clone(),
+                                            vec![cls, nm, sigc, flag],
+                                        );
+                                        let this_arg = lo.emit_get_value(this_v);
+                                        let call = if pv_is_ext {
+                                            lo.emit_static_call(
+                                                pv_owner,
+                                                pv_name,
+                                                pv_desc,
+                                                pv_inline,
+                                                vec![dele, this_arg, pref],
+                                            )
+                                        } else {
+                                            lo.emit_virtual_call(
+                                                pv_owner,
+                                                pv_name,
+                                                pv_desc,
+                                                pv_interface,
+                                                dele,
+                                                vec![this_arg, pref],
+                                            )
+                                        };
+                                        // The provide return may be erased (`<T> provideDelegate(): D<T>`);
+                                        // bridge to the field's stored type as accessors do for `getValue`.
+                                        lo.coerce_to_static(call, field_ty, pv_ret)
+                                    }
+                                },
+                            )
+                        })?;
                         let recv = lo.emit_get_value(this_v);
                         stmts.push(lo.emit_set_field(recv, class_id, field_idx, val));
                     }
@@ -5763,11 +5787,20 @@ pub(crate) struct Lower<'a> {
     /// initializer uses `(function, Some(local))`; a property initializer uses `(property, None)`.
     /// Nested declarations save/restore this context; lambda origins consume it directly.
     lambda_origin_context: Option<(String, Option<String>)>,
+    /// Enclosing-name override for lambda origins recorded OUTSIDE any function body — the
+    /// class-initialization context (`init { … }` blocks). kotlinc's class-init lambda CLASSES carry
+    /// no function segment (`C$local$1`, bare `C$1`), while the impl METHOD prefix there is
+    /// `_init_` — two different names, so the origin cannot read `cur_fn.source_name`.
+    lambda_origin_enclosing_override: Option<String>,
     /// A source lambda can be lowered into more than one physical body. Cache its single lexical
     /// origin by AST expression identity so every realization shares backend artifact identity.
     lambda_origin_by_source: HashMap<u32, crate::ir::IrLambdaOrigin>,
-    /// Next lambda ordinal per enclosing declaration and optional initializer binding.
-    lambda_ordinal_by_context: HashMap<(Option<TypeName>, String, Option<String>), u32>,
+    /// Next lambda ordinal per owner and RENDERED name prefix (the non-empty name segments joined
+    /// with `$`), NOT per raw `(enclosing, binding)` pair: different pairs can render the same
+    /// prefix — property `x` is `("x", None)` and an init-block local `x` is `("", Some("x"))`,
+    /// both `C$x$…` — and kotlinc numbers those as ONE sequence (`C$x$1`, `C$x$2`). A counter keyed
+    /// by the raw pair would number both `$1` and one class file would overwrite the other.
+    lambda_ordinal_by_context: HashMap<(Option<TypeName>, String), u32>,
     /// A local class's captures, by IR class id. The class carries each one as a leading constructor
     /// parameter, so every construction of it — whichever argument-mapping arm reaches `emit_new` —
     /// supplies them ahead of the source arguments.
@@ -8607,11 +8640,12 @@ impl<'a> Lower<'a> {
                     ) {
                         return None;
                     }
-                    let val = self.with_lambda_origin_context(
-                        c.body_props[*i].name.clone(),
-                        None,
-                        |lowerer| lowerer.lower_arg(init_e, &field_ty),
-                    )?;
+                    // Same scoping as the primary-constructor path: the property scope names the
+                    // lambda class (`C$<prop>$1`) and the impl method (`<prop>$lambda$0`).
+                    let property_name = c.body_props[*i].name.clone();
+                    let val = self.with_property_lambda_scope(property_name, |lowerer| {
+                        lowerer.lower_arg(init_e, &field_ty)
+                    })?;
                     if self.expr_diverges(init_e) {
                         stmts.push(val);
                     } else {
@@ -8641,12 +8675,15 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                     }
-                    for s in bs {
-                        stmts.push(self.stmt(s)?);
-                    }
-                    if let Some(t) = trailing {
-                        stmts.push(self.expr(t)?);
-                    }
+                    self.with_init_block_lambda_context(|lowerer| -> Option<()> {
+                        for s in bs {
+                            stmts.push(lowerer.stmt(s)?);
+                        }
+                        if let Some(t) = trailing {
+                            stmts.push(lowerer.expr(t)?);
+                        }
+                        Some(())
+                    })?;
                 }
             }
         }
@@ -10499,13 +10536,26 @@ impl<'a> Lower<'a> {
         let lambda_origin = if let Some(origin) = self.lambda_origin_by_source.get(&e.0) {
             origin.clone()
         } else {
-            let (enclosing_name, binding_name) = self
-                .lambda_origin_context
-                .clone()
-                .unwrap_or_else(|| (self.cur_fn.source_name.clone(), None));
+            let (enclosing_name, binding_name) =
+                self.lambda_origin_context.clone().unwrap_or_else(|| {
+                    (
+                        self.lambda_origin_enclosing_override
+                            .clone()
+                            .unwrap_or_else(|| self.cur_fn.source_name.clone()),
+                        None,
+                    )
+                });
+            // Mirror the backend's name rendering (empty segments dropped) so the counter key IS
+            // the rendered prefix — see the field's comment for the collision this prevents.
+            let rendered_prefix = [Some(enclosing_name.as_str()), binding_name.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+                .join("$");
             let next = self
                 .lambda_ordinal_by_context
-                .entry((self.cur_class, enclosing_name.clone(), binding_name.clone()))
+                .entry((self.cur_class, rendered_prefix))
                 .or_insert(0);
             let ordinal = *next;
             *next += 1;
@@ -19058,11 +19108,15 @@ impl<'a> Lower<'a> {
             _ => None,
         };
         let r = match binding {
-            Some(name) => self.with_lambda_origin_context(
-                self.cur_fn.source_name.clone(),
-                Some(name),
-                |lowerer| lowerer.stmt_inner(s),
-            ),
+            Some(name) => {
+                let enclosing = self
+                    .lambda_origin_enclosing_override
+                    .clone()
+                    .unwrap_or_else(|| self.cur_fn.source_name.clone());
+                self.with_lambda_origin_context(enclosing, Some(name), |lowerer| {
+                    lowerer.stmt_inner(s)
+                })
+            }
             None => self.stmt_inner(s),
         };
         if r.is_none() && self.bail.borrow().starts_with("deep") {
@@ -19085,6 +19139,44 @@ impl<'a> Lower<'a> {
             .replace((enclosing_name, binding_name));
         let result = lower(self);
         self.lambda_origin_context = previous;
+        result
+    }
+
+    /// A property-scoped initializer (a body-property initializer or a property delegate): the
+    /// property name is both the lambda-origin enclosing context (class name `C$<prop>$1`) and the
+    /// impl-method prefix (`<prop>$lambda$0`, kotlinc's spelling — and same-named declarations
+    /// share one sequence: `val member` + `fun member` → `member$lambda$0/1`, reproduced by the
+    /// `(cur_class, cur_fn.source_name)` sequence key). Both are restored BEFORE any `?`
+    /// propagation, so a bail inside cannot leak the property scope into later lowering.
+    fn with_property_lambda_scope<T>(
+        &mut self,
+        property_name: String,
+        lower: impl FnOnce(&mut Self) -> Option<T>,
+    ) -> Option<T> {
+        let previous_fn = std::mem::replace(
+            &mut self.cur_fn,
+            crate::ir::IrFunctionScope::synthetic(property_name.clone()),
+        );
+        let result = self.with_lambda_origin_context(property_name, None, lower);
+        self.cur_fn = previous_fn;
+        result
+    }
+
+    /// `init { … }` lowering context. Impl methods take kotlinc's `_init_` prefix
+    /// (`_init_$lambda$0`), while a lambda ORIGIN recorded inside carries the EMPTY enclosing name:
+    /// the class-init lambda CLASS has no function segment (`C$local$1`, bare `C$1`).
+    fn with_init_block_lambda_context<T>(
+        &mut self,
+        lower: impl FnOnce(&mut Self) -> Option<T>,
+    ) -> Option<T> {
+        let previous_fn = std::mem::replace(
+            &mut self.cur_fn,
+            crate::ir::IrFunctionScope::synthetic("_init_".to_string()),
+        );
+        let previous_override = self.lambda_origin_enclosing_override.replace(String::new());
+        let result = lower(self);
+        self.cur_fn = previous_fn;
+        self.lambda_origin_enclosing_override = previous_override;
         result
     }
 
