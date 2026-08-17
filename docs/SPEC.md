@@ -3256,6 +3256,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   one — nor an interface's `$DefaultImpls`, nor a file facade, none of which can receive such a
   `super` call. Test: `tests/default_stub_super_guard_e2e.rs` (differential over every owner shape,
   plus a run proving an ordinary defaulted call still works with the marker null).
+- **Declaration-site variance becomes a JVM wildcard in a PARAMETER position only.** Kotlin's
+  declaration-site `out`/`in` has no classfile equivalent, so the backend realizes it as a wildcard on
+  each otherwise-unprojected argument — but kotlinc does that for method PARAMETERS only. A return
+  type, a field type and a getter's return spell every argument invariantly, at EVERY nesting depth:
+  `fun <U> deep(a: Map<String, List<U>>): Map<String, List<U>>` signs its parameter
+  `Ljava/util/Map<Ljava/lang/String;+Ljava/util/List<+TU;>;>;` and its return
+  `Ljava/util/Map<Ljava/lang/String;Ljava/util/List<TU;>;>;`. krusty wildcarded both, so every generic
+  return and field diverged from the reference bytes. An EXPLICIT `in`/`out` projection is the user's
+  own and renders in either position (`Comparator<in Number>` keeps its `-` in a return); an explicit
+  `out` on an already-`out` parameter is redundant and Kotlin normalizes it away before the backend
+  sees it. A CONSTRUCTOR parameter is a parameter position even when the same declaration also backs a
+  field: `class Box(val c: Container<Number>)` with `class Container<out T>` signs its `<init>`
+  `(LContainer<+Ljava/lang/Number;>;)V`, its field `LContainer<Ljava/lang/Number;>;` and its getter
+  `()LContainer<Ljava/lang/Number;>;`. A suspend function's return travels as a `Continuation<-RET>`
+  PARAMETER and wildcards inside it. Realized as a `Wildcards` mode threaded through the signature formatter. Test:
+  `tests/generic_signature_e2e.rs::declaration_site_wildcards_appear_in_parameter_positions_only`.
 
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell
