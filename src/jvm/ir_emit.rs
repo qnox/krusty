@@ -11249,8 +11249,9 @@ fn emit_default_super_guard(
     code.bind(ok);
 }
 
-/// Whether a class can be inherited from, and so whether its members' `$default` synthetics carry
-/// kotlinc's super-call guard. See [`emit_default_super_guard`].
+/// Whether a CLASS can be inherited from, and so whether its members' `$default` synthetics carry
+/// kotlinc's super-call guard. An interface is not asked — it is always a possible `super<I>.m()`
+/// receiver, so its stub is guarded unconditionally. See [`emit_default_super_guard`].
 fn owner_is_inheritable(ir: &IrFile, owner: &str) -> bool {
     ir.classes.iter().any(|c| {
         c.fq_name_matches(owner)
@@ -11332,7 +11333,12 @@ fn emit_default_stub(
     e.next_slot = slot;
 
     let mut code = CodeBuilder::new(slot);
-    if !is_interface && owner_is_inheritable(ir, owner) {
+    // An INTERFACE's stub is guarded too: `super<I>.m()` is a real call site, so kotlinc puts the
+    // guard on whichever class carries the mask-expanding body — the interface itself under
+    // `-jvm-default=enable`, the `$DefaultImpls` holder under `disable`. (The enable-mode holder copy
+    // is a thin forward emitted by `emit_default_stub_forward` and correctly carries no guard: it
+    // passes the marker straight through to the body that does check it.)
+    if is_interface || owner_is_inheritable(ir, owner) {
         // The stub's locals at entry: the receiver, every stub parameter, one int per mask word, and
         // the trailing marker.
         let mut entry_locals = vec![VerifType::ObjectName(
