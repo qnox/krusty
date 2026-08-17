@@ -92,7 +92,9 @@ fn nested_generic_member_declares_its_type_parameter() {
     let cs = classes(src);
     assert_eq!(
         method_signature(&cs, "D", "same").as_deref(),
-        Some("<T:Ljava/lang/Object;>(Ljava/util/List<+TT;>;)Ljava/util/List<+TT;>;")
+        // The PARAMETER realizes `List`'s declaration-site `out` as a wildcard; the RETURN spells it
+        // invariantly. Verified against kotlinc 2.4.10 for this exact source.
+        Some("<T:Ljava/lang/Object;>(Ljava/util/List<+TT;>;)Ljava/util/List<TT;>;")
     );
 }
 
@@ -147,6 +149,67 @@ fn type_parameter_fields_get_field_signatures() {
     };
     assert_eq!(field_sig("a").as_deref(), Some("TA;"));
     assert_eq!(field_sig("b").as_deref(), Some("TB;"));
+}
+
+/// Declaration-site variance becomes a JVM wildcard in a PARAMETER position only. A return type, a
+/// field type and a getter's return spell every argument invariantly, at EVERY nesting depth —
+/// krusty wildcarded them everywhere, so each such signature diverged from the reference bytes.
+///
+/// An explicit `in` projection is the user's own and survives in either position; an explicit `out`
+/// on an already-`out` parameter is redundant and Kotlin normalizes it away before it reaches here.
+#[test]
+fn declaration_site_wildcards_appear_in_parameter_positions_only() {
+    let src = "class Node<T>\n\
+               fun <U> deep(a: Map<String, List<U>>): Map<String, List<U>> = a\n\
+               fun <U> deeper(): List<Map<String, Node<U>>> = emptyList()\n\
+               fun keepsIn(c: Comparator<in Number>): Comparator<in Number> = c\n";
+    let cs = classes(src);
+    assert_eq!(
+        method_signature(&cs, "GKt", "deep").as_deref(),
+        Some(concat!(
+            "<U:Ljava/lang/Object;>",
+            "(Ljava/util/Map<Ljava/lang/String;+Ljava/util/List<+TU;>;>;)",
+            "Ljava/util/Map<Ljava/lang/String;Ljava/util/List<TU;>;>;"
+        )),
+        "the parameter wildcards at every level, the return at none"
+    );
+    assert_eq!(
+        method_signature(&cs, "GKt", "deeper").as_deref(),
+        Some("<U:Ljava/lang/Object;>()Ljava/util/List<Ljava/util/Map<Ljava/lang/String;LNode<TU;>;>;>;"),
+        "a return type carries no wildcard at any depth"
+    );
+    // One declaration, three positions: kotlinc wildcards the CONSTRUCTOR parameter and spells the
+    // backing FIELD and the GETTER's return invariantly.
+    let three = classes("class Container14<out T>\nclass Box14(val c: Container14<Number>)\n");
+    assert_eq!(
+        method_signature(&three, "Box14", "<init>").as_deref(),
+        Some("(LContainer14<+Ljava/lang/Number;>;)V"),
+        "a constructor parameter keeps the wildcard"
+    );
+    assert_eq!(
+        method_signature(&three, "Box14", "getC").as_deref(),
+        Some("()LContainer14<Ljava/lang/Number;>;"),
+        "the getter's return drops it"
+    );
+    let field_sig = three
+        .iter()
+        .find(|(n, _)| n == "Box14")
+        .and_then(|(_, b)| krusty::jvm::classreader::parse_class(b).ok())
+        .and_then(|ci| ci.fields.iter().find(|f| f.name == "c")?.signature.clone());
+    assert_eq!(
+        field_sig.as_deref(),
+        Some("LContainer14<Ljava/lang/Number;>;"),
+        "the backing field drops it too"
+    );
+    let cs = classes(src);
+    assert_eq!(
+        method_signature(&cs, "GKt", "keepsIn").as_deref(),
+        Some(concat!(
+            "(Ljava/util/Comparator<-Ljava/lang/Number;>;)",
+            "Ljava/util/Comparator<-Ljava/lang/Number;>;"
+        )),
+        "an explicit `in` projection is not declaration-site variance and survives in both"
+    );
 }
 
 #[test]
