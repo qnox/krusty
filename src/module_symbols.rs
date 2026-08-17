@@ -1622,6 +1622,7 @@ mod tests {
                 is_open: false,
                 context_params: Vec::new(),
                 source_member: None,
+                hoists_to_owner_field: false,
             },
         );
         companion
@@ -1851,6 +1852,7 @@ mod tests {
                 is_open: false,
                 context_params: Vec::new(),
                 source_member: None,
+                hoists_to_owner_field: false,
             },
         );
         let mut sub = class("demo/Sub");

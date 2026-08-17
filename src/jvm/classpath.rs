@@ -5149,6 +5149,7 @@ impl super::inline::MethodBodies for Classpath {
         // this fallback the caller invents a JavaBean getter (`getSize`) off the LOGICAL type.
         inherited_property_access(self, owner, property, class_property_read_access)
             .or_else(|| self.builtin_property_read_access(owner, property))
+            .or_else(|| companion_owner_field_access(self, owner, property, false))
     }
     /// No builtins fallback, deliberately: `.kotlin_builtins` declares no `var` on a mapped type, so
     /// there is no setter for one to answer with (`MutableMap.MutableEntry` exposes `setValue` as a
@@ -5159,7 +5160,58 @@ impl super::inline::MethodBodies for Classpath {
         property: &str,
     ) -> Option<super::inline::PropertyAccess> {
         inherited_property_access(self, owner, property, class_property_write_access)
+            .or_else(|| companion_owner_field_access(self, owner, property, true))
     }
+}
+
+/// A companion property realized as a `@JvmField` PUBLIC static field hoisted onto the companion's
+/// OUTER class: the companion class file carries neither the accessor nor the field, so the
+/// declaration walks above find nothing. kotlinc's layout puts the field on the owner; answer with
+/// it when the owner actually declares a matching public static field (non-final for a write).
+fn companion_owner_field_access(
+    classpath: &Classpath,
+    owner: &str,
+    property: &str,
+    writable: bool,
+) -> Option<super::inline::PropertyAccess> {
+    // Gate on the SIGNAL, not the name shape: the nested class itself must DECLARE `property` in
+    // its `@Metadata`, and the accessor that record names must be ABSENT from the class file — the
+    // exact residue a `@JvmField` companion property leaves behind (the reader derives a
+    // conventional accessor name when the signature is omitted, so `MetaProp::getter` presence
+    // alone cannot discriminate). An arbitrary `$`-named owner, a Java nested class, or a property
+    // whose accessor really exists never reaches the outer-field probe.
+    let companion = classpath.find_name(type_name(owner))?;
+    let declared = super::metadata::class_properties(&companion)
+        .iter()
+        .find(|p| p.name == property && !p.is_extension)?;
+    let accessor = if writable {
+        declared.setter.as_ref()
+    } else {
+        declared.getter.as_ref()
+    };
+    let accessor_realized = accessor.is_some_and(|sig| {
+        companion
+            .methods
+            .iter()
+            .any(|m| m.name == sig.name && m.descriptor == sig.desc)
+    });
+    if accessor_realized {
+        return None;
+    }
+    let (outer, _) = owner.rsplit_once('$')?;
+    let ci = classpath.find_name(type_name(outer))?;
+    let field = ci.fields.iter().find(|f| {
+        f.name == property
+            && f.access & super::classreader::ACC_PUBLIC != 0
+            && f.access & super::classreader::ACC_STATIC != 0
+            && (!writable || f.access & 0x0010 == 0) // a write needs a non-final field
+    })?;
+    Some(super::inline::PropertyAccess::Field {
+        owner: outer.to_string(),
+        name: field.name.clone(),
+        descriptor: field.descriptor.clone(),
+        is_static: true,
+    })
 }
 
 /// The physical method a Kotlin BUILTIN property is realized as on its mapped JVM type — the READ

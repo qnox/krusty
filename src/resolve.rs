@@ -1118,6 +1118,14 @@ pub struct DeclaredPropertySig {
     /// beside `is_const` for the same reason: a consumer that sees only this signature must not take
     /// the conventional `getter_name`/`setter_name` spellings for methods that exist.
     pub is_jvm_field: bool,
+    /// A `@JvmField` COMPANION property in a realizable shape (plain stored `public`/`internal`
+    /// property with an initializer — no custom accessor, delegate, `lateinit`, `const`, `open`, or
+    /// `abstract`). Distinct from [`Self::is_jvm_field`], which records only that the ANNOTATION is
+    /// applied: eligibility to hoist is a second fact, decided where the whole declaration is
+    /// visible, and a consumer must not re-derive it from partial signature fields. The JVM
+    /// realization of an eligible property is a PUBLIC static field on the companion's OWNER class
+    /// with NO accessors, so the conventional `getter_name` spelling names nothing.
+    pub hoists_to_owner_field: bool,
     pub getter_name: String,
     pub setter_name: Option<String>,
     /// Visibility of the setter declaration. `None` means `val`; a `var` normally inherits the
@@ -7021,6 +7029,9 @@ fn collect_signatures_with_cp_impl(
                                             property: property_index as u32,
                                         },
                                     ),
+                                    // Instance `@JvmField` (a constructor property) has no
+                                    // realized public-field ABI in this backend yet.
+                                    hoists_to_owner_field: false,
                                 },
                             )
                         })
@@ -7586,6 +7597,25 @@ fn collect_signatures_with_cp_impl(
                                         property: (c.props.len() + body_property_index) as u32,
                                     },
                                 ),
+                                // The full realizable shape is decided HERE, where the whole
+                                // declaration is visible — consumers read one ABI fact, never
+                                // re-derive eligibility from partial signature fields.
+                                hoists_to_owner_field: matches!(
+                                    bp.visibility,
+                                    Visibility::Public | Visibility::Internal
+                                ) && bp.init.is_some()
+                                    && bp.getter.is_none()
+                                    && bp.setter.is_none()
+                                    && bp.delegate.is_none()
+                                    && !bp.is_lateinit
+                                    && !bp.is_const
+                                    && !bp.is_open
+                                    && !bp.is_abstract
+                                    && bp.annotations.iter().any(|annotation| {
+                                        class_names
+                                            .get_class(&annotation.name)
+                                            .is_some_and(|name| name.matches("kotlin/jvm/JvmField"))
+                                    }),
                             },
                         );
                         if bp.context_params.is_empty() {
@@ -14512,6 +14542,15 @@ pub enum StmtLowering {
         interface: bool,
         context_access: Option<Box<ResolvedPropertyAccess>>,
     },
+    /// `recv.name = value` resolved to a property realized as a PUBLIC STATIC FIELD with no setter
+    /// anywhere — a `@JvmField` companion `var`, whose field lives on the companion's OWNER class.
+    /// The write analogue of [`ExprLowering::StaticPropertyRead`]: lowering emits a direct
+    /// `putstatic owner.name` and performs no member lookup.
+    StaticPropertyWrite {
+        owner: TypeName,
+        name: String,
+        ty: Ty,
+    },
     /// `super.prop = value`, selected as the exact non-virtual setter call. The target carries every
     /// semantic and linkage fact; lowering emits `invokespecial` and performs no member lookup.
     SuperPropertyWrite { target: Box<ResolvedSuperCall> },
@@ -16199,6 +16238,7 @@ fn install_anonymous_object_captures(
                     is_open: false,
                     context_params: Vec::new(),
                     source_member: None,
+                    hoists_to_owner_field: false,
                 },
             );
             class.ctor_params.push(capture.ty);
@@ -43930,6 +43970,21 @@ impl<'a> Checker<'a> {
                     compiler_intrinsic,
                     ..
                 } = *member;
+                // A companion property realized as a `@JvmField` PUBLIC static field on the OWNER
+                // class has NO accessor to call — every reader goes `getstatic` on that field
+                // (kotlinc's shape), whether the declaration is in this file, a sibling file, or
+                // reached through the companion instance.
+                if let Some(static_owner) = self.jvm_field_companion_static(owner, &name) {
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::StaticPropertyRead {
+                            owner: static_owner,
+                            name,
+                            descriptor: None,
+                        },
+                    );
+                    return ty;
+                }
                 self.expr_lowers.insert(
                     expression,
                     ExprLowering::MemberPropertyRead {
@@ -44581,6 +44636,52 @@ impl<'a> Checker<'a> {
     /// Complete singleton value denoted by a classifier identity. A class with a companion denotes
     /// that nested singleton; an object denotes itself. This is the only place that translates the
     /// semantic classifier edge into a backend storage handle.
+    /// The `@JvmField` public-static-field realization of a companion property: `Some(outer)` when
+    /// `owner` is a companion object of this module whose property `name` carries that ABI — the
+    /// field lives on the returned OUTER class, `public static` (`final` for a `val`), with no
+    /// accessors anywhere. An INTERFACE owner admits the realization only under kotlinc's
+    /// whole-companion rule (every companion property a `public final val` with `@JvmField`);
+    /// otherwise the property keeps its ordinary accessor realization.
+    fn jvm_field_companion_static(&self, owner: TypeName, name: &str) -> Option<TypeName> {
+        let companion = self.syms.class_by_type_name(owner)?;
+        let sig = companion.declared_props.get(name)?;
+        if !sig.hoists_to_owner_field {
+            return None;
+        }
+        // A VALUE-CLASS-typed property never hoists (the JVM pass declines it — the backing field
+        // erases), so the field this routing would name is never emitted. MIRRORS the pass's
+        // `is_value_class_name` decline in `lower_companion_properties`, module and classpath
+        // value classes alike; the two must fall back together.
+        let value_class_typed = sig.ty.obj_internal().is_some_and(|internal| {
+            self.syms
+                .class_by_type_name(internal)
+                .is_some_and(|class| class.value_field.is_some())
+                || self
+                    .resolver()
+                    .classifier(internal)
+                    .is_some_and(|shape| shape.value_underlying.is_some())
+        });
+        if value_class_typed {
+            return None;
+        }
+        let outer = self
+            .syms
+            .classes
+            .values()
+            .find(|class| class.companion_internal == Some(owner))?;
+        if outer.is_interface() {
+            let uniform = companion.declared_props.values().all(|sig| {
+                sig.hoists_to_owner_field
+                    && sig.setter_name.is_none()
+                    && sig.visibility == Visibility::Public
+            });
+            if !uniform {
+                return None;
+            }
+        }
+        Some(outer.internal_name())
+    }
+
     fn classifier_singleton_value(&self, internal: TypeName) -> Option<SingletonValue> {
         if let Some(owner) = self
             .syms
@@ -52004,15 +52105,25 @@ impl<'a> Checker<'a> {
             }
             self.expect_assignable(lty, vt, self.value_diagnostic_span(value, vt), "assignment");
             if is_var || deferred_constructor_write {
-                self.stmt_lowers.insert(
-                    s,
-                    StmtLowering::MemberPropertyWrite {
+                // A `@JvmField` companion `var` has NO setter anywhere: the write is a direct
+                // `putstatic` on the OWNER class's public field (kotlinc's shape).
+                let lowering = match self
+                    .jvm_field_companion_static(owner, &name)
+                    .filter(|_| is_var)
+                {
+                    Some(static_owner) => StmtLowering::StaticPropertyWrite {
+                        owner: static_owner,
+                        name: name.clone(),
+                        ty: lty,
+                    },
+                    None => StmtLowering::MemberPropertyWrite {
                         owner,
                         ty: lty,
                         interface: self.resolved_owner_is_interface(owner),
                         context_access: None,
                     },
-                );
+                };
+                self.stmt_lowers.insert(s, lowering);
             }
             return;
         }

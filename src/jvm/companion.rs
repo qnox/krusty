@@ -25,6 +25,9 @@ struct Candidate {
     visibility: Visibility,
     source_order: u32,
     decl_line: u32,
+    /// `@JvmField`: the hoisted static IS the property's public surface — a PUBLIC field with no
+    /// companion accessors and no `access$…$cp` bridges (kotlinc's realization).
+    is_jvm_field: bool,
 }
 
 fn initializer_store(
@@ -121,16 +124,63 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         let Some(companion_name) = outer_class.companion_class else {
             continue;
         };
-        if outer_class.is_interface || !outer_class.enum_entries.is_empty() || outer_class.is_value
-        {
+        if !outer_class.enum_entries.is_empty() || outer_class.is_value {
             continue;
         }
+        let outer_is_interface = outer_class.is_interface;
         let Some(companion) = ir.class_id_by_name(companion_name) else {
             continue;
         };
         let companion_class = &ir.classes[companion as usize];
         if !companion_class.is_companion {
             continue;
+        }
+        // Whether this property is a `@JvmField`-realizable declaration: annotated, ordinary
+        // storage (no custom accessor, not lateinit/open), and at least internal-visible — kotlinc
+        // rejects the other placements outright, so an annotated-but-ineligible property simply
+        // keeps the ordinary realization here.
+        let jvm_field_eligible = |declaration: &crate::ir::IrProperty,
+                                  backing: &crate::ir::IrField| {
+            companion_class.property_has_jvm_field(&declaration.name)
+                && matches!(
+                    declaration.visibility,
+                    Visibility::Public | Visibility::Internal
+                )
+                && !declaration.is_private
+                && !declaration.is_open
+                && declaration.getter.is_none()
+                && declaration.setter.is_none()
+                && !backing.is_lateinit()
+        };
+        // An INTERFACE owner admits `@JvmField` hoisting only under kotlinc's whole-companion rule:
+        // every companion property is a `public final val` with `@JvmField` (an interface field is
+        // forced `public static final`, so nothing else has a legal realization there). Ordinary
+        // (non-`@JvmField`) interface-companion properties keep object-style storage on the
+        // companion itself. The rule spans the companion's WHOLE property universe: a `const val`
+        // is not in `properties` (its declaration is a class static), but it is a companion
+        // property all the same — the checker's uniformity check (`jvm_field_companion_static`)
+        // sees it and declines the field routing, so the pass must decline the hoist WITH it or a
+        // read resolves to an accessor that was never emitted.
+        if outer_is_interface {
+            let has_const_statics = ir
+                .declared_class_statics
+                .get(&companion_name)
+                .is_some_and(|statics| !statics.is_empty());
+            let all_jvm_field_vals = !has_const_statics
+                && !companion_class.properties.is_empty()
+                && companion_class.properties.iter().all(|declaration| {
+                    declaration
+                        .backing_field
+                        .and_then(|field| companion_class.fields.get(field as usize))
+                        .is_some_and(|backing| {
+                            jvm_field_eligible(declaration, backing)
+                                && !declaration.is_var
+                                && declaration.visibility.is_public()
+                        })
+                });
+            if !all_jvm_field_vals {
+                continue;
+            }
         }
         for property in 0..companion_class.properties.len() {
             let declaration = &companion_class.properties[property];
@@ -142,7 +192,8 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             };
             let backing = &companion_class.fields[field as usize];
             let visibility = declaration.visibility;
-            if !visibility.is_public()
+            let is_jvm_field = jvm_field_eligible(declaration, backing);
+            if (!visibility.is_public() && !is_jvm_field)
                 || declaration.is_private
                 || declaration.is_open
                 || declaration.getter.is_some()
@@ -173,6 +224,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 visibility,
                 source_order: declaration.source_order,
                 decl_line: declaration.decl_line,
+                is_jvm_field,
             });
         }
     }
@@ -195,11 +247,14 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             line: candidate.decl_line,
             source_order: candidate.source_order,
         });
-        ir.declared_class_statics
-            .entry(ir.classes[candidate.outer as usize].fq_name)
-            .or_default()
-            .push(index);
+        // Deliberately NOT registered in `declared_class_statics`: that table feeds the owner's
+        // `@Metadata` const-property records, and kotlinc's owner metadata has NO record for a
+        // hoisted companion property (the declaration belongs to the companion's metadata alone).
+        // Emission finds the physical field through `IrStatic.owner`.
         ir.mark_jvm_companion_hoisted_static(index);
+        if candidate.is_jvm_field {
+            ir.mark_jvm_field_static(index);
+        }
         ir.mark_jvm_companion_property_static(
             ir.classes[candidate.companion as usize].fq_name,
             candidate.property as u32,
@@ -296,56 +351,59 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
     }
 
     // Build the companion's ordinary accessor declarations over the selected static realization.
+    // A `@JvmField` property gets NONE: the public owner field is its entire JVM surface.
     for candidate in candidates {
         let static_index = static_for_field[&(candidate.companion, candidate.field)];
-        let getter_name = property_getter_name(&candidate.name);
-        let read = ir.add_expr(IrExpr::GetStatic(static_index));
-        let returned = ir.add_expr(IrExpr::Return(Some(read)));
-        let getter_body = ir.add_expr(IrExpr::Block {
-            stmts: vec![returned],
-            value: None,
-        });
-        let getter = ir.add_fun(IrFunction {
-            name: getter_name,
-            params: vec![],
-            ret: candidate.ty,
-            body: Some(getter_body),
-            is_static: false,
-            dispatch_receiver: Some(ir.classes[candidate.companion as usize].fq_name),
-            param_checks: vec![],
-        });
-        ir.fn_source_order.insert(getter, candidate.source_order);
-        let setter = if candidate.is_var {
-            let value = ir.add_expr(IrExpr::GetValue(1));
-            let write = ir.add_expr(IrExpr::SetStatic {
-                index: static_index,
-                value,
-            });
-            let returned = ir.add_expr(IrExpr::Return(None));
-            let body = ir.add_expr(IrExpr::Block {
-                stmts: vec![write, returned],
+        let accessors = (!candidate.is_jvm_field).then(|| {
+            let getter_name = property_getter_name(&candidate.name);
+            let read = ir.add_expr(IrExpr::GetStatic(static_index));
+            let returned = ir.add_expr(IrExpr::Return(Some(read)));
+            let getter_body = ir.add_expr(IrExpr::Block {
+                stmts: vec![returned],
                 value: None,
             });
-            let setter = ir.add_fun(IrFunction {
-                name: property_setter_name(&candidate.name),
-                params: vec![candidate.ty],
-                ret: Ty::Unit,
-                body: Some(body),
+            let getter = ir.add_fun(IrFunction {
+                name: getter_name,
+                params: vec![],
+                ret: candidate.ty,
+                body: Some(getter_body),
                 is_static: false,
                 dispatch_receiver: Some(ir.classes[candidate.companion as usize].fq_name),
-                // A synthesized setter is still a public Kotlin declaration: a non-null reference
-                // parameter gets the same entry guard as an ordinary backend-synthesized setter.
-                // The debug-table pass derives its first source PC from this exact prologue.
-                param_checks: vec![(candidate.ty.is_reference()
-                    && !candidate.ty.is_nullable()
-                    && !candidate.ty.is_ty_param())
-                .then(|| "<set-?>".to_string())],
+                param_checks: vec![],
             });
-            ir.fn_source_order.insert(setter, candidate.source_order);
-            Some(setter)
-        } else {
-            None
-        };
+            ir.fn_source_order.insert(getter, candidate.source_order);
+            let setter = candidate.is_var.then(|| {
+                let value = ir.add_expr(IrExpr::GetValue(1));
+                let write = ir.add_expr(IrExpr::SetStatic {
+                    index: static_index,
+                    value,
+                });
+                let returned = ir.add_expr(IrExpr::Return(None));
+                let body = ir.add_expr(IrExpr::Block {
+                    stmts: vec![write, returned],
+                    value: None,
+                });
+                let setter = ir.add_fun(IrFunction {
+                    name: property_setter_name(&candidate.name),
+                    params: vec![candidate.ty],
+                    ret: Ty::Unit,
+                    body: Some(body),
+                    is_static: false,
+                    dispatch_receiver: Some(ir.classes[candidate.companion as usize].fq_name),
+                    // A synthesized setter is still a public Kotlin declaration: a non-null
+                    // reference parameter gets the same entry guard as an ordinary
+                    // backend-synthesized setter. The debug-table pass derives its first source PC
+                    // from this exact prologue.
+                    param_checks: vec![(candidate.ty.is_reference()
+                        && !candidate.ty.is_nullable()
+                        && !candidate.ty.is_ty_param())
+                    .then(|| "<set-?>".to_string())],
+                });
+                ir.fn_source_order.insert(setter, candidate.source_order);
+                setter
+            });
+            (getter, setter)
+        });
 
         let mut initializer = candidate.initializer;
         if reads_value(ir, initializer, 0) {
@@ -370,14 +428,19 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         ir.statics[static_index as usize].init = initializer;
 
         let class = &mut ir.classes[candidate.companion as usize];
-        class.methods.push(getter);
-        if let Some(setter) = setter {
-            class.methods.push(setter);
-        }
+        let property_accessors = accessors.map(|(getter, setter)| {
+            class.methods.push(getter);
+            if let Some(setter) = setter {
+                class.methods.push(setter);
+            }
+            (getter, setter)
+        });
         let property = &mut class.properties[candidate.property];
         property.backing_field = None;
         property.storage_ty = None;
-        property.getter = Some(getter);
-        property.setter = setter;
+        if let Some((getter, setter)) = property_accessors {
+            property.getter = Some(getter);
+            property.setter = setter;
+        }
     }
 }
