@@ -7360,22 +7360,22 @@ fn collect_signatures_with_cp_impl(
                             match bp.declared_ty() {
                                 Some(r) => ty_of_ref(r, &class_names, &btp, diags),
                                 None => {
-                                    let dt = infer_lit_ty_scoped(
-                                        member_inference_source,
-                                        de,
-                                        &class_names,
-                                        &property_scope,
-                                        &*libraries,
-                                        &table,
-                                    );
-                                    delegated_getvalue_ret_for_signature(
-                                        file,
-                                        &table,
-                                        &*libraries,
-                                        dt,
-                                        member_this,
-                                    )
-                                    .unwrap_or(Ty::Error)
+                                    deferred_properties.push(DeferredProperty {
+                                        key: DeclKey::member(
+                                            i as u32,
+                                            d.0,
+                                            body_property_index as u32,
+                                        ),
+                                        file_index: i as u32,
+                                        name: bp.name.clone(),
+                                        span: bp.span,
+                                        delegate_of: Some(member_this),
+                                        expression: Some(de),
+                                        scope: property_scope.clone(),
+                                        kind: DeferredKind::Member(type_name(&internal)),
+                                    });
+                                    deferred_inference = true;
+                                    Ty::Pending
                                 }
                             }
                         } else {
@@ -7400,6 +7400,7 @@ fn collect_signatures_with_cp_impl(
                                             file_index: i as u32,
                                             name: bp.name.clone(),
                                             span: bp.span,
+                                            delegate_of: None,
                                             expression: Some(*g),
                                             scope: property_scope.clone(),
                                             kind: DeferredKind::Member(type_name(&internal)),
@@ -7428,6 +7429,7 @@ fn collect_signatures_with_cp_impl(
                                                 file_index: i as u32,
                                                 name: bp.name.clone(),
                                                 span: bp.span,
+                                                delegate_of: None,
                                                 expression: Some(expression),
                                                 scope: property_scope.clone(),
                                                 kind: DeferredKind::Member(type_name(&internal)),
@@ -8626,22 +8628,23 @@ fn collect_signatures_with_cp_impl(
                         match p.declared_ty() {
                             Some(r) => ty_of_ref(r, &class_names, &property_tparams, diags),
                             None => {
-                                let dt = infer_lit_ty_scoped(
-                                    InferenceSource::file(file, i as u32),
-                                    de,
-                                    &class_names,
-                                    &[],
-                                    &*libraries,
-                                    &table,
-                                );
-                                delegated_getvalue_ret_for_signature(
-                                    file,
-                                    &table,
-                                    &*libraries,
-                                    dt,
-                                    Ty::Null,
-                                )
-                                .unwrap_or(Ty::Error)
+                                // The delegate is an ordinary implicitly-typed body; resolving it
+                                // needs the declaration's real context, which the walk cannot build.
+                                deferred_properties.push(DeferredProperty {
+                                    key: DeclKey::declaration(i as u32, d.0),
+                                    file_index: i as u32,
+                                    name: p.name.clone(),
+                                    span: p.span,
+                                    delegate_of: Some(Ty::Null),
+                                    expression: Some(de),
+                                    scope: Vec::new(),
+                                    kind: DeferredKind::TopLevel {
+                                        position: p.span.lo,
+                                        is_eager: true,
+                                        has_context_params: false,
+                                    },
+                                });
+                                Ty::Pending
                             }
                         }
                     } else {
@@ -8673,6 +8676,7 @@ fn collect_signatures_with_cp_impl(
                             file_index: i as u32,
                             name: p.name.clone(),
                             span: p.span,
+                            delegate_of: None,
                             expression: p.init.or(match &p.getter {
                                 Some(FunBody::Expr(getter)) if is_computed => Some(*getter),
                                 // A block getter has no expression the signature pass can read; it
@@ -10392,6 +10396,10 @@ struct DeferredProperty {
     /// declaration with nothing typeable to read — a BLOCK getter, which needs an annotation — so
     /// that it declines through the one decline point and is diagnosed with the rest.
     expression: Option<ExprId>,
+    /// Set when `expression` is a DELEGATE (`val x by option(...)`). Its type is not the
+    /// declaration's: the declaration's is what the delegate's `getValue` returns, resolved once
+    /// the delegate itself is typed.
+    delegate_of: Option<Ty>,
     /// The value scope the walk resolved this declaration in: context parameters for a top-level
     /// property, the enclosing class's members and lexical values for a member. Entries still
     /// `Ty::Error` are declarations that have not been typed YET and are re-asked through the
@@ -10527,6 +10535,7 @@ impl DeferredInferenceDriver<'_> {
                     entry.file_index,
                     DeclId(entry.key.decl),
                     expression,
+                    &entry.scope,
                     self.table,
                     EngineSeams {
                         demand: &demand,
@@ -10534,6 +10543,20 @@ impl DeferredInferenceDriver<'_> {
                         rejects: &|name| !self.readable_from(entry, name),
                     },
                 ),
+            };
+            // A delegate's own type is not the declaration's: the declaration reads through
+            // `getValue`, so resolve that once the delegate itself is typed.
+            let inferred = match entry.delegate_of {
+                Some(this_ref) if inferred != Ty::Error => delegated_getvalue_ret_for_signature(
+                    file,
+                    self.table,
+                    self.table.libraries.as_ref(),
+                    inferred,
+                    this_ref,
+                )
+                .unwrap_or(Ty::Error),
+                Some(_) => Ty::Error,
+                None => inferred,
             };
             let inferred = inferred_declaration_ty(inferred);
             (inferred != Ty::Error).then_some(inferred)
@@ -11170,6 +11193,7 @@ fn infer_class_member_ty(
     file_index: u32,
     owner: DeclId,
     expression: ExprId,
+    scope_values: &[(String, Ty, bool)],
     table: &SymbolTable,
     engine: EngineSeams<'_>,
 ) -> Ty {
@@ -11228,6 +11252,13 @@ fn infer_class_member_ty(
     let properties = checker.scoped_properties(scope, internal);
     for property in &properties {
         checker.declare_scoped_property(scope, property, true);
+    }
+    // The declaration's OWN value bindings — its context parameters, and the receiver an extension
+    // property binds — are part of its body's scope and are not members of the class, so
+    // `scoped_properties` does not carry them. `context(s: String) val v get() = s` reads `s` from
+    // here or not at all.
+    for (name, ty, is_var) in scope_values {
+        checker.declare(scope, name, *ty, *is_var);
     }
     let inferred =
         checker.with_ret_allowed(Ty::Unit, false, |checker| checker.expr(scope, expression));
