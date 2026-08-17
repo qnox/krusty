@@ -49520,8 +49520,25 @@ impl<'a> Checker<'a> {
                                 "lambda_apply",
                                 "call={fname} argument={i} mapped_parameter={pi} semantic_parameter={semantic_parameter:?} bindings={known_generic_bindings:?}",
                             );
+                        // A VARARG parameter is declared as the array, but each argument packed
+                        // into it has the ELEMENT type — so `vararg selectors: (T) -> R` shapes
+                        // every one of its lambdas from `(T) -> R`. Reading the array instead fails
+                        // the function-typed test and leaves the lambda unshaped: `it` has no type
+                        // and every member read on it is unresolved. This is the LAMBDA path only —
+                        // `semantic_parameter` is shared with the ordinary argument path below,
+                        // which takes the element itself for a final vararg, and unwrapping the
+                        // shared value would leave that one with nothing to unwrap.
+                        let lambda_parameter = semantic_parameter.map(|parameter| {
+                            let packed =
+                                sig.vararg_index == Some(pi) && !self.file.is_spread_arg(a);
+                            if packed {
+                                parameter.array_read_elem().unwrap_or(parameter)
+                            } else {
+                                parameter
+                            }
+                        });
                         if let (Some(Ty::Fun(expected_function)), true) = (
-                            semantic_parameter,
+                            lambda_parameter,
                             matches!(self.file.expr(a), Expr::Lambda { .. }),
                         ) {
                             crate::trace_compiler!(
