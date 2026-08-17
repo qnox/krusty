@@ -98,6 +98,10 @@ pub(super) fn kotlin_type_name_to_ty(name: TypeName) -> Ty {
 /// checks are id compares instead of per-string name-tree walks.
 struct MetaNameIds {
     prim: crate::name_tree::FxHashMap<crate::types::TypeName, Ty>,
+    /// A Kotlin primitive's BOXED class, by name. A nullable primitive is that box in the JVM
+    /// descriptor while `@Metadata` keeps the primitive's own name, and the alignment path compares
+    /// the two — keyed by `TypeName` so the comparison stays a pointer compare.
+    prim_wrapper: crate::name_tree::FxHashMap<crate::types::TypeName, crate::types::TypeName>,
     prim_array: crate::name_tree::FxHashMap<crate::types::TypeName, &'static str>,
     array: crate::types::TypeName,
     any: crate::types::TypeName,
@@ -129,6 +133,28 @@ fn meta_ids() -> &'static MetaNameIds {
         .into_iter()
         .map(|(name, ty)| (tn(name), ty))
         .collect();
+        let prim_wrapper = [
+            "kotlin/Int",
+            "kotlin/Char",
+            "kotlin/Boolean",
+            "kotlin/Long",
+            "kotlin/Double",
+            "kotlin/Float",
+            "kotlin/Byte",
+            "kotlin/Short",
+            "kotlin/UByte",
+            "kotlin/UShort",
+            "kotlin/UInt",
+            "kotlin/ULong",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            Some((
+                tn(name),
+                tn(crate::jvm::jvm_class_map::kotlin_prim_to_wrapper(name)?),
+            ))
+        })
+        .collect();
         let prim_array = [
             ("kotlin/BooleanArray", "[Z"),
             ("kotlin/ByteArray", "[B"),
@@ -146,6 +172,7 @@ fn meta_ids() -> &'static MetaNameIds {
         .collect();
         MetaNameIds {
             prim,
+            prim_wrapper,
             prim_array,
             array: tn("kotlin/Array"),
             any: tn("kotlin/Any"),
@@ -277,6 +304,18 @@ fn value_class_return_type(
     )
 }
 
+/// Whether a JVM descriptor class is what a NULLABLE Kotlin primitive compiles to.
+///
+/// `Int?` is `java/lang/Integer` in the descriptor while `@Metadata` still names `kotlin/Int`, so
+/// comparing the two names by their erasure group — which relates mapped builtins, not boxes — never
+/// matches and the whole metadata alignment is lost: parameter NAMES go with it, and every named
+/// argument at the call site is reported as "no parameter with name 'x' found". The primitive →
+/// wrapper table is the single source of truth for that pairing.
+fn nullable_primitive_matches_descriptor(name: TypeName, actual: TypeName) -> bool {
+    crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(actual, name)
+        || meta_ids().prim_wrapper.get(&name) == Some(&actual)
+}
+
 /// Whether a `@Metadata` source value-parameter class name aligns with a JVM-descriptor parameter `Ty`.
 /// This keeps the hot overload-alignment path in borrowed names: mapped builtins compare through
 /// `to_jvm_internal`, arrays/functions use structural `Ty` facts, and no descriptor `String` is built just
@@ -302,9 +341,9 @@ fn meta_param_compat(
     }
     if let Some(prim) = ids.prim.get(&name) {
         if nullable {
-            return desc.obj_internal().is_some_and(|actual| {
-                crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(actual, name)
-            });
+            return desc
+                .obj_internal()
+                .is_some_and(|actual| nullable_primitive_matches_descriptor(name, actual));
         }
         return match prim {
             // An unsigned parameter is metadata-compatible with its own name and with the signed
@@ -364,9 +403,9 @@ fn meta_param_exact(
     }
     if let Some(prim) = ids.prim.get(&name) {
         if nullable {
-            return desc.obj_internal().is_some_and(|actual| {
-                crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(actual, name)
-            });
+            return desc
+                .obj_internal()
+                .is_some_and(|actual| nullable_primitive_matches_descriptor(name, actual));
         }
         return match prim {
             // An unsigned parameter is metadata-compatible with its own name and with the signed
@@ -6053,6 +6092,42 @@ mod fq_tests {
         assert!(classpath.ext.borrow().is_some());
         assert!(classpath.types.borrow().is_none());
         assert!(classpath.aliases.borrow().is_empty());
+    }
+
+    #[test]
+    fn metadata_param_matching_boxes_a_nullable_primitive() {
+        // `Int?` is `java/lang/Integer` in the descriptor while `@Metadata` names `kotlin/Int`.
+        // Failing to relate the two costs the function its whole alignment — parameter names
+        // included — so every named argument at the call site is "no parameter with name 'x'".
+        let no_value_classes = &|_| None;
+        let boxed = |kotlin: &str, jvm: &str| {
+            meta_param_compat(
+                Some(type_name(kotlin)),
+                true,
+                &Ty::obj(jvm),
+                no_value_classes,
+            )
+        };
+        assert!(boxed("kotlin/Int", "java/lang/Integer"));
+        assert!(boxed("kotlin/Char", "java/lang/Character"));
+        assert!(boxed("kotlin/Boolean", "java/lang/Boolean"));
+        assert!(boxed("kotlin/Long", "java/lang/Long"));
+        assert!(boxed("kotlin/Double", "java/lang/Double"));
+        // An unsigned type's box is its own inline-class wrapper, not a `java/lang/*`.
+        assert!(boxed("kotlin/UInt", "kotlin/UInt"));
+        // A different primitive's box is a different parameter — the pairing is the table's, not
+        // "any box will do".
+        assert!(!boxed("kotlin/Int", "java/lang/Long"));
+        assert!(!boxed("kotlin/Boolean", "java/lang/Integer"));
+        // A non-null primitive keeps the unboxed slot it always had.
+        assert!(meta_param_compat(
+            Some(type_name("kotlin/Int")),
+            false,
+            &Ty::Int,
+            no_value_classes
+        ));
+        // An ordinary reference parameter is unaffected by the box arm.
+        assert!(!boxed("kotlin/Int", "java/lang/String"));
     }
 
     #[test]
