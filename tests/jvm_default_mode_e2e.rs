@@ -238,6 +238,61 @@ fn the_enable_holder_is_byte_identical_to_kotlinc() {
     assert_eq!(ours, reference);
 }
 
+/// A defaulted interface member's `$default` stub carries kotlinc's super-call guard, in BOTH modes.
+///
+/// `super<I>.m()` is a real Kotlin call site, so the marker parameter is genuinely non-null there and
+/// the stub must throw — exactly as for an open class. The guard therefore belongs on whichever class
+/// carries the mask-expanding body: the INTERFACE under `enable`, the `$DefaultImpls` holder under
+/// `disable`. (Under `enable` the holder's copy is a thin forward and correctly carries no guard; the
+/// body it forwards to does the checking.)
+///
+/// Compared as an OPCODE sequence rather than as class bytes: the guard's placement is the fact under
+/// test, while the two compilers still intern the pool in a different order around it.
+#[test]
+fn a_defaulted_interface_member_guards_its_stub_in_both_modes() {
+    const SOURCE: &str = "interface GuardI { fun m(a: Int = 1): Int = a }\nclass GuardC : GuardI\n";
+    const DESCRIPTOR: &str = "(LGuardI;IILjava/lang/Object;)I";
+    for (mode, flag, carrier) in [
+        (JvmDefaultMode::Enable, "enable", "GuardI"),
+        (JvmDefaultMode::Disable, "disable", "GuardI$DefaultImpls"),
+    ] {
+        let ours = compile_source(mode, SOURCE, "Guard");
+        let reference = compile_reference_source(flag, SOURCE, "Guard");
+        let opcodes = |classes: &[(String, Vec<u8>)], who: &str| {
+            let bytes = classes
+                .iter()
+                .find_map(|(name, bytes)| (name == carrier).then_some(bytes.clone()))
+                .unwrap_or_else(|| panic!("{who} {carrier}.class under {flag}"));
+            let code = krusty::jvm::classreader::read_method_code(&bytes, "m$default", DESCRIPTOR)
+                .unwrap_or_else(|| panic!("{who} {carrier}.m$default under {flag}"));
+            code.code
+        };
+        let ours = opcodes(&ours, "krusty");
+        let reference = opcodes(&reference, "kotlinc");
+        assert_eq!(
+            ours.len(),
+            reference.len(),
+            "{carrier}.m$default must have kotlinc's body length under -jvm-default={flag} \
+             (a missing guard is 14 bytes short): {ours:?} vs {reference:?}"
+        );
+        // Opcodes only: a `new`/`ldc`/`invoke*` operand is a pool index, and the two compilers intern
+        // the pool in a different order. The guard is the leading `aload_3; ifnull` pair.
+        assert_eq!(
+            ours[0], 0x2d,
+            "the stub must open by loading the marker: {ours:?}"
+        );
+        assert_eq!(
+            ours[1], 0xc6,
+            "the marker load must be followed by ifnull: {ours:?}"
+        );
+        assert_eq!(
+            &ours[..2],
+            &reference[..2],
+            "{carrier}.m$default must open exactly as kotlinc's does under -jvm-default={flag}"
+        );
+    }
+}
+
 /// A sub-interface that declares NOTHING still republishes the compatibility surface for every
 /// default it inherits: its own `access$…$jd` bridge (an `invokespecial` through itself, resolving
 /// to the inherited default method) and its own `$DefaultImpls` holder forwarding to that bridge.
