@@ -6635,19 +6635,11 @@ fn collect_signatures_with_cp_impl(
                     // parameters are in scope for its own member/ctor/field types (`inner class N :
                     // Iterator<T>` where `T` is the outer's parameter). Walk the `inner_of` chain and
                     // include each enclosing class's parameters (erased, like the class's own).
-                    let mut ctp_names = c.type_params.clone();
                     // A LOCAL class is written inside another declaration's body, so that
                     // declaration's type parameters are in scope for its member types too — the
                     // hoisted `Decl::Class` collected here has lost that context.
                     let mut enclosing_tparam_declarations =
                         local_class_tparams[i].get(&d).cloned().unwrap_or_default();
-                    if let Some(enclosing) = local_class_tparams[i].get(&d) {
-                        ctp_names.extend(
-                            enclosing
-                                .iter()
-                                .flat_map(|declaration| declaration.names.iter().cloned()),
-                        );
-                    }
                     {
                         let mut outer = c.inner_of.clone();
                         let mut guard = 0;
@@ -6666,7 +6658,6 @@ fn collect_signatures_with_cp_impl(
                                 })
                                 .find(|x| x.name == on)
                             {
-                                ctp_names.extend(oc.type_params.iter().cloned());
                                 outer_declarations.push(EnclosingTypeParameterDeclaration {
                                     declaration_start: oc.span.lo,
                                     names: oc.type_params.clone(),
@@ -6680,7 +6671,6 @@ fn collect_signatures_with_cp_impl(
                         outer_declarations.reverse();
                         enclosing_tparam_declarations.splice(0..0, outer_declarations);
                     }
-                    let ctp = TParams::erased(&ctp_names);
                     // Bring this class's own NESTED types into scope by their SIMPLE name (`Inner` →
                     // `Outer$Inner`), so a member's parameter/return/field type may reference a sibling
                     // nested type unqualified (`fun m(i: Inner)`) — Kotlin's nested-type scoping. A nested
@@ -6800,6 +6790,25 @@ fn collect_signatures_with_cp_impl(
                         }
                         ext
                     };
+                    // JVM erasure of every type parameter in scope: the enclosing declarations'
+                    // (outer/local) first, then this class's own. A declared reference bound erases to
+                    // the bound (`<T : Cargo>` → `Lapp/Cargo;`) — the class counterpart of what the
+                    // function path already does — so the resolver hands lowering the same erased type
+                    // for a class parameter that kotlinc signs its members with. Enclosing declarations
+                    // are folded first so a same-spelled own formal shadows them, as the symbolic
+                    // scope built below does.
+                    let ctp = enclosing_tparam_declarations
+                        .iter()
+                        .fold(TParams::default(), |scope, declaration| {
+                            scope.erased_extended_with(
+                                &declaration.names,
+                                &declaration.bounds,
+                                &|name| class_names.get(name),
+                            )
+                        })
+                        .erased_extended_with(&c.type_params, &c.type_param_bounds, &|name| {
+                            class_names.get(name)
+                        });
                     resolve_declaration_type_parameter_annotation_inventory(
                         file,
                         d,
@@ -14745,6 +14754,47 @@ impl TParams {
             erasure,
             ..Default::default()
         }
+    }
+
+    /// CLASS type parameters, erased to their declared REFERENCE bound: `class Bounded<T : Cargo>`
+    /// signs its constructor/field/accessors with `Lapp/Cargo;`, exactly as kotlinc does and as the
+    /// FUNCTION path ([`from_decl_with`](Self::from_decl_with)) already did. A primitive-bounded
+    /// parameter still erases to `Any` — kotlinc specializes those too, but krusty's value-class pass
+    /// owns class-param bound handling and naive specialization there breaks the Object/value-class
+    /// boundary (VerifyError), so scalar bounds keep the [`erased`](Self::erased) model.
+    pub(crate) fn erased_with(
+        names: &[String],
+        bounds: &[(String, TypeRef)],
+        resolve: &dyn Fn(&str) -> Option<TypeName>,
+    ) -> Self {
+        let mut out = TParams::from_decl_with(names, bounds, resolve);
+        for erased in out.erasure.values_mut() {
+            if !erased.is_reference() {
+                *erased = Ty::obj("kotlin/Any");
+            }
+        }
+        out
+    }
+
+    /// [`erased_with`](Self::erased_with) layered over an enclosing scope — the class counterpart of
+    /// [`extended_with`](Self::extended_with), used to fold an inner/local class's enclosing
+    /// declarations before its own parameters.
+    pub(crate) fn erased_extended_with(
+        &self,
+        names: &[String],
+        bounds: &[(String, TypeRef)],
+        resolve: &dyn Fn(&str) -> Option<TypeName>,
+    ) -> Self {
+        let mut out = self.clone();
+        let mut declared = TParams::erased_with(names, bounds, resolve);
+        for name in names {
+            if let Some(bound) = self.enclosing_bound_erasure(name, names, bounds) {
+                declared.erasure.insert(name.clone(), bound);
+            }
+        }
+        out.erasure.extend(declared.erasure);
+        out.extra_bounds.extend(declared.extra_bounds);
+        out
     }
 
     /// Build from declared names + their upper bounds, resolving a CLASS/interface bound to its JVM

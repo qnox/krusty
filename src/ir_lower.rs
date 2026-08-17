@@ -1145,10 +1145,19 @@ fn lower_file_at_reporting_impl(
                         ));
                         let t = if p.ty.nullable() { mark_nullable(t) } else { t };
                         // A non-null reference param gets an `Intrinsics.checkNotNullParameter` guard at
-                        // `<init>` entry (kotlinc does); primitives, nullable, and class type-params skip it.
-                        let is_type_param = !p.is_vararg && c.type_params.contains(&p.ty.name);
+                        // `<init>` entry (kotlinc does); primitives and nullable params skip it. A class
+                        // type-parameter param is guarded exactly when that parameter cannot be null —
+                        // `<T : Cargo>`/`<T : Any>` yes, an unbounded `<T>` (= `Any?`) or `<T : Cargo?>` no,
+                        // the same rule the member/extension paths apply through `class_nonnull_tps`.
+                        let nullable_type_param = !p.is_vararg
+                            && c.type_params.contains(&p.ty.name)
+                            && declared_type_param_admits_null(
+                                &p.ty.name,
+                                &c.type_params,
+                                &c.type_param_bounds,
+                            );
                         let check = if !p.ty.nullable()
-                            && !is_type_param
+                            && !nullable_type_param
                             && class_sig.ctor_params[i].is_reference()
                         {
                             Some(p.name.clone())
@@ -1273,10 +1282,12 @@ fn lower_file_at_reporting_impl(
                 }
                 params.extend(logical_params.iter().map(|parameter| ty_to_ir(*parameter)));
                 let class_nonnull_tps: std::collections::HashSet<String> = c
-                    .type_param_bounds
+                    .type_params
                     .iter()
-                    .filter(|(_, tr)| !tr.nullable())
-                    .map(|(n, _)| n.clone())
+                    .filter(|name| {
+                        !declared_type_param_admits_null(name, &c.type_params, &c.type_param_bounds)
+                    })
+                    .cloned()
                     .collect();
                 let mut param_checks =
                     param_checks_for(m, &logical_params, &c.type_params, &class_nonnull_tps);
@@ -17122,6 +17133,25 @@ impl<'a> Lower<'a> {
         Some(self.coerce_to_static(call, prop_ty, linked_ret))
     }
 
+    /// The PHYSICAL type a property the owner DECLARES reads back as, when the declaration is what
+    /// erases it: a property typed as a type parameter with a REFERENCE bound erases to that bound
+    /// (`class Holder<T : Base>(val value: T)` compiles `getValue()` to `()LBase;`), so a read through
+    /// an applied receiver (`Holder<Sub>.value`) has to narrow from it. The substituted read type the
+    /// checker records cannot supply this — it is already `Sub`.
+    ///
+    /// `None` for an unknown owner/property, and deliberately for an erasure that is the TOP
+    /// (`Object`, an unbounded parameter): the emitter narrows that at the realization itself, and
+    /// naming it here would stack a second `checkcast` on the same value.
+    fn declared_property_bound_erasure(&self, owner: TypeName, name: &str) -> Option<Ty> {
+        let erased = self
+            .syms
+            .class_by_type_name(owner)?
+            .declared_props
+            .get(name)?
+            .ty;
+        (erased.is_reference() && !erased.non_null().is_erased_top()).then_some(erased)
+    }
+
     fn lower_member_read_on(&mut self, recv: u32, rt: Ty, name: &str, e: AstExprId) -> Option<u32> {
         // Resolve against the NON-NULL type. A receiver whose static type keeps its `?` (a smart-cast /
         // `!!` value bound to a call-result local, whose narrowing krusty doesn't propagate to the read
@@ -17172,7 +17202,16 @@ impl<'a> Lower<'a> {
                 );
                 resolved.member.physical_ret
             } else {
-                *declaration_ty
+                // `declaration_ty` is the SUBSTITUTED property type (`Holder<Sub>.value` → `Sub`), which
+                // is the logical read, not the accessor's physical return. When the property is declared
+                // as a type parameter with a REFERENCE bound the accessor erases to that bound
+                // (`getValue()LBase;`), so the read has to narrow — and only the owner's declaration
+                // carries that fact. Restricted to a non-`Object` bound on purpose: an UNBOUNDED
+                // parameter erases to the top, which the emitter already narrows at the realization
+                // itself, and naming it here would stack a second `checkcast` on the same value.
+                self.declared_property_bound_erasure(*owner, declaration_name)
+                    .filter(|erased| *erased != *declaration_ty)
+                    .unwrap_or(*declaration_ty)
             };
             // `declaration_ty` is the selected property's type before flow narrowing and before a
             // safe call adds its nullable result.  The checker may narrow an ordinary read (or a
@@ -28523,6 +28562,47 @@ fn expr_tree_calls_name_where(
     )
 }
 
+/// Whether a DECLARED type parameter admits `null`: an unbounded `<T>` (implicitly `Any?`) or one whose
+/// upper bound is nullable. kotlinc treats a value typed by a NON-null-bounded parameter as an ordinary
+/// non-null reference — `@NotNull` on the field/accessor/parameter and an `Intrinsics.checkNotNullParameter`
+/// guard at entry — and one that admits null as nullable, so this predicate selects both.
+///
+/// A bound may name another parameter of the same declaration (`<A : Cargo, B : A>`); follow that chain
+/// (cycle-guarded) so `B` inherits `A`'s nullability. This reads the DECLARED (source) bounds; the JVM
+/// emitter states the same rule over the RESOLVED bounds it finds in the generic signature
+/// ([`crate::ir::IrFile::class_type_param_admits_null`], `Ty::upper_bound_admits_null`).
+fn declared_type_param_admits_null(
+    name: &str,
+    names: &[String],
+    bounds: &[(String, ast::TypeRef)],
+) -> bool {
+    /// Whether any declared bound of `current` is a NON-null real type, following a bound that names a
+    /// sibling parameter through to its own bounds. Cycle-guarded (`<A : B, B : A>` bottoms out here).
+    fn bounded_non_null(
+        current: &str,
+        names: &[String],
+        bounds: &[(String, ast::TypeRef)],
+        seen: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !seen.insert(current.to_string()) {
+            return false;
+        }
+        bounds
+            .iter()
+            .filter(|(owner, _)| owner == current)
+            .any(|(_, bound)| {
+                if bound.nullable() {
+                    false
+                } else if names.iter().any(|sibling| sibling == &bound.name) {
+                    bounded_non_null(&bound.name, names, bounds, seen)
+                } else {
+                    true
+                }
+            })
+    }
+    !bounded_non_null(name, names, bounds, &mut std::collections::HashSet::new())
+}
+
 /// The `checkNotNullParameter` guard an EXTENSION receiver carries: kotlinc names it `<this>` and
 /// guards it exactly like a value parameter — a non-null reference receiver, but not a nullable one
 /// and not a bare type parameter without a non-null bound (`fun <T> T.f()` accepts null).
@@ -28550,9 +28630,15 @@ fn param_checks_for(
             // A parameter typed as a TYPE PARAMETER (the function's own or the enclosing class's) is
             // null-checked only when that parameter has a NON-NULL bound; an unbounded `T` (= `Any?`,
             // nullable) is not — e.g. `Map<K, V>.get(key: K)` on a `K = Any?` instantiation accepts null.
-            // A function type parameter uses the same rule via the function's non-null set.
+            // The function's own parameters read their DECLARED bounds, which subsumes the parser's
+            // `f.non_null_type_params`: that set holds a literal `<T : Any>` bound alone and misses
+            // every other non-null one (`<T : Cargo>`).
             let nullable_type_param = (f.type_params.contains(&p.ty.name)
-                && !f.non_null_type_params.contains(&p.ty.name))
+                && declared_type_param_admits_null(
+                    &p.ty.name,
+                    &f.type_params,
+                    &f.type_param_bounds,
+                ))
                 || (class_type_params.contains(&p.ty.name)
                     && !class_nonnull_type_params.contains(&p.ty.name));
             // A value-class parameter is erased to its underlying type; the null-check applies to that

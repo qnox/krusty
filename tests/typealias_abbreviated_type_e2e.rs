@@ -95,6 +95,11 @@ fn the_same_shapes_without_an_alias_are_already_byte_identical() {
         "package app\n\nopen class Payload(val v: Int)\n\nval top: Payload? = null\n\nval Payload.ext: Payload get() = this\n",
         "app/PropsBaseKt",
     );
+    assert_identical(
+        "BoundClassBase",
+        "package app\n\nopen class Payload(val v: Int)\n\nclass Bounded<T : Payload>(val t: T)\n",
+        "app/Bounded",
+    );
 }
 
 /// The abbreviation is recorded PER TYPE NODE, not per declaration: in `List<Cargo>` it belongs to
@@ -153,6 +158,16 @@ fn an_alias_right_hand_side_propagates_its_own_spellings_into_the_expansion() {
 fn a_type_parameter_bound_spelled_as_an_alias_is_abbreviated() {
     let src = format!("{PRELUDE}\nfun <T : Cargo> bound(t: T): T = t\n");
     assert_identical("Bound", &src, "app/BoundKt");
+}
+
+/// A CLASS type parameter's bound is a declared type too — the class counterpart of the row above.
+/// This one had to be left out while a bounded CLASS parameter still erased to `Object`: the
+/// constructor, backing field and getter all spelled `Ljava/lang/Object;`, so the fixture diverged on
+/// erasure long before its abbreviation could be compared. It erases to the bound now.
+#[test]
+fn a_class_type_parameter_bound_spelled_as_an_alias_is_abbreviated() {
+    let src = format!("{PRELUDE}\nclass Bounded<T : Cargo>(val t: T)\n");
+    assert_identical("BoundedClass", &src, "app/Bounded");
 }
 
 /// A top-level property's declared type, and an extension property's receiver.
