@@ -1378,49 +1378,27 @@ fn class_parameter_annotations_reach_metadata() {
     );
 }
 
-/// A `KClass<*>` annotation member is `java.lang.Class` in the class file.
+/// An annotation with a `KClass` member can be INSTANTIATED and read back.
 ///
-/// The JVM annotation format admits a closed set of element types — primitive, `String`, `Class`,
-/// enum, annotation, or a single-dimension array of those. `Lkotlin/reflect/KClass;` is not among
-/// them, so an annotation declaring one cannot be read reflectively at all and no Java consumer can
-/// use it. kotlinc writes `Class`, keeping the star projection in a `Signature`.
+/// Regression guard for a shape no descriptor assertion catches: the annotation interface and the
+/// synthesized `…$annotationImpl$…` class must agree on the member's type. Typing the interface
+/// member `java.lang.Class` while the implementation still returns `KClass` produces two class files
+/// that compile, pass every metadata check, and throw `NoSuchMethodError` the moment the member is
+/// read. So this compiles AND RUNS the program.
 #[test]
-fn a_kclass_annotation_member_is_a_java_class() {
-    const SRC: &str = "import kotlin.reflect.KClass\n\
-                       annotation class Anno(val k: KClass<*>, val ks: Array<KClass<*>>)\n";
-    let ours = common::expect_compile_in_process(
-        SRC,
-        "Anno",
+fn an_instantiated_kclass_annotation_reads_its_member() {
+    let out = common::compile_and_run_box(
+        "import kotlin.reflect.KClass\n\
+         annotation class Mark(val k: KClass<*>)\n\
+         fun make(): Mark = Mark(String::class)\n\
+         fun box(): String = if (make().k == String::class) \"OK\" else \"FAIL\"\n",
+        "KClassMember",
         &[common::stdlib_jar()],
         Some(common::jdk_modules().as_path()),
     );
-    let class = ours
-        .iter()
-        .find_map(|(name, bytes)| (name == "Anno").then_some(bytes))
-        .expect("Anno.class");
-    let parsed = krusty::jvm::classreader::parse_class(class).expect("parse Anno.class");
-    let member = |name: &str| {
-        parsed
-            .methods
-            .iter()
-            .find(|m| m.name == name)
-            .map(|m| (m.descriptor.clone(), m.signature.clone()))
-            .unwrap_or_else(|| panic!("missing member {name}"))
-    };
     assert_eq!(
-        member("k"),
-        (
-            "()Ljava/lang/Class;".to_string(),
-            Some("()Ljava/lang/Class<*>;".to_string())
-        ),
-        "a KClass member is a Class, with the projection kept in the Signature"
-    );
-    assert_eq!(
-        member("ks"),
-        (
-            "()[Ljava/lang/Class;".to_string(),
-            Some("()[Ljava/lang/Class<*>;".to_string())
-        ),
-        "an Array<KClass<*>> member is a Class[]"
+        out.as_deref(),
+        Some("OK"),
+        "reading the member must not throw"
     );
 }

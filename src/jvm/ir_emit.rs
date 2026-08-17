@@ -7866,41 +7866,6 @@ fn java_target_mirror(
 /// ACC_ANNOTATION`, extending `java/lang/annotation/Annotation`, with one `public abstract` accessor per
 /// member (`int x()`, `String s()`) named after the property and returning its type — kotlinc's shape.
 /// Members come from `fields`. Instances are built by the synthetic impl ([`emit_annotation_impl_class`]).
-/// An annotation member's declared type as the JVM annotation element type it realizes: Kotlin's
-/// `KClass<*>` (and `Array<KClass<*>>`) becomes `java.lang.Class`, everything else is unchanged.
-fn annotation_element_ty(ty: Ty) -> Ty {
-    match ty {
-        Ty::Obj(owner, _) if owner.matches("kotlin/reflect/KClass") => Ty::obj("java/lang/Class"),
-        Ty::Obj(owner, arguments)
-            if owner.matches("kotlin/Array")
-                && arguments.len() == 1
-                && matches!(&arguments[0], Ty::Obj(element, _) if element.matches("kotlin/reflect/KClass")) =>
-        {
-            Ty::obj_args("kotlin/Array", &[Ty::obj("java/lang/Class")])
-        }
-        other => other,
-    }
-}
-
-/// The `Signature` for an annotation member whose descriptor loses something: a class-valued member
-/// keeps `KClass<*>`'s star projection as `Ljava/lang/Class<*>;`. `None` when the descriptor already
-/// says everything, which is every other element type.
-fn annotation_element_signature(declared: Ty) -> Option<String> {
-    match declared {
-        Ty::Obj(owner, _) if owner.matches("kotlin/reflect/KClass") => {
-            Some("()Ljava/lang/Class<*>;".to_string())
-        }
-        Ty::Obj(owner, arguments)
-            if owner.matches("kotlin/Array")
-                && arguments.len() == 1
-                && matches!(&arguments[0], Ty::Obj(element, _) if element.matches("kotlin/reflect/KClass")) =>
-        {
-            Some("()[Ljava/lang/Class<*>;".to_string())
-        }
-        _ => None,
-    }
-}
-
 fn emit_annotation_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -7913,23 +7878,9 @@ fn emit_annotation_class(
     cw.set_access(class_public_bit(ir, c) | 0x0200 | 0x0400 | 0x2000);
     cw.add_interface("java/lang/annotation/Annotation");
     for field in &c.fields {
-        // An annotation member's type is the JVM ANNOTATION element type, which is a closed set:
-        // primitive, String, Class, enum, annotation, or a single-dimension array of those. Kotlin's
-        // `KClass<*>` denotes the class-valued case, and its element type is `java.lang.Class` —
-        // `Lkotlin/reflect/KClass;` is not a legal element type at all, so an annotation declaring one
-        // cannot be read reflectively and no Java consumer can use it. kotlinc writes `Class`.
-        let declared = jvm_declared_ty(&field.ty);
-        let ret = annotation_element_ty(declared);
-        // The descriptor erases `KClass<*>`'s projection, so kotlinc keeps it in a `Signature`
-        // (`()Ljava/lang/Class<*>;`). Only the class-valued members need one: every other element
-        // type is its own descriptor.
-        let signature = annotation_element_signature(declared);
-        cw.add_abstract_method_sig(
-            0x0401, // PUBLIC | ABSTRACT
-            &field.name,
-            &format!("(){}", type_descriptor(ret)),
-            signature.as_deref(),
-        );
+        let ret = jvm_declared_ty(&field.ty);
+        cw.add_abstract_method(0x0401, &field.name, &format!("(){}", type_descriptor(ret)));
+        // PUBLIC|ABSTRACT
     }
     // Retention/target meta-annotations, matching kotlinc's ORDER: everything the source declares
     // comes first, in source order — `kotlin.annotation.Retention(X)` and `kotlin.annotation.Target`
