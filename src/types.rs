@@ -710,6 +710,16 @@ pub enum Ty {
     Nothing,
     /// Placeholder after a type error, suppresses cascading diagnostics.
     Error,
+    /// A declaration whose type is NOT DETERMINED YET — recorded by signature collection for an
+    /// implicitly-typed declaration the resolution engine has not resolved.
+    ///
+    /// Distinct from [`Ty::Error`] on purpose. Spelling "not yet" and "gave up" the same way is what
+    /// forces every read site to be taught the difference by hand: a reader that finds `Error`
+    /// cannot know whether asking the engine would help, so each place has to be patched
+    /// individually and any place that is missed silently publishes a wrong type. `Pending` is
+    /// answerable — a read of it demands the declaration, and it must never reach emission or
+    /// `@Metadata`, which is an invariant that can be asserted rather than hoped for.
+    Pending,
     /// A Kotlin function type `(A, B) -> R`. The front end keeps the real parameter/return types
     /// (interned `FnSig`) so a call through a `Fun` value recovers its return type.
     Fun(&'static FnSig),
@@ -1373,6 +1383,9 @@ impl Ty {
                 inner.source_name_with_type_parameter(type_parameter)
             ),
             Ty::TyParam(n, _) => type_parameter(n),
+            // Only reachable from a diagnostic rendered while the declaration is still being
+            // resolved; it never names a real type.
+            Ty::Pending => "<not determined>".to_string(),
         }
     }
 
@@ -1396,6 +1409,7 @@ impl Ty {
             Ty::Null => "Null".to_string(),
             Ty::Nothing => "Nothing".to_string(),
             Ty::Error => "<error>".to_string(),
+            Ty::Pending => "<not determined>".to_string(),
             Ty::Fun(_) => "Function".to_string(),
             Ty::Nullable(inner) => format!("{}?", inner.name()),
             Ty::PlatformNullable(inner) => format!("{}!", inner.name()),

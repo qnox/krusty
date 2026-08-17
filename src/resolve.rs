@@ -7389,8 +7389,8 @@ fn collect_signatures_with_cp_impl(
                                     // walk's answer is the one that gets published. Every
                                     // implicitly-typed member is resolved from its own declaration
                                     // afterwards instead.
-                                    let inferred = Ty::Error;
-                                    if inferred == Ty::Error && bp.receiver.is_none() {
+                                    let inferred = Ty::Pending;
+                                    if inferred == Ty::Pending && bp.receiver.is_none() {
                                         deferred_properties.push(DeferredProperty {
                                             key: DeclKey::member(
                                                 i as u32,
@@ -7417,8 +7417,8 @@ fn collect_signatures_with_cp_impl(
                                 }
                                 (None, _) => match bp.init {
                                     Some(expression) => {
-                                        let inferred = Ty::Error;
-                                        if inferred == Ty::Error && bp.receiver.is_none() {
+                                        let inferred = Ty::Pending;
+                                        if inferred == Ty::Pending && bp.receiver.is_none() {
                                             deferred_properties.push(DeferredProperty {
                                                 key: DeclKey::member(
                                                     i as u32,
@@ -8650,8 +8650,8 @@ fn collect_signatures_with_cp_impl(
                         match (p.declared_ty(), &p.getter) {
                             (Some(r), _) => ty_of_ref(r, &class_names, &property_tparams, diags),
                             // As for members: resolved from the declaration itself afterwards.
-                            (None, Some(FunBody::Expr(_))) if is_computed => Ty::Error,
-                            (None, _) => Ty::Error,
+                            (None, Some(FunBody::Expr(_))) if is_computed => Ty::Pending,
+                            (None, _) => Ty::Pending,
                         }
                     };
                     // `null` is the expression type used by applicability, while an inferred
@@ -8663,7 +8663,7 @@ fn collect_signatures_with_cp_impl(
                     // visits files in ARGUMENT order — so record it and let the engine resolve it on
                     // demand once the walk is over. Diagnosing here is what made the answer depend
                     // on the order the compiler was asked in.
-                    if ty == Ty::Error
+                    if ty == Ty::Pending
                         && p.declared_ty().is_none()
                         && p.delegate.is_none()
                         && (p.init.is_some() || p.getter.is_some())
@@ -10569,7 +10569,7 @@ impl DeferredInferenceDriver<'_> {
             .props
             .get(name)
             .map(|(ty, _, _)| *ty)
-            .filter(|ty| *ty != Ty::Error)
+            .filter(|ty| *ty != Ty::Pending && *ty != Ty::Error)
     }
 
     /// The declaration `name` refers to, resolved now if it has not been typed yet.
@@ -10745,6 +10745,10 @@ fn resolve_deferred_properties(
     };
     for (entry, resolution) in resolutions {
         let Some(ty) = resolution.ty() else {
+            // Undetermined is not a type. Replace the marker with the ordinary error placeholder so
+            // nothing downstream — emission, `@Metadata`, a later read — can mistake "not resolved"
+            // for a shape, and report the decline.
+            decline_pending_property(table, entry);
             diags.set_file(entry.file_index);
             diags.error(
                 entry.span,
@@ -10783,6 +10787,40 @@ fn resolve_deferred_properties(
     }
 }
 
+/// Turn a declaration the engine could not determine into the ordinary error placeholder.
+fn decline_pending_property(table: &mut SymbolTable, entry: &DeferredProperty) {
+    if let Some(signature) = table
+        .source_props
+        .get_mut(&(entry.file_index, entry.key.decl))
+        .filter(|signature| signature.ty == Ty::Pending)
+    {
+        signature.ty = Ty::Error;
+    }
+    if let Some(module_property) = table
+        .props
+        .get_mut(&entry.name)
+        .filter(|property| property.0 == Ty::Pending)
+    {
+        module_property.0 = Ty::Error;
+    }
+    if let Some(owner) = entry.owner() {
+        if let Some(signature) = table.class_by_type_name_mut(owner) {
+            if let Some(property) = signature
+                .declared_props
+                .get_mut(&entry.name)
+                .filter(|property| property.ty == Ty::Pending)
+            {
+                property.ty = Ty::Error;
+            }
+            for backing in signature.props.iter_mut() {
+                if backing.0 == entry.name && backing.1 == Ty::Pending {
+                    backing.1 = Ty::Error;
+                }
+            }
+        }
+    }
+}
+
 /// Write a resolved top-level property type into the module signature.
 fn publish_top_level_property_type(
     files: &[File],
@@ -10807,7 +10845,7 @@ fn publish_top_level_property_type(
     let published = table
         .source_props
         .get_mut(&(entry.file_index, entry.key.decl))
-        .filter(|signature| signature.ty == Ty::Error)
+        .filter(|signature| signature.ty == Ty::Pending)
         .map(|signature| {
             signature.ty = ty;
             signature.compile_time_constant = compile_time_constant.clone();
@@ -11203,6 +11241,12 @@ fn infer_class_member_ty(
     if declines {
         return Ty::Error;
     }
+    if inferred == Ty::Pending {
+        // The body's own type is still the marker: something it read was undetermined and stayed
+        // that way. Publishing it would make "not resolved" look like a type — and, for a cycle
+        // between two members, would report nothing at all.
+        return Ty::Error;
+    }
     let inferred = withheld_declaration_ty(table, file_index, inferred);
     withheld_construction_ty(file, expression, &types, table, inferred)
 }
@@ -11257,6 +11301,9 @@ fn infer_declaration_ty(
     if checker.inference_incomplete
         || declaration_body_declines(file, expression, &checker.expr_types)
     {
+        return Ty::Error;
+    }
+    if inferred == Ty::Pending {
         return Ty::Error;
     }
     let inferred = withheld_declaration_ty(table, file_index, inferred);
@@ -36484,7 +36531,7 @@ impl<'a> Checker<'a> {
                         // or fails outright, while the declaration is still being resolved — both
                         // mean "not yet", not "no such property", so both ask the engine.
                         TopLevelPropertySelection::Selected(property)
-                            if property.property.ty == Ty::Error =>
+                            if property.property.ty == Ty::Pending =>
                         {
                             match self.demand_name.and_then(|demand| demand(&n)) {
                                 Some(ty) => {
@@ -37012,10 +37059,10 @@ impl<'a> Checker<'a> {
             // inside `check_member`, which is also called speculatively — by `try_member_read` and
             // `check_member_quietly`, both of which roll their diagnostics back — so a hook there
             // would fire on every probe of every implicit receiver.
-            let declared = if declared == Ty::Error {
+            let declared = if declared == Ty::Pending || declared == Ty::Error {
                 self.demand_member
                     .and_then(|demand| demand(rt, &name))
-                    .map_or(Ty::Error, |ty| self.set(e, ty))
+                    .map_or(declared, |ty| self.set(e, ty))
             } else {
                 declared
             };

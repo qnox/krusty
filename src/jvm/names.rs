@@ -228,6 +228,10 @@ pub fn type_descriptor(ty: Ty) -> String {
     // `Ty` that reaches bytecode.
     let obj_desc = |internal: &str| format!("L{};", classfile_internal_name(internal));
     match ty {
+        // The resolution engine converts an undetermined declaration into a decline before
+        // anything is emitted, so reaching emission with one is a broken invariant, not a shape to
+        // encode. Silently writing `Object` here is how a wrong descriptor used to ship.
+        Ty::Pending => unreachable!("a not-determined type reached {}", "a JVM descriptor"),
         Ty::Int => "I".into(),
         Ty::Byte => "B".into(),
         Ty::Short => "S".into(),
