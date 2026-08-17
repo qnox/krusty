@@ -829,6 +829,7 @@ mod tests {
                 vararg_index: None,
                 visibility: crate::types::Visibility::Public,
                 spellings: crate::spelling::DeclaredSpellings::default(),
+                param_annotations: Vec::new(),
             }],
             &[],
             &[],
