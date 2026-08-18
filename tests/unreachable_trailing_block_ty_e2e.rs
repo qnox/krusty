@@ -24,3 +24,41 @@ fn a_block_that_yields_nothing_is_still_nothing() {
         fun box(): String = \"OK\"\n";
     common::expect_front_end_ok_files_with_stdlib(&[SRC], "DivergingBlockAnnotated");
 }
+
+#[test]
+fn a_statement_block_after_a_return_still_diverges() {
+    // The converse of the rule above, and why it is restricted to VALUE position: a block that
+    // begins with `return` transfers control and produces nothing, so typing it by its trailing
+    // STATEMENT would say it falls through — which hands the dead code to lowering.
+    const SRC: &str = concat!(
+        "fun box(): String {\n",
+        "    try {\n",
+        "        return \"OK\"\n",
+        "        if (1 == 1) { val z = 2 }\n",
+        "        if (3 == 3) { val z = 4 }\n",
+        "    } finally {\n",
+        "    }\n",
+        "}\n",
+    );
+    common::expect_box_ok_with_stdlib(SRC, "DeadCodeAfterReturn");
+}
+
+#[test]
+fn a_member_return_reading_an_undetermined_companion_property() {
+    // A return the pre-inference pass cannot determine is not an answer: publishing the marker makes
+    // "not resolved yet" look like a type, and it sticks — the later pass finds the return already
+    // set. `fun res() = res` reads the private companion property while that property is still being
+    // resolved, and the declaration was then rejected with "expected 'String', actual
+    // '<not determined>'".
+    //
+    // Front end only: running this shape hits a separate defect in how a PRIVATE companion's
+    // property is accessed at runtime, which predates this rule and is not what it fixes.
+    const SRC: &str = concat!(
+        "class Test {\n",
+        "    private companion object { val res = \"OK\" }\n",
+        "    fun res() = res\n",
+        "}\n",
+        "fun box(): String = Test().res()\n",
+    );
+    common::expect_front_end_ok_files_with_stdlib(&[SRC], "UndeterminedCompanionReturn");
+}

@@ -17077,6 +17077,19 @@ fn preinfer_returns_pass_with_owners(
     let member_ext_fun_rets = std::mem::take(&mut pre.inferred_member_ext_fun_rets);
     drop(pre);
     let mut result = PreinferPassResult::default();
+    // A return the pass could not determine is NOT an answer. The returns fixpoint now also runs
+    // before deferred declarations have types (so that a declaration reading a member return has
+    // something to read), which means a body can reach a member whose own type is still pending —
+    // `class Test { private companion object { val res = "OK" }; fun res() = res }`. Publishing that
+    // marker as the return makes "not resolved yet" look like a type, and it is sticky: the later
+    // pass sees a return that is already set. The pass simply leaves those for the next round.
+    let determined = |ret: &Ty| !ret.mentions_pending();
+    let fun_rets = fun_rets.into_iter().filter(|(_, ret)| determined(ret));
+    let ext_rets = ext_rets.into_iter().filter(|(_, ret)| determined(ret));
+    let method_rets = method_rets.into_iter().filter(|(_, ret)| determined(ret));
+    let member_ext_fun_rets = member_ext_fun_rets
+        .into_iter()
+        .filter(|(_, ret)| determined(ret));
     for ((file, decl), ret) in fun_rets {
         if let Some((name, sig)) = syms.funs.iter_mut().find_map(|(name, sigs)| {
             sigs.iter_mut()
@@ -37882,7 +37895,13 @@ impl<'a> Checker<'a> {
                 Some(_) if trailing_contract.is_some() => Ty::Unit,
                 Some(te) => {
                     let trailing_ty = self.expr_result(scope, te, expected, value_required);
-                    match diverged && trailing_ty == Ty::Error {
+                    // Only where the block's VALUE is used. A statement block after a diverging
+                    // statement transfers control and produces nothing — `fun f() { return "OK"; …
+                    // }` is the shape — and calling it by its trailing statement's type says the
+                    // block falls through, which hands the dead code to lowering. The rule this
+                    // commit exists for is about typing a DECLARATION from a block that yields a
+                    // value; a statement block still diverges.
+                    match diverged && (!value_required || trailing_ty == Ty::Error) {
                         // Nothing usable came back from dead code; keep the old answer so a block
                         // that genuinely yields no value is still `Nothing` rather than an error.
                         true => Ty::Nothing,
