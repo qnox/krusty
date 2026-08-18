@@ -8047,7 +8047,7 @@ fn emit_annotation_impl_class(
         );
     }
 
-    emit_annotation_equals(&mut cw, &fq, iface, &members);
+    emit_annotation_equals(env, &mut cw, &fq, iface, &members);
     emit_annotation_hashcode(ir, &mut cw, &fq, &members);
     emit_annotation_tostring(&mut cw, &fq, iface, &members);
     // annotationType(): return <iface>.class. LAST, after the `Object` overrides — kotlinc's member
@@ -8066,50 +8066,62 @@ fn emit_annotation_impl_class(
 /// member must be equal (arrays compared by content via `Arrays.equals`; `float`/`double` via their
 /// wrappers' `equals` so `NaN`==`NaN` and `-0.0`!=`0.0` per the annotation contract; other references via
 /// `Object.equals`). One `false` exit label.
-fn emit_annotation_equals(cw: &mut ClassWriter, fq: &str, iface: &str, members: &[(String, Ty)]) {
+fn emit_annotation_equals(
+    env: &EmitEnv,
+    cw: &mut ClassWriter,
+    fq: &str,
+    iface: &str,
+    members: &[(String, Ty)],
+) {
+    // kotlinc's shape. Three things differ from the obvious encoding, all visible in the class file:
+    //
+    // - Every check returns EARLY (`ifne L; iconst_0; ireturn; L:`) instead of branching to one
+    //   shared exit label, so the body carries one frame per member.
+    // - BOTH sides are read through the annotation INTERFACE (`aload_0; checkcast I;
+    //   invokeinterface I.m()`), this object's own side included — never `getfield`. An annotation's
+    //   contract is its interface, which a proxy or another implementation satisfies too.
+    // - The comparison is per type: `if_icmpeq` for the int-likes, `lcmp`, `Float`/`Double.compare`
+    //   (not the wrapper's `equals`), `if_acmpeq` for an ENUM member, `Arrays.equals` for an array,
+    //   and `Intrinsics.areEqual` for every other reference.
     let mut cb = CodeBuilder::new(2); // this=0, o=1
     cb.ensure_locals(3); // +o-as-iface at local 2
-    let lfalse = cb.new_label();
     let icls = cw.class_ref(iface);
+    let self_ty = VerifType::ObjectName(crate::jvm::names::classfile_internal_name(fq));
+    let object_ty = VerifType::ObjectName("java/lang/Object".to_string());
+    let iface_ty = VerifType::ObjectName(crate::jvm::names::classfile_internal_name(iface));
+    let member_locals = vec![self_ty.clone(), object_ty.clone(), iface_ty];
+
+    let typed = cb.new_label();
     cb.aload(1);
     cb.instance_of(icls);
-    cb.ifeq(lfalse);
+    cb.add_frame_if_new(typed, vec![self_ty, object_ty], Vec::new());
+    cb.ifne(typed);
+    cb.push_int(0, cw);
+    cb.ireturn();
+    cb.bind(typed);
     cb.aload(1);
     cb.checkcast(icls);
     cb.astore(2);
     for (name, jt) in members {
-        let fref = cw.fieldref(fq, name, &type_descriptor(*jt));
         let aref = cw.interface_methodref(iface, name, &format!("(){}", type_descriptor(*jt)));
-        let push_this = |cb: &mut CodeBuilder| {
-            cb.aload(0);
-            cb.getfield(fref, slot_words(*jt) as i32);
-        };
-        let push_other = |cb: &mut CodeBuilder| {
-            cb.aload(2);
-            cb.invokeinterface(aref, 0, slot_words(*jt) as i32);
-        };
+        let next = cb.new_label();
+        cb.aload(0);
+        cb.checkcast(icls);
+        cb.invokeinterface(aref, 0, slot_words(*jt) as i32);
+        cb.aload(2);
+        cb.invokeinterface(aref, 0, slot_words(*jt) as i32);
+        cb.add_frame_if_new(next, member_locals.clone(), Vec::new());
         match *jt {
-            Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => {
-                push_this(&mut cb);
-                push_other(&mut cb);
-                cb.if_icmpne(lfalse);
-            }
+            Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => cb.if_icmpeq(next),
             Ty::Long => {
-                push_this(&mut cb);
-                push_other(&mut cb);
                 cb.lcmp();
-                cb.ifne(lfalse);
+                cb.ifeq(next);
             }
             Ty::Float | Ty::Double => {
                 let (wrap, pd) = prim_wrapper(*jt).unwrap();
-                let valueof = cw.methodref(wrap, "valueOf", &format!("({pd})L{wrap};"));
-                push_this(&mut cb);
-                cb.invokestatic(valueof, slot_words(*jt) as i32, 1);
-                push_other(&mut cb);
-                cb.invokestatic(valueof, slot_words(*jt) as i32, 1);
-                let eq = cw.methodref(wrap, "equals", "(Ljava/lang/Object;)Z");
-                cb.invokevirtual(eq, 1, 1);
-                cb.ifeq(lfalse);
+                let compare = cw.methodref(wrap, "compare", &format!("({pd}{pd})I"));
+                cb.invokestatic(compare, 2 * slot_words(*jt) as i32, 1);
+                cb.ifeq(next);
             }
             _ if jt.is_array() => {
                 let arr_desc = arrays_param_desc(*jt);
@@ -8118,32 +8130,36 @@ fn emit_annotation_equals(cw: &mut ClassWriter, fq: &str, iface: &str, members: 
                     "equals",
                     &format!("({arr_desc}{arr_desc})Z"),
                 );
-                push_this(&mut cb);
-                push_other(&mut cb);
                 cb.invokestatic(eq, 2, 1);
-                cb.ifeq(lfalse);
+                cb.ifne(next);
+            }
+            // An ENUM constant is a singleton, so kotlinc compares one by IDENTITY. Asked of the
+            // symbol source rather than of this file's classes, so a classpath enum answers the same
+            // as a source-declared one.
+            other
+                if other.obj_internal().is_some_and(|internal| {
+                    env.signature_symbols
+                        .classifier(internal)
+                        .is_some_and(|classifier| !classifier.enum_entries.is_empty())
+                }) =>
+            {
+                cb.if_acmpeq(next)
             }
             _ => {
-                // Reference member (String / enum / nested annotation): Object.equals.
-                push_this(&mut cb);
-                push_other(&mut cb);
-                let eq = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
-                cb.invokevirtual(eq, 1, 1);
-                cb.ifeq(lfalse);
+                let eq = cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "areEqual",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+                );
+                cb.invokestatic(eq, 2, 1);
+                cb.ifne(next);
             }
         }
+        cb.push_int(0, cw);
+        cb.ireturn();
+        cb.bind(next);
     }
     cb.push_int(1, cw);
-    cb.ireturn();
-    cb.bind(lfalse);
-    let impl_ref = cw.class_ref(fq);
-    let obj_ref = cw.class_ref("java/lang/Object");
-    cb.add_frame_if_new(
-        lfalse,
-        vec![VerifType::Object(impl_ref), VerifType::Object(obj_ref)],
-        vec![],
-    );
-    cb.push_int(0, cw);
     cb.ireturn();
     cb.set_needs_stackmap();
     cb.link();

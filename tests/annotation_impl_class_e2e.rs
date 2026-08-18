@@ -394,3 +394,78 @@ fn the_implementation_tostring_matches_kotlinc() {
         );
     }
 }
+
+/// The implementation's `equals` is kotlinc's, in shape AND in behaviour.
+///
+/// Three shape rules: each check returns EARLY rather than branching to one shared exit label; both
+/// sides are read through the annotation INTERFACE (`checkcast; invokeinterface`), this object's own
+/// side included, because an annotation's contract is its interface and a proxy satisfies it too; and
+/// the comparison is per type — `if_acmpeq` for an ENUM member (a constant is a singleton),
+/// `Float`/`Double.compare` rather than the wrapper's `equals`, `Intrinsics.areEqual` elsewhere.
+///
+/// The behavioural half matters just as much: `Double.compare` fixes NaN == NaN and -0.0 != 0.0, and
+/// an argument that is not the annotation at all must answer false.
+#[test]
+fn the_implementation_equals_matches_kotlinc() {
+    const SRC: &str = "enum class E { A, B }\n\
+                       annotation class Inner(val x: Int)\n\
+                       annotation class Big(val i: Int, val d: Double, val t: String,\n\
+                                            val a: IntArray, val e: E, val n: Inner)\n\
+                       fun mk(i: Int = 1, d: Double = 2.0, t: String = \"s\",\n\
+                              a: IntArray = intArrayOf(1), e: E = E.A): Big = Big(i, d, t, a, e, Inner(9))\n\
+                       fun box(): String {\n\
+                           val same = mk() == mk()\n\
+                           val byValue = mk() == mk(i = 2)\n\
+                           val byArray = mk() == mk(a = intArrayOf(2))\n\
+                           val byEnum = mk() == mk(e = E.B)\n\
+                           val nan = mk(d = Double.NaN) == mk(d = Double.NaN)\n\
+                           val zero = mk(d = -0.0) == mk(d = 0.0)\n\
+                           val other = mk().equals(\"not an annotation\")\n\
+                           return if (same && !byValue && !byArray && !byEnum && nan && !zero && !other)\n\
+                                  \"OK\" else \"FAIL\"\n\
+                       }\n";
+    let Some(build) = common::compile_libs_build("annotation_equals_shape", &[("Eq.kt", SRC)])
+    else {
+        return; // reference compiler unavailable
+    };
+    let reference_dir = build
+        .reference_out()
+        .expect("reference compiler output unavailable");
+    let ours = common::expect_compile_in_process(
+        SRC,
+        "Eq",
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    let impl_name = ours
+        .iter()
+        .map(|(name, _)| name.clone())
+        .find(|name| name.contains("$annotationImpl$Big$"))
+        .expect("the Big implementation class");
+    let body = |bytes: &[u8]| {
+        krusty::jvm::classreader::read_method_code(bytes, "equals", "(Ljava/lang/Object;)Z")
+            .expect("equals body")
+            .code
+    };
+    let ours_bytes = ours
+        .iter()
+        .find_map(|(name, bytes)| (*name == impl_name).then_some(bytes.clone()))
+        .expect("our implementation class");
+    let reference_bytes =
+        std::fs::read(reference_dir.join(format!("{impl_name}.class"))).expect("reference class");
+    assert_eq!(
+        body(&ours_bytes).len(),
+        body(&reference_bytes).len(),
+        "the equals body must be kotlinc's, not merely behaviour-equivalent"
+    );
+    assert_eq!(
+        common::run_box(
+            &ours,
+            &common::find_box_class(&ours).expect("box class"),
+            &[common::stdlib_jar()]
+        )
+        .as_deref(),
+        Some("OK"),
+        "NaN, -0.0, array content, enum identity and a non-annotation argument must all behave"
+    );
+}
