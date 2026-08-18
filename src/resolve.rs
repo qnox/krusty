@@ -34913,6 +34913,31 @@ impl<'a> Checker<'a> {
                 })
                 .flatten()
         });
+        // A call selected by the lambda's RETURN type (`recv.sumOf { … }`) has no JVM method under
+        // its source name, so every signature-driven source above misses it. It is the last source
+        // asked, and it is asked HERE rather than at the call site so that the decision stays one
+        // decision: the selector's `it` comes from the receiver's element type, at the lambda's own
+        // argument position.
+        let extension = extension.or_else(|| {
+            let params = self.lambda_return_overload_param_types(receiver, name)?;
+            Some(crate::symbol_resolver::LambdaCallShape {
+                generic_formals: Vec::new(),
+                param_types: Some(
+                    args.iter()
+                        .map(|&argument| match self.file.expr(argument) {
+                            Expr::Lambda { .. } => params.clone(),
+                            _ => Vec::new(),
+                        })
+                        .collect(),
+                ),
+                expected_types: None,
+                fixed_expected_types: None,
+                receivers: None,
+                context_counts: None,
+                materialized: None,
+                inline: false,
+            })
+        });
         // The same fitness rule, applied to the other carrier. See
         // [`Self::shape_fits_written_lambdas`] for why the two count parameters differently.
         let extension = extension.filter(|shape| self.shape_fits_written_lambdas(args, shape));
@@ -47381,23 +47406,7 @@ impl<'a> Checker<'a> {
                         | crate::libraries::CompilerIntrinsic::StringLength => None,
                     }
                 });
-                // A call selected by lambda RETURN type (`recv.sumOf { … }`): its source name has no JVM
-                // method, so the generic-signature passes above miss it — supply the selector's `it` from
-                // the receiver's element type, at the lambda argument's position.
-                let ext_lambda_pts = ext_lambda_pts.or_else(|| {
-                    let params = self.lambda_return_overload_param_types(rt, &name)?;
-                    Some(
-                        args.iter()
-                            .map(|&a| {
-                                if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                                    params.clone()
-                                } else {
-                                    Vec::new()
-                                }
-                            })
-                            .collect(),
-                    )
-                });
+
                 crate::trace_compiler!(
                     "lambda_shape",
                     "member call={name} receiver={rt:?} params={ext_lambda_pts:?} receivers={ext_lambda_recvs:?} contexts={ext_lambda_context_counts:?} provider={provider_member_lambda_pts:?}",
