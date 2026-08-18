@@ -6977,3 +6977,50 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declares shadows the module property, so it is answered from the owner chain or declined — never
   borrowed from the module.
   Tests: `tests/resolution_order_independence_e2e.rs`.
+
+- **A call's lambda arguments take their shape from ONE decision, and the sources compete on the
+  merits rather than on the order they are asked in.** A member call can shape a lambda argument from
+  a selected source member, from a classpath member's expectations, or from an extension. Every call
+  path wrote its own priority chain over those sources, and the chains disagreed: the safe-call path
+  asked an extension before a classpath member, the explicit-receiver path asked the classpath member
+  first, and the implicit-receiver path swept the whole receiver tower once per source. So
+  `x.f { … }`, `x?.f { … }` and a bare `f { … }` on the same receiver could shape the same lambda from
+  different callables.
+
+  Three rules, each measured against kotlinc 2.4.10, settle it:
+
+  A MEMBER outranks an extension, so a classpath member's expectations are asked for before any
+  extension is looked up, and a SELECTED member ends the search — no extension is consulted at all.
+  That is not only a question of which type a lambda parameter gets: whether lambda mutation is
+  allowed asks if any applicable extension is inline, so an inline extension beside a non-inline
+  member kept a captured mutable local direct for a call that does not splice.
+
+  An expectation whose parameter count cannot fit the lambda AS WRITTEN is not an expectation for
+  this call, whichever source offered it. This is the rule that lets the sources be asked in one
+  order at all — a source that cannot fit does not answer, so being asked first stops deciding the
+  outcome. `sizes?.forEach { (name, count) -> … }` on a `HashMap` reaches the Kotlin one-parameter
+  extension past the Java two-parameter `BiConsumer` for this reason alone.
+
+  The RECEIVER TOWER is innermost first, and each receiver is asked for a whole decision rather than
+  the whole tower being swept once per source. Sweeping per source let an outer receiver's extension
+  shape a lambda that an inner receiver's member should have shaped — backwards on both rules at
+  once. With `class Outer { fun Outer.forEach(block: (Int) -> Unit) }` and
+  `with(list) { forEach { it.length } }` on an `ArrayList<String>`, `it` is `String`; it was `Int`,
+  which rejected the program.
+
+  A receiver ANSWERS only when what it offers can shape a lambda: a shape carrying receivers or
+  materialization but no parameter types ends the sweep on a receiver with nothing to give, where
+  asking per source used to fall through to the next receiver.
+  Tests: `tests/member_extension_lambda_arity_e2e.rs`,
+  `tests/implicit_receiver_tower_lambda_shape_e2e.rs`,
+  `tests/build840_mm1_safe_call_lambda_ext_e2e.rs`.
+
+- **A lambda shape spells its parameters contexts first, then the receiver, then what the author
+  wrote.** `context(P) R.(X) -> T` carries a three-entry parameter list for a lambda the author
+  writes with one parameter. Any rule that measures a shape against the lambda as written, and any
+  reader that recovers the value parameters from it, has to skip both prefixes: counting the receiver
+  rejects every `R.(X) -> Y`, the shape most receiver DSLs have, and counting the contexts rejects
+  `context(P) R.(X) -> T`. Skipping exactly one entry — which two of the three readers did — is worse
+  than rejecting the shape, because it hands the lambda its own receiver as a value parameter and one
+  parameter too many.
+  Tests: `tests/context_function_type_e2e.rs`.
