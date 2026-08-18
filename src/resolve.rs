@@ -10566,6 +10566,15 @@ impl DeferredInferenceDriver<'_> {
                         rejects: &|name| !self.readable_from(entry, name),
                     },
                 ),
+                DeferredKind::Member(_) if file.is_local_declaration(DeclId(entry.key.decl)) => {
+                    infer_local_class_member_ty(
+                        file,
+                        entry.file_index,
+                        entry.span,
+                        expression,
+                        self.table,
+                    )
+                }
                 DeferredKind::Member(_) => infer_class_member_ty(
                     file,
                     entry.file_index,
@@ -11404,6 +11413,73 @@ fn infer_function_return_ty(
     rets.get(&(file_index, declaration.0))
         .copied()
         .filter(|ty| *ty != Ty::Error && *ty != Ty::Pending)
+}
+
+/// Type a LOCAL class's member by checking the function that declares the class.
+///
+/// A local class's member initializer may read the enclosing function's locals — `fun f() { val s =
+/// "x"; class A(val p: String) { val s2 = s + p } }` — and no signature-level scope can hold them:
+/// the signature walk never enters function bodies, so typing the member in its own class declines.
+///
+/// The checker answers this when it walks the function: it types `s + p` with `s` in scope. The
+/// declaration's type is READ from that run rather than recomputed — the same jump-and-resolve the
+/// engine does everywhere else, with the enclosing function as the unit resolved. That function is
+/// the innermost one whose span contains the member. The run is a full check, not an inference-only
+/// one, because inference mode does not descend into a local class body; its diagnostics go to a
+/// scratch sink and are discarded, since this run exists only to read one type.
+fn infer_local_class_member_ty(
+    file: &File,
+    file_index: u32,
+    member_span: Span,
+    expression: ExprId,
+    table: &SymbolTable,
+) -> Ty {
+    let Some(declaration) = file
+        .decls
+        .iter()
+        .copied()
+        .filter(|&declaration| {
+            matches!(file.decl(declaration), Decl::Fun(function)
+                if function.span.lo <= member_span.lo && member_span.lo <= function.span.hi)
+        })
+        .min_by_key(|&declaration| match file.decl(declaration) {
+            Decl::Fun(function) => function.span.hi.saturating_sub(function.span.lo),
+            _ => u32::MAX,
+        })
+    else {
+        return Ty::Error;
+    };
+    let Decl::Fun(function) = file.decl(declaration) else {
+        return Ty::Error;
+    };
+    let mut scratch = DiagSink::new();
+    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
+    // No demand hooks: the enclosing function's OWN body typically reads the member being computed
+    // (`return A().s2`), and answering that read through the engine re-enters the declaration that
+    // is already being computed — a cycle, which declines the very resolution this run exists to
+    // produce. The initializer needs the function's locals, which this run has, and nothing else.
+    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
+    checker.set_anonymous_lexical_class_context(declaration);
+    let root = CheckerScope::root();
+    let resolve = class_internal_resolver(checker.syms);
+    let declaration_scope = root.child(ScopeKind::Function { receiver: None });
+    let scope = &declaration_scope;
+    scope.declare_tparams(
+        &function.type_params,
+        &TParams::symbolic_from_decl_with(
+            &function.type_params,
+            &function.type_param_bounds,
+            &resolve,
+        ),
+        |name| function.reified_type_params.contains(name),
+    );
+    checker.check_fun(scope, function, Some(declaration));
+    let types = std::mem::take(&mut checker.expr_types);
+    drop(checker);
+    types
+        .get(expression.0 as usize)
+        .copied()
+        .unwrap_or(Ty::Error)
 }
 
 /// Type ONE class-body declaration in its class's checking context.
