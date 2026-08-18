@@ -37763,16 +37763,23 @@ impl<'a> Checker<'a> {
                 self.set(expression, Ty::Unit);
             }
             let t = match trailing {
-                // A trailing after a diverging statement is dead — type the block `Nothing` (still
-                // visit the trailing so its sub-expressions are checked).
-                Some(te) if diverged => {
-                    self.expr_result(scope, te, expected, value_required);
-                    Ty::Nothing
-                }
+                // A trailing after a diverging statement is unreachable, which in Kotlin is a
+                // WARNING and not a change of type: the block's value is still its trailing
+                // expression. `val a = "a".let { throw Error(); it + "a" }` is `String` to kotlinc,
+                // and typing the block `Nothing` here made the declaration untypeable — a property
+                // of type `Nothing` is rejected outright, so the whole file was refused.
                 // Propagate an expected type into the block's trailing value (a typed context
                 // reaching a `{ … ; lambda }` result).
                 Some(_) if trailing_contract.is_some() => Ty::Unit,
-                Some(te) => self.expr_result(scope, te, expected, value_required),
+                Some(te) => {
+                    let trailing_ty = self.expr_result(scope, te, expected, value_required);
+                    match diverged && trailing_ty == Ty::Error {
+                        // Nothing usable came back from dead code; keep the old answer so a block
+                        // that genuinely yields no value is still `Nothing` rather than an error.
+                        true => Ty::Nothing,
+                        false => trailing_ty,
+                    }
+                }
                 None if diverged => Ty::Nothing,
                 None => {
                     // A block whose last statement always transfers control (break/continue/return)
