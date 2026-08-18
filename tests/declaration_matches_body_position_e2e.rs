@@ -43,8 +43,10 @@ fn an_overridden_function_return_types_in_both_positions() {
     both_positions("E().viaInterface()", "OverrideReturn");
 }
 
-// NOT yet asserted: `G().chain()`, where the member's body calls ANOTHER member whose return is
-// also inferred. The declaration boundary asks the engine for `chain`, but the unqualified
-// `helper()` inside its body resolves through the implicit receiver, which does not consult the
-// engine — so the body reads the placeholder and the declaration is typed `Unit` rather than `Int`.
-// It compiles, which is why the compile-only probe missed it and running the box caught it.
+#[test]
+fn a_member_calling_a_member_types_in_both_positions() {
+    // The member's body calls ANOTHER member whose return is also inferred, through the implicit
+    // receiver. Typed `Unit` rather than `Int` while the placeholder was readable, which COMPILES —
+    // running the box in both positions is what shows the type is wrong.
+    both_positions("G().chain()", "ChainReturn");
+}

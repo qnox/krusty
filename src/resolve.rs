@@ -7771,6 +7771,13 @@ fn collect_signatures_with_cp_impl(
                                     if t != Ty::Error {
                                         return t;
                                     }
+                                    // The walk could not type this body. `Unit` is not the answer —
+                                    // it is a guess that reads as a real type everywhere afterwards,
+                                    // and the sweep that used to overwrite it answered in visit
+                                    // order rather than dependency order. Record the marker so the
+                                    // engine is asked for this declaration, exactly as it is asked
+                                    // for a property the walk could not type.
+                                    return Ty::Pending;
                                 }
                                 Ty::Unit
                             });
@@ -10978,6 +10985,49 @@ fn resolve_deferred_properties(
             .map(|entry| (entry, driver.resolve(entry.key)))
             .collect::<Vec<_>>()
     };
+    // Returns the sweep could not settle are resolved through the engine, in demand order, once the
+    // declarations they read have types. The sweep visits in whatever order it walks: `fun chain() =
+    // helper()` reached before `helper` computed its return from an unresolved call and published
+    // `Unit`, which stuck and left the field disagreeing with the value the initializer pushes. The
+    // engine asks for `helper` when `chain` needs it, so the order is the dependency order.
+    let engine_returns = {
+        let driver = DeferredInferenceDriver {
+            files,
+            table,
+            engine: &engine,
+            deferred: &by_key,
+            by_name: &by_name,
+            by_member: &by_member,
+            functions: &undetermined_functions,
+            methods: &undetermined_methods,
+            source_order: &source_order,
+        };
+        undetermined_methods
+            .keys()
+            // Every inferred-return member, not only the ones still marked pending: the sweep can
+            // publish a WRONG answer rather than no answer — `Unit`, computed from a call it could
+            // not yet resolve — and a wrong answer is exactly what the engine exists to replace.
+            .filter_map(|(owner, name)| {
+                Some((*owner, name.clone(), driver.demand_method(*owner, name)?))
+            })
+            .collect::<Vec<_>>()
+    };
+    for (owner, name, ret) in engine_returns {
+        let Some(class) = table.class_by_type_name_mut(owner) else {
+            continue;
+        };
+        // The spelling is unambiguous: an overloaded one is not in the index, because a name alone
+        // cannot choose between overloads.
+        let Some(params) = class
+            .methods
+            .get(&name)
+            .and_then(|overloads| overloads.first())
+            .map(|signature| signature.params.clone())
+        else {
+            continue;
+        };
+        class.set_inferred_method_return(&name, &params, ret);
+    }
     for (entry, resolution) in resolutions {
         let Some(ty) = resolution.ty() else {
             // Undetermined is not a type. Replace the marker with the ordinary error placeholder so
@@ -11446,6 +11496,27 @@ fn settle_undetermined_returns(table: &mut SymbolTable) {
             for signature in receivers.iter_mut() {
                 if signature.ret == Ty::Pending {
                     signature.set_inferred_return(Ty::Unit);
+                }
+            }
+        }
+    }
+    // Class members too. The marker means "ask the engine for this declaration"; where nothing
+    // answered — an overloaded spelling the index cannot key, a member of a classifier with no
+    // source declaration — it must not survive into checking or emission, so it settles to the same
+    // `Unit` the walk used to guess. The difference is that the guess is now the LAST resort rather
+    // than the first answer.
+    for class in table.classes.values_mut() {
+        for overloads in class.methods.values_mut() {
+            for signature in overloads.iter_mut() {
+                if signature.ret == Ty::Pending {
+                    signature.set_inferred_return(Ty::Unit);
+                }
+            }
+        }
+        for overloads in class.generic_methods.values_mut() {
+            for method in overloads.iter_mut() {
+                if method.ret_shape == Ty::Pending {
+                    method.ret_shape = Ty::Unit;
                 }
             }
         }
@@ -46516,6 +46587,19 @@ impl<'a> Checker<'a> {
             }
         };
         let ret = self.apply_postponed_call_bindings(ret);
+        // The selected member's own return may still be being determined — `fun chain() = helper()`
+        // reads `helper` before it has a type. Ask the engine for that declaration, exactly as the
+        // member READ path does. This sits on the one selection funnel rather than at each syntactic
+        // position, so a qualified call, an unqualified call through the implicit receiver, and a
+        // call inside another member's body all get the same answer.
+        let ret = match ret.mentions_pending() {
+            true => self
+                .demand_member
+                .and_then(|demand| demand(rt, name))
+                .filter(|answered| !answered.mentions_pending())
+                .unwrap_or(ret),
+            false => ret,
+        };
         let owner = fi.owner.unwrap_or(internal_name);
         let projected_return_hazard = self
             .syms
