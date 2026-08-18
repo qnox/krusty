@@ -1080,6 +1080,25 @@ impl JvmLibraries {
             .collect()
     }
 
+    /// The type Kotlin metadata declares for a property named `name` on `internal`, or on its
+    /// companion — the semantic type, as opposed to the JVM field descriptor that stores it.
+    fn metadata_property_ty(&self, internal: TypeName, name: &str) -> Option<Ty> {
+        let declared = |ci: &crate::jvm::classreader::ClassInfo| {
+            super::metadata::class_properties(ci)
+                .iter()
+                .find(|property| property.name == name)
+                .and_then(|property| property.ret_class)
+                .map(kotlin_type_name_to_ty)
+        };
+        let ci = self.cp.find_name(internal)?;
+        if let Some(ty) = declared(&ci) {
+            return Some(ty);
+        }
+        let companion = format!("{}$Companion", internal.render());
+        let companion = self.cp.find(&companion)?;
+        declared(&companion)
+    }
+
     fn metadata_static_companion_consts_for_class(
         &self,
         ci: &crate::jvm::classreader::ClassInfo,
@@ -5355,11 +5374,23 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 .iter()
                 .find(|f| f.name == name && f.access & 0x0008 != 0 && f.access & 0x0001 != 0)
             {
-                let ty = f
-                    .signature
-                    .as_deref()
-                    .and_then(|signature| parse_concrete_field_gsig(signature, &f.descriptor))
-                    .map(|ty| self.semanticize_jvm_type(ty))
+                // The Kotlin METADATA is the authority for a declaration's type; the descriptor is
+                // an emit handle. `UInt.Companion.MIN_VALUE` is stored in an `int` field, so reading
+                // the descriptor typed it `Int` — and an inferred `val b = UInt.MIN_VALUE` published
+                // `Int` into the field, the getter and the `@Metadata`, where kotlinc writes `UInt`.
+                // An annotated declaration hid it, because the expected type coerced the read.
+                // `Self::constants_for_class` already reads the metadata this way; the descriptor is
+                // the fallback for a field metadata does not describe.
+                let ty = self
+                    .metadata_property_ty(cur, name)
+                    .or_else(|| {
+                        f.signature
+                            .as_deref()
+                            .and_then(|signature| {
+                                parse_concrete_field_gsig(signature, &f.descriptor)
+                            })
+                            .map(|ty| self.semanticize_jvm_type(ty))
+                    })
                     .unwrap_or_else(|| field_desc_to_ty(&f.descriptor));
                 let constant = f.const_value.as_ref().map(|value| LibraryConst {
                     ty,
