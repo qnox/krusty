@@ -320,3 +320,77 @@ fn the_implementation_hashcode_matches_kotlinc() {
         "and it must still run"
     );
 }
+
+/// The implementation's `toString()` is kotlinc's, instruction for instruction — and renders the same
+/// text.
+///
+/// Three shape rules the rendered string cannot show: adjacent literals are ONE `ldc` (the class
+/// prefix runs into the first member's name, each later separator into its own), the closing paren is
+/// a CHAR append rather than a one-character String, and a MEMBERLESS annotation renders to a
+/// constant with no `StringBuilder` at all.
+#[test]
+fn the_implementation_tostring_matches_kotlinc() {
+    for (stem, src, expected) in [
+        (
+            "TsTwo",
+            "annotation class Mk(val v: Int, val s: String)\n\
+             fun mk(): Mk = Mk(1, \"x\")\n\
+             fun box(): String = mk().toString()\n",
+            "@Mk(v=1, s=x)",
+        ),
+        (
+            "TsNone",
+            "annotation class Empty\n\
+             fun mk(): Empty = Empty()\n\
+             fun box(): String = mk().toString()\n",
+            "@Empty()",
+        ),
+    ] {
+        let Some(build) = common::compile_libs_build(
+            &format!("annotation_tostring_{stem}"),
+            &[(&format!("{stem}.kt"), src)],
+        ) else {
+            return; // reference compiler unavailable
+        };
+        let reference_dir = build
+            .reference_out()
+            .expect("reference compiler output unavailable");
+        let ours = common::expect_compile_in_process(
+            src,
+            stem,
+            &[common::stdlib_jar()],
+            Some(common::jdk_modules().as_path()),
+        );
+        let impl_name = ours
+            .iter()
+            .map(|(name, _)| name.clone())
+            .find(|name| name.contains("$annotationImpl$"))
+            .expect("the annotation implementation class");
+        let body = |bytes: &[u8]| {
+            krusty::jvm::classreader::read_method_code(bytes, "toString", "()Ljava/lang/String;")
+                .expect("toString body")
+                .code
+        };
+        let ours_bytes = ours
+            .iter()
+            .find_map(|(name, bytes)| (*name == impl_name).then_some(bytes.clone()))
+            .expect("our implementation class");
+        let reference_bytes = std::fs::read(reference_dir.join(format!("{impl_name}.class")))
+            .expect("reference class");
+        assert_eq!(
+            body(&ours_bytes).len(),
+            body(&reference_bytes).len(),
+            "{stem}: the toString body must be kotlinc's, not merely text-equivalent"
+        );
+        assert_eq!(
+            common::run_box(
+                &ours,
+                &common::find_box_class(&ours).expect("box class"),
+                &[common::stdlib_jar()]
+            )
+            .as_deref(),
+            Some(expected),
+            "{stem}: and it must render what kotlinc renders"
+        );
+    }
+}

@@ -8294,6 +8294,13 @@ fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members
 /// rendered via `Arrays.toString`). Straight-line (no frames).
 fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members: &[(String, Ty)]) {
     let mut cb = CodeBuilder::new(1);
+    // A MEMBERLESS annotation renders to a constant, so kotlinc emits no `StringBuilder` at all.
+    if members.is_empty() {
+        cb.push_string(&format!("@{}()", iface.replace('/', ".")), cw);
+        cb.areturn();
+        finish_code::<0x0011>(cw, "toString", "()Ljava/lang/String;", &mut cb, 1);
+        return;
+    }
     let sb = "java/lang/StringBuilder";
     let sb_cls = cw.class_ref(sb);
     cb.new_obj(sb_cls);
@@ -8309,12 +8316,19 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
         cb.push_string(s, cw);
         cb.invokevirtual(append_str, 1, 1);
     };
-    append_lit(&mut cb, cw, &format!("@{}(", iface.replace('/', ".")));
     for (i, (name, jt)) in members.iter().enumerate() {
+        // Adjacent literals are ONE `ldc`: the class prefix runs into the first member's name
+        // (`"@Mk(v="`), and each later member's separator into its own (`", s="`). kotlinc builds the
+        // constant that way, so emitting `"@Mk("` and `"v="` as two appends diverged on every
+        // annotation that is instantiated.
         append_lit(
             &mut cb,
             cw,
-            &format!("{}{}=", if i == 0 { "" } else { ", " }, name),
+            &if i == 0 {
+                format!("@{}({name}=", iface.replace('/', "."))
+            } else {
+                format!(", {name}=")
+            },
         );
         let fref = cw.fieldref(fq, name, &type_descriptor(*jt));
         match *jt {
@@ -8383,7 +8397,11 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
             }
         }
     }
-    append_lit(&mut cb, cw, ")");
+    // The closing paren is a CHAR append, not a one-character String: kotlinc emits
+    // `bipush 41; append(C)`.
+    cb.push_int(b')' as i32, cw);
+    let append_char = cw.methodref(sb, "append", "(C)Ljava/lang/StringBuilder;");
+    cb.invokevirtual(append_char, 1, 1);
     let to_str = cw.methodref(sb, "toString", "()Ljava/lang/String;");
     cb.invokevirtual(to_str, 0, 1);
     cb.areturn();
