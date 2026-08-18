@@ -11642,6 +11642,19 @@ fn infer_declaration_ty(
         .get(expression.0 as usize)
         .copied()
         .unwrap_or(Ty::Error);
+    // A CALLABLE REFERENCE records its type beside the expression table rather than in it, so the
+    // expression itself is still the marker here. Reading only `expr_types` published that marker as
+    // the declaration's type, and a marker must never reach `@Metadata` — `val f = C::foo` aborted
+    // emission outright. The reference's own recorded type is the answer, and it is the same one the
+    // walk publishes for this shape anywhere else.
+    let inferred = match inferred == Ty::Pending {
+        true => checker
+            .callable_reference_types
+            .get(&expression)
+            .copied()
+            .unwrap_or(inferred),
+        false => inferred,
+    };
     // An elvis whose two sides are DIFFERENT numeric primitives declines. Kotlin's type for such a
     // mix is their least upper bound — for `Int` and `Double` that is `Comparable<*> & Number`,
     // which kotlinc emits as `Ljava/lang/Object;` — while the checker's ordinary join promotes,
@@ -11653,7 +11666,7 @@ fn infer_declaration_ty(
     {
         return Ty::Error;
     }
-    if inferred == Ty::Pending {
+    if inferred.mentions_pending() {
         return Ty::Error;
     }
     let inferred = withheld_declaration_ty(table, file_index, inferred);

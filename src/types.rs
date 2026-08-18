@@ -1110,6 +1110,26 @@ impl Ty {
     /// an array element, a function parameter/return, or under a `?`. A type that mentions one is not
     /// yet a concrete answer: it still needs the use site's substitution, so asserting it (as a
     /// reference type's argument, say) records `T.() -> String` where `Int.() -> String` is meant.
+    /// Whether this type carries the NOT-DETERMINED marker anywhere inside it.
+    ///
+    /// `Ty::Pending` is not only a whole answer: a declaration can be typed `KProperty1<C, Pending>`
+    /// by referencing a member whose own type is still being determined. Publishing that is exactly
+    /// what publishing the bare marker would be, and the emission boundary rejects it the same way,
+    /// so "is this determined" has to ask about the whole type rather than its outermost layer.
+    pub fn mentions_pending(self) -> bool {
+        match self {
+            Ty::Pending => true,
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner.mentions_pending(),
+            Ty::InProjection(inner) | Ty::OutProjection(inner) => inner.mentions_pending(),
+            Ty::Obj(_, args) => args.iter().any(|a| a.mentions_pending()),
+            Ty::Fun(signature) => {
+                signature.ret.mentions_pending()
+                    || signature.params.iter().any(|p| p.mentions_pending())
+            }
+            _ => false,
+        }
+    }
+
     pub fn mentions_ty_param(self) -> bool {
         match self {
             Ty::TyParam(..) => true,
