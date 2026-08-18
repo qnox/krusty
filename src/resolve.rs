@@ -8900,6 +8900,15 @@ fn collect_signatures_with_cp_impl(
     }
 
     table.libraries = libraries;
+    // A deferred declaration may read a MEMBER function whose return is itself inferred
+    // (`class W<T>(val value: T) { fun get() = value }` / `val x = W("OK").get()`). Member returns
+    // are pre-inferred after collection returns, so during this run that return was undetermined and
+    // the read erased to the parameter's bound — `x` published `Any`. Pre-inferring first gives the
+    // run something to read; the pass after collection still runs and still refines, because this is
+    // a fixpoint rather than a single sweep.
+    if !deferred_properties.is_empty() {
+        preinfer_member_returns_for_deferred(files, &mut table, diags);
+    }
     resolve_deferred_properties(files, &mut table, &deferred_properties, diags);
     // Anything still undetermined after resolution keeps the placeholder the walk used before:
     // `Unit` for a function return nothing asked for. The marker exists so that PROPERTY resolution
@@ -17102,6 +17111,40 @@ fn preinfer_returns_pass_with_owners(
         }
     }
     result
+}
+
+/// Pre-infer expression-body RETURNS far enough for deferred declaration resolution to read them.
+///
+/// Only the returns fixpoint runs here, NOT the anonymous-object capture discovery the full
+/// pre-inference starts with: captures are discovered once, and doing it before the deferred
+/// declarations have types locks in the wrong ones. The full pass still runs after collection and
+/// still refines everything this leaves incomplete — it is a fixpoint, not a single sweep.
+fn preinfer_member_returns_for_deferred(
+    files: &[File],
+    table: &mut SymbolTable,
+    diags: &mut DiagSink,
+) {
+    table.begin_module_mutation();
+    let saved = diags.current_file();
+    let anonymous_lexical_scopes = files
+        .iter()
+        .map(anonymous_lexical_class_scope)
+        .collect::<Vec<_>>();
+    let candidates = files
+        .iter()
+        .map(file_has_preinfer_candidates)
+        .collect::<Vec<_>>();
+    // No `on_wide_stack` here: collection already runs on the reserved stack, and nesting another
+    // reserve grows a fresh segment per level rather than reusing the one already in hand.
+    preinfer_module_returns_to_fixpoint(
+        files,
+        table,
+        diags,
+        &anonymous_lexical_scopes,
+        &candidates,
+    );
+    diags.set_file(saved);
+    table.finish_module_mutation();
 }
 
 /// Pre-infer EXPRESSION-body return types across the WHOLE module (every file), patching `syms` before

@@ -422,6 +422,8 @@ mod default_import_resolution_e2e;
 mod default_stub_super_guard_e2e;
 #[path = "deferred_nullable_val_e2e.rs"]
 mod deferred_nullable_val_e2e;
+#[path = "deferred_reads_inferred_member_return_e2e.rs"]
+mod deferred_reads_inferred_member_return_e2e;
 #[path = "deferred_val_init_e2e.rs"]
 mod deferred_val_init_e2e;
 #[path = "definitely_non_null_type_e2e.rs"]
