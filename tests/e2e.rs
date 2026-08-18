@@ -478,6 +478,8 @@ mod elvis_return_smartcast_e2e;
 mod elvis_signature_inference_e2e;
 #[path = "empty_loop_body_e2e.rs"]
 mod empty_loop_body_e2e;
+#[path = "engine_declaration_types_e2e.rs"]
+mod engine_declaration_types_e2e;
 #[path = "enum_body_property_e2e.rs"]
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]

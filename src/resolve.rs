@@ -2479,6 +2479,8 @@ pub struct SymbolTable {
     pub(crate) module_package_cache:
         std::cell::RefCell<Option<std::rc::Rc<std::collections::HashSet<TypeName>>>>,
     module_cache_enabled: std::cell::Cell<bool>,
+    /// How many mutation brackets are open — see [`SymbolTable::begin_module_mutation`].
+    module_mutation_depth: std::cell::Cell<usize>,
     pub funs: HashMap<String, Vec<Signature>>,
     conflicting_top_level_keys: std::collections::HashSet<TopLevelFunctionConflictKey>,
     conflicting_top_level_key_by_source: HashMap<(u32, u32), TopLevelFunctionConflictKey>,
@@ -2628,6 +2630,7 @@ impl Default for SymbolTable {
             module_shape_cache: Default::default(),
             module_package_cache: Default::default(),
             module_cache_enabled: std::cell::Cell::new(false),
+            module_mutation_depth: std::cell::Cell::new(0),
             funs: HashMap::new(),
             conflicting_top_level_keys: std::collections::HashSet::new(),
             conflicting_top_level_key_by_source: HashMap::new(),
@@ -2679,14 +2682,25 @@ impl SymbolTable {
 
     /// Signature collection mutates the module while querying provisional declarations, so caching
     /// is disabled there. A checker enables the cache only after its pre-inference mutation phase.
+    /// A mutation bracket NESTS: a pass that brackets its whole body can call another that brackets
+    /// its own, and the inner `finish` must not re-enable the cache while the outer pass is still
+    /// writing. The depth counter is what makes the pair safe to compose; a bare flag turned the
+    /// inner `finish` into an outer one and let the second half of the outer pass read a stale
+    /// module cache.
     fn begin_module_mutation(&self) {
+        self.module_mutation_depth
+            .set(self.module_mutation_depth.get() + 1);
         self.module_cache_enabled.set(false);
         self.clear_module_symbol_cache();
     }
 
     pub(crate) fn finish_module_mutation(&self) {
+        let depth = self.module_mutation_depth.get().saturating_sub(1);
+        self.module_mutation_depth.set(depth);
         self.clear_module_symbol_cache();
-        self.module_cache_enabled.set(true);
+        if depth == 0 {
+            self.module_cache_enabled.set(true);
+        }
     }
 
     fn clear_module_symbol_cache(&self) {
@@ -7744,17 +7758,17 @@ fn collect_signatures_with_cp_impl(
                             .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
                             .unwrap_or_else(|| {
                                 if let FunBody::Expr(e) = &m.body {
-                                    // The method's own parameters are in scope for its expression body, so
-                                    // `fun m(x: Int) = x + 1` infers `Int`. Parameters come FIRST: a
-                                    // parameter shadows a class property of the same name in the body (the
-                                    // scope lookup returns the first match), matching Kotlin.
+                                    // The walk's own attempt comes first: it answers the ordinary
+                                    // case cheaply, and the ENGINE overrides it below wherever the
+                                    // two disagree — a walk answer is a guess made against a
+                                    // half-built table, so it is a starting point, not the authority.
                                     let mut scope: Vec<(String, Ty, bool)> = m
                                         .params
                                         .iter()
-                                        .map(|p| {
+                                        .map(|parameter| {
                                             (
-                                                p.name.clone(),
-                                                ty_of_ref(&p.ty, &class_names, &mtp, diags),
+                                                parameter.name.clone(),
+                                                ty_of_ref(&parameter.ty, &class_names, &mtp, diags),
                                                 false,
                                             )
                                         })
@@ -7768,15 +7782,24 @@ fn collect_signatures_with_cp_impl(
                                         &*libraries,
                                         &table,
                                     );
-                                    if t != Ty::Error {
-                                        return t;
+                                    // The ENGINE is the authority for a member the engine can be
+                                    // asked about: the walk types this body against a half-built
+                                    // table, so its answer can be an erasure of the real one
+                                    // (`fun get() = value` on `class W<T>` comes back `Any`) and an
+                                    // erasure reads exactly like a real type downstream. Record the
+                                    // marker and let the engine answer.
+                                    //
+                                    // An ANONYMOUS object is the exception, and not by preference:
+                                    // it has no source declaration in the class table, so nothing
+                                    // can look it up to resolve, and a marker left on it would
+                                    // settle to `Unit`. There the walk's answer is the only one
+                                    // available.
+                                    if file.is_anonymous_object_class(d) {
+                                        if t != Ty::Error {
+                                            return t;
+                                        }
+                                        return Ty::Unit;
                                     }
-                                    // The walk could not type this body. `Unit` is not the answer —
-                                    // it is a guess that reads as a real type everywhere afterwards,
-                                    // and the sweep that used to overwrite it answered in visit
-                                    // order rather than dependency order. Record the marker so the
-                                    // engine is asked for this declaration, exactly as it is asked
-                                    // for a property the walk could not type.
                                     return Ty::Pending;
                                 }
                                 Ty::Unit
@@ -8566,6 +8589,35 @@ fn collect_signatures_with_cp_impl(
                                 _ => None,
                             })
                             .unwrap_or(Ty::Error);
+                        // An EXTENSION property the walk could not type is not an error yet, exactly
+                        // as a plain one is not: its getter may read a declaration in a file the walk
+                        // has not reached, and it is typed in a receiver scope the walk cannot build
+                        // (`val <T : CharSequence> T.z get() = { x: T -> this }`). Record the marker
+                        // and queue the declaration; the engine runs the real checker over it, and
+                        // `settle` turns a decline back into the error placeholder this used to
+                        // publish immediately.
+                        let ty = match (ty.mentions_error(), p.declared_ty(), &p.getter) {
+                            (true, None, Some(FunBody::Expr(getter))) => {
+                                deferred_properties.push(DeferredProperty {
+                                    key: DeclKey::declaration(i as u32, d.0),
+                                    file_index: i as u32,
+                                    name: p.name.clone(),
+                                    span: p.span,
+                                    delegate_of: None,
+                                    backing_field: false,
+                                    expression: Some(*getter),
+                                    scope: context_scope.clone(),
+                                    kind: DeferredKind::TopLevel {
+                                        position: p.span.lo,
+                                        is_eager: false,
+                                        has_context_params: !context_params.is_empty(),
+                                        has_receiver: true,
+                                    },
+                                });
+                                Ty::Pending
+                            }
+                            _ => ty,
+                        };
                         crate::trace_compiler!(
                             "signature_inference",
                             "extension property name={} receiver={recv_ty:?} getter={:?} inferred={ty:?}",
@@ -8672,6 +8724,7 @@ fn collect_signatures_with_cp_impl(
                                         position: p.span.lo,
                                         is_eager: true,
                                         has_context_params: false,
+                                        has_receiver: false,
                                     },
                                 });
                                 Ty::Pending
@@ -8719,6 +8772,7 @@ fn collect_signatures_with_cp_impl(
                                 position: p.span.lo,
                                 is_eager: p.init.is_some(),
                                 has_context_params: !context_params.is_empty(),
+                                has_receiver: false,
                             },
                         });
                     }
@@ -8913,9 +8967,6 @@ fn collect_signatures_with_cp_impl(
     // the read erased to the parameter's bound — `x` published `Any`. Pre-inferring first gives the
     // run something to read; the pass after collection still runs and still refines, because this is
     // a fixpoint rather than a single sweep.
-    if !deferred_properties.is_empty() {
-        preinfer_member_returns_for_deferred(files, &mut table, diags);
-    }
     resolve_deferred_properties(files, &mut table, &deferred_properties, diags);
     // Anything still undetermined after resolution keeps the placeholder the walk used before:
     // `Unit` for a function return nothing asked for. The marker exists so that PROPERTY resolution
@@ -10479,6 +10530,11 @@ enum DeferredKind {
         /// under `context_prop_names` rather than `props` — so it must not answer a demand for that
         /// spelling either.
         has_context_params: bool,
+        /// An EXTENSION property. It is top-level in the sense that no class owns it, but it is
+        /// never reachable by its bare name and it lives in `ext_props` rather than in `props` —
+        /// so it neither answers a bare-name demand nor is published (or declined) through the
+        /// module property tables, which belong to a plain property of the same spelling.
+        has_receiver: bool,
     },
     /// The exact semantic owner, rather than the source/display name used as one symbol-table
     /// index: two files may legally declare the same simple class name in different packages, and
@@ -10618,14 +10674,59 @@ impl DeferredInferenceDriver<'_> {
             // A delegate's own type is not the declaration's: the declaration reads through
             // `getValue`, so resolve that once the delegate itself is typed.
             let inferred = match entry.delegate_of {
-                Some(this_ref) if inferred != Ty::Error => delegated_getvalue_ret_for_signature(
-                    file,
-                    self.table,
-                    self.table.libraries.as_ref(),
-                    inferred,
-                    this_ref,
-                )
-                .unwrap_or(Ty::Error),
+                Some(this_ref) if inferred != Ty::Error => {
+                    // `provideDelegate` may itself have an inferred return, and its result is the
+                    // type `getValue` is then looked up on — so it has to be resolved BEFORE the
+                    // chain is followed, not patched afterwards.
+                    let delegate = self
+                        .demand_on_receiver(inferred, "provideDelegate")
+                        .filter(|provided| !provided.mentions_pending())
+                        .map(|provided| {
+                            let bindings = inferred
+                                .kotlin_class_internal()
+                                .and_then(|owner| self.table.class_by_type_name(owner))
+                                .map(|class| class.type_parameter_bindings(inferred))
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect();
+                            crate::symbol_resolver::ty_subst_keep_unbound(provided, &bindings)
+                        })
+                        .unwrap_or(inferred);
+                    delegated_getvalue_ret_for_signature(
+                        file,
+                        self.table,
+                        self.table.libraries.as_ref(),
+                        delegate,
+                        this_ref,
+                    )
+                    // `getValue`'s own return may still be being determined — `val O by W("OK")` on
+                    // `class W<T>(val value: T) { operator fun getValue(…) = value }`. Ask the engine for
+                    // that declaration and substitute it in, the same way a call or a reference does;
+                    // publishing the marker would make "not resolved" the property's type.
+                    .map(|ret| match ret.mentions_pending() {
+                        true => self
+                            .demand_on_receiver(delegate, "getValue")
+                            .filter(|answered| !answered.mentions_pending())
+                            // The answer is `getValue`'s DECLARED return — `T` for
+                            // `class W<T> { operator fun getValue(…) = value }` — so the delegate's own
+                            // type arguments are what make it this property's type.
+                            .map(|answered| {
+                                let bindings = delegate
+                                    .kotlin_class_internal()
+                                    .and_then(|owner| self.table.class_by_type_name(owner))
+                                    .map(|class| class.type_parameter_bindings(delegate))
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .collect();
+                                crate::symbol_resolver::ty_subst_keep_unbound(answered, &bindings)
+                            })
+                            .map_or(ret, |answered| {
+                                crate::types::ty_replace_pending(ret, answered)
+                            }),
+                        false => ret,
+                    })
+                    .unwrap_or(Ty::Error)
+                }
                 Some(_) => Ty::Error,
                 None => inferred,
             };
@@ -10801,16 +10902,55 @@ impl DeferredInferenceDriver<'_> {
         let owner = receiver.kotlin_class_internal()?;
         self.demand_member(owner, name)
             .or_else(|| self.demand_method(owner, name))
+            .or_else(|| self.demand_module_extension(receiver, name))
+    }
+
+    /// A module-level EXTENSION reached through a receiver — `operator fun Int.getValue(…) = …`
+    /// answering `val x by …`.
+    ///
+    /// The read goes through a receiver, so it arrives here, but the declaration is top-level: no
+    /// owner chain contains it. The RECEIVER still has to match: answering on spelling alone would
+    /// let `fun String.tag() = 1.5` type a `tag()` call on an `Int` — a wrong type published with
+    /// no diagnostic anywhere. The extension table is keyed by erased receiver exactly as ordinary
+    /// extension lookup keys it, so the same key decides this.
+    fn demand_module_extension(&self, receiver: Ty, name: &str) -> Option<Ty> {
+        let (file_index, declaration) = *self.functions.get(name)?;
+        let declared_here = |signature: &&Signature| {
+            signature.source_file == Some(file_index) && signature.source_decl == Some(declaration)
+        };
+        let families = self.table.ext_funs.get(name)?;
+        receiver
+            .erased_recv_candidates()
+            .into_iter()
+            .filter_map(|key| families.get(&key))
+            .flatten()
+            .find(declared_here)?;
+        self.demand_function(name)
     }
 
     /// A member FUNCTION's inferred return, resolved on demand and memoised like every other
     /// declaration. This is what the return pre-inference passes did by sweeping the module to a
     /// fixpoint; asking for the one declaration that is needed replaces the sweep.
     fn demand_method(&self, owner: TypeName, name: &str) -> Option<Ty> {
-        let (file_index, declaration, method_index) = self
-            .owner_chain(owner)
-            .into_iter()
-            .find_map(|declaring| self.methods.get(&(declaring, name.to_string())))
+        // A Java getter read as a Kotlin SYNTHETIC PROPERTY asks for `entries` while the declaration
+        // is spelled `getEntries` — the same mapping every other reader of these members applies. A
+        // demand that only tried the written spelling left the read undetermined, and the function
+        // that owned it settled to `Unit`.
+        let accessor = {
+            let mut characters = name.chars();
+            characters
+                .next()
+                .map(|first| format!("get{}{}", first.to_uppercase(), characters.as_str()))
+        };
+        let spellings = [Some(name.to_string()), accessor].into_iter().flatten();
+        let (file_index, declaration, method_index) = spellings
+            .flat_map(|spelling| {
+                self.owner_chain(owner)
+                    .into_iter()
+                    .filter_map(move |declaring| self.methods.get(&(declaring, spelling.clone())))
+                    .collect::<Vec<_>>()
+            })
+            .next()
             .copied()?;
         self.engine
             .resolve(
@@ -10867,9 +11007,9 @@ fn resolve_deferred_properties(
     deferred: &[DeferredProperty],
     diags: &mut DiagSink,
 ) {
-    if deferred.is_empty() {
-        return;
-    }
+    // No early return on an empty deferred queue: this is also where every undetermined RETURN and
+    // member-extension getter is resolved, and a module can have those with no deferred property at
+    // all.
     let by_key = deferred
         .iter()
         .map(|entry| (entry.key, entry))
@@ -10884,6 +11024,9 @@ fn resolve_deferred_properties(
             DeferredKind::TopLevel {
                 has_context_params: true,
                 ..
+            }
+            | DeferredKind::TopLevel {
+                has_receiver: true, ..
             } => {}
             DeferredKind::TopLevel { .. } => {
                 if by_name.insert(entry.name.clone(), entry.key).is_some() {
@@ -10939,6 +11082,7 @@ fn resolve_deferred_properties(
     // own record of which declaration produced each classifier, so a nested or same-named class
     // cannot be confused with another file's.
     let mut undetermined_methods: HashMap<(TypeName, String), (u32, DeclId, u32)> = HashMap::new();
+    let mut undetermined_method_decls: Vec<UndeterminedMethod> = Vec::new();
     let mut ambiguous_methods: std::collections::HashSet<(TypeName, String)> =
         std::collections::HashSet::new();
     for (internal, signature) in &table.classes {
@@ -10956,6 +11100,26 @@ fn resolve_deferred_properties(
             if !function_needs_return_preinfer(method) {
                 continue;
             }
+            // The DECLARATION list carries every one, overloads included: publishing does not go
+            // through a spelling, it knows which declaration it asked about. Its position among the
+            // same-spelled overloads of the same kind is what selects the signature to write, the
+            // way the lowerer selects one.
+            let overload_index = class.methods[..method_index]
+                .iter()
+                .filter(|previous| {
+                    previous.name == method.name
+                        && previous.receiver.is_some() == method.receiver.is_some()
+                })
+                .count();
+            undetermined_method_decls.push(UndeterminedMethod {
+                owner: *internal,
+                name: method.name.clone(),
+                is_extension: method.receiver.is_some(),
+                overload_index,
+                file_index,
+                declaration,
+                method_index: method_index as u32,
+            });
             let key = (*internal, method.name.clone());
             if undetermined_methods
                 .insert(key.clone(), (file_index, declaration, method_index as u32))
@@ -10965,8 +11129,43 @@ fn resolve_deferred_properties(
             }
         }
     }
+    // The by-SPELLING index drops an overloaded name: a demand that arrives with a name alone
+    // cannot choose between them. The declaration list above keeps them.
     for key in &ambiguous_methods {
         undetermined_methods.remove(key);
+    }
+    // Member-extension PROPERTIES, keyed by the declaring class and the property's position among
+    // the extensions of that spelling — the same index the publish target uses.
+    let mut undetermined_member_ext_props: Vec<(TypeName, String, usize, u32, DeclId, u32)> =
+        Vec::new();
+    for (internal, signature) in &table.classes {
+        let Some(declaration) = signature.source_decl else {
+            continue;
+        };
+        let file_index = signature.source_file;
+        let Some(file) = files.get(file_index as usize) else {
+            continue;
+        };
+        let Decl::Class(class) = file.decl(declaration) else {
+            continue;
+        };
+        for (property_index, property) in class.body_props.iter().enumerate() {
+            if member_extension_property_preinfer_body(property).is_none() {
+                continue;
+            }
+            let extension_index = class.body_props[..property_index]
+                .iter()
+                .filter(|previous| previous.receiver.is_some() && previous.name == property.name)
+                .count();
+            undetermined_member_ext_props.push((
+                *internal,
+                property.name.clone(),
+                extension_index,
+                file_index,
+                declaration,
+                property_index as u32,
+            ));
+        }
     }
     let engine = TypeEngine::new();
     let source_order = SourceOrderIndex::of(files);
@@ -10987,12 +11186,7 @@ fn resolve_deferred_properties(
             .map(|entry| (entry, driver.resolve(entry.key)))
             .collect::<Vec<_>>()
     };
-    // Returns the sweep could not settle are resolved through the engine, in demand order, once the
-    // declarations they read have types. The sweep visits in whatever order it walks: `fun chain() =
-    // helper()` reached before `helper` computed its return from an unresolved call and published
-    // `Unit`, which stuck and left the field disagreeing with the value the initializer pushes. The
-    // engine asks for `helper` when `chain` needs it, so the order is the dependency order.
-    let (engine_function_returns, engine_returns) = {
+    let (engine_function_returns, engine_returns, engine_member_ext_props) = {
         let driver = DeferredInferenceDriver {
             files,
             table,
@@ -11010,18 +11204,90 @@ fn resolve_deferred_properties(
                 Some((file_index, declaration, driver.demand_function(name)?))
             })
             .collect::<Vec<_>>();
-        let method_returns = undetermined_methods
-            .keys()
-            // Every inferred-return member, not only the ones still marked pending: the sweep can
-            // publish a WRONG answer rather than no answer — `Unit`, computed from a call it could
-            // not yet resolve — and a wrong answer is exactly what the engine exists to replace.
-            .filter_map(|(owner, name)| {
-                Some((*owner, name.clone(), driver.demand_method(*owner, name)?))
+        // Every inferred-return member, not only the ones still marked pending: the sweep can
+        // publish a WRONG answer rather than no answer — `Unit`, computed from a call it could not
+        // yet resolve — and a wrong answer is exactly what the engine exists to replace. Asked per
+        // DECLARATION, so an overloaded spelling is answered too; asking by name would drop both
+        // overloads and settle them to `Unit`, which made the answer depend on the order the files
+        // were passed in.
+        let method_returns = undetermined_method_decls
+            .iter()
+            .filter_map(|method| {
+                let ty = engine
+                    .resolve(
+                        DeclKey::member(
+                            method.file_index,
+                            method.declaration.0,
+                            method.method_index,
+                        ),
+                        || {
+                            Some(infer_method_return_ty(
+                                &files[method.file_index as usize],
+                                method.file_index,
+                                method.declaration,
+                                method.method_index,
+                                table,
+                                EngineSeams {
+                                    demand: &|name: &str| driver.demand_name_only(name),
+                                    demand_member: &|receiver: Ty, name: &str| {
+                                        driver.demand_on_receiver(receiver, name)
+                                    },
+                                    rejects: &|_| false,
+                                },
+                            ))
+                        },
+                    )
+                    .ty()?;
+                Some((method, ty))
             })
             .collect::<Vec<_>>();
-        (function_returns, method_returns)
+        let member_ext_property_types = undetermined_member_ext_props
+            .iter()
+            .filter_map(
+                |(owner, name, extension_index, file_index, declaration, property_index)| {
+                    let ty = engine
+                        .resolve(
+                            DeclKey::member(*file_index, declaration.0, *property_index),
+                            || {
+                                Some(infer_member_ext_property_ty(
+                                    &files[*file_index as usize],
+                                    *file_index,
+                                    *declaration,
+                                    *property_index,
+                                    table,
+                                    EngineSeams {
+                                        demand: &|name: &str| driver.demand_name_only(name),
+                                        demand_member: &|receiver: Ty, name: &str| {
+                                            driver.demand_on_receiver(receiver, name)
+                                        },
+                                        rejects: &|_| false,
+                                    },
+                                ))
+                            },
+                        )
+                        .ty()?;
+                    Some((*owner, name.clone(), *extension_index, ty))
+                },
+            )
+            .collect::<Vec<_>>();
+        (function_returns, method_returns, member_ext_property_types)
     };
+    for (owner, name, extension_index, ret) in engine_member_ext_props {
+        if ret == Ty::Error {
+            continue;
+        }
+        if let Some(signature) = table
+            .class_by_type_name_mut(owner)
+            .and_then(|class| class.member_ext_props.get_mut(&name))
+            .and_then(|properties| properties.get_mut(extension_index))
+        {
+            signature.ret = inferred_declaration_ty(ret);
+        }
+    }
     for (file_index, declaration, ret) in engine_function_returns {
+        if ret == Ty::Error {
+            continue;
+        }
         let declared_here = |signature: &&mut Signature| {
             signature.source_file == Some(file_index) && signature.source_decl == Some(declaration)
         };
@@ -11042,24 +11308,49 @@ fn resolve_deferred_properties(
             signature.set_inferred_return(ret);
         }
     }
-    for (owner, name, ret) in engine_returns {
-        let Some(class) = table.class_by_type_name_mut(owner) else {
+    for (method, ret) in engine_returns {
+        // `Error` is the engine saying "I could not determine this", not a type. Publishing it
+        // would overwrite whatever collection did determine (an anonymous object's member keeps
+        // the walk's answer, for one) with a placeholder that reads downstream as a real shape —
+        // an `Object` descriptor where the override needs `void`. Leave the existing answer alone;
+        // an undetermined member still carries the marker and settles with the rest.
+        if ret == Ty::Error {
+            continue;
+        }
+        let Some(class) = table.class_by_type_name_mut(method.owner) else {
             continue;
         };
-        // The spelling is unambiguous: an overloaded one is not in the index, because a name alone
-        // cannot choose between overloads.
+        // The signature written is the one this DECLARATION produced — its position among the
+        // same-spelled overloads of the same kind. Choosing by spelling alone wrote an inferred
+        // return onto an unrelated overload, including one with a DECLARED return.
+        if method.is_extension {
+            let Some((receiver, params)) = class
+                .member_ext_funs
+                .get(&method.name)
+                .and_then(|overloads| overloads.get(method.overload_index))
+                .map(|function| (function.receiver_ty, function.signature.params.clone()))
+            else {
+                continue;
+            };
+            class.set_inferred_member_extension_return(&method.name, receiver, &params, ret);
+            continue;
+        }
         let Some(params) = class
             .methods
-            .get(&name)
-            .and_then(|overloads| overloads.first())
+            .get(&method.name)
+            .and_then(|overloads| overloads.get(method.overload_index))
             .map(|signature| signature.params.clone())
         else {
             continue;
         };
-        class.set_inferred_method_return(&name, &params, ret);
+        class.set_inferred_method_return(&method.name, &params, ret);
     }
     for (entry, resolution) in resolutions {
-        let Some(ty) = resolution.ty() else {
+        // An answer that carries the error placeholder is a resolution FAILURE wearing a type's
+        // clothes: publishing it puts `<error>` into `@Metadata` and `java/lang/Object` into every
+        // descriptor derived from it, with no diagnostic anywhere. It takes the decline path with
+        // the undetermined ones, which reports it.
+        let Some(ty) = resolution.ty().filter(|ty| !ty.mentions_error()) else {
             // Undetermined is not a type. Replace the marker with the ordinary error placeholder so
             // nothing downstream — emission, `@Metadata`, a later read — can mistake "not resolved"
             // for a shape, and report the decline.
@@ -11105,8 +11396,49 @@ fn resolve_deferred_properties(
     }
 }
 
+/// One class member whose return the walk could not determine, addressed by DECLARATION.
+///
+/// The by-spelling index cannot carry an overloaded name; this can, because publishing an answer
+/// never has to choose — it already knows which declaration was asked about.
+struct UndeterminedMethod {
+    owner: TypeName,
+    name: String,
+    /// A member EXTENSION keeps its own signature table, so which one to write is decided here.
+    is_extension: bool,
+    /// Position among the same-spelled overloads of the same kind, as the lowerer counts them.
+    overload_index: usize,
+    file_index: u32,
+    declaration: DeclId,
+    method_index: u32,
+}
+
 /// Turn a declaration the engine could not determine into the ordinary error placeholder.
 fn decline_pending_property(table: &mut SymbolTable, entry: &DeferredProperty) {
+    // An extension property the engine could not determine is REMOVED from the extension table
+    // rather than left carrying a placeholder: an entry whose type is `Error` is registered — it
+    // resolves at every use site and reaches emission and `@Metadata` with `<error>` in its
+    // descriptor. Not registering it is what collection did with the same answer, and the use site
+    // reports the ordinary unresolved-reference diagnostic.
+    //
+    // The module property tables below are NOT touched for one: they are keyed by bare spelling,
+    // which an extension property does not own — writing there would place the placeholder on an
+    // unrelated `val` of the same name. `publish_top_level_property_type` returns early for the
+    // same reason.
+    if matches!(
+        entry.kind,
+        DeferredKind::TopLevel {
+            has_receiver: true,
+            ..
+        }
+    ) {
+        for overloads in table.ext_props.values_mut() {
+            overloads.retain(|signature| {
+                signature.source != (entry.file_index, entry.key.decl)
+                    || signature.ty != Ty::Pending
+            });
+        }
+        return;
+    }
     if let Some(signature) = table
         .source_props
         .get_mut(&(entry.file_index, entry.key.decl))
@@ -11160,6 +11492,20 @@ fn publish_top_level_property_type(
             })
         })
         .flatten();
+    // An EXTENSION property lives in its own table, keyed by erased receiver and spelling; it has
+    // no `source_props` entry to update.
+    if property.receiver.is_some() {
+        if let Some(signature) = table
+            .ext_props
+            .values_mut()
+            .flatten()
+            .find(|signature| signature.source == (entry.file_index, entry.key.decl))
+            .filter(|signature| signature.ty == Ty::Pending)
+        {
+            signature.ty = ty;
+        }
+        return;
+    }
     let published = table
         .source_props
         .get_mut(&(entry.file_index, entry.key.decl))
@@ -11550,6 +11896,25 @@ fn settle_undetermined_returns(table: &mut SymbolTable) {
                 }
             }
         }
+        // A member EXTENSION keeps its own table, and a marker left there reaches emission exactly
+        // as an ordinary member's would: `operator fun String.invoke() = Unit` is a real method with
+        // a real descriptor.
+        for overloads in class.member_ext_funs.values_mut() {
+            for function in overloads.iter_mut() {
+                if function.signature.ret == Ty::Pending {
+                    function.signature.set_inferred_return(Ty::Unit);
+                }
+            }
+        }
+        // Member-extension PROPERTIES keep a third table, and their getter descriptor is emitted
+        // from it. A marker left here reaches `type_encoder`, which rejects it.
+        for properties in class.member_ext_props.values_mut() {
+            for property in properties.iter_mut() {
+                if property.ret == Ty::Pending {
+                    property.ret = Ty::Unit;
+                }
+            }
+        }
     }
 }
 
@@ -11593,13 +11958,25 @@ fn infer_function_return_ty(
     let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
     checker.check_fun(scope, function, Some(declaration));
     checker.symbolic_signature_inference = outer;
-    if checker.inference_incomplete {
+    let incomplete = checker.inference_incomplete;
+    // An EXTENSION records its return in its own table, keyed by spelling as well — the module's
+    // extensions live in a table keyed by receiver, so the walk cannot key them the way it keys a
+    // plain function. Which table the answer landed in is a property of the declaration, not of the
+    // question, so both are read.
+    let rets = std::mem::take(&mut checker.inferred_fun_rets);
+    let ext_rets = std::mem::take(&mut checker.inferred_ext_fun_rets);
+    drop(checker);
+    if incomplete {
         return None;
     }
-    let rets = std::mem::take(&mut checker.inferred_fun_rets);
-    drop(checker);
     rets.get(&(file_index, declaration.0))
         .copied()
+        .or_else(|| {
+            ext_rets
+                .iter()
+                .find(|((file, decl, _), _)| *file == file_index && *decl == declaration.0)
+                .map(|(_, ret)| *ret)
+        })
         .filter(|ty| *ty != Ty::Error && *ty != Ty::Pending)
 }
 
@@ -11773,6 +12150,117 @@ fn infer_class_member_ty(
     withheld_construction_ty(file, expression, &types, table, inferred)
 }
 
+/// Type ONE member-extension property's getter, in its class's context.
+///
+/// `class C { val Foo.name get() = this.length }` needs four things bound before the getter means
+/// anything: the class's dispatch receiver and type parameters, the property's OWN type parameters
+/// on their own rung so they retire with it, the extension receiver as `this`, and the property's
+/// context parameters. The sweep built exactly this; the engine builds it for one declaration, when
+/// that declaration is asked for.
+fn infer_member_ext_property_ty(
+    file: &File,
+    file_index: u32,
+    owner: DeclId,
+    property_index: u32,
+    table: &SymbolTable,
+    engine: EngineSeams<'_>,
+) -> Ty {
+    let Decl::Class(class) = file.decl(owner) else {
+        return Ty::Error;
+    };
+    let Some(property) = class.body_props.get(property_index as usize) else {
+        return Ty::Error;
+    };
+    let Some((receiver, getter)) = member_extension_property_preinfer_body(property) else {
+        return Ty::Error;
+    };
+    let mut scratch = DiagSink::new();
+    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
+    checker.demand_name = Some(engine.demand);
+    checker.demand_member = Some(engine.demand_member);
+    checker.demand_rejects = Some(engine.rejects);
+    checker.inference_only = true;
+    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
+    checker.set_anonymous_lexical_class_context(owner);
+    let Some(internal) = checker
+        .same_package_class(&class.name)
+        .map(ClassSig::internal_name)
+    else {
+        return Ty::Error;
+    };
+    let resolve = class_internal_resolver(checker.syms);
+    // The class's formals carry the declaration-owned identity here too: without it the getter's
+    // `T` is a different variable from the class's own and `Wrapper<T>` comes back `Wrapper<Any>`.
+    let class_tparams =
+        TParams::symbolic_from_decl_with(&class.type_params, &class.type_param_bounds, &resolve)
+            .alpha_renamed_declaration(
+                &class.type_params,
+                checker.syms.compilation_id,
+                file_index,
+                class.span.lo,
+            );
+    let dispatch = Ty::obj_args_name(
+        internal,
+        &class
+            .type_params
+            .iter()
+            .map(|name| class_tparams.bound(name))
+            .collect::<Vec<_>>(),
+    );
+    let root = CheckerScope::root();
+    let dispatch_scope = root.child(ScopeKind::Function {
+        receiver: Some(dispatch),
+    });
+    let scope = &dispatch_scope;
+    scope.declare_tparams(&class.type_params, &class_tparams, |_| false);
+    checker
+        .this_labels
+        .extend(class_receiver_labels(class, checker.syms, Some(dispatch)));
+    for declared in &checker.scoped_properties(scope, internal) {
+        checker.declare_scoped_property(scope, declared, true);
+    }
+    let property_scope = scope.child(ScopeKind::Function { receiver: None });
+    let scope = &property_scope;
+    scope.declare_tparams(
+        &property.type_params,
+        &class_tparams
+            .symbolic_extended_with(&property.type_params, &property.type_param_bounds, &resolve)
+            .alpha_renamed_declaration(
+                &property.type_params,
+                checker.syms.compilation_id,
+                file_index,
+                property.span.lo,
+            ),
+        |_| false,
+    );
+    let receiver_ty = checker.type_ref_ty(scope, receiver);
+    checker
+        .this_labels
+        .push((property.name.clone(), receiver_ty, false));
+    let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
+    let inferred = {
+        let getter_scope = scope.child(ScopeKind::Function {
+            receiver: Some(receiver_ty),
+        });
+        let scope = &getter_scope;
+        for parameter in &property.context_params {
+            if parameter.name == "_" {
+                continue;
+            }
+            let parameter_type = checker.type_ref_ty(scope, &parameter.ty);
+            checker.declare(scope, &parameter.name, parameter_type, false);
+        }
+        checker.expr(scope, getter)
+    };
+    checker.symbolic_signature_inference = outer;
+    let incomplete = checker.inference_incomplete;
+    drop(checker);
+    match incomplete || inferred == Ty::Error || inferred.mentions_pending() {
+        true => Ty::Error,
+        false => inferred,
+    }
+}
+
 /// Type a member FUNCTION's inferred return, in its class's checking context.
 ///
 /// The same jump the engine makes for a member property: the class's formals are symbolic, `this`
@@ -11808,8 +12296,21 @@ fn infer_method_return_ty(
         return Ty::Error;
     };
     let resolve = class_internal_resolver(checker.syms);
+    // The class's formals carry the DECLARATION-owned identity, as they do when a member property is
+    // typed. Without it the body's `T` is a different variable from the class's own, and every read
+    // through it erases to the bound.
+    // Symbolic formals, minted with the DECLARATION-owned identity. A plain formal erases to its
+    // bound (`fun get() = value` comes back `Any`), and a symbolic one under its source name is not
+    // what the call substitutes against: the receiver's bindings are keyed by that same declaration
+    // identity, so `T` under any other key passes through unsubstituted.
     let class_tparams =
-        TParams::symbolic_from_decl_with(&class.type_params, &class.type_param_bounds, &resolve);
+        TParams::symbolic_from_decl_with(&class.type_params, &class.type_param_bounds, &resolve)
+            .alpha_renamed_declaration(
+                &class.type_params,
+                checker.syms.compilation_id,
+                file_index,
+                class.span.lo,
+            );
     let dispatch = Ty::obj_args_name(
         internal,
         &class
@@ -11831,18 +12332,14 @@ fn infer_method_return_ty(
     for property in &properties {
         checker.declare_scoped_property(scope, property, true);
     }
-    // A MEMBER EXTENSION's body reads its extension receiver as `this`, with the class's own
-    // dispatch receiver behind it. Binding it here is what lets `fun Foo.name() = this.length`
-    // inside a class answer from the declaration instead of declining.
-    let extension_receiver = method
-        .receiver
-        .as_ref()
-        .map(|receiver| checker.type_ref_ty(scope, receiver));
-    let method_scope = scope.child(ScopeKind::Function {
-        receiver: extension_receiver,
-    });
-    let method_scope = &method_scope;
-    method_scope.declare_tparams(
+    // The method's OWN type parameters go on their own rung first: an extension receiver may mention
+    // them (`fun <T> T.first()`), and resolving the receiver before they are declared erases it to
+    // its bound. Only then is the receiver typed and bound as `this`, with the class's dispatch
+    // receiver behind it — which is what lets `fun Foo.name() = this.length` inside a class answer
+    // from the declaration instead of declining.
+    let rung = scope.child(ScopeKind::Function { receiver: None });
+    let rung = &rung;
+    rung.declare_tparams(
         &method.type_params,
         &class_tparams
             .symbolic_extended_with(&method.type_params, &method.type_param_bounds, &resolve)
@@ -11854,15 +12351,46 @@ fn infer_method_return_ty(
             ),
         |name| method.reified_type_params.contains(name),
     );
+    let extension_receiver = method
+        .receiver
+        .as_ref()
+        .map(|receiver| checker.type_ref_ty(rung, receiver));
+    if let Some(receiver) = extension_receiver {
+        checker
+            .this_labels
+            .push((method.name.clone(), receiver, false));
+    }
+    let method_scope = rung.child(ScopeKind::Function {
+        receiver: extension_receiver,
+    });
+    let method_scope = &method_scope;
     let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
     checker.check_method(method_scope, method, &properties, None);
     checker.symbolic_signature_inference = outer;
     let incomplete = checker.inference_incomplete;
+    // Keyed by the method that was ASKED for. `check_method` records every return it computed while
+    // walking, so taking whichever entry happened to be first answered a different declaration.
+    //
+    // A member EXTENSION records into its own table — the ordinary methods are keyed by name and
+    // parameters, an extension by its receiver as well — so both are read here. `class.methods`
+    // holds either kind, and which table the answer landed in is a property of the declaration,
+    // not of the question being asked.
     let inferred = checker
         .inferred_method_rets
-        .values()
-        .next()
-        .copied()
+        .iter()
+        .find(|((declaring, name, _), _)| *declaring == internal && *name == method.name)
+        .map(|(_, ret)| *ret)
+        .or_else(|| {
+            // A member EXTENSION records into its own table, keyed by its RECEIVER rather than by
+            // the class that declares it, so the owner is not the discriminator here — the receiver
+            // is, and it is what tells two same-spelled extensions apart.
+            let receiver = extension_receiver?;
+            checker
+                .inferred_member_ext_fun_rets
+                .iter()
+                .find(|((_, name, recorded, _), _)| *name == method.name && *recorded == receiver)
+                .map(|(_, ret)| *ret)
+        })
         .unwrap_or(Ty::Error);
     drop(checker);
     match incomplete || inferred == Ty::Error || inferred.mentions_pending() {
@@ -11959,6 +12487,19 @@ fn infer_declaration_ty(
             // An UNBOUND reference spells a classifier, which is not a value: its receiver
             // expression has no type, and the owner comes from the classifier instead.
             .or_else(|| inferred.type_args().first().copied())
+            // A FUNCTION reference is a `Ty::Fun`, which carries no type arguments at all, so
+            // neither route above names an owner. The receiver still SPELLS the classifier —
+            // `C::foo` — and that spelling is the owner.
+            .or_else(|| {
+                let Some(Expr::Name(spelling)) = receiver.map(|receiver| file.expr(receiver))
+                else {
+                    return None;
+                };
+                checker
+                    .same_package_class(spelling)
+                    .map(ClassSig::internal_name)
+                    .map(Ty::obj_name)
+            })
             .and_then(|owner| (engine.demand_member)(owner, name))
             .filter(|answered| !answered.mentions_pending())
             .map_or(inferred, |answered| {
@@ -11972,18 +12513,14 @@ fn infer_declaration_ty(
     // which would write `D` into the field, the getter and the `@Metadata`. That is a different
     // value at runtime with nothing to reveal it, so refusing to answer is the recoverable choice;
     // the join stays as it is for expression positions, where nothing is published.
-    crate::trace_compiler!(
-        "resolve",
-        "PDEC {} raw={inferred:?} incomplete={} declines={}",
-        property.name,
-        checker.inference_incomplete,
-        declaration_body_declines(file, expression, &checker.expr_types)
-    );
-    if checker.inference_incomplete
-        || declaration_body_declines(file, expression, &checker.expr_types)
-    {
+    if declaration_body_declines(file, expression, &checker.expr_types) {
         return Ty::Error;
     }
+    // `checker.inference_incomplete` is deliberately NOT a decline on its own. It is FILE-global —
+    // it records that this run met a classifier collection had not reached yet — while the question
+    // here is about ONE declaration, which need not mention that classifier at all. The evidence
+    // that this declaration was answered is its own type: a complete one was determined, and one
+    // still carrying the marker was not.
     if inferred.mentions_pending() {
         return Ty::Error;
     }
@@ -16021,6 +16558,7 @@ fn make_checker<'a>(
         demand_rejects: None,
         inference_only: false,
         inference_incomplete: false,
+        member_bound_retries: std::collections::HashSet::new(),
         module: crate::module_symbols::ModuleSymbols::for_file(syms, file_index),
         file_index,
         source_files,
@@ -17059,9 +17597,21 @@ fn discover_anonymous_object_captures_at(file: &File, file_index: u32, syms: &mu
 }
 
 pub fn discover_anonymous_object_captures(files: &[File], syms: &mut SymbolTable) {
-    for (file_index, file) in files.iter().enumerate() {
-        discover_anonymous_object_captures_at(file, file_index as u32, syms);
-    }
+    // Bracketed as a module mutation: installing capture fields and constructor parameters changes
+    // the synthesized classes, and the table's derived indexes are rebuilt on `finish`. Without the
+    // bracket the members are written but nothing rebuilds, so an anonymous object that captures a
+    // local loses its methods entirely — `resumeWith` is absent from the emitted class and the JVM
+    // raises `AbstractMethodError` at the first call.
+    syms.begin_module_mutation();
+    // On the CHECKER's own stack: this walks whole files through the checker, and the depth guard
+    // that stops a deeply nested expression fires far later than a small caller stack runs out.
+    // Every other entry into a file-wide check is reserved the same way.
+    crate::wide_stack::on_wide_stack(|| {
+        for (file_index, file) in files.iter().enumerate() {
+            discover_anonymous_object_captures_at(file, file_index as u32, syms);
+        }
+    });
+    syms.finish_module_mutation();
 }
 
 #[derive(Default)]
@@ -17455,40 +18005,6 @@ fn preinfer_returns_pass_with_owners(
         }
     }
     result
-}
-
-/// Pre-infer expression-body RETURNS far enough for deferred declaration resolution to read them.
-///
-/// Only the returns fixpoint runs here, NOT the anonymous-object capture discovery the full
-/// pre-inference starts with: captures are discovered once, and doing it before the deferred
-/// declarations have types locks in the wrong ones. The full pass still runs after collection and
-/// still refines everything this leaves incomplete — it is a fixpoint, not a single sweep.
-fn preinfer_member_returns_for_deferred(
-    files: &[File],
-    table: &mut SymbolTable,
-    diags: &mut DiagSink,
-) {
-    table.begin_module_mutation();
-    let saved = diags.current_file();
-    let anonymous_lexical_scopes = files
-        .iter()
-        .map(anonymous_lexical_class_scope)
-        .collect::<Vec<_>>();
-    let candidates = files
-        .iter()
-        .map(file_has_preinfer_candidates)
-        .collect::<Vec<_>>();
-    // No `on_wide_stack` here: collection already runs on the reserved stack, and nesting another
-    // reserve grows a fresh segment per level rather than reusing the one already in hand.
-    preinfer_module_returns_to_fixpoint(
-        files,
-        table,
-        diags,
-        &anonymous_lexical_scopes,
-        &candidates,
-    );
-    diags.set_file(saved);
-    table.finish_module_mutation();
 }
 
 /// Pre-infer EXPRESSION-body return types across the WHOLE module (every file), patching `syms` before
@@ -18475,6 +18991,13 @@ struct Checker<'a> {
     /// For the authoritative check the same situation stays an assertion, because by then every
     /// declaration is collected and a miss is a real broken invariant.
     inference_incomplete: bool,
+    /// The `(receiver, member)` pairs whose INTERSECTION-BOUND retry is already in progress.
+    ///
+    /// `where T : A, T : B` retries an unresolved member against each remaining bound, and a bound
+    /// can name the parameter it bounds (`T : Comparable<T>`). Without a record of what is already
+    /// being retried, that self-reference is an unbounded `check_member` → `check_member_quietly`
+    /// recursion, which overflows the stack instead of reporting an unresolved reference.
+    member_bound_retries: std::collections::HashSet<(Ty, String)>,
     /// Whether the declaration being typed may not read this name AT ALL. An eager initializer runs
     /// in declaration order, so a module property declared later in the same file has no value yet;
     /// kotlinc rejects `val eager = later` with "variable 'later' must be initialized". The symbol
@@ -35905,6 +36428,30 @@ impl<'a> Checker<'a> {
                         if let Some(ty) = self.demand_name.and_then(|demand| demand(&name)) {
                             return self.set(e, ty);
                         }
+                        // An unqualified call inside a class body can name a MEMBER — of the
+                        // dispatch receiver, or of an enclosing extension receiver — and the
+                        // top-level index does not carry those. Ask the receiver tower the same
+                        // way name resolution walked it: innermost rung first.
+                        if let Some(demand) = self.demand_member {
+                            let tower: Vec<Ty> = self
+                                .this_labels
+                                .iter()
+                                .rev()
+                                .map(|(_, ty, _)| *ty)
+                                .collect();
+                            // A rung that answers `Error` or the marker has NOT answered: taking
+                            // that as the result would both type the call wrongly and stop the
+                            // walk before an outer rung — which may hold the real declaration — is
+                            // ever asked.
+                            for receiver in tower {
+                                let answered = demand(receiver, &name).filter(|answered| {
+                                    *answered != Ty::Error && !answered.mentions_pending()
+                                });
+                                if let Some(ty) = answered {
+                                    return self.set(e, ty);
+                                }
+                            }
+                        }
                     }
                 }
                 called
@@ -40745,6 +41292,18 @@ impl<'a> Checker<'a> {
                 .and_then(|source| self.inferred_source_member_rets.get(&source).copied())
                 .unwrap_or(selected.ret)
         };
+        // A member whose own return is still being determined reads as the marker here. Ask the
+        // engine for that declaration BEFORE substituting: the answer is the declared return —
+        // `fun get() = value` is `T` — and the substitution below is what turns it into this call's
+        // type. Asking after would leave `T` to leak out as the call's type.
+        let ret = match ret.mentions_pending() {
+            true => self
+                .demand_member
+                .and_then(|demand| demand(selected.receiver, &selected.member.name))
+                .filter(|answered| !answered.mentions_pending())
+                .unwrap_or(ret),
+            false => ret,
+        };
         let receiver_bindings =
             self.member_receiver_type_bindings(selected.receiver, &selected.member);
         let ret = crate::symbol_resolver::ty_subst_keep_unbound(ret, &receiver_bindings);
@@ -44325,9 +44884,15 @@ impl<'a> Checker<'a> {
         // (`x.name` on `T : Comparable<T>, T : Named`) resolved against `Comparable` and reported as
         // unresolved. Retry against the remaining bounds before giving up; the ERASURE is untouched, so
         // the descriptor still uses the first bound exactly as kotlinc emits it.
-        for bound in scope.tparam_extra_bounds(rt.non_null()) {
-            let recovered = self.check_member_quietly(scope, bound, name, span, mexpr);
-            if recovered != Ty::Error {
+        let retry = (rt.non_null(), name.to_string());
+        if self.member_bound_retries.insert(retry.clone()) {
+            let bounds = scope.tparam_extra_bounds(rt.non_null());
+            let recovered = bounds.into_iter().find_map(|bound| {
+                let recovered = self.check_member_quietly(scope, bound, name, span, mexpr);
+                (recovered != Ty::Error).then_some(recovered)
+            });
+            self.member_bound_retries.remove(&retry);
+            if let Some(recovered) = recovered {
                 return recovered;
             }
         }
@@ -46636,6 +47201,32 @@ impl<'a> Checker<'a> {
                 .demand_member
                 .and_then(|demand| demand(rt, name))
                 .filter(|answered| !answered.mentions_pending())
+                // The engine answers with the DECLARED return, which for a generic member is the
+                // class's own formal — `fun get() = value` is `T`, not `String`. The receiver's type
+                // arguments are what turn it into this call's type, and they are the same bindings
+                // the ordinary path substitutes with; without them `T` reads as its bound.
+                .map(|answered| {
+                    // Substituted with the RECEIVER's own arguments. `member_receiver_type_bindings`
+                    // answers nothing when the selected member carries no owner — exactly the
+                    // source-member case this seam serves — so the bindings come from the receiver's
+                    // classifier directly: `W<String>` binds `T` to `String`, and without that the
+                    // declared `T` leaks out as this call's type.
+                    let own = rt
+                        .kotlin_class_internal()
+                        .and_then(|owner| self.syms.class_by_type_name(owner))
+                        .map(|class| class.type_parameter_bindings(rt))
+                        .unwrap_or_default();
+                    let bindings = match own.is_empty() {
+                        true => receiver_bindings.clone(),
+                        false => own.into_iter().collect(),
+                    };
+                    let out = crate::types::ty_subst_keep_unbound(answered, &bindings);
+                    crate::trace_compiler!(
+                        "resolve",
+                        "SEAM {name} rt={rt:?} answered={answered:?} binds={bindings:?} -> {out:?}"
+                    );
+                    out
+                })
                 .unwrap_or(ret),
             false => ret,
         };

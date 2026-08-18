@@ -518,7 +518,12 @@ where
     }
     let mut symbols = collect_signatures_with_cp(&files[..inferred_end], platform, diags);
     prepare_symbols(&files, &mut symbols);
-    preinfer_module_returns(&files[..inferred_end], &mut symbols, diags);
+    // Anonymous-object CAPTURES, which the retired return pre-inference used to discover on its way
+    // past. It is not return inference and the engine does not replace it: a capture field and its
+    // constructor parameter are facts about the synthesized class, and without them an anonymous
+    // object cannot be lowered at all — `object : Sink { override fun take(v: String) { … } }` is
+    // refused by the backend rather than mistyped.
+    crate::resolve::discover_anonymous_object_captures(&files[..inferred_end], &mut symbols);
     if trim_support_bodies {
         for file in &mut files[checked_count.min(inferred_end)..inferred_end] {
             file.release_body_arenas();
@@ -541,7 +546,7 @@ fn check_source_set_skipping(
     checked_count: usize,
     diags: &mut DiagSink,
 ) -> Vec<Option<FrontendTypeInfo>> {
-    files
+    let types = files
         .iter()
         .enumerate()
         .map(|(index, _)| {
@@ -557,7 +562,8 @@ fn check_source_set_skipping(
                 ))
             }
         })
-        .collect()
+        .collect();
+    types
 }
 
 /// Check a parsed source set whose signatures have already been collected.
@@ -567,7 +573,9 @@ pub fn check_source_set(
     diags: &mut DiagSink,
 ) -> Vec<Option<FrontendTypeInfo>> {
     let diagnostics_start = diags.diags.len();
-    preinfer_module_returns(files, symbols, diags);
+    // Capture discovery, for the same reason as the other entry point: an anonymous object's capture
+    // fields and constructor parameters are facts the backend needs before it can lower one at all.
+    crate::resolve::discover_anonymous_object_captures(files, symbols);
     let types = check_source_set_skipping(files, symbols, &[], files.len(), diags);
     diags.collapse_duplicates_from(diagnostics_start);
     types

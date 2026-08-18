@@ -762,7 +762,33 @@ pub fn ty_replace_pending(ty: Ty, replacement: Ty) -> Ty {
                     .collect::<Vec<_>>(),
             )
         }
+        // A FUNCTION type carries the marker in its return or its parameters, not in type arguments:
+        // `C::foo` is `(C) -> <not determined>` while `foo`'s own return is being determined. Without
+        // this arm such a type passed through untouched and the declaration declined even though the
+        // answer had already been obtained.
+        Ty::Fun(signature) if signature.mentions_pending() => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|parameter| ty_replace_pending(*parameter, replacement))
+                .collect::<Vec<_>>(),
+            ty_replace_pending(signature.ret, replacement),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
         other => other,
+    }
+}
+
+impl FnSig {
+    /// Whether this signature carries the NOT-DETERMINED marker in its return or parameters.
+    pub fn mentions_pending(&self) -> bool {
+        self.ret.mentions_pending()
+            || self
+                .params
+                .iter()
+                .any(|parameter| parameter.mentions_pending())
     }
 }
 
@@ -1135,14 +1161,33 @@ impl Ty {
     /// what publishing the bare marker would be, and the emission boundary rejects it the same way,
     /// so "is this determined" has to ask about the whole type rather than its outermost layer.
     pub fn mentions_pending(self) -> bool {
+        self.mentions_marker(&|ty| ty == Ty::Pending)
+    }
+
+    /// Whether this type carries the ERROR placeholder anywhere inside it.
+    ///
+    /// The same containment question as [`mentions_pending`](Ty::mentions_pending), asked about
+    /// "gave up" rather than "not yet". A publish boundary needs both: an answer of `Error` is not a
+    /// type either, and it erases to `java/lang/Object` in a descriptor and to `<error>` in
+    /// `@Metadata`, so publishing one is how a resolution failure turns into a wrong program rather
+    /// than a diagnostic.
+    pub fn mentions_error(self) -> bool {
+        self.mentions_marker(&|ty| ty == Ty::Error)
+    }
+
+    /// The containment walk both markers share: the type itself, a nullability/projection wrapper's
+    /// inner type, a reference type's arguments, and a function type's parameters and return.
+    fn mentions_marker(self, marker: &dyn Fn(Ty) -> bool) -> bool {
+        if marker(self) {
+            return true;
+        }
         match self {
-            Ty::Pending => true,
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner.mentions_pending(),
-            Ty::InProjection(inner) | Ty::OutProjection(inner) => inner.mentions_pending(),
-            Ty::Obj(_, args) => args.iter().any(|a| a.mentions_pending()),
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner.mentions_marker(marker),
+            Ty::InProjection(inner) | Ty::OutProjection(inner) => inner.mentions_marker(marker),
+            Ty::Obj(_, args) => args.iter().any(|a| a.mentions_marker(marker)),
             Ty::Fun(signature) => {
-                signature.ret.mentions_pending()
-                    || signature.params.iter().any(|p| p.mentions_pending())
+                signature.ret.mentions_marker(marker)
+                    || signature.params.iter().any(|p| p.mentions_marker(marker))
             }
             _ => false,
         }
