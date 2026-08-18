@@ -8770,67 +8770,11 @@ fn collect_signatures_with_cp_impl(
     // checker resolves classifiers and callables through the table's platform. Install it before
     // that runs: without it every classpath and built-in name — `Int` included — is unresolved, and
     // every deferred declaration declines.
-    table.libraries = libraries;
-    resolve_deferred_properties(files, &mut table, &deferred_properties, diags);
-    // Anything still undetermined after resolution keeps the placeholder the walk used before:
-    // `Unit` for a function return nothing asked for. The marker exists so that PROPERTY resolution
-    // cannot consume a wrong `Unit` as an answer; past that point the ordinary return pre-inference
-    // fills these in, and a marker must never reach emission or `@Metadata`.
-    settle_undetermined_returns(&mut table);
-
-    table.conflicting_top_level_keys = report_conflicting_top_level_overloads(
-        files,
-        &top_level_fun_groups,
-        &pending_conflict_diagnostics,
-        reserved_conflict_diagnostic_bytes,
-        diags,
-    );
-    table.conflicting_top_level_candidates = top_level_fun_groups
-        .groups
-        .iter()
-        .filter(|(key, _)| table.conflicting_top_level_keys.contains(key))
-        .map(|(key, group)| {
-            (
-                key.clone(),
-                TopLevelFunctionConflictCandidates {
-                    public: group.public_candidates.clone(),
-                    private_by_file: group
-                        .files
-                        .iter()
-                        .filter(|&(_, state)| !state.private_candidates.is_empty())
-                        .map(|(&file, state)| (file, state.private_candidates.clone()))
-                        .collect(),
-                },
-            )
-        })
-        .collect();
-    for (name, signatures) in &table.funs {
-        for signature in signatures {
-            let Some((file, declaration)) = signature
-                .source_file
-                .zip(signature.source_decl.map(|declaration| declaration.0))
-            else {
-                continue;
-            };
-            let key = (
-                signature.package.clone(),
-                name.clone(),
-                erased_params_semantic_key(signature),
-            );
-            let retained_for_recovery = table
-                .conflicting_top_level_candidates
-                .get(&key)
-                .is_some_and(|candidates| {
-                    !signature.visibility.is_private()
-                        || candidates.private_by_file.contains_key(&file)
-                });
-            if retained_for_recovery {
-                table
-                    .conflicting_top_level_key_by_source
-                    .insert((file, declaration), key);
-            }
-        }
-    }
+    // Source type ALIASES are name-resolution facts the deferred run needs: it resolves a
+    // declaration by running the real checker, and `val p = AliasedCell(MyClass())` is an
+    // unresolved reference until the alias's expansion is installed. Registered here rather
+    // than after resolution for the same reason `libraries` is — a table the checker reads
+    // must be complete before the checker runs.
 
     // Retain source aliases as per-file name-resolution edges. A copied `ClassSig` under a simple
     // alias key would violate the class table's internal-name invariant and make hierarchy walks,
@@ -8952,6 +8896,68 @@ fn collect_signatures_with_cp_impl(
             table
                 .alias_expansion_spellings
                 .insert(identity, (expansion_spelling, formals.clone(), expansion));
+        }
+    }
+
+    table.libraries = libraries;
+    resolve_deferred_properties(files, &mut table, &deferred_properties, diags);
+    // Anything still undetermined after resolution keeps the placeholder the walk used before:
+    // `Unit` for a function return nothing asked for. The marker exists so that PROPERTY resolution
+    // cannot consume a wrong `Unit` as an answer; past that point the ordinary return pre-inference
+    // fills these in, and a marker must never reach emission or `@Metadata`.
+    settle_undetermined_returns(&mut table);
+
+    table.conflicting_top_level_keys = report_conflicting_top_level_overloads(
+        files,
+        &top_level_fun_groups,
+        &pending_conflict_diagnostics,
+        reserved_conflict_diagnostic_bytes,
+        diags,
+    );
+    table.conflicting_top_level_candidates = top_level_fun_groups
+        .groups
+        .iter()
+        .filter(|(key, _)| table.conflicting_top_level_keys.contains(key))
+        .map(|(key, group)| {
+            (
+                key.clone(),
+                TopLevelFunctionConflictCandidates {
+                    public: group.public_candidates.clone(),
+                    private_by_file: group
+                        .files
+                        .iter()
+                        .filter(|&(_, state)| !state.private_candidates.is_empty())
+                        .map(|(&file, state)| (file, state.private_candidates.clone()))
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    for (name, signatures) in &table.funs {
+        for signature in signatures {
+            let Some((file, declaration)) = signature
+                .source_file
+                .zip(signature.source_decl.map(|declaration| declaration.0))
+            else {
+                continue;
+            };
+            let key = (
+                signature.package.clone(),
+                name.clone(),
+                erased_params_semantic_key(signature),
+            );
+            let retained_for_recovery = table
+                .conflicting_top_level_candidates
+                .get(&key)
+                .is_some_and(|candidates| {
+                    !signature.visibility.is_private()
+                        || candidates.private_by_file.contains_key(&file)
+                });
+            if retained_for_recovery {
+                table
+                    .conflicting_top_level_key_by_source
+                    .insert((file, declaration), key);
+            }
         }
     }
 
