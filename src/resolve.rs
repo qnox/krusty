@@ -11816,6 +11816,24 @@ fn infer_declaration_ty(
             .unwrap_or(inferred),
         false => inferred,
     };
+    // A CALL of a member function whose own return is still being determined types as the marker:
+    // the call read the member's recorded return rather than asking for it. The member READ path
+    // asks the engine in exactly this situation; a call has to ask too. The receiver's type is what
+    // names the owner, and the callee spells the member.
+    let inferred = match (inferred == Ty::Pending, file.expr(expression)) {
+        (true, Expr::Call { callee, .. }) => match file.expr(*callee) {
+            Expr::Member { receiver, name } => checker
+                .expr_types
+                .get(receiver.0 as usize)
+                .copied()
+                .filter(|receiver| *receiver != Ty::Error && !receiver.mentions_pending())
+                .and_then(|owner| (engine.demand_member)(owner, name))
+                .filter(|answered| !answered.mentions_pending())
+                .unwrap_or(inferred),
+            _ => inferred,
+        },
+        _ => inferred,
+    };
     // The reference's recorded type can itself still carry the marker: `C::bar` is
     // `KProperty1<C, <not determined>>` while `bar` is being determined, because the reference read
     // the member's record rather than asking for it. The member READ path asks the engine in exactly
@@ -11844,6 +11862,13 @@ fn infer_declaration_ty(
     // which would write `D` into the field, the getter and the `@Metadata`. That is a different
     // value at runtime with nothing to reveal it, so refusing to answer is the recoverable choice;
     // the join stays as it is for expression positions, where nothing is published.
+    crate::trace_compiler!(
+        "resolve",
+        "PDEC {} raw={inferred:?} incomplete={} declines={}",
+        property.name,
+        checker.inference_incomplete,
+        declaration_body_declines(file, expression, &checker.expr_types)
+    );
     if checker.inference_incomplete
         || declaration_body_declines(file, expression, &checker.expr_types)
     {
