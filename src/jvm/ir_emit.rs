@@ -7970,13 +7970,6 @@ fn prim_wrapper(t: Ty) -> Option<(&'static str, &'static str)> {
     })
 }
 
-/// Java `String.hashCode()` of `s` (the annotation `hashCode` weights each member by `127 *
-/// name.hashCode()`, a compile-time constant).
-fn java_string_hash(s: &str) -> i32 {
-    s.chars()
-        .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
-}
-
 /// Emit the synthetic IMPLEMENTATION class for a Kotlin annotation instantiation (`A(args)`): a final
 /// class implementing the annotation interface `iface` and the full `java.lang.annotation.Annotation`
 /// contract — private final fields, a constructor, per-member accessors (`x()`/`s()`), `annotationType()`,
@@ -8055,7 +8048,7 @@ fn emit_annotation_impl_class(
     }
 
     emit_annotation_equals(&mut cw, &fq, iface, &members);
-    emit_annotation_hashcode(&mut cw, &fq, &members);
+    emit_annotation_hashcode(ir, &mut cw, &fq, &members);
     emit_annotation_tostring(&mut cw, &fq, iface, &members);
     // annotationType(): return <iface>.class. LAST, after the `Object` overrides — kotlinc's member
     // order, and the method table is part of the class file, so emitting it beside the member
@@ -8221,37 +8214,80 @@ fn jvm_array_actual_realization(
 /// `hashCode()I` for an annotation impl: the contract sum of `(127 * memberName.hashCode()) ^
 /// memberValue.hashCode()` over members (arrays via `Arrays.hashCode`, primitives via their wrappers'
 /// static `hashCode`). Straight-line (no frames).
-fn emit_annotation_hashcode(cw: &mut ClassWriter, fq: &str, members: &[(String, Ty)]) {
-    let mut cb = CodeBuilder::new(1);
-    cb.push_int(0, cw); // acc
-    for (name, jt) in members {
-        cb.push_int(127i32.wrapping_mul(java_string_hash(name)), cw);
-        // value.hashCode():
+fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members: &[(String, Ty)]) {
+    // kotlinc's shape, instruction for instruction. Two things are deliberate rather than
+    // incidental, because both are visible in the class file even though neither changes the value:
+    //
+    // - The member-name weight is COMPUTED (`ldc "v"; String.hashCode(); bipush 127; imul`), not
+    //   folded into a constant. Folding it produced the same number and a different method body.
+    // - Every PRIMITIVE goes through its wrapper's static `hashCode` — including `int`, whose value
+    //   already IS its hash. kotlinc emits `Integer.hashCode(I)` there regardless.
+    //
+    // The accumulator lives in local 1: each member xors its weighted name hash with its value hash,
+    // adds that into the accumulator (from the second member on) and stores it back.
+    let accumulates = members.len() > 1;
+    let mut cb = CodeBuilder::new(if accumulates { 2 } else { 1 });
+    let string_hash = cw.methodref("java/lang/String", "hashCode", "()I");
+    for (index, (name, jt)) in members.iter().enumerate() {
+        cb.push_string(name, cw);
+        cb.invokevirtual(string_hash, 0, 1);
+        cb.push_int(127, cw);
+        cb.imul();
         let fref = cw.fieldref(fq, name, &type_descriptor(*jt));
         cb.aload(0);
         cb.getfield(fref, slot_words(*jt) as i32);
         match *jt {
-            Ty::Int | Ty::Short | Ty::Byte | Ty::Char => { /* int value IS its hashCode */ }
-            Ty::Boolean | Ty::Long | Ty::Float | Ty::Double => {
-                let (wrap, pd) = prim_wrapper(*jt).unwrap();
-                let hc = cw.methodref(wrap, "hashCode", &format!("({pd})I"));
-                cb.invokestatic(hc, slot_words(*jt) as i32, 1);
-            }
             _ if jt.is_array() => {
                 let ad = arrays_param_desc(*jt);
                 let hc = cw.methodref("java/util/Arrays", "hashCode", &format!("({ad})I"));
                 cb.invokestatic(hc, 1, 1);
             }
-            _ => {
-                let hc = cw.methodref("java/lang/Object", "hashCode", "()I");
-                cb.invokevirtual(hc, 0, 1);
-            }
+            other => match prim_wrapper(other) {
+                Some((wrap, pd)) => {
+                    let hc = cw.methodref(wrap, "hashCode", &format!("({pd})I"));
+                    cb.invokestatic(hc, slot_words(other) as i32, 1);
+                }
+                None => {
+                    // The DECLARED class owns the call (`E.hashCode`, `String.hashCode`) — kotlinc
+                    // resolves it against the member's static type, not `Object`. An INTERFACE-typed
+                    // member (a nested annotation) cannot: `invokevirtual` on an interface type is
+                    // illegal, so kotlinc falls back to `Object.hashCode` there, and so does this.
+                    let owner = other
+                        .obj_internal()
+                        .map(|internal| {
+                            crate::jvm::names::classfile_internal_name(&internal.render())
+                        })
+                        .filter(|internal| {
+                            !ir.classes.iter().any(|class| {
+                                class.fq_name() == *internal
+                                    // An annotation class IS emitted as an interface.
+                                    && (class.is_interface || class.is_annotation)
+                            })
+                        })
+                        .unwrap_or_else(|| "java/lang/Object".to_string());
+                    let hc = cw.methodref(&owner, "hashCode", "()I");
+                    cb.invokevirtual(hc, 0, 1);
+                }
+            },
         }
         cb.ixor();
-        cb.iadd();
+        if index > 0 {
+            cb.iadd();
+        }
+        // The accumulator local exists only when there is something to accumulate: a SINGLE-member
+        // annotation leaves its one value on the stack and returns it, which is kotlinc's shape.
+        if accumulates {
+            cb.istore(1);
+            cb.iload(1);
+        }
+    }
+    // An annotation with no members hashes to 0.
+    if members.is_empty() {
+        cb.push_int(0, cw);
     }
     cb.ireturn();
-    finish_code::<0x0011>(cw, "hashCode", "()I", &mut cb, 1);
+    let max_locals = if accumulates { 2 } else { 1 };
+    finish_code::<0x0011>(cw, "hashCode", "()I", &mut cb, max_locals);
 }
 
 /// `toString()` for an annotation impl: `@<fqName>(m1=v1, m2=v2, …)` built with a `StringBuilder` (arrays

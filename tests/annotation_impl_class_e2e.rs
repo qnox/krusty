@@ -256,3 +256,67 @@ fn the_implementation_emits_members_in_kotlincs_order() {
         "the reordered implementation must still work"
     );
 }
+
+/// The implementation's `hashCode()` is kotlinc's, instruction for instruction — and computes the
+/// same value.
+///
+/// Two things the value alone cannot show, both visible in the class file: the member-name weight is
+/// COMPUTED (`ldc "v"; String.hashCode(); bipush 127; imul`) rather than folded to a constant, and
+/// every primitive goes through its wrapper's static `hashCode` — `int` included, whose value already
+/// is its hash. A reference member resolves `hashCode` against its DECLARED class (`E`, `String`),
+/// except an interface-typed one (a nested annotation), where `invokevirtual` on the interface is
+/// illegal and kotlinc falls back to `Object`.
+#[test]
+fn the_implementation_hashcode_matches_kotlinc() {
+    const SRC: &str = "enum class E { A }\n\
+                       annotation class Inner(val x: Int)\n\
+                       annotation class Outer(val i: Int, val b: Boolean, val c: Char, val l: Long,\n\
+                                              val d: Double, val t: String, val a: IntArray,\n\
+                                              val e: E, val n: Inner)\n\
+                       fun mk(): Outer = Outer(1, true, 'c', 4L, 6.0, \"s\", intArrayOf(1), E.A, Inner(1))\n\
+                       fun box(): String = if (mk().hashCode() == mk().hashCode()) \"OK\" else \"FAIL\"\n";
+    let Some(build) = common::compile_libs_build("annotation_hashcode_shape", &[("H.kt", SRC)])
+    else {
+        return; // reference compiler unavailable
+    };
+    let reference_dir = build
+        .reference_out()
+        .expect("reference compiler output unavailable");
+    let ours = common::expect_compile_in_process(
+        SRC,
+        "H",
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    let impl_name = ours
+        .iter()
+        .map(|(name, _)| name.clone())
+        .find(|name| name.contains("$annotationImpl$"))
+        .expect("the annotation implementation class");
+    let body = |bytes: &[u8]| {
+        krusty::jvm::classreader::read_method_code(bytes, "hashCode", "()I")
+            .expect("hashCode body")
+            .code
+    };
+    let ours_bytes = ours
+        .iter()
+        .find_map(|(name, bytes)| (*name == impl_name).then_some(bytes.clone()))
+        .expect("our implementation class");
+    let reference_bytes =
+        std::fs::read(reference_dir.join(format!("{impl_name}.class"))).expect("reference class");
+    assert_eq!(
+        body(&ours_bytes).len(),
+        body(&reference_bytes).len(),
+        "the hashCode body must be kotlinc's, not merely value-equivalent"
+    );
+    assert_eq!(
+        common::run_box(
+            &ours,
+            &common::find_box_class(&ours).expect("box class"),
+            &[common::stdlib_jar()]
+        )
+        .as_deref(),
+        Some("OK"),
+        "and it must still run"
+    );
+}
