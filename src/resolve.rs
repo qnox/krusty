@@ -10554,6 +10554,10 @@ struct DeferredInferenceDriver<'a> {
     /// Top-level functions whose return is not determined, by source spelling. A call to one of
     /// them cannot be answered from the table, so the function is resolved on demand.
     functions: &'a HashMap<String, (u32, DeclId)>,
+    /// Member FUNCTIONS whose expression body the walk could not type, keyed by the class that
+    /// declares them. A declaration reading `C().gen()` needs the return resolved the same way a
+    /// property read does.
+    methods: &'a HashMap<(TypeName, String), (u32, DeclId, u32)>,
     source_order: &'a SourceOrderIndex,
 }
 
@@ -10787,7 +10791,41 @@ impl DeferredInferenceDriver<'_> {
     /// [`Self::demand_member`] addressed by the receiver's semantic type rather than its identity,
     /// which is the form an expression read has to hand.
     fn demand_on_receiver(&self, receiver: Ty, name: &str) -> Option<Ty> {
-        self.demand_member(receiver.kotlin_class_internal()?, name)
+        let owner = receiver.kotlin_class_internal()?;
+        self.demand_member(owner, name)
+            .or_else(|| self.demand_method(owner, name))
+    }
+
+    /// A member FUNCTION's inferred return, resolved on demand and memoised like every other
+    /// declaration. This is what the return pre-inference passes did by sweeping the module to a
+    /// fixpoint; asking for the one declaration that is needed replaces the sweep.
+    fn demand_method(&self, owner: TypeName, name: &str) -> Option<Ty> {
+        let (file_index, declaration, method_index) = self
+            .owner_chain(owner)
+            .into_iter()
+            .find_map(|declaring| self.methods.get(&(declaring, name.to_string())))
+            .copied()?;
+        self.engine
+            .resolve(
+                DeclKey::member(file_index, declaration.0, method_index),
+                || {
+                    Some(infer_method_return_ty(
+                        &self.files[file_index as usize],
+                        file_index,
+                        declaration,
+                        method_index,
+                        self.table,
+                        EngineSeams {
+                            demand: &|name: &str| self.demand_name_only(name),
+                            demand_member: &|receiver: Ty, name: &str| {
+                                self.demand_on_receiver(receiver, name)
+                            },
+                            rejects: &|_| false,
+                        },
+                    ))
+                },
+            )
+            .ty()
     }
 
     /// Whether `from`'s body may read the module property spelled `name` at all. An eager
@@ -10888,6 +10926,39 @@ fn resolve_deferred_properties(
     for name in &ambiguous_functions {
         undetermined_functions.remove(name);
     }
+    // The same for MEMBER functions, keyed by the declaring class. The key comes from the table's
+    // own record of which declaration produced each classifier, so a nested or same-named class
+    // cannot be confused with another file's.
+    let mut undetermined_methods: HashMap<(TypeName, String), (u32, DeclId, u32)> = HashMap::new();
+    let mut ambiguous_methods: std::collections::HashSet<(TypeName, String)> =
+        std::collections::HashSet::new();
+    for (internal, signature) in &table.classes {
+        let Some(declaration) = signature.source_decl else {
+            continue;
+        };
+        let file_index = signature.source_file;
+        let Some(file) = files.get(file_index as usize) else {
+            continue;
+        };
+        let Decl::Class(class) = file.decl(declaration) else {
+            continue;
+        };
+        for (method_index, method) in class.methods.iter().enumerate() {
+            if !function_needs_return_preinfer(method) || method.receiver.is_some() {
+                continue;
+            }
+            let key = (*internal, method.name.clone());
+            if undetermined_methods
+                .insert(key.clone(), (file_index, declaration, method_index as u32))
+                .is_some()
+            {
+                ambiguous_methods.insert(key);
+            }
+        }
+    }
+    for key in &ambiguous_methods {
+        undetermined_methods.remove(key);
+    }
     let engine = TypeEngine::new();
     let source_order = SourceOrderIndex::of(files);
     let resolutions = {
@@ -10899,6 +10970,7 @@ fn resolve_deferred_properties(
             by_name: &by_name,
             by_member: &by_member,
             functions: &undetermined_functions,
+            methods: &undetermined_methods,
             source_order: &source_order,
         };
         deferred
@@ -11598,6 +11670,95 @@ fn infer_class_member_ty(
     }
     let inferred = withheld_declaration_ty(table, file_index, inferred);
     withheld_construction_ty(file, expression, &types, table, inferred)
+}
+
+/// Type a member FUNCTION's inferred return, in its class's checking context.
+///
+/// The same jump the engine makes for a member property: the class's formals are symbolic, `this`
+/// is bound to the applied dispatch type, and the class's own properties are in scope, so a body
+/// reading `value` or a companion constant answers from the declaration rather than from whatever
+/// the walk had recorded when it passed by.
+fn infer_method_return_ty(
+    file: &File,
+    file_index: u32,
+    owner: DeclId,
+    method_index: u32,
+    table: &SymbolTable,
+    engine: EngineSeams<'_>,
+) -> Ty {
+    let Decl::Class(class) = file.decl(owner) else {
+        return Ty::Error;
+    };
+    let Some(method) = class.methods.get(method_index as usize) else {
+        return Ty::Error;
+    };
+    let mut scratch = DiagSink::new();
+    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
+    checker.demand_name = Some(engine.demand);
+    checker.demand_member = Some(engine.demand_member);
+    checker.demand_rejects = Some(engine.rejects);
+    checker.inference_only = true;
+    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
+    checker.set_anonymous_lexical_class_context(owner);
+    let Some(internal) = checker
+        .same_package_class(&class.name)
+        .map(ClassSig::internal_name)
+    else {
+        return Ty::Error;
+    };
+    let resolve = class_internal_resolver(checker.syms);
+    let class_tparams =
+        TParams::symbolic_from_decl_with(&class.type_params, &class.type_param_bounds, &resolve);
+    let dispatch = Ty::obj_args_name(
+        internal,
+        &class
+            .type_params
+            .iter()
+            .map(|name| class_tparams.bound(name))
+            .collect::<Vec<_>>(),
+    );
+    let root = CheckerScope::root();
+    let dispatch_scope = root.child(ScopeKind::Function {
+        receiver: Some(dispatch),
+    });
+    let scope = &dispatch_scope;
+    scope.declare_tparams(&class.type_params, &class_tparams, |_| false);
+    checker
+        .this_labels
+        .extend(class_receiver_labels(class, checker.syms, Some(dispatch)));
+    let properties = checker.scoped_properties(scope, internal);
+    for property in &properties {
+        checker.declare_scoped_property(scope, property, true);
+    }
+    let method_scope = scope.child(ScopeKind::Function { receiver: None });
+    let method_scope = &method_scope;
+    method_scope.declare_tparams(
+        &method.type_params,
+        &class_tparams
+            .symbolic_extended_with(&method.type_params, &method.type_param_bounds, &resolve)
+            .alpha_renamed_declaration(
+                &method.type_params,
+                checker.syms.compilation_id,
+                file_index,
+                method.signature_span.lo,
+            ),
+        |name| method.reified_type_params.contains(name),
+    );
+    let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
+    checker.check_method(method_scope, method, &properties, None);
+    checker.symbolic_signature_inference = outer;
+    let incomplete = checker.inference_incomplete;
+    let inferred = checker
+        .inferred_method_rets
+        .values()
+        .next()
+        .copied()
+        .unwrap_or(Ty::Error);
+    drop(checker);
+    match incomplete || inferred == Ty::Error || inferred.mentions_pending() {
+        true => Ty::Error,
+        false => inferred,
+    }
 }
 
 /// Type a top-level declaration by running the checker over the DECLARATION, not over a scope
