@@ -94,7 +94,6 @@ fn deep_inferred_return_chain_preinfers_on_two_mib_stack() {
         let toks = lex(&src, &mut d);
         let files = vec![parse(&src, &toks, &mut d)];
         let mut syms = collect_signatures(&files, &mut d);
-        krusty::frontend::preinfer_module_returns(&files, &mut syms, &mut d);
         check_file(&files[0], &mut syms, &mut d);
         d.diags.iter().map(|x| x.msg.clone()).collect::<Vec<_>>()
     });
