@@ -49191,8 +49191,17 @@ impl<'a> Checker<'a> {
                                     let binds = self.construction_type_param_binds(
                                         scope, call, internal, expected, plan, &actuals,
                                     );
-                                    (!binds.is_empty())
-                                        .then(|| crate::types::ty_subst_keep_unbound(shape, &binds))
+                                    // Substituting NOTHING is still the right shape. A parameter
+                                    // whose result variable no other argument binds — `N<T>(build:
+                                    // (String) -> T)` — keeps that variable UNBOUND here, and an
+                                    // unbound result variable is an inference output rather than an
+                                    // expected type: the lambda's body types freely and the call
+                                    // binds `T` from it afterwards. Falling back to the declared
+                                    // parameter instead handed the lambda `(String) -> Any`, the
+                                    // variable's erased bound, which the typed-lambda path then
+                                    // imposed on the body — so `val n = N { it + "K" }` inferred
+                                    // `N<Any>` and every later use of the real type was rejected.
+                                    Some(crate::types::ty_subst_keep_unbound(shape, &binds))
                                 })
                                 .unwrap_or(declared);
                             if let Ty::Fun(signature) = shaped {

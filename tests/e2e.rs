@@ -388,6 +388,8 @@ mod cross_file_inline_call_e2e;
 mod cross_file_operator_e2e;
 #[path = "cross_file_typealias_e2e.rs"]
 mod cross_file_typealias_e2e;
+#[path = "ctor_lambda_return_binds_type_param_e2e.rs"]
+mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
 mod ctor_numeric_widening_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
