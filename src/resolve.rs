@@ -11655,6 +11655,28 @@ fn infer_declaration_ty(
             .unwrap_or(inferred),
         false => inferred,
     };
+    // The reference's recorded type can itself still carry the marker: `C::bar` is
+    // `KProperty1<C, <not determined>>` while `bar` is being determined, because the reference read
+    // the member's record rather than asking for it. The member READ path asks the engine in exactly
+    // this situation; asking here covers the reference without teaching every reference site to. The
+    // reference's own classifier names the owner, and the expression names the member.
+    let inferred = match (inferred.mentions_pending(), file.expr(expression)) {
+        (true, Expr::CallableRef { receiver, name }) => receiver
+            // A BOUND reference (`C()::bar`) names its owner with the receiver EXPRESSION, and its
+            // classifier carries only the member's own type — `KProperty0<T>` — so the type
+            // arguments cannot supply the owner the way an unbound `C::bar` does.
+            .and_then(|receiver| checker.expr_types.get(receiver.0 as usize).copied())
+            .filter(|receiver| *receiver != Ty::Error && !receiver.mentions_pending())
+            // An UNBOUND reference spells a classifier, which is not a value: its receiver
+            // expression has no type, and the owner comes from the classifier instead.
+            .or_else(|| inferred.type_args().first().copied())
+            .and_then(|owner| (engine.demand_member)(owner, name))
+            .filter(|answered| !answered.mentions_pending())
+            .map_or(inferred, |answered| {
+                crate::types::ty_replace_pending(inferred, answered)
+            }),
+        _ => inferred,
+    };
     // An elvis whose two sides are DIFFERENT numeric primitives declines. Kotlin's type for such a
     // mix is their least upper bound — for `Int` and `Double` that is `Comparable<*> & Number`,
     // which kotlinc emits as `Ljava/lang/Object;` — while the checker's ordinary join promotes,

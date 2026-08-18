@@ -748,6 +748,24 @@ pub(crate) fn stored_value_ty(ty: Ty) -> Ty {
     }
 }
 
+/// Replace every NOT-DETERMINED marker inside `ty` with `replacement`.
+pub fn ty_replace_pending(ty: Ty, replacement: Ty) -> Ty {
+    match ty {
+        Ty::Pending => replacement,
+        Ty::Nullable(inner) => Ty::nullable(ty_replace_pending(*inner, replacement)),
+        Ty::Obj(name, args) if args.iter().any(|argument| argument.mentions_pending()) => {
+            Ty::obj_args_name(
+                name,
+                &args
+                    .iter()
+                    .map(|argument| ty_replace_pending(*argument, replacement))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        other => other,
+    }
+}
+
 impl Ty {
     // Kotlin built-ins are ordinary classifiers. These associated constants preserve concise call
     // sites and const-pattern matching without creating scalar/string enum variants alongside `Obj`.
