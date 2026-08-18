@@ -10954,7 +10954,7 @@ impl DeferredInferenceDriver<'_> {
             .copied()?;
         self.engine
             .resolve(
-                DeclKey::member(file_index, declaration.0, method_index),
+                DeclKey::method(file_index, declaration.0, method_index),
                 || {
                     Some(infer_method_return_ty(
                         &self.files[file_index as usize],
@@ -11054,6 +11054,7 @@ fn resolve_deferred_properties(
     // Functions whose expression body the walk could not type. Their return reads as undetermined,
     // and a property initialized by a call to one needs it resolved first.
     let mut undetermined_functions: HashMap<String, (u32, DeclId)> = HashMap::new();
+    let mut undetermined_function_decls: Vec<(u32, DeclId)> = Vec::new();
     let mut ambiguous_functions: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     for (file_index, file) in files.iter().enumerate() {
@@ -11066,6 +11067,9 @@ fn resolve_deferred_properties(
             if !function_needs_return_preinfer(function) {
                 continue;
             }
+            // As for members: the DECLARATION list carries every one, overloads included, because
+            // publishing an answer never has to choose between them.
+            undetermined_function_decls.push((file_index as u32, declaration));
             if undetermined_functions
                 .insert(function.name.clone(), (file_index as u32, declaration))
                 .is_some()
@@ -11198,10 +11202,31 @@ fn resolve_deferred_properties(
             methods: &undetermined_methods,
             source_order: &source_order,
         };
-        let function_returns = undetermined_functions
+        // Asked per DECLARATION, so an overloaded spelling is answered too. Asking by name drops
+        // both overloads — a name alone cannot choose between them — and they then settled to
+        // `Unit`, which is how `fun f(n: Int) = n` and `fun f(s: String) = s` ended up sharing one
+        // return.
+        let function_returns = undetermined_function_decls
             .iter()
-            .filter_map(|(name, &(file_index, declaration))| {
-                Some((file_index, declaration, driver.demand_function(name)?))
+            .filter_map(|&(file_index, declaration)| {
+                let ty = engine
+                    .resolve(DeclKey::declaration(file_index, declaration.0), || {
+                        infer_function_return_ty(
+                            &files[file_index as usize],
+                            file_index,
+                            declaration,
+                            table,
+                            EngineSeams {
+                                demand: &|name: &str| driver.demand_name_only(name),
+                                demand_member: &|receiver: Ty, name: &str| {
+                                    driver.demand_on_receiver(receiver, name)
+                                },
+                                rejects: &|_| false,
+                            },
+                        )
+                    })
+                    .ty()?;
+                Some((file_index, declaration, ty))
             })
             .collect::<Vec<_>>();
         // Every inferred-return member, not only the ones still marked pending: the sweep can
@@ -11215,7 +11240,7 @@ fn resolve_deferred_properties(
             .filter_map(|method| {
                 let ty = engine
                     .resolve(
-                        DeclKey::member(
+                        DeclKey::method(
                             method.file_index,
                             method.declaration.0,
                             method.method_index,
@@ -17619,11 +17644,7 @@ struct PreinferPassResult {
     changed_names: std::collections::HashSet<String>,
 }
 
-impl PreinferPassResult {
-    fn changed(&self) -> bool {
-        !self.changed_names.is_empty()
-    }
-}
+impl PreinferPassResult {}
 
 /// The exact function shape consumed by [`preinfer_returns_pass`]. Keep the worklist candidate filter
 /// on this predicate too: adding another inferred function shape must not make the pass capable of
@@ -18097,21 +18118,6 @@ fn preinfer_module_returns_to_fixpoint(
                     )
             })
             .collect();
-    }
-}
-
-fn preinfer_file_returns_to_fixpoint(
-    file: &File,
-    file_index: u32,
-    syms: &mut SymbolTable,
-    anonymous_lexical_scope: &AnonymousLexicalClassScope,
-) {
-    for _pass in 0..8 {
-        if !preinfer_returns_pass_with_owners(file, file_index, syms, anonymous_lexical_scope)
-            .changed()
-        {
-            break;
-        }
     }
 }
 
@@ -18657,14 +18663,11 @@ fn check_file_on_checker_stack(
     diags: &mut DiagSink,
 ) -> TypeInfo {
     crate::wide_stack::on_wide_stack(move || {
-        syms.begin_module_mutation();
-        let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
-        preinfer_file_returns_to_fixpoint(file, file_index, syms, &anonymous_lexical_scope);
         if !file.anonymous_object_classes.is_empty() {
+            syms.begin_module_mutation();
             discover_anonymous_object_captures_at(file, file_index, syms);
-            preinfer_file_returns_to_fixpoint(file, file_index, syms, &anonymous_lexical_scope);
+            syms.finish_module_mutation();
         }
-        syms.finish_module_mutation();
         check_file_at_impl(file, file_index, source_files, syms, diags)
     })
 }
@@ -36432,6 +36435,7 @@ impl<'a> Checker<'a> {
                         // dispatch receiver, or of an enclosing extension receiver — and the
                         // top-level index does not carry those. Ask the receiver tower the same
                         // way name resolution walked it: innermost rung first.
+                        // (see also the qualified arm below)
                         if let Some(demand) = self.demand_member {
                             let tower: Vec<Ty> = self
                                 .this_labels
@@ -36450,6 +36454,29 @@ impl<'a> Checker<'a> {
                                 if let Some(ty) = answered {
                                     return self.set(e, ty);
                                 }
+                            }
+                        }
+                    }
+                    // A QUALIFIED call — `s.drop2()`, and the extension case in particular. The
+                    // receiver names the owner and the callee spells the declaration, which is
+                    // exactly what the member demand takes. Without this the call's type stays the
+                    // marker, every expression built on it declines, and the function that owns it
+                    // settles to `Unit`.
+                    if let Expr::Member { receiver, name } = self.file.expr(callee) {
+                        let (receiver, name) = (*receiver, name.clone());
+                        let receiver_ty = self.expr_types.get(receiver.0 as usize).copied();
+                        if let Some(owner) = receiver_ty
+                            .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
+                            .map(Ty::non_null)
+                        {
+                            let answered = self
+                                .demand_member
+                                .and_then(|demand| demand(owner, &name))
+                                .filter(|answered| {
+                                    *answered != Ty::Error && !answered.mentions_pending()
+                                });
+                            if let Some(ty) = answered {
+                                return self.set(e, ty);
                             }
                         }
                     }
@@ -37703,6 +37730,18 @@ impl<'a> Checker<'a> {
                     }
                 }
             };
+            // The selected callable's return may still be UNDETERMINED — its own body is an
+            // expression nothing has typed yet. Ask for that declaration through the receiver, the
+            // same demand the qualified spelling makes; without it the marker propagates into
+            // everything built on this call and the enclosing declaration settles to `Unit`.
+            let result = if result.mentions_pending() {
+                self.demand_member
+                    .and_then(|demand| demand(rt.non_null(), &name))
+                    .filter(|answered| *answered != Ty::Error && !answered.mentions_pending())
+                    .unwrap_or(result)
+            } else {
+                result
+            };
             let result = if result == Ty::Error {
                 self.receiver_function_value(scope, &name)
                     .and_then(|(signature, origin)| {
@@ -37929,6 +37968,20 @@ impl<'a> Checker<'a> {
                             } else {
                                 selected_ty
                             };
+                            // The member selection reads the symbol table, which still holds the
+                            // marker while that member's own type is being determined — and it wins
+                            // over the scope binding on purpose (a nearer receiver's same-named
+                            // property must). Undetermined is not a type to win with: ask for the
+                            // declaration, exactly as a qualified read of it would.
+                            if ty.mentions_pending() {
+                                if let Some(answered) = self
+                                    .demand_member
+                                    .and_then(|demand| demand(receiver.ty, &n))
+                                    .filter(|answered| !answered.mentions_pending())
+                                {
+                                    return self.set(e, answered);
+                                }
+                            }
                             return self.set(e, ty);
                         }
                     }

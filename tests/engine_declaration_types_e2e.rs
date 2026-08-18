@@ -167,3 +167,68 @@ fn module_extension_demand_requires_a_matching_receiver() {
         "engine-module-extension-receiver",
     );
 }
+
+/// A member PROPERTY and a member FUNCTION at the same index in their own lists.
+///
+/// Both were addressed as "member N of this class", so `object D { val base = 1; fun f() = … }`
+/// gave `base` and `f` the same memo key: a demand for one was answered with the other's type.
+/// Silently, and only when the two happened to occupy the same position.
+#[test]
+fn a_property_and_a_method_at_the_same_index_are_different_declarations() {
+    common::expect_box_ok_with_stdlib(
+        "object Registry {\n\
+         \x20 val base = 100\n\
+         \x20 fun scaled(x: Int) = x * 2 + base\n\
+         \x20 fun total(a: Int, b: Int) = a + b + base\n\
+         }\n\
+         fun apply1(f: (Int) -> Int, v: Int) = f(v)\n\
+         fun apply2(f: (Int, Int) -> Int, a: Int, b: Int) = f(a, b)\n\
+         fun box(): String =\n\
+         \x20 if (apply1(Registry::scaled, 3) == 106 && apply2(Registry::total, 4, 5) == 109)\n\
+         \x20 \"OK\" else \"FAIL\"\n",
+        "engine-member-key-collision",
+    );
+}
+
+/// A QUALIFIED call to a declaration whose return is not determined yet.
+///
+/// The receiver names the owner and the callee spells the declaration — the same pair a bare-name
+/// demand needs. Without the seam the call's type stayed the marker and the function that owned it
+/// settled to `Unit`, so every use of it reported a mismatch against the wrong type.
+#[test]
+fn a_qualified_call_demands_the_declaration_it_names() {
+    common::expect_box_ok_with_stdlib(
+        "fun String.head2() = if (length >= 2) subSequence(0, 2) else null\n\
+         fun width(s: String) = s.head2()?.length\n\
+         fun box(): String = if (width(\"123\") == 2) \"OK\" else \"FAIL\"\n",
+        "engine-qualified-call-demand",
+    );
+}
+
+/// The same through a SAFE call, which is that read guarded rather than a different one.
+#[test]
+fn a_safe_call_demands_the_declaration_it_names() {
+    common::expect_box_ok_with_stdlib(
+        "fun String.head2() = if (length >= 2) subSequence(0, 2) else null\n\
+         fun matches(s: String?) = 2 == s?.head2()?.length\n\
+         fun box(): String = if (matches(\"123\") && !matches(null)) \"OK\" else \"FAIL\"\n",
+        "engine-safe-call-demand",
+    );
+}
+
+/// A member read through the IMPLICIT receiver, where the member selection beats the scope binding.
+///
+/// Walking the receiver tower is correct — a nearer receiver's same-named property must win — but
+/// the selection reads the symbol table, which still holds the marker while that member is being
+/// determined. Undetermined is not a type to win with.
+#[test]
+fn an_implicit_receiver_read_demands_an_undetermined_member() {
+    common::expect_box_ok_with_stdlib(
+        "class Counter {\n\
+         \x20 val step = 2\n\
+         \x20 fun advance(n: Int) = n * step\n\
+         }\n\
+         fun box(): String = if (Counter().advance(3) == 6) \"OK\" else \"FAIL\"\n",
+        "engine-implicit-receiver-demand",
+    );
+}

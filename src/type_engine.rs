@@ -25,17 +25,32 @@ use std::collections::{HashMap, HashSet};
 
 use crate::types::Ty;
 
+/// Which list within a class body a member index counts in.
+///
+/// Properties and methods are separate lists, so index 1 names a different declaration in each.
+/// Without this, `class C { val a = 1; val b = 2; fun f() = 3; fun g() = 4 }` gives `b` and `g` the
+/// same key: the memo answers a demand for one with the other's type, silently, and only when the
+/// two happen to occupy the same position.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub enum MemberList {
+    /// The declaration itself rather than one of its body members.
+    Own,
+    Property,
+    Method,
+}
+
 /// A declaration whose type the engine can be asked for.
 ///
 /// The key is positional rather than name-based on purpose: two files may legally declare the same
 /// simple name in different packages, and a class body may declare several members that share a
 /// name with an extension receiver distinguishing them. `member` is [`DeclKey::OWN`] for the
-/// declaration itself and the member's index within the class body otherwise.
+/// declaration itself and the member's index within its own body list otherwise.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct DeclKey {
     pub file: u32,
     pub decl: u32,
     pub member: u32,
+    pub list: MemberList,
 }
 
 impl DeclKey {
@@ -47,16 +62,32 @@ impl DeclKey {
             file,
             decl,
             member: Self::OWN,
+            list: MemberList::Own,
         }
     }
 
+    /// A member PROPERTY, by its index among the class body's properties.
     pub fn member(file: u32, decl: u32, member: u32) -> Self {
+        Self::in_list(file, decl, member, MemberList::Property)
+    }
+
+    /// A member FUNCTION, by its index among the class body's methods.
+    pub fn method(file: u32, decl: u32, member: u32) -> Self {
+        Self::in_list(file, decl, member, MemberList::Method)
+    }
+
+    fn in_list(file: u32, decl: u32, member: u32, list: MemberList) -> Self {
         debug_assert_ne!(
             member,
             Self::OWN,
             "member index u32::MAX is reserved for the declaration itself"
         );
-        Self { file, decl, member }
+        Self {
+            file,
+            decl,
+            member,
+            list,
+        }
     }
 }
 
@@ -191,8 +222,12 @@ impl TypeEngine {
         members
     }
 
-    /// The already-computed answer for `key`, without starting a computation. Used by consumers that
-    /// must not trigger resolution — a diagnostic pass reading what the engine concluded.
+    /// The already-computed answer for `key`, without starting a computation.
+    ///
+    /// Used by consumers that must not trigger resolution: a diagnostic pass reading what the
+    /// engine concluded, and a scope being built for one declaration — which lists its siblings,
+    /// and where demanding the declaration the scope belongs to would record a FALSE cycle and
+    /// decline it permanently.
     pub fn known(&self, key: DeclKey) -> Option<Resolution> {
         match self.memo.borrow().get(&key).copied() {
             Some(State::Resolved(ty)) => Some(Resolution::Resolved(ty)),
