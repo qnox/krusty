@@ -469,3 +469,68 @@ fn the_implementation_equals_matches_kotlinc() {
         "NaN, -0.0, array content, enum identity and a non-annotation argument must all behave"
     );
 }
+
+/// The implementation's constructor guards every REFERENCE member, and the class carries `ACC_SUPER`.
+///
+/// An annotation member is never nullable — the JVM annotation format has no null — so kotlinc emits
+/// `Intrinsics.checkNotNullParameter` for each non-primitive parameter, in declaration order, BEFORE
+/// `super()`. The class-access word is `PUBLIC|FINAL|SUPER|SYNTHETIC`; krusty omitted `ACC_SUPER`.
+#[test]
+fn the_implementation_constructor_matches_kotlinc() {
+    const SRC: &str = "annotation class C(val i: Int, val s: String, val a: IntArray)\n\
+                       fun mk(): C = C(1, \"x\", intArrayOf(1))\n\
+                       fun box(): String = mk().s\n";
+    let Some(build) = common::compile_libs_build("annotation_ctor_shape", &[("Ct.kt", SRC)]) else {
+        return; // reference compiler unavailable
+    };
+    let reference_dir = build
+        .reference_out()
+        .expect("reference compiler output unavailable");
+    let ours = common::expect_compile_in_process(
+        SRC,
+        "Ct",
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    let impl_name = ours
+        .iter()
+        .map(|(name, _)| name.clone())
+        .find(|name| name.contains("$annotationImpl$"))
+        .expect("the annotation implementation class");
+    let ours_bytes = ours
+        .iter()
+        .find_map(|(name, bytes)| (*name == impl_name).then_some(bytes.clone()))
+        .expect("our implementation class");
+    let reference_bytes =
+        std::fs::read(reference_dir.join(format!("{impl_name}.class"))).expect("reference class");
+    let ctor = |bytes: &[u8]| {
+        krusty::jvm::classreader::read_method_code(bytes, "<init>", "(ILjava/lang/String;[I)V")
+            .expect("<init> body")
+            .code
+    };
+    assert_eq!(
+        ctor(&ours_bytes).len(),
+        ctor(&reference_bytes).len(),
+        "the constructor must carry kotlinc's parameter guards"
+    );
+    let access = |bytes: &[u8]| {
+        krusty::jvm::classreader::parse_class(bytes)
+            .expect("parse class")
+            .access
+    };
+    assert_eq!(
+        access(&ours_bytes),
+        access(&reference_bytes),
+        "the class-access word must be kotlinc's (ACC_SUPER included)"
+    );
+    assert_eq!(
+        common::run_box(
+            &ours,
+            &common::find_box_class(&ours).expect("box class"),
+            &[common::stdlib_jar()]
+        )
+        .as_deref(),
+        Some("x"),
+        "and the guarded constructor must still build the annotation"
+    );
+}

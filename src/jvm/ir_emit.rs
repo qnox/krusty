@@ -7990,7 +7990,7 @@ fn emit_annotation_impl_class(
         .map(|f| (f.name.clone(), jvm_declared_ty(&f.ty)))
         .collect();
     let mut cw = new_writer(&fq, "java/lang/Object", opts);
-    cw.set_access(0x0001 | 0x0010 | 0x1000); // PUBLIC | FINAL | SYNTHETIC
+    cw.set_access(0x0001 | 0x0010 | 0x0020 | 0x1000); // PUBLIC | FINAL | SUPER | SYNTHETIC
     cw.add_interface(iface);
     for (name, jt) in &members {
         cw.add_field(0x0002 | 0x0010, name, &type_descriptor(*jt)); // PRIVATE | FINAL
@@ -8000,6 +8000,24 @@ fn emit_annotation_impl_class(
     {
         let params_words: u16 = members.iter().map(|(_, jt)| slot_words(*jt)).sum();
         let mut ctor = CodeBuilder::new(1 + params_words);
+        // Every REFERENCE member is guarded at entry, before `super()` — kotlinc's shape, and the
+        // same `Intrinsics.checkNotNullParameter` any non-null parameter gets. An annotation member
+        // is never nullable (the JVM annotation format has no null), so every non-primitive one
+        // takes the guard, in declaration order.
+        let mut guard_slot = 1u16;
+        for (name, jt) in &members {
+            if jt.is_reference() {
+                ctor.aload(guard_slot);
+                ctor.push_string(name, &mut cw);
+                let check = cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "checkNotNullParameter",
+                    "(Ljava/lang/Object;Ljava/lang/String;)V",
+                );
+                ctor.invokestatic(check, 2, 0);
+            }
+            guard_slot += slot_words(*jt);
+        }
         ctor.aload(0);
         let obj_init = cw.methodref("java/lang/Object", "<init>", "()V");
         ctor.invokespecial(obj_init, 0, 0);
