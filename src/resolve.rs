@@ -34633,6 +34633,7 @@ impl<'a> Checker<'a> {
         partial: &[Option<Ty>],
         arg_names: Option<&[Option<String>]>,
         explicit_type_args: &[Ty],
+        expected: Option<Ty>,
         method_sig: Option<&crate::libraries::LibraryMember>,
         generic_member: Option<&GenericMemberPlan>,
     ) -> CallLambdaShaping {
@@ -34707,7 +34708,11 @@ impl<'a> Checker<'a> {
                         .iter()
                         .any(Option::is_some)
                         .then_some(plan.receivers),
-                    context_counts: None,
+                    context_counts: plan
+                        .context_counts
+                        .iter()
+                        .any(|count| *count > 0)
+                        .then_some(plan.context_counts),
                     materialized: None,
                     inline: false,
                 });
@@ -34723,7 +34728,7 @@ impl<'a> Checker<'a> {
                         arg_names,
                         trailing_lambda,
                         explicit_type_args,
-                        None,
+                        expected,
                     )
                 })
                 .flatten()
@@ -34789,6 +34794,7 @@ impl<'a> Checker<'a> {
             &partial,
             arg_names.as_deref(),
             explicit_type_args,
+            None,
             method_sig,
             generic_member.as_ref(),
         );
@@ -48932,10 +48938,23 @@ impl<'a> Checker<'a> {
                     } else {
                         None
                     };
-                let this_member_ext_lambda_plan = if implicit_member_lambda_enabled
-                    && ordinary_this_member_lambda_shape.is_none()
-                {
-                    let explicit_type_args = self
+                // An implicit receiver's call shapes its lambdas through the same one decision an
+                // explicit receiver does: each receiver of the tower is asked for a whole decision —
+                // classpath member, then extension — and the innermost one that can shape a lambda
+                // is the one used. Sweeping the whole tower once per source, as this did, let an
+                // OUTER receiver's extension beat an INNER receiver's classpath member purely
+                // because extensions were swept first, which is backwards: the tower is innermost
+                // first, and within a receiver a member outranks an extension.
+                //
+                // This closes that inversion between those two sources only. Source members are not
+                // part of this decision — they are found by their own whole-tower sweep just above,
+                // which still wins outright wherever it answers, so an outer receiver's SOURCE
+                // member still beats an inner receiver's classpath member. That inversion is older
+                // than this decision point and is not addressed here.
+                let this_member_shaping = (implicit_member_lambda_enabled
+                    && ordinary_this_member_lambda_shape.is_none())
+                .then(|| {
+                    let type_args = self
                         .file
                         .call_type_args
                         .get(&call.0)
@@ -48944,88 +48963,51 @@ impl<'a> Checker<'a> {
                         .iter()
                         .map(|argument| self.type_ref_ty(scope, argument))
                         .collect::<Vec<_>>();
+                    let partial = this_member_partial.clone().unwrap_or_default();
                     self.implicit_receiver_types(scope)
                         .into_iter()
                         .find_map(|receiver| {
-                            self.member_extension_lambda_param_types(
-                                scope,
-                                MemberExtensionCall {
-                                    extension_receiver: receiver,
-                                    name: &fname,
-                                    args,
-                                    partial_arg_tys: this_member_partial
-                                        .as_deref()
-                                        .unwrap_or_default(),
-                                    arg_names: arg_names.as_deref(),
-                                    explicit_type_args: &explicit_type_args,
-                                    trailing_lambda: self
-                                        .file
-                                        .call_has_trailing_lambda
-                                        .contains(&call.0),
-                                },
-                            )
-                        })
-                } else {
-                    None
-                };
-                let implicit_library_ext_lambda_shape = if implicit_member_lambda_enabled
-                    && ordinary_this_member_lambda_shape.is_none()
-                    && this_member_ext_lambda_plan.is_none()
-                {
-                    self.implicit_receiver_types(scope)
-                        .into_iter()
-                        .find_map(|receiver| {
-                            let shape = self.extension_lambda_shape(
-                                scope,
-                                receiver,
-                                &fname,
-                                (args, this_member_partial.as_deref().unwrap_or_default()),
-                                arg_names.as_deref(),
-                                self.file.call_has_trailing_lambda.contains(&call.0),
-                                &explicit_type_args,
-                                expected,
-                            )?;
-                            shape.param_types.as_ref()?;
-                            Some(shape)
-                        })
-                } else {
-                    None
-                };
-                // A semantic-provider member of an implicit receiver whose parameter takes a lambda
-                // (`Button().apply { addActionListener { … } }`): recover the expected shape the
-                // same way an explicit-receiver call does, so a lambda with no declared parameters
-                // types with the functional method's arity (`it` bound) instead of caching a
-                // zero-arity function type that no overload accepts.
-                let implicit_provider_member_lambda_pts = if implicit_member_lambda_enabled
-                    && ordinary_this_member_lambda_shape.is_none()
-                    && this_member_ext_lambda_plan.is_none()
-                    && implicit_library_ext_lambda_shape.is_none()
-                {
-                    let explicit_type_args = self.explicit_call_type_args(scope, call);
-                    let partial = this_member_partial.as_deref().unwrap_or_default();
-                    self.implicit_receiver_types(scope)
-                        .into_iter()
-                        .find_map(|receiver| {
-                            self.provider_member_lambda_expectations(
+                            let shaping = self.call_lambda_shaping(
                                 scope,
                                 call,
-                                crate::symbol_resolver::SymRecv::Value(receiver),
+                                receiver,
                                 &fname,
-                                (args, partial),
-                                &explicit_type_args,
-                            )
+                                args,
+                                &partial,
+                                arg_names.as_deref(),
+                                &type_args,
+                                expected,
+                                None,
+                                None,
+                            );
+                            // A receiver ANSWERS only if what it offers can shape a lambda.
+                            // `extension_lambda_shape` returns a shape for a receiver whose lambda
+                            // slot mapped to a non-function parameter — carrying receivers or
+                            // materialization but no parameter types — and taking that as an answer
+                            // would end the sweep on a receiver with nothing to give, where asking
+                            // per source used to fall through to the next receiver.
+                            (shaping
+                                .extension
+                                .as_ref()
+                                .is_some_and(|shape| shape.param_types.is_some())
+                                || shaping.provider.is_some())
+                            .then_some(shaping)
                         })
-                } else {
-                    None
-                };
-                let this_member_lambda_pts = this_member_ext_lambda_plan
-                    .as_ref()
-                    .map(|plan| plan.param_types.clone())
-                    .or_else(|| {
-                        implicit_library_ext_lambda_shape
+                })
+                .flatten();
+                let this_member_ext_lambda_plan =
+                    this_member_shaping.as_ref().and_then(|shaping| {
+                        shaping
+                            .extension
                             .as_ref()
-                            .and_then(|shape| shape.param_types.clone())
-                    })
+                            .filter(|shape| shape.param_types.is_some())
+                    });
+                let implicit_library_ext_lambda_shape = this_member_ext_lambda_plan;
+                let implicit_provider_member_lambda_pts = this_member_shaping
+                    .as_ref()
+                    .and_then(|shaping| shaping.provider.clone());
+                let this_member_lambda_pts = implicit_library_ext_lambda_shape
+                    .and_then(|shape| shape.param_types.clone())
                     .or_else(|| {
                         // Shape providers above carry `Vec<Vec<Ty>>` (every slot known, a
                         // receiver INCLUDED at index 0); the expectation probe knows only the
@@ -49047,14 +49029,8 @@ impl<'a> Checker<'a> {
                                 .collect::<Vec<_>>()
                         })
                     });
-                let this_member_lambda_recvs = this_member_ext_lambda_plan
-                    .as_ref()
-                    .map(|plan| plan.receivers.clone())
-                    .or_else(|| {
-                        implicit_library_ext_lambda_shape
-                            .as_ref()
-                            .and_then(|shape| shape.receivers.clone())
-                    })
+                let this_member_lambda_recvs = implicit_library_ext_lambda_shape
+                    .and_then(|shape| shape.receivers.clone())
                     .or_else(|| {
                         implicit_provider_member_lambda_pts.as_ref().map(|slots| {
                             slots
@@ -49066,14 +49042,11 @@ impl<'a> Checker<'a> {
                         })
                     });
                 let this_member_lambda_expected = implicit_library_ext_lambda_shape
-                    .as_ref()
                     .and_then(|shape| shape.expected_types.clone());
-                let this_member_lambda_inline = implicit_library_ext_lambda_shape
-                    .as_ref()
-                    .is_some_and(|shape| shape.inline);
-                let this_member_lambda_materialized = implicit_library_ext_lambda_shape
-                    .as_ref()
-                    .and_then(|shape| shape.materialized.clone());
+                let this_member_lambda_inline =
+                    implicit_library_ext_lambda_shape.is_some_and(|shape| shape.inline);
+                let this_member_lambda_materialized =
+                    implicit_library_ext_lambda_shape.and_then(|shape| shape.materialized.clone());
                 let constructor_expectations: Option<ConstructionExpectations> = if !self
                     .lexical_value_declares(scope, &fname)
                     && self.resolver().top_level_candidates(&fname).is_empty()
