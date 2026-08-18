@@ -34825,6 +34825,9 @@ impl<'a> Checker<'a> {
         let expected_types = shape
             .as_ref()
             .and_then(|shape| shape.expected_types.as_ref());
+        let context_counts = shape
+            .as_ref()
+            .and_then(|shape| shape.context_counts.as_ref());
         // A SEMANTIC-PROVIDER member's lambda shape (`re?.replace(s) { m -> m.value }`). The
         // providers above answer source members and extensions only, so a `?.` call to a library
         // member whose parameter is a function type or a Java SAM interface left its lambda
@@ -34894,7 +34897,28 @@ impl<'a> Checker<'a> {
                                 });
                             }
                         }
-                        if let Some(lambda_receiver) = lambda_receiver {
+                        // A shape carries any CONTEXT parameters ahead of the receiver, and the
+                        // receiver ahead of the written parameters. Reading past one entry only
+                        // would hand `context(P) R.(X) -> T` its own receiver as a value parameter.
+                        let context_count = (module_pt.is_none())
+                            .then(|| context_counts.and_then(|counts| counts.get(i)).copied())
+                            .flatten()
+                            .unwrap_or_default()
+                            .min(pt.len());
+                        let value_start = context_count + usize::from(lambda_receiver.is_some());
+                        if context_count > 0 {
+                            self.check_lambda_with_implicit_receivers_labeled(
+                                scope,
+                                x,
+                                LambdaShape {
+                                    context_types: &pt[..context_count],
+                                    extension_receiver: lambda_receiver,
+                                    value_types: pt.get(value_start..).unwrap_or_default(),
+                                },
+                                false,
+                                Some(name),
+                            )
+                        } else if let Some(lambda_receiver) = lambda_receiver {
                             self.check_lambda_with_receiver_labeled(
                                 scope,
                                 x,
@@ -48974,6 +48998,8 @@ impl<'a> Checker<'a> {
                                 .collect::<Vec<_>>()
                         })
                     });
+                let this_member_lambda_contexts = implicit_library_ext_lambda_shape
+                    .and_then(|shape| shape.context_counts.clone());
                 let this_member_lambda_recvs = implicit_library_ext_lambda_shape
                     .and_then(|shape| shape.receivers.clone())
                     .or_else(|| {
@@ -49182,6 +49208,31 @@ impl<'a> Checker<'a> {
                                         signature,
                                         &pt,
                                         receiver.is_some(),
+                                        call_fn_name.as_deref(),
+                                    )
+                                });
+                            }
+                            // Contexts sit ahead of the receiver, which sits ahead of what the
+                            // author wrote; reading past one entry only would hand a
+                            // `context(P) R.(X) -> T` lambda its own receiver as a value parameter.
+                            let context_count = this_member_lambda_contexts
+                                .as_ref()
+                                .and_then(|counts| counts.get(i))
+                                .copied()
+                                .unwrap_or_default()
+                                .min(pt.len());
+                            if context_count > 0 {
+                                let value_start = context_count + usize::from(receiver.is_some());
+                                return self.with_lambda_mutation(inline, |checker| {
+                                    checker.check_lambda_with_implicit_receivers_labeled(
+                                        scope,
+                                        a,
+                                        LambdaShape {
+                                            context_types: &pt[..context_count],
+                                            extension_receiver: receiver,
+                                            value_types: pt.get(value_start..).unwrap_or_default(),
+                                        },
+                                        false,
                                         call_fn_name.as_deref(),
                                     )
                                 });
