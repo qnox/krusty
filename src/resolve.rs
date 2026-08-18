@@ -34582,10 +34582,11 @@ impl<'a> Checker<'a> {
     ///
     /// The two carriers count differently and the difference is the whole content of this function:
     /// a [`LambdaExpectation`]'s `value_params` has already had the receiver and context parameters
-    /// split off, while a [`LambdaCallShape`]'s `param_types` entry carries the receiver INSIDE it,
-    /// at the front. Consumers read past it with `get(1..)` exactly when `receivers` names one for
-    /// that argument, so this reads it the same way — counting the receiver as a written parameter
-    /// would reject every `R.(X) -> Y` argument, which is the shape most receiver DSLs have.
+    /// split off, while a [`LambdaCallShape`]'s `param_types` entry carries both INSIDE it, at the
+    /// front — context parameters first, then the receiver. Only what follows them is written by the
+    /// author, so only that is counted. Counting the receiver would reject every `R.(X) -> Y`
+    /// argument, the shape most receiver DSLs have; counting the context parameters would reject
+    /// `context(P) R.(X) -> T`, where the author writes one parameter against an entry of three.
     fn shape_fits_written_lambdas(
         &self,
         args: &[ExprId],
@@ -34604,7 +34605,15 @@ impl<'a> Checker<'a> {
                             .as_ref()
                             .and_then(|receivers| receivers.get(index))
                             .is_some_and(Option::is_some);
-                        let offered = offered.len() - usize::from(receiver);
+                        let contexts = shape
+                            .context_counts
+                            .as_ref()
+                            .and_then(|counts| counts.get(index))
+                            .copied()
+                            .unwrap_or_default();
+                        let offered = offered
+                            .len()
+                            .saturating_sub(contexts + usize::from(receiver));
                         match params.is_empty() {
                             // An implicit `it` names exactly one parameter.
                             true => offered <= 1,
@@ -34656,10 +34665,11 @@ impl<'a> Checker<'a> {
         // `method_sig` rather than on `module` is deliberate: it is the question the member-call path
         // asks, and the two differ only when a selected member yields no slot mapping at all.
         //
-        // Nothing ELSE about when a source is consulted changes here. In particular the second
-        // extension carrier stays reachable with a member selected, which it was before, so a
-        // selected member whose parameter is not a function type can still take a shape from an
-        // extension for that argument.
+        // A SELECTED MEMBER ends the search. Both extension carriers are gated on there being no
+        // selected member, which is what the member-call path has always done: letting an extension
+        // shape an argument of a call that resolves to a member is not merely a typing difference,
+        // because an inline extension alongside a non-inline member would keep a captured mutable
+        // local direct for a call that does not splice.
         let provider = method_sig
             .is_none()
             .then(|| {
@@ -34681,20 +34691,31 @@ impl<'a> Checker<'a> {
             .filter(|expectations| {
                 self.member_expectations_fit_written_lambdas(args, expectations)
             });
-        let member_extension = (method_sig.is_none() && provider.is_none()).then(|| {
-            self.member_extension_lambda_param_types(
-                scope,
-                MemberExtensionCall {
-                    extension_receiver: receiver,
-                    name,
-                    args,
-                    partial_arg_tys: partial,
-                    arg_names,
-                    explicit_type_args,
-                    trailing_lambda,
-                },
-            )
-        });
+        // An extension is worth looking up only for a call that HAS a lambda or callable-reference
+        // argument to shape, on a receiver that typed at all — the member-call path has always
+        // guarded its extension lookups this way, and the lookup is the expensive part.
+        let shapeable = receiver != Ty::Error
+            && args.iter().any(|&argument| {
+                matches!(
+                    self.file.expr(argument),
+                    Expr::Lambda { .. } | Expr::CallableRef { .. }
+                )
+            });
+        let member_extension =
+            (shapeable && method_sig.is_none() && provider.is_none()).then(|| {
+                self.member_extension_lambda_param_types(
+                    scope,
+                    MemberExtensionCall {
+                        extension_receiver: receiver,
+                        name,
+                        args,
+                        partial_arg_tys: partial,
+                        arg_names,
+                        explicit_type_args,
+                        trailing_lambda,
+                    },
+                )
+            });
         let extension =
             member_extension
                 .flatten()
@@ -34717,8 +34738,7 @@ impl<'a> Checker<'a> {
                     inline: false,
                 });
         let extension = extension.or_else(|| {
-            provider
-                .is_none()
+            (shapeable && method_sig.is_none() && provider.is_none())
                 .then(|| {
                     self.extension_lambda_shape(
                         scope,
@@ -45621,7 +45641,6 @@ impl<'a> Checker<'a> {
     ) -> (
         Option<crate::libraries::LibraryMember>,
         Option<GenericMemberPlan>,
-        Option<MemberLambdaShape>,
     ) {
         let argument_names = self.file.call_arg_names.get(&call.0).cloned();
         let explicit_type_args = self.resolved_explicit_type_args(scope, call);
@@ -45650,18 +45669,7 @@ impl<'a> Checker<'a> {
                 },
             )
         });
-        let lambda = member.as_ref().and_then(|member| {
-            module_member_lambda_shape(
-                &*self.syms.libraries,
-                member,
-                generic.as_ref(),
-                args,
-                argument_names.as_deref(),
-                trailing_lambda,
-                self.member_inline_body_available(member),
-            )
-        });
-        (member, generic, lambda)
+        (member, generic)
     }
 
     fn check_applicable_module_member_call(
@@ -47080,56 +47088,20 @@ impl<'a> Checker<'a> {
                 // Selection and contextual lambda typing depend on the receiver's semantic members,
                 // not on whether lowering later obtains that receiver from an expression, an object
                 // singleton, or a companion field. Classifier receivers use this same planner above.
-                let (method_sig, generic_member, module_lambda_shape) = self
-                    .module_member_lambda_plan(
-                        scope,
-                        call,
-                        rt,
-                        &name,
-                        args,
-                        &generic_member_partial,
-                    );
+                let (method_sig, generic_member) = self.module_member_lambda_plan(
+                    scope,
+                    call,
+                    rt,
+                    &name,
+                    args,
+                    &generic_member_partial,
+                );
                 crate::trace_compiler!(
                     "resolve",
                     "MCALL name={name} rt={rt:?} nargs={} generic_member={}",
                     args.len(),
                     generic_member.is_some()
                 );
-                let provider_member_lambda_pts = if method_sig.is_none() {
-                    let explicit_type_args = self.explicit_call_type_args(scope, call);
-                    self.provider_member_lambda_expectations(
-                        scope,
-                        call,
-                        crate::symbol_resolver::SymRecv::Value(rt),
-                        &name,
-                        (args, &generic_member_partial),
-                        &explicit_type_args,
-                    )
-                    .filter(|expectations| expectations.iter().any(Option::is_some))
-                    .filter(|expectations| {
-                        self.member_expectations_fit_written_lambdas(args, expectations)
-                    })
-                } else {
-                    None
-                };
-                // A library extension taking a lambda (`list.map { it … }`): the lambda's parameter
-                // types are recovered from the extension's generic signature — bound by the receiver's
-                // element type and the non-lambda arguments — so the lambda body checks against `Int`
-                // rather than the erased `Any`. Type the non-lambda arguments first (the accumulator in
-                // `fold(0) { acc, x -> }` binds `R`); lambda positions are `None` until resolved.
-                let ext_lambda_partial: Option<Vec<Option<Ty>>> = if method_sig.is_none()
-                    && provider_member_lambda_pts.is_none()
-                    && rt != Ty::Error
-                    && args.iter().any(|&a| {
-                        matches!(
-                            self.file.expr(a),
-                            Expr::Lambda { .. } | Expr::CallableRef { .. }
-                        )
-                    }) {
-                    Some(generic_member_partial.clone())
-                } else {
-                    None
-                };
                 let member_extension_type_args = self
                     .file
                     .call_type_args
@@ -47139,64 +47111,37 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|argument| self.type_ref_ty(scope, argument))
                     .collect::<Vec<_>>();
-                let member_ext_lambda_plan: Option<MemberExtensionLambdaPlan> =
-                    ext_lambda_partial.as_ref().and_then(|partial| {
-                        self.member_extension_lambda_param_types(
-                            scope,
-                            MemberExtensionCall {
-                                extension_receiver: rt,
-                                name: &name,
-                                args,
-                                partial_arg_tys: partial,
-                                arg_names: arg_names.as_deref(),
-                                explicit_type_args: &member_extension_type_args,
-                                trailing_lambda: self
-                                    .file
-                                    .call_has_trailing_lambda
-                                    .contains(&call.0),
-                            },
-                        )
-                    });
-                let ext_lambda_shape = if member_ext_lambda_plan.is_none() {
-                    ext_lambda_partial.as_ref().and_then(|partial| {
-                        self.extension_lambda_shape(
-                            scope,
-                            rt,
-                            &name,
-                            (args, partial),
-                            arg_names.as_deref(),
-                            self.file.call_has_trailing_lambda.contains(&call.0),
-                            &member_extension_type_args,
-                            expected,
-                        )
-                    })
-                } else {
-                    None
-                };
-                let ext_lambda_pts: Option<Vec<Vec<Ty>>> = member_ext_lambda_plan
+                // One decision for the whole call — see `Checker::call_lambda_shaping`. What this
+                // replaced was this path's own copy of that decision: a selected member, then a
+                // classpath member's expectations, then the two extension carriers, each gating the
+                // next by hand.
+                let shaping = self.call_lambda_shaping(
+                    scope,
+                    call,
+                    rt,
+                    &name,
+                    args,
+                    &generic_member_partial,
+                    arg_names.as_deref(),
+                    &member_extension_type_args,
+                    expected,
+                    method_sig.as_ref(),
+                    generic_member.as_ref(),
+                );
+                let CallLambdaShaping {
+                    module: module_lambda_shape,
+                    extension: ext_lambda_shape,
+                    provider: provider_member_lambda_pts,
+                } = shaping;
+                let ext_lambda_pts: Option<Vec<Vec<Ty>>> = ext_lambda_shape
                     .as_ref()
-                    .map(|plan| plan.param_types.clone())
-                    .or_else(|| {
-                        ext_lambda_shape
-                            .as_ref()
-                            .and_then(|shape| shape.param_types.clone())
-                    });
-                let ext_lambda_recvs: Option<Vec<Option<Ty>>> = member_ext_lambda_plan
+                    .and_then(|shape| shape.param_types.clone());
+                let ext_lambda_recvs: Option<Vec<Option<Ty>>> = ext_lambda_shape
                     .as_ref()
-                    .map(|plan| plan.receivers.clone())
-                    .or_else(|| {
-                        ext_lambda_shape
-                            .as_ref()
-                            .and_then(|shape| shape.receivers.clone())
-                    });
-                let ext_lambda_context_counts: Option<Vec<usize>> = member_ext_lambda_plan
+                    .and_then(|shape| shape.receivers.clone());
+                let ext_lambda_context_counts: Option<Vec<usize>> = ext_lambda_shape
                     .as_ref()
-                    .map(|plan| plan.context_counts.clone())
-                    .or_else(|| {
-                        ext_lambda_shape
-                            .as_ref()
-                            .and_then(|shape| shape.context_counts.clone())
-                    });
+                    .and_then(|shape| shape.context_counts.clone());
                 let ext_callable_types: Option<Vec<Option<Ty>>> = ext_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.expected_types.clone());
