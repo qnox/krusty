@@ -10918,7 +10918,9 @@ fn resolve_deferred_properties(
             let Decl::Fun(function) = file.decl(declaration) else {
                 continue;
             };
-            if !function_needs_return_preinfer(function) || function.receiver.is_some() {
+            // Extensions are indexed too: their spelling is the key, and a spelling declared more
+            // than once is dropped below exactly as a plain function's is.
+            if !function_needs_return_preinfer(function) {
                 continue;
             }
             if undetermined_functions
@@ -10951,7 +10953,7 @@ fn resolve_deferred_properties(
             continue;
         };
         for (method_index, method) in class.methods.iter().enumerate() {
-            if !function_needs_return_preinfer(method) || method.receiver.is_some() {
+            if !function_needs_return_preinfer(method) {
                 continue;
             }
             let key = (*internal, method.name.clone());
@@ -10990,7 +10992,7 @@ fn resolve_deferred_properties(
     // helper()` reached before `helper` computed its return from an unresolved call and published
     // `Unit`, which stuck and left the field disagreeing with the value the initializer pushes. The
     // engine asks for `helper` when `chain` needs it, so the order is the dependency order.
-    let engine_returns = {
+    let (engine_function_returns, engine_returns) = {
         let driver = DeferredInferenceDriver {
             files,
             table,
@@ -11002,7 +11004,13 @@ fn resolve_deferred_properties(
             methods: &undetermined_methods,
             source_order: &source_order,
         };
-        undetermined_methods
+        let function_returns = undetermined_functions
+            .iter()
+            .filter_map(|(name, &(file_index, declaration))| {
+                Some((file_index, declaration, driver.demand_function(name)?))
+            })
+            .collect::<Vec<_>>();
+        let method_returns = undetermined_methods
             .keys()
             // Every inferred-return member, not only the ones still marked pending: the sweep can
             // publish a WRONG answer rather than no answer — `Unit`, computed from a call it could
@@ -11010,8 +11018,30 @@ fn resolve_deferred_properties(
             .filter_map(|(owner, name)| {
                 Some((*owner, name.clone(), driver.demand_method(*owner, name)?))
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (function_returns, method_returns)
     };
+    for (file_index, declaration, ret) in engine_function_returns {
+        let declared_here = |signature: &&mut Signature| {
+            signature.source_file == Some(file_index) && signature.source_decl == Some(declaration)
+        };
+        if let Some(signature) = table
+            .funs
+            .values_mut()
+            .find_map(|signatures| signatures.iter_mut().find(declared_here))
+        {
+            signature.set_inferred_return(ret);
+            continue;
+        }
+        // An EXTENSION lives in its own table, keyed by spelling and then by receiver.
+        if let Some(signature) = table.ext_funs.values_mut().find_map(|receivers| {
+            receivers
+                .values_mut()
+                .find_map(|signatures| signatures.iter_mut().find(declared_here))
+        }) {
+            signature.set_inferred_return(ret);
+        }
+    }
     for (owner, name, ret) in engine_returns {
         let Some(class) = table.class_by_type_name_mut(owner) else {
             continue;
@@ -11801,7 +11831,16 @@ fn infer_method_return_ty(
     for property in &properties {
         checker.declare_scoped_property(scope, property, true);
     }
-    let method_scope = scope.child(ScopeKind::Function { receiver: None });
+    // A MEMBER EXTENSION's body reads its extension receiver as `this`, with the class's own
+    // dispatch receiver behind it. Binding it here is what lets `fun Foo.name() = this.length`
+    // inside a class answer from the declaration instead of declining.
+    let extension_receiver = method
+        .receiver
+        .as_ref()
+        .map(|receiver| checker.type_ref_ty(scope, receiver));
+    let method_scope = scope.child(ScopeKind::Function {
+        receiver: extension_receiver,
+    });
     let method_scope = &method_scope;
     method_scope.declare_tparams(
         &method.type_params,
