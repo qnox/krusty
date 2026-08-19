@@ -136,6 +136,8 @@ mod callable_ref_extension_e2e;
 mod callable_ref_to_inferred_member_e2e;
 #[path = "callable_ref_unresolved_e2e.rs"]
 mod callable_ref_unresolved_e2e;
+#[path = "cannot_infer_cascade_e2e.rs"]
+mod cannot_infer_cascade_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
 mod catch_annotation_comma_e2e;
 #[path = "char_literal_diagnostics_e2e.rs"]

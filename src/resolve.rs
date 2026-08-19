@@ -2875,6 +2875,13 @@ type ModuleSymbolCache = HashMap<
     HashMap<String, std::rc::Rc<crate::libraries::ResolvedSymbols>>,
 >;
 
+#[derive(Clone)]
+enum PropertyInferenceFailure {
+    Recursive { span: Span },
+    UninitializedReads(Vec<(Span, String)>),
+    Untypeable,
+}
+
 pub struct SymbolTable {
     /// Opaque identity of this compilation. Declaration-owned generic variables include it so two
     /// concurrent modules with identical file offsets cannot alias in the process-wide type interner.
@@ -2962,6 +2969,10 @@ pub struct SymbolTable {
     pub context_prop_names: std::collections::HashSet<String>,
     /// Top-level *computed* properties (`val g: T get() = …`): a `getG()` static method, no field.
     pub computed_props: std::collections::HashSet<String>,
+    /// Why an implicitly typed property could not be resolved, keyed by its source declaration.
+    /// The authoritative checker consumes this fact once; reads keep the ordinary error type and
+    /// do not reconstruct the failure from a spelling or emit cascades.
+    property_inference_failures: HashMap<DeclKey, PropertyInferenceFailure>,
     /// `(source file, declaration)` → the `@JvmName` spelling of a top-level function whose emitted
     /// method name differs from its source name. A CROSS-FILE caller resolves the callee by source
     /// name but must emit the annotated one, and the callee's AST is out of its reach — so the name
@@ -3061,6 +3072,7 @@ impl Default for SymbolTable {
             source_props: HashMap::new(),
             context_prop_names: std::collections::HashSet::new(),
             computed_props: std::collections::HashSet::new(),
+            property_inference_failures: HashMap::new(),
             toplevel_jvm_names: HashMap::new(),
             enums: HashMap::new(),
             static_classifier_values: HashMap::new(),
@@ -7655,7 +7667,6 @@ fn collect_signatures_with_cp_impl(
                             property_scope.push(("this".to_string(), receiver, false));
                         }
                         property_scope.extend(init_scope.iter().cloned());
-                        let mut deferred_inference = false;
                         let property_ty = if let Some(de) = bp.delegate {
                             // A delegated member property: type = annotation, else the delegate's
                             // `getValue` return type.
@@ -7677,7 +7688,6 @@ fn collect_signatures_with_cp_impl(
                                         scope: property_scope.clone(),
                                         kind: DeferredKind::Member(type_name(&internal)),
                                     });
-                                    deferred_inference = true;
                                     Ty::Pending
                                 }
                             }
@@ -7709,7 +7719,6 @@ fn collect_signatures_with_cp_impl(
                                             scope: property_scope.clone(),
                                             kind: DeferredKind::Member(type_name(&internal)),
                                         });
-                                        deferred_inference = true;
                                     }
                                     inferred
                                 }
@@ -7739,7 +7748,6 @@ fn collect_signatures_with_cp_impl(
                                                 scope: property_scope.clone(),
                                                 kind: DeferredKind::Member(type_name(&internal)),
                                             });
-                                            deferred_inference = true;
                                         }
                                         inferred
                                     }
@@ -7812,13 +7820,6 @@ fn collect_signatures_with_cp_impl(
                                     ),
                                 );
                             }
-                        }
-                        if property_ty == Ty::Error
-                            && !deferred_inference
-                            && bp.ty.is_none()
-                            && (bp.init.is_some() || matches!(bp.getter, Some(FunBody::Block(_))))
-                        {
-                            diags.error(bp.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", bp.name));
                         }
                         if let (Some(receiver_ty), Some(receiver)) =
                             (extension_receiver, bp.receiver.as_ref())
@@ -9265,7 +9266,7 @@ fn collect_signatures_with_cp_impl(
     // the read erased to the parameter's bound — `x` published `Any`. Pre-inferring first gives the
     // run something to read; the pass after collection still runs and still refines, because this is
     // a fixpoint rather than a single sweep.
-    resolve_deferred_properties(files, &mut table, &deferred_properties, diags);
+    resolve_deferred_properties(files, &mut table, &deferred_properties);
     // Anything still undetermined after resolution keeps the placeholder the walk used before:
     // `Unit` for a function return nothing asked for. The marker exists so that PROPERTY resolution
     // cannot consume a wrong `Unit` as an answer; past that point the ordinary return pre-inference
@@ -10935,6 +10936,16 @@ impl DeferredProperty {
 /// position comparison.
 #[derive(Default)]
 struct SourceOrderIndex(HashMap<(u32, String), u32>);
+/// The one wording for an unannotated property whose type could not be inferred. Emitted by the
+/// checker (not the signature passes) so an initializer or getter that diagnoses itself
+/// (`val LOG = logger<Foo>()`) does not also draw this error on top of the unresolved reference.
+fn cannot_infer_property_message(name: &str) -> String {
+    format!("krusty: cannot infer the type of property '{name}'; add an explicit type")
+}
+
+const RECURSIVE_INFERENCE_MESSAGE: &str = "type checking has run into a recursive problem. Easiest workaround: specify the types of your declarations explicitly.";
+const EXPLICIT_PROPERTY_TYPE_MESSAGE: &str =
+    "this property must have an explicit type, be initialized, or be delegated.";
 
 impl SourceOrderIndex {
     fn of(files: &[File]) -> Self {
@@ -10998,6 +11009,8 @@ struct DeferredInferenceDriver<'a> {
     /// property read does.
     methods: &'a HashMap<(TypeName, String), (u32, DeclId, u32)>,
     source_order: &'a SourceOrderIndex,
+    rejected_reads: &'a std::cell::RefCell<HashMap<DeclKey, Vec<(Span, String)>>>,
+    recursive_dependents: &'a std::cell::RefCell<std::collections::HashSet<DeclKey>>,
 }
 
 impl DeferredInferenceDriver<'_> {
@@ -11012,7 +11025,19 @@ impl DeferredInferenceDriver<'_> {
             let demand = |name: &str| self.demand(entry, name);
             let demand_call = |name: &str, arg_tys: &[Ty]| self.demand_call_overload(name, arg_tys);
             let demand_member = |receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                self.demand_on_receiver(receiver, name, arg_tys)
+                self.demand_on_receiver(Some(entry), receiver, name, arg_tys)
+            };
+            let rejects = |name: &str, span: Span| {
+                let rejected = !self.readable_from(entry, name);
+                if rejected {
+                    let read = (span, name.to_string());
+                    let mut rejected_reads = self.rejected_reads.borrow_mut();
+                    let reads = rejected_reads.entry(entry.key).or_default();
+                    if !reads.contains(&read) {
+                        reads.push(read);
+                    }
+                }
+                rejected
             };
             let inferred = match entry.kind {
                 DeferredKind::TopLevel { .. } => infer_declaration_ty(
@@ -11025,7 +11050,7 @@ impl DeferredInferenceDriver<'_> {
                         demand: &demand,
                         demand_call: &demand_call,
                         demand_member: &demand_member,
-                        rejects: &|name| !self.readable_from(entry, name),
+                        rejects: &rejects,
                     },
                 ),
                 DeferredKind::Member(_) if file.is_local_declaration(DeclId(entry.key.decl)) => {
@@ -11048,7 +11073,7 @@ impl DeferredInferenceDriver<'_> {
                         demand: &demand,
                         demand_call: &demand_call,
                         demand_member: &demand_member,
-                        rejects: &|name| !self.readable_from(entry, name),
+                        rejects: &rejects,
                     },
                 ),
             };
@@ -11060,7 +11085,7 @@ impl DeferredInferenceDriver<'_> {
                     // type `getValue` is then looked up on — so it has to be resolved BEFORE the
                     // chain is followed, not patched afterwards.
                     let delegate = self
-                        .demand_on_receiver(inferred, "provideDelegate", &[])
+                        .demand_on_receiver(None, inferred, "provideDelegate", &[])
                         .filter(|provided| !provided.mentions_pending())
                         .map(|provided| {
                             let bindings = inferred
@@ -11086,7 +11111,7 @@ impl DeferredInferenceDriver<'_> {
                     // publishing the marker would make "not resolved" the property's type.
                     .map(|ret| match ret.mentions_pending() {
                         true => self
-                            .demand_on_receiver(delegate, "getValue", &[])
+                            .demand_on_receiver(None, delegate, "getValue", &[])
                             .filter(|answered| !answered.mentions_pending())
                             // The answer is `getValue`'s DECLARED return — `T` for
                             // `class W<T> { operator fun getValue(…) = value }` — so the delegate's own
@@ -11151,7 +11176,7 @@ impl DeferredInferenceDriver<'_> {
     /// The declaration `name` refers to, resolved now if it has not been typed yet.
     fn demand_declared(&self, from: &DeferredProperty, name: &str) -> Option<Ty> {
         if let Some(owner) = from.owner() {
-            if let Some(ty) = self.demand_member(owner, name) {
+            if let Some(ty) = self.demand_member(Some(from), owner, name) {
                 return Some(ty);
             }
             // The class — or something it inherits from — declares this spelling, so it SHADOWS any
@@ -11167,13 +11192,23 @@ impl DeferredInferenceDriver<'_> {
         if from.scope_binds(name) {
             return None;
         }
-        if !self.readable_from(from, name) {
-            return None;
-        }
         self.by_name
             .get(name)
-            .and_then(|key| self.resolve(*key).ty())
+            .and_then(|key| self.resolution_ty_for(Some(from), self.resolve(*key)))
             .or_else(|| self.demand_function(name))
+    }
+
+    fn resolution_ty_for(
+        &self,
+        from: Option<&DeferredProperty>,
+        resolution: Resolution,
+    ) -> Option<Ty> {
+        if resolution.declined() == Some(DeclineReason::Recursive) {
+            if let Some(from) = from {
+                self.recursive_dependents.borrow_mut().insert(from.key);
+            }
+        }
+        resolution.ty()
     }
 
     /// The return of a top-level function whose own body has not been typed yet.
@@ -11196,9 +11231,9 @@ impl DeferredInferenceDriver<'_> {
                             self.demand_call_overload(name, arg_tys)
                         },
                         demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                            self.demand_on_receiver(receiver, name, arg_tys)
+                            self.demand_on_receiver(None, receiver, name, arg_tys)
                         },
-                        rejects: &|_| false,
+                        rejects: &|_, _| false,
                     },
                 )
             })
@@ -11263,9 +11298,9 @@ impl DeferredInferenceDriver<'_> {
                             self.demand_call_overload(name, arg_tys)
                         },
                         demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                            self.demand_on_receiver(receiver, name, arg_tys)
+                            self.demand_on_receiver(None, receiver, name, arg_tys)
                         },
-                        rejects: &|_| false,
+                        rejects: &|_, _| false,
                     },
                 )
             })
@@ -11302,12 +11337,17 @@ impl DeferredInferenceDriver<'_> {
     ///
     /// The index is keyed by the DECLARING owner, so an inherited member is found by walking the
     /// supertypes rather than by a second index that could disagree with the class graph.
-    fn demand_member(&self, owner: TypeName, name: &str) -> Option<Ty> {
+    fn demand_member(
+        &self,
+        from: Option<&DeferredProperty>,
+        owner: TypeName,
+        name: &str,
+    ) -> Option<Ty> {
         let key = *self
             .owner_chain(owner)
             .into_iter()
             .find_map(|declaring| self.by_member.get(&(declaring, name.to_string())))?;
-        self.resolve(key).ty()
+        self.resolution_ty_for(from, self.resolve(key))
     }
 
     /// Whether `owner` or any of its supertypes declares a property spelled `name`, whatever its
@@ -11362,9 +11402,15 @@ impl DeferredInferenceDriver<'_> {
 
     /// [`Self::demand_member`] addressed by the receiver's semantic type rather than its identity,
     /// which is the form an expression read has to hand.
-    fn demand_on_receiver(&self, receiver: Ty, name: &str, arg_tys: &[Ty]) -> Option<Ty> {
+    fn demand_on_receiver(
+        &self,
+        from: Option<&DeferredProperty>,
+        receiver: Ty,
+        name: &str,
+        arg_tys: &[Ty],
+    ) -> Option<Ty> {
         let owner = receiver.kotlin_class_internal()?;
-        self.demand_member(owner, name)
+        self.demand_member(from, owner, name)
             .or_else(|| self.demand_method(owner, name))
             .or_else(|| self.demand_method_overload(owner, name, arg_tys))
             .or_else(|| self.demand_module_extension(receiver, name))
@@ -11426,9 +11472,9 @@ impl DeferredInferenceDriver<'_> {
                                 self.demand_call_overload(name, arg_tys)
                             },
                             demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                                self.demand_on_receiver(receiver, name, arg_tys)
+                                self.demand_on_receiver(None, receiver, name, arg_tys)
                             },
-                            rejects: &|_| false,
+                            rejects: &|_, _| false,
                         },
                     ))
                 },
@@ -11499,9 +11545,9 @@ impl DeferredInferenceDriver<'_> {
                                 self.demand_call_overload(name, arg_tys)
                             },
                             demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                                self.demand_on_receiver(receiver, name, arg_tys)
+                                self.demand_on_receiver(None, receiver, name, arg_tys)
                             },
-                            rejects: &|_| false,
+                            rejects: &|_, _| false,
                         },
                     ))
                 },
@@ -11539,7 +11585,6 @@ fn resolve_deferred_properties(
     files: &[File],
     table: &mut SymbolTable,
     deferred: &[DeferredProperty],
-    diags: &mut DiagSink,
 ) {
     // No early return on an empty deferred queue: this is also where every undetermined RETURN and
     // member-extension getter is resolved, and a module can have those with no deferred property at
@@ -11732,6 +11777,8 @@ fn resolve_deferred_properties(
     }
     let engine = TypeEngine::new();
     let source_order = SourceOrderIndex::of(files);
+    let rejected_reads = std::cell::RefCell::new(HashMap::new());
+    let recursive_dependents = std::cell::RefCell::new(std::collections::HashSet::new());
     let resolutions = {
         let driver = DeferredInferenceDriver {
             files,
@@ -11745,6 +11792,8 @@ fn resolve_deferred_properties(
             methods_by_name: &undetermined_methods_by_name,
             methods: &undetermined_methods,
             source_order: &source_order,
+            rejected_reads: &rejected_reads,
+            recursive_dependents: &recursive_dependents,
         };
         deferred
             .iter()
@@ -11764,6 +11813,8 @@ fn resolve_deferred_properties(
             methods_by_name: &undetermined_methods_by_name,
             methods: &undetermined_methods,
             source_order: &source_order,
+            rejected_reads: &rejected_reads,
+            recursive_dependents: &recursive_dependents,
         };
         // Asked per DECLARATION, so an overloaded spelling is answered too. Asking by name drops
         // both overloads — a name alone cannot choose between them — and they then settled to
@@ -11785,9 +11836,9 @@ fn resolve_deferred_properties(
                                     driver.demand_call_overload(name, arg_tys)
                                 },
                                 demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                                    driver.demand_on_receiver(receiver, name, arg_tys)
+                                    driver.demand_on_receiver(None, receiver, name, arg_tys)
                                 },
-                                rejects: &|_| false,
+                                rejects: &|_, _| false,
                             },
                         )
                     })
@@ -11824,9 +11875,9 @@ fn resolve_deferred_properties(
                                         driver.demand_call_overload(name, arg_tys)
                                     },
                                     demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                                        driver.demand_on_receiver(receiver, name, arg_tys)
+                                        driver.demand_on_receiver(None, receiver, name, arg_tys)
                                     },
-                                    rejects: &|_| false,
+                                    rejects: &|_, _| false,
                                 },
                             ))
                         },
@@ -11856,9 +11907,11 @@ fn resolve_deferred_properties(
                                         },
                                         demand_member:
                                             &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                                                driver.demand_on_receiver(receiver, name, arg_tys)
+                                                driver.demand_on_receiver(
+                                                    None, receiver, name, arg_tys,
+                                                )
                                             },
-                                        rejects: &|_| false,
+                                        rejects: &|_, _| false,
                                     },
                                 ))
                             },
@@ -11951,16 +12004,25 @@ fn resolve_deferred_properties(
         let Some(ty) = resolution.ty().filter(|ty| !ty.mentions_error()) else {
             // Undetermined is not a type. Replace the marker with the ordinary error placeholder so
             // nothing downstream — emission, `@Metadata`, a later read — can mistake "not resolved"
-            // for a shape, and report the decline.
+            // for a shape. The decline is DIAGNOSED by the authoritative check of the declaration,
+            // not here: only that run knows whether the body already reported its own error (an
+            // unresolved reference inside the initializer), in which case kotlinc shows no second
+            // inference error.
+            let failure = if resolution.declined() == Some(DeclineReason::Recursive)
+                || recursive_dependents.borrow().contains(&entry.key)
+            {
+                let span = entry
+                    .expression
+                    .and_then(|expression| files[entry.file_index as usize].expr_span(expression))
+                    .unwrap_or(entry.span);
+                PropertyInferenceFailure::Recursive { span }
+            } else if let Some(reads) = rejected_reads.borrow().get(&entry.key).cloned() {
+                PropertyInferenceFailure::UninitializedReads(reads)
+            } else {
+                PropertyInferenceFailure::Untypeable
+            };
+            table.property_inference_failures.insert(entry.key, failure);
             decline_pending_property(table, entry);
-            diags.set_file(entry.file_index);
-            diags.error(
-                entry.span,
-                format!(
-                    "krusty: cannot infer the type of property '{}'; add an explicit type",
-                    entry.name
-                ),
-            );
             continue;
         };
         match &entry.kind {
@@ -12484,7 +12546,7 @@ struct EngineSeams<'a> {
     /// plain read: a name alone cannot choose between overloads, and they can.
     demand_member: DemandMember<'a>,
     /// A name this declaration may not read at all, by initialization order.
-    rejects: &'a dyn Fn(&str) -> bool,
+    rejects: &'a dyn Fn(&str, Span) -> bool,
 }
 
 /// Replace any function return still undetermined after resolution with the placeholder the walk
@@ -19186,9 +19248,8 @@ struct Checker<'a> {
     /// Whether the declaration being typed may not read this name AT ALL. An eager initializer runs
     /// in declaration order, so a module property declared later in the same file has no value yet;
     /// kotlinc rejects `val eager = later` with "variable 'later' must be initialized". The symbol
-    /// table has no notion of position, so the engine answers that question and the read is reported
-    /// unresolved rather than silently taking the later declaration's type.
-    demand_rejects: Option<&'a dyn Fn(&str) -> bool>,
+    /// table has no notion of position, so the engine records the rejected read at its source span.
+    demand_rejects: Option<&'a dyn Fn(&str, Span) -> bool>,
     expr_types: Vec<Ty>,
     /// Trace-only duplicate-traversal detector. This is deliberately not a semantic cache: normal
     /// builds contain no field or branch, and trace builds report the caller bug to remove.
@@ -25573,8 +25634,12 @@ impl<'a> Checker<'a> {
         let mut missing_context = None;
         let mut applicable = Vec::new();
         for property in properties {
+            // `Unit` excludes zero-arg functions posing as property reads. `Error` must NOT
+            // exclude: a property whose inference failed is still a declared name — kotlinc
+            // resolves reads of it silently (the failure is diagnosed at the declaration), never
+            // as `unresolved reference`.
             if property.kind != crate::libraries::PropKind::TopLevel
-                || !property.getter.ret.is_read_value_result()
+                || property.getter.ret == Ty::Unit
                 || property.context_count > property.getter.params.len()
             {
                 continue;
@@ -32009,6 +32074,15 @@ impl<'a> Checker<'a> {
             .receiver
             .as_ref()
             .map(|r| self.type_ref_ty_reported(scope, r));
+        let inference_key = DeclKey::declaration(self.file_index, d.0);
+        let explicit_type_required = p.declared_ty().is_none()
+            && p.init.is_none()
+            && matches!(p.getter, Some(FunBody::Block(_)));
+        self.report_property_inference_before_body(p.span, explicit_type_required);
+        // Diagnostics from the accessor/initializer checks below explain an `Error` inference
+        // on their own (`val LOG = logger<Foo>()` reports the unresolved reference, not a
+        // second inference error — kotlinc parity).
+        let body_diag_mark = self.diags.diags.len();
         let resolved_property_ty = {
             let context_scope = scope.declaration_function_child(
                 recv_ty,
@@ -32148,6 +32222,68 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+        }
+        // The signature passes leave the type `Error` without a diagnostic; the checker reports the
+        // inference failure only when neither the getter nor the initializer diagnosed itself — the
+        // same coverage the signature passes had (top-level, non-extension, init or getter, no
+        // delegate), now with the unresolved-reference cascade suppressed.
+        if resolved_property_ty == Ty::Error
+            && p.receiver.is_none()
+            && p.declared_ty().is_none()
+            && (p.init.is_some() || p.getter.is_some())
+            && p.delegate.is_none()
+        {
+            self.report_property_inference_failure(
+                inference_key,
+                p.span,
+                &p.name,
+                body_diag_mark,
+                explicit_type_required,
+            );
+        }
+    }
+
+    fn report_property_inference_failure(
+        &mut self,
+        key: DeclKey,
+        declaration_span: Span,
+        name: &str,
+        body_diag_mark: usize,
+        explicit_type_required: bool,
+    ) {
+        if explicit_type_required {
+            return;
+        }
+        match self.syms.property_inference_failures.get(&key).cloned() {
+            Some(PropertyInferenceFailure::Recursive { span }) => {
+                self.diags.error(span, RECURSIVE_INFERENCE_MESSAGE);
+            }
+            Some(PropertyInferenceFailure::UninitializedReads(reads)) => {
+                for (span, name) in reads {
+                    self.diags
+                        .error(span, format!("variable '{name}' must be initialized."));
+                }
+            }
+            Some(PropertyInferenceFailure::Untypeable) | None
+                if !self.diags.diags[body_diag_mark..]
+                    .iter()
+                    .any(|diagnostic| diagnostic.severity == crate::diag::Severity::Error) =>
+            {
+                self.diags
+                    .error(declaration_span, cannot_infer_property_message(name));
+            }
+            Some(PropertyInferenceFailure::Untypeable) | None => {}
+        }
+    }
+
+    fn report_property_inference_before_body(
+        &mut self,
+        declaration_span: Span,
+        explicit_type_required: bool,
+    ) {
+        if explicit_type_required {
+            self.diags
+                .error(declaration_span, EXPLICIT_PROPERTY_TYPE_MESSAGE);
         }
     }
 
@@ -33475,6 +33611,16 @@ impl<'a> Checker<'a> {
                         .same_package_class(&cl.name)
                         .and_then(|class| class.declared_props.get(&bp.name))
                         .map(|property| (property.ty, property.storage_ty));
+                    let inference_key = DeclKey::member(self.file_index, d.0, bp_index as u32);
+                    let explicit_type_required = bp.declared_ty().is_none()
+                        && bp.init.is_none()
+                        && matches!(bp.getter, Some(FunBody::Block(_)));
+                    self.report_property_inference_before_body(bp.span, explicit_type_required);
+                    // Diagnostics from the initializer/accessor checks below explain an `Error`
+                    // inference on their own (kotlinc parity: only the unresolved reference is
+                    // reported); the inference error is emitted after the accessor checks only
+                    // when they stayed silent.
+                    let body_diag_mark = self.diags.diags.len();
                     if let Some(init) = bp.init {
                         let declared = declared_property
                             .map(|(property_ty, field_ty)| field_ty.unwrap_or(property_ty))
@@ -33631,6 +33777,28 @@ impl<'a> Checker<'a> {
                                 });
                             }
                         }
+                    }
+                    // Same kotlinc-parity rule as top-level properties: the signature passes leave
+                    // an unannotated property's failed inference as a bare `Error`; report it here
+                    // only when the initializer/getter did not diagnose itself. Coverage matches
+                    // the retired signature-pass sites: eager initializers and block getters (any
+                    // receiver), expression getters only for non-extension properties.
+                    let getter_covered = match &bp.getter {
+                        Some(FunBody::Block(_)) => true,
+                        Some(FunBody::Expr(_)) => bp.receiver.is_none(),
+                        _ => false,
+                    };
+                    if bp.ty.is_none()
+                        && prop_ty == Ty::Error
+                        && (bp.init.is_some() || getter_covered)
+                    {
+                        self.report_property_inference_failure(
+                            inference_key,
+                            bp.span,
+                            &bp.name,
+                            body_diag_mark,
+                            explicit_type_required,
+                        );
                     }
                     if extension_receiver.is_some() {
                         self.extension_receiver_labels.pop();
@@ -39013,7 +39181,11 @@ impl<'a> Checker<'a> {
                     );
                     return self.set(e, ty);
                 }
-                if self.demand_rejects.is_some_and(|rejects| rejects(&n)) {
+                if self
+                    .demand_rejects
+                    .is_some_and(|rejects| rejects(&n, self.span(e)))
+                {
+                    let _ = self.demand_name.and_then(|demand| demand(&n));
                     self.diags
                         .error(self.span(e), format!("unresolved reference '{n}'."));
                     Ty::Error
@@ -57711,19 +57883,14 @@ fun box(): String {
 
     #[test]
     fn computed_property_getter_cycle_reports_inference_error() {
-        // The bounded module-wide retry must stop on mutual getter recursion instead of looping or
-        // inventing a type. Both declarations remain Error and receive the ordinary inference error.
         let (errs, _) = check(
             r#"
 val x get() = y
 val y get() = x
 "#,
         );
-        assert!(
-            errs.iter()
-                .any(|e| e.contains("cannot infer the type of property 'x'")),
-            "expected a cyclic inference error, got {errs:?}"
-        );
+        assert_eq!(errs.len(), 2);
+        assert_eq!(errs, vec![RECURSIVE_INFERENCE_MESSAGE; 2]);
     }
 
     #[test]
@@ -57737,11 +57904,8 @@ val eager = later
 val later = 1
 "#,
         );
-        assert!(
-            errs.iter()
-                .any(|error| error.contains("cannot infer the type of property 'eager'")),
-            "expected an eager forward-reference inference error, got {errs:?}"
-        );
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs, ["variable 'later' must be initialized."]);
     }
 
     #[test]

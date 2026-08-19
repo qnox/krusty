@@ -6123,6 +6123,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type had to be inferred from it. Test:
   `toplevel_property_inference_e2e::toplevel_property_cross_reference`.
 
+- **A failed property inference has one diagnostic owner.** If an initializer or getter already
+  reports its error, the declaration does not add a `cannot infer the type` diagnostic and later
+  reads of the error-typed property remain quiet. Deferred inference records a failure against the
+  source declaration: recursion is reported at each recursive body, and every same-file forward
+  read in an eager initializer reports that the variable must be initialized. An untyped block
+  getter still reports its required explicit type before any body diagnostic. Tests:
+  `tests/cannot_infer_cascade_e2e.rs`, `tests/diagnostics_match_kotlinc.rs`.
+
 - **A classpath value class's member property is read through its static `-impl` accessor.** kotlinc
   realizes every member of a `@JvmInline value class` as a static whose FIRST parameter is the
   receiver's carrier (`kotlin/Result.isSuccess` → `isSuccess-impl(Ljava/lang/Object;)Z`,

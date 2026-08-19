@@ -57,13 +57,14 @@ fn sides_that_do_not_agree_decline() {
     // typings agree — it passed while the bug was live. The assertion has to be the descriptor.
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    for (label, source) in [
+    for (label, source, expected) in [
         (
             "Int and Double",
             "package repro\n\
              fun maybeInt(): Int? = 3\n\
              val NUMBER = maybeInt() ?: 2.5\n\
              fun box(): String = \"OK\"\n",
+            "krusty: cannot infer the type of property 'NUMBER'; add an explicit type",
         ),
         (
             "Int and Long",
@@ -71,16 +72,13 @@ fn sides_that_do_not_agree_decline() {
              val n: Int? = null\n\
              val A = n ?: 1L\n\
              fun box(): String = \"OK\"\n",
+            "krusty: cannot infer the type of property 'A'; add an explicit type",
         ),
     ] {
         let diagnostics =
             common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
-        assert!(
-            diagnostics
-                .iter()
-                .any(|message| message.contains("cannot infer the type of property")),
-            "{label}: sides that do not agree must decline rather than widen: {diagnostics:?}"
-        );
+        assert_eq!(diagnostics.len(), 1, "{label}: diagnostic count");
+        assert_eq!(diagnostics, [expected], "{label}: exact diagnostic");
     }
 }
 
@@ -94,12 +92,13 @@ fn a_throw_never_gives_an_initializer_a_type_on_its_own() {
     // diagnostic that would have rejected the source.
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    for (label, source) in [
+    for (label, source, expected) in [
         (
             "bare initializer",
             "package repro\n\
              val A = throw RuntimeException()\n\
              fun box(): String = \"OK\"\n",
+            "krusty: cannot infer the type of property 'A'; add an explicit type",
         ),
         (
             "both if branches",
@@ -107,12 +106,14 @@ fn a_throw_never_gives_an_initializer_a_type_on_its_own() {
              val c = true\n\
              val A = if (c) throw RuntimeException() else throw IllegalStateException()\n\
              fun box(): String = \"OK\"\n",
+            "krusty: cannot infer the type of property 'A'; add an explicit type",
         ),
         (
             "class member",
             "package repro\n\
              class C { val a = throw RuntimeException() }\n\
              fun box(): String = \"OK\"\n",
+            "krusty: cannot infer the type of property 'a'; add an explicit type",
         ),
         (
             "every when arm throws",
@@ -120,47 +121,40 @@ fn a_throw_never_gives_an_initializer_a_type_on_its_own() {
              val c = 1\n\
              val A = when (c) { 1 -> throw RuntimeException() else -> throw IllegalStateException() }\n\
              fun box(): String = \"OK\"\n",
+            "krusty: cannot infer the type of property 'A'; add an explicit type",
         ),
         (
             "object member",
             "package repro\n\
              object O { val b = throw RuntimeException() }\n\
              fun box(): String = \"OK\"\n",
+            "krusty: cannot infer the type of property 'b'; add an explicit type",
         ),
         (
             "null left of a throw",
             "package repro\n\
              val A = null ?: throw RuntimeException()\n\
              fun box(): String = \"OK\"\n",
+            "krusty: cannot infer the type of property 'A'; add an explicit type",
         ),
     ] {
         let diagnostics =
             common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
-        assert!(
-            diagnostics
-                .iter()
-                .any(|message| message.contains("cannot infer the type of property")),
-            "{label}: a throw must not give an initializer a type: {diagnostics:?}"
-        );
+        assert_eq!(diagnostics.len(), 1, "{label}: diagnostic count");
+        assert_eq!(diagnostics, [expected], "{label}: exact diagnostic");
     }
 }
 
 #[test]
 fn an_untypeable_side_still_declines() {
-    // The must-not-touch side. When either side cannot be typed the initializer must keep asking for
-    // an explicit type rather than inventing one from the half it does understand.
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     const SRC: &str = "package repro\n\
         private val UNKNOWN = unresolvedThing() ?: \"fallback\"\n\
         fun box(): String = \"OK\"\n";
     let diagnostics = common::front_end_diagnostics(SRC, std::slice::from_ref(&stdlib), Some(&jdk));
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("cannot infer the type of property")),
-        "an initializer whose left side does not resolve must not be typed silently: {diagnostics:?}"
-    );
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics, ["unresolved reference 'unresolvedThing'."]);
 }
 
 #[test]
