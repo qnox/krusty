@@ -848,6 +848,7 @@ mod tests {
                                 receiver_rank: 0,
                                 source_key: None,
                                 source_member: None,
+                                accessor_derived: false,
                             }],
                         }),
                     );
