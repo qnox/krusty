@@ -340,6 +340,7 @@ impl SymbolSource for DependencyPlatform {
                     source_properties,
                 ),
             ),
+            importable_declaration: primary.importable_declaration || source.importable_declaration,
         });
         if !merged.is_empty() {
             self.symbols_memo

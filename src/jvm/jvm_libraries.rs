@@ -4630,6 +4630,13 @@ impl JvmLibraries {
         } else {
             platform_callables
         };
+        let importable_declaration = core.importable_declaration
+            || match namespace {
+                SymbolNamespace::Package(package) => {
+                    self.top_level_static_field(package, name).is_some()
+                }
+                SymbolNamespace::Classifier(owner) => self.static_field_name(owner, name).is_some(),
+            };
         self.cp.memoize_symbols(
             namespace,
             name,
@@ -4637,6 +4644,7 @@ impl JvmLibraries {
                 classifier_name,
                 classifier,
                 callables,
+                importable_declaration,
             },
         )
     }

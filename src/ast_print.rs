@@ -29,11 +29,23 @@ pub fn write_file(out: &mut impl fmt::Write, file: &File) -> fmt::Result {
     )?;
     writeln!(out, "is_script: {}", file.is_script)?;
     writeln!(out, "source_line_count: {}", file.source_line_count)?;
-    if !file.imports.is_empty() {
-        writeln!(out, "imports: {:?}", file.imports)?;
-    }
-    if !file.import_aliases.is_empty() {
-        writeln!(out, "import_aliases: {:?}", file.import_aliases)?;
+    if !file.import_paths.is_empty() {
+        let imports = file
+            .import_paths
+            .iter()
+            .map(|import| {
+                let mut path = import.path();
+                if import.wildcard {
+                    path.push_str(".*");
+                }
+                if let Some(alias) = &import.alias {
+                    path.push_str(" as ");
+                    path.push_str(alias);
+                }
+                path
+            })
+            .collect::<Vec<_>>();
+        writeln!(out, "imports: {imports:?}")?;
     }
     writeln!(out, "decls: {:?}", file.decls)?;
     if !file.expect_decls.is_empty() {

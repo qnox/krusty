@@ -1303,10 +1303,31 @@ impl SymbolSource for ModuleSymbols<'_> {
             }),
             (true, true) => Callables::None,
         };
+        let importable_declaration = match namespace {
+            SymbolNamespace::Package(package) => {
+                crate::types::existing_type_name_child(package, &name)
+                    .is_some_and(|identity| self.syms.source_alias_fqns.contains_key(&identity))
+            }
+            SymbolNamespace::Classifier(owner) => {
+                self.classifier_record(owner).is_some_and(|classifier| {
+                    classifier.is_enum_entry(&name)
+                        || classifier.constants.contains_key(&name)
+                        || classifier
+                            .fields
+                            .iter()
+                            .any(|field| field.is_static && field.name == name)
+                        || classifier
+                            .companion_object
+                            .as_ref()
+                            .is_some_and(|(field, _)| field == &name)
+                })
+            }
+        };
         let record = std::rc::Rc::new(ResolvedSymbols {
             classifier_name,
             classifier,
             callables,
+            importable_declaration,
         });
         if self.syms.module_cache_enabled() {
             self.syms

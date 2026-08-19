@@ -668,6 +668,8 @@ mod implicit_this_callable_ref_e2e;
 mod implicit_this_member_hof_lambda_e2e;
 #[path = "implicit_this_method_ref_e2e.rs"]
 mod implicit_this_method_ref_e2e;
+#[path = "import_resolution_diag_e2e.rs"]
+mod import_resolution_diag_e2e;
 #[path = "import_scope_conformance_e2e.rs"]
 mod import_scope_conformance_e2e;
 #[path = "imported_companion_property_e2e.rs"]

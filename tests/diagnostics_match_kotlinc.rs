@@ -170,9 +170,12 @@ fn where_constraint_subject_diagnostic_matches_kotlinc() {
     let source = "class C<T> where U : Any";
     let (code, stderr) = common::kotlinc_source_result("InvalidWhereSubject", source);
     assert_ne!(code, 0, "kotlinc unexpectedly accepted invalid constraint");
-    assert!(
-        stderr.contains("'U' does not refer to a type parameter of 'C'."),
-        "unexpected kotlinc diagnostic: {stderr}"
+    assert_eq!(
+        errors(&stderr)
+            .into_iter()
+            .map(|error| error.message)
+            .collect::<Vec<_>>(),
+        vec!["'U' does not refer to a type parameter of 'C'."]
     );
     assert_eq!(
         common::front_end_diagnostics(source, &[], None),
@@ -219,7 +222,47 @@ class Derived : Base({ this })
         kotlinc_code, 0,
         "kotlinc rejected enum this: {kotlinc_stderr}"
     );
-    assert!(diagnostics.is_empty(), "krusty: {diagnostics:?}");
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
+fn unresolved_imports_match_kotlinc_exactly() {
+    let source = "import java.util.Nonexistent\n\
+                  import nonexistent.pkg.*\n\
+                  fun f() = 1\n";
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("ImportFailures.kt", source)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let mut kotlinc_errors = errors(&result.reference_stderr);
+    krusty_errors.sort_by_key(|error| (error.line, error.column));
+    kotlinc_errors.sort_by_key(|error| (error.line, error.column));
+    assert_eq!(krusty_errors, kotlinc_errors);
+    assert_eq!(
+        krusty_errors,
+        vec![
+            ObservedError {
+                file: "ImportFailures.kt".to_string(),
+                line: 1,
+                column: 18,
+                message: "unresolved reference 'Nonexistent'.".to_string(),
+            },
+            ObservedError {
+                file: "ImportFailures.kt".to_string(),
+                line: 2,
+                column: 8,
+                message: "unresolved reference 'nonexistent'.".to_string(),
+            },
+        ]
+    );
 }
 
 #[test]
@@ -533,16 +576,12 @@ fn kotlin_internal_exact_requires_an_exact_argument_type() {
         result.reference_code, 0,
         "@Exact unexpectedly accepted the widened type"
     );
-    assert!(
-        result.reference_stderr.contains("argument type mismatch"),
-        "unexpected kotlinc diagnostic: {}",
-        result.reference_stderr
-    );
-
-    let krusty_error =
-        first_error(&result.krusty_stderr).or_else(|| first_error(&result.krusty_stdout));
     assert_ne!(result.krusty_code, 0, "krusty unexpectedly accepted @Exact");
-    assert_eq!(krusty_error, first_error(&result.reference_stderr));
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    assert_eq!(krusty_errors, kotlinc_errors);
+    assert_eq!(krusty_errors.len(), 1);
 }
 
 #[test]
@@ -552,11 +591,21 @@ fn kotlin_internal_exact_can_require_two_arguments_to_have_the_same_type() {
         "fun <T> same(first: @kotlin.internal.Exact T, second: @kotlin.internal.Exact T) {}\n",
         "fun use(first: String, second: CharSequence) = same(first, second)",
     );
-    let (code, stderr) = common::kotlinc_source_result("ExactPair", source);
-    assert_ne!(code, 0, "two @Exact parameters accepted different types");
-    assert!(
-        stderr.contains("argument type mismatch"),
-        "unexpected kotlinc diagnostic: {stderr}"
+    let result = common::compiler_diagnostics(&[("ExactPair.kt", source)], &[]);
+    assert_ne!(
+        result.reference_code, 0,
+        "two @Exact parameters accepted different types"
+    );
+    assert_eq!(
+        errors(&result.reference_stderr),
+        vec![ObservedError {
+            file: "ExactPair.kt".to_string(),
+            line: 3,
+            column: 60,
+            message:
+                "argument type mismatch: actual type is 'CharSequence', but 'String' was expected."
+                    .to_string(),
+        }]
     );
 }
 

@@ -1021,6 +1021,7 @@ mod tests {
                 callables: Callables::Functions(FunctionSet {
                     overloads: vec![function],
                 }),
+                importable_declaration: false,
             })
         }
     }

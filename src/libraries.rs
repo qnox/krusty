@@ -2098,6 +2098,9 @@ pub struct ResolvedSymbols {
     /// Shared with the type-name memo, so cloning a record never deep-clones the classifier.
     pub classifier: Option<std::sync::Arc<LibraryType>>,
     pub callables: Callables,
+    /// A declaration that is importable but has no classifier or callable candidate, such as a
+    /// primitive typealias, enum entry, or public static field.
+    pub importable_declaration: bool,
 }
 
 impl ResolvedSymbols {
@@ -2106,6 +2109,7 @@ impl ResolvedSymbols {
         self.classifier_name.is_none()
             && self.classifier.is_none()
             && matches!(self.callables, Callables::None)
+            && !self.importable_declaration
     }
 }
 
@@ -2766,6 +2770,7 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
             classifier_name: Some(internal),
             classifier: Some(std::sync::Arc::new(classifier)),
             callables,
+            importable_declaration: false,
         })
     }
 }

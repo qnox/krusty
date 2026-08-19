@@ -198,6 +198,7 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
                     crate::libraries::LibraryType::declaration_header(),
                 )),
                 callables: library.callables.clone(),
+                importable_declaration: library.importable_declaration,
             })
         } else {
             library
@@ -329,6 +330,97 @@ fn classifier_path<S: SymbolSource + ?Sized>(
                     .unwrap_or_default()
                     .to_string(),
             })
+        }
+    }
+}
+
+/// Validate an import from left to right and return its single source diagnostic, if any.
+fn import_path_diagnostic(
+    import: &crate::ast::ImportPath,
+    source: &dyn SymbolSource,
+) -> Option<(Span, String)> {
+    use crate::libraries::Callables;
+    use crate::symbol_source::SymbolNamespace;
+    let unresolved =
+        |segment: &str, span: Span| (span, format!("unresolved reference '{segment}'."));
+    let mut prefix = ResolvedQualifier::Package(TypeName::ROOT);
+    for (index, (segment, span)) in import.segments.iter().enumerate() {
+        // A `.*` suffix means every stored segment is a qualifier, never the imported name.
+        let terminal = index + 1 == import.segments.len() && !import.wildcard;
+        match prefix {
+            ResolvedQualifier::Value => return None,
+            ResolvedQualifier::Package(package) => {
+                let symbols = source.symbols(SymbolNamespace::Package(package), segment);
+                if let Some(classifier) = symbols.classifier_name {
+                    prefix = ResolvedQualifier::Classifier(classifier);
+                } else if source.package_exists(package, segment) {
+                    prefix =
+                        ResolvedQualifier::Package(crate::types::type_name_child(package, segment));
+                } else if terminal
+                    && (!matches!(symbols.callables, Callables::None)
+                        || symbols.importable_declaration)
+                {
+                    return None;
+                } else {
+                    return Some(unresolved(segment, *span));
+                }
+            }
+            ResolvedQualifier::Classifier(owner) => {
+                let symbols = source.symbols(SymbolNamespace::Classifier(owner), segment);
+                if let Some(classifier) = symbols.classifier_name {
+                    prefix = ResolvedQualifier::Classifier(classifier);
+                    continue;
+                }
+                if !terminal {
+                    return Some(unresolved(segment, *span));
+                }
+                if !matches!(symbols.callables, Callables::None) || symbols.importable_declaration {
+                    return None;
+                }
+                let Some(owner_type) = source.classifier(owner) else {
+                    return Some(unresolved(segment, *span));
+                };
+                let instance_member = owner_type
+                    .declared_callables
+                    .get(segment)
+                    .is_some_and(|callables| !matches!(callables, Callables::None))
+                    || owner_type
+                        .members
+                        .iter()
+                        .any(|member| member.name == *segment)
+                    || owner_type
+                        .fields
+                        .iter()
+                        .any(|field| !field.is_static && field.name == *segment);
+                if instance_member {
+                    return Some((
+                        *span,
+                        format!(
+                            "cannot import '{segment}'. Functions and properties can only be imported from packages or objects."
+                        ),
+                    ));
+                }
+                return Some(unresolved(segment, *span));
+            }
+        }
+    }
+    None
+}
+
+impl Checker<'_> {
+    fn check_import_paths(&mut self) {
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &self.module as &dyn SymbolSource,
+            &*self.syms.libraries as &dyn SymbolSource,
+        ]);
+        let mut reports = Vec::new();
+        for import in &self.file.import_paths {
+            if let Some(report) = import_path_diagnostic(import, &source) {
+                reports.push(report);
+            }
+        }
+        for (span, message) in reports {
+            self.diags.error(span, message);
         }
     }
 }
@@ -4961,18 +5053,14 @@ pub fn builtin_bitwise_ret(recv: Ty, name: &str, n_args: usize) -> Option<Ty> {
 /// wildcard import (`a.b.*`) has no simple name — those are represented by [`import_levels`].
 pub fn import_map(file: &File) -> HashMap<String, String> {
     let mut m = HashMap::new();
-    for fq in &file.imports {
-        if fq.ends_with(".*") {
+    for import in &file.import_paths {
+        if import.wildcard {
             continue;
         }
-        if let Some(simple) = fq.rsplit('.').next() {
+        let fq = import.path();
+        if let Some(simple) = import.imported_name() {
             let internal = fq.replace('.', "/");
-            let source_name = file
-                .import_aliases
-                .iter()
-                .find_map(|(alias, target)| (target == fq).then_some(alias.as_str()))
-                .unwrap_or(simple);
-            m.insert(source_name.to_string(), internal);
+            m.insert(simple.to_string(), internal);
         }
     }
     m
@@ -5368,12 +5456,10 @@ fn import_levels(file: &File, platform_defaults: &[&str]) -> [Vec<TypeName>; 4] 
         None => type_name(""),
     };
     let explicit_star: Vec<TypeName> = file
-        .imports
+        .import_paths
         .iter()
-        .filter_map(|fq| {
-            fq.strip_suffix(".*")
-                .map(|p| type_name(&p.replace('.', "/")))
-        })
+        .filter(|import| import.wildcard)
+        .map(|import| type_name(&import.path().replace('.', "/")))
         .collect();
     let kotlin_defaults: Vec<TypeName> = KOTLIN_DEFAULT_IMPORT_PACKAGES
         .iter()
@@ -8973,9 +9059,10 @@ fn collect_signatures_with_cp_impl(
         }
         // Star imports contribute below same-package declarations.
         for imported_package in file
-            .imports
+            .import_paths
             .iter()
-            .filter_map(|import| import.strip_suffix(".*"))
+            .filter(|import| import.wildcard)
+            .map(crate::ast::ImportPath::path)
         {
             for declaration_file in files
                 .iter()
@@ -18213,6 +18300,7 @@ fn check_file_at_impl_mode(
         c.in_script_body = false;
     }
     if !capture_discovery {
+        c.check_import_paths();
         for reference in &file.detached_type_refs {
             if suppresses_detached_type_reference(file, file_index, syms, reference) {
                 continue;
@@ -38456,17 +38544,7 @@ impl<'a> Checker<'a> {
                     self.diags
                         .error(self.span(e), format!("unresolved reference '{n}'."));
                     Ty::Error
-                } else if let Some(field) = self.imports.get(&n).and_then(|full| {
-                    let (package, member) = full.rsplit_once('/')?;
-                    self.syms
-                        .libraries
-                        .top_level_static_field(type_name(package), member)
-                }) {
-                    // A CLASSPATH top-level `const val` reached by name (`import kotlin.math.PI`). A
-                    // `const` has no accessor, so it is absent from the property namespace that models
-                    // properties by their accessors; the platform answers with the field that holds it.
-                    // `record_external_static_field` inlines the literal when the field carries a
-                    // `ConstantValue`, which is what kotlinc does at every use site.
+                } else if let Some(field) = self.imported_static_field(&n) {
                     self.record_external_static_field(Some(e), field)
                 } else if let Some((implicit_receiver, member)) =
                     implicit_receivers.iter().copied().find_map(|receiver| {
@@ -46346,6 +46424,19 @@ impl<'a> Checker<'a> {
             },
             declared_name,
         ))
+    }
+
+    fn imported_static_field(&self, name: &str) -> Option<crate::libraries::StaticFieldRef> {
+        let (namespace, declared_name) = self.function_import_scope.explicit_target(name)?;
+        match namespace {
+            crate::symbol_source::SymbolNamespace::Package(package) => self
+                .syms
+                .libraries
+                .top_level_static_field(package, &declared_name),
+            crate::symbol_source::SymbolNamespace::Classifier(owner) => {
+                self.resolver().static_field(owner, &declared_name)
+            }
+        }
     }
 
     /// The constructor shapes each argument of `Name(args)` is typed against, in SOURCE-ARGUMENT
@@ -54489,6 +54580,7 @@ val result = object { fun value(): String = captured }
                             )],
                         },
                     ),
+                    importable_declaration: false,
                 });
             }
             // A provider owns the textual index for its declarations. It may intern the identity
@@ -54515,6 +54607,7 @@ val result = object { fun value(): String = captured }
                 }),
                 classifier,
                 callables: crate::libraries::Callables::None,
+                importable_declaration: false,
             })
         }
     }
@@ -56779,6 +56872,7 @@ fun box(): String {
                     classifier_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::None,
+                    importable_declaration: false,
                 });
             }
             if matches!(name, "conflictingNames" | "conflictingNamesExt") {
@@ -56842,6 +56936,7 @@ fun box(): String {
                             ],
                         },
                     ),
+                    importable_declaration: false,
                 });
             }
             let (kind, receiver, owner, name, params, ret, descriptor) = match name {
@@ -56975,6 +57070,7 @@ fun box(): String {
                 callables: crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
                     overloads: vec![info],
                 }),
+                importable_declaration: false,
             })
         }
 

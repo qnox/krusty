@@ -132,6 +132,7 @@ impl SymbolSource for CompositeSource<'_> {
                 let mut classifier_name = None;
                 let mut fns = Vec::new();
                 let mut props = Vec::new();
+                let mut importable_declaration = false;
                 for r in &records {
                     if classifier.is_none() {
                         classifier = r.classifier.clone();
@@ -149,6 +150,7 @@ impl SymbolSource for CompositeSource<'_> {
                         }
                         Callables::None => {}
                     }
+                    importable_declaration |= r.importable_declaration;
                 }
                 let callables = match (fns.is_empty(), props.is_empty()) {
                     (false, false) => Callables::Both {
@@ -163,6 +165,7 @@ impl SymbolSource for CompositeSource<'_> {
                     classifier_name,
                     classifier,
                     callables,
+                    importable_declaration,
                 })
             }
         }
@@ -302,6 +305,7 @@ mod tests {
                 }),
                 classifier,
                 callables,
+                importable_declaration: false,
             })
         }
     }

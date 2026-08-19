@@ -356,10 +356,14 @@ impl CompletionSymbols {
                 } else {
                     format!("{}.{}", global.package, global.symbol.label)
                 };
-                let wildcard = format!("{}.*", global.package);
-                file.imports
-                    .iter()
-                    .any(|import| import == &qualified || import == &wildcard)
+                file.import_paths.iter().any(|import| {
+                    let path = import.path();
+                    if import.wildcard {
+                        path == global.package
+                    } else {
+                        path == qualified
+                    }
+                })
             })
             .map(|global| &global.symbol)
     }
@@ -372,11 +376,12 @@ impl CompletionSymbols {
             }
         }
         let simple = simple_name(name);
-        for import in &file.imports {
-            if import.rsplit('.').next() == Some(simple.as_str())
-                && self.class_owners.values().any(|owner| owner == import)
+        for import in &file.import_paths {
+            let path = import.path();
+            if import.imported_name() == Some(simple.as_str())
+                && self.class_owners.values().any(|owner| owner == &path)
             {
-                return import.clone();
+                return path;
             }
         }
         let package = file.package.clone().unwrap_or_default();
@@ -384,10 +389,10 @@ impl CompletionSymbols {
             return owner.clone();
         }
         let wildcard_owners: Vec<_> = file
-            .imports
+            .import_paths
             .iter()
-            .filter_map(|import| import.strip_suffix(".*"))
-            .map(|package| qualified_name(package, &simple))
+            .filter(|import| import.wildcard)
+            .map(|import| qualified_name(&import.path(), &simple))
             .filter(|candidate| self.class_owners.values().any(|owner| owner == candidate))
             .collect();
         if let [owner] = wildcard_owners.as_slice() {

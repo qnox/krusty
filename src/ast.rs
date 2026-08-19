@@ -1282,15 +1282,40 @@ pub enum AnonymousEnclosingFunction {
     Member { class: DeclId, method: u32 },
 }
 
+/// One parsed import directive with the source span of each path segment.
+#[derive(Clone, Debug)]
+pub struct ImportPath {
+    pub segments: Vec<(String, Span)>,
+    pub wildcard: bool,
+    pub alias: Option<String>,
+}
+
+impl ImportPath {
+    pub fn path(&self) -> String {
+        self.segments
+            .iter()
+            .map(|(segment, _)| segment.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    pub fn imported_name(&self) -> Option<&str> {
+        if self.wildcard {
+            return None;
+        }
+        self.alias
+            .as_deref()
+            .or_else(|| self.segments.last().map(|(segment, _)| segment.as_str()))
+    }
+}
+
 /// One parsed source file: its package, and arenas for every node kind.
 #[derive(Default)]
 pub struct File {
     pub package: Option<String>,
     pub is_script: bool,
-    /// Fully-qualified import names (e.g. `util.Calc`), used to resolve Java/JDK references.
-    pub imports: Vec<String>,
-    /// Aliased imports as `(source alias, fully-qualified target)`.
-    pub import_aliases: Vec<(String, String)>,
+    /// Source imports in declaration order.
+    pub import_paths: Vec<ImportPath>,
     /// Classifier references that are not retained by another AST node. Import entries are candidates
     /// until semantic resolution confirms that the imported declaration is a type.
     pub detached_type_refs: Vec<TypeRef>,

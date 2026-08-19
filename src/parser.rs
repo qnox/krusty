@@ -1306,13 +1306,19 @@ impl<'a> Parser<'a> {
                 TokenKind::KwImport => {
                     self.bump(); // 'import'
                     let import_span = self.tok().span;
-                    let mut fq = self.parse_qualified_name();
-                    // `import a.b.*` — `parse_qualified_name` consumes the trailing `.` (it only keeps a
+                    let segments = self.parse_qualified_name_segments();
+                    let fq = segments
+                        .iter()
+                        .map(|(segment, _)| segment.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    // `import a.b.*` — the segment scan consumes the trailing `.` (it only keeps a
                     // segment when an `Ident` follows), leaving us at `*`. Recover the wildcard so it is
                     // recorded as `a.b.*` (the form the import-level builder recognizes).
+                    let mut wildcard = false;
                     if self.at(TokenKind::Star) {
                         self.bump(); // '*'
-                        fq.push_str(".*");
+                        wildcard = true;
                     }
                     let mut alias = None;
                     if self.at(TokenKind::Ident) && self.keyword_text("as") {
@@ -1323,15 +1329,16 @@ impl<'a> Parser<'a> {
                         }
                     }
                     if !fq.is_empty() {
-                        if !fq.ends_with(".*") {
+                        if !wildcard {
                             let mut reference = simple_type_ref(&fq, import_span);
                             reference.flags = reference.flags.with_import(true);
                             self.file.detached_type_refs.push(reference);
                         }
-                        if let Some(alias) = alias {
-                            self.file.import_aliases.push((alias, fq.clone()));
-                        }
-                        self.file.imports.push(fq);
+                        self.file.import_paths.push(crate::ast::ImportPath {
+                            segments,
+                            wildcard,
+                            alias,
+                        });
                     }
                     // tolerate any remaining trailing tokens to end of line
                     while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
@@ -2974,20 +2981,27 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_qualified_name(&mut self) -> String {
-        let mut s = String::new();
+        self.parse_qualified_name_segments()
+            .into_iter()
+            .map(|(segment, _)| segment)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    fn parse_qualified_name_segments(&mut self) -> Vec<(String, crate::diag::Span)> {
+        let mut segments = Vec::new();
         if self.at(TokenKind::Ident) {
-            s.push_str(self.text());
+            segments.push((self.text().to_string(), self.tok().span));
             self.bump();
             while self.at(TokenKind::Dot) {
                 self.bump();
                 if self.at(TokenKind::Ident) {
-                    s.push('.');
-                    s.push_str(self.text());
+                    segments.push((self.text().to_string(), self.tok().span));
                     self.bump();
                 }
             }
         }
-        s
+        segments
     }
 
     fn parse_fun(&mut self, modifiers: &[String]) -> FunDecl {
