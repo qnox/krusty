@@ -110,3 +110,41 @@ fn capture_used_in_property_initializer() {
          fun box(): String { return if (mk(21).g() == 42) \"OK\" else \"F\" }\n",
     );
 }
+
+#[test]
+fn captures_smart_cast_val() {
+    // The capture must record the NARROWED binding (kotlinc accepts): discovery used to keep the
+    // outer declared `String?` binding and reject `t.length` inside the object body.
+    run_ok(
+        "AnonSmartVal",
+        "interface L { fun g(): Int }\n\
+         fun f(p: String?): Int {\n\
+         val t: String? = p\n\
+         if (t != null) {\n\
+         val o = object : L { override fun g() = t.length }\n\
+         return o.g() }\n\
+         return -1 }\n\
+         fun box(): String {\n\
+         if (f(null) != -1) return \"FAIL null\"\n\
+         return if (f(\"abc\") == 3) \"OK\" else \"FAIL\" }\n",
+    );
+}
+
+#[test]
+fn captures_inner_shadowed_local() {
+    // Plain lexical shadowing: the capture is the INNER `t` (`String`), never the outer `Int`.
+    run_ok(
+        "AnonInnerShadow",
+        "interface L { fun g(): Int }\n\
+         fun f(b: Boolean): Int {\n\
+         val t: Int = 1\n\
+         if (b) {\n\
+         val t: String = \"abc\"\n\
+         val o = object : L { override fun g() = t.length }\n\
+         return o.g() }\n\
+         return -1 }\n\
+         fun box(): String {\n\
+         if (f(false) != -1) return \"FAIL false\"\n\
+         return if (f(true) == 3) \"OK\" else \"FAIL\" }\n",
+    );
+}
