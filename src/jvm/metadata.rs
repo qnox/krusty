@@ -1278,24 +1278,27 @@ fn annotation_jvm_name(bodies: &[Vec<u8>], records: &[Rec], d2: &[String]) -> Op
     None
 }
 
-fn has_annotation(bodies: &[Vec<u8>], records: &[Rec], d2: &[String], expected: &str) -> bool {
-    bodies.iter().any(|body| {
-        let mut pb = Pb { b: body, i: 0 };
-        let mut id = None;
-        while !pb.at_end() {
-            let Some(tag) = pb.varint() else {
-                return false;
-            };
-            match (tag >> 3, tag & 7) {
-                (1, 0) => id = pb.varint(),
-                (_, wire) if pb.skip(wire).is_none() => return false,
-                _ => {}
+fn annotation_names(
+    bodies: &[Vec<u8>],
+    records: &[Rec],
+    d2: &[String],
+) -> Vec<crate::types::TypeName> {
+    bodies
+        .iter()
+        .filter_map(|body| {
+            let mut pb = Pb { b: body, i: 0 };
+            let mut id = None;
+            while !pb.at_end() {
+                let tag = pb.varint()?;
+                match (tag >> 3, tag & 7) {
+                    (1, 0) => id = pb.varint(),
+                    (_, wire) => pb.skip(wire)?,
+                }
             }
-        }
-        id.and_then(|id| resolve_class_name(records, d2, id as usize))
-            .map(|name| type_name(&name))
-            .is_some_and(|name| name.matches(expected))
-    })
+            id.and_then(|id| resolve_class_name(records, d2, id as usize))
+                .map(|name| type_name(&name))
+        })
+        .collect()
 }
 
 /// The declaration facts carried directly by one Kotlin metadata `Type` message.
@@ -1837,11 +1840,10 @@ impl MfnFlags {
     const IS_EXTENSION: u16 = 1 << 2;
     const RET_NULLABLE: u16 = 1 << 3;
     const IS_OPERATOR: u16 = 1 << 4;
-    const LOW_PRIORITY: u16 = 1 << 5;
-    const IS_INFIX: u16 = 1 << 6;
-    const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 7;
-    const DEPRECATED_HIDDEN: u16 = 1 << 8;
-    const IS_ABSTRACT: u16 = 1 << 9;
+    const IS_INFIX: u16 = 1 << 5;
+    const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 6;
+    const DEPRECATED_HIDDEN: u16 = 1 << 7;
+    const IS_ABSTRACT: u16 = 1 << 8;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1876,10 +1878,6 @@ impl MfnFlags {
     #[inline]
     pub const fn with_is_operator(self, on: bool) -> Self {
         self.with(Self::IS_OPERATOR, on)
-    }
-    #[inline]
-    pub const fn with_low_priority(self, on: bool) -> Self {
-        self.with(Self::LOW_PRIORITY, on)
     }
     #[inline]
     pub const fn with_is_infix(self, on: bool) -> Self {
@@ -1940,6 +1938,11 @@ pub struct MetaFn {
     /// contract IR — the effects the checker applies at call sites (`returns(…) implies …`,
     /// `callsInPlace`). `None` when the function declares no contract.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
+    /// Annotation class identities declared on this function (from \`Function.annotation\`).
+    /// The decoder keeps these as interned \`TypeName\`s so consumers — overload resolution,
+    /// deprecation handling, etc. — can check for the annotations they care about without the
+    /// metadata layer hard-coding any one annotation's semantics.
+    pub annotations: Vec<crate::types::TypeName>,
 }
 
 impl MetaFn {
@@ -1979,10 +1982,6 @@ impl MetaFn {
     pub fn ret_nullable(&self) -> bool {
         self.flags.has(MfnFlags::RET_NULLABLE)
     }
-    #[inline]
-    pub fn low_priority(&self) -> bool {
-        self.flags.has(MfnFlags::LOW_PRIORITY)
-    }
     /// `@Deprecated(level = HIDDEN)`: the declaration exists for binary compatibility only and
     /// kotlinc removes it from overload resolution entirely. Stamped from the realization
     /// method's `kotlin.Deprecated` annotation after metadata decode.
@@ -1990,7 +1989,6 @@ impl MetaFn {
     pub fn deprecated_hidden(&self) -> bool {
         self.flags.has(MfnFlags::DEPRECATED_HIDDEN)
     }
-
     pub fn context_count(&self) -> usize {
         self.context_params.len()
     }
@@ -2840,19 +2838,14 @@ fn decode_functions(
                             .with_is_infix(pf.is_infix)
                             .with_has_reified_type_params(
                                 pf.type_params.iter().any(|parameter| parameter.reified),
-                            )
-                            .with_low_priority(has_annotation(
-                                &pf.annotation_bodies,
-                                records,
-                                d2,
-                                "kotlin/internal/LowPriorityInOverloadResolution",
-                            )),
+                            ),
                         receiver_class,
                         ret_class,
                         value_params,
                         generic_sig,
                         contract,
                         context_params,
+                        annotations: annotation_names(&pf.annotation_bodies, records, d2),
                     });
                 }
             }

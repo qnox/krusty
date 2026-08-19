@@ -1055,7 +1055,10 @@ pub struct MetadataCallFacts {
     pub is_operator: bool,
     /// Kotlin's source-level `infix` modifier. The JVM descriptor/name cannot encode it.
     pub is_infix: bool,
-    pub low_priority: bool,
+    /// Annotation class identities declared on the descriptor-aligned declaration. Consumers decide
+    /// which annotations affect resolution/emission; the classpath layer only records their
+    /// qualified identities.
+    pub annotations: Vec<crate::types::TypeName>,
     /// The callable's declared contract, decoded from `@Metadata` (`None` when it has none).
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
     /// Leading context parameters (supplied implicitly by the caller, not positionally).
@@ -1096,7 +1099,7 @@ impl MetadataCallFacts {
             has_reified_type_params: false,
             is_operator: false,
             is_infix: false,
-            low_priority: false,
+            annotations: Vec::new(),
             contract: None,
             context_count: 0,
             deprecated_hidden: false,
@@ -2382,7 +2385,7 @@ impl Classpath {
             has_reified_type_params: c.has_reified_type_params(),
             is_operator: c.is_operator(),
             is_infix: c.is_infix(),
-            low_priority: c.low_priority(),
+            annotations: c.annotations.clone(),
             contract: c.contract.clone(),
             context_count: c.context_count(),
             deprecated_hidden: c.deprecated_hidden(),
@@ -2880,7 +2883,7 @@ impl Classpath {
                             m.generic_sig.params.len(),
                         ),
                         context_count: 0,
-                        low_priority: false,
+                        annotations: Vec::new(),
                         contract: None,
                         default_values: Vec::new(),
                         default_realization: None,

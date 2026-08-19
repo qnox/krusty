@@ -133,6 +133,20 @@ fun box(): String = choose(1)
 }
 
 #[test]
+fn local_function_low_priority_annotation_reaches_overload_selection() {
+    const SRC: &str = r#"
+fun box(): String {
+    fun choose(value: Int) = "int"
+    @Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
+    @kotlin.internal.LowPriorityInOverloadResolution
+    fun choose(value: Number) = "number"
+    return if (choose(1) == "int") "OK" else "FAIL: ${choose(1)}"
+}
+"#;
+    assert_eq!(run(SRC, "LocalLowPriority"), "OK");
+}
+
+#[test]
 fn overload_vararg_vs_fixed() {
     const SRC: &str = "fun sum(a: Int): String = \"one:\" + a\n\
 fun sum(vararg xs: Int): String {\n\

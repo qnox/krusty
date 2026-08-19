@@ -102,3 +102,35 @@ fun choose(value: Any) = "normal"
         .expect("pooled box runner unavailable");
     assert_eq!(output.trim(), "normal");
 }
+
+/// A RUNTIME annotation on a module-level source function reaches the emitted class file,
+/// proving annotations travel through Signature -> FunctionInfo -> emission.
+#[test]
+fn module_function_annotation_is_emitted() {
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let lib = common::compile_lib("module_fn_annlib", LIB).expect("compile annotation lib");
+    let classes = common::expect_compile_in_process(
+        "package demo\n\
+         import lib.Vis\n\
+         @Vis(\"module-fun\")\n\
+         fun annotated() {}\n\
+         fun box(): String { annotated(); return \"OK\" }\n",
+        "File",
+        &[lib, sl, jdk.clone()],
+        Some(jdk.as_path()),
+    );
+    let bytes = classes
+        .into_iter()
+        .find(|(n, _)| n == "demo/FileKt")
+        .expect("demo/FileKt emitted")
+        .1;
+    assert!(
+        contains(&bytes, "RuntimeVisibleAnnotations"),
+        "no visible attr on module function"
+    );
+    assert!(
+        contains(&bytes, "Llib/Vis;"),
+        "RUNTIME annotation missing on module function"
+    );
+}
