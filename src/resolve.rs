@@ -10403,12 +10403,17 @@ fn delegated_getvalue_ret_for_signature(
     );
     let kproperty = Ty::obj("kotlin/reflect/KProperty");
     let convention_args = [this_ref, kproperty];
+    // `provideDelegate` read from the TABLE, whose return may still be the marker — its body is an
+    // expression nothing has typed yet. The caller has already resolved that step and passes the
+    // stored type in, so an undetermined answer here is not an answer: it would make the delegate
+    // `<not determined>` and lose `getValue` entirely.
     let stored_ty = select_delegate_operator_return(
         &resolver,
         delegate_ty,
         "provideDelegate",
         &convention_args,
     )
+    .filter(|stored| !stored.mentions_pending())
     .unwrap_or(delegate_ty);
     select_delegate_operator_return(&resolver, stored_ty, "getValue", &convention_args)
 }
@@ -12644,12 +12649,22 @@ fn infer_method_return_ty(
             // A member EXTENSION records into its own table, keyed by its RECEIVER rather than by
             // the class that declares it, so the owner is not the discriminator here — the receiver
             // is, and it is what tells two same-spelled extensions apart.
+            //
+            // The recorded receiver is the one `check_method` resolved in its own scope, which for
+            // a GENERIC receiver (`fun <T : Any> T.self()`) is a type parameter under a different
+            // identity than the one minted here. Exact identity is preferred; failing that, the
+            // ERASURE decides, which is what the extension tables themselves are keyed by.
             let receiver = extension_receiver?;
-            checker
-                .inferred_member_ext_fun_rets
-                .iter()
-                .find(|((_, name, recorded, _), _)| *name == method.name && *recorded == receiver)
-                .map(|(_, ret)| *ret)
+            let recorded_for = |matches: &dyn Fn(Ty) -> bool| {
+                checker
+                    .inferred_member_ext_fun_rets
+                    .iter()
+                    .find(|((_, name, recorded, _), _)| *name == method.name && matches(*recorded))
+                    .map(|(_, ret)| *ret)
+            };
+            recorded_for(&|recorded| recorded == receiver).or_else(|| {
+                recorded_for(&|recorded| erased_type_key(recorded) == erased_type_key(receiver))
+            })
         })
         .unwrap_or(Ty::Error);
     drop(checker);

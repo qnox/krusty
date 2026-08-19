@@ -323,3 +323,23 @@ fn a_callable_reference_demands_its_target() {
         "engine-callable-reference-demand",
     );
 }
+
+/// A delegated property whose `provideDelegate` has an INFERRED return.
+///
+/// The delegate convention is read from the symbol table, where `provideDelegate`'s return is still
+/// the marker while its own body is being typed. Taking that as the stored type loses `getValue`
+/// entirely, and the property reports "cannot infer the type" for a program kotlinc accepts. The
+/// caller has already resolved that step, so an undetermined answer there is not an answer.
+#[test]
+fn a_provide_delegate_with_an_inferred_return() {
+    common::expect_box_ok_with_stdlib(
+        "import kotlin.reflect.KProperty\n\
+         class Slot {\n\
+         \x20 operator fun provideDelegate(thisRef: Any?, property: KProperty<*>) = this\n\
+         \x20 operator fun getValue(thisRef: Any?, property: KProperty<*>) = \"OK\"\n\
+         }\n\
+         class Holder { val held by Slot() }\n\
+         fun box(): String = Holder().held\n",
+        "engine-provide-delegate-inferred",
+    );
+}
