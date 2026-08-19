@@ -639,6 +639,203 @@ pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static 
     builtin_ids().jvm_builtin.get(&internal).map(|(s, _)| *s)
 }
 
+/// One JDK member kotlinc re-admits over the `.kotlin_builtins` scope of a mapped class
+/// (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`): a mapped Kotlin collection's source scope is
+/// its Kotlin declaration, but these Java default methods are part of the Kotlin API surface too.
+/// Entries are keyed by the JVM owner the signature is declared on, matched by physical name and
+/// erased descriptor — the same key kotlinc's table uses.
+struct MappedVisibleMethod {
+    jvm_owner: &'static str,
+    name: &'static str,
+    descriptor: &'static str,
+    /// `Some(face)` — a kotlinc `MUTABLE_METHOD_SIGNATURES` entry, visible only on that mutable
+    /// Kotlin face. `None` — visible on the group's read-only face (the first of its
+    /// [`ErasureGroup::kotlin_names`]); the mutable face inherits it through the Kotlin hierarchy,
+    /// mirroring `JvmMappedScope`, which attaches non-mutating signatures to the read-only
+    /// container only.
+    mutable_face: Option<&'static str>,
+}
+
+const fn visible(
+    jvm_owner: &'static str,
+    name: &'static str,
+    descriptor: &'static str,
+) -> MappedVisibleMethod {
+    MappedVisibleMethod {
+        jvm_owner,
+        name,
+        descriptor,
+        mutable_face: None,
+    }
+}
+
+const fn mutable(
+    jvm_owner: &'static str,
+    face: &'static str,
+    name: &'static str,
+    descriptor: &'static str,
+) -> MappedVisibleMethod {
+    MappedVisibleMethod {
+        jvm_owner,
+        name,
+        descriptor,
+        mutable_face: Some(face),
+    }
+}
+
+/// kotlinc 2.4's whitelist for the mapped collection interfaces (the KotlinDeclaration erasure
+/// groups). `kotlin/Throwable`, `kotlin/CharSequence` & co. stay JoinedWithJvm and need no entries;
+/// `java/util/Map.remove(Object,Object)` is omitted because Kotlin's `MutableMap` itself declares
+/// `remove(key, value)` — re-admitting the Java signature would publish a duplicate candidate.
+const MAPPED_VISIBLE_METHODS: &[MappedVisibleMethod] = &[
+    visible(
+        "java/util/Iterator",
+        "forEachRemaining",
+        "(Ljava/util/function/Consumer;)V",
+    ),
+    visible(
+        "java/lang/Iterable",
+        "forEach",
+        "(Ljava/util/function/Consumer;)V",
+    ),
+    visible(
+        "java/lang/Iterable",
+        "spliterator",
+        "()Ljava/util/Spliterator;",
+    ),
+    visible(
+        "java/util/Collection",
+        "spliterator",
+        "()Ljava/util/Spliterator;",
+    ),
+    visible(
+        "java/util/Collection",
+        "parallelStream",
+        "()Ljava/util/stream/Stream;",
+    ),
+    visible(
+        "java/util/Collection",
+        "stream",
+        "()Ljava/util/stream/Stream;",
+    ),
+    mutable(
+        "java/util/Collection",
+        "kotlin/collections/MutableCollection",
+        "removeIf",
+        "(Ljava/util/function/Predicate;)Z",
+    ),
+    mutable(
+        "java/util/List",
+        "kotlin/collections/MutableList",
+        "replaceAll",
+        "(Ljava/util/function/UnaryOperator;)V",
+    ),
+    mutable(
+        "java/util/List",
+        "kotlin/collections/MutableList",
+        "addFirst",
+        "(Ljava/lang/Object;)V",
+    ),
+    mutable(
+        "java/util/List",
+        "kotlin/collections/MutableList",
+        "addLast",
+        "(Ljava/lang/Object;)V",
+    ),
+    mutable(
+        "java/util/List",
+        "kotlin/collections/MutableList",
+        "removeFirst",
+        "()Ljava/lang/Object;",
+    ),
+    mutable(
+        "java/util/List",
+        "kotlin/collections/MutableList",
+        "removeLast",
+        "()Ljava/lang/Object;",
+    ),
+    visible(
+        "java/util/Map",
+        "getOrDefault",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+    ),
+    visible(
+        "java/util/Map",
+        "forEach",
+        "(Ljava/util/function/BiConsumer;)V",
+    ),
+    mutable(
+        "java/util/Map",
+        "kotlin/collections/MutableMap",
+        "computeIfAbsent",
+        "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;",
+    ),
+    mutable(
+        "java/util/Map",
+        "kotlin/collections/MutableMap",
+        "computeIfPresent",
+        "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+    ),
+    mutable(
+        "java/util/Map",
+        "kotlin/collections/MutableMap",
+        "compute",
+        "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+    ),
+    mutable(
+        "java/util/Map",
+        "kotlin/collections/MutableMap",
+        "merge",
+        "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+    ),
+    mutable(
+        "java/util/Map",
+        "kotlin/collections/MutableMap",
+        "putIfAbsent",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+    ),
+    mutable(
+        "java/util/Map",
+        "kotlin/collections/MutableMap",
+        "replaceAll",
+        "(Ljava/util/function/BiFunction;)V",
+    ),
+    mutable(
+        "java/util/Map",
+        "kotlin/collections/MutableMap",
+        "replace",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+    ),
+    mutable(
+        "java/util/Map",
+        "kotlin/collections/MutableMap",
+        "replace",
+        "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z",
+    ),
+];
+
+/// Whether a Java member read from the mapped JVM class is part of the SOURCE scope of the mapped
+/// Kotlin face `face` (`kotlin/collections/MutableMap`, …) under kotlinc's
+/// `VISIBLE_METHOD_SIGNATURES` whitelist. Consulted only where the Kotlin declaration is otherwise
+/// authoritative; the JVM face (`java/util/Map` itself) keeps its full classfile scope untouched.
+pub fn mapped_scope_keeps_jvm_method(face: TypeName, name: &str, descriptor: &str) -> bool {
+    MAPPED_VISIBLE_METHODS.iter().any(|method| {
+        if method.name != name || method.descriptor != descriptor {
+            return false;
+        }
+        match method.mutable_face {
+            Some(mutable) => face.matches(mutable),
+            None => ERASURE_GROUPS.iter().any(|group| {
+                group.jvm_name == method.jvm_owner
+                    && group
+                        .kotlin_names
+                        .first()
+                        .is_some_and(|read_only| face.matches(read_only))
+            }),
+        }
+    })
+}
+
 pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
     builtin_ids()
         .jvm_builtin
