@@ -121,6 +121,105 @@ fun box(): String {
     );
 }
 
+/// Java package-private visibility is honored from Kotlin in the SAME package: a package-private
+/// class's package-private static member is callable. Kotlin has no package-private keyword, but
+/// the compiler maps Java package-private to package-scoped access.
+#[test]
+fn package_private_java_static_callable_within_same_package() {
+    run_mixed(
+        &[
+            (
+                "p/Out.java",
+                "package p; public class Out { public static String value = \"\"; }",
+            ),
+            (
+                "p/Helper.java",
+                "package p; final class Helper { static void adjust() { Out.value = \"adjusted\"; } }",
+            ),
+        ],
+        "package p\nfun box(): String {\n    Helper.adjust()\n    return if (Out.value == \"adjusted\") \"OK\" else \"FAIL\"\n}\n",
+    );
+}
+
+/// CROSS-package access to a package-private Java class and static member is rejected with
+/// kotlinc's exact diagnostic pair.
+#[test]
+fn package_private_java_static_rejected_cross_package() {
+    let diagnostics = mixed_diagnostics(
+        &[(
+            "p/Helper.java",
+            "package p; final class Helper { static void adjust() { } }",
+        )],
+        "package q\nfun bad() { p.Helper.adjust() }\n",
+    )
+    .expect("javac");
+    assert_eq!(
+        diagnostics,
+        [
+            "cannot access 'class Helper : Any': it is package-private in file.",
+            "cannot access 'static fun adjust(): Unit': it is package-private in 'p.Helper'."
+        ]
+    );
+}
+
+/// Java package-private instance methods are visible from Kotlin in the SAME package.
+#[test]
+fn package_private_java_instance_callable_within_same_package() {
+    run_mixed(
+        &[(
+            "p/Helper.java",
+            "package p; public class Helper { String value() { return \"OK\"; } }",
+        )],
+        "package p\nfun box(): String = Helper().value()\n",
+    );
+}
+
+/// CROSS-package access to a package-private Java instance method is rejected.
+#[test]
+fn package_private_java_instance_callable_rejected_cross_package() {
+    let diagnostics = mixed_diagnostics(
+        &[(
+            "p/Helper.java",
+            "package p; public class Helper { String value() { return \"OK\"; } }",
+        )],
+        "package q\nfun bad(h: p.Helper) { h.value() }\n",
+    )
+    .expect("javac");
+    assert_eq!(
+        diagnostics,
+        ["cannot access 'fun value(): String!': it is package-private in 'p.Helper'."]
+    );
+}
+
+/// Java package-private instance fields are visible from Kotlin in the SAME package.
+#[test]
+fn package_private_java_field_within_same_package() {
+    run_mixed(
+        &[(
+            "p/Helper.java",
+            "package p; public class Helper { String value = \"OK\"; }",
+        )],
+        "package p\nfun box(): String = Helper().value\n",
+    );
+}
+
+/// CROSS-package access to a package-private Java field is rejected.
+#[test]
+fn package_private_java_field_rejected_cross_package() {
+    let diagnostics = mixed_diagnostics(
+        &[(
+            "p/Helper.java",
+            "package p; public class Helper { String value = \"OK\"; }",
+        )],
+        "package q\nfun bad(h: p.Helper) { h.value }\n",
+    )
+    .expect("javac");
+    assert_eq!(
+        diagnostics,
+        ["cannot access 'field value: String!': it is package-private in 'p.Helper'."]
+    );
+}
+
 /// The CIRCULAR direction (slice 2, Kotlin-first): Java extends a Kotlin class, Kotlin calls the
 /// Java class. Pipeline: signature stubs from the Java source (`krusty::jvm::java_stub`, no
 /// javac) → krusty compiles Kotlin against the stub dir → real javac compiles the Java against

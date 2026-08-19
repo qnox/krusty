@@ -1028,6 +1028,7 @@ mod tests {
     impl SemanticPlatform for ExistingLibrary {
         fn static_field(
             &self,
+            _context: crate::libraries::AccessContext,
             internal: &str,
             name: &str,
         ) -> Option<crate::libraries::StaticFieldRef> {
@@ -1044,10 +1045,18 @@ mod tests {
 
         fn static_field_name(
             &self,
+            _context: crate::libraries::AccessContext,
             internal: crate::types::TypeName,
             name: &str,
         ) -> Option<crate::libraries::StaticFieldRef> {
-            self.static_field(&internal.render(), name)
+            self.static_field(
+                crate::libraries::AccessContext {
+                    package: crate::types::type_name(""),
+                    file: 0,
+                },
+                &internal.render(),
+                name,
+            )
         }
     }
 
@@ -2241,12 +2250,26 @@ mod tests {
         assert!(analysis
             .symbols
             .libraries
-            .static_field("fixture/CollisionEnum", "ANY")
+            .static_field(
+                crate::libraries::AccessContext {
+                    package: crate::types::type_name(""),
+                    file: 0,
+                },
+                "fixture/CollisionEnum",
+                "ANY",
+            )
             .is_none());
         assert!(analysis
             .symbols
             .libraries
-            .static_field_name(collision, "ANY")
+            .static_field_name(
+                crate::libraries::AccessContext {
+                    package: crate::types::type_name(""),
+                    file: 0,
+                },
+                collision,
+                "ANY",
+            )
             .is_none());
     }
 

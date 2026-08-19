@@ -500,11 +500,21 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     }
 
     /// A runtime-valued public static field on `internal` or its supertypes.
-    fn static_field(&self, _internal: &str, _name: &str) -> Option<StaticFieldRef> {
+    fn static_field(
+        &self,
+        _context: AccessContext,
+        _internal: &str,
+        _name: &str,
+    ) -> Option<StaticFieldRef> {
         None
     }
 
-    fn static_field_name(&self, _internal: TypeName, _name: &str) -> Option<StaticFieldRef> {
+    fn static_field_name(
+        &self,
+        _context: AccessContext,
+        _internal: TypeName,
+        _name: &str,
+    ) -> Option<StaticFieldRef> {
         None
     }
 
@@ -512,7 +522,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// platform holds it in a field on whichever package artifact owns the declaration — so it cannot be
     /// answered by the property namespace, which models properties by their accessors. Resolution of a
     /// bare imported name needs the OWNER, which only the platform knows.
-    fn top_level_static_field(&self, _package: TypeName, _name: &str) -> Option<StaticFieldRef> {
+    fn top_level_static_field(
+        &self,
+        _context: AccessContext,
+        _package: TypeName,
+        _name: &str,
+    ) -> Option<StaticFieldRef> {
         None
     }
 
@@ -661,6 +676,63 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     fn iterable_element_type_name(&self, _internal: TypeName) -> Option<Ty> {
         None
     }
+
+    /// Platform-specific access diagnostic for a member the core checker has already resolved.
+    /// The core supplies the resolved `owner`, member `name`, and core `visibility` (already filtered
+    /// through the platform-independent rules). If the platform has an additional restriction
+    /// (e.g. JVM package-private), return the user-facing diagnostic; otherwise return `None`.
+    fn member_access_diagnostic(
+        &self,
+        _context: AccessContext,
+        _receiver: Ty,
+        _name: &str,
+        _owner: TypeName,
+        _visibility: Visibility,
+        _is_field: bool,
+    ) -> Option<String> {
+        None
+    }
+
+    /// Platform-specific diagnostic for an unresolved member reference. If the platform knows of an
+    /// inaccessible member that matches the reference, return the diagnostic to emit instead of the
+    /// generic "unresolved reference"; otherwise return `None`.
+    fn unresolved_member_diagnostic(
+        &self,
+        _context: AccessContext,
+        _receiver: Ty,
+        _name: &str,
+    ) -> Option<String> {
+        None
+    }
+
+    /// Effective visibility for a field considered as a Kotlin property in the current access
+    /// context. The core resolver found a field named `name` on `owner` with the given declared
+    /// core `visibility`. Return `Some(vis)` to override the effective visibility, or `None` to
+    /// apply the core visibility rules. This lets platforms enforce target-specific field access
+    /// without adding target visibilities to the shared model.
+    fn field_visible_as_property(
+        &self,
+        _context: AccessContext,
+        _owner: TypeName,
+        _name: &str,
+        _visibility: Visibility,
+    ) -> Option<Visibility> {
+        None
+    }
+
+    /// Whether a callable is visible from the current access context. The default accepts every
+    /// candidate; platforms use this to hide target-specific inaccessible members (e.g. JVM
+    /// package-private methods) before overload selection runs.
+    fn callable_visible_in_context(
+        &self,
+        _context: AccessContext,
+        _owner: TypeName,
+        _name: &str,
+        _descriptor: &str,
+        _visibility: Visibility,
+    ) -> bool {
+        true
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -676,6 +748,15 @@ pub struct MappedInterfaceMember {
 pub struct SemanticSupertype {
     pub name: TypeName,
     pub type_parameters: usize,
+}
+
+/// Access context for platform-specific member visibility checks. The core checker/resolver passes
+/// the current source site; platform implementations apply their own target-specific rules without
+/// leaking them into the shared [`Visibility`] model.
+#[derive(Clone, Copy, Debug)]
+pub struct AccessContext {
+    pub package: TypeName,
+    pub file: u32,
 }
 
 impl LibraryMember {

@@ -4131,16 +4131,35 @@ impl<'a> SymbolResolver<'a> {
         } else {
             Callables::default()
         };
+        let context = self.access_context();
         let mut functions = members
             .functions()
             .iter()
             .filter(|function| function.kind == FnKind::Member)
+            .filter(|function| {
+                self.lib.callable_visible_in_context(
+                    context,
+                    function.callable.owner,
+                    &function.callable.name,
+                    &function.callable.descriptor,
+                    function.visibility,
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
         let mut properties = members
             .properties()
             .iter()
             .filter(|property| property.kind == PropKind::Member)
+            .filter(|property| {
+                self.lib.callable_visible_in_context(
+                    context,
+                    property.owner,
+                    &property.getter.name,
+                    &property.getter.descriptor,
+                    property.visibility,
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
         if self.fn_scope.is_some() {
@@ -4582,10 +4601,20 @@ impl<'a> SymbolResolver<'a> {
 
     pub fn static_field(
         &self,
+        context: crate::libraries::AccessContext,
         internal: TypeName,
         name: &str,
     ) -> Option<crate::libraries::StaticFieldRef> {
-        self.lib.static_field_name(internal, name)
+        self.lib.static_field_name(context, internal, name)
+    }
+
+    fn access_context(&self) -> crate::libraries::AccessContext {
+        crate::libraries::AccessContext {
+            package: self
+                .access_package
+                .unwrap_or_else(|| crate::types::type_name("")),
+            file: self.access_file.unwrap_or(0),
+        }
     }
 
     /// The declared type of the member property `name` on `recv` — the property itself, with no accessor
@@ -4615,6 +4644,7 @@ impl<'a> SymbolResolver<'a> {
             let Some(shape) = self.src.classifier(internal) else {
                 continue;
             };
+            let context = self.access_context();
             let local_property = declared_callables(&self.src, &shape, current, name)
                 .into_parts()
                 .1
@@ -4622,61 +4652,79 @@ impl<'a> SymbolResolver<'a> {
                 .into_iter()
                 .filter(|property| property.kind == PropKind::Member && property.receiver_rank == 0)
                 .min_by_key(|property| property.receiver_rank);
-            if let Some(mut property) = local_property {
-                crate::trace_compiler!(
-                    "resolve",
-                    "member property candidate receiver={current:?} owner={} name={name} classifier_formals={:?} declared={:?}",
+            let property_visible = local_property.as_ref().is_some_and(|property| {
+                self.lib.callable_visible_in_context(
+                    context,
                     property.owner,
-                    shape.type_params,
-                    property.ty,
-                );
-                // `declared_callables` has already applied `current` to this declaration. Applying
-                // the classifier bindings again is not idempotent: after `Content<T>.value` becomes
-                // a caller-owned type parameter, a second substitution sees that scoped parameter
-                // as unbound and erases it to `Any`.
-                let declared_ty = property.ty;
-                let ty = nearer
-                    .iter()
-                    .find_map(|(shape, applied)| {
-                        declared_callables(
-                            &self.src,
-                            shape.as_ref(),
-                            *applied,
-                            &property.getter.name,
-                        )
-                        .into_parts()
-                        .0
-                        .overloads
-                        .into_iter()
-                        .find(|function| function.semantic_params().is_empty())
-                        .map(|function| function.callable.ret)
-                    })
-                    .unwrap_or(declared_ty);
-                property.ty = ty;
-                property.getter.ret = ty;
-                crate::trace_compiler!(
-                    "resolve",
-                    "member property selected receiver={current:?} owner={} name={name} ty={ty:?} visibility={:?}",
-                    property.owner,
+                    &property.getter.name,
+                    &property.getter.descriptor,
                     property.visibility,
-                );
-                let interface = self
-                    .src
-                    .classifier(property.owner)
-                    .is_some_and(|owner| owner.is_interface());
-                return Some(SelectedMemberProperty {
-                    owner: property.owner,
-                    ty,
-                    interface,
-                    field: None,
-                    setter: property.setter.clone(),
-                    setter_visibility: property.setter_visibility,
-                    visibility: property.visibility,
-                    property: Some(property),
-                });
+                )
+            });
+            if property_visible {
+                if let Some(mut property) = local_property {
+                    crate::trace_compiler!(
+                        "resolve",
+                        "member property candidate receiver={current:?} owner={} name={name} classifier_formals={:?} declared={:?}",
+                        property.owner,
+                        shape.type_params,
+                        property.ty,
+                    );
+                    // `declared_callables` has already applied `current` to this declaration. Applying
+                    // the classifier bindings again is not idempotent: after `Content<T>.value` becomes
+                    // a caller-owned type parameter, a second substitution sees that scoped parameter
+                    // as unbound and erases it to `Any`.
+                    let declared_ty = property.ty;
+                    let ty = nearer
+                        .iter()
+                        .find_map(|(shape, applied)| {
+                            declared_callables(
+                                &self.src,
+                                shape.as_ref(),
+                                *applied,
+                                &property.getter.name,
+                            )
+                            .into_parts()
+                            .0
+                            .overloads
+                            .into_iter()
+                            .find(|function| function.semantic_params().is_empty())
+                            .map(|function| function.callable.ret)
+                        })
+                        .unwrap_or(declared_ty);
+                    property.ty = ty;
+                    property.getter.ret = ty;
+                    crate::trace_compiler!(
+                        "resolve",
+                        "member property selected receiver={current:?} owner={} name={name} ty={ty:?} visibility={:?}",
+                        property.owner,
+                        property.visibility,
+                    );
+                    let interface = self
+                        .src
+                        .classifier(property.owner)
+                        .is_some_and(|owner| owner.is_interface());
+                    return Some(SelectedMemberProperty {
+                        owner: property.owner,
+                        ty,
+                        interface,
+                        field: None,
+                        setter: property.setter.clone(),
+                        setter_visibility: property.setter_visibility,
+                        visibility: property.visibility,
+                        property: Some(property),
+                    });
+                }
             }
             if let Some(field) = shape.fields.iter().find(|field| field.name == name) {
-                if field.is_static || field.visibility != crate::types::Visibility::Public {
+                if field.is_static {
+                    return None;
+                }
+                let effective_visibility = self
+                    .lib
+                    .field_visible_as_property(context, internal, &field.name, field.visibility)
+                    .unwrap_or(field.visibility);
+                if effective_visibility == crate::types::Visibility::Private {
                     return None;
                 }
                 let arguments = current.type_args();
@@ -4704,8 +4752,8 @@ impl<'a> SymbolResolver<'a> {
                     interface: shape.is_interface(),
                     field: Some(target),
                     setter: None,
-                    setter_visibility: crate::types::Visibility::Public,
-                    visibility: crate::types::Visibility::Public,
+                    setter_visibility: effective_visibility,
+                    visibility: effective_visibility,
                     property: None,
                 });
             }
@@ -4753,10 +4801,20 @@ impl<'a> SymbolResolver<'a> {
         }
 
         let classifier = self.src.classifier(internal)?;
+        let context = self.access_context();
         let mut candidates = classifier
             .classifier_callables(internal)
             .into_iter()
-            .filter(|member| member.name == name);
+            .filter(|member| member.name == name)
+            .filter(|candidate| {
+                self.lib.callable_visible_in_context(
+                    context,
+                    candidate.owner.unwrap_or(internal),
+                    &candidate.name,
+                    &candidate.descriptor,
+                    candidate.visibility,
+                )
+            });
         let selected = candidates.next()?;
         candidates.next().is_none().then_some(selected)
     }
@@ -4808,14 +4866,25 @@ impl<'a> SymbolResolver<'a> {
                 candidates.extend(self.implicit_classifier_callable_candidates(internal, name));
                 candidates
             }
-            None => self
-                .src
-                .classifier(internal)?
-                .classifier_callables(internal)
-                .into_iter()
-                .filter(|member| member.name == name)
-                .map(|member| FunctionInfo::classifier_member(FnKind::Member, internal, member))
-                .collect(),
+            None => {
+                let context = self.access_context();
+                self.src
+                    .classifier(internal)?
+                    .classifier_callables(internal)
+                    .into_iter()
+                    .filter(|member| member.name == name)
+                    .filter(|candidate| {
+                        self.lib.callable_visible_in_context(
+                            context,
+                            candidate.owner.unwrap_or(internal),
+                            &candidate.name,
+                            &candidate.descriptor,
+                            candidate.visibility,
+                        )
+                    })
+                    .map(|member| FunctionInfo::classifier_member(FnKind::Member, internal, member))
+                    .collect()
+            }
         };
         Some((
             receiver.unwrap_or_else(|| Ty::obj_name(internal)),

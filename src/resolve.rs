@@ -28910,6 +28910,13 @@ impl<'a> Checker<'a> {
         )
     }
 
+    fn access_context(&self) -> crate::libraries::AccessContext {
+        crate::libraries::AccessContext {
+            package: self.source_package_name(),
+            file: self.file_index,
+        }
+    }
+
     /// If a bare type name `n` denotes a reference type usable as an unbound class literal `n::class`,
     /// its `Ty`. Checks built-ins, user classes, enclosing nested types, and imports, but not the global
     /// simple-name index because it collides with built-in names. Primitive or unknown names return `None`.
@@ -38238,9 +38245,11 @@ impl<'a> Checker<'a> {
                     Ty::Error
                 } else if let Some(field) = self.imports.get(&n).and_then(|full| {
                     let (package, member) = full.rsplit_once('/')?;
-                    self.syms
-                        .libraries
-                        .top_level_static_field(type_name(package), member)
+                    self.syms.libraries.top_level_static_field(
+                        self.access_context(),
+                        type_name(package),
+                        member,
+                    )
                 }) {
                     // A CLASSPATH top-level `const val` reached by name (`import kotlin.math.PI`). A
                     // `const` has no accessor, so it is absent from the property namespace that models
@@ -38636,12 +38645,23 @@ impl<'a> Checker<'a> {
                     );
                     return self.set(e, ty);
                 }
-                if let Some(field) = self.resolver().static_field(owner, &name) {
+                if let Some(field) =
+                    self.resolver()
+                        .static_field(self.access_context(), owner, &name)
+                {
                     if self.reject_inaccessible_classifier_expression(receiver, owner) {
                         return self.set(e, Ty::Error);
                     }
                     let ty = self.record_external_static_field(Some(e), field);
                     return self.set(e, ty);
+                }
+                if let Some(diagnostic) = self.syms.libraries.unresolved_member_diagnostic(
+                    self.access_context(),
+                    Ty::obj_name(owner),
+                    &name,
+                ) {
+                    self.diags.error(self.span(e), diagnostic);
+                    return self.set(e, Ty::Error);
                 }
             }
             // Resolve the next segment against the already-bound prefix before asking whether the
@@ -45036,7 +45056,10 @@ impl<'a> Checker<'a> {
             }
         }
         if let Some(internal) = rt.non_null().obj_internal() {
-            if let Some(sf) = self.resolver().static_field(internal, name) {
+            if let Some(sf) = self
+                .resolver()
+                .static_field(self.access_context(), internal, name)
+            {
                 return self.record_external_static_field(mexpr, sf);
             }
         }
@@ -45095,6 +45118,16 @@ impl<'a> Checker<'a> {
             "unresolved_member",
             "name={name} receiver={rt:?} expression={mexpr:?} span={diagnostic_span:?}",
         );
+        if !rt.is_nullable() {
+            if let Some(diagnostic) = self.syms.libraries.unresolved_member_diagnostic(
+                self.access_context(),
+                rt.non_null(),
+                name,
+            ) {
+                self.diags.error(diagnostic_span, diagnostic);
+                return Ty::Error;
+            }
+        }
         self.diags
             .error(diagnostic_span, format!("unresolved reference '{name}'."));
         Ty::Error
@@ -45965,7 +45998,9 @@ impl<'a> Checker<'a> {
                 return Some(Ty::obj_name(companion));
             }
         }
-        let field = self.resolver().static_field(owner, name)?;
+        let field = self
+            .resolver()
+            .static_field(self.access_context(), owner, name)?;
         Some(self.record_external_static_field(Some(expression), field))
     }
 
@@ -45980,7 +46015,11 @@ impl<'a> Checker<'a> {
         package: TypeName,
         name: &str,
     ) -> Option<Ty> {
-        if let Some(field) = self.syms.libraries.top_level_static_field(package, name) {
+        if let Some(field) =
+            self.syms
+                .libraries
+                .top_level_static_field(self.access_context(), package, name)
+        {
             return Some(self.record_external_static_field(Some(expression), field));
         }
         let property = self
@@ -48312,6 +48351,21 @@ impl<'a> Checker<'a> {
                 // otherwise a resolved classifier supplies both its value facet (object/companion)
                 // and its classifier callables. Do not reconstruct or re-resolve the dotted spelling.
                 if let Ok(ResolvedQualifier::Classifier(classifier)) = receiver_qualifier {
+                    if let Some(access) = self.resolver().inaccessible_classifier_access(classifier)
+                    {
+                        let simple = classifier.segment();
+                        let message = if access
+                            == crate::symbol_source::ClassifierAccess::PackagePrivate
+                        {
+                            format!(
+                                "cannot access 'class {simple} : Any': it is package-private in file."
+                            )
+                        } else {
+                            inaccessible_classifier_message(&simple, access)
+                        };
+                        self.diags.error(self.span(receiver), message);
+                    }
+
                     // A classifier that denotes an object or companion is a VALUE receiver. Commit
                     // that identity and use the ordinary member/extension tower; a failed member is
                     // final and cannot reinterpret the same classifier as a static namespace.
@@ -48361,6 +48415,15 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                     if self.resolved_type_name(classifier).is_some() {
+                        let receiver_ty = Ty::obj_name(classifier);
+                        if let Some(diagnostic) = self.syms.libraries.unresolved_member_diagnostic(
+                            self.access_context(),
+                            receiver_ty,
+                            &name,
+                        ) {
+                            self.diags.error(span, diagnostic);
+                            return Ty::Error;
+                        }
                         let owner = match self.file.expr(receiver) {
                             Expr::Name(source_name) => source_name.as_str().into(),
                             _ => classifier.to_string(),
@@ -49061,6 +49124,17 @@ impl<'a> Checker<'a> {
                     &inapplicable_candidates,
                 ) {
                     return Ty::Error;
+                }
+                if inapplicable_candidates.is_empty() && rt != Ty::Error && !rt.is_nullable() {
+                    if let Some(diagnostic) = self.syms.libraries.unresolved_member_diagnostic(
+                        self.access_context(),
+                        rt.non_null(),
+                        &name,
+                    ) {
+                        self.diags
+                            .error(self.call_callee_name_span(call), diagnostic);
+                        return Ty::Error;
+                    }
                 }
                 self.diags.error(
                     self.call_callee_name_span(call),

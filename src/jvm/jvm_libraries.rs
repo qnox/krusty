@@ -1768,13 +1768,11 @@ impl JvmLibraries {
                 }
                 // Public members are callable from anywhere; a `protected` member is surfaced too so a
                 // subclass can reach it through the supertype walk (a compiling program only reaches it
-                // from a legal subclass, which kotlinc already checked). Private/package members stay
-                // dropped: no legal call site.
-                if declaration.is_none()
-                    && constructor_declaration.is_none()
-                    && !m.is_public()
-                    && !m.is_protected()
-                {
+                // from a legal subclass, which kotlinc already checked). A package-private member is
+                // surfaced as a public candidate so the resolver can admit a same-package call site and
+                // diagnose a cross-package one. Only `private` members stay dropped: no legal Kotlin
+                // call site.
+                if declaration.is_none() && constructor_declaration.is_none() && m.is_private() {
                     continue;
                 }
                 let Some((mut params, mut ret)) = parse_method_desc(&m.descriptor) else {
@@ -1999,8 +1997,13 @@ impl JvmLibraries {
                 if declaration.is_none() && constructor_declaration.is_none() {
                     member.visibility = if m.is_public() {
                         Visibility::Public
-                    } else {
+                    } else if m.is_protected() {
                         Visibility::Protected
+                    } else {
+                        // `private` is dropped above; what remains is JVM package-private.
+                        // Surface it as a public candidate and let the platform hook enforce
+                        // same-package access.
+                        Visibility::Public
                     };
                     member.generic_sig = m
                         .signature
@@ -3907,10 +3910,9 @@ impl JvmLibraries {
                 });
             }
         }
-        if overloads.is_empty()
-            && (self.cp.builtin_member_is_property_name(cn, name)
-                || mapped_builtin_property(cn, name))
-        {
+        let is_builtin_prop = self.cp.builtin_member_is_property_name(cn, name);
+        let is_mapped_prop = mapped_builtin_property(cn, name);
+        if overloads.is_empty() && (is_builtin_prop || is_mapped_prop) {
             if let Some(function) = functions
                 .overloads
                 .iter()
@@ -4693,6 +4695,50 @@ impl SymbolSource for JvmLibraries {
 }
 
 impl JvmLibraries {
+    /// Package-private JVM members are surfaced as `Visibility::Public` candidates in the common model.
+    /// These helpers check the raw classfile access flags and compare the owner's package with the call
+    /// site's package so the platform hook can hide cross-package package-private members.
+    fn package_private_accessible(
+        &self,
+        context: crate::libraries::AccessContext,
+        owner: TypeName,
+    ) -> bool {
+        owner
+            .parent()
+            .is_none_or(|package| package == context.package)
+    }
+
+    fn is_package_private_field(&self, owner: TypeName, name: &str) -> bool {
+        self.cp.find_name(owner).is_some_and(|class| {
+            class.fields.iter().any(|field| {
+                field.name == name
+                    && field.access & 0x0001 == 0
+                    && field.access & 0x0004 == 0
+                    && field.access & 0x0002 == 0
+            })
+        })
+    }
+
+    fn is_package_private_method_desc(
+        &self,
+        owner: TypeName,
+        name: &str,
+        descriptor: &str,
+    ) -> bool {
+        if descriptor.is_empty() {
+            return false;
+        }
+        self.cp.find_name(owner).is_some_and(|class| {
+            class.methods.iter().any(|method| {
+                method.name == name
+                    && method.descriptor == descriptor
+                    && method.access & 0x0001 == 0
+                    && method.access & 0x0004 == 0
+                    && method.access & 0x0002 == 0
+            })
+        })
+    }
+
     fn inline_body_plan(&self, callable: &LibraryCallable) -> Option<InlineBodyPlan> {
         if !callable.inline.can_inline() {
             return None;
@@ -5336,13 +5382,19 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         }
     }
 
-    fn static_field(&self, internal: &str, name: &str) -> Option<crate::libraries::StaticFieldRef> {
+    fn static_field(
+        &self,
+        _context: crate::libraries::AccessContext,
+        internal: &str,
+        name: &str,
+    ) -> Option<crate::libraries::StaticFieldRef> {
         let internal = crate::types::existing_type_name(internal)?;
-        self.static_field_name(internal, name)
+        self.static_field_name(_context, internal, name)
     }
 
     fn top_level_static_field(
         &self,
+        _context: crate::libraries::AccessContext,
         package: TypeName,
         name: &str,
     ) -> Option<crate::libraries::StaticFieldRef> {
@@ -5352,14 +5404,19 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         self.cp
             .package_facades_name(package)
             .into_iter()
-            .find_map(|facade| self.static_field_name(facade, name))
+            .find_map(|facade| self.static_field_name(_context, facade, name))
     }
 
     fn static_field_name(
         &self,
+        context: crate::libraries::AccessContext,
         internal: TypeName,
         name: &str,
     ) -> Option<crate::libraries::StaticFieldRef> {
+        const ACC_PUBLIC: u16 = 0x0001;
+        const ACC_PRIVATE: u16 = 0x0002;
+        const ACC_PROTECTED: u16 = 0x0004;
+        const ACC_STATIC: u16 = 0x0008;
         let mut stack = vec![internal];
         let mut seen = std::collections::HashSet::new();
         while let Some(cur) = stack.pop() {
@@ -5369,11 +5426,19 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             let Some(ci) = self.cp.find_name(cur) else {
                 continue;
             };
-            if let Some(f) = ci
-                .fields
-                .iter()
-                .find(|f| f.name == name && f.access & 0x0008 != 0 && f.access & 0x0001 != 0)
-            {
+            if let Some(f) = ci.fields.iter().find(|f| {
+                if f.name != name || f.access & ACC_STATIC == 0 {
+                    return false;
+                }
+                if f.access & ACC_PUBLIC != 0 {
+                    return true;
+                }
+                if f.access & (ACC_PROTECTED | ACC_PRIVATE) != 0 {
+                    return false;
+                }
+                // Package-private: visible only from the same package as the declaring class.
+                self.package_private_accessible(context, cur)
+            }) {
                 // The Kotlin METADATA is the authority for a declaration's type; the descriptor is
                 // an emit handle. `UInt.Companion.MIN_VALUE` is stored in an `int` field, so reading
                 // the descriptor typed it `Int` — and an inferred `val b = UInt.MIN_VALUE` published
@@ -5410,6 +5475,124 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             stack.extend(ci.interfaces.iter_ids());
         }
         None
+    }
+
+    fn field_visible_as_property(
+        &self,
+        context: crate::libraries::AccessContext,
+        owner: TypeName,
+        name: &str,
+        _visibility: Visibility,
+    ) -> Option<Visibility> {
+        if !self.is_package_private_field(owner, name) {
+            return None;
+        }
+        Some(if self.package_private_accessible(context, owner) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        })
+    }
+
+    fn callable_visible_in_context(
+        &self,
+        context: crate::libraries::AccessContext,
+        owner: TypeName,
+        name: &str,
+        descriptor: &str,
+        _visibility: Visibility,
+    ) -> bool {
+        if descriptor.is_empty() || !self.is_package_private_method_desc(owner, name, descriptor) {
+            return true;
+        }
+        self.package_private_accessible(context, owner)
+    }
+
+    fn unresolved_member_diagnostic(
+        &self,
+        context: crate::libraries::AccessContext,
+        receiver: Ty,
+        name: &str,
+    ) -> Option<String> {
+        let internal = receiver.non_null().kotlin_class_internal()?;
+        const ACC_PUBLIC: u16 = 0x0001;
+        const ACC_PROTECTED: u16 = 0x0004;
+        const ACC_PRIVATE: u16 = 0x0002;
+        const ACC_STATIC: u16 = 0x0008;
+        let owner_string = |owner: TypeName| owner.render().replace('/', ".");
+        let platform_ty_name = |ty: Ty| {
+            if ty == Ty::Unit {
+                ty.source_name()
+            } else {
+                Ty::platform_nullable(ty).source_name()
+            }
+        };
+        let mut stack = vec![internal];
+        let mut seen = std::collections::HashSet::new();
+        let mut inaccessible: Option<String> = None;
+        while let Some(owner) = stack.pop() {
+            if !seen.insert(owner) {
+                continue;
+            }
+            let class = self.cp.find_name(owner)?;
+            for field in &class.fields {
+                if field.name != name {
+                    continue;
+                }
+                if field.access & (ACC_PUBLIC | ACC_PROTECTED) != 0 {
+                    // An accessible (public/protected) member with this name exists; the unresolved
+                    // reference is an ordinary lookup failure, not a package-private visibility issue.
+                    return None;
+                }
+                if field.access & ACC_PRIVATE != 0 {
+                    continue;
+                }
+                if self.package_private_accessible(context, owner) {
+                    return None;
+                }
+                if inaccessible.is_none() {
+                    let ty = platform_ty_name(field_desc_to_ty(&field.descriptor));
+                    inaccessible = Some(format!(
+                        "cannot access 'field {name}: {ty}': it is package-private in '{}'.",
+                        owner_string(owner)
+                    ));
+                }
+            }
+            for method in &class.methods {
+                if method.name != name {
+                    continue;
+                }
+                if method.access & (ACC_PUBLIC | ACC_PROTECTED) != 0 {
+                    return None;
+                }
+                if method.access & ACC_PRIVATE != 0 {
+                    continue;
+                }
+                if self.package_private_accessible(context, owner) {
+                    return None;
+                }
+                if inaccessible.is_none() {
+                    let (params, ret) = parse_method_desc(&method.descriptor)?;
+                    let param_tys: Vec<String> = params.into_iter().map(platform_ty_name).collect();
+                    let ret_ty = platform_ty_name(ret);
+                    let static_prefix = if method.access & ACC_STATIC != 0 {
+                        "static "
+                    } else {
+                        ""
+                    };
+                    inaccessible = Some(format!(
+                        "cannot access '{static_prefix}fun {name}({}): {ret_ty}': it is package-private in '{}'.",
+                        param_tys.join(", "),
+                        owner_string(owner)
+                    ));
+                }
+            }
+            if let Some(s) = class.super_class {
+                stack.push(s);
+            }
+            stack.extend(class.interfaces.iter_ids());
+        }
+        inaccessible
     }
 
     fn extension_receiver_rank(&self, recv: Ty, decl_recv: Ty) -> Option<u32> {

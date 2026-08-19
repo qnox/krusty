@@ -1000,6 +1000,8 @@ mod operator_index_e2e;
 mod overloaded_extension_e2e;
 #[path = "overloaded_inferred_return_e2e.rs"]
 mod overloaded_inferred_return_e2e;
+#[path = "package_private_visibility_e2e.rs"]
+mod package_private_visibility_e2e;
 #[path = "package_qualified_type_no_import_e2e.rs"]
 mod package_qualified_type_no_import_e2e;
 #[path = "pair_triple_e2e.rs"]

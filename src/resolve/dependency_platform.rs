@@ -1,6 +1,7 @@
 use crate::libraries::{
-    Callables, FunctionInfo, FunctionSet, LibraryMember, LibraryType, PropKind, PropertyInfo,
-    PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype, StaticFieldRef,
+    AccessContext, Callables, FunctionInfo, FunctionSet, LibraryMember, LibraryType, PropKind,
+    PropertyInfo, PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype,
+    StaticFieldRef,
 };
 use crate::module_symbols::ModuleSymbols;
 use crate::name_tree::FxHashMap;
@@ -366,16 +367,26 @@ impl SemanticPlatform for DependencyPlatform {
         })
     }
 
-    fn static_field(&self, internal: &str, name: &str) -> Option<StaticFieldRef> {
+    fn static_field(
+        &self,
+        context: AccessContext,
+        internal: &str,
+        name: &str,
+    ) -> Option<StaticFieldRef> {
         let internal_name = crate::types::type_name(internal);
         self.static_field_with_platform(internal_name, name, || {
-            self.platform.static_field(internal, name)
+            self.platform.static_field(context, internal, name)
         })
     }
 
-    fn static_field_name(&self, internal: TypeName, name: &str) -> Option<StaticFieldRef> {
+    fn static_field_name(
+        &self,
+        context: AccessContext,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<StaticFieldRef> {
         self.static_field_with_platform(internal, name, || {
-            self.platform.static_field_name(internal, name)
+            self.platform.static_field_name(context, internal, name)
         })
     }
 
