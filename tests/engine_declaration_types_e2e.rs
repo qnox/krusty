@@ -343,3 +343,24 @@ fn a_provide_delegate_with_an_inferred_return() {
         "engine-provide-delegate-inferred",
     );
 }
+
+/// A member EXTENSION whose receiver is a TYPE PARAMETER, returning an anonymous object.
+///
+/// `check_method` reads `scope.this_ty()` before pushing the extension receiver, to decide which
+/// table the inferred return belongs in. Handed a scope whose `this` was already the extension
+/// receiver, that read a type parameter rather than the declaring class, so the return was recorded
+/// in NEITHER table and the declaration settled to `Unit` — every member reached through it was
+/// then an unresolved reference.
+#[test]
+fn a_generic_member_extension_returning_an_anonymous_object() {
+    common::expect_box_ok_with_stdlib(
+        "class Wrapper {\n\
+         \x20 private fun <T : Any> T.boxed() = object {\n\
+         \x20 \x20 fun unwrap(): T = this@boxed\n\
+         \x20 }\n\
+         \x20 fun run(): Int = 1.boxed().unwrap() + 1\n\
+         }\n\
+         fun box(): String = if (Wrapper().run() == 2) \"OK\" else \"FAIL\"\n",
+        "engine-generic-member-extension-anon",
+    );
+}

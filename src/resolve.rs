@@ -12625,8 +12625,14 @@ fn infer_method_return_ty(
             .this_labels
             .push((method.name.clone(), receiver, false));
     }
+    // The scope `check_method` is handed carries the DISPATCH receiver, not the extension one: it
+    // pushes the extension receiver itself, and it reads `scope.this_ty()` BEFORE doing so to decide
+    // which table the inferred return belongs in. Handing it a scope whose `this` is already the
+    // extension receiver made that read the receiver — a type PARAMETER for
+    // `fun <T : Any> T.self()` — so the return was recorded in neither table and the declaration
+    // settled to `Unit`.
     let method_scope = rung.child(ScopeKind::Function {
-        receiver: extension_receiver,
+        receiver: Some(dispatch),
     });
     let method_scope = &method_scope;
     let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
