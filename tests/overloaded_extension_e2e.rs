@@ -38,6 +38,27 @@ fun box(): String {\n\
 }
 
 #[test]
+fn unresolved_receiver_types_do_not_confuse_erasure_clash_detection() {
+    // Two same-named extensions whose receiver types both fail to resolve: the erasure key must
+    // not collapse both receivers to the same error key — kotlinc reports only the unresolved
+    // references, no "conflicting extension functions" diagnostic.
+    let mut diags = common::front_end_diagnostics_files_with_stdlib(&[
+        "inline fun <T> SpanBuilder.use(operation: (Span) -> T): T = TODO()\n\
+         inline fun <T> Span.use(operation: (Span) -> T): T = TODO()\n",
+    ]);
+    diags.sort();
+    assert_eq!(
+        diags,
+        vec![
+            "unresolved reference 'Span'.".to_string(),
+            "unresolved reference 'Span'.".to_string(),
+            "unresolved reference 'Span'.".to_string(),
+            "unresolved reference 'SpanBuilder'.".to_string(),
+        ],
+    );
+}
+
+#[test]
 fn bounded_receiver_overloads_keep_distinct_erasure() {
     const MEMBER_SRC: &str = "\
 interface Alpha\n\
