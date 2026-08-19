@@ -866,22 +866,6 @@ impl LibraryCallable {
     }
 }
 
-/// A resolved companion-object function on a classpath value class (`Result.success`). The call lowers
-/// to `getstatic <class>.<field>:L<companion>;` (the receiver) then an inline-splice of the companion
-/// INSTANCE method carried by `callable` (its `this` is the loaded singleton).
-#[derive(Clone, Debug)]
-pub struct CompanionFn {
-    /// The value-class declaring the companion (`kotlin/Result`).
-    pub class_internal: TypeName,
-    /// The companion object's internal name (`kotlin/Result$Companion`).
-    pub companion_internal: TypeName,
-    /// The static field on `class_internal` holding the singleton (`Companion`).
-    pub companion_field: String,
-    /// Selected companion method. Its `owner` is `companion_internal`; its name/descriptor are backend
-    /// tokens, and its params/ret are the logical Kotlin call shape.
-    pub callable: LibraryCallable,
-}
-
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
 #[derive(Clone, Debug)]
@@ -2179,10 +2163,6 @@ pub struct LibraryType {
     /// `C` in value position is that companion instance — `getstatic C.field:LcompanionType;`. Lets the
     /// resolver resolve `Json.encodeToString(…)` (an instance method on the companion's type).
     pub companion_object: Option<(String, TypeName)>,
-    /// Public inline companion functions on a classpath value class whose bytecode method is private but
-    /// callable per metadata (`Result.success`). Lowering loads the companion object and splices the
-    /// method body; ordinary companion members stay in `companion`.
-    pub value_companion_fns: Vec<CompanionFn>,
     /// For a classpath `@JvmInline value class`, the erased underlying type it represents on the JVM
     /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
     /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
@@ -2291,7 +2271,6 @@ impl LibraryType {
             sam_eligible: false,
             callable_signature: None,
             companion_object: None,
-            value_companion_fns: Vec::new(),
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,
@@ -2874,7 +2853,6 @@ mod tests {
             sam_eligible: false,
             callable_signature: None,
             companion_object: None,
-            value_companion_fns: vec![],
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,

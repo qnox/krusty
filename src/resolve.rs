@@ -15539,14 +15539,6 @@ impl TypeInfo {
     }
 }
 
-/// Call-site selections whose legal lowering is an inline/custom emit form rather than the normal
-/// function-call path.
-#[derive(Clone, Debug)]
-pub enum InlineCall {
-    /// `Result.success(args)`: load the companion singleton and inline-splice the selected method.
-    ValueCompanion(Box<crate::libraries::CompanionFn>),
-}
-
 enum ExtensionRefSelection {
     None,
     Selected(Box<(crate::libraries::FunctionInfo, Vec<AdaptedRefArgument>)>),
@@ -15790,9 +15782,6 @@ pub enum ExprLowering {
     /// left-to-right capture order. Qualifier-only candidates (`super`, packages, classifiers) are
     /// excluded by resolution; lowering spills exactly this list and performs no qualifier guessing.
     IncDecAccessOperands(Vec<ExprId>),
-    /// A call whose selected lowering is an inline/custom emit form rather than the normal function-call
-    /// path: value-class companion calls (`Result.success`) or receiver-lambda scope calls.
-    InlineCall(InlineCall),
     /// A compiler-provided declaration with an IR body rather than an ordinary callable body. The
     /// frontend records the selected declaration identity; lowering never looks it up by source name.
     CompilerSynthetic(crate::synthetics::SyntheticKind),
@@ -17258,6 +17247,7 @@ fn make_checker<'a>(
         resolved_call_type_args: HashMap::new(),
         narrowed_this_member: HashMap::new(),
         resolved_calls: HashMap::new(),
+        unbound_classifier_value_calls: std::collections::HashSet::new(),
         implicit_receiver_selections: HashMap::new(),
         source_contracts: HashMap::new(),
         resolved_source_calls: HashMap::new(),
@@ -19264,6 +19254,8 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Classifier-value calls whose generic result remains provisional until its consumer is known.
+    unbound_classifier_value_calls: std::collections::HashSet<ExprId>,
     /// Checker-selected receiver for a bare call or property read. The receiver stack is semantic scope
     /// state, so this decision must cross the frontend/backend boundary rather than being guessed from
     /// JVM slot names.
@@ -20984,6 +20976,101 @@ impl<'a> Checker<'a> {
             "{suspend}fun {receiver}{name}({parameters}): {}",
             function.callable.ret.source_name()
         )
+    }
+
+    fn generic_callable_display(name: &str, function: &crate::libraries::FunctionInfo) -> String {
+        let signature = function.semantic_signature();
+        let type_parameters = signature
+            .formals
+            .iter()
+            .map(|formal| crate::types::type_parameter_source_name(formal))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let type_parameters = if type_parameters.is_empty() {
+            String::new()
+        } else {
+            format!("<{type_parameters}> ")
+        };
+        let parameters = signature
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                let parameter_name = function
+                    .call_sig
+                    .param_names
+                    .get(index)
+                    .map(String::as_str)
+                    .unwrap_or("_");
+                format!("{parameter_name}: {}", parameter.source_name())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "fun {type_parameters}{name}({parameters}): {}",
+            signature.ret.source_name()
+        )
+    }
+
+    fn report_callable_type_argument_arity(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        supplied: usize,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> bool {
+        if supplied == 0 {
+            return false;
+        }
+        let visible = candidates
+            .iter()
+            .filter(|candidate| self.source_callable_visible(candidate))
+            .collect::<Vec<_>>();
+        let [candidate] = visible.as_slice() else {
+            return false;
+        };
+        let expected = candidate.semantic_signature().formals.len();
+        if supplied == expected {
+            return false;
+        }
+        let wording = match expected {
+            0 => "no type arguments expected".to_string(),
+            1 => "one type argument expected".to_string(),
+            count => format!("{count} type arguments expected"),
+        };
+        let callee = self.call_callee_name_span(call);
+        self.diags.error(
+            Span::new(callee.hi, callee.hi.saturating_add(1)),
+            format!(
+                "{wording} for '{}'.",
+                Self::generic_callable_display(name, candidate)
+            ),
+        );
+        true
+    }
+
+    fn report_unbound_call_result_type_parameter(&mut self, call: ExprId) -> bool {
+        if !self.unbound_classifier_value_calls.remove(&call) {
+            return false;
+        }
+        let Some(signature) = self.unbound_call_result_signature(call).cloned() else {
+            return false;
+        };
+        let actual = self.expr_types[call.0 as usize];
+        let Some(formal) = signature.formals.iter().find(|formal| {
+            ty_mentions_param(actual, std::slice::from_ref(*formal))
+                || ty_mentions_param(signature.ret, std::slice::from_ref(*formal))
+        }) else {
+            return false;
+        };
+        self.diags.error(
+            self.call_callee_name_span(call),
+            format!(
+                "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                crate::types::type_parameter_source_name(formal)
+            ),
+        );
+        true
     }
 
     fn report_callable_ambiguity(
@@ -31810,6 +31897,9 @@ impl<'a> Checker<'a> {
                 Some(expected) => self.expr_expected(scope, init, expected),
                 None => self.expr(scope, init),
             };
+            if p.declared_ty().is_none() {
+                self.report_unbound_call_result_type_parameter(init);
+            }
             if let Some(declared) = declared {
                 if p.declared_ty().is_some() {
                     let actual = self.expression_type_for_expected(scope, init, it, declared);
@@ -33161,6 +33251,9 @@ impl<'a> Checker<'a> {
                             Some(expected) => self.expr_expected(scope, init, expected),
                             None => self.expr(scope, init),
                         };
+                        if bp.declared_ty().is_none() {
+                            self.report_unbound_call_result_type_parameter(init);
+                        }
                         if let Some(declared) = declared {
                             self.narrow_platform_value(
                                 declared,
@@ -35190,7 +35283,12 @@ impl<'a> Checker<'a> {
 
     fn expr_statement(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> Ty {
         self.discarded_exprs.insert(e);
-        self.expr_with_context(scope, e, false)
+        let ty = self.expr_with_context(scope, e, false);
+        if self.report_unbound_call_result_type_parameter(e) {
+            Ty::Error
+        } else {
+            ty
+        }
     }
 
     fn expr_with_context(
@@ -46512,21 +46610,27 @@ impl<'a> Checker<'a> {
                 ))
                 .collect::<Vec<_>>(),
         );
-        if let Some(selected) = self
-            .select_callable_candidate(
-                scope,
-                CallArgs {
-                    call,
-                    args,
-                    arg_tys: &argument_types,
-                },
-                &type_args,
-                None,
-                expected,
-                candidates,
-            )
-            .and_then(CallableCandidateSelection::available)
-        {
+        let selection = self.select_callable_candidate(
+            scope,
+            CallArgs {
+                call,
+                args,
+                arg_tys: &argument_types,
+            },
+            &type_args,
+            None,
+            expected,
+            candidates.clone(),
+        );
+        if let Some(selected) = selection.and_then(CallableCandidateSelection::available) {
+            let signature = selected.semantic_signature();
+            if signature
+                .formals
+                .iter()
+                .any(|formal| !selected.bindings.contains_key(formal))
+            {
+                self.unbound_classifier_value_calls.insert(call);
+            }
             let selected_owner = selected.callable.owner_type();
             if !self.member_accessible(selected.visibility, selected_owner) {
                 self.reject_if_inaccessible(
@@ -46628,6 +46732,10 @@ impl<'a> Checker<'a> {
             expected,
         ) {
             return ClassifierValueCall::Checked(ret);
+        }
+
+        if self.report_callable_type_argument_arity(call, name, type_args.len(), &candidates) {
+            return ClassifierValueCall::Checked(Ty::Error);
         }
 
         let has_candidates = self
@@ -48399,6 +48507,7 @@ impl<'a> Checker<'a> {
         // check is a discarded probe, not a second overload result; rebuild the call's exclusive
         // semantic handoff from this check.
         self.resolved_calls.remove(&call);
+        self.unbound_classifier_value_calls.remove(&call);
         self.resolved_constructors.remove(&call);
         if let Some(declaration) = self.file.anonymous_object_classes.get(&call).copied() {
             if self.discover_anonymous_captures {
@@ -48905,55 +49014,6 @@ impl<'a> Checker<'a> {
                                 return Ty::Error;
                             }
                         }
-                    }
-                }
-                // Classpath value-class COMPANION call `Result.success(args)`: `Result` is a classpath
-                // value class whose companion declares `success` (an `inline` fn — private in bytecode,
-                // public per `@Metadata`). Resolve metadata-first; lowering emits the companion `getstatic`
-                // receiver + an inline-splice of the companion method.
-                if let Some(internal) = receiver_qualifier
-                    .as_ref()
-                    .ok()
-                    .copied()
-                    .and_then(ResolvedQualifier::classifier)
-                {
-                    if let Some(mut cf) = self.resolved_type_name(internal).and_then(|t| {
-                        t.value_companion_fns
-                            .iter()
-                            .find(|cf| {
-                                cf.callable.name == name && cf.callable.params.len() == args.len()
-                            })
-                            .cloned()
-                    }) {
-                        let arg_tys = args
-                            .iter()
-                            .map(|&argument| self.expr(scope, argument))
-                            .collect::<Vec<_>>();
-                        if let Some(signature) = cf.callable.generic_sig.as_deref() {
-                            let bindings = crate::symbol_resolver::infer_generic_bindings(
-                                signature,
-                                arg_tys.iter().copied().enumerate(),
-                            );
-                            cf.callable.params = signature
-                                .params
-                                .iter()
-                                .map(|parameter| {
-                                    crate::symbol_resolver::ty_subst_keep_unbound(
-                                        *parameter, &bindings,
-                                    )
-                                })
-                                .collect();
-                            cf.callable.ret = crate::symbol_resolver::ty_subst_keep_unbound(
-                                signature.ret,
-                                &bindings,
-                            );
-                        }
-                        let ret = cf.callable.ret;
-                        self.expr_lowers.insert(
-                            call,
-                            ExprLowering::InlineCall(InlineCall::ValueCompanion(Box::new(cf))),
-                        );
-                        return ret;
                     }
                 }
                 // `super.method(args)` / `super<T>.method(args)` — dispatch to a supertype's method
@@ -53102,6 +53162,8 @@ impl<'a> Checker<'a> {
             Some(d) => self.expr_expected(scope, init, d),
             _ => self.expr(scope, init),
         };
+        let unbound_initializer =
+            declared.is_none() && self.report_unbound_call_result_type_parameter(init);
         let bind = match declared {
             Some(d) => {
                 if !deferred {
@@ -53116,6 +53178,7 @@ impl<'a> Checker<'a> {
                 }
                 d
             }
+            None if unbound_initializer => Ty::Error,
             None => it,
         };
         crate::trace_compiler!(
@@ -55022,7 +55085,6 @@ val result = object { fun value(): String = captured }
             sam_eligible: false,
             callable_signature: None,
             companion_object: None,
-            value_companion_fns: Vec::new(),
             value_underlying: None,
             value_underlying_property: None,
             alias_target,
@@ -57702,7 +57764,6 @@ fun box(): String {
                     sam_eligible: false,
                     callable_signature: None,
                     companion_object: None,
-                    value_companion_fns: vec![],
                     value_underlying: None,
                     value_underlying_property: None,
                     alias_target: None,

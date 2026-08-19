@@ -18,12 +18,12 @@ use crate::frontend::{
     AnonymousObjectCaptureSource, CallableReferenceBinding, CallableReferenceTarget,
     CompoundAssignmentTarget, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget,
     ExprLowering, FrontendClassModel, FrontendSymbols, FrontendTypeInfo, FunctionImportScope,
-    ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InlineCall, InvokeKind,
-    LambdaCapture, LambdaInfo, PlatformNarrowing, ReceiverFnValueOrigin, ResolvedCall,
-    ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
-    ResolvedExtensionCall, ResolvedIncDec, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedPropertyAccess, ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef,
-    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
+    ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InvokeKind, LambdaCapture,
+    LambdaInfo, PlatformNarrowing, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
+    ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
+    ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
+    ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
+    SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrAnnotationConstruction, IrBinOp, IrCatch, IrClass,
@@ -6273,6 +6273,17 @@ impl<'a> Lower<'a> {
                         descriptor: String::new(),
                         params: Some((member.params, logical_ret)),
                         interface,
+                    },
+                    Some(recv),
+                    args,
+                ),
+            crate::libraries::MemberRealization::Dispatch if member.inline.must_inline() => self
+                .emit_call(
+                    Callee::Static {
+                        owner,
+                        name: member.name,
+                        descriptor: member.descriptor,
+                        inline: member.inline,
                     },
                     Some(recv),
                     args,
@@ -23176,47 +23187,6 @@ impl<'a> Lower<'a> {
                 let extension = self.expr(callee)?;
                 self.lower_member_extension_call(extension, &target, &args, e)?
             }
-            Expr::Call { .. }
-                if matches!(
-                    self.info.expr_lowers.get(&e),
-                    Some(ExprLowering::InlineCall(_))
-                ) =>
-            {
-                match self.info.expr_lowers.get(&e).cloned()? {
-                    ExprLowering::InlineCall(InlineCall::ValueCompanion(cf)) => {
-                        let args = match self.afile.expr(e).clone() {
-                            Expr::Call { args, .. } => args,
-                            _ => return None,
-                        };
-                        let recv_field = self.runtime.companion_instance_field(
-                            &cf.class_internal.render(),
-                            &cf.companion_internal.render(),
-                            &cf.companion_field,
-                        )?;
-                        let recv = self.platform_static_field(recv_field);
-                        // A value-class companion fn's params are erased reference types
-                        // (`success(Object)`, `failure(Throwable)`) — target `Object` so a primitive
-                        // argument is boxed (`Integer.valueOf`), matching kotlinc; a reference argument
-                        // passes through unchanged.
-                        let obj_ty = Ty::nullable(Ty::obj("kotlin/Any"));
-                        let mut ir_args = Vec::with_capacity(args.len());
-                        for &a in &args {
-                            ir_args.push(self.lower_arg(a, &obj_ty)?);
-                        }
-                        Some(self.emit_call(
-                            Callee::Static {
-                                owner: cf.callable.owner,
-                                name: cf.callable.name.clone(),
-                                descriptor: cf.callable.descriptor.clone(),
-                                inline: cf.callable.inline,
-                            },
-                            Some(recv),
-                            ir_args,
-                        ))?
-                    }
-                    _ => return None,
-                }
-            }
             // A PLAIN-NAME call with a spread argument (`foo(*a)`, `foo(x, *a, y)`): a sole spread
             // passes the array through the platform copy helper, a mixed call packs one
             // spread-flagged array; an unhandled shape returns `None` → the file skips, never
@@ -27187,6 +27157,11 @@ impl<'a> Lower<'a> {
                 }
                 let physical_ret = member.physical_ret;
                 let mparams = member.params.clone();
+                let physical_params = if resolved.physical_params.len() == mparams.len() {
+                    resolved.physical_params.clone()
+                } else {
+                    mparams.clone()
+                };
                 let owner = member.owner.unwrap_or_else(|| {
                     rt.obj_internal()
                         .map(|n| n.render())
@@ -27261,8 +27236,8 @@ impl<'a> Lower<'a> {
                         self.lower_call_slot_args_source_order_with_element(
                             &args,
                             &slots,
-                            &mparams,
-                            None,
+                            &physical_params,
+                            Some(&mparams),
                             elem_prim,
                             None,
                             OmittedSlotPolicy::Reject,
@@ -27270,9 +27245,9 @@ impl<'a> Lower<'a> {
                     } else {
                         let mut lowered = Vec::new();
                         for (i, &arg) in args.iter().enumerate() {
-                            match mparams.get(i) {
-                                Some(p)
-                                    if p.is_erased_top()
+                            match mparams.get(i).zip(physical_params.get(i)) {
+                                Some((_semantic, physical))
+                                    if physical.is_erased_top()
                                         && elem_prim.is_some_and(|e| {
                                             let a = self.info.ty(arg);
                                             self.has_scalar_value_repr(a) && a != e
@@ -27285,10 +27260,17 @@ impl<'a> Lower<'a> {
                                     lowered.push(self.emit_type_op(
                                         IrTypeOp::ImplicitCoercion,
                                         v,
-                                        ty_to_ir(*p),
+                                        ty_to_ir(*physical),
                                     ));
                                 }
-                                Some(p) => lowered.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                Some((semantic, physical)) => {
+                                    let value = self.lower_arg(arg, &ty_to_ir(*semantic))?;
+                                    lowered.push(self.coerce_argument_value(
+                                        value,
+                                        *semantic,
+                                        ty_to_ir(*physical),
+                                    )?);
+                                }
                                 None => lowered.push(self.expr(arg)?),
                             }
                         }

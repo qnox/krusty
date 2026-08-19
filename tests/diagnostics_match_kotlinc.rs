@@ -200,6 +200,76 @@ fn callable_reference_bound_failure_is_inference_error() {
 }
 
 #[test]
+fn result_failure_type_argument_arity_matches_kotlinc_exactly() {
+    let source = "fun box() { Result.failure<Int, String>(RuntimeException(\"x\")) }";
+    let result = common::compiler_diagnostics(
+        &[("ResultFailureArity.kt", source)],
+        &[common::stdlib_jar()],
+    );
+    let mut krusty = errors(&result.krusty_stdout);
+    krusty.extend(errors(&result.krusty_stderr));
+    let reference = errors(&result.reference_stderr);
+    assert_eq!(krusty, reference);
+    assert_eq!(krusty.len(), 1);
+}
+
+#[test]
+fn result_failure_unbound_type_parameter_matches_kotlinc_exactly() {
+    let source = "fun box() { val result = Result.failure(RuntimeException(\"x\")) }";
+    let result = common::compiler_diagnostics(
+        &[("ResultFailureInference.kt", source)],
+        &[common::stdlib_jar()],
+    );
+    let mut krusty = errors(&result.krusty_stdout);
+    krusty.extend(errors(&result.krusty_stderr));
+    let reference = errors(&result.reference_stderr);
+    assert_eq!(krusty, reference);
+    assert_eq!(krusty.len(), 1);
+}
+
+#[test]
+fn discarded_result_failure_unbound_type_parameter_matches_kotlinc_exactly() {
+    let source = "fun box() { Result.failure(RuntimeException(\"x\")) }";
+    let result = common::compiler_diagnostics(
+        &[("DiscardedResultFailureInference.kt", source)],
+        &[common::stdlib_jar()],
+    );
+    let mut krusty = errors(&result.krusty_stdout);
+    krusty.extend(errors(&result.krusty_stderr));
+    let reference = errors(&result.reference_stderr);
+    assert_eq!(krusty, reference);
+    assert_eq!(krusty.len(), 1);
+}
+
+#[test]
+fn top_level_result_failure_unbound_type_parameter_matches_kotlinc_exactly() {
+    let source = "val result = Result.failure(RuntimeException(\"x\"))";
+    let result = common::compiler_diagnostics(
+        &[("TopLevelResultFailureInference.kt", source)],
+        &[common::stdlib_jar()],
+    );
+    let mut krusty = errors(&result.krusty_stdout);
+    krusty.extend(errors(&result.krusty_stderr));
+    let reference = errors(&result.reference_stderr);
+    assert_eq!(krusty, reference);
+    assert_eq!(krusty.len(), 1);
+}
+
+#[test]
+fn member_result_failure_unbound_type_parameter_matches_kotlinc_exactly() {
+    let source = "class C { val result = Result.failure(RuntimeException(\"x\")) }";
+    let result = common::compiler_diagnostics(
+        &[("MemberResultFailureInference.kt", source)],
+        &[common::stdlib_jar()],
+    );
+    let mut krusty = errors(&result.krusty_stdout);
+    krusty.extend(errors(&result.krusty_stderr));
+    let reference = errors(&result.reference_stderr);
+    assert_eq!(krusty, reference);
+    assert_eq!(krusty.len(), 1);
+}
+
+#[test]
 fn constructor_header_lambda_this_matches_kotlinc() {
     let source = r#"
 enum class Choice(val callback: () -> Enum.Companion) {
