@@ -710,6 +710,16 @@ pub enum Ty {
     Nothing,
     /// Placeholder after a type error, suppresses cascading diagnostics.
     Error,
+    /// A declaration whose type is NOT DETERMINED YET — recorded by signature collection for an
+    /// implicitly-typed declaration the resolution engine has not resolved.
+    ///
+    /// Distinct from [`Ty::Error`] on purpose. Spelling "not yet" and "gave up" the same way is what
+    /// forces every read site to be taught the difference by hand: a reader that finds `Error`
+    /// cannot know whether asking the engine would help, so each place has to be patched
+    /// individually and any place that is missed silently publishes a wrong type. `Pending` is
+    /// answerable — a read of it demands the declaration, and it must never reach emission or
+    /// `@Metadata`, which is an invariant that can be asserted rather than hoped for.
+    Pending,
     /// A Kotlin function type `(A, B) -> R`. The front end keeps the real parameter/return types
     /// (interned `FnSig`) so a call through a `Fun` value recovers its return type.
     Fun(&'static FnSig),
@@ -735,6 +745,50 @@ pub(crate) fn stored_value_ty(ty: Ty) -> Ty {
         Ty::obj("kotlin/Unit")
     } else {
         ty
+    }
+}
+
+/// Replace every NOT-DETERMINED marker inside `ty` with `replacement`.
+pub fn ty_replace_pending(ty: Ty, replacement: Ty) -> Ty {
+    match ty {
+        Ty::Pending => replacement,
+        Ty::Nullable(inner) => Ty::nullable(ty_replace_pending(*inner, replacement)),
+        Ty::Obj(name, args) if args.iter().any(|argument| argument.mentions_pending()) => {
+            Ty::obj_args_name(
+                name,
+                &args
+                    .iter()
+                    .map(|argument| ty_replace_pending(*argument, replacement))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        // A FUNCTION type carries the marker in its return or its parameters, not in type arguments:
+        // `C::foo` is `(C) -> <not determined>` while `foo`'s own return is being determined. Without
+        // this arm such a type passed through untouched and the declaration declined even though the
+        // answer had already been obtained.
+        Ty::Fun(signature) if signature.mentions_pending() => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|parameter| ty_replace_pending(*parameter, replacement))
+                .collect::<Vec<_>>(),
+            ty_replace_pending(signature.ret, replacement),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
+        other => other,
+    }
+}
+
+impl FnSig {
+    /// Whether this signature carries the NOT-DETERMINED marker in its return or parameters.
+    pub fn mentions_pending(&self) -> bool {
+        self.ret.mentions_pending()
+            || self
+                .params
+                .iter()
+                .any(|parameter| parameter.mentions_pending())
     }
 }
 
@@ -1100,6 +1154,45 @@ impl Ty {
     /// an array element, a function parameter/return, or under a `?`. A type that mentions one is not
     /// yet a concrete answer: it still needs the use site's substitution, so asserting it (as a
     /// reference type's argument, say) records `T.() -> String` where `Int.() -> String` is meant.
+    /// Whether this type carries the NOT-DETERMINED marker anywhere inside it.
+    ///
+    /// `Ty::Pending` is not only a whole answer: a declaration can be typed `KProperty1<C, Pending>`
+    /// by referencing a member whose own type is still being determined. Publishing that is exactly
+    /// what publishing the bare marker would be, and the emission boundary rejects it the same way,
+    /// so "is this determined" has to ask about the whole type rather than its outermost layer.
+    pub fn mentions_pending(self) -> bool {
+        self.mentions_marker(&|ty| ty == Ty::Pending)
+    }
+
+    /// Whether this type carries the ERROR placeholder anywhere inside it.
+    ///
+    /// The same containment question as [`mentions_pending`](Ty::mentions_pending), asked about
+    /// "gave up" rather than "not yet". A publish boundary needs both: an answer of `Error` is not a
+    /// type either, and it erases to `java/lang/Object` in a descriptor and to `<error>` in
+    /// `@Metadata`, so publishing one is how a resolution failure turns into a wrong program rather
+    /// than a diagnostic.
+    pub fn mentions_error(self) -> bool {
+        self.mentions_marker(&|ty| ty == Ty::Error)
+    }
+
+    /// The containment walk both markers share: the type itself, a nullability/projection wrapper's
+    /// inner type, a reference type's arguments, and a function type's parameters and return.
+    fn mentions_marker(self, marker: &dyn Fn(Ty) -> bool) -> bool {
+        if marker(self) {
+            return true;
+        }
+        match self {
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner.mentions_marker(marker),
+            Ty::InProjection(inner) | Ty::OutProjection(inner) => inner.mentions_marker(marker),
+            Ty::Obj(_, args) => args.iter().any(|a| a.mentions_marker(marker)),
+            Ty::Fun(signature) => {
+                signature.ret.mentions_marker(marker)
+                    || signature.params.iter().any(|p| p.mentions_marker(marker))
+            }
+            _ => false,
+        }
+    }
+
     pub fn mentions_ty_param(self) -> bool {
         match self {
             Ty::TyParam(..) => true,
@@ -1373,6 +1466,9 @@ impl Ty {
                 inner.source_name_with_type_parameter(type_parameter)
             ),
             Ty::TyParam(n, _) => type_parameter(n),
+            // Only reachable from a diagnostic rendered while the declaration is still being
+            // resolved; it never names a real type.
+            Ty::Pending => "<not determined>".to_string(),
         }
     }
 
@@ -1396,6 +1492,7 @@ impl Ty {
             Ty::Null => "Null".to_string(),
             Ty::Nothing => "Nothing".to_string(),
             Ty::Error => "<error>".to_string(),
+            Ty::Pending => "<not determined>".to_string(),
             Ty::Fun(_) => "Function".to_string(),
             Ty::Nullable(inner) => format!("{}?", inner.name()),
             Ty::PlatformNullable(inner) => format!("{}!", inner.name()),

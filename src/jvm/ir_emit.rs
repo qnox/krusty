@@ -5278,6 +5278,38 @@ fn constructed_outside(ir: &IrFile, fq: &str) -> bool {
     constructions.iter().any(|id| !inside.contains(id))
 }
 
+/// Every method this class emits must carry a DETERMINED signature.
+///
+/// `Ty::Error` and `Ty::Pending` are answers about resolution, not types, and neither survives the
+/// descriptor: both erase to `java/lang/Object`. An override whose return did not resolve therefore
+/// emits `(Ljava/lang/Object;)Ljava/lang/Object;` where the interface declares `(…)V`, which is a
+/// DIFFERENT method — the class verifies, loads, and then throws `AbstractMethodError` at the first
+/// call. Nothing between the frontend and the JVM notices, so the invariant is asserted here, where
+/// the signature is fixed, rather than hoped for. The `@Metadata` encoder asserts the same thing for
+/// the classes that carry metadata; an anonymous object carries none, which is exactly the shape
+/// that reached a real JVM as `AbstractMethodError`.
+fn assert_determined_member_signatures(ir: &IrFile, c: &crate::ir::IrClass) {
+    let undetermined = |ty: &Ty| ty.mentions_pending() || ty.mentions_error();
+    for &fid in &c.methods {
+        let Some(function) = ir.functions.get(fid as usize) else {
+            continue;
+        };
+        if let Some(ty) = function
+            .params
+            .iter()
+            .chain(std::iter::once(&function.ret))
+            .find(|ty| undetermined(ty))
+        {
+            panic!(
+                "undetermined type {ty:?} in the emitted signature of {}.{}: a resolution answer is \
+                 not a type, and erases to `java/lang/Object` in the descriptor",
+                c.fq_name(),
+                function.name,
+            );
+        }
+    }
+}
+
 fn emit_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -5287,6 +5319,7 @@ fn emit_class(
     class_meta: Option<&KotlinMetadata>,
     extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
+    assert_determined_member_signatures(ir, c);
     if !c.enum_entries.is_empty() {
         return emit_enum_class(ir, c, facade, env, opts);
     }

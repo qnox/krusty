@@ -146,6 +146,22 @@ The engine owns `RefCell<HashMap<DeclKey, ResolutionState>>` plus a `Vec<DeclKey
 Publication into `SymbolTable` happens at seam points; the memo itself is never the symbol table,
 because a resolution running inside a checker holds `&SymbolTable`, not `&mut`.
 
+A phase that "completes every signature before inference" is NOT achievable, and the design was
+wrong to imply it. An implicitly-typed declaration HAS no signature until inference produces one, so
+the implicit slots — exactly the ones that matter — are still empty when body resolution starts.
+What the reference compiler relies on is not a full table but that nothing ever reads an unfilled
+slot directly: `ReturnTypeCalculatorWithJump` exists so that a read of an implicit type becomes a
+JUMP rather than a table lookup.
+
+The invariant is therefore **a placeholder is never an answer**: every read of a not-yet-inferred
+declaration goes to the engine. Ordering only decides when the ANNOTATED types are available, which
+is much weaker than a phase split.
+
+It has to be applied LAZILY, at the read. Applying it eagerly — resolving every undetermined sibling
+before typing a member — forces resolution of declarations the body never reads, costs a full
+checker run each, and turns any cycle among them into a decline for members that are individually
+fine (measured: 18 gate failures became 232).
+
 Consequences we assert as tests:
 
 - **Order independence.** A declaration is resolved when first asked for, so the argument order of

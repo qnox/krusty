@@ -132,6 +132,8 @@ mod callable_ref_e2e;
 mod callable_ref_equality_e2e;
 #[path = "callable_ref_extension_e2e.rs"]
 mod callable_ref_extension_e2e;
+#[path = "callable_ref_to_inferred_member_e2e.rs"]
+mod callable_ref_to_inferred_member_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
 mod catch_annotation_comma_e2e;
 #[path = "char_literal_diagnostics_e2e.rs"]
@@ -388,6 +390,8 @@ mod cross_file_inline_call_e2e;
 mod cross_file_operator_e2e;
 #[path = "cross_file_typealias_e2e.rs"]
 mod cross_file_typealias_e2e;
+#[path = "ctor_lambda_return_binds_type_param_e2e.rs"]
+mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
 mod ctor_numeric_widening_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
@@ -402,6 +406,8 @@ mod data_object_e2e;
 mod dataclass_hash_and_sam_e2e;
 #[path = "decl_body_on_next_line_e2e.rs"]
 mod decl_body_on_next_line_e2e;
+#[path = "declaration_matches_body_position_e2e.rs"]
+mod declaration_matches_body_position_e2e;
 #[path = "deep_class_bail_reason_e2e.rs"]
 mod deep_class_bail_reason_e2e;
 #[path = "deep_expression_nesting_check.rs"]
@@ -420,6 +426,8 @@ mod default_import_resolution_e2e;
 mod default_stub_super_guard_e2e;
 #[path = "deferred_nullable_val_e2e.rs"]
 mod deferred_nullable_val_e2e;
+#[path = "deferred_reads_inferred_member_return_e2e.rs"]
+mod deferred_reads_inferred_member_return_e2e;
 #[path = "deferred_val_init_e2e.rs"]
 mod deferred_val_init_e2e;
 #[path = "definitely_non_null_type_e2e.rs"]
@@ -470,6 +478,8 @@ mod elvis_return_smartcast_e2e;
 mod elvis_signature_inference_e2e;
 #[path = "empty_loop_body_e2e.rs"]
 mod empty_loop_body_e2e;
+#[path = "engine_declaration_types_e2e.rs"]
+mod engine_declaration_types_e2e;
 #[path = "enum_body_property_e2e.rs"]
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]
@@ -646,6 +656,8 @@ mod implicit_integer_coercion_e2e;
 mod implicit_receiver_member_shadow_e2e;
 #[path = "implicit_receiver_named_args_e2e.rs"]
 mod implicit_receiver_named_args_e2e;
+#[path = "implicit_receiver_tower_lambda_shape_e2e.rs"]
+mod implicit_receiver_tower_lambda_shape_e2e;
 #[path = "implicit_this_callable_ref_e2e.rs"]
 mod implicit_this_callable_ref_e2e;
 #[path = "implicit_this_member_hof_lambda_e2e.rs"]
@@ -1276,6 +1288,8 @@ mod type_annotation_newline_e2e;
 mod type_param_vararg_check_e2e;
 #[path = "typealias_abbreviated_type_e2e.rs"]
 mod typealias_abbreviated_type_e2e;
+#[path = "typealias_constructor_inference_e2e.rs"]
+mod typealias_constructor_inference_e2e;
 #[path = "typealias_emission_e2e.rs"]
 mod typealias_emission_e2e;
 #[path = "typealias_function_type_e2e.rs"]
@@ -1296,10 +1310,14 @@ mod unit_value_e2e;
 mod unit_vararg_e2e;
 #[path = "unqualified_enum_entry_e2e.rs"]
 mod unqualified_enum_entry_e2e;
+#[path = "unreachable_trailing_block_ty_e2e.rs"]
+mod unreachable_trailing_block_ty_e2e;
 #[path = "unsigned_array_e2e.rs"]
 mod unsigned_array_e2e;
 #[path = "unsigned_classpath_call_e2e.rs"]
 mod unsigned_classpath_call_e2e;
+#[path = "unsigned_companion_constant_ty_e2e.rs"]
+mod unsigned_companion_constant_ty_e2e;
 #[path = "unsigned_ext_e2e.rs"]
 mod unsigned_ext_e2e;
 #[path = "unsigned_generic_erasure_e2e.rs"]

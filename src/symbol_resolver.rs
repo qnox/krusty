@@ -3936,21 +3936,6 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
-    pub(crate) fn new_import_scoped(
-        lib: &'a dyn SemanticPlatform,
-        fn_scope: &'a FunctionImportScope,
-    ) -> Self {
-        SymbolResolver {
-            lib,
-            src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
-            module: None,
-            fn_scope: Some(FunctionScopeRef::Imports(fn_scope)),
-            lexical_classes: Vec::new(),
-            access_package: None,
-            access_file: None,
-        }
-    }
-
     /// The primary resolver: symbol resolution federates the current `module` over the classpath `lib`.
     pub fn new_scoped_with_module(
         lib: &'a dyn SemanticPlatform,
@@ -4838,37 +4823,6 @@ impl<'a> SymbolResolver<'a> {
         ))
     }
 
-    /// Select the ordinary, context-free callable denoted by `Classifier.name`. A classifier with a
-    /// value facet (an object or companion) contributes that value's member family; a classifier
-    /// without one contributes its classifier callables. These are mutually exclusive semantic
-    /// shapes, not retry/fallback levels.
-    pub(crate) fn select_classifier_call(
-        &self,
-        internal: TypeName,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-    ) -> Option<LibraryMember> {
-        let (receiver, candidates) = self.classifier_call_candidates(internal, name)?;
-        let selected = select_receiver_overload_from_functions(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-            },
-            &candidates,
-            IndexedConvention::Ordinary,
-        )?;
-        let resolved = self.materialize_member_function(receiver, args, type_args, selected);
-        let mut member = resolved.member;
-        member.ret = resolved.ret;
-        Some(member)
-    }
-
     pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
         let functions = self
             .symbol_levels_in_scope(name)
@@ -4898,55 +4852,6 @@ impl<'a> SymbolResolver<'a> {
             // by declaration order and later append `$default` a second time.
             .filter(|function| !function.callable.default_call)
             .collect()
-    }
-
-    /// The symbolic signature of the callable `name(args)` selects, with the RECEIVER's type
-    /// arguments already substituted.
-    ///
-    /// Selection is unchanged; this reports the signature instead of the substituted return, so a
-    /// caller can bind a type variable an argument fixes. Applying the receiver here keeps the
-    /// hierarchy walk (`List<Dto>` answering a `fun <T> Iterable<T>.map` receiver) on this side of
-    /// the boundary — the caller sees a signature whose remaining formals are exactly the ones its
-    /// arguments have to bind.
-    pub(crate) fn call_template(
-        &self,
-        recv: SymRecv,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-    ) -> Option<crate::libraries::GenericSig> {
-        let receiver = match recv {
-            SymRecv::Value(ty) | SymRecv::ImplicitValue(ty) => Some(ty),
-            _ => None,
-        };
-        let sig = self
-            .select_symbol(recv, name, args, type_args)?
-            .call_generic_sig()?;
-        let mut binds = GSigBinds::new();
-        if let (Some(shape), Some(actual)) = (sig.receiver, receiver) {
-            if actual != Ty::Error {
-                unify_ty_from_symbols(&self.src, shape, actual, &mut binds);
-            }
-        }
-        let (formals, formal_bounds) = sig
-            .formals
-            .iter()
-            .zip(&sig.formal_bounds)
-            .filter(|(formal, _)| !binds.contains_key(formal.as_str()))
-            .map(|(formal, bounds)| (formal.clone(), bounds.clone()))
-            .unzip();
-        Some(crate::libraries::GenericSig {
-            formals,
-            formal_bounds,
-            receiver: sig.receiver.map(|ty| ty_subst_keep_unbound(ty, &binds)),
-            params: sig
-                .params
-                .iter()
-                .map(|&param| ty_subst_keep_unbound(param, &binds))
-                .collect(),
-            ret: ty_subst_keep_unbound(sig.ret, &binds),
-            return_policy: sig.return_policy,
-        })
     }
 
     pub(crate) fn select_symbol(

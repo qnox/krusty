@@ -81,18 +81,19 @@ fn a_classpath_extension_still_answers_the_same_way() {
 }
 
 #[test]
-fn an_undetermined_generic_extension_declines_rather_than_erasing() {
-    // The sharp edge of reporting a result at all. A `vararg` generic extension aligns its arguments
-    // against the ARRAY parameter, so `T` binds from nothing and specializes to its bound; the same
-    // happens for a defaulted call and for a type-variable receiver. Reporting `Any` there is worse
-    // than reporting nothing: the property compiles, runs, and emits `Ljava/lang/Object;` where
-    // kotlinc emits `Ljava/lang/String;`, so a downstream module cannot use the class and no box
-    // test can see it. These must keep asking for an explicit type.
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    for (label, source) in [
+fn a_generic_extension_result_is_the_one_kotlinc_writes() {
+    // These shapes USED to decline. The signature pre-pass aligned a `vararg` call against the
+    // ARRAY parameter, so `T` bound from nothing and specialized to its bound — reporting `Any`,
+    // or `CharSequence` for a bounded variable, where kotlinc writes `String`. Declining was the
+    // recoverable answer to a question that pass could not answer.
+    //
+    // With one typer there is no second pass to disagree, and the checker determines all of them.
+    // The assertion is therefore the emitted FIELD DESCRIPTOR against the reference compiler's, not
+    // a diagnostic: a decline here would now be a regression, and so would agreeing with neither.
+    for (label, descriptor, source) in [
         (
             "vararg",
+            "java.lang.String",
             "package repro\n\
              class Src\n\
              fun <T> Src.firstOf(vararg xs: T): T = xs[0]\n\
@@ -100,7 +101,10 @@ fn an_undetermined_generic_extension_declines_rather_than_erasing() {
              fun box(): String = \"OK\"\n",
         ),
         (
+            // The element type survives: `Array<String>`, whose JVM signature is `[Ljava/lang/String;`
+            // — spelling it `Lkotlin/Array<Ljava/lang/String;>;` is not a signature a consumer reads.
             "array argument to a vararg",
+            "java.lang.String[]",
             "package repro\n\
              class Src\n\
              fun <T> Src.of(vararg xs: T): T = xs[0]\n\
@@ -109,26 +113,26 @@ fn an_undetermined_generic_extension_declines_rather_than_erasing() {
         ),
         (
             "type-variable receiver",
+            "java.lang.String",
             "package repro\n\
              fun <T> T?.orDef(d: T): T = this ?: d\n\
              class Holder { val s: String? = null; val v = s.orDef(\"zz\") }\n\
              fun box(): String = \"OK\"\n",
         ),
         (
-            // A variable "bound" to ITSELF is not bound. Testing the specialized return against
-            // `Any` misses this entirely, because an unbound variable erases to ITS OWN bound:
-            // this one emitted `Ljava/lang/CharSequence;` where kotlinc writes `Ljava/lang/String;`.
+            // A variable "bound" to ITSELF is not bound, and an unbound one erases to its OWN bound:
+            // this emitted `CharSequence` where kotlinc writes `String`.
             "type-variable receiver under a bound",
+            "java.lang.String",
             "package repro\n\
              fun <T : CharSequence> T?.orDef(d: T): T = this ?: d\n\
              class Holder { val s: String? = null; val v = s.orDef(\"zz\") }\n\
              fun box(): String = \"OK\"\n",
         ),
         (
-            // One formal reached from two arguments keeps the FIRST and never joins, so the
-            // pre-pass would report `String` for a call the checker types `Any` — the compiler
-            // contradicting itself within one compilation.
+            // One formal reached from two disagreeing arguments joins rather than keeping the first.
             "one formal from two disagreeing arguments",
+            "java.lang.Object",
             "package repro\n\
              class Src\n\
              fun <T> Src.pick(a: T, b: T): T = a\n\
@@ -136,14 +140,26 @@ fn an_undetermined_generic_extension_declines_rather_than_erasing() {
              fun box(): String = \"OK\"\n",
         ),
     ] {
-        let diagnostics =
-            common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
+        let classes = common::expect_classes_with_stdlib(source, "Main");
+        let holder = classes
+            .iter()
+            .find(|(name, _)| name.ends_with("Holder"))
+            .map(|(_, bytes)| bytes.clone())
+            .unwrap_or_else(|| panic!("{label}: repro.Holder was not emitted"));
+        let scratch = common::scratch_dir().expect("scratch filesystem unavailable");
+        let path = scratch.join(format!("gen-ext-{}.class", label.replace(' ', "-")));
+        std::fs::write(&path, holder).expect("write class file");
+        let text = common::javap(&["-p", path.to_str().expect("utf-8 path")])
+            .expect("pooled javap unavailable");
+        let declared = text
+            .lines()
+            .find(|line| line.trim_end().ends_with(" v;"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         assert!(
-            diagnostics
-                .iter()
-                .any(|message| message.contains("cannot infer the type of property")),
-            "{label}: an undetermined generic extension must decline, not erase to its bound: \
-             {diagnostics:?}"
+            declared.contains(descriptor),
+            "{label}: expected the property to be {descriptor}, got {declared:?}"
         );
     }
 }
