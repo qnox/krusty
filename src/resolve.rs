@@ -16040,6 +16040,8 @@ pub enum ImplicitPropertyWriteTarget {
         property_ty: Ty,
         getter: Option<Box<crate::symbol_resolver::ResolvedMember>>,
         setter: Option<Box<crate::libraries::LibraryCallable>>,
+        /// The exact field declaration when the write binds a Java instance field.
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
     },
     Extension {
         receiver: ImplicitReceiverSelection,
@@ -18908,6 +18910,9 @@ struct ImplicitPropertyWriteResolution {
     is_var: bool,
     getter: Option<crate::symbol_resolver::ResolvedMember>,
     setter: Option<crate::symbol_resolver::ResolvedPropertySetter>,
+    /// The exact Java instance field the write binds, when the hierarchy walk selected one that is
+    /// accessible from this site. `is_var` still carries its `final`ity.
+    field: Option<crate::libraries::InstanceFieldRef>,
     extension: Option<ResolvedPropertyAccess>,
 }
 
@@ -33803,6 +33808,52 @@ impl<'a> Checker<'a> {
         receiver: ImplicitReceiver,
         name: &str,
     ) -> Option<ImplicitPropertyWriteResolution> {
+        // Java fields are writable unless final and take precedence over accessor-derived properties.
+        if let Some(selected) =
+            self.resolver()
+                .select_member_property_where(receiver.ty, name, |field| {
+                    self.member_accessible(field.visibility, field.owner)
+                })
+        {
+            if let Some(field) = selected.field {
+                if self.member_accessible(field.visibility, field.owner) {
+                    return Some(ImplicitPropertyWriteResolution {
+                        receiver,
+                        property_ty: field.ty,
+                        is_var: !field.is_final,
+                        getter: None,
+                        setter: None,
+                        field: Some(field),
+                        extension: None,
+                    });
+                }
+            } else if let Some(property) = selected
+                .property
+                .filter(|property| property.accessor_derived && property.context_count == 0)
+            {
+                let getter = crate::symbol_resolver::ResolvedMember::from_callable(
+                    receiver.ty,
+                    property.getter.clone(),
+                    false,
+                );
+                let setter = property.setter.clone().map(|callable| {
+                    crate::symbol_resolver::ResolvedPropertySetter {
+                        callable,
+                        visibility: property.setter_visibility,
+                        source_member: property.source_member,
+                    }
+                });
+                return Some(ImplicitPropertyWriteResolution {
+                    receiver,
+                    property_ty: property.ty,
+                    is_var: setter.is_some(),
+                    getter: Some(getter),
+                    setter,
+                    field: None,
+                    extension: None,
+                });
+            }
+        }
         let getter = self.select_property_member(receiver.ty, name);
         let setter = self.select_property_setter(receiver.ty, name);
         if let Some(setter) = setter {
@@ -33813,6 +33864,7 @@ impl<'a> Checker<'a> {
                 is_var: true,
                 getter,
                 setter: Some(setter),
+                field: None,
                 extension: None,
             });
         }
@@ -33823,6 +33875,7 @@ impl<'a> Checker<'a> {
                 is_var: false,
                 getter: Some(property),
                 setter: None,
+                field: None,
                 extension: None,
             });
         }
@@ -33839,6 +33892,7 @@ impl<'a> Checker<'a> {
                 is_var: property.setter.is_some(),
                 getter: None,
                 setter: None,
+                field: None,
                 extension: Some(ResolvedPropertyAccess {
                     property,
                     context_args,
@@ -33867,6 +33921,7 @@ impl<'a> Checker<'a> {
                     .setter
                     .clone()
                     .map(|setter| Box::new(setter.callable)),
+                field: resolution.field.clone().map(Box::new),
             }
         }
     }
@@ -44357,12 +44412,10 @@ impl<'a> Checker<'a> {
                         enclosing == owner
                             || nested_in_owner
                             || companion_of_enclosing
-                            // `protected` additionally reaches from a subclass of the owner.
+                            // Protected access uses the federated subtype relation so dependency
+                            // superclasses participate in the same check as source classes.
                             || (vis == Visibility::Protected
-                                && self
-                                    .syms
-                                    .supertype_internal_names_from(enclosing)
-                                    .contains(&owner))
+                                && self.obj_name_is_subtype(enclosing, owner))
                     })
             }
         }
@@ -44377,11 +44430,7 @@ impl<'a> Checker<'a> {
                 .lexical_source_class_names()
                 .into_iter()
                 .any(|enclosing| {
-                    (enclosing == owner
-                        || self
-                            .syms
-                            .supertype_internal_names_from(enclosing)
-                            .contains(&owner))
+                    (enclosing == owner || self.obj_name_is_subtype(enclosing, owner))
                         && self.receiver_is_assignable(receiver, Ty::obj_name(enclosing))
                 })
     }
@@ -45507,15 +45556,19 @@ impl<'a> Checker<'a> {
     ) -> Result<Option<PropertyReadSelection>, PropertyReadAmbiguity> {
         if !receiver.is_nullable() {
             let resolver = self.resolver();
-            let declaration = resolver.select_member_property(receiver, name);
-            if let Some(property) = declaration {
-                let owner = property.owner;
-                let field = property.field;
+            let declaration = resolver.select_member_property_where(receiver, name, |field| {
+                self.receiver_member_accessible(field.visibility, field.owner, receiver)
+            });
+            if let Some(selected) = declaration {
+                let owner = selected.owner;
+                let ty = selected.ty;
+                let visibility = selected.visibility;
+                let field = selected.field;
+                let selected_property = selected.property;
                 // Core property selection already incorporates a nearer covariant accessor override.
                 // The inherited declaration still owns the physical accessor/field shape; its erased
                 // return must not overwrite the selected logical property type.
-                let ty = property.ty;
-                let (getter, context_access) = if let Some(declaration) = property.property.as_ref()
+                let (getter, context_access) = if let Some(declaration) = selected_property.as_ref()
                 {
                     if declaration.context_count == 0 {
                         (
@@ -45564,16 +45617,14 @@ impl<'a> Checker<'a> {
                         name: name.to_string(),
                         ty,
                         owner,
-                        interface: property.interface,
+                        interface: selected.interface,
                         field: field.map(Box::new),
                         getter,
                         context_access,
-                        compiler_intrinsic: property
-                            .property
+                        compiler_intrinsic: selected_property
                             .as_ref()
                             .and_then(|property| property.getter.compiler_intrinsic),
-                        access: (property.visibility != Visibility::Public)
-                            .then_some((property.visibility, owner)),
+                        access: (visibility != Visibility::Public).then_some((visibility, owner)),
                     },
                 ))));
             }
@@ -53773,36 +53824,46 @@ impl<'a> Checker<'a> {
             receiver_ty
         };
         let selected_member_property = (!rt.is_nullable())
-            .then(|| self.resolver().select_member_property(rt, &name))
+            .then(|| {
+                self.resolver()
+                    .select_member_property_where(rt, &name, |field| {
+                        self.receiver_member_accessible(field.visibility, field.owner, rt)
+                    })
+            })
             .flatten();
-        let context_member_property = selected_member_property.as_ref().and_then(|selected| {
+        let accessor_member_property = selected_member_property.as_ref().and_then(|selected| {
             let property = selected.property.as_ref()?;
-            (property.context_count > 0).then_some((
+            (property.context_count > 0 || property.accessor_derived).then_some((
                 selected.owner,
                 selected.interface,
                 property.clone(),
             ))
         });
-        if let Some((owner, interface, property)) = context_member_property {
+        if let Some((owner, interface, property)) = accessor_member_property {
             let target_span = self.assignment_target_span(s);
             let Some(setter) = property.setter.as_ref() else {
                 self.diags
                     .error(target_span, "'val' cannot be reassigned.".to_string());
                 return;
             };
-            let Some(context_types) = setter.params.get(..property.context_count) else {
-                self.diags.error(
-                    target_span,
-                    format!("No context argument for '{name}' found."),
-                );
-                return;
-            };
-            let Some(context_args) = self.select_context_arguments(scope, context_types) else {
-                self.diags.error(
-                    target_span,
-                    format!("No context argument for '{name}' found."),
-                );
-                return;
+            let context_args = if property.context_count == 0 {
+                Vec::new()
+            } else {
+                let Some(context_types) = setter.params.get(..property.context_count) else {
+                    self.diags.error(
+                        target_span,
+                        format!("No context argument for '{name}' found."),
+                    );
+                    return;
+                };
+                let Some(context_args) = self.select_context_arguments(scope, context_types) else {
+                    self.diags.error(
+                        target_span,
+                        format!("No context argument for '{name}' found."),
+                    );
+                    return;
+                };
+                context_args
             };
             if property.setter_visibility != Visibility::Public {
                 self.reject_if_inaccessible(property.setter_visibility, &name, owner, target_span);
@@ -53829,63 +53890,59 @@ impl<'a> Checker<'a> {
             );
             return;
         }
+        // A Java instance field is writable unless it is final. Protected writes additionally require
+        // a receiver whose type is the accessing subclass (or one of its subclasses).
         if let Some(selected) = selected_member_property {
             if let Some(field) = selected.field {
-                let member_span = self.assignment_member_name_span(s, &name);
-                if !self.receiver_member_accessible(selected.visibility, selected.owner, rt) {
-                    if matches!(
-                        selected.visibility,
-                        Visibility::PackagePrivate | Visibility::Protected
-                    ) {
-                        let visibility = if selected.visibility == Visibility::Protected {
-                            "protected"
-                        } else {
-                            "package-private"
-                        };
-                        self.diags.error(
-                            member_span,
-                            Self::field_access_message(
-                                false,
-                                &field.name,
-                                field.ty,
-                                field.owner,
-                                visibility,
-                            ),
-                        );
-                    } else {
-                        self.reject_if_inaccessible(
-                            selected.visibility,
-                            &field.name,
-                            field.owner,
-                            member_span,
-                        );
+                let target_span = self.assignment_target_span(s);
+                if self.receiver_member_accessible(field.visibility, field.owner, rt) {
+                    if field.is_final {
+                        self.diags
+                            .error(target_span, "'val' cannot be reassigned.".to_string());
+                        return;
                     }
-                    return;
-                }
-                if field.is_final {
-                    self.diags.error(
-                        self.assignment_target_span(s),
-                        "'val' cannot be reassigned.",
+                    let value_ty = self.expr_expected(scope, value, field.ty);
+                    self.expect_assignable(
+                        field.ty,
+                        value_ty,
+                        self.value_diagnostic_span(value, value_ty),
+                        "assignment",
+                    );
+                    self.stmt_lowers.insert(
+                        s,
+                        StmtLowering::MemberPropertyWrite {
+                            owner: field.owner,
+                            ty: field.ty,
+                            interface: selected.interface,
+                            field: Some(Box::new(field)),
+                            context_access: None,
+                        },
                     );
                     return;
                 }
-                let value_ty = self.expr_expected(scope, value, field.ty);
-                self.expect_assignable(
-                    field.ty,
-                    value_ty,
-                    self.value_diagnostic_span(value, value_ty),
-                    "assignment",
-                );
-                self.stmt_lowers.insert(
-                    s,
-                    StmtLowering::MemberPropertyWrite {
-                        owner: field.owner,
-                        ty: field.ty,
-                        interface: selected.interface,
-                        field: Some(Box::new(field)),
-                        context_access: None,
-                    },
-                );
+                if matches!(
+                    field.visibility,
+                    Visibility::Protected | Visibility::PackagePrivate
+                ) {
+                    let visibility = if field.visibility == Visibility::Protected {
+                        "protected"
+                    } else {
+                        "package-private"
+                    };
+                    self.diags.error(
+                        self.assignment_member_name_span(s, &name),
+                        Self::field_access_message(
+                            false,
+                            &field.name,
+                            field.ty,
+                            field.owner,
+                            visibility,
+                        ),
+                    );
+                    return;
+                }
+                self.diags
+                    .error(target_span, "'val' cannot be reassigned.".to_string());
                 return;
             }
         }

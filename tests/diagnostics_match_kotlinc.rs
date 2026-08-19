@@ -543,6 +543,54 @@ fn protected_java_field_receiver_diagnostics_match_kotlinc() {
                 .to_string(),
         },
     ];
+    assert_eq!(krusty_errors.len(), 2);
+    assert_eq!(kotlinc_errors.len(), 2);
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}
+
+#[test]
+fn java_field_write_rejection_diagnostics_match_kotlinc() {
+    let Some((java_dir, _)) = common::javac_compile(
+        &[(
+            "fixtures/Parent.java".to_string(),
+            "package fixtures; public class Parent { public final String finalField = \"\"; protected String protectedField = \"\"; }".to_string(),
+        )],
+        &[],
+    ) else {
+        return;
+    };
+    let source = "package consumer\n\
+                  import fixtures.Parent\n\
+                  fun finalWrite(parent: Parent) { parent.finalField = \"\" }\n\
+                  fun protectedWrite(parent: Parent) { parent.protectedField = \"\" }";
+    let result = common::compiler_diagnostics(
+        &[("JavaFieldWriteRejections.kt", source)],
+        std::slice::from_ref(&java_dir),
+    );
+    if let Some(root) = java_dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let expected = vec![
+        ObservedError {
+            file: "JavaFieldWriteRejections.kt".to_string(),
+            line: 3,
+            column: 41,
+            message: "'val' cannot be reassigned.".to_string(),
+        },
+        ObservedError {
+            file: "JavaFieldWriteRejections.kt".to_string(),
+            line: 4,
+            column: 45,
+            message: "cannot access 'field protectedField: String!': it is protected in 'fixtures.Parent'."
+                .to_string(),
+        },
+    ];
+    assert_eq!(krusty_errors.len(), 2);
+    assert_eq!(kotlinc_errors.len(), 2);
     assert_eq!(krusty_errors, expected);
     assert_eq!(kotlinc_errors, expected);
 }

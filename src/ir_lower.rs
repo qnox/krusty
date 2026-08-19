@@ -7669,6 +7669,7 @@ impl<'a> Lower<'a> {
                 receiver,
                 property_ty,
                 setter,
+                field,
                 ..
             } => {
                 crate::trace_compiler!(
@@ -7677,6 +7678,20 @@ impl<'a> Lower<'a> {
                 );
                 let value = self.lower_arg(value, &ty_to_ir(property_ty))?;
                 let (receiver, _) = self.materialize_implicit_receiver(receiver)?;
+                if let Some(field) = field {
+                    // The checker bound this write to a Java instance field; emit the store it
+                    // selected (`putfield`), never a reconstructed accessor.
+                    let owner = field.owner;
+                    return Some(self.add_property_write_target(
+                        receiver,
+                        owner,
+                        name,
+                        value,
+                        property_ty,
+                        false,
+                        Some(field),
+                    ));
+                }
                 self.emit_selected_property_set(receiver, name, property_ty, *setter?, value)
             }
             ImplicitPropertyWriteTarget::Extension { receiver, access } => {
@@ -7704,6 +7719,52 @@ impl<'a> Lower<'a> {
         )
     }
 
+    fn lower_implicit_member_property_get(
+        &mut self,
+        receiver: ImplicitReceiverSelection,
+        name: &str,
+        property_ty: Ty,
+        getter: Option<Box<crate::symbol_resolver::ResolvedMember>>,
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
+    ) -> Option<u32> {
+        let (receiver, _) = self.materialize_implicit_receiver(receiver)?;
+        match field {
+            Some(field) => Some(self.add_property_read_target(
+                receiver,
+                field.owner,
+                name,
+                property_ty,
+                false,
+                Some(field),
+            )),
+            None => self.emit_selected_property_get(receiver, name, *getter?),
+        }
+    }
+
+    fn lower_implicit_member_property_set(
+        &mut self,
+        receiver: ImplicitReceiverSelection,
+        name: &str,
+        property_ty: Ty,
+        setter: Option<Box<crate::libraries::LibraryCallable>>,
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
+        value: u32,
+    ) -> Option<u32> {
+        let (receiver, _) = self.materialize_implicit_receiver(receiver)?;
+        match field {
+            Some(field) => Some(self.add_property_write_target(
+                receiver,
+                field.owner,
+                name,
+                value,
+                property_ty,
+                false,
+                Some(field),
+            )),
+            None => self.emit_selected_property_set(receiver, name, property_ty, *setter?, value),
+        }
+    }
+
     fn lower_selected_implicit_property_incdec(
         &mut self,
         site: IncDecSite,
@@ -7719,27 +7780,34 @@ impl<'a> Lower<'a> {
                 property_ty,
                 getter,
                 setter,
+                field,
             } => {
-                let getter = getter.map(|getter| *getter)?;
-                let setter = setter.map(|setter| *setter)?;
-                let (read_receiver, _) = self.materialize_implicit_receiver(receiver.clone())?;
-                let current =
-                    self.emit_selected_property_get(read_receiver, name, getter.clone())?;
+                let current = self.lower_implicit_member_property_get(
+                    receiver.clone(),
+                    name,
+                    property_ty,
+                    getter.clone(),
+                    field.clone(),
+                )?;
                 if prefix {
                     let updated =
                         self.lower_incdec_updated_value(site, current, property_ty, decrement)?;
-                    let (write_receiver, _) =
-                        self.materialize_implicit_receiver(receiver.clone())?;
-                    let store = self.emit_selected_property_set(
-                        write_receiver,
+                    let store = self.lower_implicit_member_property_set(
+                        receiver.clone(),
                         name,
                         property_ty,
                         setter.clone(),
+                        field.clone(),
                         updated,
                     )?;
                     let value = if as_value {
-                        let (read_receiver, _) = self.materialize_implicit_receiver(receiver)?;
-                        Some(self.emit_selected_property_get(read_receiver, name, getter)?)
+                        Some(self.lower_implicit_member_property_get(
+                            receiver,
+                            name,
+                            property_ty,
+                            getter,
+                            field,
+                        )?)
                     } else {
                         None
                     };
@@ -7750,12 +7818,12 @@ impl<'a> Lower<'a> {
                 let old_read = self.emit_get_value(old_value);
                 let updated =
                     self.lower_incdec_updated_value(site, old_read, property_ty, decrement)?;
-                let (write_receiver, _) = self.materialize_implicit_receiver(receiver)?;
-                let store = self.emit_selected_property_set(
-                    write_receiver,
+                let store = self.lower_implicit_member_property_set(
+                    receiver,
                     name,
                     property_ty,
                     setter,
+                    field,
                     updated,
                 )?;
                 let value = as_value.then(|| self.emit_get_value(old_value));
@@ -17075,6 +17143,8 @@ impl<'a> Lower<'a> {
         self.add_property_write_target(receiver, owner, name, value, ty, interface, None)
     }
 
+    /// Write analogue of [`Self::add_property_read_target`]: forwards the exact declaration target
+    /// resolution selected, without classifying origins.
     fn add_property_write_target(
         &mut self,
         receiver: u32,
