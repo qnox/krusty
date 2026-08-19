@@ -281,12 +281,8 @@ fn an_eager_initializer_still_observes_declaration_order_within_its_file() {
         &[stdlib],
         Some(jdk.as_path()),
     );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|line| line.contains("cannot infer the type of property 'eager'")),
-        "a same-file forward reference from an initializer must still be rejected, got {diagnostics:?}"
-    );
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics, ["variable 'later' must be initialized."]);
 }
 
 #[test]

@@ -12,6 +12,8 @@ struct ObservedError {
     message: String,
 }
 
+const RECURSIVE_INFERENCE_MESSAGE: &str = "type checking has run into a recursive problem. Easiest workaround: specify the types of your declarations explicitly.";
+
 /// Extract every `path:line:column: error: message` record. Compare the basename because both
 /// compilers receive the same path, while their renderers may independently canonicalize its prefix.
 fn errors(output: &str) -> Vec<ObservedError> {
@@ -215,6 +217,125 @@ fn constructor_infers_nested_function_type() {
         diagnostics,
         ["argument type mismatch: actual type is 'Int', but 'String' was expected."]
     );
+}
+
+#[test]
+fn failed_property_inference_diagnostics_match_kotlinc_exactly() {
+    let result = common::compiler_diagnostics(
+        &[
+            (
+                "Blocks.kt",
+                "package blocks\nval topBlock get() { return missingTopBlock() }\nclass C {\n    val memberBlock get() { return missingMemberBlock() }\n}\n",
+            ),
+            (
+                "Cycle.kt",
+                "package cycle\nval x get() = y\nval y get() = x\n",
+            ),
+            (
+                "Expressions.kt",
+                "package expressions\nval topExpression get() = missingTopExpression()\nval String.topExtension get() = missingTopExtension()\nclass C {\n    val memberExpression get() = missingMemberExpression()\n    val String.memberExtension get() = missingMemberExtension()\n}\n",
+            ),
+            (
+                "Forward.kt",
+                "package forward\nval eager = later\nval later = 1\n",
+            ),
+            (
+                "Multiple.kt",
+                "package multiple\nval eager = later + after\nval later = 1\nval after = 2\n",
+            ),
+        ],
+        &[],
+    );
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    let reference = errors(&result.reference_stderr);
+    let recursive = RECURSIVE_INFERENCE_MESSAGE.to_string();
+    let expected = vec![
+        ObservedError {
+            file: "Blocks.kt".to_string(),
+            line: 2,
+            column: 1,
+            message: "this property must have an explicit type, be initialized, or be delegated."
+                .to_string(),
+        },
+        ObservedError {
+            file: "Blocks.kt".to_string(),
+            line: 2,
+            column: 29,
+            message: "unresolved reference 'missingTopBlock'.".to_string(),
+        },
+        ObservedError {
+            file: "Blocks.kt".to_string(),
+            line: 4,
+            column: 5,
+            message: "this property must have an explicit type, be initialized, or be delegated."
+                .to_string(),
+        },
+        ObservedError {
+            file: "Blocks.kt".to_string(),
+            line: 4,
+            column: 36,
+            message: "unresolved reference 'missingMemberBlock'.".to_string(),
+        },
+        ObservedError {
+            file: "Cycle.kt".to_string(),
+            line: 2,
+            column: 15,
+            message: recursive.clone(),
+        },
+        ObservedError {
+            file: "Cycle.kt".to_string(),
+            line: 3,
+            column: 15,
+            message: recursive,
+        },
+        ObservedError {
+            file: "Expressions.kt".to_string(),
+            line: 2,
+            column: 27,
+            message: "unresolved reference 'missingTopExpression'.".to_string(),
+        },
+        ObservedError {
+            file: "Expressions.kt".to_string(),
+            line: 3,
+            column: 33,
+            message: "unresolved reference 'missingTopExtension'.".to_string(),
+        },
+        ObservedError {
+            file: "Expressions.kt".to_string(),
+            line: 5,
+            column: 34,
+            message: "unresolved reference 'missingMemberExpression'.".to_string(),
+        },
+        ObservedError {
+            file: "Expressions.kt".to_string(),
+            line: 6,
+            column: 40,
+            message: "unresolved reference 'missingMemberExtension'.".to_string(),
+        },
+        ObservedError {
+            file: "Forward.kt".to_string(),
+            line: 2,
+            column: 13,
+            message: "variable 'later' must be initialized.".to_string(),
+        },
+        ObservedError {
+            file: "Multiple.kt".to_string(),
+            line: 2,
+            column: 13,
+            message: "variable 'later' must be initialized.".to_string(),
+        },
+        ObservedError {
+            file: "Multiple.kt".to_string(),
+            line: 2,
+            column: 21,
+            message: "variable 'after' must be initialized.".to_string(),
+        },
+    ];
+    assert_eq!(krusty.len(), 13);
+    assert_eq!(reference.len(), 13);
+    assert_eq!(krusty, expected);
+    assert_eq!(reference, expected);
 }
 
 #[test]

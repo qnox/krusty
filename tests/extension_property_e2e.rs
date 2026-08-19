@@ -13,7 +13,7 @@ fn run(src: &str) -> Option<String> {
 fn member_extension_property_resolution() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    const CASES: &[(&str, &str, Option<&str>)] = &[
+    const CASES: &[(&str, &str, Option<&[&str]>)] = &[
         (
             "both receivers in lexical scope",
             "
@@ -34,7 +34,7 @@ fn member_extension_property_resolution() {
                 }
                 fun read(token: Token): String = token.marker
             ",
-            Some("unresolved"),
+            Some(&["unresolved reference 'marker'."]),
         ),
         (
             "getter return inferred from extension receiver",
@@ -69,7 +69,7 @@ fn member_extension_property_resolution() {
                 fun read(container: Container, token: Token): String =
                     container.run { token.marker }
             ",
-            Some("cannot access 'marker'"),
+            Some(&["cannot access 'marker': it is private in 'Container'"]),
         ),
         (
             "private inherited member",
@@ -82,7 +82,7 @@ fn member_extension_property_resolution() {
                     fun read(token: Token): String = token.marker
                 }
             ",
-            Some("cannot access 'marker'"),
+            Some(&["cannot access 'marker': it is private in 'Base'"]),
         ),
         (
             "protected inherited member",
@@ -107,7 +107,7 @@ fn member_extension_property_resolution() {
                 fun read(container: Container, token: Token): String =
                     container.run { token.marker }
             ",
-            Some("cannot access 'marker'"),
+            Some(&["cannot access 'marker': it is protected in 'Container'"]),
         ),
         (
             "supertype extension receiver",
@@ -215,7 +215,7 @@ fn member_extension_property_resolution() {
                 }
                 class Token(val text: String)
             ",
-            Some("unresolved reference 'missing'"),
+            Some(&["unresolved reference 'missing'."]),
         ),
         (
             "numeric conversion does not select extension receiver",
@@ -225,7 +225,7 @@ fn member_extension_property_resolution() {
                     fun read(token: Int): Int = token.marker
                 }
             ",
-            Some("unresolved"),
+            Some(&["unresolved reference 'marker'."]),
         ),
         (
             "bounded generic receiver is more specific",
@@ -362,7 +362,7 @@ fn member_extension_property_resolution() {
                     fun read(token: String): Int = token.marker.length
                 }
             ",
-            Some("unresolved reference 'length'"),
+            Some(&["unresolved reference 'length'."]),
         ),
         (
             "lambda typing selects the matching member overload",
@@ -455,7 +455,7 @@ fn member_extension_property_resolution() {
                     val String.marker get() { return length }
                 }
             ",
-            Some("cannot infer the type of property 'marker'"),
+            Some(&["this property must have an explicit type, be initialized, or be delegated."]),
         ),
         (
             "inherited dispatch type argument substitutes return",
@@ -481,7 +481,7 @@ fn member_extension_property_resolution() {
                     fun read(token: Both) = token.marker
                 }
             ",
-            Some("overload resolution ambiguity"),
+            Some(&["overload resolution ambiguity for member 'marker'"]),
         ),
         (
             "read-only member blocks extension setter",
@@ -495,7 +495,7 @@ fn member_extension_property_resolution() {
                     }
                 }
             ",
-            Some("'val' cannot be reassigned"),
+            Some(&["'val' cannot be reassigned."]),
         ),
         (
             "property type parameter shadows class parameter",
@@ -558,7 +558,7 @@ fn member_extension_property_resolution() {
                     fun read(token: Token) = token.marker.missing
                 }
             ",
-            Some("unresolved reference 'missing'"),
+            Some(&["unresolved reference 'missing'."]),
         ),
         (
             "inferred getter substitutes inherited receiver property",
@@ -581,10 +581,12 @@ fn member_extension_property_resolution() {
             Some(jdk.as_path()),
         );
         if let Some(expected) = expected_diagnostic {
-            assert!(
-                diagnostics.iter().any(|message| message.contains(expected)),
-                "{case}: expected diagnostic containing {expected:?}: {diagnostics:?}"
+            assert_eq!(
+                diagnostics.len(),
+                expected.len(),
+                "{case}: diagnostic count, got {diagnostics:?}"
             );
+            assert_eq!(diagnostics, expected, "{case}: exact diagnostics");
         } else {
             assert!(
                 diagnostics.is_empty(),
@@ -606,11 +608,10 @@ class C(val value: String?) {
 }
 "#;
     let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        diagnostics.iter().any(|diagnostic| diagnostic.contains(
-            "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver"
-        )),
-        "the extension receiver must not inherit the dispatch receiver's smartcast: {diagnostics:?}"
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics,
+        ["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'."]
     );
 }
 
@@ -804,11 +805,10 @@ fn same_precedence_extension_properties_are_ambiguous() {
         &[],
         None,
     );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("overload resolution ambiguity")),
-        "{diagnostics:?}"
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics,
+        ["overload resolution ambiguity for extension property 'code'"]
     );
 }
 
@@ -934,12 +934,8 @@ fn member_extension_receiver_inference_is_cross_file_order_independent() {
         &[],
         None,
     );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("unresolved reference 'missing'")),
-        "expected the inferred String return to expose the bad chained read: {diagnostics:?}"
-    );
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics, ["unresolved reference 'missing'."]);
 }
 
 #[test]
