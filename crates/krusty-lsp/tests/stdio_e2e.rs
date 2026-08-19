@@ -1480,21 +1480,21 @@ fn stdio_server_keeps_dependency_and_friend_visibility_distinct() {
     let friend_diagnostics = diagnostics.remove(&friend_uri).unwrap();
     assert!(friend_diagnostics.is_empty(), "{friend_diagnostics:?}");
     let dependency_diagnostics = diagnostics.remove(&dependency_uri).unwrap();
-    assert!(
-        dependency_diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("'OpenInternal'"))),
+    assert_eq!(
+        dependency_diagnostics.len(),
+        2,
         "{dependency_diagnostics:?}"
     );
-    assert!(
-        dependency_diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("'DiskInternal'"))),
-        "{dependency_diagnostics:?}"
+    let messages: std::collections::HashSet<_> = dependency_diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic["message"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        messages,
+        std::collections::HashSet::from([
+            "Cannot access 'OpenInternal': it is internal",
+            "Cannot access 'DiskInternal': it is internal",
+        ])
     );
 
     let completion_labels = |response: &Value| {
@@ -1622,9 +1622,10 @@ fn stdio_server_suppresses_semantic_diagnostics_for_an_incomplete_source_set() {
     });
     let diagnostics = diagnostics["params"]["diagnostics"].as_array().unwrap();
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-    assert!(diagnostics[0]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("semantic diagnostics suppressed")));
+    assert_eq!(
+        diagnostics[0]["message"].as_str(),
+        Some("Module source set exceeds analysis limit (maximum 32 MiB); semantic diagnostics suppressed")
+    );
     server.shutdown_and_exit();
 }
 

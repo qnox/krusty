@@ -100,8 +100,8 @@ boundary.
   survives the chunk merge. Workspace-wide pull responses honor prior result ids and emit
   tombstones for disappeared files, but are cancelled with a non-retriggering protocol error when the
   bounded non-streaming report would exceed its item, byte, or message limit. Each accepted changed
-  chunk also pushes diagnostics for its closed attempted files immediately (including an empty set
-  for a deleted file); open documents are excluded because their buffers supersede disk snapshots.
+  chunk publishes diagnostics for its closed attempted files only when the client does not support
+  pull diagnostics; open documents are always excluded because their buffers supersede disk snapshots.
 - An open document retains its source text, a bounded compact diagnostic cache for published and
   pull diagnostics, and compact indexes for hover, completion, definitions, document symbols,
   signature help, folding ranges, and semantic highlighting. The compiler's full diagnostic vector
