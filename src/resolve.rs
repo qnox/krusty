@@ -37458,6 +37458,31 @@ impl<'a> Checker<'a> {
             }
             Expr::Member { receiver, name } => {
                 let (receiver, name) = (*receiver, name.clone());
+                // `super.foo()` / `super<B>.foo()` names a SUPERTYPE's declaration. The qualifier is
+                // encoded on the receiver name and has no expression type, so the ordinary receiver
+                // route says nothing — and the tower would offer this class, whose own `foo` is the
+                // one being determined.
+                if let Expr::Name(spelling) = self.file.expr(receiver) {
+                    if spelling.starts_with("super") {
+                        let spelling = spelling.clone();
+                        // `super<B>` names its supertype outright; a bare `super` means the
+                        // declaring class's own superclass. Either way the answer is a SUPERTYPE's
+                        // declaration — asking the receiver tower instead would offer this class,
+                        // whose same-named member is the one being determined.
+                        let qualified = spelling
+                            .strip_prefix("super<")
+                            .and_then(|rest| rest.split('>').next())
+                            .and_then(|classifier| self.same_package_class(classifier))
+                            .map(ClassSig::internal_name);
+                        let owner = qualified.or_else(|| {
+                            let dispatch = self.super_receiver_selection(scope, &spelling)?.ty;
+                            self.syms
+                                .class_by_type_name(dispatch.kotlin_class_internal()?)?
+                                .super_internal
+                        })?;
+                        return on_receiver(Ty::obj_name(owner), &name, arg_tys);
+                    }
+                }
                 let receiver_ty = self.expr_types.get(receiver.0 as usize).copied()?;
                 if let Some(ty) = on_receiver(receiver_ty, &name, arg_tys) {
                     return Some(ty);

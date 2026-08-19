@@ -413,3 +413,22 @@ fn an_inferred_member_read_from_a_member_extension() {
         "engine-member-read-from-extension",
     );
 }
+
+/// A `super`-qualified call to a member whose return is inferred.
+///
+/// `super<B>.foo()` names a SUPERTYPE's declaration, and the qualifier is encoded on the receiver
+/// name — it has no expression type, so the ordinary receiver route says nothing about it. Falling
+/// back to the receiver tower offers this class, whose same-named member is the one being
+/// determined, so the demand declined on a cycle of its own making and the override settled to
+/// `Unit`. Byte-identical to kotlinc 2.4.10 with the qualifier resolved.
+#[test]
+fn a_super_qualified_call_demands_the_supertype_declaration() {
+    common::expect_box_ok_with_stdlib(
+        "open class Base { open fun tag() = \"OK\" }\n\
+         open class Middle : Base() { override fun tag() = super.tag() }\n\
+         interface Marker\n\
+         class Leaf : Marker, Middle() { override fun tag() = super<Middle>.tag() }\n\
+         fun box(): String = Leaf().tag()\n",
+        "engine-super-qualified-demand",
+    );
+}
