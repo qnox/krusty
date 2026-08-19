@@ -11197,14 +11197,20 @@ fn resolve_deferred_properties(
                 has_receiver: true, ..
             } => {}
             DeferredKind::TopLevel { .. } => {
-                if by_name.insert(entry.name.clone(), entry.key).is_some() {
+                if by_name
+                    .insert(entry.name.clone(), entry.key)
+                    .is_some_and(|previous| previous != entry.key)
+                {
                     ambiguous.insert(entry.name.clone());
                 }
             }
             DeferredKind::Member(owner) => {
+                // Two entries for the SAME declaration are not two declarations: a `var` with an
+                // inferred type queues its property and its backing field under one key. Only a
+                // genuine second declaration of the spelling makes the name unanswerable.
                 if by_member
                     .insert((*owner, entry.name.clone()), entry.key)
-                    .is_some()
+                    .is_some_and(|previous| previous != entry.key)
                 {
                     ambiguous_members.insert((*owner, entry.name.clone()));
                 }
@@ -27061,7 +27067,14 @@ impl<'a> Checker<'a> {
             scope,
             &property.name,
             if owner_storage_visible {
-                property.owner_storage_ty.unwrap_or(property.ty)
+                // A narrower BACKING-FIELD type is visible inside the owner — but only when it is a
+                // type. While the field's own initializer is being determined it is the marker, and
+                // taking it then makes every read of the property inside its own class undetermined
+                // even though the PROPERTY's type is already known.
+                property
+                    .owner_storage_ty
+                    .filter(|storage| !storage.mentions_pending())
+                    .unwrap_or(property.ty)
             } else {
                 property.ty
             },
@@ -37860,6 +37873,32 @@ impl<'a> Checker<'a> {
         }
         let t = match lookup {
             Some(l) => {
+                // The binding's recorded type is the marker while that declaration's own type is
+                // being determined. Ask for it BEFORE the origin-specific paths below: each of them
+                // reads the binding or re-selects the member from the symbol table, and both hold
+                // the marker at this point. The receiver tower names the owner, innermost first,
+                // exactly as name resolution walked it.
+                if l.ty.mentions_pending() {
+                    if let Some(demand) = self.demand_member {
+                        let tower: Vec<Ty> = self
+                            .this_labels
+                            .iter()
+                            .rev()
+                            .map(|(_, ty, _)| *ty)
+                            .collect();
+                        let answered = tower.into_iter().find_map(|receiver| {
+                            (receiver != Ty::Error && !receiver.mentions_pending())
+                                .then(|| demand(receiver.non_null(), &n, &[]))
+                                .flatten()
+                                .filter(|answered| {
+                                    *answered != Ty::Error && !answered.mentions_pending()
+                                })
+                        });
+                        if let Some(answered) = answered {
+                            return self.set(e, answered);
+                        }
+                    }
+                }
                 if let ReceiverFnValueOrigin::ClassStorage(field) = l.origin {
                     self.expr_lowers
                         .insert(e, ExprLowering::ClassStorageRead { field });
@@ -37916,7 +37955,26 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                self.local_narrowing(scope, &n).unwrap_or(l.ty)
+                let ty = self.local_narrowing(scope, &n).unwrap_or(l.ty);
+                // No receiver in the tower answered, so the binding's own recorded type stands —
+                // and while that member's type is being determined it is the marker. The binding
+                // knows its OWNER, which is what the demand needs; without this a read of an
+                // inferred member from inside a member EXTENSION of the same class types as
+                // undetermined and the extension settles to `Unit`.
+                if ty.mentions_pending() {
+                    if let ReceiverFnValueOrigin::DispatchProperty { owner, .. } = l.origin {
+                        if let Some(answered) = self
+                            .demand_member
+                            .and_then(|demand| demand(Ty::obj_name(owner), &n, &[]))
+                            .filter(|answered| {
+                                *answered != Ty::Error && !answered.mentions_pending()
+                            })
+                        {
+                            return self.set(e, answered);
+                        }
+                    }
+                }
+                ty
             }
             // `field` inside an accessor body → the property's backing field. `field` is a soft
             // keyword: it only has this meaning when an accessor is being checked (and a real
