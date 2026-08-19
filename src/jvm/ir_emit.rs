@@ -13391,28 +13391,31 @@ impl<'a> Emitter<'a> {
                 .property_declaration_types
                 .get(&operation.expression)
         });
-        let access = self
-            .declared_property_write_access(operation.owner, operation.name)
-            .or_else(|| {
-                self.bodies
-                    .property_write_access(operation.owner, operation.name)
-            })
-            // A sibling source file's `@JvmField` property has no setter to call — before the
-            // naming convention below invents one.
-            .or_else(|| self.module_jvm_field_access(operation.owner, operation.name))
-            .unwrap_or_else(|| PropertyAccess::Accessor {
-                owner: operation.owner.to_string(),
-                name: stamped
-                    .map(|(name, _)| name.clone())
-                    .unwrap_or_else(|| crate::names::property_setter_name(operation.name)),
-                descriptor: method_descriptor(
-                    &[ir_ty_to_jvm(physical.unwrap_or(operation.ty))],
-                    Ty::Unit,
-                ),
-                is_static: false,
-                is_interface: operation.interface
-                    || self.bodies.owner_is_interface(operation.owner),
-            });
+        let access = if let Some(field) = operation.field {
+            self.selected_property_field_access(field)
+        } else {
+            self.declared_property_write_access(operation.owner, operation.name)
+                .or_else(|| {
+                    self.bodies
+                        .property_write_access(operation.owner, operation.name)
+                })
+                // A sibling source file's `@JvmField` property has no setter to call — before the
+                // naming convention below invents one.
+                .or_else(|| self.module_jvm_field_access(operation.owner, operation.name))
+                .unwrap_or_else(|| PropertyAccess::Accessor {
+                    owner: operation.owner.to_string(),
+                    name: stamped
+                        .map(|(name, _)| name.clone())
+                        .unwrap_or_else(|| crate::names::property_setter_name(operation.name)),
+                    descriptor: method_descriptor(
+                        &[ir_ty_to_jvm(physical.unwrap_or(operation.ty))],
+                        Ty::Unit,
+                    ),
+                    is_static: false,
+                    is_interface: operation.interface
+                        || self.bodies.owner_is_interface(operation.owner),
+                })
+        };
         let access_owner = match &access {
             PropertyAccess::Field { owner, .. }
             | PropertyAccess::Accessor { owner, .. }
@@ -13822,20 +13825,23 @@ impl<'a> Emitter<'a> {
         name: &str,
         field: Option<&crate::libraries::InstanceFieldRef>,
     ) -> Option<(crate::jvm::inline::PropertyAccess, bool)> {
-        use crate::jvm::inline::PropertyAccess;
         if let Some(field) = field {
-            return Some((
-                PropertyAccess::Field {
-                    owner: field.owner.render(),
-                    name: field.name.clone(),
-                    descriptor: field.descriptor.clone(),
-                    is_static: false,
-                },
-                true,
-            ));
+            return Some((self.selected_property_field_access(field), true));
         }
         self.declared_property_read_access(owner, name, None, false)
             .map(|access| (access, false))
+    }
+
+    fn selected_property_field_access(
+        &self,
+        field: &crate::libraries::InstanceFieldRef,
+    ) -> crate::jvm::inline::PropertyAccess {
+        crate::jvm::inline::PropertyAccess::Field {
+            owner: field.owner.render(),
+            name: field.name.clone(),
+            descriptor: field.descriptor.clone(),
+            is_static: false,
+        }
     }
 
     /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
@@ -14225,15 +14231,17 @@ impl<'a> Emitter<'a> {
                 value,
                 ty,
                 interface,
+                field,
                 operation,
             } => {
-                let (receiver, owner, name, value, ty, interface, operation) = (
+                let (receiver, owner, name, value, ty, interface, field, operation) = (
                     *receiver,
                     owner.render(),
                     name.clone(),
                     *value,
                     *ty,
                     *interface,
+                    field.as_deref(),
                     operation.unwrap_or(e),
                 );
                 self.emit_property_write(
@@ -14244,7 +14252,7 @@ impl<'a> Emitter<'a> {
                         name: &name,
                         ty: &ty,
                         interface,
-                        field: None,
+                        field,
                     },
                     value,
                     code,

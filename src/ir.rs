@@ -297,10 +297,8 @@ pub enum IrExpr {
         /// not accidentally remain attached to the obsolete arena index.
         operation: Option<u32>,
     },
-    /// Write a PROPERTY of `owner` (statement) — the write analogue of [`IrExpr::PropertyRead`], and the
-    /// same rule: it names the property, and how the target writes it (a field store, an instance setter,
-    /// a receiverless one) is derived by the backend from the owner's declaration. `ty` is the property's
-    /// Kotlin type, which the assigned `value` is bridged to.
+    /// Write a property or an already-selected physical field. `ty` is the source type that the assigned
+    /// value is bridged to; `field` carries the complete physical target when resolution selected one.
     PropertyWrite {
         receiver: ExprId,
         owner: TypeName,
@@ -308,6 +306,7 @@ pub enum IrExpr {
         value: ExprId,
         ty: Ty,
         interface: bool,
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
         operation: Option<u32>,
     },
     /// Read an instance field (`IrGetField`): `receiver.<fields[index]>` of class `class`.

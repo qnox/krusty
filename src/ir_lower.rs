@@ -17061,6 +17061,19 @@ impl<'a> Lower<'a> {
         ty: Ty,
         interface: bool,
     ) -> u32 {
+        self.add_property_write_target(receiver, owner, name, value, ty, interface, None)
+    }
+
+    fn add_property_write_target(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        name: &str,
+        value: u32,
+        ty: Ty,
+        interface: bool,
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
+    ) -> u32 {
         self.note_property_declaration(owner, name);
         let write = self.ir.add_expr(IrExpr::PropertyWrite {
             receiver,
@@ -17069,6 +17082,7 @@ impl<'a> Lower<'a> {
             value,
             ty,
             interface,
+            field,
             operation: None,
         });
         self.record_property_declaration_type(write, owner, name, ty);
@@ -21181,19 +21195,28 @@ impl<'a> Lower<'a> {
         // code and is not materialized, but any OTHER receiver expression keeps its effects in
         // kotlinc's order: receiver, then value, then `putstatic` (measured: `side().v = 7`
         // evaluates `side()` and pops; the READ of the same shape drops the call entirely).
-        if let Some(StmtLowering::StaticPropertyWrite { owner, name, ty }) =
-            self.info.stmt_lowers.get(&stmt).cloned()
+        if let Some(StmtLowering::StaticPropertyWrite {
+            owner,
+            name,
+            ty,
+            descriptor,
+        }) = self.info.stmt_lowers.get(&stmt).cloned()
         {
-            let receiver_effect = if matches!(
-                self.info.expr_lowers.get(&receiver),
-                Some(ExprLowering::SingletonValue(_))
-            ) {
+            let external_field = descriptor.is_some();
+            let receiver_effect = if external_field
+                || matches!(
+                    self.info.expr_lowers.get(&receiver),
+                    Some(ExprLowering::SingletonValue(_))
+                ) {
                 None
             } else {
                 Some(self.expr(receiver)?)
             };
             let v = self.lower_arg(value, &ty_to_ir(ty))?;
-            let descriptor = self.runtime.type_descriptor(ty)?;
+            let descriptor = match descriptor {
+                Some(descriptor) => descriptor,
+                None => self.runtime.type_descriptor(ty)?,
+            };
             let store = self.ir.add_expr(IrExpr::SetExternalStaticField {
                 owner,
                 name,
@@ -21216,6 +21239,7 @@ impl<'a> Lower<'a> {
             owner,
             ty,
             interface,
+            field,
             context_access,
         }) = self.info.stmt_lowers.get(&stmt).cloned()
         {
@@ -21224,7 +21248,7 @@ impl<'a> Lower<'a> {
                 return self.lower_property_set(&access, value, Some((r, self.info.ty(receiver))));
             }
             let v = self.lower_arg(value, &ty_to_ir(ty))?;
-            let write = self.add_property_write(r, owner, name, v, ty, interface);
+            let write = self.add_property_write_target(r, owner, name, v, ty, interface, field);
             return Some(write);
         }
         // A `var` MEMBER EXTENSION PROPERTY write (`i.foo = v` where `class C { var Int.foo }`) —
