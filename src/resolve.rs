@@ -17456,13 +17456,17 @@ fn record_anonymous_construction_captures(
         return;
     };
     let bound = anonymous_body_bound_names(file, declaration);
+    // `visit_bindings` walks the scope tower INNERMOST-first, so the first candidate of a name is
+    // the binding a read at the construction site resolves to (a narrowing shadow or an inner
+    // shadowing local). Keeping the last captured the OUTERMOST binding instead, losing smart
+    // casts and mis-binding shadowed locals.
     let selected = candidates
         .iter()
         .enumerate()
         .filter(|(index, candidate)| {
-            !candidates[index + 1..]
+            !candidates[..*index]
                 .iter()
-                .any(|later| later.name == candidate.name)
+                .any(|earlier| earlier.name == candidate.name)
         })
         .filter(|(_, candidate)| candidate.ty != Ty::Error)
         .filter(|(_, candidate)| {
