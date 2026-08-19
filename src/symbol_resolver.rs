@@ -3641,7 +3641,8 @@ pub(crate) fn selected_default_callable(base: &FunctionInfo) -> Option<LibraryCa
         return None;
     };
     let mut callable = base.callable.clone();
-    callable.name.push_str("$default");
+    callable.owner = realization.owner;
+    callable.name = realization.name.clone();
     callable.descriptor = realization.descriptor.clone();
     callable.physical_params = realization.real_params.clone();
     callable.physical_ret = realization.ret;
@@ -6129,7 +6130,8 @@ impl<'a> SymbolResolver<'a> {
                 base.generic_sig.is_some()
             );
             let ret_ty = base.ret.apply(ret_ty);
-            let mut callable = callable_with_return(c, ret_ty, true);
+            let mut callable =
+                callable_with_return(&selected_default_callable(&base)?, ret_ty, true);
             // The bridge's descriptor exposes erased parameters (`Any`, `Any`, …), but argument
             // checking belongs to the selected SOURCE declaration. Retain the base generic shapes
             // specialized by this call's constraints; otherwise an omitted-default call such as
@@ -9417,11 +9419,57 @@ mod tests {
     }
 
     #[test]
+    fn a_default_callable_uses_the_provider_target_identity() {
+        let mut base = top_level_nullable_string_info();
+        base.callable.default_realization = Some(Box::new(DefaultCallRealization {
+            owner: crate::types::type_name("demo/Defaults"),
+            name: "realized$default".to_string(),
+            descriptor: "(ILjava/lang/Object;)Ljava/lang/String;".to_string(),
+            declaration_owner: crate::types::type_name("demo/DefaultsBody"),
+            real_params: vec![Ty::Int],
+            mask_count: 1,
+            ret: Ty::String,
+            suspend: false,
+        }));
+
+        let realized = selected_default_callable(&base).expect("default realization");
+
+        assert_eq!(realized.owner, crate::types::type_name("demo/Defaults"));
+        assert_eq!(realized.name, "realized$default");
+        assert_eq!(
+            realized.descriptor,
+            "(ILjava/lang/Object;)Ljava/lang/String;"
+        );
+        assert_eq!(realized.physical_params, vec![Ty::Int]);
+        assert_eq!(realized.physical_ret, Ty::String);
+        assert!(!realized.suspend);
+        assert!(realized.default_call);
+        let target = realized
+            .default_realization
+            .as_deref()
+            .expect("attached default target");
+        assert_eq!(target.owner, crate::types::type_name("demo/Defaults"));
+        assert_eq!(target.name, "realized$default");
+        assert_eq!(target.descriptor, "(ILjava/lang/Object;)Ljava/lang/String;");
+        assert_eq!(
+            target.declaration_owner,
+            crate::types::type_name("demo/DefaultsBody")
+        );
+        assert_eq!(target.real_params, vec![Ty::Int]);
+        assert_eq!(target.mask_count, 1);
+        assert_eq!(target.ret, Ty::String);
+        assert!(!target.suspend);
+    }
+
+    #[test]
     fn constructor_selection_consumes_only_the_declaration_attached_realization() {
         let mut declaration =
             LibraryMember::new("<init>".into(), vec![Ty::Int], Ty::Unit, String::new());
         declaration.default_realization = Some(Box::new(DefaultCallRealization {
+            owner: crate::types::type_name("demo/Category"),
+            name: "<init>".to_string(),
             descriptor: "(ILplatform/Marker;)V".to_string(),
+            declaration_owner: crate::types::type_name("demo/Category"),
             real_params: vec![Ty::Int],
             mask_count: 0,
             ret: Ty::Unit,
@@ -9605,6 +9653,19 @@ mod tests {
             },
             ..FunctionInfo::plain(FnKind::TopLevel, None, callable)
         }
+    }
+
+    fn attach_default_target(base: &mut FunctionInfo, bridge: &FunctionInfo) {
+        base.callable.default_realization = Some(Box::new(DefaultCallRealization {
+            owner: bridge.callable.owner,
+            name: bridge.callable.name.clone(),
+            descriptor: bridge.callable.descriptor.clone(),
+            declaration_owner: bridge.callable.owner,
+            real_params: base.callable.physical_params.clone(),
+            mask_count: 1,
+            ret: bridge.callable.physical_ret,
+            suspend: bridge.callable.suspend,
+        }));
     }
 
     fn top_level_nullable_string_info() -> FunctionInfo {
@@ -10132,6 +10193,7 @@ mod tests {
         let mut base = bridge.clone();
         base.callable.name = "make".to_string();
         base.callable.default_call = false;
+        attach_default_target(&mut base, &bridge);
         let source = DefaultSource { bridge, base };
         let scope = vec![type_name("")];
         let resolver = SymbolResolver::new_scoped(&source, &scope);
@@ -10193,6 +10255,7 @@ mod tests {
         let mut base = bridge.clone();
         base.callable.name = "same".to_string();
         base.callable.default_call = false;
+        attach_default_target(&mut base, &bridge);
         base.generic_sig = Some(GenericSig {
             formals: vec!["T".to_string()],
             formal_bounds: vec![vec![nullable_any]],

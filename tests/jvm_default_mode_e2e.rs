@@ -981,6 +981,81 @@ fn a_disable_dependency_is_consumed_through_its_recorded_realizations() {
     let _ = std::fs::remove_dir_all(work);
 }
 
+#[test]
+fn a_kotlinc_disable_dependency_supplies_the_exact_default_call_target() {
+    let parameters = (0..33)
+        .map(|index| format!("p{index}: Int = {index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let library_text = format!(
+        r#"package dep
+        interface I {{
+            fun value(number: Int = 7): String = "v$number"
+            fun many({parameters}): Int = p0 + p32
+        }}
+        class C : I
+    "#
+    );
+    const APPLICATION: &str = r#"package app
+        import dep.C
+        import dep.I
+        fun box(): String {
+            val direct: I = C()
+            val nullable: I? = direct
+            return if (direct.value() == "v7" && direct.value(3) == "v3" &&
+                nullable?.value() == "v7" && direct.many() == 32 &&
+                direct.many(p32 = 10) == 10) "OK" else "fail"
+        }
+    "#;
+
+    let work = common::scratch_dir().expect("allocate default-call fixture");
+    let library = work.join("library");
+    let reference = work.join("reference");
+    std::fs::create_dir_all(&library).expect("create dependency output");
+    std::fs::create_dir_all(&reference).expect("create reference output");
+    let library_source = work.join("Library.kt");
+    let application_source = work.join("Application.kt");
+    std::fs::write(&library_source, library_text).expect("write dependency source");
+    std::fs::write(&application_source, APPLICATION).expect("write application source");
+
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        library.to_string_lossy().into_owned(),
+        "-nowarn".to_string(),
+        "-jvm-default=disable".to_string(),
+        library_source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference compiler unavailable");
+    assert_eq!(code, 0, "kotlinc dependency failed: {stderr}");
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = [library.clone(), stdlib.clone()];
+    let diagnostics = common::front_end_diagnostics(APPLICATION, &classpath, Some(&jdk));
+    assert_eq!(diagnostics.len(), 0, "diagnostic count: {diagnostics:?}");
+    assert_eq!(diagnostics, Vec::<String>::new());
+    let ours = common::expect_box_run(APPLICATION, "Application", &classpath, Some(&jdk));
+
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference.to_string_lossy().into_owned(),
+        "-nowarn".to_string(),
+        "-classpath".to_string(),
+        library.to_string_lossy().into_owned(),
+        application_source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference compiler unavailable");
+    assert_eq!(code, 0, "kotlinc application failed: {stderr}");
+    let mut reference_classes = Vec::new();
+    collect_classes(&reference, &reference, &mut reference_classes);
+    let reference_box = common::find_box_class(&reference_classes).expect("reference box class");
+    let expected = common::run_box(&reference_classes, &reference_box, &[library, stdlib])
+        .expect("JVM unavailable for reference default-call fixture");
+    assert_eq!(expected, "OK");
+    assert_eq!(ours, expected);
+    let _ = std::fs::remove_dir_all(work);
+}
+
 /// Sibling files are declarations from the same normalized module provider, not a special IR-only
 /// classifier kind. A class emitted from one file must receive the property forwarder declared by
 /// an interface in another file without searching that class's current-file IR.

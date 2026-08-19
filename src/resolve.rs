@@ -15081,8 +15081,11 @@ impl ResolvedSuperCall {
 
 #[derive(Clone, Debug)]
 pub struct ResolvedDefaultMemberCall {
+    pub owner: TypeName,
+    pub name: String,
     pub descriptor: String,
     pub real_params: Vec<Ty>,
+    pub mask_count: usize,
     pub ret: Ty,
     pub suspend: bool,
 }
@@ -44997,8 +45000,11 @@ impl<'a> Checker<'a> {
         self.resolved_default_member_calls.insert(
             call,
             ResolvedDefaultMemberCall {
+                owner: realization.owner,
+                name: realization.name.clone(),
                 descriptor: realization.descriptor.clone(),
                 real_params: realization.real_params.clone(),
+                mask_count: realization.mask_count,
                 ret: realization.ret,
                 suspend: realization.suspend,
             },
@@ -59177,9 +59183,12 @@ fun box(): String {
                     if has_defaults {
                         info.callable.default_realization =
                             Some(Box::new(crate::libraries::DefaultCallRealization {
+                                owner: crate::types::type_name("test/Host"),
+                                name: format!("{name}$default"),
                                 descriptor:
                                     "(Ljava/lang/String;IIILjava/lang/Object;)Ljava/lang/String;"
                                         .to_string(),
+                                declaration_owner: crate::types::type_name("test/Host"),
                                 real_params: vec![Ty::Int, Ty::Int],
                                 mask_count: 1,
                                 ret: Ty::String,
