@@ -40187,7 +40187,26 @@ impl<'a> Checker<'a> {
             // method or extension function from the receiver's semantic type. Typed as
             // `(method/ext args) -> ret` — the receiver is bound, not a parameter.
             if let Some(r) = receiver {
+                let diag_mark = self.diags.diags.len();
                 let rty = self.expr(scope, r);
+                if rty == Ty::Error {
+                    // An error-typed receiver carries one of two situations. Typing the receiver
+                    // EXPRESSION may itself have failed (`Unresolved::method`, `missingFn()::m`):
+                    // that diagnostic already explains the failure, and kotlinc adds nothing on
+                    // the member name. Or the expression is valid but its TYPE could not be
+                    // resolved (a parameter declared with an unresolved classifier): the member
+                    // cannot be looked up, so kotlinc reports the NAME as unresolved.
+                    let receiver_diagnosed = self.diags.diags[diag_mark..]
+                        .iter()
+                        .any(|d| d.severity == crate::diag::Severity::Error);
+                    if !receiver_diagnosed {
+                        self.diags.error(
+                            self.member_name_span(e, &name),
+                            format!("unresolved reference '{name}'."),
+                        );
+                    }
+                    return self.set(e, Ty::Error);
+                }
                 // A function value's `invoke` declaration is carried by `Ty::Fun` itself, including
                 // receiver/context parameters and suspension. It is not a classifier-name convention
                 // and must not be reconstructed as `FunctionN`; select that one semantic declaration
@@ -40223,7 +40242,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let member_candidates = (rty != Ty::Error && rty != Ty::Null && !rty.is_nullable())
+                let member_candidates = (rty != Ty::Null && !rty.is_nullable())
                     .then(|| self.callable_ref_candidates(rty, &name));
                 crate::trace_compiler!(
                     "callable_ref",
@@ -40364,16 +40383,47 @@ impl<'a> Checker<'a> {
                 ) {
                     return self.set(e, ty);
                 }
+                // No member, extension, or nested-classifier rung applied. When NOTHING by this
+                // name exists on the receiver type, kotlinc reports the name itself as
+                // unresolved; candidates that exist but did not fit the expected type keep the
+                // generic unsupported note below.
+                let no_candidates = member_candidates.as_ref().is_none_or(|candidates| {
+                    candidates.property.is_none()
+                        && candidates.method.is_none()
+                        && candidates.overloads.is_empty()
+                        && candidates.extension_property.is_none()
+                }) && extension_candidates.property.is_none()
+                    && extension_candidates.method.is_none()
+                    && extension_candidates.overloads.is_empty()
+                    && extension_candidates.extension_property.is_none();
+                if no_candidates {
+                    self.diags.error(
+                        self.member_name_span(e, &name),
+                        format!("unresolved reference '{name}'."),
+                    );
+                    return self.set(e, Ty::Error);
+                }
             }
             crate::trace_compiler!(
                 "callable_ref",
                 "unsupported callable reference expression={e:?} receiver={receiver:?} name={name} expected={expected:?} span={:?}",
                 self.span(e),
             );
-            self.diags.error(
-                self.span(e),
-                "krusty: callable references are not supported",
-            );
+            // A receiver-less reference (`::missing`) that survived every rung names nothing:
+            // kotlinc reports the name as unresolved. A bound reference that HAD candidates but
+            // fit none of them (e.g. against an incompatible expected type) is the genuinely
+            // unsupported remainder.
+            if receiver.is_none() {
+                self.diags.error(
+                    self.member_name_span(e, &name),
+                    format!("unresolved reference '{name}'."),
+                );
+            } else {
+                self.diags.error(
+                    self.span(e),
+                    "krusty: callable references are not supported",
+                );
+            }
             Ty::Error
         };
         self.set(e, t)
