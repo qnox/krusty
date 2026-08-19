@@ -29110,22 +29110,34 @@ impl<'a> Checker<'a> {
     }
 
     /// If a bare type name `n` denotes a reference type usable as an unbound class literal `n::class`,
-    /// its `Ty`. Checks built-ins, user classes, enclosing nested types, and imports, but not the global
-    /// simple-name index because it collides with built-in names. Primitive or unknown names return `None`.
-    fn class_literal_unbound_ty(&self, scope: &CheckerScope<'_>, n: &str) -> Option<Ty> {
+    /// its `Ty`. The receiver of an unbound literal is a TYPE, so the spelling resolves through the
+    /// ordinary typeref channel — including any type arguments the parser attached to the reference
+    /// node (`Array<String>::class`, where the element type is part of the represented array's JVM
+    /// descriptor) — exactly as in a declared-type position. A name that binds a VALUE is a bound
+    /// literal instead (`x::class`), and a type parameter is left to the reified channel. Primitive
+    /// or unknown names return `None`.
+    fn class_literal_unbound_ty(&self, scope: &CheckerScope<'_>, e: ExprId, n: &str) -> Option<Ty> {
         if scope.tparam_contains(n) {
             return None;
         }
         if self.lookup(scope, n).is_some() {
             return None;
         }
-        let scoped = self.select_classifier(scope, n);
-        if scoped == InheritedNestedClassifier::Ambiguous {
-            return None;
-        }
-        let ty = classifier_over_default(n, scoped.found())
-            .map(Ty::obj_name)
-            .or_else(|| Ty::from_name(n))?;
+        let reference = TypeRef {
+            name: n.to_string(),
+            flags: TrFlags::default(),
+            arg: None,
+            targs: self
+                .file
+                .call_type_args
+                .get(&e.0)
+                .cloned()
+                .unwrap_or_default(),
+            span: self.file.expr_spans[e.0 as usize],
+            fun_params: Vec::new(),
+            fun_context_count: 0,
+        };
+        let ty = self.type_ref_ty_silent(scope, &reference);
         if ty == Ty::Error {
             return None;
         }
@@ -40025,7 +40037,7 @@ impl<'a> Checker<'a> {
                     // substitutes its declaration-owned identity to the call-site type
                     // (`reified_subst`) when it expands the inline body. Only a REIFIED `T` is
                     // accepted — kotlinc rejects a class literal on a non-reified type parameter.
-                    self.class_literal_unbound_ty(scope, &n)
+                    self.class_literal_unbound_ty(scope, e, &n)
                         .or_else(|| scope.reified_tparam(&n))
                 } else {
                     // A QUALIFIED type name (`pkg.Cls::class`, `java.util.ArrayList::class`,
@@ -52483,7 +52495,7 @@ impl<'a> Checker<'a> {
         match receiver {
             None => true,
             Some(receiver) => match self.file.expr(*receiver) {
-                Expr::Name(n) => self.class_literal_unbound_ty(scope, n).is_some(),
+                Expr::Name(n) => self.class_literal_unbound_ty(scope, e, n).is_some(),
                 _ => false,
             },
         }

@@ -78,3 +78,33 @@ fn bound_class_literal_smartcast_in_equals() {
 fun box(): String = if (Foo(\"a\") == Foo(\"a\") && Foo(\"a\") != Foo(\"b\")) \"OK\" else \"Fail\"\n";
     assert_eq!(run(SRC).expect("bound class literal in equals"), "OK");
 }
+
+#[test]
+fn array_class_literals() {
+    // An array type name is an unbound literal exactly like any other reference type:
+    // `Array<String>::class.java` is the `String[]` class constant, `IntArray::class.java` the
+    // primitive `int[]` one — the element type is part of the JVM descriptor, so the literal's
+    // type arguments must reach the represented type.
+    const SRC: &str = "fun box(): String {\n\
+    if (Array<String>::class.java.getName() != \"[Ljava.lang.String;\") return \"Fail 1\"\n\
+    if (IntArray::class.java.getName() != \"[I\") return \"Fail 2\"\n\
+    if (Array<Int>::class.java.getName() != \"[Ljava.lang.Integer;\") return \"Fail 3\"\n\
+    if (Array<Array<String>>::class.java.getName() != \"[[Ljava.lang.String;\") return \"Fail 4\"\n\
+    if (Array<String>::class != Array<String>::class) return \"Fail 5\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("array class literals"), "OK");
+}
+
+#[test]
+fn array_class_literals_report_no_diagnostic() {
+    // kotlinc accepts every array class-literal form silently.
+    let diags = common::front_end_diagnostics_files_with_stdlib(&["fun f() {\n\
+         \u{20}   val a = Array<String>::class\n\
+         \u{20}   val b = Array<String>::class.java\n\
+         \u{20}   val c = IntArray::class\n\
+         \u{20}   val d = IntArray::class.java\n\
+         \u{20}   val e = Array<Array<String>>::class.java\n\
+         }\n"]);
+    assert_eq!(diags, Vec::<String>::new());
+}
