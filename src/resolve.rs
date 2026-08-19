@@ -10615,8 +10615,15 @@ struct DeferredInferenceDriver<'a> {
     /// sharing a simple name in different packages cannot answer for each other.
     by_member: &'a HashMap<(TypeName, String), DeclKey>,
     /// Top-level functions whose return is not determined, by source spelling. A call to one of
-    /// them cannot be answered from the table, so the function is resolved on demand.
+    /// them cannot be answered from the table, so the function is resolved on demand. An OVERLOADED
+    /// spelling is absent — a name alone cannot choose between overloads.
     functions: &'a HashMap<String, (u32, DeclId)>,
+    /// Every one of them, overloads included, by spelling. A call site knows its argument types and
+    /// can choose; this is the index it chooses from.
+    functions_by_name: &'a HashMap<String, Vec<(u32, DeclId)>>,
+    /// The same for class members: every undetermined method by declaring class and spelling,
+    /// overloads included.
+    methods_by_name: &'a HashMap<(TypeName, String), Vec<UndeterminedMethod>>,
     /// Member FUNCTIONS whose expression body the walk could not type, keyed by the class that
     /// declares them. A declaration reading `C().gen()` needs the return resolved the same way a
     /// property read does.
@@ -10634,7 +10641,10 @@ impl DeferredInferenceDriver<'_> {
             let file_index = entry.file_index as usize;
             let file = &self.files[file_index];
             let demand = |name: &str| self.demand(entry, name);
-            let demand_member = |receiver: Ty, name: &str| self.demand_on_receiver(receiver, name);
+            let demand_call = |name: &str, arg_tys: &[Ty]| self.demand_call_overload(name, arg_tys);
+            let demand_member = |receiver: Ty, name: &str, arg_tys: &[Ty]| {
+                self.demand_on_receiver(receiver, name, arg_tys)
+            };
             let inferred = match entry.kind {
                 DeferredKind::TopLevel { .. } => infer_declaration_ty(
                     file,
@@ -10644,6 +10654,7 @@ impl DeferredInferenceDriver<'_> {
                     self.table,
                     EngineSeams {
                         demand: &demand,
+                        demand_call: &demand_call,
                         demand_member: &demand_member,
                         rejects: &|name| !self.readable_from(entry, name),
                     },
@@ -10666,6 +10677,7 @@ impl DeferredInferenceDriver<'_> {
                     self.table,
                     EngineSeams {
                         demand: &demand,
+                        demand_call: &demand_call,
                         demand_member: &demand_member,
                         rejects: &|name| !self.readable_from(entry, name),
                     },
@@ -10679,7 +10691,7 @@ impl DeferredInferenceDriver<'_> {
                     // type `getValue` is then looked up on — so it has to be resolved BEFORE the
                     // chain is followed, not patched afterwards.
                     let delegate = self
-                        .demand_on_receiver(inferred, "provideDelegate")
+                        .demand_on_receiver(inferred, "provideDelegate", &[])
                         .filter(|provided| !provided.mentions_pending())
                         .map(|provided| {
                             let bindings = inferred
@@ -10705,7 +10717,7 @@ impl DeferredInferenceDriver<'_> {
                     // publishing the marker would make "not resolved" the property's type.
                     .map(|ret| match ret.mentions_pending() {
                         true => self
-                            .demand_on_receiver(delegate, "getValue")
+                            .demand_on_receiver(delegate, "getValue", &[])
                             .filter(|answered| !answered.mentions_pending())
                             // The answer is `getValue`'s DECLARED return — `T` for
                             // `class W<T> { operator fun getValue(…) = value }` — so the delegate's own
@@ -10811,14 +10823,97 @@ impl DeferredInferenceDriver<'_> {
                     self.table,
                     EngineSeams {
                         demand: &|name: &str| self.demand_name_only(name),
-                        demand_member: &|receiver: Ty, name: &str| {
-                            self.demand_on_receiver(receiver, name)
+                        demand_call: &|name: &str, arg_tys: &[Ty]| {
+                            self.demand_call_overload(name, arg_tys)
+                        },
+                        demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
+                            self.demand_on_receiver(receiver, name, arg_tys)
                         },
                         rejects: &|_| false,
                     },
                 )
             })
             .ty()
+    }
+
+    /// A module function by spelling AND the call's argument types.
+    ///
+    /// The by-spelling index drops an overloaded name because a name alone cannot choose between
+    /// overloads. A CALL can: its arguments are already typed. Applicability is decided the way the
+    /// table decides it — parameter count, then each argument against the declared parameter — and
+    /// an answer is given only when exactly one candidate survives, so a genuinely ambiguous call
+    /// still declines rather than picking one.
+    fn demand_call_overload(&self, name: &str, arg_tys: &[Ty]) -> Option<Ty> {
+        if let Some(ty) = self.demand_name_only(name) {
+            return Some(ty);
+        }
+        let candidates = self.functions_by_name.get(name)?;
+        if candidates.len() < 2 {
+            return None;
+        }
+        let applicable = candidates
+            .iter()
+            .filter(|(file_index, declaration)| {
+                !self
+                    .engine
+                    .is_computing(DeclKey::declaration(*file_index, declaration.0))
+            })
+            .filter(|(file_index, declaration)| {
+                let Some(Decl::Fun(function)) = self
+                    .files
+                    .get(*file_index as usize)
+                    .map(|file| file.decl(*declaration))
+                else {
+                    return false;
+                };
+                function.receiver.is_none()
+                    && function.params.len() == arg_tys.len()
+                    && self
+                        .signature_of(*file_index, *declaration)
+                        .is_some_and(|params| {
+                            params.iter().zip(arg_tys).all(|(parameter, argument)| {
+                                *argument == Ty::Error
+                                    || erased_type_key(*parameter) == erased_type_key(*argument)
+                            })
+                        })
+            })
+            .collect::<Vec<_>>();
+        let [(file_index, declaration)] = applicable.as_slice() else {
+            return None;
+        };
+        self.engine
+            .resolve(DeclKey::declaration(*file_index, declaration.0), || {
+                infer_function_return_ty(
+                    &self.files[*file_index as usize],
+                    *file_index,
+                    *declaration,
+                    self.table,
+                    EngineSeams {
+                        demand: &|name: &str| self.demand_name_only(name),
+                        demand_call: &|name: &str, arg_tys: &[Ty]| {
+                            self.demand_call_overload(name, arg_tys)
+                        },
+                        demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
+                            self.demand_on_receiver(receiver, name, arg_tys)
+                        },
+                        rejects: &|_| false,
+                    },
+                )
+            })
+            .ty()
+    }
+
+    /// The collected parameter types of the function declared at `(file, declaration)`.
+    fn signature_of(&self, file_index: u32, declaration: DeclId) -> Option<Vec<Ty>> {
+        self.table
+            .funs
+            .values()
+            .flatten()
+            .find(|signature| {
+                signature.source_file == Some(file_index)
+                    && signature.source_decl == Some(declaration)
+            })
+            .map(|signature| signature.params.clone())
     }
 
     /// A module declaration by spelling, without a requesting declaration's ordering rules.
@@ -10898,11 +10993,78 @@ impl DeferredInferenceDriver<'_> {
 
     /// [`Self::demand_member`] addressed by the receiver's semantic type rather than its identity,
     /// which is the form an expression read has to hand.
-    fn demand_on_receiver(&self, receiver: Ty, name: &str) -> Option<Ty> {
+    fn demand_on_receiver(&self, receiver: Ty, name: &str, arg_tys: &[Ty]) -> Option<Ty> {
         let owner = receiver.kotlin_class_internal()?;
         self.demand_member(owner, name)
             .or_else(|| self.demand_method(owner, name))
+            .or_else(|| self.demand_method_overload(owner, name, arg_tys))
             .or_else(|| self.demand_module_extension(receiver, name))
+    }
+
+    /// A member FUNCTION by spelling AND the call's argument types.
+    ///
+    /// [`Self::demand_method`] is keyed by spelling, which cannot name one of several overloads, so
+    /// an overloaded member is absent from that index — `private fun foo() = foo(1)` beside
+    /// `private fun foo(i: Int) = "O"` left BOTH undetermined and settling to `Unit`. A call knows
+    /// its argument types; applicability is decided on them, and an answer is given only when
+    /// exactly one candidate survives.
+    fn demand_method_overload(&self, owner: TypeName, name: &str, arg_tys: &[Ty]) -> Option<Ty> {
+        let applicable = self
+            .owner_chain(owner)
+            .into_iter()
+            .flat_map(|declaring| {
+                self.methods_by_name
+                    .get(&(declaring, name.to_string()))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+            })
+            .filter(|method| {
+                !self.engine.is_computing(DeclKey::method(
+                    method.file_index,
+                    method.declaration.0,
+                    method.method_index,
+                ))
+            })
+            .filter(|method| {
+                self.table
+                    .class_by_type_name(method.owner)
+                    .and_then(|class| class.methods.get(&method.name))
+                    .and_then(|overloads| overloads.get(method.overload_index))
+                    .is_some_and(|signature| {
+                        signature.params.len() == arg_tys.len()
+                            && signature.params.iter().zip(arg_tys).all(|(p, a)| {
+                                *a == Ty::Error || erased_type_key(*p) == erased_type_key(*a)
+                            })
+                    })
+            })
+            .collect::<Vec<_>>();
+        let [method] = applicable.as_slice() else {
+            return None;
+        };
+        self.engine
+            .resolve(
+                DeclKey::method(method.file_index, method.declaration.0, method.method_index),
+                || {
+                    Some(infer_method_return_ty(
+                        &self.files[method.file_index as usize],
+                        method.file_index,
+                        method.declaration,
+                        method.method_index,
+                        self.table,
+                        EngineSeams {
+                            demand: &|name: &str| self.demand_name_only(name),
+                            demand_call: &|name: &str, arg_tys: &[Ty]| {
+                                self.demand_call_overload(name, arg_tys)
+                            },
+                            demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
+                                self.demand_on_receiver(receiver, name, arg_tys)
+                            },
+                            rejects: &|_| false,
+                        },
+                    ))
+                },
+            )
+            .ty()
     }
 
     /// A module-level EXTENSION reached through a receiver — `operator fun Int.getValue(…) = …`
@@ -10964,8 +11126,11 @@ impl DeferredInferenceDriver<'_> {
                         self.table,
                         EngineSeams {
                             demand: &|name: &str| self.demand_name_only(name),
-                            demand_member: &|receiver: Ty, name: &str| {
-                                self.demand_on_receiver(receiver, name)
+                            demand_call: &|name: &str, arg_tys: &[Ty]| {
+                                self.demand_call_overload(name, arg_tys)
+                            },
+                            demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
+                                self.demand_on_receiver(receiver, name, arg_tys)
                             },
                             rejects: &|_| false,
                         },
@@ -11055,6 +11220,7 @@ fn resolve_deferred_properties(
     // and a property initialized by a call to one needs it resolved first.
     let mut undetermined_functions: HashMap<String, (u32, DeclId)> = HashMap::new();
     let mut undetermined_function_decls: Vec<(u32, DeclId)> = Vec::new();
+    let mut undetermined_functions_by_name: HashMap<String, Vec<(u32, DeclId)>> = HashMap::new();
     let mut ambiguous_functions: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     for (file_index, file) in files.iter().enumerate() {
@@ -11070,6 +11236,10 @@ fn resolve_deferred_properties(
             // As for members: the DECLARATION list carries every one, overloads included, because
             // publishing an answer never has to choose between them.
             undetermined_function_decls.push((file_index as u32, declaration));
+            undetermined_functions_by_name
+                .entry(function.name.clone())
+                .or_default()
+                .push((file_index as u32, declaration));
             if undetermined_functions
                 .insert(function.name.clone(), (file_index as u32, declaration))
                 .is_some()
@@ -11087,6 +11257,8 @@ fn resolve_deferred_properties(
     // cannot be confused with another file's.
     let mut undetermined_methods: HashMap<(TypeName, String), (u32, DeclId, u32)> = HashMap::new();
     let mut undetermined_method_decls: Vec<UndeterminedMethod> = Vec::new();
+    let mut undetermined_methods_by_name: HashMap<(TypeName, String), Vec<UndeterminedMethod>> =
+        HashMap::new();
     let mut ambiguous_methods: std::collections::HashSet<(TypeName, String)> =
         std::collections::HashSet::new();
     for (internal, signature) in &table.classes {
@@ -11115,6 +11287,18 @@ fn resolve_deferred_properties(
                         && previous.receiver.is_some() == method.receiver.is_some()
                 })
                 .count();
+            undetermined_methods_by_name
+                .entry((*internal, method.name.clone()))
+                .or_default()
+                .push(UndeterminedMethod {
+                    owner: *internal,
+                    name: method.name.clone(),
+                    is_extension: method.receiver.is_some(),
+                    overload_index,
+                    file_index,
+                    declaration,
+                    method_index: method_index as u32,
+                });
             undetermined_method_decls.push(UndeterminedMethod {
                 owner: *internal,
                 name: method.name.clone(),
@@ -11182,6 +11366,8 @@ fn resolve_deferred_properties(
             by_name: &by_name,
             by_member: &by_member,
             functions: &undetermined_functions,
+            functions_by_name: &undetermined_functions_by_name,
+            methods_by_name: &undetermined_methods_by_name,
             methods: &undetermined_methods,
             source_order: &source_order,
         };
@@ -11199,6 +11385,8 @@ fn resolve_deferred_properties(
             by_name: &by_name,
             by_member: &by_member,
             functions: &undetermined_functions,
+            functions_by_name: &undetermined_functions_by_name,
+            methods_by_name: &undetermined_methods_by_name,
             methods: &undetermined_methods,
             source_order: &source_order,
         };
@@ -11218,8 +11406,11 @@ fn resolve_deferred_properties(
                             table,
                             EngineSeams {
                                 demand: &|name: &str| driver.demand_name_only(name),
-                                demand_member: &|receiver: Ty, name: &str| {
-                                    driver.demand_on_receiver(receiver, name)
+                                demand_call: &|name: &str, arg_tys: &[Ty]| {
+                                    driver.demand_call_overload(name, arg_tys)
+                                },
+                                demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
+                                    driver.demand_on_receiver(receiver, name, arg_tys)
                                 },
                                 rejects: &|_| false,
                             },
@@ -11254,8 +11445,11 @@ fn resolve_deferred_properties(
                                 table,
                                 EngineSeams {
                                     demand: &|name: &str| driver.demand_name_only(name),
-                                    demand_member: &|receiver: Ty, name: &str| {
-                                        driver.demand_on_receiver(receiver, name)
+                                    demand_call: &|name: &str, arg_tys: &[Ty]| {
+                                        driver.demand_call_overload(name, arg_tys)
+                                    },
+                                    demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
+                                        driver.demand_on_receiver(receiver, name, arg_tys)
                                     },
                                     rejects: &|_| false,
                                 },
@@ -11282,9 +11476,13 @@ fn resolve_deferred_properties(
                                     table,
                                     EngineSeams {
                                         demand: &|name: &str| driver.demand_name_only(name),
-                                        demand_member: &|receiver: Ty, name: &str| {
-                                            driver.demand_on_receiver(receiver, name)
+                                        demand_call: &|name: &str, arg_tys: &[Ty]| {
+                                            driver.demand_call_overload(name, arg_tys)
                                         },
+                                        demand_member:
+                                            &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
+                                                driver.demand_on_receiver(receiver, name, arg_tys)
+                                            },
                                         rejects: &|_| false,
                                     },
                                 ))
@@ -11419,6 +11617,35 @@ fn resolve_deferred_properties(
             }
         }
     }
+}
+
+/// The engine's member-demand hook: what `owner`'s `name` denotes, refined by a CALL's argument
+/// types (empty for a plain read, where there is nothing to choose between overloads with).
+type DemandMember<'a> = &'a dyn Fn(Ty, &str, &[Ty]) -> Option<Ty>;
+
+/// The engine's bare-name demand: what a module declaration spelled `name` denotes.
+type DemandName<'a> = &'a dyn Fn(&str) -> Option<Ty>;
+
+/// The same for a spelling that may be OVERLOADED, chosen by a call's argument types.
+type DemandCall<'a> = &'a dyn Fn(&str, &[Ty]) -> Option<Ty>;
+
+/// `KFunctionN<A, …, R>` as the function type `(A, …) -> R`.
+///
+/// A function reference types as the function type once its target's return is known; only while
+/// that return is undetermined does it stay a reflective `KFunctionN`. Property references
+/// (`KProperty1`) are untouched: they are not function types.
+fn natural_function_reference_ty(ty: Ty) -> Ty {
+    let Ty::Obj(name, args) = ty else {
+        return ty;
+    };
+    let rendered = name.render();
+    if !rendered.starts_with("kotlin/reflect/KFunction") || args.is_empty() {
+        return ty;
+    }
+    let Some((ret, params)) = args.split_last() else {
+        return ty;
+    };
+    Ty::fun(params.to_vec(), *ret)
 }
 
 /// One class member whose return the walk could not determine, addressed by DECLARATION.
@@ -11630,7 +11857,7 @@ fn infer_lit_ty_scoped(
     table: &SymbolTable,
 ) -> Ty {
     let _ = (class_names, src);
-    infer_lit_ty_scoped_on_demand(source, e, props, table, &|_| None, &|_, _| None)
+    infer_lit_ty_scoped_on_demand(source, e, props, table, &|_| None, &|_, _, _| None)
 }
 
 /// Whether `ty` mentions a value class anywhere inside it.
@@ -11875,9 +12102,12 @@ fn declaration_body_declines(file: &File, expression: ExprId, expr_types: &[Ty])
 #[derive(Clone, Copy)]
 struct EngineSeams<'a> {
     /// A name whose declaration has not been typed yet.
-    demand: &'a dyn Fn(&str) -> Option<Ty>,
-    /// The same, for a read through a receiver.
-    demand_member: &'a dyn Fn(Ty, &str) -> Option<Ty>,
+    demand: DemandName<'a>,
+    /// A spelling that may be OVERLOADED, chosen by the call's argument types.
+    demand_call: DemandCall<'a>,
+    /// The same, for a read through a receiver. The argument types are the CALL's, empty for a
+    /// plain read: a name alone cannot choose between overloads, and they can.
+    demand_member: DemandMember<'a>,
     /// A name this declaration may not read at all, by initialization order.
     rejects: &'a dyn Fn(&str) -> bool,
 }
@@ -11963,6 +12193,7 @@ fn infer_function_return_ty(
     let mut scratch = DiagSink::new();
     let mut checker = make_checker(file, file_index, None, table, &mut scratch);
     checker.demand_name = Some(engine.demand);
+    checker.demand_call = Some(engine.demand_call);
     checker.demand_member = Some(engine.demand_member);
     checker.inference_only = true;
     checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
@@ -12091,6 +12322,7 @@ fn infer_class_member_ty(
 ) -> Ty {
     let EngineSeams {
         demand,
+        demand_call,
         demand_member,
         rejects,
     } = engine;
@@ -12100,6 +12332,7 @@ fn infer_class_member_ty(
     let mut scratch = DiagSink::new();
     let mut checker = make_checker(file, file_index, None, table, &mut scratch);
     checker.demand_name = Some(demand);
+    checker.demand_call = Some(demand_call);
     checker.demand_member = Some(demand_member);
     checker.demand_rejects = Some(rejects);
     checker.inference_only = true;
@@ -12202,6 +12435,7 @@ fn infer_member_ext_property_ty(
     let mut scratch = DiagSink::new();
     let mut checker = make_checker(file, file_index, None, table, &mut scratch);
     checker.demand_name = Some(engine.demand);
+    checker.demand_call = Some(engine.demand_call);
     checker.demand_member = Some(engine.demand_member);
     checker.demand_rejects = Some(engine.rejects);
     checker.inference_only = true;
@@ -12309,6 +12543,7 @@ fn infer_method_return_ty(
     let mut scratch = DiagSink::new();
     let mut checker = make_checker(file, file_index, None, table, &mut scratch);
     checker.demand_name = Some(engine.demand);
+    checker.demand_call = Some(engine.demand_call);
     checker.demand_member = Some(engine.demand_member);
     checker.demand_rejects = Some(engine.rejects);
     checker.inference_only = true;
@@ -12444,6 +12679,7 @@ fn infer_declaration_ty(
 ) -> Ty {
     let EngineSeams {
         demand,
+        demand_call,
         demand_member,
         rejects,
     } = engine;
@@ -12453,6 +12689,7 @@ fn infer_declaration_ty(
     let mut scratch = DiagSink::new();
     let mut checker = make_checker(file, file_index, None, table, &mut scratch);
     checker.demand_name = Some(&demand);
+    checker.demand_call = Some(&demand_call);
     checker.demand_member = Some(&demand_member);
     checker.demand_rejects = Some(&rejects);
     checker.inference_only = true;
@@ -12490,7 +12727,7 @@ fn infer_declaration_ty(
                 .get(receiver.0 as usize)
                 .copied()
                 .filter(|receiver| *receiver != Ty::Error && !receiver.mentions_pending())
-                .and_then(|owner| (engine.demand_member)(owner, name))
+                .and_then(|owner| (engine.demand_member)(owner, name, &[]))
                 .filter(|answered| !answered.mentions_pending())
                 .unwrap_or(inferred),
             _ => inferred,
@@ -12525,7 +12762,7 @@ fn infer_declaration_ty(
                     .map(ClassSig::internal_name)
                     .map(Ty::obj_name)
             })
-            .and_then(|owner| (engine.demand_member)(owner, name))
+            .and_then(|owner| (engine.demand_member)(owner, name, &[]))
             .filter(|answered| !answered.mentions_pending())
             .map_or(inferred, |answered| {
                 crate::types::ty_replace_pending(inferred, answered)
@@ -12576,7 +12813,7 @@ fn infer_lit_ty_scoped_on_demand(
     props: &[(String, Ty, bool)],
     table: &SymbolTable,
     demand: &dyn Fn(&str) -> Option<Ty>,
-    demand_member: &dyn Fn(Ty, &str) -> Option<Ty>,
+    demand_member: DemandMember<'_>,
 ) -> Ty {
     let InferenceSource(file, file_index, implicit_classifier, implicit_value, implicit_instance) =
         source;
@@ -16579,6 +16816,7 @@ fn make_checker<'a>(
         file,
         syms,
         demand_name: None,
+        demand_call: None,
         demand_member: None,
         demand_rejects: None,
         inference_only: false,
@@ -18514,10 +18752,14 @@ struct Checker<'a> {
     /// declaration finds a placeholder in the symbol table, and reading the placeholder as the
     /// answer declines a program kotlinc accepts, so it is asked for here instead. `None` for
     /// ordinary file checking, where every declaration already has its type.
-    demand_name: Option<&'a dyn Fn(&str) -> Option<Ty>>,
+    demand_name: Option<DemandName<'a>>,
+    /// The same, for a spelling that may be OVERLOADED. A name alone cannot choose between
+    /// overloads, so [`Checker::demand_name`] declines one; the call's argument types can, and are
+    /// what the call site has in hand.
+    demand_call: Option<DemandCall<'a>>,
     /// The same seam for a read THROUGH a receiver, which resolves against the member records
     /// rather than by name.
-    demand_member: Option<&'a dyn Fn(Ty, &str) -> Option<Ty>>,
+    demand_member: Option<DemandMember<'a>>,
     /// Whether this checker exists only to determine ONE declaration's type, rather than to check a
     /// file.
     inference_only: bool,
@@ -35962,7 +36204,16 @@ impl<'a> Checker<'a> {
                 // walk could not type. Ask for that declaration rather than taking the marker as
                 // the call's type, which would publish it into whatever this call initializes.
                 if called == Ty::Pending {
-                    if let Some(ty) = self.demand_call_target(scope, callee) {
+                    let arg_tys = args
+                        .iter()
+                        .map(|&argument| {
+                            self.expr_types
+                                .get(argument.0 as usize)
+                                .copied()
+                                .unwrap_or(Ty::Error)
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(ty) = self.demand_call_target(scope, callee, &arg_tys) {
                         return self.set(e, ty);
                     }
                 }
@@ -35992,7 +36243,33 @@ impl<'a> Checker<'a> {
                 return self.expr_inner_when(scope, e, expected, value_required, subject, arms)
             }
             Expr::CallableRef { receiver, name } => {
-                return self.expr_inner_callable_ref(scope, e, expected, receiver, name)
+                let referenced =
+                    self.expr_inner_callable_ref(scope, e, expected, receiver, name.clone());
+                // The reference's type is built FROM the target's, so an undetermined target makes
+                // the reference undetermined — `(::foo).let { it(1, 2) }` then types as the marker
+                // and the declaration that owns it settles to `Unit`. The reference spells its own
+                // target: ask for that declaration and put the answer where the marker sits.
+                if referenced.mentions_pending() {
+                    if let Some(answered) = self.demand_callable_reference_target(scope, e) {
+                        // The reference's FUNCTION type is recorded beside the expression table —
+                        // it is what a call THROUGH the reference reads — so the answer goes into
+                        // both, or the call resolves against the marker it was meant to replace.
+                        if let Some(function) = self.callable_reference_types.get(&e).copied() {
+                            self.callable_reference_types
+                                .insert(e, crate::types::ty_replace_pending(function, answered));
+                        }
+                        let answered = crate::types::ty_replace_pending(referenced, answered);
+                        // A FUNCTION reference whose target's return was undetermined is typed
+                        // `KFunctionN<…>`; with the return in hand the reference types as the
+                        // function type itself, which is what every consumer of a function-valued
+                        // declaration reads. Normalize to the shape the determined path produces,
+                        // so that the answer does not also change the reference's KIND.
+                        let answered = natural_function_reference_ty(answered);
+                        self.expr_types[e.0 as usize] = answered;
+                        return answered;
+                    }
+                }
+                return referenced;
             }
         };
         self.set(e, t)
@@ -37021,6 +37298,67 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
+    /// Ask the engine for the declaration a CALLABLE REFERENCE names.
+    ///
+    /// The reference spells its target directly — `::foo` a module declaration, `C::foo` a member
+    /// of the classifier it names, `value::foo` a member of the receiver's type — so the same three
+    /// demands a call uses answer it. The answer replaces the marker inside the reference's type
+    /// rather than becoming that type: `KFunction2<Int, Int, R>` keeps its shape and gains its `R`.
+    fn demand_callable_reference_target(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        reference: ExprId,
+    ) -> Option<Ty> {
+        let determined = |answered: &Ty| *answered != Ty::Error && !answered.mentions_pending();
+        let Expr::CallableRef { receiver, name } = self.file.expr(reference) else {
+            return None;
+        };
+        let (receiver, name) = (*receiver, name.clone());
+        let Some(receiver) = receiver else {
+            // `::foo` — a module declaration, or a member of an enclosing `this`.
+            if let Some(ty) = self
+                .demand_name
+                .and_then(|demand| demand(&name))
+                .filter(determined)
+            {
+                return Some(ty);
+            }
+            let demand_member = self.demand_member?;
+            let tower: Vec<Ty> = self
+                .this_labels
+                .iter()
+                .rev()
+                .map(|(_, ty, _)| *ty)
+                .collect();
+            return tower.into_iter().find_map(|dispatch| {
+                (dispatch != Ty::Error && !dispatch.mentions_pending())
+                    .then(|| demand_member(dispatch.non_null(), &name, &[]))
+                    .flatten()
+                    .filter(determined)
+            });
+        };
+        let demand_member = self.demand_member?;
+        // A BOUND reference names its owner with the receiver EXPRESSION's type; an UNBOUND one
+        // spells a classifier, which is not a value and has no expression type — its own spelling
+        // is the owner.
+        let owner = self
+            .expr_types
+            .get(receiver.0 as usize)
+            .copied()
+            .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
+            .or_else(|| match self.file.expr(receiver) {
+                Expr::Name(spelling) => {
+                    let spelling = spelling.clone();
+                    self.same_package_class(&spelling)
+                        .map(ClassSig::internal_name)
+                        .map(Ty::obj_name)
+                }
+                _ => None,
+            })?;
+        let _ = scope;
+        demand_member(owner.non_null(), &name, &[]).filter(determined)
+    }
+
     /// Ask the engine for the declaration a CALL names, when the call's own type came back
     /// undetermined.
     ///
@@ -37035,12 +37373,17 @@ impl<'a> Checker<'a> {
     ///
     /// A rung or a receiver that answers `Error` or the marker has NOT answered: taking that would
     /// type the call wrongly AND stop the search before a later source could answer.
-    fn demand_call_target(&mut self, scope: &CheckerScope<'_>, callee: ExprId) -> Option<Ty> {
+    fn demand_call_target(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        callee: ExprId,
+        arg_tys: &[Ty],
+    ) -> Option<Ty> {
         let determined = |answered: &Ty| *answered != Ty::Error && !answered.mentions_pending();
         let demand_member = self.demand_member?;
-        let on_receiver = |receiver: Ty, name: &str| {
+        let on_receiver = |receiver: Ty, name: &str, arg_tys: &[Ty]| {
             (receiver != Ty::Error && !receiver.mentions_pending())
-                .then(|| demand_member(receiver.non_null(), name))
+                .then(|| demand_member(receiver.non_null(), name, arg_tys))
                 .flatten()
                 .filter(determined)
         };
@@ -37056,9 +37399,12 @@ impl<'a> Checker<'a> {
         match self.file.expr(callee) {
             Expr::Name(name) => {
                 let name = name.clone();
+                // The overload-aware demand subsumes the plain one: it tries the by-spelling
+                // index first and only then chooses among overloads by argument type.
                 if let Some(ty) = self
-                    .demand_name
-                    .and_then(|demand| demand(&name))
+                    .demand_call
+                    .and_then(|demand| demand(&name, arg_tys))
+                    .or_else(|| self.demand_name.and_then(|demand| demand(&name)))
                     .filter(determined)
                 {
                     return Some(ty);
@@ -37071,17 +37417,17 @@ impl<'a> Checker<'a> {
                     .collect();
                 if let Some(ty) = tower
                     .into_iter()
-                    .find_map(|receiver| on_receiver(receiver, &name))
+                    .find_map(|receiver| on_receiver(receiver, &name, arg_tys))
                 {
                     return Some(ty);
                 }
                 // `method(i)` where `method` is a VALUE with an `invoke` operator.
-                on_receiver(callee_ty()?, "invoke")
+                on_receiver(callee_ty()?, "invoke", arg_tys)
             }
             Expr::Member { receiver, name } => {
                 let (receiver, name) = (*receiver, name.clone());
                 let receiver_ty = self.expr_types.get(receiver.0 as usize).copied()?;
-                if let Some(ty) = on_receiver(receiver_ty, &name) {
+                if let Some(ty) = on_receiver(receiver_ty, &name, arg_tys) {
                     return Some(ty);
                 }
                 // A MEMBER EXTENSION is declared on an enclosing class and called on another
@@ -37095,9 +37441,9 @@ impl<'a> Checker<'a> {
                     .collect();
                 tower
                     .into_iter()
-                    .find_map(|dispatch| on_receiver(dispatch, &name))
+                    .find_map(|dispatch| on_receiver(dispatch, &name, arg_tys))
             }
-            _ => on_receiver(callee_ty()?, "invoke"),
+            _ => on_receiver(callee_ty()?, "invoke", arg_tys),
         }
     }
 
@@ -37301,7 +37647,7 @@ impl<'a> Checker<'a> {
             // everything built on this call and the enclosing declaration settles to `Unit`.
             let result = if result.mentions_pending() {
                 self.demand_member
-                    .and_then(|demand| demand(rt.non_null(), &name))
+                    .and_then(|demand| demand(rt.non_null(), &name, &[]))
                     .filter(|answered| *answered != Ty::Error && !answered.mentions_pending())
                     .unwrap_or(result)
             } else {
@@ -37541,7 +37887,7 @@ impl<'a> Checker<'a> {
                             if ty.mentions_pending() {
                                 if let Some(answered) = self
                                     .demand_member
-                                    .and_then(|demand| demand(receiver.ty, &n))
+                                    .and_then(|demand| demand(receiver.ty, &n, &[]))
                                     .filter(|answered| !answered.mentions_pending())
                                 {
                                     return self.set(e, answered);
@@ -38189,7 +38535,7 @@ impl<'a> Checker<'a> {
             // would fire on every probe of every implicit receiver.
             let declared = if declared == Ty::Pending || declared == Ty::Error {
                 self.demand_member
-                    .and_then(|demand| demand(rt, &name))
+                    .and_then(|demand| demand(rt, &name, &[]))
                     .map_or(declared, |ty| self.set(e, ty))
             } else {
                 declared
@@ -40917,7 +41263,7 @@ impl<'a> Checker<'a> {
         let ret = match ret.mentions_pending() {
             true => self
                 .demand_member
-                .and_then(|demand| demand(selected.receiver, &selected.member.name))
+                .and_then(|demand| demand(selected.receiver, &selected.member.name, &[]))
                 .filter(|answered| !answered.mentions_pending())
                 .unwrap_or(ret),
             false => ret,
@@ -44636,7 +44982,7 @@ impl<'a> Checker<'a> {
                 self.lookup_prop_name(receiver.ty, name)
                     .is_some_and(|property| property.0 == Ty::Pending)
             })
-            .and_then(|demand| demand(receiver.ty, name))
+            .and_then(|demand| demand(receiver.ty, name, &[]))
         {
             return Some(self.set(expression, resolved));
         }
@@ -46817,7 +47163,7 @@ impl<'a> Checker<'a> {
         let ret = match ret.mentions_pending() {
             true => self
                 .demand_member
-                .and_then(|demand| demand(rt, name))
+                .and_then(|demand| demand(rt, name, &[]))
                 .filter(|answered| !answered.mentions_pending())
                 // The engine answers with the DECLARED return, which for a generic member is the
                 // class's own formal — `fun get() = value` is `T`, not `String`. The receiver's type

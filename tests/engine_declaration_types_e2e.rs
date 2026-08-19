@@ -268,3 +268,58 @@ fn a_member_extension_is_demanded_through_the_declaring_class() {
         "engine-member-extension-through-declarer",
     );
 }
+
+/// OVERLOADED MEMBERS with inferred returns, one calling the other.
+///
+/// A name alone cannot choose between overloads, so the by-spelling index drops them and both
+/// settled to `Unit`. The CALL can choose — it knows its argument types — and must never choose a
+/// candidate that is already being computed: `foo()` asking for `foo` with no arguments would pick
+/// itself, closing a cycle that is an artefact of the choice and declining it for good.
+#[test]
+fn overloaded_members_calling_each_other() {
+    common::expect_box_ok_with_stdlib(
+        "class Holder {\n\
+         \x20 private fun pick() = pick(1)\n\
+         \x20 private fun pick(i: Int) = \"OK\"\n\
+         \x20 fun read() = pick()\n\
+         }\n\
+         fun box(): String = Holder().read()\n",
+        "engine-overloaded-members",
+    );
+}
+
+/// OVERLOADED module functions with inferred returns, called from another inferred body.
+#[test]
+fn overloaded_module_functions_called_from_an_inferred_body() {
+    common::expect_box_ok_with_stdlib(
+        "fun render(x: Int) = \"int\"\n\
+         fun render(x: String) = \"string\"\n\
+         fun useInt(x: Int) = render(x)\n\
+         fun useString(x: String) = render(x)\n\
+         fun box(): String =\n\
+         \x20 if (useInt(1) == \"int\" && useString(\"s\") == \"string\") \"OK\" else \"FAIL\"\n",
+        "engine-overloaded-module-functions",
+    );
+}
+
+/// A CALLABLE REFERENCE whose target's return is not determined yet.
+///
+/// The reference's type is built from the target's, so the marker travels into everything built on
+/// it. The reference spells its own target, so the same demands a call uses answer it — and a
+/// function reference types as the function type once the return is in hand, which is the shape a
+/// determined target produces and what every consumer of a function-valued declaration reads.
+#[test]
+fn a_callable_reference_demands_its_target() {
+    common::expect_box_ok_with_stdlib(
+        "class Owner {\n\
+         \x20 fun first() = 111\n\
+         \x20 fun second(n: Int) = n\n\
+         }\n\
+         fun plain(o: Int, k: Int) = o + k\n\
+         fun Owner.combine() = (Owner::first).let { it(this) } + (Owner::second).let { it(this, 222) }\n\
+         fun useModule() = (::plain).let { it(111, 222) }\n\
+         fun box(): String =\n\
+         \x20 if (Owner().combine() == 333 && useModule() == 333) \"OK\" else \"FAIL\"\n",
+        "engine-callable-reference-demand",
+    );
+}

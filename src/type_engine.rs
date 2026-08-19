@@ -158,6 +158,16 @@ impl TypeEngine {
         Self::default()
     }
 
+    /// Whether `key` is on the computing stack right now.
+    ///
+    /// A demand that CHOOSES between candidates must not choose one that is already being computed:
+    /// asking for it closes a cycle that is an artefact of the choice, not of the program, and the
+    /// decline is memoised for good. `fun foo() = foo(1)` beside `fun foo(i: Int) = "O"` is the
+    /// case — an argument-less demand arriving while `foo()` is in flight would pick `foo()`.
+    pub fn is_computing(&self, key: DeclKey) -> bool {
+        matches!(self.memo.borrow().get(&key), Some(State::Computing))
+    }
+
     /// The type of `key`, computing it at most once.
     ///
     /// `compute` performs the jump: it reconstructs the declaration's resolution context and runs the
