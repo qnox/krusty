@@ -642,6 +642,58 @@ fn package_private_java_classifier_constructor_diagnostics_match_kotlinc() {
 }
 
 #[test]
+fn package_private_java_static_field_diagnostics_match_kotlinc() {
+    let Some((java_dir, _)) = common::javac_compile(
+        &[(
+            "p/Pub.java".to_string(),
+            "package p; public class Pub { static int count = 7; }".to_string(),
+        )],
+        &[],
+    ) else {
+        return;
+    };
+    let result = common::compiler_diagnostics(
+        &[
+            (
+                "ClassifierImportStaticField.kt",
+                "package q\nimport p.Pub\nfun classifierImport(): Int = Pub.count\n",
+            ),
+            (
+                "QualifiedStaticField.kt",
+                "package q\nfun qualified(): Int = p.Pub.count\n",
+            ),
+        ],
+        std::slice::from_ref(&java_dir),
+    );
+    if let Some(root) = java_dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let message =
+        "cannot access 'static field count: Int': it is package-private in 'p.Pub'.".to_string();
+    let expected = vec![
+        ObservedError {
+            file: "ClassifierImportStaticField.kt".to_string(),
+            line: 3,
+            column: 35,
+            message: message.clone(),
+        },
+        ObservedError {
+            file: "QualifiedStaticField.kt".to_string(),
+            line: 2,
+            column: 30,
+            message,
+        },
+    ];
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+    assert_eq!(krusty_errors.len(), 2);
+    assert_eq!(kotlinc_errors.len(), 2);
+}
+
+#[test]
 fn package_private_java_classifier_public_constructor_diagnostics_match_kotlinc() {
     let Some((java_dir, _)) = common::javac_compile(
         &[(

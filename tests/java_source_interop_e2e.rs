@@ -218,6 +218,18 @@ fn package_private_java_static_rejected_cross_package() {
     );
 }
 
+#[test]
+fn package_private_java_static_field_read_within_same_package() {
+    run_mixed(
+        &[(
+            "p/Pub.java",
+            "package p; public class Pub { static int count = 7; }",
+        )],
+        "package p\n\
+         fun box(): String = if (Pub.count + p.Pub.count == 14) \"OK\" else \"FAIL\"\n",
+    );
+}
+
 /// The CIRCULAR direction (slice 2, Kotlin-first): Java extends a Kotlin class, Kotlin calls the
 /// Java class. Pipeline: signature stubs from the Java source (`krusty::jvm::java_stub`, no
 /// javac) → krusty compiles Kotlin against the stub dir → real javac compiles the Java against
