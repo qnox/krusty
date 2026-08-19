@@ -2984,6 +2984,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java_source_interop_e2e::package_private_java_static_field_read_within_same_package`,
   `java_source_interop_e2e::package_private_java_static_field_rejected_cross_package`.
 
+- **Signature inference binds a callee type parameter from a lambda argument's RESULT.** When a type
+  parameter occurs only in the lambda's return position (`lazy { 1 }`, `make { 1 }`), signature
+  inference checks the lambda under the substituted parameter shape and unifies its result. The
+  inferred property type therefore retains the binding. Test: `tests/lambda_result_inference_e2e.rs`.
+
 - **Generic classpath extension properties retain Kotlin return semantics.** The metadata decoder
   preserves property formals, receiver, return type, bounds, and nullability. Resolution specializes
   that logical type from the receiver, while lowering bridges the erased getter result. Test:
