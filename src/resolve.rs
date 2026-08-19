@@ -3863,33 +3863,6 @@ impl SymbolTable {
         hierarchy
     }
 
-    /// Applied source declarations in breadth-first inheritance order. Consumers that select a
-    /// declaration (rather than merely ask whether an ancestor exists) use this so the nearest
-    /// override masks an equally shaped declaration farther up the graph.
-    pub(crate) fn applied_source_hierarchy_bfs(&self, root: Ty) -> Vec<(TypeName, Ty, usize)> {
-        let Some(internal) = root.obj_internal() else {
-            return Vec::new();
-        };
-        let mut pending = std::collections::VecDeque::from([(internal, root, 0)]);
-        let mut seen = std::collections::HashSet::new();
-        let mut hierarchy = Vec::new();
-        while let Some((owner, applied, depth)) = pending.pop_front() {
-            if !seen.insert(owner) {
-                continue;
-            }
-            hierarchy.push((owner, applied, depth));
-            if let Some(class) = self.class_by_type_name(owner) {
-                let bindings = class.type_parameter_bindings(applied);
-                pending.extend(
-                    self.applied_source_parents(class, bindings)
-                        .into_iter()
-                        .map(|(parent, applied)| (parent, applied, depth + 1)),
-                );
-            }
-        }
-        hierarchy
-    }
-
     pub(crate) fn applied_hierarchy(&self, root: Ty) -> Vec<(TypeName, Ty, usize)> {
         let Some(internal) = root.obj_internal() else {
             return Vec::new();
@@ -54334,7 +54307,7 @@ val result = object { fun value(): String = captured }
             members: Vec::new(),
             companion: Vec::new(),
             constants: HashMap::new(),
-            sam_method: None,
+            sam_eligible: false,
             callable_signature: None,
             companion_object: None,
             value_companion_fns: Vec::new(),
@@ -57003,7 +56976,7 @@ fun box(): String {
                     members: vec![],
                     companion,
                     constants: HashMap::new(),
-                    sam_method: None,
+                    sam_eligible: false,
                     callable_signature: None,
                     companion_object: None,
                     value_companion_fns: vec![],

@@ -1,10 +1,4 @@
-//! Functional-interface adaptation for lambda arguments passed to Kotlin-declared functions.
-//!
-//! The semantic rule is independent of where the Kotlin declaration was loaded: current-file,
-//! sibling-module, and dependency candidates all expose parameters through the same callable model.
-//! These tests therefore cover both source and compiled-provider boundaries, overload preference,
-//! ambiguity, and negative controls. The box runs verify that accepted lambdas are not merely typed;
-//! they execute through the selected interface method and therefore exercise lowering as well.
+//! Functional-interface conversion through source and dependency callable shapes.
 use super::common;
 
 fn diagnostics(src: &str) -> Vec<String> {
@@ -191,11 +185,25 @@ fn lambda_against_non_sam_java_interface_still_fails() {
          \x20 return \"OK\"\n\
          }\n",
     );
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.contains("argument type mismatch") && d.contains("List")),
-        "expected argument type mismatch mentioning List, got {diags:?}"
+    assert_eq!(
+        diags,
+        ["argument type mismatch: actual type is '() -> Unit', but 'List<String>' was expected."]
+    );
+}
+
+#[test]
+fn mapped_kotlin_interface_is_not_a_sam() {
+    const SOURCE: &str = "fun take(value: CharSequence) {}\n\
+        fun use() { take { } }\n";
+    let (reference_code, _) =
+        common::kotlinc_source_result("MappedKotlinInterfaceReference", SOURCE);
+    assert_ne!(
+        reference_code, 0,
+        "kotlinc accepted a lambda as CharSequence"
+    );
+    assert_eq!(
+        diagnostics(SOURCE),
+        ["argument type mismatch: actual type is '() -> Unit', but 'CharSequence' was expected."]
     );
 }
 
@@ -211,11 +219,9 @@ fn lambda_against_kotlin_plain_interface_still_fails() {
          \x20 return \"OK\"\n\
          }\n",
     );
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.contains("argument type mismatch") && d.contains("Plain")),
-        "expected argument type mismatch mentioning Plain, got {diags:?}"
+    assert_eq!(
+        diags,
+        ["argument type mismatch: actual type is '() -> Unit', but 'Plain' was expected."]
     );
 }
 
@@ -247,14 +253,7 @@ fn function_value_into_java_sam_param_converts() {
     common::expect_box_ok_with_stdlib(SOURCE, "function_value_java_sam");
 }
 
-/// Negative pin (kotlinc-pinned): a lambda matched against TWO same-arity Java-SAM overloads of
-/// one top-level name fits both through SAM conversion, so the call is an overload resolution
-/// ambiguity — krusty reports it with each candidate's source display.
-///
-/// Documented divergence: with a 1-parameter lambda (`two { it.length; "y" }`) krusty's probe
-/// still sees both SAMs as arity-fitting and accepts one, where kotlinc is ambiguous too; an
-/// implicit-`it` lambda's arity cannot disqualify the 0-parameter `Runnable` overload the way an
-/// explicit 1-parameter SAM signature check would. krusty accepts more here.
+/// Two same-arity SAM overloads remain ambiguous and list both exact candidates.
 #[test]
 fn two_sam_overload_top_level_lambda_is_ambiguous() {
     let diags = diagnostics(
@@ -263,11 +262,9 @@ fn two_sam_overload_top_level_lambda_is_ambiguous() {
          fun two(c: Consumer<String>): String = \"consumer\"\n\
          fun box(): String = two { }\n",
     );
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.contains("overload resolution ambiguity")),
-        "expected overload resolution ambiguity, got {diags:?}"
+    assert_eq!(
+        diags,
+        ["overload resolution ambiguity between candidates:\nfun two(r: java.lang.Runnable): String\nfun two(c: java.util.function.Consumer<String>): String"]
     );
 }
 
@@ -288,13 +285,9 @@ fn two_sam_overload_member_lambda_is_ambiguous() {
         "kotlinc accepted fixture: {reference_stderr}"
     );
     let diags = diagnostics(SOURCE);
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.contains("overload resolution ambiguity")
-                && d.contains("Consumer")
-                && d.contains("Runnable")),
-        "expected member overload ambiguity listing Consumer and Runnable, got {diags:?}"
+    assert_eq!(
+        diags,
+        ["overload resolution ambiguity between candidates:\nfun perform(c: java.util.function.Consumer<String>): String\nfun perform(r: java.lang.Runnable): String"]
     );
 }
 
@@ -351,8 +344,157 @@ fn destructured_lambda_does_not_fit_a_two_parameter_sam() {
         "kotlinc accepted fixture: {reference_stderr}"
     );
     let diags = diagnostics(SOURCE);
-    assert!(
-        diags.iter().any(|d| d.contains("argument type mismatch")),
-        "expected argument arity mismatch, got {diags:?}"
+    assert_eq!(
+        diags,
+        [
+            "krusty: cannot destructure this type (no operator 'component1')",
+            "krusty: cannot destructure this type (no operator 'component2')",
+            "argument type mismatch: actual type is '(Any) -> Unit', but 'java.util.function.BiConsumer<String, Int>' was expected.",
+        ]
     );
+}
+
+/// `UnaryOperator<T>` inherits `Function<T, T>.apply`; both parameter and result specialize to `T`.
+#[test]
+fn inherited_sam_method_substitutes_the_interface_type_argument() {
+    const SRC: &str = "fun applyTwice(u: java.util.function.UnaryOperator<Int>, x: Int): Int = u.apply(u.apply(x))\n\
+        fun box(): String {\n\
+        \x20 val a = applyTwice({ it + 1 }, 40)\n\
+        \x20 val b = applyTwice({ v -> v * 2 }, 3)\n\
+        \x20 return if (a == 42 && b == 12) \"OK\" else \"fail:$a:$b\"\n\
+        }\n";
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("InheritedJdkSamReference", SRC);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected fixture: {reference_stderr}"
+    );
+    common::expect_box_ok_with_stdlib(SRC, "sam_inherited_substitution");
+}
+
+/// User Java hierarchies cover multi-hop, diamond, and reordered generic substitution.
+#[test]
+fn user_defined_sam_hierarchy_substitutes_through_the_supertype() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let java = [
+        (
+            "Fn.java".to_string(),
+            "package fixtures;\npublic interface Fn<T, R> { R apply(T t); }\n".to_string(),
+        ),
+        (
+            "Mid.java".to_string(),
+            "package fixtures;\npublic interface Mid<T> extends Fn<T, T> { }\n".to_string(),
+        ),
+        (
+            "Op.java".to_string(),
+            "package fixtures;\npublic interface Op<T> extends Mid<T> { }\n".to_string(),
+        ),
+        (
+            "Left.java".to_string(),
+            "package fixtures;\npublic interface Left<T> extends Fn<T, T> { }\n".to_string(),
+        ),
+        (
+            "Right.java".to_string(),
+            "package fixtures;\npublic interface Right<T> extends Fn<T, T> { }\n".to_string(),
+        ),
+        (
+            "Diamond.java".to_string(),
+            "package fixtures;\npublic interface Diamond<T> extends Left<T>, Right<T> { }\n"
+                .to_string(),
+        ),
+        (
+            "Reverse.java".to_string(),
+            "package fixtures;\npublic interface Reverse<A, B> extends Fn<B, A> { }\n".to_string(),
+        ),
+        (
+            "First.java".to_string(),
+            "package fixtures;\npublic interface First { void first(); }\n".to_string(),
+        ),
+        (
+            "Second.java".to_string(),
+            "package fixtures;\npublic interface Second { void second(); }\n".to_string(),
+        ),
+        (
+            "Both.java".to_string(),
+            "package fixtures;\npublic interface Both extends First, Second { }\n".to_string(),
+        ),
+        (
+            "Base.java".to_string(),
+            "package fixtures;\npublic interface Base { void run(); }\n".to_string(),
+        ),
+        (
+            "NoSam.java".to_string(),
+            "package fixtures;\npublic interface NoSam extends Base { default void run() {} }\n"
+                .to_string(),
+        ),
+    ];
+    let (classes, _) = common::javac_compile(&java, &[])
+        .expect("javac is required for the inherited Java SAM regression");
+    let root = classes.parent().map(std::path::Path::to_path_buf);
+    let classpath = vec![classes, stdlib];
+    const REJECTED: &str = "fun takeBoth(value: fixtures.Both) {}\n\
+         fun takeNoSam(value: fixtures.NoSam) {}\n\
+         fun use() {\n\
+         \x20 takeBoth { }\n\
+         \x20 takeNoSam { }\n\
+         }\n";
+    const ACCEPTED: &str = "fun runOp(o: fixtures.Op<Int>, x: Int): Int = o.apply(x)\n\
+         fun runDiamond(o: fixtures.Diamond<Int>, x: Int): Int = o.apply(x)\n\
+         fun runReverse(o: fixtures.Reverse<String, Int>, x: Int): String = o.apply(x)\n\
+         fun box(): String {\n\
+         \x20 val r = runOp({ it * 3 }, 5)\n\
+         \x20 val s = runOp({ v -> v + 10 }, 5)\n\
+         \x20 val d = runDiamond({ it + 1 }, 4)\n\
+         \x20 val reversed = runReverse({ it.toString() }, 7)\n\
+         \x20 return if (r == 15 && s == 15 && d == 5 && reversed == \"7\") \"OK\" else \"fail:$r:$s:$d:$reversed\"\n\
+         }\n";
+    let kotlinc_args = vec!["-classpath".to_string(), classpath[0].display().to_string()];
+    let (accepted_code, accepted_stderr) = common::kotlinc_source_result_with_args(
+        "InheritedUserSamReference",
+        ACCEPTED,
+        &kotlinc_args,
+    );
+    assert_eq!(
+        accepted_code, 0,
+        "kotlinc rejected fixture: {accepted_stderr}"
+    );
+    let (rejected_code, _) = common::kotlinc_source_result_with_args(
+        "NonSamHierarchyReference",
+        REJECTED,
+        &kotlinc_args,
+    );
+    assert_ne!(rejected_code, 0, "kotlinc accepted non-SAM fixtures");
+    let rejected = common::front_end_diagnostics(REJECTED, &classpath, Some(&jdk));
+    assert_eq!(
+        rejected,
+        [
+            "argument type mismatch: actual type is '() -> Unit', but 'fixtures.Both' was expected.",
+            "argument type mismatch: actual type is '() -> Unit', but 'fixtures.NoSam' was expected.",
+        ]
+    );
+    let output = common::compile_and_run_box(ACCEPTED, "Main", &classpath, Some(&jdk));
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(output.as_deref(), Some("OK"));
+}
+
+#[test]
+fn source_fun_interface_inherits_its_generic_sam_shape() {
+    const SOURCE: &str = "fun interface Fn<T, R> { fun apply(value: T): R }\n\
+        fun interface Op<T> : Fn<T, T>\n\
+        fun runOp(op: Op<Int>, value: Int): Int = op.apply(value)\n\
+        fun box(): String {\n\
+        \x20 val result = runOp({ it + 2 }, 40)\n\
+        \x20 return if (result == 42) \"OK\" else \"result:$result\"\n\
+        }\n";
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("InheritedSourceSamReference", SOURCE);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected fixture: {reference_stderr}"
+    );
+    assert_eq!(diagnostics(SOURCE), Vec::<String>::new());
+    common::expect_box_ok_with_stdlib(SOURCE, "source_inherited_sam");
 }

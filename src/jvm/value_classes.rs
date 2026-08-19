@@ -1264,7 +1264,7 @@ pub fn lower_value_classes(
         for expression in &mut ir.exprs {
             let IrExpr::Lambda {
                 impl_fn,
-                sam: Some((_, method, _)),
+                sam: Some((_, method, descriptor)),
                 ..
             } = expression
             else {
@@ -1274,6 +1274,16 @@ pub fn lower_value_classes(
                 continue;
             };
             *method = vc_mangle_once(method, params, ret, &callable_under, false, false);
+            if descriptor.is_none() {
+                let physical_params = params
+                    .iter()
+                    .map(|parameter| erase(parameter, &under))
+                    .collect::<Vec<_>>();
+                *descriptor = Some(crate::jvm::names::method_descriptor(
+                    &physical_params,
+                    erase(ret, &under),
+                ));
+            }
         }
     }
     // Rewrite cross-file calls with value-class signatures to their JVM names and types.
