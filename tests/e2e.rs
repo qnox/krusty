@@ -1092,6 +1092,8 @@ mod resolve_reject_coverage_e2e;
 mod resolver_errors_coverage_e2e;
 #[path = "resolver_regression_e2e.rs"]
 mod resolver_regression_e2e;
+#[path = "result_companion_targs_e2e.rs"]
+mod result_companion_targs_e2e;
 #[path = "result_e2e.rs"]
 mod result_e2e;
 #[path = "run_noreceiver_e2e.rs"]
