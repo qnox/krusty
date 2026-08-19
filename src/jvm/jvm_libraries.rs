@@ -1045,6 +1045,7 @@ impl JvmLibraries {
                 receiver_rank: 0,
                 source_key: None,
                 source_member: None,
+                accessor_derived: false,
             });
         }
     }
@@ -3816,6 +3817,7 @@ impl JvmLibraries {
                     receiver_rank: 0,
                     source_key: None,
                     source_member: None,
+                    accessor_derived: false,
                 });
             }
         }
@@ -3852,6 +3854,7 @@ impl JvmLibraries {
                     receiver_rank: 0,
                     source_key: None,
                     source_member: None,
+                    accessor_derived: false,
                 });
             }
         }
@@ -3918,6 +3921,9 @@ impl JvmLibraries {
                         receiver_rank: 0,
                         source_key: None,
                         source_member: None,
+                        // Derived from Java bean accessors, not a declared property: a same-named
+                        // instance field selected by the hierarchy walk overrides it when accessible.
+                        accessor_derived: true,
                     });
                 }
             }
@@ -4420,6 +4426,7 @@ impl JvmLibraries {
                     receiver_rank: 0,
                     source_key: None,
                     source_member: None,
+                    accessor_derived: false,
                 });
             }
         }

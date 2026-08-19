@@ -306,6 +306,9 @@ pub enum IrExpr {
         value: ExprId,
         ty: Ty,
         interface: bool,
+        /// Exact field declaration selected by resolution, when the property is physically a field.
+        /// Mirrors [`IrExpr::PropertyRead::field`]: the backend emits `putfield` for the recorded
+        /// target instead of rediscovering the store form.
         field: Option<Box<crate::libraries::InstanceFieldRef>>,
         operation: Option<u32>,
     },

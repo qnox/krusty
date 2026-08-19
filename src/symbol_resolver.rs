@@ -4713,7 +4713,22 @@ impl<'a> SymbolResolver<'a> {
     /// finding one. Returns the selected declaration owner and its interface shape beside the logical
     /// property type so lowering does not rediscover either from a source-specific table. Nearest
     /// declaration wins, as for any member.
+    ///
+    /// Java fields take precedence over accessor-derived properties. The checker supplies the
+    /// use-site accessibility predicate because protected access depends on both the lexical class
+    /// and the receiver type. Selection still returns one declaration: an accessible field, the
+    /// nearest accessor-derived property, or an inaccessible field when no property can represent
+    /// the name.
     pub fn select_member_property(&self, recv: Ty, name: &str) -> Option<SelectedMemberProperty> {
+        self.select_member_property_where(recv, name, |_| true)
+    }
+
+    pub(crate) fn select_member_property_where(
+        &self,
+        recv: Ty,
+        name: &str,
+        field_accessible: impl Fn(&crate::libraries::InstanceFieldRef) -> bool,
+    ) -> Option<SelectedMemberProperty> {
         if recv.is_nullable() || recv.kotlin_class_internal().is_none() {
             return None;
         }
@@ -4724,6 +4739,7 @@ impl<'a> SymbolResolver<'a> {
         let mut queue = std::collections::VecDeque::from([recv]);
         let mut seen = std::collections::HashSet::new();
         let mut nearer: Vec<(std::sync::Arc<crate::libraries::LibraryType>, Ty)> = Vec::new();
+        let mut tentative: Option<crate::libraries::PropertyInfo> = None;
         while let Some(current) = queue.pop_front() {
             let Some(internal) = current.kotlin_class_internal() else {
                 continue;
@@ -4773,26 +4789,32 @@ impl<'a> SymbolResolver<'a> {
                     .unwrap_or(declared_ty);
                 property.ty = ty;
                 property.getter.ret = ty;
-                crate::trace_compiler!(
-                    "resolve",
-                    "member property selected receiver={current:?} owner={} name={name} ty={ty:?} visibility={:?}",
-                    property.owner,
-                    property.visibility,
-                );
-                let interface = self
-                    .src
-                    .classifier(property.owner)
-                    .is_some_and(|owner| owner.is_interface());
-                return Some(SelectedMemberProperty {
-                    owner: property.owner,
-                    ty,
-                    interface,
-                    field: None,
-                    setter: property.setter.clone(),
-                    setter_visibility: property.setter_visibility,
-                    visibility: property.visibility,
-                    property: Some(property),
-                });
+                if property.accessor_derived {
+                    // Keep the nearest accessor-derived property while looking for a field. A field
+                    // that is inaccessible at this use site cannot replace this candidate.
+                    if tentative.is_none() {
+                        tentative = Some(property);
+                    }
+                } else {
+                    crate::trace_compiler!(
+                        "resolve",
+                        "member property selected receiver={current:?} owner={} name={name} ty={ty:?} visibility={:?}",
+                        property.owner,
+                        property.visibility,
+                    );
+                    let interface = self
+                        .src
+                        .classifier(property.owner)
+                        .is_some_and(|owner| owner.is_interface());
+                    return Some(SelectedMemberProperty {
+                        owner: property.owner,
+                        ty,
+                        interface,
+                        field: None,
+                        visibility: property.visibility,
+                        property: Some(property),
+                    });
+                }
             }
             if let Some(field) = shape.fields.iter().find(|field| field.name == name) {
                 let inaccessible_package_field = field.visibility
@@ -4806,6 +4828,8 @@ impl<'a> SymbolResolver<'a> {
                             || (function.visibility == crate::types::Visibility::PackagePrivate
                                 && self.package_private_member_accessible(function.callable.owner)))
                 });
+                // These fields hide inherited fields but do not replace an applicable accessor-derived
+                // property, such as `HashMap.size` backed by the public `size()` method.
                 if field.is_static
                     || field.visibility == crate::types::Visibility::Private
                     || (inaccessible_package_field && readable_method_facet)
@@ -4830,15 +4854,30 @@ impl<'a> SymbolResolver<'a> {
                     name: field.name.clone(),
                     ty,
                     descriptor: field.descriptor.clone(),
+                    visibility: field.visibility,
                     is_final: field.is_final,
                 };
+                if !field_accessible(&target) {
+                    if let Some(property) = tentative.take() {
+                        let interface = self
+                            .src
+                            .classifier(property.owner)
+                            .is_some_and(|owner| owner.is_interface());
+                        return Some(SelectedMemberProperty {
+                            owner: property.owner,
+                            ty: property.ty,
+                            interface,
+                            field: None,
+                            visibility: property.visibility,
+                            property: Some(property),
+                        });
+                    }
+                }
                 return Some(SelectedMemberProperty {
                     owner: internal,
                     ty,
                     interface: shape.is_interface(),
                     field: Some(target),
-                    setter: None,
-                    setter_visibility: field.visibility,
                     visibility: field.visibility,
                     property: None,
                 });
@@ -4846,7 +4885,20 @@ impl<'a> SymbolResolver<'a> {
             nearer.push((shape, current));
             queue.extend(direct_supertypes(&self.src, current));
         }
-        None
+        // No field replaced the nearest accessor-derived property.
+        let property = tentative?;
+        let interface = self
+            .src
+            .classifier(property.owner)
+            .is_some_and(|owner| owner.is_interface());
+        Some(SelectedMemberProperty {
+            owner: property.owner,
+            ty: property.ty,
+            interface,
+            field: None,
+            visibility: property.visibility,
+            property: Some(property),
+        })
     }
 
     /// Resolve a name on a receiver to the thing it DENOTES — a member, a property, a companion/instance
@@ -6567,8 +6619,6 @@ pub struct SelectedMemberProperty {
     pub ty: Ty,
     pub interface: bool,
     pub field: Option<crate::libraries::InstanceFieldRef>,
-    pub setter: Option<LibraryCallable>,
-    pub setter_visibility: crate::types::Visibility,
     pub visibility: crate::types::Visibility,
     /// The selected Kotlin declaration. Physical fields have no property declaration.
     pub property: Option<PropertyInfo>,

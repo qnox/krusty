@@ -118,6 +118,49 @@ fun box(): String {
     );
 }
 
+/// Public and protected Java fields remain writable when a superclass also exposes bean accessors.
+#[test]
+fn java_instance_field_writes_public_and_protected() {
+    run_mixed(
+        &[
+            (
+                "p/Grand.java",
+                "package p; public class Grand { protected String prot; protected String accessed; protected int count; }",
+            ),
+            (
+                "p/Base.java",
+                "package p; public class Base extends Grand { public String pub; public int publicCount; public String getPub() { return \"getter\"; } public String getProt() { return \"getter\"; } public String getAccessed() { return accessed; } public void setAccessed(String value) { accessed = value; } public int getCount() { return 99; } public int getPublicCount() { return 99; } }",
+            ),
+        ],
+        r#"
+class Sub : p.Base() {
+    fun setAll() {
+        prot = "p"
+        this.prot = "q"
+        publicCount++
+        ++publicCount
+        count++
+        ++count
+    }
+    fun readAll(): String = pub + prot + publicCount + count
+}
+fun box(): String {
+    val sub = Sub()
+    sub.pub = "a"
+    sub.setAll()
+    sub.publicCount++
+    sub.accessed = "z"
+    val read = sub.readAll() + sub.accessed
+    return if (read == "aq32z") "OK" else "FAIL:$read"
+}
+"#,
+    );
+}
+
+/// Java package-private visibility is honored from Kotlin in the SAME package: a package-private
+/// class's package-private static member is callable (`UiThreadPriority.adjust()` in intellij's
+/// `platform-impl/bootstrap`, called from `ui.kt` in the same package). Kotlin has no
+/// package-private keyword, but the compiler maps Java package-private to package-scoped access.
 #[test]
 fn package_private_java_members_are_accessible_within_the_same_package() {
     run_mixed(

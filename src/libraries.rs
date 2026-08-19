@@ -457,6 +457,7 @@ pub struct LibraryField {
     pub descriptor: String,
     pub visibility: Visibility,
     pub is_static: bool,
+    /// A `final` field is a read-only (`val`) property at the source level.
     pub is_final: bool,
 }
 
@@ -467,6 +468,9 @@ pub struct InstanceFieldRef {
     pub name: String,
     pub ty: Ty,
     pub descriptor: String,
+    /// Declared visibility; the checker applies the use-site access rules.
+    pub visibility: Visibility,
+    /// A `final` field reads as a `val`: reads bind it, writes are rejected.
     pub is_final: bool,
 }
 
@@ -1983,6 +1987,9 @@ pub struct PropertyInfo {
     pub source_key: Option<(u32, u32)>,
     /// Exact AST-backed member property from the current compilation module.
     pub source_member: Option<SourceMember>,
+    /// Whether this property is derived from Java bean accessors. A same-named accessible field
+    /// takes precedence during member selection.
+    pub accessor_derived: bool,
 }
 
 /// ALL properties of one name applicable to an access — members AND extensions AND top-level, in one
@@ -2465,6 +2472,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             receiver_rank: 0,
             source_key: None,
             source_member: None,
+            accessor_derived: false,
         };
         classifier
             .declared_callables
@@ -2597,6 +2605,7 @@ impl EmptySymbolSource {
                 receiver_rank: 0,
                 source_key: None,
                 source_member: None,
+                accessor_derived: false,
             }],
         })
     }
@@ -2696,6 +2705,7 @@ impl EmptySymbolSource {
                 receiver_rank: 0,
                 source_key: None,
                 source_member: None,
+                accessor_derived: false,
             }],
         })
     }

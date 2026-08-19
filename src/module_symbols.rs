@@ -972,6 +972,7 @@ fn source_property(
         receiver_rank,
         source_key: None,
         source_member: property.source_member,
+        accessor_derived: false,
     }
 }
 
@@ -1185,6 +1186,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                             receiver_rank: 0,
                             source_key: None,
                             source_member: None,
+                            accessor_derived: false,
                         });
                     }
                 }
@@ -1238,6 +1240,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 receiver_rank: 0,
                 source_key: Some(source),
                 source_member: None,
+                accessor_derived: false,
             });
         }
         for ((_, property_name), signatures) in &self.syms.ext_props {
@@ -1288,6 +1291,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     receiver_rank: 0,
                     source_key: Some(property.source),
                     source_member: None,
+                    accessor_derived: false,
                 });
             }
         }
