@@ -1832,6 +1832,8 @@ fn render_visibility(visibility: Visibility) -> &'static str {
         Visibility::Internal => "internal ",
         Visibility::Protected => "protected ",
         Visibility::Private => "private ",
+        // Java class-file package-private has no Kotlin keyword; no modifier is rendered.
+        Visibility::PackagePrivate => "",
     }
 }
 

@@ -373,6 +373,11 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         crate::types::Visibility::Private => 1,
         crate::types::Visibility::Protected => 2,
         crate::types::Visibility::Public => 3,
+        crate::types::Visibility::PackagePrivate => {
+            unreachable!(
+                "package-private is a Java classpath visibility, never emitted to Kotlin metadata"
+            )
+        }
     };
     let flags = u64::from(!f.annotations.is_empty())
         | (vis << 1)
@@ -590,6 +595,11 @@ fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
         crate::types::Visibility::Private => 1,
         crate::types::Visibility::Protected => 2,
         crate::types::Visibility::Public => 3,
+        crate::types::Visibility::PackagePrivate => {
+            unreachable!(
+                "package-private is a Java classpath visibility, never emitted to Kotlin metadata"
+            )
+        }
     };
     if vis != 3 {
         p.field_varint(1, vis << 1); // TypeAlias.flags = 1 (elided at the public default 6)
@@ -666,6 +676,11 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
         crate::types::Visibility::Private => 1,
         crate::types::Visibility::Protected => 2,
         crate::types::Visibility::Public => 3,
+        crate::types::Visibility::PackagePrivate => {
+            unreachable!(
+                "package-private is a Java classpath visibility, never emitted to Kotlin metadata"
+            )
+        }
     };
     let base = if m.is_var {
         PKG_VAR_FLAGS

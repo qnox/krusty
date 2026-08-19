@@ -1039,6 +1039,8 @@ mod tests {
                     descriptor: Some("Lfixture/CollisionEnum;".to_string()),
                     ty: Ty::obj("fixture/CollisionEnum"),
                     constant: None,
+                    visibility: crate::types::Visibility::Public,
+                    is_final: true,
                 }
             })
         }

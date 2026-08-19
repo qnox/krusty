@@ -338,6 +338,7 @@ fn classifier_path<S: SymbolSource + ?Sized>(
 fn import_path_diagnostic(
     import: &crate::ast::ImportPath,
     source: &dyn SymbolSource,
+    access_package: TypeName,
 ) -> Option<(Span, String)> {
     use crate::libraries::Callables;
     use crate::symbol_source::SymbolNamespace;
@@ -352,6 +353,21 @@ fn import_path_diagnostic(
             ResolvedQualifier::Package(package) => {
                 let symbols = source.symbols(SymbolNamespace::Package(package), segment);
                 if let Some(classifier) = symbols.classifier_name {
+                    if terminal {
+                        let shape = source.classifier(classifier)?;
+                        let declared_package = classifier.package();
+                        if shape.access == crate::libraries::ClassifierAccess::PackagePrivate
+                            && !access_package.matches(&declared_package)
+                        {
+                            return Some((
+                                *span,
+                                format!(
+                                    "cannot access '{}': it is package-private in file.",
+                                    classifier_access_display_from_shape(classifier, &shape),
+                                ),
+                            ));
+                        }
+                    }
                     prefix = ResolvedQualifier::Classifier(classifier);
                 } else if source.package_exists(package, segment) {
                     prefix =
@@ -415,7 +431,9 @@ impl Checker<'_> {
         ]);
         let mut reports = Vec::new();
         for import in &self.file.import_paths {
-            if let Some(report) = import_path_diagnostic(import, &source) {
+            if let Some(report) =
+                import_path_diagnostic(import, &source, self.source_package_name())
+            {
                 reports.push(report);
             }
         }
@@ -14886,6 +14904,12 @@ enum SourceConstructorSelection {
     Ambiguous,
 }
 
+enum LibraryConstructorSelection {
+    Selected,
+    Rejected,
+    NoMatch,
+}
+
 fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
     let mut state = vec![0u8; edges.len()];
     let mut cycles = Vec::new();
@@ -15973,24 +15997,21 @@ pub enum StmtLowering {
         owner: TypeName,
         ty: Ty,
     },
-    /// `recv.name = value` resolved to a MEMBER PROPERTY the receiver's type declares — the write
-    /// analogue of [`ExprLowering::MemberPropertyRead`]. `ty` is the property's type, which the assigned
-    /// value is bridged to. Lowering emits [`crate::ir::IrExpr::PropertyWrite`] and decides nothing about
-    /// the store form.
+    /// Selected member-property or physical-field write. The optional field is the complete target;
+    /// lowering does not repeat member lookup.
     MemberPropertyWrite {
         owner: TypeName,
         ty: Ty,
         interface: bool,
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
         context_access: Option<Box<ResolvedPropertyAccess>>,
     },
-    /// `recv.name = value` resolved to a property realized as a PUBLIC STATIC FIELD with no setter
-    /// anywhere — a `@JvmField` companion `var`, whose field lives on the companion's OWNER class.
-    /// The write analogue of [`ExprLowering::StaticPropertyRead`]: lowering emits a direct
-    /// `putstatic owner.name` and performs no member lookup.
+    /// Selected static-field write, including external Java fields and `@JvmField` properties.
     StaticPropertyWrite {
         owner: TypeName,
         name: String,
         ty: Ty,
+        descriptor: Option<String>,
     },
     /// `super.prop = value`, selected as the exact non-virtual setter call. The target carries every
     /// semantic and linkage fact; lowering emits `invokespecial` and performs no member lookup.
@@ -24412,7 +24433,7 @@ impl<'a> Checker<'a> {
             Visibility::Private => candidate
                 .source_key
                 .is_some_and(|(file, _)| file == self.file_index),
-            Visibility::Protected => false,
+            Visibility::PackagePrivate | Visibility::Protected => false,
         }
     }
 
@@ -25492,6 +25513,11 @@ impl<'a> Checker<'a> {
             .get(&statement.0)
             .copied()
             .unwrap_or(self.file.stmt_spans[statement.0 as usize])
+    }
+
+    fn assignment_member_name_span(&self, statement: StmtId, name: &str) -> Span {
+        let span = self.assignment_target_span(statement);
+        Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
     }
 
     fn value_operator_span(&self, value: ExprId) -> Span {
@@ -41909,20 +41935,43 @@ impl<'a> Checker<'a> {
     ) -> Option<Ty> {
         let owner = selected.member.owner?;
         if !self.selected_member_accessible(&selected, owner) {
-            let visibility = match selected.member.visibility {
-                Visibility::Private => "private",
-                Visibility::Protected => "protected",
-                Visibility::Internal => "internal",
-                Visibility::Public => "public",
-            };
-            self.diags.error(
-                self.call_callee_name_span(call),
-                format!(
-                    "cannot access '{}': it is {visibility} in '{}'",
-                    selected.member.name,
-                    owner.render()
-                ),
-            );
+            if matches!(
+                selected.member.visibility,
+                Visibility::PackagePrivate | Visibility::Protected
+            ) {
+                let visibility = if selected.member.visibility == Visibility::Protected {
+                    "protected"
+                } else {
+                    "package-private"
+                };
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    Self::callable_access_message(
+                        false,
+                        &selected.member.name,
+                        &selected.member.params,
+                        &selected.member.call_sig.param_names,
+                        selected.member.ret,
+                        owner,
+                        visibility,
+                    ),
+                );
+            } else {
+                let visibility = match selected.member.visibility {
+                    Visibility::Private => "private",
+                    Visibility::Internal => "internal",
+                    Visibility::Public => "public",
+                    Visibility::Protected | Visibility::PackagePrivate => unreachable!(),
+                };
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    format!(
+                        "cannot access '{}': it is {visibility} in '{}'",
+                        selected.member.name,
+                        owner.render()
+                    ),
+                );
+            }
             return Some(Ty::Error);
         }
         let mut semantic_params = selected.member.params.clone();
@@ -42024,22 +42073,7 @@ impl<'a> Checker<'a> {
         if visibility == Visibility::Internal && matches!(selected.origin, Origin::Library) {
             return false;
         }
-        if !self.member_accessible(visibility, owner) {
-            return false;
-        }
-        if visibility != Visibility::Protected {
-            return true;
-        }
-        self.lexical_source_class_names()
-            .into_iter()
-            .any(|enclosing| {
-                (enclosing == owner
-                    || self
-                        .syms
-                        .supertype_internal_names_from(enclosing)
-                        .contains(&owner))
-                    && self.receiver_is_assignable(selected.receiver, Ty::obj_name(enclosing))
-            })
+        self.receiver_member_accessible(visibility, owner, selected.receiver)
     }
 
     fn this_member_call_ret(
@@ -42246,6 +42280,7 @@ impl<'a> Checker<'a> {
                         Visibility::Private => "private",
                         Visibility::Protected => "protected",
                         Visibility::Internal => "internal",
+                        Visibility::PackagePrivate => "package-private",
                         Visibility::Public => "public",
                     };
                     self.diags.error(
@@ -43634,7 +43669,7 @@ impl<'a> Checker<'a> {
         classifier: &crate::libraries::LibraryType,
         args: &[ExprId],
         arg_names: Option<&[Option<String>]>,
-    ) -> Result<Option<ResolvedConstructor>, CallArgMappingFailure> {
+    ) -> Result<LibraryConstructorSelection, CallArgMappingFailure> {
         for &argument in args {
             if self.expr_types[argument.0 as usize] == Ty::Error
                 && !matches!(
@@ -43659,7 +43694,9 @@ impl<'a> Checker<'a> {
         let mut mapping_failures = Vec::new();
 
         for declaration in &classifier.constructors {
-            if !self.member_accessible(declaration.visibility, internal) {
+            if declaration.visibility != Visibility::PackagePrivate
+                && !self.member_accessible(declaration.visibility, internal)
+            {
                 continue;
             }
             let mut member = declaration.clone();
@@ -43758,12 +43795,28 @@ impl<'a> Checker<'a> {
                             return Err(failure);
                         }
                     }
-                    return Ok(None);
+                    return Ok(LibraryConstructorSelection::NoMatch);
                 }
             };
         let Some(member) = members.get(candidate_index).cloned() else {
-            return Ok(None);
+            return Ok(LibraryConstructorSelection::NoMatch);
         };
+        if !self.member_accessible(member.visibility, internal) {
+            if member.visibility == Visibility::PackagePrivate {
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    Self::package_private_constructor_access_message(internal, &member),
+                );
+            } else {
+                self.reject_if_inaccessible(
+                    member.visibility,
+                    internal.nested_segment_ref(),
+                    internal,
+                    self.call_callee_name_span(call),
+                );
+            }
+            return Ok(LibraryConstructorSelection::Rejected);
+        }
         let mut slots = vec![None; member.params.len()];
         for (&argument, &slot) in args.iter().zip(&selected.argument_slots) {
             if let Some(target) = slots.get_mut(slot) {
@@ -43807,14 +43860,14 @@ impl<'a> Checker<'a> {
             }
         };
         if !self.expect_selected_constructor_args(scope, call, &target) {
-            return Ok(None);
+            return Ok(LibraryConstructorSelection::NoMatch);
         }
         if let Expr::Call { callee, .. } = self.file.expr(call) {
             self.reject_inaccessible_classifier_expression(*callee, internal);
         }
         self.check_selected_constructor_lambdas(scope, args, &selected.argument_types);
         self.commit_constructor(call, target.clone());
-        Ok(Some(target))
+        Ok(LibraryConstructorSelection::Selected)
     }
 
     fn record_resolved_library_constructor(
@@ -43824,9 +43877,9 @@ impl<'a> Checker<'a> {
         internal: TypeName,
         args: &[ExprId],
         arg_names: Option<&[Option<String>]>,
-    ) -> Result<Option<ResolvedConstructor>, CallArgMappingFailure> {
+    ) -> Result<LibraryConstructorSelection, CallArgMappingFailure> {
         let Some(classifier) = self.resolved_type_name(internal) else {
-            return Ok(None);
+            return Ok(LibraryConstructorSelection::NoMatch);
         };
         self.record_library_constructor(scope, call, internal, &classifier, args, arg_names)
     }
@@ -44169,10 +44222,15 @@ impl<'a> Checker<'a> {
     /// — a class whose own COMPANION declares the member, since a companion's members are in the
     /// containing class's scope. `protected` reaches those plus any subclass of `owner`. At a
     /// top-level site (no enclosing class) a non-public member is inaccessible.
+    /// Java package-private declarations are accessible from their declaring package.
     fn member_accessible(&self, vis: Visibility, owner: TypeName) -> bool {
         match vis {
             Visibility::Public => true,
             Visibility::Internal => self.syms.class_by_type_name(owner).is_some(),
+            Visibility::PackagePrivate => {
+                let declared = owner.package();
+                self.source_package_name().matches(&declared)
+            }
             Visibility::Private | Visibility::Protected => {
                 // Access is LEXICAL, so the ENCLOSING chain is walked, not the receiver chain: a
                 // NESTED (non-`inner`) class has no outer receiver at all, yet it sits inside its
@@ -44212,6 +44270,24 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn receiver_member_accessible(&self, vis: Visibility, owner: TypeName, receiver: Ty) -> bool {
+        if !self.member_accessible(vis, owner) {
+            return false;
+        }
+        vis != Visibility::Protected
+            || self
+                .lexical_source_class_names()
+                .into_iter()
+                .any(|enclosing| {
+                    (enclosing == owner
+                        || self
+                            .syms
+                            .supertype_internal_names_from(enclosing)
+                            .contains(&owner))
+                        && self.receiver_is_assignable(receiver, Ty::obj_name(enclosing))
+                })
+    }
+
     fn inaccessible_classifier(
         &self,
         scope: &CheckerScope<'_>,
@@ -44244,13 +44320,21 @@ impl<'a> Checker<'a> {
             Expr::Name(name) => name.clone(),
             _ => internal.render().replace(['/', '$'], "."),
         };
+        let message = if access == crate::libraries::ClassifierAccess::PackagePrivate {
+            self.classifier_access_display(internal).map_or_else(
+                || inaccessible_classifier_message(&display, access),
+                |display| format!("cannot access '{display}': it is package-private in file."),
+            )
+        } else {
+            inaccessible_classifier_message(&display, access)
+        };
         self.diags.error_with_identity(
             reference,
             DiagnosticIdentity::ClassifierAccess {
                 reference,
                 classifier: internal,
             },
-            inaccessible_classifier_message(&display, access),
+            message,
         );
         true
     }
@@ -44263,6 +44347,7 @@ impl<'a> Checker<'a> {
                 Visibility::Private => "private",
                 Visibility::Protected => "protected",
                 Visibility::Internal => "internal",
+                Visibility::PackagePrivate => "package-private",
                 Visibility::Public => "public",
             };
             self.diags.error(
@@ -44273,6 +44358,110 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
+    }
+
+    fn access_owner_display(owner: TypeName) -> String {
+        owner.render().replace(['/', '$'], ".")
+    }
+
+    fn access_parameter_display(params: &[Ty], names: &[String]) -> String {
+        params
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                let name = names
+                    .get(index)
+                    .filter(|name| !name.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| format!("p{index}"));
+                format!("{name}: {}", ty.source_name())
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn callable_access_message(
+        is_static: bool,
+        name: &str,
+        params: &[Ty],
+        param_names: &[String],
+        ret: Ty,
+        owner: TypeName,
+        visibility: &str,
+    ) -> String {
+        let static_prefix = if is_static { "static " } else { "" };
+        let params = Self::access_parameter_display(params, param_names);
+        format!(
+            "cannot access '{static_prefix}fun {name}({params}): {}': it is {visibility} in '{}'.",
+            ret.source_name(),
+            Self::access_owner_display(owner),
+        )
+    }
+
+    fn field_access_message(
+        is_static: bool,
+        name: &str,
+        ty: Ty,
+        owner: TypeName,
+        visibility: &str,
+    ) -> String {
+        let static_prefix = if is_static { "static " } else { "" };
+        format!(
+            "cannot access '{static_prefix}field {name}: {}': it is {visibility} in '{}'.",
+            ty.source_name(),
+            Self::access_owner_display(owner),
+        )
+    }
+
+    fn package_private_constructor_access_message(
+        owner: TypeName,
+        member: &crate::libraries::LibraryMember,
+    ) -> String {
+        let params = Self::access_parameter_display(&member.params, &member.call_sig.param_names);
+        format!(
+            "cannot access 'constructor({params}): {}': it is package-private in '{}'.",
+            owner.nested_segment_ref(),
+            Self::access_owner_display(owner),
+        )
+    }
+
+    fn reject_package_private_classifier_call(
+        &mut self,
+        receiver: ExprId,
+        call: ExprId,
+        classifier: TypeName,
+        name: &str,
+        selected: &SelectedCallable,
+    ) {
+        if self.resolver().inaccessible_classifier_access(classifier)
+            == Some(crate::libraries::ClassifierAccess::PackagePrivate)
+        {
+            let display = self
+                .classifier_access_display(classifier)
+                .unwrap_or_else(|| classifier.render().replace(['/', '$'], "."));
+            self.diags.error(
+                self.span(receiver),
+                format!("cannot access '{display}': it is package-private in file."),
+            );
+        }
+        self.diags.error(
+            self.call_callee_name_span(call),
+            Self::callable_access_message(
+                true,
+                name,
+                &selected.semantic_params(),
+                &selected.call_sig.param_names,
+                selected.callable.ret,
+                selected.callable.owner,
+                "package-private",
+            ),
+        );
+    }
+
+    /// kotlinc's descriptor rendering of a classifier for an access diagnostic: `class Helper : Any`.
+    fn classifier_access_display(&self, internal: TypeName) -> Option<String> {
+        let shape = self.resolver().classifier(internal)?;
+        Some(classifier_access_display_from_shape(internal, &shape))
     }
 
     fn maximal_member_extensions<T>(
@@ -45463,8 +45652,34 @@ impl<'a> Checker<'a> {
         match self.select_property_read(scope, rt, name) {
             Ok(Some(selection)) => {
                 if let Some((visibility, owner)) = selection.access() {
-                    if visibility != Visibility::Public {
+                    if visibility != Visibility::Public
+                        && !self.receiver_member_accessible(visibility, owner, rt)
+                    {
+                        if matches!(
+                            visibility,
+                            Visibility::PackagePrivate | Visibility::Protected
+                        ) {
+                            if let PropertyReadSelection::Member(member) = &selection {
+                                if member.field.is_some() {
+                                    let diagnostic_span = mexpr
+                                        .map_or(span, |member| self.member_name_span(member, name));
+                                    let visibility = if visibility == Visibility::Protected {
+                                        "protected"
+                                    } else {
+                                        "package-private"
+                                    };
+                                    self.diags.error(
+                                        diagnostic_span,
+                                        Self::field_access_message(
+                                            false, name, member.ty, owner, visibility,
+                                        ),
+                                    );
+                                    return Ty::Error;
+                                }
+                            }
+                        }
                         self.reject_if_inaccessible(visibility, name, owner, span);
+                        return Ty::Error;
                     }
                 }
                 return self.record_property_read(scope, mexpr, selection);
@@ -45587,6 +45802,28 @@ impl<'a> Checker<'a> {
         expr: Option<ExprId>,
         field: crate::libraries::StaticFieldRef,
     ) -> Ty {
+        if field.visibility != Visibility::Public
+            && !self.member_accessible(field.visibility, field.owner)
+        {
+            if let Some(expr) = expr {
+                let span = self.member_name_span(expr, &field.name);
+                if field.visibility == Visibility::PackagePrivate {
+                    self.diags.error(
+                        span,
+                        Self::field_access_message(
+                            true,
+                            &field.name,
+                            field.ty,
+                            field.owner,
+                            "package-private",
+                        ),
+                    );
+                } else {
+                    self.reject_if_inaccessible(field.visibility, &field.name, field.owner, span);
+                }
+            }
+            return Ty::Error;
+        }
         if let Some(constant) = field.constant {
             let ty = constant.ty;
             if let Some(expr) = expr {
@@ -48654,14 +48891,15 @@ impl<'a> Checker<'a> {
                             args,
                             arg_names.as_deref(),
                         ) {
-                            Ok(Some(_)) => {
+                            Ok(LibraryConstructorSelection::Selected) => {
                                 crate::trace_compiler!(
                                     "resolve",
                                     "classpath nested constructor {qualified} -> {internal}"
                                 );
                                 return self.ctor_result_name(scope, call, internal, expected);
                             }
-                            Ok(None) => {}
+                            Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                            Ok(LibraryConstructorSelection::NoMatch) => {}
                             Err(error) => {
                                 self.report_call_arg_mapping_error(call, args, error);
                                 return Ty::Error;
@@ -48880,6 +49118,14 @@ impl<'a> Checker<'a> {
                         )
                         .and_then(CallableCandidateSelection::available)
                     {
+                        if selected.visibility == Visibility::PackagePrivate
+                            && !self.member_accessible(selected.visibility, selected.callable.owner)
+                        {
+                            self.reject_package_private_classifier_call(
+                                receiver, call, classifier, &name, &selected,
+                            );
+                            return Ty::Error;
+                        }
                         self.set(receiver, Ty::obj_name(classifier));
                         let ret = selected.callable.ret;
                         let member = selected.member_with_return(ret);
@@ -49402,14 +49648,15 @@ impl<'a> Checker<'a> {
                                 args,
                                 arg_names.as_deref(),
                             ) {
-                                Ok(Some(_)) => {
+                                Ok(LibraryConstructorSelection::Selected) => {
                                     self.resolved_constructors
                                         .get_mut(&call)
                                         .expect("selected dependency constructor")
                                         .bind_outer(receiver);
                                     return self.ctor_result_name(scope, call, internal, expected);
                                 }
-                                Ok(None) => {}
+                                Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                                Ok(LibraryConstructorSelection::NoMatch) => {}
                                 Err(error) => {
                                     self.report_call_arg_mapping_error(call, args, error);
                                     return Ty::Error;
@@ -51795,7 +52042,7 @@ impl<'a> Checker<'a> {
                                 args,
                                 arg_names.as_deref(),
                             ) {
-                                Ok(Some(_)) => {
+                                Ok(LibraryConstructorSelection::Selected) => {
                                     return self.ctor_result_name(
                                         scope,
                                         call,
@@ -51803,7 +52050,8 @@ impl<'a> Checker<'a> {
                                         expected,
                                     );
                                 }
-                                Ok(None) => {}
+                                Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                                Ok(LibraryConstructorSelection::NoMatch) => {}
                                 Err(error) => {
                                     constructor_mapping_failure = Some(error);
                                 }
@@ -53378,9 +53626,59 @@ impl<'a> Checker<'a> {
         // package, so there is no value to evaluate: the write is the declaring facade's `setX`
         // accessor, selected in that package's scope alone (a fully-qualified reference names one
         // declaration, so this file's imports must neither shadow nor widen it).
-        if let Ok(ResolvedQualifier::Package(package)) =
-            self.qualifier(scope, QualifierInput::Expression(receiver))
-        {
+        let receiver_qualifier = self.qualifier(scope, QualifierInput::Expression(receiver));
+        if let Ok(ResolvedQualifier::Classifier(owner)) = receiver_qualifier {
+            if let Some(field) = self.resolver().static_field(owner, &name) {
+                let member_span = self.assignment_member_name_span(s, &name);
+                if !self.member_accessible(field.visibility, field.owner) {
+                    if field.visibility == Visibility::PackagePrivate {
+                        self.diags.error(
+                            member_span,
+                            Self::field_access_message(
+                                true,
+                                &field.name,
+                                field.ty,
+                                field.owner,
+                                "package-private",
+                            ),
+                        );
+                    } else {
+                        self.reject_if_inaccessible(
+                            field.visibility,
+                            &field.name,
+                            field.owner,
+                            member_span,
+                        );
+                    }
+                    return;
+                }
+                if field.is_final {
+                    self.diags.error(
+                        self.assignment_target_span(s),
+                        "'val' cannot be reassigned.",
+                    );
+                    return;
+                }
+                let value_ty = self.expr_expected(scope, value, field.ty);
+                self.expect_assignable(
+                    field.ty,
+                    value_ty,
+                    self.value_diagnostic_span(value, value_ty),
+                    "assignment",
+                );
+                self.stmt_lowers.insert(
+                    s,
+                    StmtLowering::StaticPropertyWrite {
+                        owner: field.owner,
+                        name: field.name,
+                        ty: field.ty,
+                        descriptor: field.descriptor,
+                    },
+                );
+                return;
+            }
+        }
+        if let Ok(ResolvedQualifier::Package(package)) = receiver_qualifier {
             if let Some(property) = self
                 .resolver_in_scope(std::slice::from_ref(&package))
                 .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &name, &[], &[])
@@ -53411,17 +53709,17 @@ impl<'a> Checker<'a> {
         } else {
             receiver_ty
         };
-        let context_member_property = (!rt.is_nullable())
+        let selected_member_property = (!rt.is_nullable())
             .then(|| self.resolver().select_member_property(rt, &name))
-            .flatten()
-            .and_then(|selected| {
-                let property = selected.property?;
-                (property.context_count > 0).then_some((
-                    selected.owner,
-                    selected.interface,
-                    property,
-                ))
-            });
+            .flatten();
+        let context_member_property = selected_member_property.as_ref().and_then(|selected| {
+            let property = selected.property.as_ref()?;
+            (property.context_count > 0).then_some((
+                selected.owner,
+                selected.interface,
+                property.clone(),
+            ))
+        });
         if let Some((owner, interface, property)) = context_member_property {
             let target_span = self.assignment_target_span(s);
             let Some(setter) = property.setter.as_ref() else {
@@ -53459,6 +53757,7 @@ impl<'a> Checker<'a> {
                     owner,
                     ty: property.ty,
                     interface,
+                    field: None,
                     context_access: Some(Box::new(ResolvedPropertyAccess {
                         property,
                         context_args,
@@ -53466,6 +53765,66 @@ impl<'a> Checker<'a> {
                 },
             );
             return;
+        }
+        if let Some(selected) = selected_member_property {
+            if let Some(field) = selected.field {
+                let member_span = self.assignment_member_name_span(s, &name);
+                if !self.receiver_member_accessible(selected.visibility, selected.owner, rt) {
+                    if matches!(
+                        selected.visibility,
+                        Visibility::PackagePrivate | Visibility::Protected
+                    ) {
+                        let visibility = if selected.visibility == Visibility::Protected {
+                            "protected"
+                        } else {
+                            "package-private"
+                        };
+                        self.diags.error(
+                            member_span,
+                            Self::field_access_message(
+                                false,
+                                &field.name,
+                                field.ty,
+                                field.owner,
+                                visibility,
+                            ),
+                        );
+                    } else {
+                        self.reject_if_inaccessible(
+                            selected.visibility,
+                            &field.name,
+                            field.owner,
+                            member_span,
+                        );
+                    }
+                    return;
+                }
+                if field.is_final {
+                    self.diags.error(
+                        self.assignment_target_span(s),
+                        "'val' cannot be reassigned.",
+                    );
+                    return;
+                }
+                let value_ty = self.expr_expected(scope, value, field.ty);
+                self.expect_assignable(
+                    field.ty,
+                    value_ty,
+                    self.value_diagnostic_span(value, value_ty),
+                    "assignment",
+                );
+                self.stmt_lowers.insert(
+                    s,
+                    StmtLowering::MemberPropertyWrite {
+                        owner: field.owner,
+                        ty: field.ty,
+                        interface: selected.interface,
+                        field: Some(Box::new(field)),
+                        context_access: None,
+                    },
+                );
+                return;
+            }
         }
         let source_property = if rt.is_nullable() {
             None
@@ -53566,11 +53925,13 @@ impl<'a> Checker<'a> {
                         owner: static_owner,
                         name: name.clone(),
                         ty: lty,
+                        descriptor: None,
                     },
                     None => StmtLowering::MemberPropertyWrite {
                         owner,
                         ty: lty,
                         interface: self.resolved_owner_is_interface(owner),
+                        field: None,
                         context_access: None,
                     },
                 };
@@ -53592,6 +53953,7 @@ impl<'a> Checker<'a> {
                     owner,
                     ty: callable.params.first().copied().unwrap_or(pty),
                     interface: self.resolved_owner_is_interface(owner),
+                    field: None,
                     context_access: None,
                 },
             );
@@ -54316,6 +54678,37 @@ fn inaccessible_classifier_message(
         ClassifierAccess::Public => "public",
     };
     format!("cannot access '{name}': it is {kind}")
+}
+
+fn classifier_access_display_from_shape(
+    internal: TypeName,
+    shape: &crate::libraries::LibraryType,
+) -> String {
+    let kind = match shape.kind {
+        crate::libraries::TypeKind::Class => "class",
+        crate::libraries::TypeKind::Interface => "interface",
+        crate::libraries::TypeKind::Annotation => "annotation class",
+        crate::libraries::TypeKind::Enum => "enum class",
+        crate::libraries::TypeKind::Object => "object",
+    };
+    let supertypes = shape
+        .supertypes
+        .iter_ids()
+        .map(|supertype| {
+            let ty = Ty::obj_name(supertype);
+            if ty.is_erased_top() {
+                "Any".to_string()
+            } else {
+                ty.source_name()
+            }
+        })
+        .collect::<Vec<_>>();
+    let supertypes = if supertypes.is_empty() {
+        String::new()
+    } else {
+        format!(" : {}", supertypes.join(", "))
+    };
+    format!("{} {}{supertypes}", kind, internal.nested_segment_ref())
 }
 
 #[cfg(test)]

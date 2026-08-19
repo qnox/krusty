@@ -4086,10 +4086,7 @@ impl<'a> SymbolResolver<'a> {
             return true;
         }
         if classifier.access == crate::libraries::ClassifierAccess::PackagePrivate
-            && self.access_package.is_some_and(|package| {
-                let declared = internal.package();
-                package.matches(&declared)
-            })
+            && self.package_private_member_accessible(internal)
         {
             return true;
         }
@@ -4147,6 +4144,13 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<crate::symbol_source::ClassifierAccess> {
         let access = self.src.classifier(internal)?.access;
         (!self.classifier_accessible(internal)).then_some(access)
+    }
+
+    fn package_private_member_accessible(&self, owner: TypeName) -> bool {
+        self.access_package.is_some_and(|package| {
+            let declared = owner.package();
+            package.matches(&declared)
+        })
     }
 
     /// Whether the type named `internal` — or anything in its (classpath) supertype chain — declares a
@@ -4730,9 +4734,9 @@ impl<'a> SymbolResolver<'a> {
             let Some(shape) = self.src.classifier(internal) else {
                 continue;
             };
-            let local_property = declared_callables(&self.src, &shape, current, name)
-                .into_parts()
-                .1
+            let (local_functions, local_properties) =
+                declared_callables(&self.src, &shape, current, name).into_parts();
+            let local_property = local_properties
                 .overloads
                 .into_iter()
                 .filter(|property| property.kind == PropKind::Member && property.receiver_rank == 0)
@@ -4791,8 +4795,22 @@ impl<'a> SymbolResolver<'a> {
                 });
             }
             if let Some(field) = shape.fields.iter().find(|field| field.name == name) {
-                if field.is_static || field.visibility != crate::types::Visibility::Public {
-                    return None;
+                let inaccessible_package_field = field.visibility
+                    == crate::types::Visibility::PackagePrivate
+                    && !self.package_private_member_accessible(internal);
+                let readable_method_facet = local_functions.overloads.iter().any(|function| {
+                    function.kind == FnKind::Member
+                        && function.semantic_params().is_empty()
+                        && function.callable.ret.is_read_value_result()
+                        && (function.visibility == crate::types::Visibility::Public
+                            || (function.visibility == crate::types::Visibility::PackagePrivate
+                                && self.package_private_member_accessible(function.callable.owner)))
+                });
+                if field.is_static
+                    || field.visibility == crate::types::Visibility::Private
+                    || (inaccessible_package_field && readable_method_facet)
+                {
+                    break;
                 }
                 let arguments = current.type_args();
                 let fully_applied = shape.type_params.len() == arguments.len();
@@ -4812,6 +4830,7 @@ impl<'a> SymbolResolver<'a> {
                     name: field.name.clone(),
                     ty,
                     descriptor: field.descriptor.clone(),
+                    is_final: field.is_final,
                 };
                 return Some(SelectedMemberProperty {
                     owner: internal,
@@ -4819,8 +4838,8 @@ impl<'a> SymbolResolver<'a> {
                     interface: shape.is_interface(),
                     field: Some(target),
                     setter: None,
-                    setter_visibility: crate::types::Visibility::Public,
-                    visibility: crate::types::Visibility::Public,
+                    setter_visibility: field.visibility,
+                    visibility: field.visibility,
                     property: None,
                 });
             }

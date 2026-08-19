@@ -1375,6 +1375,7 @@ fn hoist_expr(
             value,
             ty,
             interface,
+            field,
             operation,
         } => {
             let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
@@ -1386,6 +1387,7 @@ fn hoist_expr(
                 value: nv,
                 ty,
                 interface,
+                field,
                 operation,
             };
             e

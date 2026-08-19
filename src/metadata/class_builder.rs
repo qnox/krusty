@@ -246,6 +246,11 @@ fn property_flags(prop: &PropMeta) -> u64 {
         Visibility::Private => 2,
         Visibility::Protected => 4,
         Visibility::Public => 6,
+        Visibility::PackagePrivate => {
+            unreachable!(
+                "package-private is a Java classpath visibility, never emitted to Kotlin metadata"
+            )
+        }
     };
     (property_flags::DEFAULT & !property_flags::VISIBILITY_MASK)
         | visibility

@@ -109,6 +109,8 @@ impl DependencyPlatform {
             descriptor: Some(format!("L{};", internal.render())),
             ty,
             constant: None,
+            visibility: Visibility::Public,
+            is_final: true,
         })
     }
 

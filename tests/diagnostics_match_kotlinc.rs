@@ -245,24 +245,22 @@ fn unresolved_imports_match_kotlinc_exactly() {
     let mut kotlinc_errors = errors(&result.reference_stderr);
     krusty_errors.sort_by_key(|error| (error.line, error.column));
     kotlinc_errors.sort_by_key(|error| (error.line, error.column));
-    assert_eq!(krusty_errors, kotlinc_errors);
-    assert_eq!(
-        krusty_errors,
-        vec![
-            ObservedError {
-                file: "ImportFailures.kt".to_string(),
-                line: 1,
-                column: 18,
-                message: "unresolved reference 'Nonexistent'.".to_string(),
-            },
-            ObservedError {
-                file: "ImportFailures.kt".to_string(),
-                line: 2,
-                column: 8,
-                message: "unresolved reference 'nonexistent'.".to_string(),
-            },
-        ]
-    );
+    let expected = vec![
+        ObservedError {
+            file: "ImportFailures.kt".to_string(),
+            line: 1,
+            column: 18,
+            message: "unresolved reference 'Nonexistent'.".to_string(),
+        },
+        ObservedError {
+            file: "ImportFailures.kt".to_string(),
+            line: 2,
+            column: 8,
+            message: "unresolved reference 'nonexistent'.".to_string(),
+        },
+    ];
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
 }
 
 #[test]
@@ -295,6 +293,280 @@ fn qualified_type_failure_messages_match_kotlinc() {
     ];
     assert_eq!(krusty_messages, expected);
     assert_eq!(kotlinc_messages, expected);
+}
+
+#[test]
+fn java_package_private_member_diagnostics_match_kotlinc() {
+    let Some((java_dir, _)) = common::javac_compile(
+        &[(
+            "p/Api.java".to_string(),
+            "package p; public final class Api {\n\
+                 String instanceField = \"\";\n\
+                 static String staticField = \"\";\n\
+                 Api() {}\n\
+                 void instanceMethod() {}\n\
+                 static void staticMethod() {}\n\
+             }"
+            .to_string(),
+        )],
+        &[],
+    ) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let source = "package q\n\
+                  fun rejected(api: p.Api) {\n\
+                      api.instanceField\n\
+                      p.Api.staticField\n\
+                      api.instanceMethod()\n\
+                      p.Api.staticMethod()\n\
+                      p.Api()\n\
+                      api.instanceField = \"x\"\n\
+                      p.Api.staticField = \"x\"\n\
+                  }\n";
+    let result = common::compiler_diagnostics(
+        &[("PackagePrivateMembers.kt", source)],
+        std::slice::from_ref(&java_dir),
+    );
+    if let Some(root) = java_dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let mut kotlinc_errors = errors(&result.reference_stderr);
+    krusty_errors.sort_by_key(|error| (error.line, error.column));
+    kotlinc_errors.sort_by_key(|error| (error.line, error.column));
+    let expected = vec![
+        ObservedError {
+            file: "PackagePrivateMembers.kt".to_string(),
+            line: 3,
+            column: 5,
+            message: "cannot access 'field instanceField: String!': it is package-private in 'p.Api'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "PackagePrivateMembers.kt".to_string(),
+            line: 4,
+            column: 7,
+            message: "cannot access 'static field staticField: String!': it is package-private in 'p.Api'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "PackagePrivateMembers.kt".to_string(),
+            line: 5,
+            column: 5,
+            message: "cannot access 'fun instanceMethod(): Unit': it is package-private in 'p.Api'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "PackagePrivateMembers.kt".to_string(),
+            line: 6,
+            column: 7,
+            message: "cannot access 'static fun staticMethod(): Unit': it is package-private in 'p.Api'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "PackagePrivateMembers.kt".to_string(),
+            line: 7,
+            column: 3,
+            message: "cannot access 'constructor(): Api': it is package-private in 'p.Api'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "PackagePrivateMembers.kt".to_string(),
+            line: 8,
+            column: 5,
+            message: "cannot access 'field instanceField: String!': it is package-private in 'p.Api'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "PackagePrivateMembers.kt".to_string(),
+            line: 9,
+            column: 7,
+            message: "cannot access 'static field staticField: String!': it is package-private in 'p.Api'."
+                .to_string(),
+        },
+    ];
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}
+
+#[test]
+fn protected_java_member_receiver_diagnostics_match_kotlinc() {
+    let Some((java_dir, _)) = common::javac_compile(
+        &[(
+            "fixtures/Parent.java".to_string(),
+            "package fixtures; public class Parent { protected String value() { return \"hidden\"; } }"
+                .to_string(),
+        )],
+        &[],
+    ) else {
+        return;
+    };
+    let source = "package consumer\nimport fixtures.Parent\nclass Child : Parent() { fun read(parent: Parent): String = parent.value() }";
+    let result = common::compiler_diagnostics(
+        &[("ProtectedReceiver.kt", source)],
+        std::slice::from_ref(&java_dir),
+    );
+    if let Some(root) = java_dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let expected = vec![ObservedError {
+        file: "ProtectedReceiver.kt".to_string(),
+        line: 3,
+        column: 68,
+        message: "cannot access 'fun value(): String!': it is protected in 'fixtures.Parent'."
+            .to_string(),
+    }];
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(errors(&result.reference_stderr), expected);
+}
+
+#[test]
+fn protected_java_field_receiver_diagnostics_match_kotlinc() {
+    let Some((java_dir, _)) = common::javac_compile(
+        &[(
+            "fixtures/Parent.java".to_string(),
+            "package fixtures; public class Parent { protected String field = \"\"; }".to_string(),
+        )],
+        &[],
+    ) else {
+        return;
+    };
+    let source = "package consumer\n\
+                  import fixtures.Parent\n\
+                  class Child : Parent() {\n\
+                      fun read(parent: Parent): String = parent.field\n\
+                      fun write(parent: Parent) { parent.field = \"\" }\n\
+                  }";
+    let result = common::compiler_diagnostics(
+        &[("ProtectedFieldReceiver.kt", source)],
+        std::slice::from_ref(&java_dir),
+    );
+    if let Some(root) = java_dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let expected = vec![
+        ObservedError {
+            file: "ProtectedFieldReceiver.kt".to_string(),
+            line: 4,
+            column: 43,
+            message: "cannot access 'field field: String!': it is protected in 'fixtures.Parent'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "ProtectedFieldReceiver.kt".to_string(),
+            line: 5,
+            column: 36,
+            message: "cannot access 'field field: String!': it is protected in 'fixtures.Parent'."
+                .to_string(),
+        },
+    ];
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}
+
+#[test]
+fn package_private_java_classifier_constructor_diagnostics_match_kotlinc() {
+    let Some((java_dir, _)) = common::javac_compile(
+        &[(
+            "javafixture/PackageBox.java".to_string(),
+            "package javafixture; class PackageBox { PackageBox(int value) {} }".to_string(),
+        )],
+        &[],
+    ) else {
+        return;
+    };
+    let source = "package consumer\n\
+                  import javafixture.PackageBox\n\
+                  fun use(): Int { PackageBox(1); return 0 }\n";
+    let result = common::compiler_diagnostics(
+        &[("PackagePrivateClassifier.kt", source)],
+        std::slice::from_ref(&java_dir),
+    );
+    if let Some(root) = java_dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let mut kotlinc_errors = errors(&result.reference_stderr);
+    krusty_errors.sort_by_key(|error| (error.line, error.column));
+    kotlinc_errors.sort_by_key(|error| (error.line, error.column));
+    let expected = vec![
+        ObservedError {
+            file: "PackagePrivateClassifier.kt".to_string(),
+            line: 2,
+            column: 20,
+            message: "cannot access 'class PackageBox : Any': it is package-private in file."
+                .to_string(),
+        },
+        ObservedError {
+            file: "PackagePrivateClassifier.kt".to_string(),
+            line: 3,
+            column: 18,
+            message: "cannot access 'constructor(p0: Int): PackageBox': it is package-private in 'javafixture.PackageBox'."
+                .to_string(),
+        },
+    ];
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}
+
+#[test]
+fn package_private_java_classifier_public_constructor_diagnostics_match_kotlinc() {
+    let Some((java_dir, _)) = common::javac_compile(
+        &[(
+            "fixtures/PackageType.java".to_string(),
+            "package fixtures; class PackageType { public PackageType() {} }".to_string(),
+        )],
+        &[],
+    ) else {
+        return;
+    };
+    let source = "package consumer\n\
+                  import fixtures.PackageType\n\
+                  fun use(): Any = PackageType()\n";
+    let result = common::compiler_diagnostics(
+        &[("PackagePrivatePublicConstructor.kt", source)],
+        std::slice::from_ref(&java_dir),
+    );
+    if let Some(root) = java_dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let mut kotlinc_errors = errors(&result.reference_stderr);
+    krusty_errors.sort_by_key(|error| (error.line, error.column));
+    kotlinc_errors.sort_by_key(|error| (error.line, error.column));
+    let expected = vec![
+        ObservedError {
+            file: "PackagePrivatePublicConstructor.kt".to_string(),
+            line: 2,
+            column: 17,
+            message: "cannot access 'class PackageType : Any': it is package-private in file."
+                .to_string(),
+        },
+        ObservedError {
+            file: "PackagePrivatePublicConstructor.kt".to_string(),
+            line: 3,
+            column: 18,
+            message: "cannot access 'class PackageType : Any': it is package-private in file."
+                .to_string(),
+        },
+    ];
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
 }
 
 #[test]

@@ -74,6 +74,7 @@ impl From<Visibility> for ClassifierAccess {
             Visibility::Internal => Self::Internal,
             Visibility::Protected => Self::Protected,
             Visibility::Private => Self::Private,
+            Visibility::PackagePrivate => Self::PackagePrivate,
         }
     }
 }
@@ -425,7 +426,7 @@ pub struct PluginExpressionDeclaration {
     pub operation: &'static str,
 }
 
-/// A public static field and its optional compile-time constant.
+/// A static field declaration and its optional compile-time constant.
 #[derive(Clone, Debug)]
 pub struct StaticFieldRef {
     pub owner: TypeName,
@@ -437,6 +438,8 @@ pub struct StaticFieldRef {
     pub descriptor: Option<String>,
     pub ty: Ty,
     pub constant: Option<LibraryConst>,
+    pub visibility: Visibility,
+    pub is_final: bool,
 }
 
 /// One field declaration retained on a classifier shape. Keeping inaccessible and static declarations
@@ -454,15 +457,17 @@ pub struct LibraryField {
     pub descriptor: String,
     pub visibility: Visibility,
     pub is_static: bool,
+    pub is_final: bool,
 }
 
-/// An exact readable instance-field declaration selected by the shared hierarchy walk.
+/// An exact instance-field declaration selected by the shared hierarchy walk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstanceFieldRef {
     pub owner: TypeName,
     pub name: String,
     pub ty: Ty,
     pub descriptor: String,
+    pub is_final: bool,
 }
 
 /// Source-level services exposed by compiled libraries.
