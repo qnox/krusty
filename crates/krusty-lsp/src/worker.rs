@@ -1991,10 +1991,12 @@ mod tests {
         .unwrap();
 
         let analyses = decode_worker_output(output);
-        assert!(analyses[0]
+        let messages = analyses[0]
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("Only")));
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(messages, vec!["unresolved reference 'hidden'."]);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
