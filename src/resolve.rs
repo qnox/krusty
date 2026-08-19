@@ -18658,6 +18658,11 @@ struct NamedTopLevelCall<'a> {
 struct SelectedCallable {
     info: crate::libraries::FunctionInfo,
     bindings: crate::symbol_resolver::GSigBinds,
+    /// The winning applicability needed a lambda→SAM conversion for at least one argument.
+    /// Overload resolution prefers a conversion-free candidate over a converted one even ACROSS
+    /// the member/extension tower rung (kotlinc binds the inline stdlib `forEach` extension over
+    /// the whitelisted `java/lang/Iterable.forEach(Consumer)` member for a plain lambda).
+    sam_converted: bool,
 }
 
 impl std::ops::Deref for SelectedCallable {
@@ -22193,6 +22198,7 @@ impl<'a> Checker<'a> {
             let selected = SelectedCallable {
                 info: candidate,
                 bindings,
+                sam_converted: sam_converted.contains(&index),
             };
             applicable.push((
                 score.rank,
@@ -25662,6 +25668,7 @@ impl<'a> Checker<'a> {
         let SelectedCallable {
             info: mut selected,
             bindings: mut selected_bindings,
+            ..
         } = selected;
         let host_checkpoint = (self.in_script_body
             && selected
@@ -45512,7 +45519,45 @@ impl<'a> Checker<'a> {
             expected,
             overloads.clone(),
         ) {
-            Some(CallableCandidateSelection::Selected(selected)) => selected.info.clone(),
+            Some(CallableCandidateSelection::Selected(selected)) => {
+                // A member whose applicability needed a lambda→SAM conversion yields the rung to a
+                // conversion-free extension: kotlinc resolves a plain lambda to the Kotlin function
+                // -typed candidate (the inline stdlib `forEach` extension) over the whitelisted JDK
+                // SAM member (`java/lang/Iterable.forEach(Consumer)`). Probe the extension family of
+                // the same receiver-callable set; when none applies conversion-free, the member
+                // keeps the call (no rival exists for `removeIf`, `computeIfAbsent`, …).
+                if selected.sam_converted {
+                    let extensions = self
+                        .resolver()
+                        .receiver_callables(rt, name)
+                        .functions()
+                        .iter()
+                        .filter(|candidate| candidate.kind == crate::libraries::FnKind::Extension)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let conversion_free_extension = (!extensions.is_empty())
+                        && matches!(
+                            self.select_callable_candidate(
+                                scope,
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
+                                &type_arguments,
+                                Some(rt),
+                                expected,
+                                extensions,
+                            ),
+                            Some(CallableCandidateSelection::Selected(extension))
+                                if !extension.sam_converted
+                        );
+                    if conversion_free_extension {
+                        return MemberSlotCall::NoMatch(None);
+                    }
+                }
+                selected.info.clone()
+            }
             Some(CallableCandidateSelection::MissingContext(_)) => {
                 self.diags.error(
                     self.call_callee_name_span(call),
@@ -51567,8 +51612,9 @@ impl<'a> Checker<'a> {
                         .then_some(known_sam_signatures)
                 });
                 let (top_level_sam_pick, top_level_sam_ambiguous) = match top_level_sam {
-                    Some(TopLevelSamSelection::Picked(candidate, bindings, _)) => {
-                        (Some((*candidate, bindings)), None)
+                    Some(TopLevelSamSelection::Picked(candidate, bindings, signatures)) => {
+                        let converted = signatures.iter().any(Option::is_some);
+                        (Some((*candidate, bindings, converted)), None)
                     }
                     Some(TopLevelSamSelection::Ambiguous(candidates)) => (None, Some(candidates)),
                     None => (None, None),
@@ -51595,10 +51641,11 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 let top_level = top_level_sam_pick
-                    .map(|(info, bindings)| {
+                    .map(|(info, bindings, sam_converted)| {
                         CallableCandidateSelection::Selected(Box::new(SelectedCallable {
                             info,
                             bindings,
+                            sam_converted,
                         }))
                     })
                     .or_else(|| {

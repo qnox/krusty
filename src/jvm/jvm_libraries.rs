@@ -2499,7 +2499,23 @@ impl JvmLibraries {
             // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
             // joins them, with anything the class file already states under a physical name dropped.
             if kotlin_scope_is_authoritative {
-                members.clear();
+                // The builtins declaration is authoritative, but kotlinc re-admits an explicit
+                // JDK-member whitelist over it (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`):
+                // read-only Java defaults (`stream`, `getOrDefault`, `forEach`, …) on the read-only
+                // face and the mutating ones (`putIfAbsent`, `computeIfAbsent`, `removeIf`, …) on the
+                // mutable face. The table lives with the rest of the Kotlin↔JVM mapping
+                // (`jvm_class_map::mapped_scope_keeps_jvm_method`); every non-whitelisted member
+                // (`remove(int)`, `toArray`, `getFirst`, …) stays out of the Kotlin scope.
+                members.retain(|member| {
+                    super::jvm_class_map::mapped_scope_keeps_jvm_method(
+                        internal_name,
+                        member
+                            .physical_name
+                            .as_deref()
+                            .unwrap_or(member.name.as_str()),
+                        &member.descriptor,
+                    )
+                });
             } else {
                 // A mapped JVM method and its Kotlin builtin entry are two descriptions of one
                 // declaration, not two overloads. Prefer the builtin: it carries Kotlin-only facts such
