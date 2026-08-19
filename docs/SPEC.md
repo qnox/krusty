@@ -2030,18 +2030,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Long`). This is what compiles the large `kotlin.test`-based slice of the box corpus.
 - **A nullable-primitive *field* smart-cast** (`if (value != null) value` where `value: Int?`) unboxes the
   wrapper on read, like the local-variable path — else the `Integer` reaches an `int` context (verify error).
+- **A subjectless `when` threads negated branch conditions into later branches**: a branch's condition
+  and body run only when every earlier branch fell through, so each earlier GUARDLESS condition's
+  false-branch narrowings accumulate exactly like `if/else if/else` (`when { s == null -> …; else ->
+  s.length }` smart-casts `s`; a value-class receiver like `Result<Int>?` narrows the same way). A
+  guarded arm contributes nothing — it can fall through on the guard even when its condition held.
+  `tests/when_null_guard_smartcast_e2e.rs`.
+- **A statement-position `when` may mix `Unit` arms with value arms** — kotlinc coerces every arm to
+  `Unit` and pops the value, exactly like `if (c) println("x") else 42`. The lowerer reads the
+  checker's discarded-expression mark to tell that shape from a value-position mix (which still bails)
+  and lowers each value arm as effect-then-`Unit`; the exhaustive-last-arm-to-`else` rewrite stays off
+  because statement position carries no exhaustiveness proof, so a non-matching subject runs nothing.
+  `tests/when_statement_value_arm_e2e.rs`.
 - **`x ?: return` smart-casts `x` for the code that follows** (also `?: throw`/`break`/`continue`/a
   `Nothing`-typed call): completing an elvis whose right-hand side is `Nothing` proves a stable
   `val`/parameter non-null, exactly like an `if (x == null) return` guard. A nullable-primitive local
   narrows to its unboxed primitive (the lowerer's `Name` path unboxes the reference slot on use); a
-  nullable reference already reads as its non-null type. `var`s are not narrowed (a closure could reset
-  them to null), and unsigned stays unnarrowed (its value-box unbox isn't modeled).
+  nullable reference already reads as its non-null type. A local `var` narrows like a `val` when no
+  changing closure captures it (see the var smart-cast entry below); unsigned stays unnarrowed (its
+  value-box unbox isn't modeled).
   `tests/elvis_return_smartcast_e2e.rs`.
 - **`u?.member ?: return` smart-casts the safe-call ROOT receiver** for the code that follows: the
   elvis only completes when every `?.` in the left side held, which proves the chain's root non-null.
-  The root must be a stable `val`/parameter name; the same `var`/unsigned exclusions as the bare-name
-  form apply. (Intermediate chain links narrow too when they are stable property paths — see the
-  access-path entry below.) `tests/elvis_return_smartcast_e2e.rs`,
+  The root must be a stable `val`/parameter name or a local `var` no changing closure captures; the
+  same unsigned exclusions as the bare-name form apply. (Intermediate chain links narrow too when
+  they are stable property paths — see the access-path entry below.) `tests/elvis_return_smartcast_e2e.rs`,
   `crates/krusty-lsp/src/compiler_analysis.rs::source_set_narrows_safe_call_root_after_elvis_return`.
 - **Smart casts apply to stable ACCESS PATHS, not only plain names** (`tests/path_smartcast_e2e.rs`).
   `==`/`!=` null checks, `is`/`!is` type tests, and contract conclusions (`returns(false) implies

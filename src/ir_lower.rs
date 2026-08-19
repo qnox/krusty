@@ -25713,11 +25713,15 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let t = {
             // Bail on shapes the flat IR can't emit safely: branches that mix `Unit` with real
-            // values (only valid as a discarded statement, indistinguishable here from a value
-            // use → inconsistent frames), and a subject `==` comparison that mixes a primitive
-            // with a reference (e.g. `when (i: Int) { null -> … }` → bad-typed compare). A `Nothing`
-            // (diverging `throw`/`return`) branch is exempt: it pushes nothing at the merge, so a
-            // statement `when` with a throwing `else` (`is A -> r = …; else -> throw`) is fine.
+            // values IN VALUE POSITION (inconsistent frames at the merge), and a subject `==`
+            // comparison that mixes a primitive with a reference (e.g. `when (i: Int) { null -> … }`
+            // → bad-typed compare). A `Nothing` (diverging `throw`/`return`) branch is exempt: it
+            // pushes nothing at the merge, so a statement `when` with a throwing `else`
+            // (`is A -> r = …; else -> throw`) is fine. In STATEMENT position a mixed `when` is
+            // ordinary Kotlin — kotlinc coerces every arm to `Unit`, popping the value arms — and
+            // the checker's discarded-expression mark says exactly that, so those arms lower as
+            // effect-then-`Unit` below instead of bailing.
+            let discarded = self.info.is_discarded_expression(e);
             let body_tys: Vec<Ty> = arms.iter().map(|a| self.info.ty(a.body)).collect();
             // A `Nothing`-typed arm (a `throw`/`return`, or a CALL to a `Nothing`-returning function)
             // pushes nothing at the merge — it's exempt from the "mixes Unit with a value" bail. The
@@ -25729,9 +25733,12 @@ impl<'a> Lower<'a> {
                 && body_tys
                     .iter()
                     .all(|t| is_unit_body(*t) || *t == Ty::Nothing);
-            if any_unit && !all_unit {
+            if any_unit && !all_unit && !discarded {
                 return None;
             }
+            // Statement position with a value arm: coerce EVERY arm to the stored `Unit` so the
+            // merge frames uniformly (the value arms are evaluated for their effect and popped).
+            let arms_coerce_to_unit = all_unit || (any_unit && discarded);
             // An unsigned subject compares its arms with unsigned `==`, which is BIT equality — the
             // same comparison the emitter already produces for the underlying `int`/`long`, for
             // `UInt` and `ULong` alike (magnitude never enters an equality test). So a subject whose
@@ -25755,7 +25762,11 @@ impl<'a> Lower<'a> {
             // to the `else` (one arm always matches, so the final one is the catch-all). This is
             // behavior-preserving for an exhaustive `when`.
             let has_else = arms.iter().any(|a| a.conditions.is_empty());
-            let make_last_else = !has_else && self.info.ty(e) != Ty::Unit && !arms.is_empty();
+            // …but a DISCARDED (statement) `when` was never proven exhaustive — the checker types it
+            // `Unit` regardless — so its last arm must stay a real conditional arm: dropping it to
+            // `else` would run it on every non-match.
+            let make_last_else =
+                !has_else && !discarded && self.info.ty(e) != Ty::Unit && !arms.is_empty();
             let subj_ty = subject.map(|subj| self.info.ty(subj));
             if let Some(st) = subj_ty {
                 for arm in &arms {
@@ -25800,8 +25811,17 @@ impl<'a> Lower<'a> {
             let res = self.info.ty(e);
             let mut branches = Vec::new();
             for (ai, arm) in arms.iter().enumerate() {
-                let body = if all_unit {
-                    self.lower_arg(arm.body, &unit_value_ty)?
+                let body = if arms_coerce_to_unit {
+                    let bt = self.info.ty(arm.body);
+                    if all_unit || is_unit_body(bt) || bt == Ty::Nothing {
+                        self.lower_arg(arm.body, &unit_value_ty)?
+                    } else {
+                        // A value arm of a discarded statement `when`: evaluate for its effect,
+                        // then yield `Unit` so the merge frame matches the `Unit` arms (kotlinc
+                        // emits the same pop).
+                        let v = self.expr(arm.body)?;
+                        self.unit_value_after_effect(v)
+                    }
                 } else if res.is_reference() {
                     self.lower_arg(arm.body, &ty_to_ir(res))?
                 } else {
