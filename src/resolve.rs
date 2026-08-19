@@ -36658,7 +36658,7 @@ impl<'a> Checker<'a> {
                         .and_then(Option::as_ref)
                     {
                         Some(expectation) => {
-                            self.check_lambda_with_expectation(scope, arg, expectation, None)
+                            self.check_lambda_with_expectation(scope, arg, expectation, Some(name))
                         }
                         None => partial[index].unwrap_or_else(|| self.expr(scope, arg)),
                     }
