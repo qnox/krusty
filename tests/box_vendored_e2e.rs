@@ -34,16 +34,12 @@ fn vendored_kotlin_box_cases_return_ok() {
     for kt in &cases {
         let src = fs::read_to_string(kt).unwrap();
         let stem = kt.file_stem().unwrap().to_string_lossy().into_owned();
-        let compile_cp = if src.lines().any(|line| line.trim() == "// WITH_STDLIB") {
-            std::slice::from_ref(&stdlib)
-        } else {
-            &[]
-        };
+        let compile_cp = common::classpath_jars_for(&src);
         // The IR backend covers a subset; a case it rejects is *skipped*, never a failure. The gate
         // is: every case krusty *accepts* must run and return "OK" (never miscompile an accepted
         // file).
         let Some(classes) =
-            common::compile_in_process(&src, &stem, compile_cp, Some(jdk.as_path()))
+            common::compile_in_process(&src, &stem, &compile_cp, Some(jdk.as_path()))
         else {
             skipped += 1;
             continue;

@@ -111,21 +111,32 @@ fn kotlin_dependency_candidates(kind: SourceKind, text: &str) -> Vec<String> {
         ),
         _ => crate::parser::parse(text, &tokens, &mut diagnostics),
     };
-    let mut candidates = file.imports.clone();
-    let wildcard_imports = file
-        .imports
+    let mut candidates = file
+        .import_paths
         .iter()
-        .filter_map(|import| import.strip_suffix(".*"))
+        .map(|import| {
+            let mut path = import.path();
+            if import.wildcard {
+                path.push_str(".*");
+            }
+            path
+        })
+        .collect::<Vec<_>>();
+    let wildcard_imports = file
+        .import_paths
+        .iter()
+        .filter(|import| import.wildcard)
+        .map(crate::ast::ImportPath::path)
         .collect::<Vec<_>>();
     for token in &tokens {
         let name = token.text(text);
         if token.kind == crate::token::TokenKind::Ident
             && name.chars().next().is_some_and(char::is_uppercase)
         {
-            let explicitly_imported =
-                file.imports.iter().any(|import| {
-                    !import.ends_with(".*") && import.rsplit('.').next() == Some(name)
-                }) || file.import_aliases.iter().any(|(alias, _)| alias == name);
+            let explicitly_imported = file
+                .import_paths
+                .iter()
+                .any(|import| import.imported_name() == Some(name));
             if !explicitly_imported {
                 if let Some(package) = &file.package {
                     candidates.push(format!("{package}.{name}"));

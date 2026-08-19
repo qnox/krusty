@@ -634,12 +634,14 @@ impl SignatureHelpSymbols {
         {
             return Some(group);
         }
-        for import in &file.imports {
-            if import.rsplit('.').next() == Some(name) {
-                let imported_package = import.rsplit_once('.').map_or("", |(package, _)| package);
+        for import in &file.import_paths {
+            if import.imported_name() == Some(name) {
+                let path = import.path();
+                let (imported_package, declared_name) =
+                    path.rsplit_once('.').unwrap_or(("", &path));
                 if let Some(&group) = self.top_by_qualified.get(&(
                     imported_package.to_string(),
-                    name.to_string(),
+                    declared_name.to_string(),
                     String::new(),
                 )) {
                     return Some(group);
@@ -659,12 +661,14 @@ impl SignatureHelpSymbols {
         {
             return Some(group);
         }
-        for import in &file.imports {
-            if import.rsplit('.').next() == Some(name) {
-                let imported_package = import.rsplit_once('.').map_or("", |(package, _)| package);
+        for import in &file.import_paths {
+            if import.imported_name() == Some(name) {
+                let path = import.path();
+                let (imported_package, declared_name) =
+                    path.rsplit_once('.').unwrap_or(("", &path));
                 if let Some(&group) = self
                     .constructors_by_qualified
-                    .get(&(imported_package.to_string(), name.to_string()))
+                    .get(&(imported_package.to_string(), declared_name.to_string()))
                 {
                     return Some(group);
                 }

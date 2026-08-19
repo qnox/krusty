@@ -8877,6 +8877,7 @@ mod tests {
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier: classifier.map(std::sync::Arc::new),
                 callables: Callables::None,
+                importable_declaration: false,
             })
         }
     }
@@ -8941,6 +8942,7 @@ mod tests {
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier: classifier.map(std::sync::Arc::new),
                 callables: Callables::None,
+                importable_declaration: false,
             })
         }
     }
@@ -9058,6 +9060,7 @@ mod tests {
                 }),
                 classifier,
                 callables,
+                importable_declaration: false,
             })
         }
     }
@@ -9939,6 +9942,7 @@ mod tests {
                     classifier_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(FunctionSet { overloads }),
+                    importable_declaration: false,
                 })
             }
         }
@@ -9985,6 +9989,7 @@ mod tests {
                     classifier_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(FunctionSet { overloads }),
+                    importable_declaration: false,
                 })
             }
         }

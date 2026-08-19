@@ -1119,10 +1119,10 @@ impl DefinitionSymbols {
             return Some(local);
         }
         let mut explicit_owners = file
-            .imports
+            .import_paths
             .iter()
-            .filter(|import| !import.ends_with(".*") && import.rsplit('.').next() == Some(name))
-            .filter_map(|import| self.dotted_class(import).map(|(owner, _)| owner))
+            .filter(|import| import.imported_name() == Some(name))
+            .filter_map(|import| self.dotted_class(&import.path()).map(|(owner, _)| owner))
             .collect::<Vec<_>>();
         explicit_owners.sort_unstable();
         explicit_owners.dedup();
@@ -1133,11 +1133,11 @@ impl DefinitionSymbols {
             };
         }
         let mut wildcard_owners = file
-            .imports
+            .import_paths
             .iter()
-            .filter_map(|import| import.strip_suffix(".*"))
-            .filter_map(|owner| {
-                self.dotted_class(&format!("{owner}.{name}"))
+            .filter(|import| import.wildcard)
+            .filter_map(|import| {
+                self.dotted_class(&format!("{}.{name}", import.path()))
                     .map(|(owner, _)| owner)
             })
             .collect::<Vec<_>>();
@@ -1234,21 +1234,21 @@ impl DefinitionSymbols {
         if let Some(targets) = self.top_levels.get(&(package, name.to_owned(), kind)) {
             return targets.clone();
         }
-        let mut explicit_packages = Vec::new();
-        for import in &file.imports {
-            if !import.ends_with(".*") && import.rsplit('.').next() == Some(name) {
-                let mut components = import.rsplitn(2, '.');
-                let _ = components.next();
-                explicit_packages.push(components.next().unwrap_or_default().replace('.', "/"));
+        let mut explicit_targets = Vec::new();
+        for import in &file.import_paths {
+            if import.imported_name() == Some(name) {
+                let path = import.path();
+                let (package, declared_name) = path.rsplit_once('.').unwrap_or(("", &path));
+                explicit_targets.push((package.replace('.', "/"), declared_name.to_string()));
             }
         }
-        explicit_packages.sort_unstable();
-        explicit_packages.dedup();
-        if !explicit_packages.is_empty() {
-            return match explicit_packages.as_slice() {
-                [package] => self
+        explicit_targets.sort_unstable();
+        explicit_targets.dedup();
+        if !explicit_targets.is_empty() {
+            return match explicit_targets.as_slice() {
+                [(package, declared_name)] => self
                     .top_levels
-                    .get(&(package.clone(), name.to_owned(), kind))
+                    .get(&(package.clone(), declared_name.clone(), kind))
                     .cloned()
                     .unwrap_or_default(),
                 _ => Vec::new(),
@@ -1256,10 +1256,10 @@ impl DefinitionSymbols {
         }
 
         let mut wildcard_packages = file
-            .imports
+            .import_paths
             .iter()
-            .filter_map(|import| import.strip_suffix(".*"))
-            .map(|package| package.replace('.', "/"))
+            .filter(|import| import.wildcard)
+            .map(|import| import.path().replace('.', "/"))
             .filter(|package| {
                 self.top_levels
                     .contains_key(&(package.clone(), name.to_owned(), kind))
@@ -1884,15 +1884,16 @@ fn extension_is_in_scope(file: &File, name: &str, package: &str) -> bool {
     if package_key(file) == package {
         return true;
     }
-    file.imports.iter().any(|import| {
-        import
-            .strip_suffix(".*")
-            .is_some_and(|import_package| import_package.replace('.', "/") == package)
-            || import
-                .rsplit_once('.')
-                .is_some_and(|(import_package, item)| {
-                    item == name && import_package.replace('.', "/") == package
-                })
+    file.import_paths.iter().any(|import| {
+        let path = import.path();
+        if import.wildcard {
+            path.replace('.', "/") == package
+        } else {
+            import.imported_name() == Some(name)
+                && path
+                    .rsplit_once('.')
+                    .is_some_and(|(import_package, _)| import_package.replace('.', "/") == package)
+        }
     })
 }
 
