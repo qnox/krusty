@@ -1201,7 +1201,10 @@ where
     }
 
     fn pushes_diagnostics(&self) -> bool {
-        !self.client_pulls_diagnostics || !self.client_refreshes_diagnostics
+        // A client that supports pull diagnostics is expected to pull them. Sending the same
+        // diagnostics through both push and pull channels makes editors such as Zed show them
+        // twice, and the LSP model treats the two delivery modes as alternatives.
+        !self.client_pulls_diagnostics
     }
 
     fn publish(
@@ -1468,20 +1471,24 @@ where
             ));
         }
         if outcome.changed {
-            // Publish each chunk as it lands. A workspace pull only arrives if the client asks,
-            // and on a large repository the sweep runs for hours -- waiting until the end would
-            // show nothing for the whole of it. Open documents are excluded: their buffer is
-            // newer than whatever the sweep read from disk.
-            for uri in attempted {
-                if self.documents.contains_key(&uri) {
-                    continue;
+            // Publish each chunk as it lands when the client has no pull channel. A workspace
+            // pull only arrives if the client asks, and on a large repository the sweep runs for
+            // hours -- waiting until the end would show nothing for the whole of it. Open
+            // documents are excluded: their buffer is newer than whatever the sweep read from disk.
+            // Pull-capable clients are told to refresh instead; publishing the same diagnostics
+            // through both channels makes editors such as Zed display them twice.
+            if self.pushes_diagnostics() {
+                for uri in attempted {
+                    if self.documents.contains_key(&uri) {
+                        continue;
+                    }
+                    let index = self
+                        .workspace_diagnostics
+                        .diagnostics(&uri)
+                        .map(|found| DiagnosticIndex::from_workspace(&found))
+                        .unwrap_or_default();
+                    messages.push(publish_diagnostics(&uri, None, &index));
                 }
-                let index = self
-                    .workspace_diagnostics
-                    .diagnostics(&uri)
-                    .map(|found| DiagnosticIndex::from_workspace(&found))
-                    .unwrap_or_default();
-                messages.push(publish_diagnostics(&uri, None, &index));
             }
             messages.extend(self.diagnostic_refresh());
         }
@@ -3098,7 +3105,9 @@ where
 
     /// Report every file the sweep has indexed. Without this the retained diagnostics are
     /// unreachable: a client only pulls `textDocument/diagnostic` for documents it has open, and
-    /// those are always answered from the open buffer.
+    /// those are always answered from the open buffer. To avoid showing the same diagnostic twice
+    /// in editors such as Zed, open documents are reported as empty here when the client will also
+    /// pull them through `textDocument/diagnostic`.
     fn workspace_diagnostic(&mut self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
@@ -3138,9 +3147,18 @@ where
         let mut item_wire_bytes = 2usize;
         for uri in uris {
             let workspace_index;
+            let open_empty_index;
             let empty_index;
             let index = if let Some(open) = self.documents.get(&uri) {
-                &open.diagnostics
+                if self.client_pulls_diagnostics {
+                    // The client pulls open documents via textDocument/diagnostic. Returning them
+                    // again in the workspace report makes editors such as Zed display every
+                    // diagnostic twice, so the workspace report clears its copy instead.
+                    open_empty_index = DiagnosticIndex::default();
+                    &open_empty_index
+                } else {
+                    &open.diagnostics
+                }
             } else if let Some(found) = self.workspace_diagnostics.diagnostics(&uri) {
                 workspace_index = DiagnosticIndex::from_workspace(&found);
                 &workspace_index
@@ -4988,9 +5006,16 @@ mod tests {
         )
         .unwrap();
 
-        let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("textDocument/publishDiagnostics"));
-        assert!(text.contains("file:///a.kt"));
+        let messages = decode_messages(&out);
+        let publish = messages
+            .iter()
+            .find(|message| message["method"] == "textDocument/publishDiagnostics")
+            .expect("analysis result must be published");
+        assert_eq!(publish["params"]["uri"], "file:///a.kt");
+        assert_eq!(
+            publish["params"]["diagnostics"].as_array().map(Vec::len),
+            Some(0)
+        );
         assert_eq!(submitted.borrow().len(), 1);
     }
 
@@ -5594,9 +5619,11 @@ mod tests {
         )
         .unwrap();
 
-        let answered = String::from_utf8(out[before..].to_vec()).unwrap();
+        let answered = decode_messages(&out[before..]);
         assert!(
-            answered.contains("\"id\":2"),
+            answered
+                .iter()
+                .any(|message| message.get("id") == Some(&json!(2))),
             "hover response must be written while analysis is in flight: {answered:?}"
         );
         assert!(
@@ -5604,19 +5631,28 @@ mod tests {
             "the hover was answered before analysis completed"
         );
 
+        let before_release = out.len();
         release_tx.send(()).unwrap();
-        let mut published = false;
+        let mut after_release = Vec::new();
         for _ in 0..INPUT_QUEUE_CAPACITY + 2 {
             let event = incoming
                 .recv_timeout(Duration::from_secs(5))
                 .expect("analysis completion event");
             step_async(&mut service, &mut out, &incoming, &mut pending, event).unwrap();
-            if String::from_utf8_lossy(&out).contains("textDocument/publishDiagnostics") {
-                published = true;
+            after_release = decode_messages(&out[before_release..]);
+            if after_release
+                .iter()
+                .any(|message| message["method"] == "textDocument/publishDiagnostics")
+            {
                 break;
             }
         }
-        assert!(published, "analysis result is published after release");
+        assert!(
+            after_release
+                .iter()
+                .any(|message| message["method"] == "textDocument/publishDiagnostics"),
+            "analysis result is published after release"
+        );
         assert!(completed.load(Ordering::SeqCst));
     }
 
@@ -7132,7 +7168,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_without_refresh_support_keeps_diagnostic_push() {
+    fn pull_client_without_refresh_is_not_pushed_diagnostics() {
         let mut service = LspService::new(|sources: &[&str]| {
             sources
                 .iter()
@@ -7158,9 +7194,18 @@ mod tests {
             support_documents: Vec::new(),
             pending: false,
         });
-        assert!(messages
-            .iter()
-            .any(|message| message["method"] == "textDocument/publishDiagnostics"));
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["method"] == "textDocument/publishDiagnostics"),
+            "a pull client must not also be pushed diagnostics: {messages:?}"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["method"] == "workspace/diagnostic/refresh"),
+            "without refresh support there is nothing to request: {messages:?}"
+        );
     }
 
     #[test]
@@ -7236,6 +7281,81 @@ mod tests {
 
         let pulled = service.pull_diagnostics(
             Some(json!(2)),
+            json!({ "textDocument": { "uri": "file:///a.kt" } }),
+        );
+        assert_eq!(
+            pulled.messages[0]["result"]["items"]
+                .as_array()
+                .map(Vec::len),
+            Some(1),
+            "{:?}",
+            pulled.messages
+        );
+    }
+
+    #[test]
+    fn workspace_diagnostic_clears_open_documents_for_pull_clients() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "textDocument": { "diagnostic": { "dynamicRegistration": false } },
+                    "workspace": { "diagnostics": { "refreshSupport": true } },
+                }
+            },
+        }));
+        service.open_document_for_test("file:///a.kt", "x", 1);
+        service.take_analysis_job();
+
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis {
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "boom".to_string(),
+                    file: 0,
+                }],
+                ..DocumentAnalysis::empty()
+            }],
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["method"] == "textDocument/publishDiagnostics"),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["method"] == "workspace/diagnostic/refresh"),
+            "{messages:?}"
+        );
+
+        let workspace = service.workspace_diagnostic(Some(json!(2)), json!({}));
+        let items = workspace.messages[0]["result"]["items"]
+            .as_array()
+            .expect("workspace diagnostic items");
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["uri"], "file:///a.kt");
+        assert_eq!(items[0]["kind"], "full");
+        assert_eq!(items[0]["items"], json!([]));
+
+        let pulled = service.pull_diagnostics(
+            Some(json!(3)),
             json!({ "textDocument": { "uri": "file:///a.kt" } }),
         );
         assert_eq!(
@@ -8113,6 +8233,122 @@ mod tests {
             published["params"]["diagnostics"].as_array().map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn indexed_chunk_does_not_publish_for_pull_refresh_client() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "textDocument": { "diagnostic": { "dynamicRegistration": false } },
+                    "workspace": { "diagnostics": { "refreshSupport": true } },
+                }
+            },
+        }));
+
+        let messages = service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec!["file:///w/Swept.kt".to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: "file:///w/Swept.kt".to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 3),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "swept boom".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "val x = 1\n".to_string(),
+            }],
+        });
+
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["method"] == "textDocument/publishDiagnostics"),
+            "a pull+refresh client must not be pushed the same diagnostics it will pull: {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["method"] == "workspace/diagnostic/refresh"),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn indexed_chunk_does_not_publish_for_pull_client_without_refresh() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "textDocument": { "diagnostic": { "dynamicRegistration": false } },
+                }
+            },
+        }));
+
+        let messages = service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec!["file:///w/Swept.kt".to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: "file:///w/Swept.kt".to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 3),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "swept boom".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "val x = 1\n".to_string(),
+            }],
+        });
+
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["method"] == "textDocument/publishDiagnostics"),
+            "a pull client must not also be pushed diagnostics: {messages:?}"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["method"] == "workspace/diagnostic/refresh"),
+            "without refresh support the server has no way to prompt a re-pull: {messages:?}"
+        );
+
+        // The diagnostic is still reachable through the pull channel.
+        let report = service.pull_diagnostics(
+            Some(json!(2)),
+            json!({"textDocument": {"uri": "file:///w/Swept.kt"}}),
+        );
+        let items = &report.messages[0]["result"]["items"];
+        assert_eq!(items.as_array().map(Vec::len), Some(1));
+        assert_eq!(items[0]["message"], "Swept boom");
     }
 
     #[test]
