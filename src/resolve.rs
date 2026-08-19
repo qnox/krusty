@@ -34613,6 +34613,13 @@ impl<'a> Checker<'a> {
     }
 
     fn report_assignability_error(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
+        // Neither side is a TYPE when it still carries the not-determined marker: the declaration it
+        // came from has not been resolved yet, and the message would name `<not determined>` — a
+        // placeholder the source never wrote — for a program that may well be correct. Whatever
+        // could not be determined is reported at its own declaration.
+        if expected.mentions_pending() || actual.mentions_pending() {
+            return;
+        }
         crate::trace_compiler!(
             "assignability",
             "context={ctx} expected={expected:?} actual={actual:?} span={span:?}"
@@ -51664,6 +51671,14 @@ impl<'a> Checker<'a> {
     fn join(&mut self, a: Ty, b: Ty, span: Span) -> Ty {
         if let Some(joined) = self.semantic_common_supertype(a, b) {
             return joined;
+        }
+        // A branch whose type is not determined yet has no common supertype with anything, and
+        // saying the branches are incompatible names a placeholder rather than a real disagreement.
+        // The ordinary error placeholder is what propagates — it is what suppresses the cascade the
+        // way every other failed join does; only the MESSAGE is withheld, because whatever could
+        // not be determined is reported at its own declaration.
+        if a.mentions_pending() || b.mentions_pending() {
+            return Ty::Error;
         }
         self.diags.error(
             span,

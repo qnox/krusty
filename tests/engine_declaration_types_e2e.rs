@@ -432,3 +432,40 @@ fn a_super_qualified_call_demands_the_supertype_declaration() {
         "engine-super-qualified-demand",
     );
 }
+
+/// A not-determined operand is never a type mismatch.
+///
+/// While a declaration's own type is being resolved, an expression that reads it carries the
+/// marker. Comparing that against anything and reporting the difference names `<not determined>` —
+/// a placeholder the source never wrote — for a program that is fine. Whatever could not be
+/// determined is reported at its own declaration, once.
+#[test]
+fn a_not_determined_operand_is_not_a_mismatch() {
+    common::expect_front_end_ok_files_with_stdlib(
+        &["class Holder {\n\
+           \x20 val width = compute()\n\
+           \x20 val doubled: Int = width * 2\n\
+           \x20 fun compute() = 21\n\
+           }\n\
+           fun use(): Int = Holder().doubled\n"],
+        "engine-marker-is-not-a-mismatch",
+    );
+}
+
+/// A not-determined argument makes a call UNANSWERED, not ambiguous.
+///
+/// Every overload accepts a marker, so reporting the ambiguity describes the missing answer rather
+/// than the program — `append(x)` on a `StringBuilder` listed a dozen candidates where the only
+/// fact was that `x`'s declaration had not been resolved yet.
+#[test]
+fn a_not_determined_argument_is_not_an_ambiguity() {
+    common::expect_front_end_ok_files_with_stdlib(
+        &["class Holder {\n\
+           \x20 val width = compute()\n\
+           \x20 fun render(): String = StringBuilder().append(width).toString()\n\
+           \x20 fun compute() = 21\n\
+           }\n\
+           fun use(): String = Holder().render()\n"],
+        "engine-marker-is-not-an-ambiguity",
+    );
+}
