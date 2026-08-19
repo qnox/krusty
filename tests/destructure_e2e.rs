@@ -145,3 +145,36 @@ fn destructuring_non_component_type_is_rejected() {
         "msgs: {msgs:?}"
     );
 }
+
+#[test]
+fn destructured_lambda_against_multi_arity_function_type_is_rejected() {
+    // `{ (a, b) -> }` declares ONE destructured parameter, so it never fits a two-parameter
+    // expected shape: kotlinc 2.4.10 reports `initializer type mismatch: expected
+    // '(Int, Int) -> Unit', actual '(Int) -> Unit'` (plus component1/component2 errors on the
+    // destructured `Int`) rather than zipping the single parameter across both slots.
+    let msgs = check(
+        "fun box(): String {\n    val f: (Int, Int) -> Unit = { (a, b) -> }\n    return \"OK\"\n}\n",
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains(
+            "initializer type mismatch: expected '(Int, Int) -> Unit', actual '(Int) -> Unit'"
+        )),
+        "msgs: {msgs:?}"
+    );
+}
+
+#[test]
+fn lambda_declaring_more_parameters_than_the_expected_shape_is_rejected() {
+    // The mirror image: two declared parameters against a one-parameter function type. kotlinc
+    // 2.4.10 reports the arity mismatch (`actual '(Int, ???) -> Unit'`) and declines to infer the
+    // surplus parameter; krusty rejects with the same initializer mismatch (surplus parameter
+    // types as `Any`).
+    let msgs = check(
+        "fun box(): String {\n    val f: (Int) -> Unit = { a, b -> }\n    return \"OK\"\n}\n",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("initializer type mismatch: expected '(Int) -> Unit'")),
+        "msgs: {msgs:?}"
+    );
+}

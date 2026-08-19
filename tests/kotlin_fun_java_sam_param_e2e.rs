@@ -336,3 +336,23 @@ fn member_overload_consumer_and_runnable_picks_consumer_both_orders() {
         }\n";
     common::expect_box_ok_with_stdlib(SRC, "sam_member_consumer_runnable");
 }
+
+/// A destructured lambda declares ONE (synthetic) parameter, so it cannot fit a two-parameter
+/// SAM — kotlinc-pinned rejection. The arity mismatch must surface at the argument boundary
+/// instead of silently zipping the single parameter against both SAM slots.
+#[test]
+fn destructured_lambda_does_not_fit_a_two_parameter_sam() {
+    const SOURCE: &str = "fun take(c: java.util.function.BiConsumer<String, Int>) {}\n\
+        fun use() { take { (a, b) -> } }\n";
+    let (reference_code, reference_stderr) =
+        common::kotlinc_source_result("sam_destructured_arity_reference", SOURCE);
+    assert_ne!(
+        reference_code, 0,
+        "kotlinc accepted fixture: {reference_stderr}"
+    );
+    let diags = diagnostics(SOURCE);
+    assert!(
+        diags.iter().any(|d| d.contains("argument type mismatch")),
+        "expected argument arity mismatch, got {diags:?}"
+    );
+}
