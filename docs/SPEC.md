@@ -2694,9 +2694,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java.util` class that does (`ArrayList`) is not an authoritative name. A member-name probe cannot see
   supertypes, so this needs its own coverage. Tests: `tests/mapped_string_scope_e2e.rs`.
 
-  Still NOT the remaining mapped builtins, and the reason is a mechanism krusty does not have. kotlinc does
-  not hide every Java method on a mapped type: `JvmBuiltInsCustomizer` re-admits an explicit whitelist
-  (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) on top of the builtins scope. Measured against
+  Still NOT the remaining mapped builtins. kotlinc does not hide every Java method on a mapped type:
+  `JvmBuiltInsCustomizer` re-admits an explicit whitelist
+  (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) on top of the builtins scope. krusty ports that
+  whitelist for the mapped COLLECTION faces as `jvm_class_map::MAPPED_VISIBLE_METHODS` (read-only
+  signatures on the read-only face, mutating ones on the `Mutable*` face, mirroring `JvmMappedScope`),
+  so `MutableMap.computeIfAbsent`/`putIfAbsent`/`merge`, `List.stream`, and friends resolve exactly as
+  kotlinc 2.4 admits them. Tests: `tests/mapped_collection_scope_e2e.rs`. Measured against
   kotlinc, making the remaining names authoritative would WRONGLY reject `java.lang.CharSequence.chars` /
   `codePoints`, `java.lang.Enum.name` / `ordinal`, and `java.lang.Throwable.fillInStackTrace` /
   `getLocalizedMessage` / `getStackTrace` / `getSuppressed` / `initCause` / `setStackTrace` — all of which
