@@ -1382,6 +1382,8 @@ mod when_lambda_branch_e2e;
 mod when_multiple_else_check_e2e;
 #[path = "when_nothing_arm_e2e.rs"]
 mod when_nothing_arm_e2e;
+#[path = "when_statement_value_arm_e2e.rs"]
+mod when_statement_value_arm_e2e;
 #[path = "when_throwing_branch_e2e.rs"]
 mod when_throwing_branch_e2e;
 #[path = "wrapped_param_type_e2e.rs"]
