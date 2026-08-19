@@ -458,11 +458,11 @@ fn contextual_source_classifier(
         return Ok(Some(local));
     }
     let explicit = file
-        .imports
+        .import_paths
         .iter()
-        .filter(|import| !import.ends_with(".*") && import.rsplit('.').next() == Some(name))
+        .filter(|import| import.imported_name() == Some(name))
+        .map(krusty::ast::ImportPath::path)
         .filter(|import| exists(import))
-        .cloned()
         .collect::<Vec<_>>();
     match unique_source_classifier(explicit) {
         Ok(Some(result)) => return Ok(Some(result)),
@@ -470,10 +470,10 @@ fn contextual_source_classifier(
         Ok(None) => {}
     }
     unique_source_classifier(
-        file.imports
+        file.import_paths
             .iter()
-            .filter_map(|import| import.strip_suffix(".*"))
-            .map(|package| format!("{package}.{name}"))
+            .filter(|import| import.wildcard)
+            .map(|import| format!("{}.{name}", import.path()))
             .filter(|candidate| exists(candidate))
             .collect(),
     )

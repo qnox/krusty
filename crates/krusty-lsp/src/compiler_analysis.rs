@@ -388,6 +388,7 @@ impl krusty::symbol_source::SymbolSource for StandaloneKotlinSymbols {
             classifier_name: Some(identity),
             classifier: Some(std::sync::Arc::new(classifier)),
             callables: krusty::libraries::Callables::None,
+            importable_declaration: false,
         })
     }
 }
