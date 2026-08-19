@@ -3534,7 +3534,18 @@ fn ranked_extension_candidates<'a>(
             Some((rank, binding_receiver, o))
         })
         .collect();
-    out.sort_by_key(|(rank, _, _)| *rank);
+    // `@kotlin.internal.HidesMembers` sits above the whole callable tower, so it also outranks a
+    // NEARER receiver: `Map<out K, V>.forEach` beats a user `MutableMap<String, Int>.forEach` whose
+    // rank is 0. Receiver distance orders only within a tier. Consumers that walk this list looking
+    // for the first candidate that fits the call (lambda-parameter shaping) thereby try the annotated
+    // declaration first and fall through to the ordinary ones exactly when it does not fit.
+    out.sort_by_key(|(rank, _, o)| {
+        (
+            !o.annotations
+                .contains(&crate::types::type_name("kotlin/internal/HidesMembers")),
+            *rank,
+        )
+    });
     out
 }
 
@@ -4144,7 +4155,33 @@ impl<'a> SymbolResolver<'a> {
             .cloned()
             .collect::<Vec<_>>();
         if self.fn_scope.is_some() {
-            for level in self.symbol_levels_in_scope(name) {
+            let levels = self.symbol_levels_in_scope(name);
+            // `@kotlin.internal.HidesMembers` declarations are NOT part of the tower: they resolve
+            // above all of it. The nearest-level rule below stops at the first level holding an
+            // applicable extension, which would hide the default-imported `kotlin.collections`
+            // level behind a same-file / imported / local `forEach` — so lift every annotated
+            // declaration applicable to this receiver out of EVERY level first. Selection, not
+            // lookup, then decides whether the promotion actually takes the call (see the priority
+            // tiers in `select_overload_tracking_with_functions`); an annotated declaration that
+            // does not fit falls through to the ordinary candidates collected below.
+            for level in &levels {
+                let scoped = callables_from_symbols(level);
+                functions.extend(
+                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter())
+                        .into_iter()
+                        .filter(|(_, _, function)| {
+                            function
+                                .annotations
+                                .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
+                        })
+                        .map(|(rank, _, function)| {
+                            let mut function = function.clone();
+                            function.receiver_rank = rank;
+                            function
+                        }),
+                );
+            }
+            for level in levels {
                 let scoped = callables_from_symbols(&level);
                 crate::trace_compiler!(
                     "resolve",
@@ -4155,8 +4192,19 @@ impl<'a> SymbolResolver<'a> {
                         .map(|function| (function.kind, function.semantic_receiver()))
                         .collect::<Vec<_>>()
                 );
+                // Annotated declarations were already lifted above the tower; collecting them a second
+                // time here would put two copies of one declaration in the same priority bucket and
+                // read as an ambiguity. A level holding ONLY annotated declarations is therefore
+                // empty for tower purposes and the walk continues past it.
                 let extensions =
-                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter());
+                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter())
+                        .into_iter()
+                        .filter(|(_, _, function)| {
+                            !function
+                                .annotations
+                                .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
+                        })
+                        .collect::<Vec<_>>();
                 crate::trace_compiler!(
                     "resolve",
                     "receiver scope applicable name={name} receiver={receiver:?} extensions={:?}",
@@ -5233,11 +5281,16 @@ impl<'a> SymbolResolver<'a> {
                 })
                 .is_some()
         };
-        if parsed
-            .iter()
-            .any(|candidate| !candidate.0.flags.low_priority && applicable(candidate))
-        {
-            parsed.retain(|candidate| !candidate.0.flags.low_priority);
+        if parsed.iter().any(|candidate| {
+            !candidate.0.annotations.contains(&crate::types::type_name(
+                "kotlin/internal/LowPriorityInOverloadResolution",
+            )) && applicable(candidate)
+        }) {
+            parsed.retain(|candidate| {
+                !candidate.0.annotations.contains(&crate::types::type_name(
+                    "kotlin/internal/LowPriorityInOverloadResolution",
+                ))
+            });
         }
 
         let pick = if let Some(exact) = parsed.iter().find(|(_, params, ..)| {
@@ -7223,6 +7276,16 @@ fn select_overload_tracking_with_functions(
             o.callable.owner.render(),
         );
     }
+    // Declaration-priority tiers, tried in this order and falling through whenever the tier holds no
+    // applicable candidate (the `by_rank` walk below). Kotlin resolves a `@kotlin.internal.HidesMembers`
+    // extension above members — the annotation exists so `Iterable<T>.forEach` wins over
+    // `java.lang.Iterable.forEach(Consumer)` — and, as measured against kotlinc 2.4.10, above every
+    // ordinary extension level as well, whatever its receiver specificity or lexical distance. Members
+    // still precede ordinary extensions.
+    const HIDES_MEMBERS_PRIORITY: u8 = 0;
+    const MEMBER_PRIORITY: u8 = 1;
+    const EXTENSION_PRIORITY: u8 = 2;
+
     let mut by_rank: std::collections::BTreeMap<(u8, u32), Vec<(&FunctionInfo, Vec<Ty>)>> =
         std::collections::BTreeMap::new();
     let mut ranked: Vec<(u8, u32, Ty, &FunctionInfo)> = Vec::new();
@@ -7240,7 +7303,21 @@ fn select_overload_tracking_with_functions(
                     .filter(|o| pre_scoped || fn_in_scope(o, ext.fn_scope)),
             )
             .into_iter()
-            .map(|(rank, receiver, overload)| (1, rank, receiver, overload)),
+            .map(|(rank, receiver, overload)| {
+                (
+                    if overload
+                        .annotations
+                        .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
+                    {
+                        HIDES_MEMBERS_PRIORITY
+                    } else {
+                        EXTENSION_PRIORITY
+                    },
+                    rank,
+                    receiver,
+                    overload,
+                )
+            }),
         );
     }
     if matches!(
@@ -7253,7 +7330,7 @@ fn select_overload_tracking_with_functions(
                 .iter()
                 .copied()
                 .filter(|o| o.kind == FnKind::Member)
-                .map(|o| (0, o.receiver_rank, recv, o)),
+                .map(|o| (MEMBER_PRIORITY, o.receiver_rank, recv, o)),
         );
     }
     ranked.sort_by_key(|(priority, rank, _, _)| (*priority, *rank));
@@ -7735,14 +7812,22 @@ pub(crate) fn best_by_args<'a>(
 ) -> CandidateSelection<&'a FunctionInfo> {
     let ordinary = cands
         .iter()
-        .filter(|(candidate, _)| !candidate.flags.low_priority)
+        .filter(|(candidate, _)| {
+            !candidate.annotations.contains(&crate::types::type_name(
+                "kotlin/internal/LowPriorityInOverloadResolution",
+            ))
+        })
         .cloned()
         .collect::<Vec<_>>();
     match best_by_args_at_priority(lib, src, &ordinary, args) {
         CandidateSelection::None => {
             let low = cands
                 .iter()
-                .filter(|(candidate, _)| candidate.flags.low_priority)
+                .filter(|(candidate, _)| {
+                    candidate.annotations.contains(&crate::types::type_name(
+                        "kotlin/internal/LowPriorityInOverloadResolution",
+                    ))
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             best_by_args_at_priority(lib, src, &low, args)

@@ -990,9 +990,9 @@ fn fn_info(
             operator: sig.is_operator(),
             infix: sig.is_infix(),
             is_abstract: sig.is_abstract(),
-            low_priority: sig.low_priority(),
         },
         visibility: sig.visibility,
+        annotations: sig.annotations.clone(),
         ..FunctionInfo::plain(kind, receiver, callable)
     }
 }
@@ -1479,6 +1479,7 @@ mod tests {
                 .with_is_override(false)
                 .with_is_final(false)
                 .with_is_suspend(false),
+            annotations: Vec::new(),
             vararg_index: None,
             required: 0,
             param_defaults: vec![],

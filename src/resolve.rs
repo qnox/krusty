@@ -40,13 +40,6 @@ const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
 const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
 
-fn has_low_priority_annotation(annotations: &[AnnotationRef], class_names: &ClassNames) -> bool {
-    annotations
-        .iter()
-        .filter_map(|annotation| class_names.get_class(&annotation.name))
-        .any(|annotation| annotation.matches("kotlin/internal/LowPriorityInOverloadResolution"))
-}
-
 /// Is this property declaration annotated `@JvmField`? Resolved by annotation IDENTITY, like every
 /// other recognized annotation here — a user annotation spelled `JvmField` resolves elsewhere and
 /// must not suppress an accessor.
@@ -459,9 +452,8 @@ impl SigFlags {
     const IS_SUSPEND: u16 = 1 << 5;
     const REQUIRES_SPLICE: u16 = 1 << 6;
     const IS_ABSTRACT: u16 = 1 << 7;
-    const LOW_PRIORITY: u16 = 1 << 8;
-    const IS_INFIX: u16 = 1 << 9;
-    const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 10;
+    const IS_INFIX: u16 = 1 << 8;
+    const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -514,10 +506,6 @@ impl SigFlags {
         self.with(Self::IS_ABSTRACT, on)
     }
     #[inline]
-    pub const fn with_low_priority(self, on: bool) -> Self {
-        self.with(Self::LOW_PRIORITY, on)
-    }
-    #[inline]
     pub const fn with_is_infix(self, on: bool) -> Self {
         self.with(Self::IS_INFIX, on)
     }
@@ -536,6 +524,9 @@ pub struct Signature {
     /// — a `suspend fun`. `requires_splice` — no direct-call fallback is semantically legal even when
     /// the backend emits a method so another compilation can obtain and inline its body.
     pub flags: SigFlags,
+    /// Annotation class identities declared on the source declaration. Consumers decide which
+    /// annotations affect resolution/emission; the signature layer only records their identities.
+    pub annotations: Vec<crate::types::TypeName>,
     pub vararg_index: Option<usize>,
     /// Minimum number of arguments a caller must supply — params beyond this have default values
     /// that the caller fills in. Equals `params.len()` when there are no defaults.
@@ -696,10 +687,6 @@ impl Signature {
         self.flags.has(SigFlags::IS_ABSTRACT)
     }
     #[inline]
-    pub fn low_priority(&self) -> bool {
-        self.flags.has(SigFlags::LOW_PRIORITY)
-    }
-    #[inline]
     pub fn set_vararg(&mut self, on: bool) {
         self.flags = self.flags.with_vararg(on);
         if !on {
@@ -758,9 +745,9 @@ fn signature_from_resolved_function(function: &crate::libraries::FunctionInfo) -
             .with_is_operator(function.flags.operator)
             .with_is_infix(function.flags.infix)
             .with_is_suspend(function.flags.suspend)
-            .with_low_priority(function.flags.low_priority)
             .with_has_reified_type_params(function.flags.reified)
             .with_requires_splice(function.flags.inline.must_inline()),
+        annotations: function.annotations.clone(),
         vararg_index: function.call_sig.vararg_index,
         required: function.call_sig.required,
         param_defaults: function.call_sig.param_defaults.clone(),
@@ -6403,10 +6390,6 @@ fn collect_signatures_with_cp_impl(
                             .with_is_override(f.is_override())
                             .with_is_final(f.is_final())
                             .with_is_suspend(f.is_suspend())
-                            .with_low_priority(has_low_priority_annotation(
-                                &f.annotations,
-                                &class_names,
-                            ))
                             // Reified source bodies may be emitted to make their inline body
                             // available across a compilation boundary, but their erased JVM method
                             // is not a legal direct-call fallback. Encode that semantic capability on
@@ -6415,6 +6398,11 @@ fn collect_signatures_with_cp_impl(
                             // declaration set or rediscovering `reified` in individual call paths.
                             .with_requires_splice(!f.reified_type_params.is_empty())
                             .with_has_reified_type_params(!f.reified_type_params.is_empty()),
+                        annotations: f
+                            .annotations
+                            .iter()
+                            .filter_map(|annotation| class_names.get_class(&annotation.name))
+                            .collect(),
                         vararg_index,
                         required,
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
@@ -8028,6 +8016,7 @@ fn collect_signatures_with_cp_impl(
                                         .with_is_override(false)
                                         .with_is_final(true)
                                         .with_is_suspend(false),
+                                    annotations: Vec::new(),
                                     vararg_index: None,
                                     required: 0,
                                     param_defaults: Vec::new(),
@@ -8069,6 +8058,7 @@ fn collect_signatures_with_cp_impl(
                                 }),
                                 projected_return_hazard: false,
                                 flags: SigFlags::default(),
+                                annotations: Vec::new(),
                                 vararg_index: None,
                                 required: 0,
                                 param_defaults: vec![true; data_properties.len()],
@@ -8215,6 +8205,7 @@ fn collect_signatures_with_cp_impl(
                             generic_sig: member.generic_sig,
                             projected_return_hazard: false,
                             flags: SigFlags::default().with_is_final(true),
+                            annotations: Vec::new(),
                             vararg_index: None,
                             required,
                             param_defaults: vec![],
@@ -13314,8 +13305,12 @@ fn member_signature(
             .with_is_override(m.is_override())
             .with_is_final(m.is_final())
             .with_is_suspend(m.is_suspend())
-            .with_low_priority(has_low_priority_annotation(&m.annotations, classes))
             .with_is_abstract(m.is_abstract()),
+        annotations: m
+            .annotations
+            .iter()
+            .filter_map(|annotation| classes.get_class(&annotation.name))
+            .collect(),
         vararg_index: m.params.iter().position(|p| p.is_vararg),
         required: m.params.iter().take_while(|p| p.default.is_none()).count(),
         param_defaults: m.params.iter().map(|p| p.default.is_some()).collect(),
@@ -22075,11 +22070,14 @@ impl<'a> Checker<'a> {
                 applicable.last().unwrap().5.callable.ret,
             );
         }
-        if applicable
-            .iter()
-            .any(|(_, _, _, _, _, candidate, _)| !candidate.flags.low_priority)
-        {
-            applicable.retain(|(_, _, _, _, _, candidate, _)| !candidate.flags.low_priority);
+        let low_priority_annotation =
+            crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
+        if applicable.iter().any(|(_, _, _, _, _, candidate, _)| {
+            !candidate.annotations.contains(&low_priority_annotation)
+        }) {
+            applicable.retain(|(_, _, _, _, _, candidate, _)| {
+                !candidate.annotations.contains(&low_priority_annotation)
+            });
         }
         let has_context = applicable
             .iter()
@@ -22643,16 +22641,27 @@ impl<'a> Checker<'a> {
                 let declared = semantic.params.get(parameter).copied()?;
                 if overload.call_sig.vararg_index == Some(parameter) {
                     let whole_array = whole_array_varargs.get(argument).copied().unwrap_or(false);
-                    if let (Some(actual), Some(element)) = (actual, declared.array_read_elem()) {
+                    if let Some(element) = declared.array_read_elem() {
                         if whole_array {
                             return Some(element);
                         }
-                        if !crate::assignable::is_assignable(
-                            &crate::assignable::TyCtx::new(),
-                            self,
-                            *actual,
-                            declared,
-                        ) {
+                        if actual.map_or(false, |actual| {
+                            !crate::assignable::is_assignable(
+                                &crate::assignable::TyCtx::new(),
+                                self,
+                                actual,
+                                declared,
+                            )
+                        }) {
+                            return Some(element);
+                        }
+                        // An untyped lambda packed into the vararg has no `actual` yet. Shape it by
+                        // the element type so the arity gate and lambda shaping see a callable type
+                        // instead of a non-callable array.
+                        if actual.is_none()
+                            && (matches!(element.non_null(), Ty::Fun(_))
+                                || self.semantic_sam_signature(element).is_some())
+                        {
                             return Some(element);
                         }
                     }
@@ -25320,10 +25329,6 @@ impl<'a> Checker<'a> {
         update(&mut info);
         self.expr_lowers.insert(e, ExprLowering::Lambda(info));
     }
-    fn mark_inline_lambda(&mut self, e: ExprId) {
-        self.update_lambda_info(e, |info| info.capture = LambdaCapture::InlineSplice);
-    }
-
     /// Commit inline-lambda capture semantics from one already-selected callable. Candidate probing may
     /// contextually type a lambda, but only selection may decide whether that lambda is spliced or
     /// materialized (`crossinline`/`noinline`). The checker-owned slot map supplies the exact parameter
@@ -25334,11 +25339,13 @@ impl<'a> Checker<'a> {
         inline: crate::libraries::InlineKind,
         call_sig: &CallSig,
     ) {
-        if !inline.can_inline() {
-            return;
-        }
         let Some(slots) = self.resolved_call_arg_slots.get(&call).cloned() else {
             return;
+        };
+        let target = if inline.can_inline() {
+            LambdaCapture::InlineSplice
+        } else {
+            LambdaCapture::Closure
         };
         for (parameter, argument) in slots.into_iter().enumerate() {
             let Some(argument) = argument else { continue };
@@ -25351,7 +25358,7 @@ impl<'a> Checker<'a> {
             {
                 continue;
             }
-            self.mark_inline_lambda(argument);
+            self.update_lambda_info(argument, |info| info.capture = target);
         }
     }
     fn mark_receiver_lambda(&mut self, e: ExprId, receiver: Ty) {
@@ -28339,7 +28346,9 @@ impl<'a> Checker<'a> {
                 defaults: call_sig.param_defaults,
                 vararg: call_sig.vararg_index,
                 supports_default_abi,
-                low_priority: constructor.low_priority,
+                low_priority: constructor.annotations.contains(&crate::types::type_name(
+                    "kotlin/internal/LowPriorityInOverloadResolution",
+                )),
                 parameter_constraints: constructor
                     .params
                     .iter()
@@ -35947,7 +35956,14 @@ impl<'a> Checker<'a> {
                     );
                     continue;
                 };
-                candidates.push((score.rank, function.flags.low_priority, signature, bindings));
+                let low_priority_annotation =
+                    crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
+                candidates.push((
+                    score.rank,
+                    function.annotations.contains(&low_priority_annotation),
+                    signature,
+                    bindings,
+                ));
             }
             if candidates.iter().any(|(_, low_priority, ..)| !low_priority) {
                 candidates.retain(|(_, low_priority, ..)| !*low_priority);
@@ -42545,7 +42561,7 @@ impl<'a> Checker<'a> {
             value_types,
         } = shape;
         if self.allow_lambda_mutation {
-            self.mark_inline_lambda(e);
+            self.update_lambda_info(e, |info| info.capture = LambdaCapture::InlineSplice);
         }
         if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
             let bind_names: Vec<String> = if !params.is_empty() {
@@ -43261,7 +43277,9 @@ impl<'a> Checker<'a> {
                 defaults: member.call_sig.param_defaults.clone(),
                 vararg: member.call_sig.vararg_index,
                 supports_default_abi: member.default_realization.is_some(),
-                low_priority: member.low_priority,
+                low_priority: member.annotations.contains(&crate::types::type_name(
+                    "kotlin/internal/LowPriorityInOverloadResolution",
+                )),
                 parameter_constraints: member
                     .params
                     .iter()
@@ -44048,6 +44066,7 @@ impl<'a> Checker<'a> {
                 .with_is_suspend(member.suspend())
                 .with_is_final(true)
                 .with_vararg(vararg_index.is_some()),
+            annotations: member.annotations.clone(),
             vararg_index,
             required,
             param_defaults,
@@ -46476,11 +46495,18 @@ impl<'a> Checker<'a> {
             let ret = crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings);
             fitted.push((score, overload_index, params, ret, bindings));
         }
-        if fitted
-            .iter()
-            .any(|(_, index, ..)| !overloads[*index].flags.low_priority)
-        {
-            fitted.retain(|(_, index, ..)| !overloads[*index].flags.low_priority);
+        let low_priority_annotation =
+            crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
+        if fitted.iter().any(|(_, index, ..)| {
+            !overloads[*index]
+                .annotations
+                .contains(&low_priority_annotation)
+        }) {
+            fitted.retain(|(_, index, ..)| {
+                !overloads[*index]
+                    .annotations
+                    .contains(&low_priority_annotation)
+            });
         }
         let best_rank = fitted.iter().map(|(score, ..)| score.rank).max()?;
         let maximal = fitted
@@ -53598,6 +53624,11 @@ impl<'a> Checker<'a> {
                 .with_is_override(f.is_override())
                 .with_is_final(false)
                 .with_is_suspend(f.is_suspend()),
+            annotations: f
+                .annotations
+                .iter()
+                .filter_map(|annotation| class_names.get_class(&annotation.name))
+                .collect(),
             vararg_index: f.params.iter().position(|p| p.is_vararg),
             required: params.len(),
             param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
@@ -56672,7 +56703,7 @@ fun box(): String {
                         visibility: crate::types::Visibility::Public,
                         call_sig: CallSig::default(),
                         context_count: 0,
-                        low_priority: false,
+                        annotations: Vec::new(),
                         contract: None,
                         default_values: Vec::new(),
                         default_realization: None,

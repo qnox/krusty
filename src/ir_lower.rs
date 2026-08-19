@@ -19752,6 +19752,7 @@ impl<'a> Lower<'a> {
                                         .with_is_override(false)
                                         .with_is_final(true)
                                         .with_is_suspend(false),
+                                    annotations: Vec::new(),
                                     vararg_index: None,
                                     required: physical_params.len(),
                                     param_defaults: Vec::new(),
@@ -19806,6 +19807,7 @@ impl<'a> Lower<'a> {
                                     .with_is_override(false)
                                     .with_is_final(true)
                                     .with_is_suspend(false),
+                                annotations: Vec::new(),
                                 vararg_index: None,
                                 required: physical_params.len(),
                                 param_defaults: Vec::new(),

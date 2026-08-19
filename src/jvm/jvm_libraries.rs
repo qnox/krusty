@@ -682,8 +682,8 @@ impl JvmLibraries {
                     operator: meta.is_operator,
                     infix: meta.is_infix,
                     is_abstract: false,
-                    low_priority: meta.low_priority,
                 },
+                annotations: meta.annotations.clone(),
                 ..FunctionInfo::plain(kind, None, callable)
             });
         }
@@ -757,8 +757,8 @@ impl JvmLibraries {
                 operator: builtin.is_operator,
                 infix: builtin.is_infix,
                 is_abstract: false,
-                low_priority: false,
             };
+            function.annotations = Vec::new();
             overloads.push(function);
         }
         overloads
@@ -925,8 +925,8 @@ impl JvmLibraries {
                     operator: function.is_operator(),
                     infix: function.is_infix(),
                     is_abstract: false,
-                    low_priority: function.low_priority(),
                 },
+                annotations: function.annotations.clone(),
                 ..FunctionInfo::plain(
                     if receiver.is_some() {
                         FnKind::Extension
@@ -1868,7 +1868,7 @@ impl JvmLibraries {
                         declaration.is_inline() && !m.is_public(),
                     );
                     member.reified = declaration.has_reified_type_params();
-                    member.low_priority = declaration.low_priority();
+                    member.annotations = declaration.annotations.clone();
                     member.contract = declaration.contract.clone();
                     member.set_is_member_extension(declaration.is_extension());
                     member.set_is_operator(declaration.is_operator());
@@ -4365,8 +4365,8 @@ impl JvmLibraries {
                         operator: mf.is_operator(),
                         infix: mf.is_infix(),
                         is_abstract: false,
-                        low_priority: mf.low_priority(),
                     },
+                    annotations: mf.annotations.clone(),
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
@@ -5280,8 +5280,8 @@ impl JvmLibraries {
                                 operator: m.is_operator(),
                                 infix: m.is_infix(),
                                 is_abstract: m.is_abstract(),
-                                low_priority: m.low_priority,
                             },
+                            annotations: m.annotations.clone(),
                             ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
                         });
                         if let Some(function) = overloads.last_mut() {
