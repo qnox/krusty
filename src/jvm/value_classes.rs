@@ -3927,6 +3927,18 @@ fn record_value_boundary(
                 }
             }
         }
+        // A boxed branch result may still contain an unboxed value-class tail. Box that tail so
+        // every path entering the merge has the same representation.
+        Repr::Boxed(value_class) if supertype_box => {
+            let mut tails = Vec::new();
+            value_tails(exprs, value, &mut tails);
+            for tail in tails {
+                if matches!(repr_ctx.repr(tail), Repr::Unboxed(tail_class) if tail_class == value_class)
+                {
+                    ops.push((tail, repr_ctx.box_op(tail, value_class)));
+                }
+            }
+        }
         Repr::Boxed(value_class) if matches!(target, Target::UnboxedX(target_class) if target_class == value_class) =>
         {
             let mut tails = Vec::new();
