@@ -15509,20 +15509,18 @@ impl<'a> Emitter<'a> {
                         // `samMethodType` is the INTERFACE method's (erased) descriptor — NOT the
                         // lambda's — so a SAM with parameters (or a generic SAM erased to `Object`)
                         // matches the abstract method the metafactory must implement.
-                        let sam_desc = descriptor.clone().unwrap_or_else(|| {
-                            self.ir
-                                .classes
-                                .iter()
-                                .find(|c| c.fq_name_matches(iface))
-                                .and_then(|c| {
-                                    c.methods
-                                        .iter()
-                                        .map(|&m| &self.ir.functions[m as usize])
-                                        .find(|f| f.name == *method)
-                                })
-                                .map(|f| ir_method_desc(&f.params, &f.ret))
-                                .unwrap_or_else(|| method_descriptor(lam_tys, impl_ret))
-                        });
+                        let sam_desc = if let Some(descriptor) = descriptor {
+                            descriptor.clone()
+                        } else if let Some((params, ret)) =
+                            self.ir.lambda_sam_signature.get(impl_fn)
+                        {
+                            method_descriptor(&jvm_tys(params), jvm_declared_ty(ret))
+                        } else {
+                            self.run.set_emit_error(
+                                "SAM lambda is missing its selected declaration shape".to_string(),
+                            );
+                            return;
+                        };
                         // `instantiatedMethodType` describes the specialization of the ERASED SAM
                         // method, not merely the lifted implementation's primitive signature. A
                         // generic interface slot can erase to `Object` while checking substitutes a
@@ -15534,31 +15532,36 @@ impl<'a> Emitter<'a> {
                         // instantiated boundary with the wrapper wherever the SAM descriptor says the
                         // physical slot is a reference. This reads only descriptor SHAPE, so source,
                         // sibling-module, and dependency interfaces all take the same path.
-                        let inst_desc = crate::jvm::names::parse_method_descriptor(&sam_desc)
-                            .filter(|(sam_params, _)| sam_params.len() == lam_tys.len())
-                            .map(|(sam_params, sam_ret)| {
-                                let params: String = lam_tys
-                                    .iter()
-                                    .zip(sam_params)
-                                    .map(|(&logical, physical)| {
-                                        if descriptor_is_reference(physical) {
-                                            boxed_descriptor(logical)
-                                        } else {
-                                            type_descriptor(logical)
-                                        }
-                                    })
-                                    .collect();
-                                let ret = if descriptor_is_reference(sam_ret) {
-                                    boxed_descriptor(impl_ret)
+                        let Some((sam_params, sam_ret)) =
+                            crate::jvm::names::parse_method_descriptor(&sam_desc)
+                        else {
+                            self.run
+                                .set_emit_error("selected SAM descriptor is malformed".to_string());
+                            return;
+                        };
+                        if sam_params.len() != lam_tys.len() {
+                            self.run.set_emit_error(
+                                "selected SAM descriptor has the wrong parameter count".to_string(),
+                            );
+                            return;
+                        }
+                        let params: String = lam_tys
+                            .iter()
+                            .zip(sam_params)
+                            .map(|(&logical, physical)| {
+                                if descriptor_is_reference(physical) {
+                                    boxed_descriptor(logical)
                                 } else {
-                                    type_descriptor(impl_ret)
-                                };
-                                format!("({params}){ret}")
+                                    type_descriptor(logical)
+                                }
                             })
-                            // A malformed or temporarily incomplete provider descriptor must not
-                            // invent slot alignment. Preserve the prior implementation-signature
-                            // fallback; normal resolved SAMs always supply a parseable descriptor.
-                            .unwrap_or_else(|| method_descriptor(lam_tys, impl_ret));
+                            .collect();
+                        let ret = if descriptor_is_reference(sam_ret) {
+                            boxed_descriptor(impl_ret)
+                        } else {
+                            type_descriptor(impl_ret)
+                        };
+                        let inst_desc = format!("({params}){ret}");
                         (iface.clone(), method.clone(), sam_desc, inst_desc)
                     }
                     None => {

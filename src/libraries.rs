@@ -2157,9 +2157,10 @@ pub struct LibraryType {
     /// Compile-time constants declared by this classifier. For `Int.Companion.MAX_VALUE`, this map is
     /// on the `Int.Companion` classifier; the outer classifier merely points at that companion.
     pub constants: HashMap<String, LibraryConst>,
-    /// The single abstract method when this type is a functional interface. None for ordinary classes,
-    /// non-SAM interfaces, and sources that do not provide SAM metadata.
-    pub sam_method: Option<LibraryMember>,
+    /// Whether this declaration permits SAM conversion. Java interfaces are structurally eligible;
+    /// Kotlin interfaces require the `fun interface` declaration bit. Core selects the single
+    /// abstract method from direct members and applied supertypes.
+    pub sam_eligible: bool,
     /// Function signature implemented by values of this classifier. This is classifier metadata, not
     /// a convention inferred from its name; core substitutes the classifier's applied type arguments.
     pub callable_signature: Option<Ty>,
@@ -2278,7 +2279,7 @@ impl LibraryType {
             members: Vec::new(),
             companion: Vec::new(),
             constants: HashMap::new(),
-            sam_method: None,
+            sam_eligible: false,
             callable_signature: None,
             companion_object: None,
             value_companion_fns: Vec::new(),
@@ -2860,7 +2861,7 @@ mod tests {
             members: vec![],
             companion: vec![],
             constants: std::collections::HashMap::new(),
-            sam_method: None,
+            sam_eligible: false,
             callable_signature: None,
             companion_object: None,
             value_companion_fns: vec![],

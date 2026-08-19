@@ -2547,59 +2547,126 @@ pub(crate) fn semantic_sam_signature(
 ) -> Option<SamSignature> {
     let target = target.non_null();
     let internal = target.obj_internal()?;
-    let ty = lib.classifier(internal)?;
-    let sam = ty.sam_method.as_ref()?;
-    let descriptor = (!sam.descriptor.is_empty()).then(|| sam.descriptor.clone());
-    let Some(gsig) = sam.generic_sig.as_ref() else {
-        return Some(SamSignature {
-            internal,
-            method: sam.name.clone(),
-            descriptor,
-            params: sam.params.clone(),
-            ret: sam.ret,
-            declared_params: sam.params.clone(),
-            declared_ret: sam.ret,
-            context_count: sam.context_count,
-            has_receiver: sam.is_member_extension(),
-            suspend: sam.suspend(),
-        });
-    };
+    if !lib.classifier(internal)?.sam_eligible {
+        return None;
+    }
 
-    let mut occurrence_bounds = classifier_type_parameter_bounds(&ty);
-    for method_formal in &gsig.formals {
-        occurrence_bounds.remove(method_formal);
+    type Declaration = (u32, LibraryMember, Vec<Ty>, Ty);
+    let mut declarations: std::collections::HashMap<(String, Vec<Ty>), Vec<Declaration>> =
+        std::collections::HashMap::new();
+    for (applied, depth) in receiver_hierarchy(lib, target) {
+        let Some(owner) = applied.obj_internal() else {
+            continue;
+        };
+        let Some(classifier) = lib.classifier(owner) else {
+            continue;
+        };
+        let mut classifier_bindings = classifier_bindings(&classifier, applied);
+        for argument in classifier_bindings.values_mut() {
+            if let Some(projected) = argument.projection_inner() {
+                *argument = projected;
+            }
+        }
+        let classifier_occurrence_bounds = classifier_type_parameter_bounds(&classifier);
+        for member in &classifier.members {
+            if member.visibility != Visibility::Public || is_public_object_method(member) {
+                continue;
+            }
+            let mut bindings = classifier_bindings.clone();
+            let mut occurrence_bounds = classifier_occurrence_bounds.clone();
+            if let Some(signature) = &member.generic_sig {
+                for formal in &signature.formals {
+                    bindings.remove(formal);
+                    occurrence_bounds.remove(formal);
+                }
+            }
+            let declared_params = member
+                .generic_sig
+                .as_ref()
+                .map_or(member.params.as_slice(), |signature| {
+                    signature.params.as_slice()
+                });
+            let declared_ret = member
+                .generic_sig
+                .as_ref()
+                .map_or(member.ret, |signature| signature.ret);
+            let params = declared_params
+                .iter()
+                .map(|parameter| sam_substitute(*parameter, &occurrence_bounds, &bindings))
+                .collect::<Vec<_>>();
+            let ret = sam_substitute(declared_ret, &occurrence_bounds, &bindings);
+            declarations
+                .entry((member.name.clone(), params.clone()))
+                .or_default()
+                .push((depth, member.clone(), params, ret));
+        }
     }
-    let mut binds = GSigBinds::new();
-    for (formal, actual) in ty.type_params.iter().zip(target.type_args()) {
-        binds.insert(formal.clone(), actual.projection_inner().unwrap_or(*actual));
+
+    let mut abstract_method = None;
+    for declarations in declarations.into_values() {
+        let nearest = declarations.iter().map(|(depth, ..)| *depth).min()?;
+        let nearest = declarations
+            .into_iter()
+            .filter(|(depth, ..)| *depth == nearest)
+            .collect::<Vec<_>>();
+        if nearest.iter().any(|(_, member, ..)| !member.is_abstract()) {
+            continue;
+        }
+        let (_, member, params, ret) = nearest.into_iter().next()?;
+        if abstract_method.replace((member, params, ret)).is_some() {
+            return None;
+        }
     }
-    if let Some(receiver) = gsig.receiver {
-        unify_ty(receiver, target, &mut binds);
-    }
+    let (sam, params, ret) = abstract_method?;
+    let descriptor = (!sam.descriptor.is_empty()).then(|| sam.descriptor.clone());
     Some(SamSignature {
         internal,
         method: sam.name.clone(),
         descriptor,
-        params: gsig
-            .params
-            .iter()
-            .map(|parameter| {
-                ty_subst_keep_unbound(
-                    crate::types::ty_with_param_bounds(*parameter, &occurrence_bounds),
-                    &binds,
-                )
-            })
-            .collect(),
-        ret: ty_subst_keep_unbound(
-            crate::types::ty_with_param_bounds(gsig.ret, &occurrence_bounds),
-            &binds,
-        ),
+        params,
+        ret,
         declared_params: sam.params.clone(),
         declared_ret: sam.ret,
         context_count: sam.context_count,
         has_receiver: sam.is_member_extension(),
         suspend: sam.suspend(),
     })
+}
+
+fn sam_substitute(
+    declared: Ty,
+    occurrence_bounds: &std::collections::HashMap<String, Ty>,
+    bindings: &GSigBinds,
+) -> Ty {
+    let platform_inner = match declared {
+        Ty::PlatformNullable(inner) => Some(*inner),
+        _ => None,
+    };
+    let explicit_nullable = platform_inner.and_then(|inner| match inner {
+        Ty::TyParam(name, _) => bindings
+            .get(name)
+            .copied()
+            .filter(|binding| matches!(binding, Ty::Nullable(_))),
+        _ => None,
+    });
+    if let Some(binding) = explicit_nullable {
+        return binding;
+    }
+    ty_subst_keep_unbound(
+        crate::types::ty_with_param_bounds(declared, occurrence_bounds),
+        bindings,
+    )
+}
+
+fn is_public_object_method(member: &LibraryMember) -> bool {
+    match (member.name.as_str(), member.params.as_slice()) {
+        ("hashCode" | "toString", []) => true,
+        ("equals", [parameter]) => parameter.non_null().obj_internal().is_some_and(|internal| {
+            internal == crate::types::type_name("kotlin/Any")
+                || internal == crate::types::type_name("java/lang/Object")
+        }),
+        _ => false,
+    }
 }
 
 /// Specialize the selected member's lambda-parameter slots from concrete non-lambda arguments.
@@ -8626,7 +8693,7 @@ mod tests {
             members: vec![],
             companion: vec![],
             constants: std::collections::HashMap::new(),
-            sam_method: None,
+            sam_eligible: false,
             callable_signature: None,
             companion_object: None,
             value_companion_fns: Vec::new(),
@@ -8641,6 +8708,132 @@ mod tests {
             retention: None,
             annotation_targets: None,
         }
+    }
+
+    struct SamHierarchySource {
+        classifiers: std::collections::HashMap<TypeName, std::sync::Arc<LibraryType>>,
+    }
+
+    impl SymbolSource for SamHierarchySource {
+        fn classifier(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
+            self.classifiers.get(&internal).cloned()
+        }
+    }
+
+    fn sam_classifier(
+        formals: &[&str],
+        supertypes: Vec<Ty>,
+        members: Vec<LibraryMember>,
+    ) -> LibraryType {
+        let mut classifier = fake_library_type(Vec::new(), Vec::new());
+        classifier.kind = TypeKind::Interface;
+        classifier.sam_eligible = true;
+        classifier.type_parameters = crate::types::TypeParameters::invariant(
+            formals.iter().map(|formal| (*formal).to_string()).collect(),
+            vec![Vec::new(); formals.len()],
+        );
+        classifier.supertypes = supertypes
+            .iter()
+            .filter_map(|supertype| supertype.obj_internal())
+            .collect::<Vec<_>>()
+            .into();
+        classifier.supertype_templates = supertypes;
+        classifier.members = members;
+        classifier
+    }
+
+    fn abstract_generic_member(name: &str, params: Vec<Ty>, ret: Ty) -> LibraryMember {
+        let mut member = LibraryMember::new(name.to_string(), params.clone(), ret, String::new());
+        member.generic_sig = Some(GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: None,
+            params,
+            ret,
+            return_policy: Default::default(),
+        });
+        member.set_is_abstract(true);
+        member
+    }
+
+    #[test]
+    fn sam_signature_uses_the_applied_inherited_declaration() {
+        let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+        let input = Ty::ty_param("I", bound);
+        let output = Ty::ty_param("O", bound);
+        let parameter = Ty::ty_param("T", bound);
+        let base = sam_classifier(
+            &["I", "O"],
+            Vec::new(),
+            vec![abstract_generic_member("apply", vec![input], output)],
+        );
+        let operation = sam_classifier(
+            &["T"],
+            vec![Ty::obj_args("test/Base", &[parameter, parameter])],
+            Vec::new(),
+        );
+        let source = SamHierarchySource {
+            classifiers: [
+                (
+                    crate::types::type_name("test/Base"),
+                    std::sync::Arc::new(base),
+                ),
+                (
+                    crate::types::type_name("test/Operation"),
+                    std::sync::Arc::new(operation),
+                ),
+            ]
+            .into(),
+        };
+
+        let signature =
+            semantic_sam_signature(&source, Ty::obj_args("test/Operation", &[Ty::String]))
+                .expect("the inherited abstract declaration is the SAM");
+        assert_eq!(
+            signature.internal,
+            crate::types::type_name("test/Operation")
+        );
+        assert_eq!(signature.method, "apply");
+        assert_eq!(signature.params, [Ty::String]);
+        assert_eq!(signature.ret, Ty::String);
+    }
+
+    #[test]
+    fn sam_signature_rejects_two_distinct_abstract_declarations() {
+        let left = sam_classifier(
+            &[],
+            Vec::new(),
+            vec![abstract_generic_member("left", Vec::new(), Ty::Unit)],
+        );
+        let right = sam_classifier(
+            &[],
+            Vec::new(),
+            vec![abstract_generic_member("right", Vec::new(), Ty::Unit)],
+        );
+        let both = sam_classifier(
+            &[],
+            vec![Ty::obj("test/Left"), Ty::obj("test/Right")],
+            Vec::new(),
+        );
+        let source = SamHierarchySource {
+            classifiers: [
+                (
+                    crate::types::type_name("test/Left"),
+                    std::sync::Arc::new(left),
+                ),
+                (
+                    crate::types::type_name("test/Right"),
+                    std::sync::Arc::new(right),
+                ),
+                (
+                    crate::types::type_name("test/Both"),
+                    std::sync::Arc::new(both),
+                ),
+            ]
+            .into(),
+        };
+
+        assert!(semantic_sam_signature(&source, Ty::obj("test/Both")).is_none());
     }
 
     struct AppliedHierarchySource;

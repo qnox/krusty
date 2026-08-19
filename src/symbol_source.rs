@@ -254,7 +254,7 @@ mod tests {
                     members: vec![],
                     companion: vec![],
                     constants: std::collections::HashMap::new(),
-                    sam_method: None,
+                    sam_eligible: false,
                     callable_signature: None,
                     companion_object: None,
                     value_companion_fns: Vec::new(),
