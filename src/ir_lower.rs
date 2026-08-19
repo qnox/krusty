@@ -121,12 +121,6 @@ struct ClassInfo {
     super_internal: Option<TypeName>,
 }
 
-impl ClassInfo {
-    fn internal(&self) -> String {
-        self.internal.render()
-    }
-}
-
 /// Lower a checked file to IR, or `None` if it uses anything outside the core subset.
 pub fn lower_file(
     file: &ast::File,
@@ -9181,8 +9175,8 @@ impl<'a> Lower<'a> {
                     &c.params,
                     args,
                     has_trailing_lambda,
-                    c.vararg_elem,
-                    c.vararg_index,
+                    c.vararg_elem.zip(c.vararg_index),
+                    c.default_realization.as_deref()?.mask_count,
                 )?;
             }
         } else {
@@ -9292,11 +9286,11 @@ impl<'a> Lower<'a> {
             if !callable.default_call {
                 return None;
             }
-            self.append_default_masks_marker(
+            self.append_platform_default_masks_marker(
                 &mut arguments,
-                semantic_params.len(),
+                callable.default_realization.as_deref()?.mask_count,
                 omitted.iter().copied(),
-            );
+            )?;
         }
         let physical_ret = callable.physical_ret;
         let suspend = callable.suspend;
@@ -12574,10 +12568,6 @@ impl<'a> Lower<'a> {
         let receiver = self.emit_get_value(this);
         let value = self.emit_get_field(receiver, class, field as u32);
         self.coerce_argument_value(value, actual, capture.ty)
-    }
-
-    fn class_of(&self, ty: Ty) -> Option<&ClassInfo> {
-        ty.obj_internal().and_then(|i| self.class_info_name(i))
     }
 
     /// The label a lambda answers to. An EXPLICITLY labelled literal (`run rr@{ … }`) answers to its
@@ -16471,25 +16461,31 @@ impl<'a> Lower<'a> {
         self.emit_const(c)
     }
 
-    fn append_default_mask_marker(&mut self, out: &mut Vec<u32>, mask: i32) {
-        out.push(self.emit_const(IrConst::Int(mask)));
-        out.push(self.emit_const(IrConst::Null));
-    }
-
     fn append_default_masks_marker(
         &mut self,
         out: &mut Vec<u32>,
         param_count: usize,
         omitted: impl IntoIterator<Item = usize>,
     ) {
-        let mut masks = vec![0i32; default_mask_count(param_count)];
+        self.append_platform_default_masks_marker(out, default_mask_count(param_count), omitted)
+            .expect("source parameter count provides every default mask slot");
+    }
+
+    fn append_platform_default_masks_marker(
+        &mut self,
+        out: &mut Vec<u32>,
+        mask_count: usize,
+        omitted: impl IntoIterator<Item = usize>,
+    ) -> Option<()> {
+        let mut masks = vec![0i32; mask_count];
         for i in omitted {
-            masks[i / 32] |= default_mask_bit(i);
+            *masks.get_mut(i / 32)? |= default_mask_bit(i);
         }
         for mask in masks {
             out.push(self.emit_const(IrConst::Int(mask)));
         }
         out.push(self.emit_const(IrConst::Null));
+        Some(())
     }
 
     fn empty_array(&mut self, array_type: Ty) -> u32 {
@@ -16519,13 +16515,13 @@ impl<'a> Lower<'a> {
         params: &[Ty],
         args: &[AstExprId],
         trailing_lambda: bool,
-        vararg_elem: Option<Ty>,
-        vararg_index: Option<usize>,
+        vararg: Option<(Ty, usize)>,
+        mask_count: usize,
     ) -> Option<()> {
         // Element-form vararg into a `$default` (`split('.')` → `split$default(recv, char[],
         // boolean, int, mask, marker)`): PACK the trailing provided arguments into the vararg
         // slot's array, then placeholder+mask the name-only-defaulted tail.
-        if let Some((elem, slot)) = vararg_elem.zip(vararg_index) {
+        if let Some((elem, slot)) = vararg {
             let array_type = *params.get(slot)?;
             // The resolver records the semantic slot; the physical parameter need only be an
             // array. In particular, `vararg T` specialized to `String` still emits `Object[]`.
@@ -16559,14 +16555,14 @@ impl<'a> Lower<'a> {
             for &param in &params[slot + 1..] {
                 out.push(self.zero_placeholder(param));
             }
-            let mask: i32 = (provided_prefix..slot)
-                .chain(slot + 1..params.len())
-                .map(|j| 1i32 << j)
-                .sum();
-            self.append_default_mask_marker(out, mask);
+            self.append_platform_default_masks_marker(
+                out,
+                mask_count,
+                (provided_prefix..slot).chain(slot + 1..params.len()),
+            )?;
             return Some(());
         }
-        let mask: i32 = if trailing_lambda && args.len() < params.len() {
+        let omitted = if trailing_lambda && args.len() < params.len() {
             let prefix_len = args.len().checked_sub(1)?;
             let last = params.len() - 1;
             for j in 0..params.len() {
@@ -16579,7 +16575,7 @@ impl<'a> Lower<'a> {
                     out.push(self.zero_placeholder(params[j]));
                 }
             }
-            (prefix_len..last).map(|j| 1i32 << j).sum()
+            (prefix_len..last).collect::<Vec<_>>()
         } else if args.len() <= params.len() {
             for (i, &arg) in args.iter().enumerate() {
                 out.push(self.lower_arg(arg, &ty_to_ir(params[i]))?);
@@ -16587,12 +16583,11 @@ impl<'a> Lower<'a> {
             for &param in &params[args.len()..] {
                 out.push(self.zero_placeholder(param));
             }
-            (args.len()..params.len()).map(|j| 1i32 << j).sum()
+            (args.len()..params.len()).collect::<Vec<_>>()
         } else {
             return None;
         };
-        self.append_default_mask_marker(out, mask);
-        Some(())
+        self.append_platform_default_masks_marker(out, mask_count, omitted)
     }
 
     fn lower_assert_fails_with_default(
@@ -18213,20 +18208,6 @@ impl<'a> Lower<'a> {
             return None;
         }
         let member = &resolved.member;
-        // The receiver may be typed nullable at this point; the member/default synthetic lives on the
-        // non-null class either way.
-        let owner = member
-            .owner
-            .map(|owner| owner.render())
-            .or_else(|| self.class_of(rt).map(|ci| ci.internal()))
-            .or_else(|| rt.non_null().obj_internal().map(|n| n.render()))?;
-        crate::trace_compiler!(
-            "resolve",
-            "lower_library_default_member_call {owner}.{} args={} named={}",
-            member.name,
-            args.len(),
-            self.afile.call_arg_names.contains_key(&call.0)
-        );
         // An inline callee must not route through its `$default` synthetic: the selected inline body
         // is the semantic implementation, and a caller that cannot splice it must fail cleanly.
         if !matches!(member.inline, crate::libraries::InlineKind::None) {
@@ -18234,6 +18215,14 @@ impl<'a> Lower<'a> {
         }
         let logical_ret = resolved.ret;
         let default_target = self.info.resolved_default_member_call(call)?;
+        let owner = default_target.owner.render();
+        crate::trace_compiler!(
+            "resolve",
+            "lower_library_default_member_call {owner}.{} args={} named={}",
+            default_target.name,
+            args.len(),
+            self.afile.call_arg_names.contains_key(&call.0)
+        );
         let desc = default_target.descriptor.clone();
         let real = &default_target.real_params;
         let suspend = default_target.suspend;
@@ -18252,10 +18241,10 @@ impl<'a> Lower<'a> {
             .filter(|(_, s)| s.is_none())
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        self.append_default_masks_marker(&mut a, slots.len(), omitted);
+        self.append_platform_default_masks_marker(&mut a, default_target.mask_count, omitted)?;
         let call = self.emit_static_call(
             owner,
-            format!("{}$default", member.name),
+            default_target.name.clone(),
             desc,
             InlineKind::None,
             a,
@@ -18515,12 +18504,6 @@ impl<'a> Lower<'a> {
             )?;
             arg_prelude = prelude;
             if c.default_call {
-                // This emitter currently writes one 32-bit `$default` mask. The checker may faithfully
-                // record a larger semantic map for another consumer; decline here instead of shifting by
-                // an invalid amount or emitting an ABI shape this branch cannot represent.
-                if slots.len() > 32 {
-                    return None;
-                }
                 // The vararg slot never takes a mask bit: its value is the packed (possibly empty)
                 // array, which the `$default` stub passes straight through.
                 //
@@ -18528,17 +18511,17 @@ impl<'a> Lower<'a> {
                 // the extension receiver excluded — which is how kotlinc's own stub reads them
                 // (`context(c) fun R.f(x = …, y = …)` tests `mask & 2` for `x`). `slots` indexes only
                 // the written value parameters, so each bit shifts past the contexts.
-                if slots.len() + context_count > 32 {
-                    return None;
-                }
-                let mask: i32 = slots
+                let omitted = slots
                     .iter()
                     .enumerate()
                     .filter(|(i, slot)| slot.is_none() && c.vararg_index != Some(*i))
-                    .map(|(i, _)| 1i32 << (i + context_count))
-                    .sum();
+                    .map(|(i, _)| i + context_count);
                 a.extend(slot_args);
-                self.append_default_mask_marker(&mut a, mask);
+                self.append_platform_default_masks_marker(
+                    &mut a,
+                    c.default_realization.as_deref()?.mask_count,
+                    omitted,
+                )?;
             } else {
                 if slots
                     .iter()
@@ -26502,8 +26485,8 @@ impl<'a> Lower<'a> {
                             &c.params,
                             &args,
                             trailing_lambda,
-                            c.vararg_elem,
-                            c.vararg_index,
+                            c.vararg_elem.zip(c.vararg_index),
+                            c.default_realization.as_deref()?.mask_count,
                         )?;
                     }
                 } else {
@@ -27423,8 +27406,8 @@ impl<'a> Lower<'a> {
                         explicit_params,
                         &args,
                         trailing_lambda,
-                        c.vararg_elem,
-                        c.vararg_index,
+                        c.vararg_elem.zip(c.vararg_index),
+                        c.default_realization.as_deref()?.mask_count,
                     )?;
                 } else if let Some((fixed, arr_ty, elem)) = c
                     .vararg_elem

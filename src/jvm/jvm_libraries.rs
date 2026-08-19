@@ -2331,7 +2331,10 @@ impl JvmLibraries {
                         };
                         (ret == Ty::Unit && marker && shape_matches).then(|| {
                             Box::new(crate::libraries::DefaultCallRealization {
+                                owner: internal_name,
+                                name: "<init>".to_string(),
                                 descriptor: method.descriptor.clone(),
+                                declaration_owner: internal_name,
                                 real_params: params[real_start..real_end].to_vec(),
                                 mask_count: if has_defaults { mask_count } else { 0 },
                                 ret: Ty::Unit,
@@ -4802,12 +4805,11 @@ impl JvmLibraries {
         let Some(realization) = callable.default_realization.as_deref() else {
             return Some(false);
         };
-        let owner = callable.owner.render();
-        let bridge_name = format!("{}$default", callable.name);
+        let owner = realization.declaration_owner.render();
         // A failed bridge-body READ is the transient case the caller must not memoize.
         let body = self
             .cp
-            .method_code(&owner, &bridge_name, &realization.descriptor)?;
+            .method_code(&owner, &realization.name, &realization.descriptor)?;
         let Some(instructions) = crate::jvm::inline::disassemble(&body.code) else {
             return Some(false);
         };
@@ -4876,7 +4878,10 @@ impl JvmLibraries {
                     return None;
                 }
                 Some(crate::libraries::DefaultCallRealization {
+                    owner: callable.owner,
+                    name: bridge_name.clone(),
                     descriptor: method.descriptor.clone(),
+                    declaration_owner: current,
                     real_params: callable.physical_params.clone(),
                     mask_count,
                     ret,
@@ -4905,50 +4910,63 @@ impl JvmLibraries {
         };
         let suspend = member.suspend();
         let real_params = member.params.clone();
-        class.methods.iter().find_map(|method| {
-            if !method.is_static() || method.name != bridge_name {
-                return None;
-            }
-            let (params, ret) = parse_method_desc_with_field_params(&method.descriptor)?;
-            // A dispatched member's base descriptor excludes its receiver while its static
-            // `$default` bridge prepends one. A provider-normalized direct realization (legacy
-            // interface holder, value-class implementation method) already carries that receiver
-            // in the base descriptor. Compare the exact physical prefix supplied by the selected
-            // declaration instead of assuming one origin-specific layout.
-            let prefix = match member.realization {
-                crate::libraries::MemberRealization::Direct {
-                    pass_receiver: true,
-                } => params.as_slice(),
-                _ => params.get(1..).unwrap_or_default(),
-            };
-            if !prefix.starts_with(&base_params) {
-                return None;
-            }
-            let mut suffix = &prefix[base_params.len()..];
-            if suspend {
-                let (continuation, rest) = suffix.split_first()?;
-                if !is_continuation(*continuation) {
-                    return None;
-                }
-                suffix = rest;
-            }
-            let mask_count = member.params.len().div_ceil(32).max(1);
-            if suffix.len() != mask_count + 1
-                || !suffix[..suffix.len() - 1]
-                    .iter()
-                    .all(|parameter| *parameter == Ty::Int)
-                || !suffix.last().copied().is_some_and(Ty::is_reference)
-            {
-                return None;
-            }
-            Some(crate::libraries::DefaultCallRealization {
-                descriptor: method.descriptor.clone(),
-                real_params: real_params.clone(),
-                mask_count,
-                ret,
-                suspend,
+        let holder_name = crate::types::type_name_nested_child(owner, "DefaultImpls");
+        let holder = if class.is_interface() {
+            self.cp.find_name(holder_name)
+        } else {
+            None
+        };
+        let classes = [(owner, Some(class)), (holder_name, holder)];
+        classes
+            .into_iter()
+            .filter_map(|(class_name, class)| class.map(|class| (class_name, class)))
+            .find_map(|(class_name, class)| {
+                class.methods.iter().find_map(|method| {
+                    if !method.is_static() || method.name != bridge_name {
+                        return None;
+                    }
+                    let (params, ret) = parse_method_desc_with_field_params(&method.descriptor)?;
+                    // A dispatched member's base descriptor excludes its receiver while its static
+                    // `$default` bridge prepends one. A direct interface-holder or value-class
+                    // realization already carries that receiver in the base descriptor.
+                    let prefix = match member.realization {
+                        crate::libraries::MemberRealization::Direct {
+                            pass_receiver: true,
+                        } => params.as_slice(),
+                        _ => params.get(1..).unwrap_or_default(),
+                    };
+                    if !prefix.starts_with(&base_params) {
+                        return None;
+                    }
+                    let mut suffix = &prefix[base_params.len()..];
+                    if suspend {
+                        let (continuation, rest) = suffix.split_first()?;
+                        if !is_continuation(*continuation) {
+                            return None;
+                        }
+                        suffix = rest;
+                    }
+                    let mask_count = member.params.len().div_ceil(32).max(1);
+                    if suffix.len() != mask_count + 1
+                        || !suffix[..suffix.len() - 1]
+                            .iter()
+                            .all(|parameter| *parameter == Ty::Int)
+                        || !suffix.last().copied().is_some_and(Ty::is_reference)
+                    {
+                        return None;
+                    }
+                    Some(crate::libraries::DefaultCallRealization {
+                        owner: class_name,
+                        name: bridge_name.clone(),
+                        descriptor: method.descriptor.clone(),
+                        declaration_owner: class_name,
+                        real_params: real_params.clone(),
+                        mask_count,
+                        ret,
+                        suspend,
+                    })
+                })
             })
-        })
     }
 
     fn member_functions(&self, receiver: Ty, name: &str) -> FunctionSet {
