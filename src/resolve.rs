@@ -6527,7 +6527,11 @@ fn collect_signatures_with_cp_impl(
                                 )
                             })
                             .unwrap_or_default();
-                        let conflicts_existing = if private {
+                        // kotlinc exempts entry-point `main` functions from CROSS-FILE overload
+                        // conflicts — each file's facade class hosts its own — so like a private
+                        // declaration, a `main` clashes only with a same-file candidate.
+                        let same_file_only = private || f.name == "main";
+                        let conflicts_existing = if same_file_only {
                             file_declaration_count > 0
                         } else {
                             group.public_count > 0 || file_private_count > 0
