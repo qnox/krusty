@@ -266,6 +266,38 @@ fn unresolved_imports_match_kotlinc_exactly() {
 }
 
 #[test]
+fn qualified_type_failure_messages_match_kotlinc() {
+    let source = "class Outer\n\
+                  fun a(x: deep.pkg.Missing): Int = 0\n\
+                  fun b(x: kotlin.Missing?): Int = 0\n\
+                  fun c(x: Outer.Nope): Int = 0\n";
+    let result = common::compiler_diagnostics(&[("QualifiedTypes.kt", source)], &[]);
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let krusty_messages = krusty_errors
+        .into_iter()
+        .map(|error| error.message)
+        .collect::<Vec<_>>();
+    let kotlinc_messages = errors(&result.reference_stderr)
+        .into_iter()
+        .map(|error| error.message)
+        .collect::<Vec<_>>();
+    let expected = vec![
+        "unresolved reference 'deep'.".to_string(),
+        "unresolved reference 'Missing'.".to_string(),
+        "unresolved reference 'Nope'.".to_string(),
+    ];
+    assert_eq!(krusty_messages, expected);
+    assert_eq!(kotlinc_messages, expected);
+}
+
+#[test]
 fn shared_diagnostic_wording_matches_kotlinc() {
     let source = "fun breakOutside() { break }\n\
                   fun continueOutside() { continue }\n\

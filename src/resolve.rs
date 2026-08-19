@@ -2454,6 +2454,8 @@ pub struct ClassNames {
     /// That is right for every semantic purpose and wrong for exactly one: `@Metadata` records the
     /// SPELLING as `Type.abbreviated_type`, so the alias identity needs its own edge to survive.
     source_alias_identities: HashMap<String, TypeName>,
+    /// First segment that failed while binding a source spelling in this file.
+    unresolved_segments: HashMap<String, String>,
 }
 
 impl ClassNames {
@@ -2465,6 +2467,7 @@ impl ClassNames {
             alias_bindings: HashMap::new(),
             alias_expansions: HashMap::new(),
             source_alias_identities: HashMap::new(),
+            unresolved_segments: HashMap::new(),
         }
     }
 
@@ -2520,6 +2523,40 @@ impl ClassNames {
     pub fn contains_key(&self, k: &str) -> bool {
         !self.ambiguous.contains(k) && (self.user.contains_key(k) || self.base.contains_key(k))
     }
+    fn classifier_binding<'a>(&'a self, spelling: &'a str) -> Result<TypeName, &'a str> {
+        if let Some(classifier) = self.get_class(spelling) {
+            return Ok(classifier);
+        }
+        let mut segments = spelling
+            .split(['.', '/'])
+            .filter(|segment| !segment.is_empty());
+        let Some(root) = segments.next() else {
+            return Err(spelling);
+        };
+        let scoped_root = if self.ambiguous.contains(root) {
+            None
+        } else {
+            self.user.get(root).copied()
+        };
+        if let Some(mut owner) = scoped_root.filter(|internal| !internal.starts_with("__ty/")) {
+            for segment in segments {
+                let Some(child) = crate::types::existing_type_name_nested_child(owner, segment)
+                    .filter(|&child| self.has_internal(child))
+                else {
+                    return Err(segment);
+                };
+                owner = child;
+            }
+            return Ok(owner);
+        }
+        Err(self
+            .unresolved_segments
+            .get(spelling)
+            .map_or(root, String::as_str))
+    }
+    fn unresolved_segment<'a>(&'a self, spelling: &'a str) -> &'a str {
+        self.classifier_binding(spelling).err().unwrap_or(spelling)
+    }
     fn has_internal(&self, internal: TypeName) -> bool {
         self.user.values().any(|&value| value == internal)
             || self.base.values().any(|&value| value == internal)
@@ -2567,6 +2604,7 @@ impl ClassNames {
             alias_bindings,
             alias_expansions,
             source_alias_identities,
+            unresolved_segments,
         } = self;
         let merged = if base.is_empty() {
             user
@@ -2582,6 +2620,7 @@ impl ClassNames {
             alias_bindings,
             alias_expansions,
             source_alias_identities,
+            unresolved_segments,
         }
     }
 
@@ -2596,6 +2635,10 @@ impl ClassNames {
     pub fn mark_ambiguous(&mut self, name: String) {
         self.user.remove(&name);
         self.ambiguous.insert(name);
+    }
+
+    fn insert_unresolved_segment(&mut self, spelling: String, segment: String) {
+        self.unresolved_segments.insert(spelling, segment);
     }
 }
 
@@ -5486,13 +5529,13 @@ fn classifier_from_imports<S: SymbolSource + ?Sized>(
     explicit: &HashMap<String, String>,
     levels: &[Vec<TypeName>],
     source: &S,
-) -> Option<TypeName> {
+) -> InheritedNestedClassifier {
     if let Some(fq) = explicit.get(name) {
         // Imports share syntax but not namespaces. An explicit import of a callable named `Foo`
         // must not erase a same-file classifier `Foo`; it contributes to classifier lookup only
         // when the imported path actually resolves to a classifier.
         if let Ok(classifier) = classifier_path(fq, source, None) {
-            return Some(classifier);
+            return InheritedNestedClassifier::Found(classifier);
         }
     }
     for level in levels {
@@ -5510,11 +5553,11 @@ fn classifier_from_imports<S: SymbolSource + ?Sized>(
         }
         match hits.len() {
             0 => continue,
-            1 => return hits.into_iter().next(),
-            _ => return None, // ambiguous within this level — kotlinc rejects; leave unresolved
+            1 => return InheritedNestedClassifier::Found(hits[0]),
+            _ => return InheritedNestedClassifier::Ambiguous,
         }
     }
-    None
+    InheritedNestedClassifier::NotFound
 }
 
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
@@ -6046,6 +6089,7 @@ fn collect_signatures_with_cp_impl(
             let mut file_imports = HashMap::new();
             let mut file_expansions: HashMap<String, crate::libraries::AliasExpansion> =
                 HashMap::new();
+            let mut file_unresolved = HashMap::new();
             // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
             // it) plus the explicit-import names themselves.
             let mut names = std::collections::HashSet::new();
@@ -6059,18 +6103,49 @@ fn collect_signatures_with_cp_impl(
                 // all see the same Kotlin source spelling. Keep `name` unchanged below as the binding
                 // key because later consumers query `class_names` with the original AST spelling.
                 let source_name = name.replace('/', ".");
-                let full = if let Some(path) = imap.get(&source_name) {
+                let (full, unresolved) = if let Some(path) = imap.get(&source_name) {
                     // An explicit import is the selected root. A missing segment is final: do not
                     // reopen same-package, star-import, or absolute-package interpretations.
-                    classifier_path(path, &source, None).ok()
+                    match classifier_path(path, &source, None) {
+                        Ok(classifier) => (Some(classifier), None),
+                        Err(_) => (
+                            None,
+                            Some(
+                                source_name
+                                    .split('.')
+                                    .next()
+                                    .unwrap_or(&source_name)
+                                    .to_string(),
+                            ),
+                        ),
+                    }
                 } else if source_name.contains('.') {
                     let root = source_name.split('.').next().unwrap_or_default();
-                    let scoped_root = classifier_from_imports(root, &imap, &levels, &source);
-                    classifier_path(&source_name, &source, scoped_root).ok()
+                    match classifier_from_imports(root, &imap, &levels, &source) {
+                        InheritedNestedClassifier::Ambiguous => (None, Some(root.to_string())),
+                        scoped_root => {
+                            match classifier_path(&source_name, &source, scoped_root.found()) {
+                                Ok(classifier) => (Some(classifier), None),
+                                Err(QualifierError::UnresolvedSegment { name, .. })
+                                | Err(QualifierError::AmbiguousRoot { name, .. }) => {
+                                    (None, Some(name))
+                                }
+                                Err(QualifierError::NotANameChain { .. }) => {
+                                    (None, Some(root.to_string()))
+                                }
+                            }
+                        }
+                    }
                 } else {
-                    classifier_from_imports(&source_name, &imap, &levels, &source)
+                    let classifier =
+                        classifier_from_imports(&source_name, &imap, &levels, &source).found();
+                    let unresolved = classifier.is_none().then(|| source_name.clone());
+                    (classifier, unresolved)
                 };
                 let full = full.map(|full| libraries.canonical_source_type_name(full));
+                if let Some(segment) = unresolved {
+                    file_unresolved.insert(name.clone(), segment);
+                }
                 match consensus.get_mut(&name) {
                     Some(previous) if *previous != full => *previous = None,
                     Some(_) => {}
@@ -6151,7 +6226,7 @@ fn collect_signatures_with_cp_impl(
                     file_imports.insert(name, full);
                 }
             }
-            imports_by_file.push((file_imports, file_expansions));
+            imports_by_file.push((file_imports, file_expansions, file_unresolved));
         }
         for (simple, full) in consensus {
             if let Some(full) = full {
@@ -6216,7 +6291,7 @@ fn collect_signatures_with_cp_impl(
     let class_names = class_names.into_shared();
     let file_class_names: Vec<ClassNames> = imports_by_file
         .into_iter()
-        .map(|(imports, expansions)| {
+        .map(|(imports, expansions, unresolved)| {
             let mut names = class_names.clone();
             for (simple, full) in imports {
                 names.insert_name(simple, full);
@@ -6225,6 +6300,9 @@ fn collect_signatures_with_cp_impl(
             // spelling, and each must expand through its own.
             for (simple, expansion) in expansions {
                 names.insert_alias_expansion(simple, expansion);
+            }
+            for (spelling, segment) in unresolved {
+                names.insert_unresolved_segment(spelling, segment);
             }
             expand_type_aliases(&mut names, &alias_map);
             names
@@ -8288,10 +8366,19 @@ fn collect_signatures_with_cp_impl(
                             c.enum_entries.iter().map(|e| e.name.clone()).collect(),
                         );
                     }
-                    // Resolve each supertype to a JVM internal name via `class_names` (user/classpath
-                    // classes, stdlib aliases, mapped built-ins). A supertype that resolves to none
-                    // of those would be emitted as a bare default-package name → `NoClassDefFound`
-                    // at load; reject (skip) instead — never emit an unresolved supertype.
+                    // An unresolved supertype is diagnosed at its own source span and is never emitted.
+                    let super_span = |name: &str| {
+                        if c.base_class.as_deref() == Some(name) {
+                            if let Some(span) = c.base_class_span {
+                                return span;
+                            }
+                        }
+                        c.supertypes
+                            .iter()
+                            .find(|t| t.name == name)
+                            .map(|t| t.span)
+                            .unwrap_or(c.span)
+                    };
                     let mut resolve_super = |s: &str| -> String {
                         let resolved = declared_supertype_name(c, s, &class_names)
                             .map(TypeName::render)
@@ -8300,7 +8387,11 @@ fn collect_signatures_with_cp_impl(
                         match resolved {
                             Some(internal) => internal,
                             None => {
-                                diags.error(c.span, format!("krusty: supertype '{s}' could not be resolved (provide it on the classpath)"));
+                                let segment = class_names.unresolved_segment(s);
+                                diags.error(
+                                    super_span(s),
+                                    format!("unresolved reference '{segment}'."),
+                                );
                                 s.to_string()
                             }
                         }
@@ -14105,10 +14196,14 @@ fn ty_of_ref_with(
         );
         return Ty::Error;
     }
+    let (resolved_classifier, failed_segment) = match classes.classifier_binding(&r.name) {
+        Ok(classifier) => (Some(classifier), None),
+        Err(segment) => (None, Some(segment)),
+    };
     let scoped = if tparams.contains(&r.name) {
         Some(tparams.bound(&r.name))
     } else {
-        typeref_classifier(r, classes.get_class(&r.name)).map(|internal| {
+        typeref_classifier(r, resolved_classifier).map(|internal| {
             if r.targs.is_empty() {
                 // A PARAMETERLESS alias still expands: `typealias Plain = PBox<String, Int>` names
                 // a parameterized target whose arguments all come from its own right-hand side.
@@ -14151,7 +14246,7 @@ fn ty_of_ref_with(
         t
     } else if let Some(t) = typeref_leaf(r, &mut |x| ty_of_ref_with(x, classes, tparams, diags)) {
         t
-    } else if let Some(internal) = classes.get(&r.name) {
+    } else if let Some(internal) = resolved_classifier.or_else(|| classes.get(&r.name)) {
         // `"__ty/<PrimName>"` encodes a type-alias → primitive/builtin mapping.
         if let Some(prim) = internal.strip_prefix("__ty/") {
             Ty::from_name(&prim).unwrap_or(Ty::Error)
@@ -14186,7 +14281,8 @@ fn ty_of_ref_with(
             )
         }
     } else {
-        diags.error(r.span, format!("unresolved reference '{}'.", r.name));
+        let segment = failed_segment.unwrap_or(&r.name);
+        diags.error(r.span, format!("unresolved reference '{segment}'."));
         Ty::Error
     };
     let base = if r.definitely_non_null() {
@@ -17100,6 +17196,7 @@ fn make_checker<'a>(
         expr_stack: Vec::new(),
         callable_reference_types: HashMap::new(),
         resolved_type_tys: HashMap::new(),
+        unresolved_type_segments: HashMap::new(),
         resolved_type_bounds: HashMap::new(),
         resolved_declaration_types: HashMap::new(),
         resolved_declaration_type_parameters: HashMap::new(),
@@ -19065,6 +19162,7 @@ struct Checker<'a> {
     expr_stack: Vec<ExprId>,
     callable_reference_types: HashMap<ExprId, Ty>,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
+    unresolved_type_segments: HashMap<(u32, u32), String>,
     resolved_type_bounds: HashMap<(u32, u32), (Ty, bool)>,
     resolved_declaration_types: HashMap<(u32, u32), Ty>,
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
@@ -28976,14 +29074,18 @@ impl<'a> Checker<'a> {
 
     /// Select the classifier root from the scope tower, then commit every remaining segment through
     /// the shared qualifier loop. There is no import/module/classpath retry after this returns.
-    fn select_classifier(&self, scope: &CheckerScope<'_>, name: &str) -> InheritedNestedClassifier {
+    fn select_classifier_binding(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> (InheritedNestedClassifier, Option<String>) {
         let segments = name
             .split(['.', '/'])
             .filter(|segment| !segment.is_empty())
             .map(|segment| (None, segment.to_string()))
             .collect::<Vec<_>>();
         let Some((_, root_name)) = segments.first() else {
-            return InheritedNestedClassifier::NotFound;
+            return (InheritedNestedClassifier::NotFound, Some(name.to_string()));
         };
         let source = self.fed_source();
         let scoped = scope.symbols(root_name, &source);
@@ -28997,7 +29099,10 @@ impl<'a> Checker<'a> {
                     ResolvedQualifier::Classifier(internal)
                 }
                 InheritedNestedClassifier::Ambiguous => {
-                    return InheritedNestedClassifier::Ambiguous;
+                    return (
+                        InheritedNestedClassifier::Ambiguous,
+                        Some(root_name.clone()),
+                    );
                 }
                 InheritedNestedClassifier::NotFound => {
                     if let Some(classifier) = self.same_package_class(root_name) {
@@ -29012,19 +29117,33 @@ impl<'a> Checker<'a> {
                         crate::trace_compiler!(
                             "resolve",
                             "classifier root={root_name} imported={:?}",
-                            imported.map(TypeName::render)
+                            imported.found().map(TypeName::render)
                         );
-                        if let Some(internal) = imported {
-                            ResolvedQualifier::Classifier(internal)
-                        } else if segments.len() > 1
-                            && source.package_exists(TypeName::ROOT, root_name)
-                        {
-                            ResolvedQualifier::Package(crate::types::type_name_child(
-                                TypeName::ROOT,
-                                root_name,
-                            ))
-                        } else {
-                            return InheritedNestedClassifier::NotFound;
+                        match imported {
+                            InheritedNestedClassifier::Found(internal) => {
+                                ResolvedQualifier::Classifier(internal)
+                            }
+                            InheritedNestedClassifier::Ambiguous => {
+                                return (
+                                    InheritedNestedClassifier::Ambiguous,
+                                    Some(root_name.clone()),
+                                );
+                            }
+                            InheritedNestedClassifier::NotFound
+                                if segments.len() > 1
+                                    && source.package_exists(TypeName::ROOT, root_name) =>
+                            {
+                                ResolvedQualifier::Package(crate::types::type_name_child(
+                                    TypeName::ROOT,
+                                    root_name,
+                                ))
+                            }
+                            InheritedNestedClassifier::NotFound => {
+                                return (
+                                    InheritedNestedClassifier::NotFound,
+                                    Some(root_name.clone()),
+                                );
+                            }
                         }
                     }
                 }
@@ -29032,12 +29151,24 @@ impl<'a> Checker<'a> {
         };
         match walk_qualifier(&source, root, &segments[1..]) {
             Ok(ResolvedQualifier::Classifier(internal)) => {
-                InheritedNestedClassifier::Found(internal)
+                (InheritedNestedClassifier::Found(internal), None)
             }
-            Ok(ResolvedQualifier::Value | ResolvedQualifier::Package(_)) | Err(_) => {
-                InheritedNestedClassifier::NotFound
+            Ok(ResolvedQualifier::Value | ResolvedQualifier::Package(_)) => (
+                InheritedNestedClassifier::NotFound,
+                segments.last().map(|(_, segment)| segment.clone()),
+            ),
+            Err(QualifierError::UnresolvedSegment { name, .. })
+            | Err(QualifierError::AmbiguousRoot { name, .. }) => {
+                (InheritedNestedClassifier::NotFound, Some(name))
+            }
+            Err(QualifierError::NotANameChain { .. }) => {
+                (InheritedNestedClassifier::NotFound, Some(root_name.clone()))
             }
         }
+    }
+
+    fn select_classifier(&self, scope: &CheckerScope<'_>, name: &str) -> InheritedNestedClassifier {
+        self.select_classifier_binding(scope, name).0
     }
 
     /// Find a nested type visible from the lexical class receiver stack.
@@ -29411,7 +29542,7 @@ impl<'a> Checker<'a> {
     fn check_type_parameter_bound(&mut self, scope: &CheckerScope<'_>, bound: &TypeRef) -> Ty {
         let checked = self.type_ref_ty(scope, bound);
         if checked.contains_error() {
-            self.report_unresolved_type_ref(scope, bound);
+            self.report_unresolved_type_ref(bound);
         }
         let bound_is_interface = checked
             .non_null()
@@ -29439,7 +29570,7 @@ impl<'a> Checker<'a> {
     fn check_declaration_type(&mut self, scope: &CheckerScope<'_>, reference: &TypeRef) -> Ty {
         let declaration = self.type_ref_ty(scope, reference);
         if declaration.contains_error() {
-            self.report_unresolved_type_ref(scope, reference);
+            self.report_unresolved_type_ref(reference);
         }
         self.resolved_declaration_types
             .insert((reference.span.lo, reference.span.hi), declaration);
@@ -29452,21 +29583,29 @@ impl<'a> Checker<'a> {
     fn type_ref_ty_reported(&mut self, scope: &CheckerScope<'_>, reference: &TypeRef) -> Ty {
         let ty = self.type_ref_ty(scope, reference);
         if ty.contains_error() {
-            self.report_unresolved_type_ref(scope, reference);
+            self.report_unresolved_type_ref(reference);
         }
         ty
     }
 
     /// Resolve a syntactic type without erasing source nullability.
     fn type_ref_ty(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
+        let mut unresolved_segment = None;
         let scoped = if scope.tparam_contains(&r.name) {
             Some(scope.tparam_bound(&r.name))
         } else {
-            match self.select_classifier(scope, &r.name) {
+            let (selection, failed_segment) = self.select_classifier_binding(scope, &r.name);
+            match selection {
                 InheritedNestedClassifier::Found(internal) => typeref_classifier(r, Some(internal))
                     .map(|internal| self.obj_with_targs_name(scope, internal, r)),
-                InheritedNestedClassifier::Ambiguous => Some(Ty::Error),
-                InheritedNestedClassifier::NotFound => None,
+                InheritedNestedClassifier::Ambiguous => {
+                    unresolved_segment = failed_segment;
+                    Some(Ty::Error)
+                }
+                InheritedNestedClassifier::NotFound => {
+                    unresolved_segment = failed_segment;
+                    None
+                }
             }
         };
         let base = if let Some(t) = scoped {
@@ -29490,6 +29629,12 @@ impl<'a> Checker<'a> {
         } else {
             base
         };
+        if resolved == Ty::Error {
+            if let Some(segment) = unresolved_segment {
+                self.unresolved_type_segments
+                    .insert((r.span.lo, r.span.hi), segment);
+            }
+        }
         if !scope.tparam_contains(&r.name) {
             if let Some(internal) = resolved.non_null().kotlin_class_internal() {
                 if !r.is_import() {
@@ -37170,7 +37315,7 @@ impl<'a> Checker<'a> {
             }
             // An unresolved non-function target reads exactly as kotlinc reports it — `unresolved
             // reference 'T'.` at the failing type's span — never as a compiler-specific rejection.
-            if tt.contains_error() && self.report_unresolved_type_ref(scope, &ty) {
+            if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
                 return Ty::Error;
             }
             // `instanceof` needs a reference operand and a *known* target. An unresolved target
@@ -37212,48 +37357,21 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    /// Report an expression-position type operand (`is`/`as` target) that failed to resolve, the
-    /// way kotlinc does. When the LEAF name itself is unresolvable (`Missing<T>`) name it — the
-    /// outer failure is primary, and kotlinc reports it first; only when the leaf resolves on its
-    /// own does a nested type carry the failure (`Array<Missing>` reports `Missing` at its own
-    /// span). Returns whether it actually reported an unresolved classifier: a fully resolved target
-    /// may still be `Ty::Error` because its SHAPE is unsupported (`Array` without an element,
-    /// `Array<Nothing>`), and that must fall through to the existing supported-shape diagnostic.
-    /// Re-resolving a nested type here records only resolved-classifier facts; the Error path itself
-    /// emits nothing, so this cannot double-report.
-    fn report_unresolved_type_ref(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> bool {
-        // Probe the classifier/function leaf without its nested types.
-        let leaf_resolves = {
-            let mut leaf = r.clone();
-            leaf.arg = None;
-            leaf.targs = Vec::new();
-            leaf.fun_params = Vec::new();
-            scope.tparam_contains(&leaf.name)
-                || matches!(
-                    self.select_classifier(scope, &leaf.name),
-                    InheritedNestedClassifier::Found(_)
-                )
-                || default_classifier_internal(&leaf.name).is_some()
-                || typeref_leaf(&leaf, &mut |_| Ty::Error).is_some_and(|ty| ty != Ty::Error)
-                || self.scoped_source_alias_identity(&leaf.name).is_some()
-        };
-        if !leaf_resolves {
+    /// Report the failed classifier binding recorded by [`Self::type_ref_ty`]. Unsupported shapes
+    /// have no binding failure and continue to their shape-specific diagnostic.
+    fn report_unresolved_type_ref(&mut self, r: &TypeRef) -> bool {
+        if let Some(segment) = self.unresolved_type_segments.get(&(r.span.lo, r.span.hi)) {
             self.diags
-                .error(r.span, format!("unresolved reference '{}'.", r.name));
+                .error(r.span, format!("unresolved reference '{segment}'."));
             return true;
         }
-        // Nested positions in source order: function-type parameters/return, then classifier type
-        // arguments. `contains_error` matters here: an
-        // ordinary generic or function type keeps its outer shape around an unresolved component.
         let nested = r
             .fun_params
             .iter()
             .chain(r.arg.iter().map(|arg| &**arg))
             .chain(r.targs.iter());
         for part in nested {
-            if self.type_ref_ty(scope, part).contains_error()
-                && self.report_unresolved_type_ref(scope, part)
-            {
+            if self.report_unresolved_type_ref(part) {
                 return true;
             }
         }
@@ -37292,7 +37410,7 @@ impl<'a> Checker<'a> {
             }
             // Same kotlinc parity as `is`: an unresolved cast target is `unresolved reference
             // 'T'.`, never a compiler-specific "not supported" rejection.
-            if tt.contains_error() && self.report_unresolved_type_ref(scope, &ty) {
+            if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
                 return Ty::Error;
             }
             if tt.contains_error() {
@@ -52551,8 +52669,7 @@ impl<'a> Checker<'a> {
                 let prop_ty = self.type_ref_ty(scope, &ty);
                 // Same rule as `Stmt::Local`: an unresolved annotation errors, never a silent `Error`.
                 if prop_ty == Ty::Error {
-                    self.diags
-                        .error(ty.span, format!("unresolved reference '{}'.", ty.name));
+                    self.report_unresolved_type_ref(&ty);
                 }
                 self.local_decl_types.insert(s, prop_ty);
                 self.declare(scope, &name, prop_ty, true);
@@ -52728,8 +52845,7 @@ impl<'a> Checker<'a> {
         // another module) then SAM-converts the lambda by ITS OWN arity and miscompiles
         // (IncompatibleClassChangeError at the call expecting the annotated shape).
         if let (Some(Ty::Error), Some(r)) = (declared, ty.as_ref()) {
-            self.diags
-                .error(r.span, format!("unresolved reference '{}'.", r.name));
+            self.report_unresolved_type_ref(r);
         }
         // Deferred declarations have a synthetic `null` but no source `=`.
         let deferred = ty.is_some() && !self.file.value_operator_spans.contains_key(&init.0);
@@ -52838,8 +52954,7 @@ impl<'a> Checker<'a> {
                 // Same rule as `Stmt::Local`: an unresolved annotation errors instead of
                 // silently binding `Error` (every use-site check would be suppressed).
                 if t == Ty::Error {
-                    self.diags
-                        .error(r.span, format!("unresolved reference '{}'.", r.name));
+                    self.report_unresolved_type_ref(r);
                 }
                 t
             }
@@ -54623,7 +54738,10 @@ val result = object { fun value(): String = captured }
             ],
             &ClassifierImportSource,
         );
-        assert_eq!(resolved, Some(crate::types::type_name("fallback/Thing")));
+        assert_eq!(
+            resolved,
+            InheritedNestedClassifier::Found(crate::types::type_name("fallback/Thing"))
+        );
     }
 
     #[test]
@@ -54637,7 +54755,10 @@ val result = object { fun value(): String = captured }
             ]],
             &ClassifierImportSource,
         );
-        assert_eq!(resolved, Some(crate::types::type_name("target/Thing")));
+        assert_eq!(
+            resolved,
+            InheritedNestedClassifier::Found(crate::types::type_name("target/Thing"))
+        );
     }
 
     #[test]
@@ -54651,7 +54772,7 @@ val result = object { fun value(): String = captured }
             ]],
             &ClassifierImportSource,
         );
-        assert_eq!(resolved, None);
+        assert_eq!(resolved, InheritedNestedClassifier::Ambiguous);
     }
 
     fn check(src: &str) -> (Vec<String>, Option<TypeInfo>) {

@@ -1631,6 +1631,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Known gap: the checkpoint is taken after the receiver but before the arguments, so an argument that
   itself reports (`s?.nope(undefinedVar)`) suppresses the member report — the program is still rejected,
   with one diagnostic instead of two. (`tests/safe_call_unresolved_member_e2e.rs`.)
+- **An unresolved qualified type names its first failed segment.** Binding records that segment once;
+  diagnostics consume the recorded result without repeating lookup. A qualified `TypeRef` currently
+  carries one span for the complete spelling, so its diagnostic range covers the full reference.
 - Lambdas `{ a, b -> … }`: a function type `(A,…) -> R` is the JVM interface
   `kotlin/jvm/functions/Function{arity}`. A non-capturing lambda compiles to `invokedynamic` bound by
   `LambdaMetafactory.metafactory` to a synthesized `private static` method `<enclosing>$lambda$<n>`
