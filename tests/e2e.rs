@@ -794,6 +794,8 @@ mod labeled_super_e2e;
 mod labeled_this_e2e;
 #[path = "lambda_e2e.rs"]
 mod lambda_e2e;
+#[path = "lambda_result_inference_e2e.rs"]
+mod lambda_result_inference_e2e;
 #[path = "lambda_result_type_variable_e2e.rs"]
 mod lambda_result_type_variable_e2e;
 #[path = "lambda_vs_block_fun_type_e2e.rs"]
