@@ -60,3 +60,17 @@ fun box(): String {
 "#;
     assert_eq!(run(SRC).expect("nested multi-dollar templates"), "OK");
 }
+
+#[test]
+fn template_interpolation_allows_newlines_around_expression() {
+    // `"${" NL* expression NL* "}"` per the Kotlin grammar: line breaks may surround the
+    // interpolated expression, including a multiline lambda inside a raw string (the
+    // ApplicationLoader `dumpCoroutines().let { … }` shape). kotlinc compiles both.
+    const SRC: &str = "fun dump(): String? = \"x\"\n\
+        fun box(): String {\n\
+        \x20 val s = \"\"\"\nheader\n${dump().let {\n  if (it == null) \"\" else \"\\n$it\"\n}\n}\n\"\"\"\n\
+        \x20 val t = \"${\n 40 + 2\n}\"\n\
+        \x20 return if (s == \"\\nheader\\n\\nx\\n\" && t == \"42\") \"OK\" else \"FAIL:$s|$t\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("newline interpolation"), "OK");
+}

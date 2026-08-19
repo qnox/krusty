@@ -2892,6 +2892,80 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   method-owned parameters still bind from call arguments. Test:
   `classpath_static_call_inference_e2e::class_literal_binds_nested_java_generic_returns`.
 
+- **An unbound class literal on an ARRAY type resolves its spelling as a type, arguments included.**
+  `Array<String>::class` / `IntArray::class.java` resolve through the ordinary typeref channel with the
+  type arguments the parser attached to the reference node, so the represented type is
+  `Array<String>` / `IntArray` — the element type is part of the JVM class constant
+  (`[Ljava/lang/String;`, `[I`). A bare name that binds a value stays a bound literal; a type parameter
+  stays on the reified channel. Tests: `class_literal_e2e::array_class_literals`,
+  `class_literal_e2e::array_class_literals_report_no_diagnostic`.
+
+- **Signature inference binds a callee type parameter from a lambda argument's RESULT.** When a type
+  parameter occurs only in the lambda's return position (`lazy { 1 }`, `make { 1 }`,
+  `listOf("x").map { it.length }`), the light signature pass infers the lambda body under the
+  substituted shape and unifies the result, so the property/return reads back the bound type instead
+  of `Any`. Selection uses the same candidate entry points as checking (`select_call_template`), and
+  the template result is used only when a lambda result actually contributed a binding. Tests:
+  `tests/lambda_result_inference_e2e.rs`.
+
+- **A delegated property's getter coerces the erased `getValue` result to the property type.** A
+  generic delegate's `getValue` physically returns `Object`; both the member and the top-level
+  getter bridge it through `coerce_to_static` (unbox for a scalar property, `checkcast` for a
+  reference narrowing), and an inferred property type comes from the checker's
+  `property_decl_types`, not the erased return. Tests: `lambda_result_inference_e2e`,
+  `delegated_prop_e2e`.
+
+- **String-template interpolation allows line breaks around the expression.** `"${" NL* expression
+  NL* "}"` per the Kotlin grammar — a multiline lambda inside `${…}` (common in raw strings) parses.
+  Plain line breaks only; an explicit `;` still terminates the expression. Test:
+  `nested_string_template_e2e::template_interpolation_allows_newlines_around_expression`.
+
+- **A Java instance field is a Kotlin `var` property (unless `final`), with Java visibility.** Public
+  fields read/write anywhere; protected fields bind from a subclass of the declaring class (any
+  depth). An accessible field beats a bean-getter synthetic property even across hierarchy rungs
+  (kotlinc emits `getfield`/`putfield`, not the getter); an inaccessible field falls back to the
+  synthetic property (getter call on read, `'val' cannot be reassigned.` on write). The resolver walk
+  returns the field with its visibility/finality beside the tentative synthetic property
+  (`PropertyInfo::synthetic`), the checker accepts visibility at the site, and lowering consumes the
+  recorded `InstanceFieldRef` on `IrExpr::PropertyWrite`. Tests:
+  `java_source_interop_e2e::java_instance_field_writes_public_and_protected`,
+  `java_source_interop_e2e::java_instance_field_write_rejections_match_kotlinc`.
+
+- **A lambda argument to a Java STATIC method's SAM parameter carries the call's implicit return
+  label.** `SwingUtilities.invokeLater { … return@invokeLater }` binds the label to the lambda
+  exactly like the instance-method and Kotlin top-level paths: `provider_member_lambda_arg_kinds`
+  threads the callee name into `check_lambda_with_expectation` for both classifier call shapes
+  (value-facet and static-namespace) instead of dropping it. Test:
+  `sam_classpath_e2e::java_static_sam_lambda_return_label_runs`.
+
+- **Java package-private members are visible from Kotlin in the SAME package.** `Visibility` gained
+  `PackagePrivate` (a Java class-file-only fact); the classfile decoder retains package-private
+  methods/fields instead of dropping or erasing them, and the single `member_accessible` gate admits
+  them iff the current file's package equals the owner's package — statics, instance methods, fields,
+  and constructors all flow through that one arm. Cross-package access reports kotlinc's exact pair:
+  `cannot access 'class Helper : Any': it is package-private in file.` at the qualifier and
+  `cannot access 'static fun adjust(): Unit': it is package-private in 'p.Helper'.` at the callee.
+  Tests: `java_source_interop_e2e::package_private_java_static_callable_within_same_package`,
+  `java_source_interop_e2e::package_private_java_static_rejected_cross_package`.
+  An INACCESSIBLE package-private candidate never shadows an accessible one: the
+  `select_member_property` walk declines to bind a package-private field the current file's package
+  cannot read (one `package_private_member_accessible` check beside the existing private/static
+  hides-without-binding cases), so `HashMap.size`'s package-private field no longer hides the public
+  `size()` property facet from non-`java.util` code — the `cannot access` diagnostic fires only when
+  the package-private declaration is the sole candidate. Tests:
+  `map_entry_destructure_e2e::discarded_map_put_does_not_unbox_null`,
+  `ir_lower_deep_coverage_e2e::map_index_get_set`.
+
+- **A package-private static FIELD of a public Java class follows the same rule.** The classpath
+  `static_field_name` decoder retains package-private static fields (only `private` is dropped) and
+  `StaticFieldRef` carries the declared `visibility`; the three checker read sites (qualified
+  classifier read, member-read fallback, `read_classifier_member`) all pass through the one
+  `record_static_field_gated` helper — same-package reads bind and emit `getstatic`, cross-package
+  reads report `cannot access 'static field count: Int': it is package-private in 'p.Pub'.` at the
+  member segment. Tests:
+  `java_source_interop_e2e::package_private_java_static_field_read_within_same_package`,
+  `java_source_interop_e2e::package_private_java_static_field_rejected_cross_package`.
+
 - **Generic classpath extension properties retain Kotlin return semantics.** The metadata decoder
   preserves property formals, receiver, return type, bounds, and nullability. Resolution specializes
   that logical type from the receiver, while lowering bridges the erased getter result. Test:

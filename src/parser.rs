@@ -7965,7 +7965,13 @@ impl<'a> Parser<'a> {
                 TokenKind::Dollar => {
                     self.bump();
                     if self.eat(TokenKind::LBrace) {
+                        // `"${" NL* expression NL* "}"` — line breaks may surround the
+                        // interpolated expression (a multiline lambda inside a raw template is
+                        // the common shape). Plain newlines only: an explicit `;` still ends the
+                        // expression and errors at the expected `}`.
+                        self.skip_plain_newlines();
                         let e = self.parse_expr();
+                        self.skip_plain_newlines();
                         self.expect(TokenKind::RBrace, "'}'");
                         parts.push(TemplatePart::Expr(e));
                     } else if self.at(TokenKind::Ident) {
