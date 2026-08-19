@@ -534,3 +534,71 @@ fn the_implementation_constructor_matches_kotlinc() {
         "and the guarded constructor must still build the annotation"
     );
 }
+
+/// The implementation's member FLAGS and `LocalVariableTable`s are kotlinc's.
+///
+/// Nothing in source declares this class, so kotlinc marks what it generates `ACC_SYNTHETIC` — the
+/// fields, the member accessors and `annotationType()` — while leaving the constructor and the
+/// `Object` overrides unmarked. It also names `this` (and the constructor's parameters, and `equals`'s
+/// `other`) in a `LocalVariableTable`, which a debugger and a decompiler both read.
+#[test]
+fn the_implementation_flags_and_locals_match_kotlinc() {
+    const SRC: &str = "annotation class C(val i: Int, val s: String, val a: IntArray)\n\
+                       fun mk(): C = C(1, \"x\", intArrayOf(1))\n\
+                       fun box(): String = mk().s\n";
+    let Some(build) = common::compile_libs_build("annotation_flags_shape", &[("Fl.kt", SRC)])
+    else {
+        return; // reference compiler unavailable
+    };
+    let reference_dir = build
+        .reference_out()
+        .expect("reference compiler output unavailable");
+    let ours = common::expect_compile_in_process(
+        SRC,
+        "Fl",
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    let impl_name = ours
+        .iter()
+        .map(|(name, _)| name.clone())
+        .find(|name| name.contains("$annotationImpl$"))
+        .expect("the annotation implementation class");
+    let ours_bytes = ours
+        .iter()
+        .find_map(|(name, bytes)| (*name == impl_name).then_some(bytes.clone()))
+        .expect("our implementation class");
+    let reference_bytes =
+        std::fs::read(reference_dir.join(format!("{impl_name}.class"))).expect("reference class");
+    let shape = |bytes: &[u8]| {
+        let class = krusty::jvm::classreader::parse_class(bytes).expect("parse class");
+        let mut methods = class
+            .methods
+            .iter()
+            .map(|m| (m.name.clone(), m.descriptor.clone(), m.access))
+            .collect::<Vec<_>>();
+        methods.sort();
+        let mut fields = class
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), f.access))
+            .collect::<Vec<_>>();
+        fields.sort();
+        (fields, methods)
+    };
+    assert_eq!(
+        shape(&ours_bytes),
+        shape(&reference_bytes),
+        "field and method flags must match kotlinc's, ACC_SYNTHETIC included"
+    );
+    assert_eq!(
+        common::run_box(
+            &ours,
+            &common::find_box_class(&ours).expect("box class"),
+            &[common::stdlib_jar()]
+        )
+        .as_deref(),
+        Some("x"),
+        "and the class must still work"
+    );
+}
