@@ -37479,6 +37479,22 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The type of a member read, with the marker replaced by the declaration's own answer.
+    ///
+    /// A read through an implicit receiver resolves against the symbol table, which holds the
+    /// marker while that member's own type is being determined. The receiver names the owner, which
+    /// is all the demand needs. Returns `ty` unchanged when it is already determined or when
+    /// nothing answers.
+    fn demanded_member_read(&mut self, ty: Ty, receiver: Ty, name: &str) -> Ty {
+        if !ty.mentions_pending() || receiver == Ty::Error || receiver.mentions_pending() {
+            return ty;
+        }
+        self.demand_member
+            .and_then(|demand| demand(receiver.non_null(), name, &[]))
+            .filter(|answered| *answered != Ty::Error && !answered.mentions_pending())
+            .unwrap_or(ty)
+    }
+
     fn expr_inner_safe_call(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -41097,6 +41113,12 @@ impl<'a> Checker<'a> {
     }
 
     fn bin_err(&mut self, op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
+        if lt.mentions_pending() || rt.mentions_pending() {
+            // An operand whose declaration is still being determined is not a type mismatch. The
+            // diagnostic would name `<not determined>` — a placeholder the source never wrote — and
+            // the enclosing declaration would settle to `Unit` on the strength of it.
+            return Ty::Pending;
+        }
         crate::trace_compiler!("resolve", "bin_err op={:?} lt={:?} rt={:?}", op, lt, rt);
         let message = match op {
             BinOp::Eq | BinOp::Ne => format!(
@@ -45036,7 +45058,11 @@ impl<'a> Checker<'a> {
             }
             return None;
         }
-        Some(t)
+        // Every read through a receiver funnels here, and the member's record still holds the
+        // marker while its own type is being determined. The receiver names the owner, which is all
+        // the demand needs — asking once here answers the bare-name, implicit-receiver and
+        // narrowed-`this` spellings alike, instead of teaching each of them separately.
+        Some(self.demanded_member_read(t, rt, name))
     }
 
     /// Probe one already-ordered implicit receiver for a bare property name. Scope-tower ordering

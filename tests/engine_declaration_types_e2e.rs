@@ -390,3 +390,26 @@ fn a_chain_of_anonymous_object_members() {
         "engine-anonymous-object-chain",
     );
 }
+
+/// An inferred member read from inside a member EXTENSION of the same class.
+///
+/// Every read through a receiver funnels through one member lookup, and that lookup consults the
+/// symbol table, which holds the marker while the member's own type is being determined. Asking
+/// there answers the bare-name, implicit-receiver and narrowed-`this` spellings alike. Without it
+/// the extension's own return settled to `Unit`.
+///
+/// A marker operand is also not a type mismatch: `Int + <not determined>` is a declaration still
+/// being determined, and reporting it names a placeholder the source never wrote.
+#[test]
+fn an_inferred_member_read_from_a_member_extension() {
+    common::expect_box_ok_with_stdlib(
+        "class Counter {\n\
+         \x20 var step = 5\n\
+         \x20 val base = 10.toLong()\n\
+         \x20 fun Long.scaled() = this.toInt() + step\n\
+         \x20 fun run() = base.scaled()\n\
+         }\n\
+         fun box(): String = if (Counter().run() == 15) \"OK\" else \"FAIL\"\n",
+        "engine-member-read-from-extension",
+    );
+}
