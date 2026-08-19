@@ -896,6 +896,48 @@ fn top_level_property_abi_matches_kotlin() {
     );
 }
 
+// ---- Differential: DECLARATION-POSITION type resolution is BYTE-IDENTICAL to kotlinc ---------
+//
+// A declaration whose type the signature walk cannot determine is resolved on demand by the engine.
+// Compiling is not the bar: the resolved type reaches the field descriptor, the getter's return and
+// the `@Metadata`, so the only proof that it is the RIGHT type is that the class kotlinc writes and
+// the class krusty writes are the same bytes.
+
+#[test]
+fn a_local_class_member_reading_a_capture_is_byte_identical_to_kotlinc() {
+    assert_diff("tr_local_class_capture");
+}
+
+#[test]
+fn a_block_with_unreachable_code_is_byte_identical_to_kotlinc() {
+    assert_diff("tr_unreachable_trailing");
+}
+
+#[test]
+fn an_inferred_unsigned_constant_is_byte_identical_to_kotlinc() {
+    assert_diff("tr_unsigned_constant");
+}
+
+#[test]
+fn a_typealias_constructor_declaration_is_byte_identical_to_kotlinc() {
+    assert_diff("tr_typealias_ctor");
+}
+
+#[test]
+fn a_constructor_bound_by_a_lambda_return_is_byte_identical_to_kotlinc() {
+    assert_diff("tr_ctor_lambda_return");
+}
+
+#[test]
+fn an_inferred_member_return_read_by_a_declaration_is_byte_identical_to_kotlinc() {
+    assert_diff("tr_inferred_member_return");
+}
+
+#[test]
+fn a_property_reference_to_an_inferred_member_is_byte_identical_to_kotlinc() {
+    assert_diff("tr_property_reference");
+}
+
 // ---- Differential: a counting loop is BYTE-IDENTICAL to kotlinc ------------------------------
 
 #[test]
@@ -934,6 +976,24 @@ struct DiffCase {
 /// `diff_refs`. Add a case here and reference it by `name` from a `#[test]` via `assert_diff`.
 fn diff_cases() -> Vec<DiffCase> {
     vec![
+        // Declaration-position type resolution. Every one of these is a shape whose type the
+        // signature walk cannot determine on its own, so the engine resolves it on demand; the
+        // parity check is what proves the resolved type is the type kotlinc writes, byte for byte,
+        // rather than merely a type that compiles.
+        DiffCase { name: "tr_local_class_capture", file: "TrLocalCapture.kt", class: "TrLocalCaptureKt", marker: None,
+            src: "fun box(): String {\n  val s = \"captured\"\n  class A(val p: String) { val s2 = s + p }\n  return if (A(\"OK\").s2 == \"capturedOK\") \"OK\" else \"F\"\n}\n" },
+        DiffCase { name: "tr_unreachable_trailing", file: "TrUnreachable.kt", class: "TrUnreachableKt", marker: None,
+            src: "val a1 = \"a\".let {\n  if (false) throw Error()\n  it + \"a\"\n}\nfun box(): String = if (a1 == \"aa\") \"OK\" else \"F\"\n" },
+        DiffCase { name: "tr_unsigned_constant", file: "TrUnsigned.kt", class: "TrUnsignedKt", marker: None,
+            src: "val maxU = UInt.MAX_VALUE\nval minU: UInt = UInt.MIN_VALUE\nfun box(): String = if (minU == 0u && maxU > 0u) \"OK\" else \"F\"\n" },
+        DiffCase { name: "tr_typealias_ctor", file: "TrAlias.kt", class: "TrAliasKt", marker: None,
+            src: "class Cell<T>(val x: T)\ntypealias AliasedCell<TT> = Cell<TT>\nval cell = AliasedCell(\"OK\")\nfun box(): String = cell.x\n" },
+        DiffCase { name: "tr_ctor_lambda_return", file: "TrCtorLambda.kt", class: "TrCtorLambdaKt", marker: None,
+            src: "class N<T>(val build: (String) -> T)\nval n = N { it + \"K\" }\nfun box(): String = n.build(\"O\")\n" },
+        DiffCase { name: "tr_inferred_member_return", file: "TrMemberReturn.kt", class: "TrMemberReturnKt", marker: None,
+            src: "class W<T>(val value: T) { fun get() = value }\nval got = W(\"OK\").get()\nfun box(): String = got\n" },
+        DiffCase { name: "tr_property_reference", file: "TrPropRef.kt", class: "TrPropRefKt", marker: None,
+            src: "class C { val bar = 42 }\nval unbound = C::bar\nval bound = C()::bar\nfun box(): String = if (unbound.get(C()) == 42 && bound.get() == 42) \"OK\" else \"F\"\n" },
         DiffCase { name: "ruc", file: "Ruc.kt", class: "RucKt", marker: None,
             src: "fun box(): String {\n  var s = 0\n  for (i in 0 until 10) s += i\n  return \"OK\"\n}\n" },
         DiffCase { name: "rtc", file: "Rtc.kt", class: "RtcKt", marker: None,

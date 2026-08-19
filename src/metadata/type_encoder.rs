@@ -138,11 +138,16 @@ pub(crate) enum TypeEncodeError {
     MissingTypeParameter(String),
     NonMetadataType(Ty),
     FunctionArity(usize),
+    /// A declaration whose type the resolution engine never determined reached `@Metadata`.
+    NotDetermined,
 }
 
 impl fmt::Display for TypeEncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NotDetermined => {
+                write!(f, "a not-determined declaration type reached @Metadata")
+            }
             Self::MissingTypeParameter(name) => {
                 write!(
                     f,
@@ -359,6 +364,9 @@ fn encode_type_with_parameter(
     }
 
     match base {
+        // The engine turns an undetermined declaration into a decline before anything is written,
+        // so a pending type here is a broken invariant rather than a shape to encode.
+        Ty::Pending => return Err(TypeEncodeError::NotDetermined),
         Ty::TyParam(name, _) => {
             let index = type_parameters
                 .get(name)

@@ -411,3 +411,40 @@ fun consume(document: Document): String {\n\
         "explicit Any must not be narrowed: {explicit_diagnostics:?}"
     );
 }
+
+#[test]
+fn safe_call_context_extension_lambda_keeps_its_value_parameter() {
+    // The `?.` spelling of `context_extension_lambda_keeps_its_value_parameter`. A shape's parameter
+    // entry carries the context parameters ahead of the receiver and the receiver ahead of what the
+    // author wrote; a reader that skips one entry only hands the lambda its own receiver as a value
+    // parameter. This path used to reject the shape outright, so it never had to decode it.
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+class Prefix(val first: String)\n\
+class Target(val second: String)\n\
+context(prefix: Prefix)\n\
+fun <T> Target.consume(action: context(Prefix) Target.(Int) -> T): T = action(Prefix(\"O\"), this, 0)\n\
+fun box(): String = with(Prefix(\"wrong\")) {\n\
+\x20   val target: Target? = Target(\"K\")\n\
+\x20   target?.consume { first + second } ?: \"null\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "SafeCallContextExtensionLambda");
+}
+
+#[test]
+fn implicit_receiver_context_extension_lambda_keeps_its_value_parameter() {
+    // The implicit-receiver spelling: the call names no receiver at all and finds `consume` on the
+    // implicit `Target`, so the shape reaches the implicit path's reader.
+    //
+    // Front end only. The IR backend declines to lower an unqualified call of this shape, which is a
+    // separate gap; what is asserted here is that the lambda's parameters are typed — with the
+    // shape read as `[receiver, contexts…]` instead, `first` and `second` do not resolve.
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+class Prefix(val first: String)\n\
+class Target(val second: String)\n\
+context(prefix: Prefix)\n\
+fun <T> Target.consume(action: context(Prefix) Target.(Int) -> T): T = action(Prefix(\"O\"), this, 0)\n\
+fun box(): String = with(Prefix(\"wrong\")) {\n\
+\x20   with(Target(\"K\")) { consume { first + second } }\n\
+}\n";
+    common::expect_front_end_ok_files_with_stdlib(&[SRC], "ImplicitContextExtensionLambda");
+}
