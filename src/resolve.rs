@@ -36284,6 +36284,38 @@ impl<'a> Checker<'a> {
             .or_else(|| (actual == provisional).then_some(signature))
     }
 
+    /// A generic result that a conditional sibling may constrain. Return-only formals remain
+    /// eligible when an enclosing expectation supplied their provisional binding.
+    fn conditional_call_result_signature(&self, expression: ExprId) -> Option<&GenericSig> {
+        if let Some(signature) = self.unbound_call_result_signature(expression) {
+            return Some(signature);
+        }
+        if self
+            .file
+            .call_type_args
+            .get(&expression.0)
+            .is_some_and(|arguments| !arguments.is_empty())
+        {
+            return None;
+        }
+        let signature = self.selected_generic_call_signature(expression)?;
+        signature
+            .formals
+            .iter()
+            .any(|formal| {
+                let formal = std::slice::from_ref(formal);
+                ty_mentions_param(signature.ret, formal)
+                    && signature
+                        .receiver
+                        .is_none_or(|receiver| !ty_mentions_param(receiver, formal))
+                    && signature
+                        .params
+                        .iter()
+                        .all(|parameter| !ty_mentions_param(*parameter, formal))
+            })
+            .then_some(signature)
+    }
+
     /// Whether an UNTYPED lambda that omits its parameter list must synthesize Kotlin's implicit `it`.
     ///
     /// Merely finding the token in the body is insufficient: when a lexical value named `it` already
@@ -38568,18 +38600,26 @@ impl<'a> Checker<'a> {
         rhs: ExprId,
     ) -> Ty {
         let t = {
-            let lt0 = match expected {
+            let conditional_expected = Self::usable_conditional_expected(scope, expected);
+            let lt0 = match conditional_expected {
                 Some(ty) => self.expr_expected(scope, lhs, ty),
                 None => self.expr(scope, lhs),
             };
             // The non-null LHS constrains an otherwise underdetermined generic fallback:
             // `map[key] ?: emptyList()` must infer the element type from `map[key]`, just as the
             // same generic call is retyped from an enclosing callable parameter elsewhere.
-            let lt = lt0.non_null();
-            let rt = match expected {
+            let mut lt = lt0.non_null();
+            let rt = match conditional_expected {
                 Some(ty) => self.expr_expected(scope, rhs, ty),
                 None => self.expr_expected(scope, rhs, lt),
             };
+            let lt0 = self
+                .rebind_conditional_branch(lhs, rt, lt0, |c, exp| c.expr_expected(scope, lhs, exp));
+            lt = lt0.non_null();
+            let rt = self
+                .rebind_conditional_branch(rhs, lt, rt, |c, exp| c.expr_expected(scope, rhs, exp));
+            self.report_unbound_conditional_branch(lhs);
+            self.report_unbound_conditional_branch(rhs);
             // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
             // unboxed primitive, while an ordinary nullable reference `T?` unwraps to `T`.
             crate::trace_compiler!(
@@ -39995,6 +40035,93 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
+    /// Check an `if` branch with its condition narrowings.
+    fn if_branch_ty(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        cond: ExprId,
+        branch: ExprId,
+        then: bool,
+        wanted: Wanted,
+    ) -> Ty {
+        let (casts, declined) = self.condition_narrowings(scope, cond, then);
+        let compound = matches!(self.file.expr(cond), Expr::Binary { op, .. } if *op
+            == if then { BinOp::And } else { BinOp::Or });
+        let branch_scope = scope.child(ScopeKind::Block);
+        let scope = &branch_scope;
+        self.apply_narrowings(scope, &casts, &declined, compound);
+        // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
+        self.with_this_narrow(self.this_is_narrowing(scope, cond, !then), |c| {
+            c.expr_result(scope, branch, wanted.expected, wanted.value_required)
+        })
+    }
+
+    /// An outer call's pending type variable cannot constrain a conditional branch. A lexical type
+    /// parameter remains a usable expectation.
+    fn usable_conditional_expected(scope: &CheckerScope<'_>, expected: Option<Ty>) -> Option<Ty> {
+        expected
+            .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
+            .filter(|ty| Self::lambda_return_is_lexically_fixed(scope, *ty))
+    }
+
+    /// Recheck a branch whose selected generic call has an unbound result formal, using a sibling's
+    /// result as its expectation.
+    fn rebind_conditional_branch(
+        &mut self,
+        branch: ExprId,
+        sibling: Ty,
+        current: Ty,
+        recheck: impl FnOnce(&mut Self, Ty) -> Ty,
+    ) -> Ty {
+        if current == Ty::Error
+            || matches!(sibling, Ty::Error | Ty::Nothing)
+            || sibling.mentions_pending()
+        {
+            return current;
+        }
+        let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
+            return current;
+        };
+        if crate::symbol_resolver::infer_generic_return_bindings(
+            &signature,
+            sibling,
+            |actual, bound| self.receiver_is_assignable(actual, bound),
+        )
+        .is_none()
+        {
+            return current;
+        }
+        crate::trace_compiler!(
+            "expected_call",
+            "conditional branch {branch:?} rebinds against sibling {sibling:?}"
+        );
+        recheck(self, sibling)
+    }
+
+    /// Report a conditional branch whose selected generic call remains symbolic after sibling
+    /// rebinding. A call defaulted to its formal's bound has no symbolic remainder and is not
+    /// diagnosed here.
+    fn report_unbound_conditional_branch(&mut self, branch: ExprId) {
+        let Some(signature) = self.unbound_call_result_signature(branch).cloned() else {
+            return;
+        };
+        let actual = self.expr_types[branch.0 as usize];
+        let Some(formal) = signature
+            .formals
+            .iter()
+            .find(|formal| ty_mentions_param(actual, std::slice::from_ref(formal)))
+        else {
+            return;
+        };
+        self.diags.error(
+            self.call_callee_name_span(branch),
+            format!(
+                "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                crate::types::type_parameter_source_name(formal)
+            ),
+        );
+    }
+
     fn expr_inner_if(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -40007,33 +40134,42 @@ impl<'a> Checker<'a> {
         let t = {
             let ct = self.expr(scope, cond);
             self.expect_assignable(Ty::Boolean, ct, self.span(cond), "if condition");
-            let (then_casts, then_declined) = self.condition_narrowings(scope, cond, true);
-            let then_compound = matches!(self.file.expr(cond), Expr::Binary { op: BinOp::And, .. });
-            let tt = {
-                let branch_scope = scope.child(ScopeKind::Block);
-                let scope = &branch_scope;
-                self.apply_narrowings(scope, &then_casts, &then_declined, then_compound);
-                // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
-                self.with_this_narrow(self.this_is_narrowing(scope, cond, false), |c| {
-                    c.expr_result(scope, then_branch, wanted.expected, wanted.value_required)
-                })
-            };
+            let tt = self.if_branch_ty(scope, cond, then_branch, true, wanted);
             match else_branch {
                 Some(eb) => {
-                    let (else_casts, else_declined) = self.condition_narrowings(scope, cond, false);
-                    let else_compound =
-                        matches!(self.file.expr(cond), Expr::Binary { op: BinOp::Or, .. });
-                    let et = {
-                        let branch_scope = scope.child(ScopeKind::Block);
-                        let scope = &branch_scope;
-                        self.apply_narrowings(scope, &else_casts, &else_declined, else_compound);
-                        self.with_this_narrow(self.this_is_narrowing(scope, cond, true), |c| {
-                            c.expr_result(scope, eb, wanted.expected, wanted.value_required)
-                        })
-                    };
+                    let et = self.if_branch_ty(scope, cond, eb, false, wanted);
+                    let tt = self.rebind_conditional_branch(then_branch, et, tt, |c, exp| {
+                        c.if_branch_ty(
+                            scope,
+                            cond,
+                            then_branch,
+                            true,
+                            Wanted {
+                                expected: Some(exp),
+                                value_required: wanted.value_required,
+                            },
+                        )
+                    });
+                    let et = self.rebind_conditional_branch(eb, tt, et, |c, exp| {
+                        c.if_branch_ty(
+                            scope,
+                            cond,
+                            eb,
+                            false,
+                            Wanted {
+                                expected: Some(exp),
+                                value_required: wanted.value_required,
+                            },
+                        )
+                    });
+                    self.report_unbound_conditional_branch(then_branch);
+                    self.report_unbound_conditional_branch(eb);
                     self.join(tt, et, self.span(e))
                 }
-                None => Ty::Unit,
+                None => {
+                    self.report_unbound_conditional_branch(then_branch);
+                    Ty::Unit
+                }
             }
         };
         self.set(e, t)
@@ -40197,7 +40333,17 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let t = {
             let subj_ty = subject.map(|s| self.expr(scope, s));
-            let mut result: Option<Ty> = None;
+            struct ArmResult {
+                body: ExprId,
+                span: Span,
+                ty: Ty,
+                fallthrough_casts: Vec<(NarrowPath, Ty)>,
+                fallthrough_declined: Vec<(String, Ty)>,
+                arm_casts: Vec<(NarrowPath, Ty)>,
+                arm_declined: Vec<(String, Ty)>,
+                this_narrow: Option<Ty>,
+            }
+            let mut arm_results = Vec::with_capacity(arms.len());
             let mut has_else = false;
             // A `when` may have at most one `else` branch (kotlinc rejects a second one).
             if arms.iter().filter(|a| a.conditions.is_empty()).count() > 1 {
@@ -40214,6 +40360,16 @@ impl<'a> Checker<'a> {
                 if arm.conditions.is_empty() {
                     has_else = true;
                 }
+                let incoming_fallthrough_casts = if subj_ty.is_none() {
+                    fallthrough_casts.clone()
+                } else {
+                    Vec::new()
+                };
+                let incoming_fallthrough_declined = if subj_ty.is_none() {
+                    fallthrough_declined.clone()
+                } else {
+                    Vec::new()
+                };
                 // Keep accumulated facts in the subjectless arm's child scope. Subject-form
                 // conditions continue to compare against the subject in the enclosing scope.
                 let arm_scope = scope.child(ScopeKind::Block);
@@ -40305,11 +40461,70 @@ impl<'a> Checker<'a> {
                         c.expr_result(scope, arm.body, expected, value_required)
                     })
                 };
-                result = Some(match result {
-                    Some(r) => self.join(r, bt, self.span(arm.body)),
-                    None => bt,
+                arm_results.push(ArmResult {
+                    body: arm.body,
+                    span: self.span(arm.body),
+                    ty: bt,
+                    fallthrough_casts: incoming_fallthrough_casts,
+                    fallthrough_declined: incoming_fallthrough_declined,
+                    arm_casts,
+                    arm_declined,
+                    this_narrow: arm_this_narrow,
                 });
             }
+            // Recheck a symbolic generic call against the other arms' common result type. Conditions
+            // and guards are not rechecked.
+            if arm_results.len() >= 2 {
+                for i in 0..arm_results.len() {
+                    let sibling = arm_results
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .map(|(_, record)| record.ty)
+                        .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
+                        .fold(None, |acc: Option<Ty>, ty| {
+                            Some(match acc {
+                                Some(a) => self.semantic_common_supertype(a, ty).unwrap_or(a),
+                                None => ty,
+                            })
+                        });
+                    let Some(sibling) = sibling else { continue };
+                    let record = &arm_results[i];
+                    let body = record.body;
+                    let current = record.ty;
+                    let fallthrough_casts = record.fallthrough_casts.clone();
+                    let fallthrough_declined = record.fallthrough_declined.clone();
+                    let arm_casts = record.arm_casts.clone();
+                    let arm_declined = record.arm_declined.clone();
+                    let this_narrow = record.this_narrow;
+                    let rebound =
+                        self.rebind_conditional_branch(body, sibling, current, |c, exp| {
+                            let arm_scope = scope.child(ScopeKind::Block);
+                            let scope = &arm_scope;
+                            c.apply_narrowings(
+                                scope,
+                                &fallthrough_casts,
+                                &fallthrough_declined,
+                                false,
+                            );
+                            c.apply_narrowings(scope, &arm_casts, &arm_declined, false);
+                            c.with_this_narrow(this_narrow, |c2| {
+                                c2.expr_result(scope, body, Some(exp), value_required)
+                            })
+                        });
+                    arm_results[i].ty = rebound;
+                }
+            }
+            for record in &arm_results {
+                self.report_unbound_conditional_branch(record.body);
+            }
+            // Preserve source order when joining arm types.
+            let result = arm_results.iter().fold(None, |result: Option<Ty>, record| {
+                Some(match result {
+                    Some(r) => self.join(r, record.ty, record.span),
+                    None => record.ty,
+                })
+            });
             let missing = if has_else {
                 None
             } else {
@@ -53616,8 +53831,10 @@ impl<'a> Checker<'a> {
         right: Ty,
         visiting: &mut std::collections::HashSet<(Ty, Ty)>,
     ) -> Option<Ty> {
-        let left_hierarchy = self.syms.applied_hierarchy(left);
-        let right_hierarchy = self.syms.applied_hierarchy(right);
+        // Nullability does not change a classifier's hierarchy. Restore the operands' result
+        // nullability after finding their common classifier.
+        let left_hierarchy = self.syms.applied_hierarchy(left.non_null());
+        let right_hierarchy = self.syms.applied_hierarchy(right.non_null());
         let right_by_owner = right_hierarchy
             .into_iter()
             .map(|(owner, applied, _)| (owner, applied))
