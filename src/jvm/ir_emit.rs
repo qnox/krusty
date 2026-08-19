@@ -8026,7 +8026,10 @@ fn emit_annotation_impl_class(
     cw.set_access(0x0001 | 0x0010 | 0x0020 | 0x1000); // PUBLIC | FINAL | SUPER | SYNTHETIC
     cw.add_interface(iface);
     for (name, jt) in &members {
-        cw.add_field(0x0002 | 0x0010, name, &type_descriptor(*jt)); // PRIVATE | FINAL
+        // SYNTHETIC: nothing in source declares these — the class is generated for an annotation
+        // instantiation, and kotlinc marks its fields and member accessors so tooling skips them.
+        // The constructor and the `Object` overrides are NOT marked, which is kotlinc's split.
+        cw.add_field(0x0002 | 0x0010 | 0x1000, name, &type_descriptor(*jt)); // PRIVATE|FINAL|SYNTHETIC
     }
 
     // <init>(members…): super(); store each arg to its field.
@@ -8071,6 +8074,13 @@ fn emit_annotation_impl_class(
         );
         ctor.ret_void();
         finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, 1 + params_words);
+        let mut locals = vec![("this".to_string(), format!("L{fq};"), 0)];
+        let mut debug_slot = 1u16;
+        for (name, jt) in &members {
+            locals.push((name.clone(), type_descriptor(*jt), debug_slot));
+            debug_slot += slot_words(*jt);
+        }
+        cw.set_method_debug("<init>", &desc, None, &locals);
         // A default on any annotation member (`annotation class C(val i: Int = 1)`) → the same synthetic
         // `<init>(members…, int mask, DefaultConstructorMarker)` overload an ordinary class gets. The impl
         // class is what `C()` actually constructs, so without it a call omitting a default targets a
@@ -8089,12 +8099,15 @@ fn emit_annotation_impl_class(
         let fref = cw.fieldref(&fq, name, &type_descriptor(*jt));
         g.getfield(fref, slot_words(*jt) as i32);
         emit_return(*jt, &mut g);
-        finish_code::<0x0011>(
-            &mut cw,
+        // PUBLIC | FINAL | SYNTHETIC — see the field flags above.
+        let accessor_desc = format!("(){}", type_descriptor(*jt));
+        finish_code::<0x1011>(&mut cw, name, &accessor_desc, &mut g, 1);
+        // kotlinc names `this` in every member's `LocalVariableTable`, generated class or not.
+        cw.set_method_debug(
             name,
-            &format!("(){}", type_descriptor(*jt)),
-            &mut g,
-            1,
+            &accessor_desc,
+            None,
+            &[("this".to_string(), format!("L{fq};"), 0)],
         );
     }
 
@@ -8108,7 +8121,15 @@ fn emit_annotation_impl_class(
         let mut m = CodeBuilder::new(1);
         m.ldc_class(iface, &mut cw);
         m.areturn();
-        finish_code::<0x0011>(&mut cw, "annotationType", "()Ljava/lang/Class;", &mut m, 1);
+        // SYNTHETIC like the accessors: `annotationType()` is the `Annotation` contract, not a
+        // source declaration.
+        finish_code::<0x1011>(&mut cw, "annotationType", "()Ljava/lang/Class;", &mut m, 1);
+        cw.set_method_debug(
+            "annotationType",
+            "()Ljava/lang/Class;",
+            None,
+            &[("this".to_string(), format!("L{fq};"), 0)],
+        );
     }
     cw.finish()
 }
@@ -8215,6 +8236,15 @@ fn emit_annotation_equals(
     cb.set_needs_stackmap();
     cb.link();
     cw.add_method(0x0011, "equals", "(Ljava/lang/Object;)Z", &cb);
+    cw.set_method_debug(
+        "equals",
+        "(Ljava/lang/Object;)Z",
+        None,
+        &[
+            ("this".to_string(), format!("L{fq};"), 0),
+            ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
+        ],
+    );
 }
 
 /// `Arrays.equals`/`Arrays.hashCode`/`Arrays.toString` parameter descriptor for an array member: a
@@ -8366,6 +8396,12 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
         cb.push_string(&format!("@{}()", iface.replace('/', ".")), cw);
         cb.areturn();
         finish_code::<0x0011>(cw, "toString", "()Ljava/lang/String;", &mut cb, 1);
+        cw.set_method_debug(
+            "toString",
+            "()Ljava/lang/String;",
+            None,
+            &[("this".to_string(), format!("L{fq};"), 0)],
+        );
         return;
     }
     let sb = "java/lang/StringBuilder";
@@ -8473,6 +8509,12 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
     cb.invokevirtual(to_str, 0, 1);
     cb.areturn();
     finish_code::<0x0011>(cw, "toString", "()Ljava/lang/String;", &mut cb, 1);
+    cw.set_method_debug(
+        "toString",
+        "()Ljava/lang/String;",
+        None,
+        &[("this".to_string(), format!("L{fq};"), 0)],
+    );
 }
 
 /// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`. A method
