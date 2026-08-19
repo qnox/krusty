@@ -602,3 +602,73 @@ fn the_implementation_flags_and_locals_match_kotlinc() {
         "and the class must still work"
     );
 }
+
+/// The implementation carries kotlinc's nullability annotations.
+///
+/// Each is measured, not inferred from a rule: the constructor's REFERENCE parameters are `@NotNull`
+/// (an annotation member is never null), `equals`'s parameter is `@Nullable` (it accepts anything and
+/// answers false), `toString`'s RETURN is `@NotNull` — and the member accessors carry none at all,
+/// including the reference-typed ones.
+#[test]
+fn the_implementation_nullability_matches_kotlinc() {
+    const SRC: &str = "annotation class C(val i: Int, val s: String, val a: IntArray)\n\
+                       fun mk(): C = C(1, \"x\", intArrayOf(1))\n\
+                       fun box(): String = mk().s\n";
+    let Some(build) = common::compile_libs_build("annotation_nullability_shape", &[("Nl.kt", SRC)])
+    else {
+        return; // reference compiler unavailable
+    };
+    let reference_dir = build
+        .reference_out()
+        .expect("reference compiler output unavailable");
+    let ours = common::expect_compile_in_process(
+        SRC,
+        "Nl",
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    let impl_name = ours
+        .iter()
+        .map(|(name, _)| name.clone())
+        .find(|name| name.contains("$annotationImpl$"))
+        .expect("the annotation implementation class");
+    let ours_bytes = ours
+        .iter()
+        .find_map(|(name, bytes)| (*name == impl_name).then_some(bytes.clone()))
+        .expect("our implementation class");
+    let reference_bytes =
+        std::fs::read(reference_dir.join(format!("{impl_name}.class"))).expect("reference class");
+    // `javap`-free: compare the raw attribute NAMES each method carries, which is where the
+    // nullability annotations live.
+    let attributes = |bytes: &[u8]| {
+        let class = krusty::jvm::classreader::parse_class(bytes).expect("parse class");
+        let mut out = class
+            .methods
+            .iter()
+            .map(|m| {
+                (
+                    m.name.clone(),
+                    m.descriptor.clone(),
+                    format!("{:?}", m.return_nullability),
+                    format!("{:?}", m.parameter_nullability),
+                )
+            })
+            .collect::<Vec<_>>();
+        out.sort();
+        out
+    };
+    assert_eq!(
+        attributes(&ours_bytes),
+        attributes(&reference_bytes),
+        "every method's nullability annotations must match kotlinc's"
+    );
+    assert_eq!(
+        common::run_box(
+            &ours,
+            &common::find_box_class(&ours).expect("box class"),
+            &[common::stdlib_jar()]
+        )
+        .as_deref(),
+        Some("x"),
+    );
+}
