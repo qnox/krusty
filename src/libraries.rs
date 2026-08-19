@@ -280,8 +280,9 @@ pub struct LibraryMember {
     pub call_sig: CallSig,
     /// Leading context-parameter count of this member's logical parameter list.
     pub context_count: usize,
-    /// Declared source-level overload priority from metadata.
-    pub low_priority: bool,
+    /// Annotation class identities declared on this member. Consumers decide which annotations affect
+    /// resolution/emission; the library layer only records their qualified identities.
+    pub annotations: Vec<crate::types::TypeName>,
     /// Declared contract effects from metadata.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
     /// File-independent values for source defaults, parallel to [`Self::params`]. Presence and named
@@ -699,7 +700,7 @@ impl LibraryMember {
             visibility: Visibility::Public,
             call_sig: CallSig::default(),
             context_count: 0,
-            low_priority: false,
+            annotations: Vec::new(),
             contract: None,
             default_values: Vec::new(),
             default_realization: None,
@@ -1613,6 +1614,9 @@ pub struct FunctionInfo {
     /// iteration body. Providers attach this semantic capability to the ordinary candidate; callers'
     /// imports never participate in the body's convention lookup.
     pub iterator_protocol_scope: Vec<TypeName>,
+    /// Annotation class identities declared on this callable. Consumers decide which annotations affect
+    /// resolution/emission; the library layer only records their qualified identities.
+    pub annotations: Vec<crate::types::TypeName>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1724,6 +1728,7 @@ impl FunctionInfo {
             source_member: None,
             implicit_classifier_callable: None,
             iterator_protocol_scope: Vec::new(),
+            annotations: Vec::new(),
         }
     }
 
@@ -1769,7 +1774,7 @@ impl FunctionInfo {
         candidate.flags.operator = member.is_operator();
         candidate.flags.infix = member.is_infix();
         candidate.flags.is_abstract = member.is_abstract();
-        candidate.flags.low_priority = member.low_priority;
+        candidate.annotations = member.annotations.clone();
         candidate.default_values = member.default_values.clone();
         candidate.source_member = member.source_member;
         candidate.implicit_classifier_callable = member.implicit_classifier_callable;
@@ -1808,6 +1813,7 @@ impl FunctionInfo {
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
         member.reified = self.flags.reified;
+        member.annotations = self.annotations.clone();
         member.visibility = self.visibility;
         member.set_suspend(self.flags.suspend);
         member.set_is_operator(self.flags.operator);
@@ -1822,7 +1828,6 @@ impl FunctionInfo {
         // Keep source call shape coupled to the selected overload.
         member.call_sig = self.call_sig.clone();
         member.context_count = self.context_count;
-        member.low_priority = self.flags.low_priority;
         member.contract = self.callable.contract.clone();
         member.implicit_classifier_callable = self.implicit_classifier_callable;
         member.plugin_expression = self.callable.plugin_expression;
@@ -1897,9 +1902,6 @@ pub struct FnFlags {
     /// reaches a concrete override; a non-virtual `super` call must continue to another direct
     /// supertype instead.
     pub is_abstract: bool,
-    /// `@LowPriorityInOverloadResolution`: discard this declaration whenever an ordinary candidate
-    /// is applicable at the same callable-tower level.
-    pub low_priority: bool,
 }
 
 /// All overloads of one function name applicable to a call — members AND extensions AND top-level, in one
