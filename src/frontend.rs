@@ -24,12 +24,12 @@ pub(crate) use crate::resolve::{
     check_preinferred_file_in_source_set, function_import_scope, AdaptedRefArgument,
     CallableReferenceBinding, CallableReferenceTarget, ConstructorReferenceOuter, CtorDefaultValue,
     DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FunctionImportScope,
-    ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InlineCall, InvokeKind,
-    LambdaCapture, LambdaInfo, PlatformNarrowing, ReceiverFnValueOrigin, ResolvedCall,
-    ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
-    ResolvedExtensionCall, ResolvedIncDec, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedPropertyAccess, ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef,
-    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
+    ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InvokeKind, LambdaCapture,
+    LambdaInfo, PlatformNarrowing, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
+    ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
+    ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
+    ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
+    SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
 pub(crate) use crate::resolve::{selected_context_values, SelectedContextSources};
 /// Types carried by the public source-set analysis signatures, re-exported here so process
@@ -930,7 +930,6 @@ mod tests {
                     sam_eligible: false,
                     callable_signature: None,
                     companion_object,
-                    value_companion_fns: Vec::new(),
                     value_underlying: None,
                     value_underlying_property: None,
                     alias_target: None,

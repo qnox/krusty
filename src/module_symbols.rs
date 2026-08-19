@@ -394,7 +394,6 @@ impl<'a> ModuleSymbols<'a> {
             companion_object: c
                 .companion_internal
                 .map(|companion| (companion.nested_segment_ref().to_string(), companion)),
-            value_companion_fns: Vec::new(),
             // `LibraryType` is the provider-neutral classifier shape consumed by the federated
             // resolver. Preserve source value-class metadata here just as a classpath provider
             // does, so every downstream query (identity diagnostics included) can use the common

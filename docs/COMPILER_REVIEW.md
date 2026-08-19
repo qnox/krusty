@@ -568,13 +568,6 @@ lambda construction and the `Comparable<T>` bridge path. Verified with
 `./run-tests.sh --test sam_classpath_e2e` and
 `./run-tests.sh --test feature_box_e2e --test classpath_companion --test sam_classpath_e2e`.
 
-Twenty-fourth-pass cleanup deleted `LibrarySet::value_companion_fn`. Public inline companion functions
-on classpath value classes (`Result.success`) now live on `LibraryType::value_companion_fns` beside
-the companion object field, SAM method, constructors, members, and value-class underlying type. The
-checker selects the stored companion callable by source name and logical parameter count without
-parsing JVM descriptors or making a second provider query. Verified with
-`./run-tests.sh --test result_e2e --test metadata_reader_e2e --test suspend_e2e`.
-
 Twenty-fifth-pass cleanup deleted `LibrarySet::mangled_member`. Unsigned range/progression lowering
 now resolves mangled inline-class getter names by walking `LibraryType::members` and `supertypes`,
 instead of asking a JVM-specific trait method to scan class files by prefix. This keeps real member
@@ -908,10 +901,7 @@ Current side-table audit status:
 
 - `ext_calls`: deleted; it was written by the checker and never read.
 - `expr_lowers`: still read by lowering for selected expression forms that cannot be recovered from
-  shape alone. It now combines the old `obj_value_refs`, `ext_prop_calls`, `local_call_map`, and
-  `inline_calls` maps, plus the old `lambda_info`, with explicit `LocalFunction`, `InlineCall`,
-  `Lambda`, `ObjectValue`, and `ExtensionPropertyGet` variants; it should eventually become part of a
-  unified expression-resolution table.
+  shape alone; it should eventually become part of a unified expression-resolution table.
 - `stmt_lowers`: still read by statement lowering for selected statement forms. It currently carries
   `PlusAssign`, replacing the old `plus_assign` set.
 
@@ -940,38 +930,6 @@ cargo fmt --check
 cargo check --profile gate
 ./run-tests.sh --test extension_property_e2e -- --nocapture
 ./run-tests.sh --test var_extension_property_e2e -- --nocapture
-./run-tests.sh --test box_corpus_regression_e2e -- --nocapture
-```
-
-Fifty-fourth-pass companion-call payload cleanup removed the duplicate method fields from
-`CompanionFn`. Value-class companion calls (`Result.success`) now keep only the companion receiver
-metadata (`class_internal`, `companion_internal`, `companion_field`) plus the selected `LibraryCallable`
-for owner/name/descriptor/params/return/inline policy. The checker selects against `callable.name` and
-`callable.params`; lowering emits through `callable.owner`, `callable.name`, `callable.descriptor`, and
-`callable.inline`. This keeps the side table as one selected call payload instead of a second
-companion-specific callable shape. Verification:
-
-```sh
-cargo fmt --check
-cargo check --profile gate
-./run-tests.sh --test result_e2e -- --nocapture
-./run-tests.sh --test value_class_e2e -- --nocapture
-./run-tests.sh --test box_corpus_regression_e2e -- --nocapture
-```
-
-Fifty-fifth-pass inline-call side-table consolidation merged `companion_calls` and `receiver_lambdas`
-into one `TypeInfo::inline_calls: HashMap<ExprId, InlineCall>`. The checker now records
-`InlineCall::ValueCompanion` for value-class companion methods and `InlineCall::ReceiverLambda` for
-`run`/`apply`/`with`; lowering has one pre-normal-call arm that consumes the selected variant. This
-removes one expression-keyed side table and one name-shaped special-case path while preserving the
-semantics that cannot legally fall through to ordinary call lowering. Verification:
-
-```sh
-cargo fmt --check
-cargo check --profile gate
-./run-tests.sh --test result_e2e -- --nocapture
-./run-tests.sh --test value_class_e2e -- --nocapture
-./run-tests.sh --test feature_box_e2e -- --nocapture
 ./run-tests.sh --test box_corpus_regression_e2e -- --nocapture
 ```
 
@@ -1105,22 +1063,6 @@ cargo fmt --check
 cargo check --profile gate
 ./run-tests.sh --test lambda_e2e -- --nocapture
 ./run-tests.sh --test callable_ref_e2e -- --nocapture
-./run-tests.sh --test feature_box_e2e -- --nocapture feature_snippets_run
-./run-tests.sh --test box_corpus_regression_e2e -- --nocapture
-```
-
-Sixty-sixth-pass selected-expression inline-call cleanup removed `TypeInfo::inline_calls`. Value-class
-companion calls and receiver-lambda scope calls now record `ExprLowering::InlineCall(InlineCall)` in the
-same selected-expression table as local-function calls, classpath object values, and extension-property
-gets. Lowering has one expression selection lookup for these special expression forms instead of a
-second `ExprId` map checked before ordinary call lowering. Verification:
-
-```sh
-cargo fmt --check
-cargo check --profile gate
-./run-tests.sh --test result_e2e -- --nocapture
-./run-tests.sh --test value_class_e2e -- --nocapture
-./run-tests.sh --test classpath_receiver_lambda_e2e -- --nocapture
 ./run-tests.sh --test feature_box_e2e -- --nocapture feature_snippets_run
 ./run-tests.sh --test box_corpus_regression_e2e -- --nocapture
 ```

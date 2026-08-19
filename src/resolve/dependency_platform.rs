@@ -521,7 +521,6 @@ mod tests {
             sam_eligible: false,
             callable_signature: None,
             companion_object: None,
-            value_companion_fns: Vec::new(),
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,

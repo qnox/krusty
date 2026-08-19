@@ -853,16 +853,12 @@ impl JvmLibraries {
         // name + descriptor, never a `getX` guess, so `@JvmName` and value-class mangling
         // (`getMinutes-UwyO8pc`) are carried verbatim.
         //
-        // A NON-public one is `@InlineOnly` (`Duration.Companion`'s `minutes` accessor is `private`):
-        // there is no legal call site for it, so it must be SPLICED, which is what `MustInline` tells
-        // the backend. Returning the inline kind rather than a yes/no keeps that distinction where the
-        // bytecode fact is read.
-        let declared = |jvm_name: &str, desc: &str| {
+        let bytecode_public = |jvm_name: &str, desc: &str| {
             class
                 .methods
                 .iter()
                 .find(|method| method.name == jvm_name && method.descriptor == desc)
-                .map(|method| InlineKind::from_flags(!method.is_public(), !method.is_public()))
+                .map(|method| method.is_public())
         };
         for function in super::metadata::class_functions(&class) {
             if function.kotlin_name != name || !function.is_public() || function.deprecated_hidden()
@@ -880,9 +876,13 @@ impl JvmLibraries {
             let Some(desc) = function.jvm_desc else {
                 continue;
             };
-            let Some(function_inline) = declared(&function.jvm_name, desc) else {
+            let Some(bytecode_public) = bytecode_public(&function.jvm_name, desc) else {
                 continue;
             };
+            let function_inline = InlineKind::from_flags(
+                function.is_inline(),
+                function.is_inline() && !bytecode_public,
+            );
             let Some((params, physical_ret)) = parse_method_desc(desc) else {
                 continue;
             };
@@ -921,7 +921,7 @@ impl JvmLibraries {
                 context_count: function.context_count(),
                 call_sig: function.member_call_sig(),
                 flags: FnFlags {
-                    inline: InlineKind::None,
+                    inline: function_inline,
                     reified: function.has_reified_type_params(),
                     suspend: function.is_suspend(),
                     operator: function.is_operator(),
@@ -951,9 +951,10 @@ impl JvmLibraries {
             let Some(getter_sig) = property.getter.as_ref() else {
                 continue;
             };
-            let Some(getter_inline) = declared(&getter_sig.name, &getter_sig.desc) else {
+            let Some(getter_public) = bytecode_public(&getter_sig.name, &getter_sig.desc) else {
                 continue;
             };
+            let getter_inline = InlineKind::from_flags(!getter_public, !getter_public);
             let Some((getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
                 continue;
             };
@@ -994,7 +995,8 @@ impl JvmLibraries {
                 }
             };
             let setter = property.setter.as_ref().and_then(|setter_sig| {
-                let setter_inline = declared(&setter_sig.name, &setter_sig.desc)?;
+                let setter_public = bytecode_public(&setter_sig.name, &setter_sig.desc)?;
+                let setter_inline = InlineKind::from_flags(!setter_public, !setter_public);
                 let (params, ret) = parse_method_desc(&setter_sig.desc)?;
                 (params.len() == 2 && ret == Ty::Unit).then(|| {
                     accessor(
@@ -1479,57 +1481,6 @@ impl JvmLibraries {
 
     fn sam_eligible_for_class(ci: &crate::jvm::classreader::ClassInfo) -> bool {
         ci.is_interface() && (!ci.meta.is_present() || ci.meta.is_fun_interface)
-    }
-
-    fn value_companion_fns_for_class(
-        &self,
-        ci: &crate::jvm::classreader::ClassInfo,
-        inline: bool,
-    ) -> Vec<crate::libraries::CompanionFn> {
-        if !inline {
-            return Vec::new();
-        }
-        let internal = ci.this_class();
-        let Some(companion_field) = metadata::class_companion_name(ci) else {
-            return Vec::new();
-        };
-        let companion_internal = format!("{internal}${companion_field}");
-        let Some(comp_ci) = self.cp.find(&companion_internal) else {
-            return Vec::new();
-        };
-        metadata::class_functions(&comp_ci)
-            .iter()
-            .filter(|m| m.is_public() && !m.deprecated_hidden())
-            .filter_map(|m| {
-                let descriptor = m.jvm_desc?;
-                let (physical_params, _) = parse_method_desc(descriptor)?;
-                let generic = m.generic_sig.clone();
-                let params = generic.as_ref().map_or_else(
-                    || physical_params.clone(),
-                    |signature| signature.params.clone(),
-                );
-                let ret = generic
-                    .as_ref()
-                    .map_or_else(|| Ty::obj(&internal), |signature| signature.ret);
-                let mut callable = LibraryCallable::library(
-                    type_name(&companion_internal),
-                    m.jvm_name.clone(),
-                    physical_params,
-                    ret,
-                    Ty::obj("kotlin/Any"),
-                    descriptor,
-                );
-                callable.params = params;
-                callable.inline = InlineKind::MustInline;
-                callable.generic_sig = generic.map(Box::new);
-                Some(crate::libraries::CompanionFn {
-                    class_internal: type_name(&internal),
-                    companion_internal: type_name(&companion_internal),
-                    companion_field: companion_field.clone(),
-                    callable,
-                })
-            })
-            .collect()
     }
 
     /// The one-time (per memo miss) composition of a classpath type's shape. A Kotlin MAPPED type
@@ -2624,7 +2575,6 @@ impl JvmLibraries {
                 sam_eligible: !is_mapped_builtin && Self::sam_eligible_for_class(&ci),
                 callable_signature,
                 companion_object,
-                value_companion_fns: self.value_companion_fns_for_class(&ci, inline.is_some()),
                 value_underlying,
                 value_underlying_property: inline
                     .as_ref()
@@ -3403,7 +3353,6 @@ fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
         sam_eligible: false,
         callable_signature: None,
         companion_object: None,
-        value_companion_fns: Vec::new(),
         value_underlying: None,
         value_underlying_property: None,
         alias_target: None,
@@ -3468,7 +3417,6 @@ fn builtin_library_type(
         sam_eligible: false,
         callable_signature,
         companion_object: None,
-        value_companion_fns: Vec::new(),
         value_underlying: None,
         value_underlying_property: None,
         alias_target: None,
