@@ -1475,55 +1475,8 @@ impl JvmLibraries {
         bindings
     }
 
-    fn sam_method_for_class(&self, internal: &str) -> Option<LibraryMember> {
-        let ci = self.cp.find(internal)?;
-        crate::trace_compiler!(
-            "resolve",
-            "classpath SAM owner={internal} interface={} metadata={} fun_interface={} methods={:?}",
-            ci.is_interface(),
-            ci.meta.is_present(),
-            ci.meta.is_fun_interface,
-            ci.methods
-                .iter()
-                .map(|method| (&method.name, method.access))
-                .collect::<Vec<_>>(),
-        );
-        if !ci.is_interface() {
-            return None;
-        }
-        // Java SAM conversion is structural. Kotlin deliberately requires `fun interface`, whose
-        // declaration bit is carried by metadata; an ordinary Kotlin interface with one abstract
-        // method is not a SAM target.
-        if ci.meta.is_present() && !ci.meta.is_fun_interface {
-            return None;
-        }
-        // The single public abstract instance method that isn't an `Object` method (`equals`/`hashCode`
-        // /`toString`, which a functional interface may redeclare). `default`/`static` methods aren't
-        // abstract (0x0400).
-        let mut sam = None;
-        for m in &ci.methods {
-            if m.access & 0x0400 == 0 || m.is_static() || !m.is_public() {
-                continue;
-            }
-            if matches!(m.name.as_str(), "equals" | "hashCode" | "toString") {
-                continue;
-            }
-            if sam.is_some() {
-                return None;
-            }
-            let Some((params, ret)) = parse_method_desc(&m.descriptor) else {
-                continue;
-            };
-            let mut member = LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
-            member.signature = m.signature.clone();
-            member.generic_sig = m
-                .signature
-                .as_deref()
-                .and_then(parse_method_gsig)
-                .map(|signature| self.semanticize_jvm_generic_sig(signature));
-            sam = Some(member);
-        }
-        sam
+    fn sam_eligible_for_class(ci: &crate::jvm::classreader::ClassInfo) -> bool {
+        ci.is_interface() && (!ci.meta.is_present() || ci.meta.is_fun_interface)
     }
 
     fn value_companion_fns_for_class(
@@ -2657,7 +2610,7 @@ impl JvmLibraries {
                 members,
                 companion,
                 constants: self.constants_for_class(internal_name, &ci),
-                sam_method: self.sam_method_for_class(&ci.this_class()),
+                sam_eligible: !is_mapped_builtin && Self::sam_eligible_for_class(&ci),
                 callable_signature,
                 companion_object,
                 value_companion_fns: self.value_companion_fns_for_class(&ci, inline.is_some()),
@@ -3436,7 +3389,7 @@ fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
         members,
         companion: Vec::new(),
         constants: Default::default(),
-        sam_method: None,
+        sam_eligible: false,
         callable_signature: None,
         companion_object: None,
         value_companion_fns: Vec::new(),
@@ -3501,7 +3454,7 @@ fn builtin_library_type(
         members,
         companion: Vec::new(),
         constants: Default::default(),
-        sam_method: None,
+        sam_eligible: false,
         callable_signature,
         companion_object: None,
         value_companion_fns: Vec::new(),
