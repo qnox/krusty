@@ -8081,6 +8081,15 @@ fn emit_annotation_impl_class(
             debug_slot += slot_words(*jt);
         }
         cw.set_method_debug("<init>", &desc, None, &locals);
+        // A reference member is non-null (the JVM annotation format has no null), so kotlinc stamps
+        // the synthesized `@NotNull` on each such parameter — the same annotation any non-null
+        // parameter gets, and what a Java caller reads to know the contract.
+        let notnull = "Lorg/jetbrains/annotations/NotNull;";
+        let param_nullability: Vec<Option<&str>> = members
+            .iter()
+            .map(|(_, jt)| jt.is_reference().then_some(notnull))
+            .collect();
+        cw.set_method_nullability("<init>", &desc, None, &param_nullability);
         // A default on any annotation member (`annotation class C(val i: Int = 1)`) → the same synthetic
         // `<init>(members…, int mask, DefaultConstructorMarker)` overload an ordinary class gets. The impl
         // class is what `C()` actually constructs, so without it a call omitting a default targets a
@@ -8244,6 +8253,14 @@ fn emit_annotation_equals(
             ("this".to_string(), format!("L{fq};"), 0),
             ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
         ],
+    );
+    // `equals(Object?)` accepts null and answers false, so its parameter is `@Nullable` — kotlinc
+    // stamps it, and a Java caller reads the contract from it.
+    cw.set_method_nullability(
+        "equals",
+        "(Ljava/lang/Object;)Z",
+        None,
+        &[Some("Lorg/jetbrains/annotations/Nullable;")],
     );
 }
 
@@ -8514,6 +8531,14 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
         "()Ljava/lang/String;",
         None,
         &[("this".to_string(), format!("L{fq};"), 0)],
+    );
+    // `toString()` returns a non-null String, and kotlinc stamps the synthesized `@NotNull` on it.
+    // The member ACCESSORS carry none, even the reference-typed ones — measured, not assumed.
+    cw.set_method_nullability(
+        "toString",
+        "()Ljava/lang/String;",
+        Some("Lorg/jetbrains/annotations/NotNull;"),
+        &[],
     );
 }
 
