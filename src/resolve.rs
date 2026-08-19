@@ -35962,59 +35962,8 @@ impl<'a> Checker<'a> {
                 // walk could not type. Ask for that declaration rather than taking the marker as
                 // the call's type, which would publish it into whatever this call initializes.
                 if called == Ty::Pending {
-                    if let Expr::Name(name) = self.file.expr(callee) {
-                        let name = name.clone();
-                        if let Some(ty) = self.demand_name.and_then(|demand| demand(&name)) {
-                            return self.set(e, ty);
-                        }
-                        // An unqualified call inside a class body can name a MEMBER — of the
-                        // dispatch receiver, or of an enclosing extension receiver — and the
-                        // top-level index does not carry those. Ask the receiver tower the same
-                        // way name resolution walked it: innermost rung first.
-                        // (see also the qualified arm below)
-                        if let Some(demand) = self.demand_member {
-                            let tower: Vec<Ty> = self
-                                .this_labels
-                                .iter()
-                                .rev()
-                                .map(|(_, ty, _)| *ty)
-                                .collect();
-                            // A rung that answers `Error` or the marker has NOT answered: taking
-                            // that as the result would both type the call wrongly and stop the
-                            // walk before an outer rung — which may hold the real declaration — is
-                            // ever asked.
-                            for receiver in tower {
-                                let answered = demand(receiver, &name).filter(|answered| {
-                                    *answered != Ty::Error && !answered.mentions_pending()
-                                });
-                                if let Some(ty) = answered {
-                                    return self.set(e, ty);
-                                }
-                            }
-                        }
-                    }
-                    // A QUALIFIED call — `s.drop2()`, and the extension case in particular. The
-                    // receiver names the owner and the callee spells the declaration, which is
-                    // exactly what the member demand takes. Without this the call's type stays the
-                    // marker, every expression built on it declines, and the function that owns it
-                    // settles to `Unit`.
-                    if let Expr::Member { receiver, name } = self.file.expr(callee) {
-                        let (receiver, name) = (*receiver, name.clone());
-                        let receiver_ty = self.expr_types.get(receiver.0 as usize).copied();
-                        if let Some(owner) = receiver_ty
-                            .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
-                            .map(Ty::non_null)
-                        {
-                            let answered = self
-                                .demand_member
-                                .and_then(|demand| demand(owner, &name))
-                                .filter(|answered| {
-                                    *answered != Ty::Error && !answered.mentions_pending()
-                                });
-                            if let Some(ty) = answered {
-                                return self.set(e, ty);
-                            }
-                        }
+                    if let Some(ty) = self.demand_call_target(scope, callee) {
+                        return self.set(e, ty);
                     }
                 }
                 called
@@ -37070,6 +37019,86 @@ impl<'a> Checker<'a> {
             }
         };
         self.set(e, t)
+    }
+
+    /// Ask the engine for the declaration a CALL names, when the call's own type came back
+    /// undetermined.
+    ///
+    /// A call reaches its callable four ways, and each names the declaration differently:
+    ///
+    /// * a bare spelling that is a module declaration — the name index answers it;
+    /// * a bare spelling that is a member of an enclosing `this` — the receiver TOWER answers it,
+    ///   innermost rung first, which is the order name resolution itself walked;
+    /// * a qualified spelling — the receiver names the owner and the callee spells the member;
+    /// * the `invoke` convention — `method(i)` and `method.invoke(i)` are the same declaration
+    ///   reached under different syntax, and neither spells `invoke` where the first two look.
+    ///
+    /// A rung or a receiver that answers `Error` or the marker has NOT answered: taking that would
+    /// type the call wrongly AND stop the search before a later source could answer.
+    fn demand_call_target(&mut self, scope: &CheckerScope<'_>, callee: ExprId) -> Option<Ty> {
+        let determined = |answered: &Ty| *answered != Ty::Error && !answered.mentions_pending();
+        let demand_member = self.demand_member?;
+        let on_receiver = |receiver: Ty, name: &str| {
+            (receiver != Ty::Error && !receiver.mentions_pending())
+                .then(|| demand_member(receiver.non_null(), name))
+                .flatten()
+                .filter(determined)
+        };
+        // A callee spelled as a bare name is not typed as a VALUE by the call path, so its
+        // recorded expression type is absent; the scope binding is where its type lives.
+        let callee_ty = || match self.file.expr(callee) {
+            Expr::Name(name) => self
+                .lookup(scope, name)
+                .map(|local| local.ty)
+                .or_else(|| self.expr_types.get(callee.0 as usize).copied()),
+            _ => self.expr_types.get(callee.0 as usize).copied(),
+        };
+        match self.file.expr(callee) {
+            Expr::Name(name) => {
+                let name = name.clone();
+                if let Some(ty) = self
+                    .demand_name
+                    .and_then(|demand| demand(&name))
+                    .filter(determined)
+                {
+                    return Some(ty);
+                }
+                let tower: Vec<Ty> = self
+                    .this_labels
+                    .iter()
+                    .rev()
+                    .map(|(_, ty, _)| *ty)
+                    .collect();
+                if let Some(ty) = tower
+                    .into_iter()
+                    .find_map(|receiver| on_receiver(receiver, &name))
+                {
+                    return Some(ty);
+                }
+                // `method(i)` where `method` is a VALUE with an `invoke` operator.
+                on_receiver(callee_ty()?, "invoke")
+            }
+            Expr::Member { receiver, name } => {
+                let (receiver, name) = (*receiver, name.clone());
+                let receiver_ty = self.expr_types.get(receiver.0 as usize).copied()?;
+                if let Some(ty) = on_receiver(receiver_ty, &name) {
+                    return Some(ty);
+                }
+                // A MEMBER EXTENSION is declared on an enclosing class and called on another
+                // receiver entirely (`fun Outer.foo()` inside `Inner`), so the receiver alone does
+                // not name its owner — the tower does.
+                let tower: Vec<Ty> = self
+                    .this_labels
+                    .iter()
+                    .rev()
+                    .map(|(_, ty, _)| *ty)
+                    .collect();
+                tower
+                    .into_iter()
+                    .find_map(|dispatch| on_receiver(dispatch, &name))
+            }
+            _ => on_receiver(callee_ty()?, "invoke"),
+        }
     }
 
     fn expr_inner_safe_call(

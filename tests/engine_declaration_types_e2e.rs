@@ -232,3 +232,39 @@ fn an_implicit_receiver_read_demands_an_undetermined_member() {
         "engine-implicit-receiver-demand",
     );
 }
+
+/// A call through the `invoke` CONVENTION, in both spellings.
+///
+/// `method(i)` and `method.invoke(i)` reach the same declaration, and neither spells `invoke` where
+/// a bare-name or a qualified demand looks: the first names a value, the second a member of a class
+/// that has no member of that name written at the call. Both ask for `invoke` on the callee's type.
+#[test]
+fn an_invoke_convention_call_demands_the_operator_it_reaches() {
+    common::expect_box_ok_with_stdlib(
+        "class Doubler { operator fun invoke(n: Int) = n * 2 }\n\
+         fun direct(d: Doubler, n: Int) = d(n)\n\
+         fun spelled(d: Doubler, n: Int) = d.invoke(n)\n\
+         fun box(): String =\n\
+         \x20 if (direct(Doubler(), 3) == 6 && spelled(Doubler(), 4) == 8) \"OK\" else \"FAIL\"\n",
+        "engine-invoke-convention-demand",
+    );
+}
+
+/// A MEMBER EXTENSION called on a receiver that is not the class declaring it.
+///
+/// `fun Outer.tag()` declared inside `Inner` is reached as `Outer(…).tag()`, so the call's receiver
+/// names `Outer` — which declares nothing of that name. The declaring class is on the `this` tower,
+/// so a qualified call falls back to it rather than giving up.
+#[test]
+fn a_member_extension_is_demanded_through_the_declaring_class() {
+    common::expect_box_ok_with_stdlib(
+        "class Outer(val value: String) {\n\
+         \x20 inner class Inner {\n\
+         \x20 \x20 fun Outer.tag() = value\n\
+         \x20 }\n\
+         }\n\
+         fun Outer.Inner.read() = Outer(\"OK\").tag()\n\
+         fun box(): String = Outer(\"FAIL\").Inner().read()\n",
+        "engine-member-extension-through-declarer",
+    );
+}
