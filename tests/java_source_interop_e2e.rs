@@ -1,8 +1,5 @@
-//! Java-source interop: a box test whose `// FILE:` blocks include `.java` sources (the corpus'
-//! `codegen/box` Java-interop shape). The Java files are compiled by the persistent JavaRunner's
-//! in-process javac (`common::javac_compile` — no per-test `javac` spawn), their output directory
-//! joins krusty's compile classpath (loose-`.class` dir entries are already supported), and the
-//! resulting classes run together with krusty's in one BoxRunner classloader.
+//! Java-source interop tests compile Java fixtures through the shared harness, add those classes to
+//! krusty's classpath, and run the Java and Kotlin outputs together.
 
 use super::common;
 
@@ -118,6 +115,63 @@ fun box(): String {
     assert_eq!(
         nullable_diagnostics,
         ["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'p.Box<String>?'."]
+    );
+}
+
+#[test]
+fn package_private_java_members_are_accessible_within_the_same_package() {
+    run_mixed(
+        &[(
+            "p/Api.java",
+            "package p; public final class Api {\n\
+                 String field = \"F\";\n\
+                 static String staticField = \"S\";\n\
+                 Api() {}\n\
+                 String instanceMethod() { return \"I\"; }\n\
+                 static String staticMethod() { return \"M\"; }\n\
+             }",
+        )],
+        "package p\n\
+         fun box(): String {\n\
+             val api = Api()\n\
+             api.field = \"A\"\n\
+             Api.staticField = \"B\"\n\
+             val result = api.field + Api.staticField + api.instanceMethod() + Api.staticMethod()\n\
+             return if (result == \"ABIM\") \"OK\" else result\n\
+         }\n",
+    );
+}
+
+#[test]
+fn package_private_java_field_does_not_hide_public_method_property() {
+    let result = common::compile_and_run_with_stdlib(
+        "fun box(): String {\n\
+             val values = java.util.HashMap<String, String>()\n\
+             values[\"key\"] = \"value\"\n\
+             return if (values.size == 1) \"OK\" else values.size.toString()\n\
+         }\n",
+        "Main",
+    )
+    .expect("HashMap.size must select the public method property");
+    assert_eq!(result, "OK");
+}
+
+#[test]
+fn package_private_java_static_rejected_cross_package() {
+    let diagnostics = mixed_diagnostics(
+        &[(
+            "p/Helper.java",
+            "package p; final class Helper { static void adjust() { } }",
+        )],
+        "package q\nfun bad() { p.Helper.adjust() }\n",
+    )
+    .expect("javac");
+    assert_eq!(
+        diagnostics,
+        [
+            "cannot access 'class Helper : Any': it is package-private in file.",
+            "cannot access 'static fun adjust(): Unit': it is package-private in 'p.Helper'."
+        ]
     );
 }
 
@@ -386,17 +440,9 @@ fun call(value: String?) {
         return;
     };
 
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("PlatformApi.required")),
-        "{diagnostics:?}"
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .all(|diagnostic| !diagnostic.contains("PlatformApi.optional")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        ["unresolved Java static 'PlatformApi.required' for given argument types"]
     );
 }
 
@@ -556,11 +602,12 @@ fn cross_package_java_package_classifier_constructor_is_rejected() {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("PackageType")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        [
+            "cannot access 'class PackageType : Any': it is package-private in file.",
+            "cannot access 'class PackageType : Any': it is package-private in file.",
+        ]
     );
 }
 
@@ -662,11 +709,9 @@ fn inherited_classifier_does_not_expose_its_protected_member() {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("secret")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        ["cannot access 'fun secret(): String!': it is protected in 'fixtures.Parent.Category'."]
     );
 }
 
@@ -695,12 +740,7 @@ fn inherited_classifier_does_not_expose_its_protected_constructor() {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("Category")),
-        "{diagnostics:?}"
-    );
+    assert_eq!(diagnostics, ["unresolved reference 'Category'."]);
 }
 
 #[test]
@@ -774,12 +814,7 @@ fn peer_inherited_nested_ambiguity_does_not_fall_back_to_source_type() {
         return;
     };
 
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("Category")),
-        "peer inherited classifiers must remain ambiguous: {diagnostics:?}"
-    );
+    assert_eq!(diagnostics, ["unresolved reference 'Category'."]);
 }
 
 #[test]
@@ -858,11 +893,9 @@ fn protected_java_member_is_not_visible_through_base_value() {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("value")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        ["cannot access 'fun value(): String!': it is protected in 'fixtures.Parent'."]
     );
 }
 
@@ -880,11 +913,9 @@ fn dependency_internal_member_is_not_visible() {
     ) else {
         return;
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("hidden")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        ["cannot access 'hidden': it is internal in 'fixtures/PublicApi'"]
     );
 }
 

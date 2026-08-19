@@ -1822,6 +1822,8 @@ pub enum Visibility {
     Internal,
     Protected,
     Private,
+    /// A Java class-file declaration with no access modifier.
+    PackagePrivate,
 }
 
 /// Kotlin annotation retention after frontend resolution. `Default` is runtime retention without

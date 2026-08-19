@@ -790,6 +790,8 @@ impl JvmLibraries {
                     descriptor: Some(descriptor.clone()),
                     ty: Ty::obj_name(candidate),
                     constant: None,
+                    visibility: Visibility::Public,
+                    is_final: true,
                 };
                 let classifier = self.classifier_record(candidate)?;
                 if let Some((outer, simple)) = name.rsplit_once('$') {
@@ -1719,15 +1721,8 @@ impl JvmLibraries {
                 {
                     continue;
                 }
-                // Public members are callable from anywhere; a `protected` member is surfaced too so a
-                // subclass can reach it through the supertype walk (a compiling program only reaches it
-                // from a legal subclass, which kotlinc already checked). Private/package members stay
-                // dropped: no legal call site.
-                if declaration.is_none()
-                    && constructor_declaration.is_none()
-                    && !m.is_public()
-                    && !m.is_protected()
-                {
+                // Keep every Java declaration that can be accessed outside its declaring class.
+                if declaration.is_none() && constructor_declaration.is_none() && m.is_private() {
                     continue;
                 }
                 let Some((mut params, mut ret)) = parse_method_desc(&m.descriptor) else {
@@ -1952,8 +1947,10 @@ impl JvmLibraries {
                 if declaration.is_none() && constructor_declaration.is_none() {
                     member.visibility = if m.is_public() {
                         Visibility::Public
-                    } else {
+                    } else if m.is_protected() {
                         Visibility::Protected
+                    } else {
+                        Visibility::PackagePrivate
                     };
                     member.generic_sig = m
                         .signature
@@ -2560,10 +2557,13 @@ impl JvmLibraries {
                             Visibility::Public
                         } else if field.access & 0x0004 != 0 {
                             Visibility::Protected
-                        } else {
+                        } else if field.access & 0x0002 != 0 {
                             Visibility::Private
+                        } else {
+                            Visibility::PackagePrivate
                         },
                         is_static: field.access & ACC_STATIC != 0,
+                        is_final: field.access & 0x0010 != 0,
                     }
                 })
                 .collect();
@@ -5341,11 +5341,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             let Some(ci) = self.cp.find_name(cur) else {
                 continue;
             };
-            if let Some(f) = ci
-                .fields
-                .iter()
-                .find(|f| f.name == name && f.access & 0x0008 != 0 && f.access & 0x0001 != 0)
-            {
+            if let Some(f) = ci.fields.iter().find(|f| {
+                f.name == name
+                    && f.access & 0x0008 != 0
+                    && (f.access & 0x0001 != 0 || f.access & 0x0007 == 0)
+            }) {
                 // The Kotlin METADATA is the authority for a declaration's type; the descriptor is
                 // an emit handle. `UInt.Companion.MIN_VALUE` is stored in an `int` field, so reading
                 // the descriptor typed it `Int` — and an inferred `val b = UInt.MIN_VALUE` published
@@ -5364,6 +5364,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                             .map(|ty| self.semanticize_jvm_type(ty))
                     })
                     .unwrap_or_else(|| field_desc_to_ty(&f.descriptor));
+                let ty = if ci.meta.is_present() {
+                    ty
+                } else {
+                    java_type_nullability(ty, f.nullability)
+                };
                 let constant = f.const_value.as_ref().map(|value| LibraryConst {
                     ty,
                     value: Self::library_const(value),
@@ -5374,6 +5379,12 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     descriptor: Some(f.descriptor.clone()),
                     ty,
                     constant,
+                    visibility: if f.access & 0x0001 != 0 {
+                        Visibility::Public
+                    } else {
+                        Visibility::PackagePrivate
+                    },
+                    is_final: f.access & 0x0010 != 0,
                 });
             }
             if let Some(s) = ci.super_class {

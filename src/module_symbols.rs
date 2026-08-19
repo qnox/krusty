@@ -1092,6 +1092,8 @@ impl SymbolSource for ModuleSymbols<'_> {
                     descriptor: Some(format!("L{};", owner.render())),
                     ty: Ty::obj_name(owner),
                     constant: None,
+                    visibility: crate::types::Visibility::Public,
+                    is_final: true,
                 };
                 let imported = classifier
                     .declared_callables
