@@ -364,3 +364,29 @@ fn a_generic_member_extension_returning_an_anonymous_object() {
         "engine-generic-member-extension-anon",
     );
 }
+
+/// A CHAIN of anonymous objects, each member returning the next.
+///
+/// An anonymous object's member was the one declaration kept on the walk's answer, on the reasoning
+/// that nothing could look it up. It can: its class is a source declaration like any other. And the
+/// walk cannot answer it at all when the body constructs another anonymous object, because the
+/// registry naming those types is still being built while the walk runs — so the member typed as an
+/// error, and every member reached through it was unresolved.
+#[test]
+fn a_chain_of_anonymous_object_members() {
+    common::expect_box_ok_with_stdlib(
+        "object Chain {\n\
+         \x20 private val first = object {\n\
+         \x20 \x20 fun second() = object {\n\
+         \x20 \x20 \x20 fun third() = object {\n\
+         \x20 \x20 \x20 \x20 fun value() = \"OK\"\n\
+         \x20 \x20 \x20 }\n\
+         \x20 \x20 }\n\
+         \x20 }\n\
+         \x20 private val second = first.second()\n\
+         \x20 val value = second.third().value()\n\
+         }\n\
+         fun box(): String = Chain.value\n",
+        "engine-anonymous-object-chain",
+    );
+}

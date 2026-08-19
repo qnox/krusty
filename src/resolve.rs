@@ -7789,17 +7789,15 @@ fn collect_signatures_with_cp_impl(
                                     // erasure reads exactly like a real type downstream. Record the
                                     // marker and let the engine answer.
                                     //
-                                    // An ANONYMOUS object is the exception, and not by preference:
-                                    // it has no source declaration in the class table, so nothing
-                                    // can look it up to resolve, and a marker left on it would
-                                    // settle to `Unit`. There the walk's answer is the only one
-                                    // available.
-                                    if file.is_anonymous_object_class(d) {
-                                        if t != Ty::Error {
-                                            return t;
-                                        }
-                                        return Ty::Unit;
-                                    }
+                                    // An ANONYMOUS object's member is no exception. Its class is a
+                                    // source declaration like any other, so the engine can be asked
+                                    // for it — and the walk cannot answer it at all when the body
+                                    // constructs another anonymous object, because the registry
+                                    // that names those types is still being built here. Keeping the
+                                    // walk's answer for them left `fun bar() = object { … }`
+                                    // typed as an error and every member reached through it
+                                    // unresolved.
+                                    let _ = t;
                                     return Ty::Pending;
                                 }
                                 Ty::Unit
