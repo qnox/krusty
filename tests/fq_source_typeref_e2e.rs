@@ -115,12 +115,99 @@ fn fq_source_unresolved_path_still_errors() {
         &[],
         None,
     );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.contains("unresolved reference 'pkg1.Nope'")),
-        "expected an unresolved-reference diagnostic, got: {diagnostics:?}"
+    assert_eq!(diagnostics, vec!["unresolved reference 'Nope'."]);
+}
+
+#[test]
+fn fq_unresolved_reports_first_failing_segment() {
+    let diagnostics = common::front_end_diagnostics_files(
+        &[
+            DECLS,
+            "package pkg2\n\
+             import pkg1.Outer\n\
+             fun a(x: deep.pkg.Missing): Int = 0\n\
+             fun b(x: kotlin.Missing?): Int = 0\n\
+             fun c(x: Outer.Nope): Int = 0\n",
+        ],
+        &[],
+        None,
     );
+    assert_eq!(
+        diagnostics,
+        vec![
+            "unresolved reference 'deep'.",
+            "unresolved reference 'Missing'.",
+            "unresolved reference 'Nope'.",
+        ]
+    );
+}
+
+#[test]
+fn fq_unresolved_local_annotation_reports_first_failing_segment() {
+    let diagnostics = common::front_end_diagnostics(
+        "fun f() {\n    val x: deep.pkg.Missing? = null\n}\n",
+        &[],
+        None,
+    );
+    assert_eq!(diagnostics, vec!["unresolved reference 'deep'."]);
+}
+
+#[test]
+fn fq_unresolved_segment_respects_lexical_scope() {
+    let diagnostics = common::front_end_diagnostics(
+        "class Host {\n\
+             class Outer\n\
+             fun inside(x: Outer.Nope): Int = 0\n\
+         }\n\
+         fun outside(x: Outer.Nope): Int = 0\n",
+        &[],
+        None,
+    );
+    assert_eq!(
+        diagnostics,
+        vec![
+            "unresolved reference 'Nope'.",
+            "unresolved reference 'Outer'.",
+        ]
+    );
+}
+
+#[test]
+fn fq_unresolved_expression_type_respects_lexical_scope() {
+    let diagnostics = common::front_end_diagnostics(
+        "class Host {\n\
+             class Outer\n\
+             fun inside(value: Any): Boolean = value is Outer.Nope\n\
+         }\n\
+         fun outside(value: Any): Boolean = value is Outer.Nope\n",
+        &[],
+        None,
+    );
+    assert_eq!(
+        diagnostics,
+        vec![
+            "unresolved reference 'Nope'.",
+            "unresolved reference 'Outer'.",
+        ]
+    );
+}
+
+#[test]
+fn ambiguous_import_root_is_not_reinterpreted_as_a_package() {
+    let diagnostics = common::front_end_diagnostics_files(
+        &[
+            "package first\nclass Root\n",
+            "package second\nclass Root\n",
+            "package Root\nclass Child\n",
+            "package use\n\
+             import first.*\n\
+             import second.*\n\
+             fun f(value: Root.Child): Int = 0\n",
+        ],
+        &[],
+        None,
+    );
+    assert_eq!(diagnostics, vec!["unresolved reference 'Root'."]);
 }
 
 /// A class named `Cls` exists in BOTH `pkg1` (member `n`) and `pkg3` (member `other`):
