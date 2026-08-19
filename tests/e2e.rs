@@ -350,6 +350,8 @@ mod compound_member_assign_lhs_caching_e2e;
 mod computed_prop_e2e;
 #[path = "computed_prop_generic_return_e2e.rs"]
 mod computed_prop_generic_return_e2e;
+#[path = "conditional_branch_inference_e2e.rs"]
+mod conditional_branch_inference_e2e;
 #[path = "consistent_copy_visibility_e2e.rs"]
 mod consistent_copy_visibility_e2e;
 #[path = "const_constantvalue_e2e.rs"]

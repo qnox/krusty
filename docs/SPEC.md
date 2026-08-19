@@ -1988,6 +1988,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Return-only type parameters on `inline` functions use the expected type.** The inferred binding
   must satisfy its declared bound and is passed to the inline expander for reified operations. For a
   nullable return such as `T?`, inference removes the return nullability before binding `T`.
+- **Conditional branches contribute result-type constraints to generic calls.** For `if`, `when`,
+  and elvis expressions, a selected call with unbound result formals is rechecked against a sibling
+  result type that can bind them. Branch order does not affect the binding. If no sibling can bind
+  the formals, the cannot-infer diagnostic is reported at the call. Test:
+  `tests/conditional_branch_inference_e2e.rs`.
 - **A tail-call-forwarded suspend fn boxes its EARLY returns.** The tail-forward shape (no state machine,
   `$completion` threaded to the callee, callee's `Object` result `areturn`ed verbatim) also admits bodies
   with early exits (`if (n == 0) return true; return odd(n - 1)`); the CPS method returns `Object`, so the

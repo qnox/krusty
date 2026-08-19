@@ -525,6 +525,159 @@ fn result_failure_unbound_type_parameter_matches_kotlinc_exactly() {
 }
 
 #[test]
+fn conditional_inference_diagnostics_match_kotlinc_exactly() {
+    let result = common::compiler_diagnostics(
+        &[
+            (
+                "ElvisLeftBound.kt",
+                "fun <T> id(value: T): T = value\n\
+                 fun <T> nullable(): T? = null\n\
+                 fun elvisCase() {\n\
+                 val result: Int = id(nullable() ?: \"a\")\n\
+                 }\n",
+            ),
+            (
+                "IfBound.kt",
+                "fun boundCase(n: Result<Int>?) {\n\
+                 val result: String = if (true) Result.failure(RuntimeException(\"a\")) else n\n\
+                 }\n",
+            ),
+            (
+                "IfInvalidArgument.kt",
+                "fun <T> invalidFrom(value: String): T = throw RuntimeException()\n\
+                 fun ifInvalidArgument() {\n\
+                 val result = if (true) invalidFrom(1) else 0\n\
+                 }\n",
+            ),
+            (
+                "IfNarrowed.kt",
+                "fun <T> from(value: String): T = throw RuntimeException()\n\
+                 fun ifNarrowed(text: String?) {\n\
+                 val result: String = if (text != null) from(text) else 0\n\
+                 }\n",
+            ),
+            (
+                "IfUnbound.kt",
+                "fun ifCase() {\n\
+                 val result = if (true) Result.failure(RuntimeException(\"a\")) else Result.failure(RuntimeException(\"b\"))\n\
+                 }\n",
+            ),
+            (
+                "WhenInvalidArgument.kt",
+                "fun <T> invalidFromWhen(value: String): T = throw RuntimeException()\n\
+                 fun whenInvalidArgument() {\n\
+                 val result = when {\n\
+                 true -> invalidFromWhen(1)\n\
+                 else -> 0\n\
+                 }\n\
+                 }\n",
+            ),
+            (
+                "WhenNarrowed.kt",
+                "fun <T> fromWhen(value: String): T = throw RuntimeException()\n\
+                 fun whenNarrowed(text: String?) {\n\
+                 val result: String = when {\n\
+                 text == null -> 0\n\
+                 else -> fromWhen(text)\n\
+                 }\n\
+                 }\n",
+            ),
+            (
+                "WhenUnbound.kt",
+                "fun whenCase() {\n\
+                 val result = when {\n\
+                 true -> Result.failure(RuntimeException(\"a\"))\n\
+                 false -> Result.failure(RuntimeException(\"b\"))\n\
+                 else -> Result.failure(RuntimeException(\"c\"))\n\
+                 }\n\
+                 }\n",
+            ),
+        ],
+        &[common::stdlib_jar()],
+    );
+    let mut krusty = errors(&result.krusty_stdout);
+    krusty.extend(errors(&result.krusty_stderr));
+    let reference = errors(&result.reference_stderr);
+    let cannot_infer =
+        "cannot infer type for type parameter 'T'. Specify it explicitly.".to_string();
+    let expected = vec![
+        ObservedError {
+            file: "ElvisLeftBound.kt".to_string(),
+            line: 4,
+            column: 17,
+            message: "initializer type mismatch: expected 'Int', actual 'String'.".to_string(),
+        },
+        ObservedError {
+            file: "IfBound.kt".to_string(),
+            line: 2,
+            column: 20,
+            message: "initializer type mismatch: expected 'String', actual 'Result<Int>?'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "IfInvalidArgument.kt".to_string(),
+            line: 3,
+            column: 36,
+            message: "argument type mismatch: actual type is 'Int', but 'String' was expected."
+                .to_string(),
+        },
+        ObservedError {
+            file: "IfNarrowed.kt".to_string(),
+            line: 3,
+            column: 20,
+            message: "initializer type mismatch: expected 'String', actual 'Int'.".to_string(),
+        },
+        ObservedError {
+            file: "IfUnbound.kt".to_string(),
+            line: 2,
+            column: 31,
+            message: cannot_infer.clone(),
+        },
+        ObservedError {
+            file: "IfUnbound.kt".to_string(),
+            line: 2,
+            column: 74,
+            message: cannot_infer.clone(),
+        },
+        ObservedError {
+            file: "WhenInvalidArgument.kt".to_string(),
+            line: 4,
+            column: 25,
+            message: "argument type mismatch: actual type is 'Int', but 'String' was expected."
+                .to_string(),
+        },
+        ObservedError {
+            file: "WhenNarrowed.kt".to_string(),
+            line: 3,
+            column: 20,
+            message: "initializer type mismatch: expected 'String', actual 'Int'.".to_string(),
+        },
+        ObservedError {
+            file: "WhenUnbound.kt".to_string(),
+            line: 3,
+            column: 16,
+            message: cannot_infer.clone(),
+        },
+        ObservedError {
+            file: "WhenUnbound.kt".to_string(),
+            line: 4,
+            column: 17,
+            message: cannot_infer.clone(),
+        },
+        ObservedError {
+            file: "WhenUnbound.kt".to_string(),
+            line: 5,
+            column: 16,
+            message: cannot_infer,
+        },
+    ];
+    assert_eq!(krusty.len(), expected.len());
+    assert_eq!(reference.len(), expected.len());
+    assert_eq!(krusty, expected);
+    assert_eq!(reference, expected);
+}
+
+#[test]
 fn discarded_result_failure_unbound_type_parameter_matches_kotlinc_exactly() {
     let source = "fun box() { Result.failure(RuntimeException(\"x\")) }";
     let result = common::compiler_diagnostics(
