@@ -22704,16 +22704,50 @@ impl<'a> Checker<'a> {
                     .or(declared);
                 match *actual {
                     None => {
-                        if !args.get(argument).is_some_and(|&argument| {
-                            matches!(self.file.expr(argument), Expr::Lambda { .. })
-                        }) {
+                        let Some(&argument_expr) = args.get(argument) else {
                             return true;
+                        };
+                        let Expr::Lambda { params, .. } = self.file.expr(argument_expr) else {
+                            return true;
+                        };
+                        let Some(expected) = expected else {
+                            return false;
+                        };
+                        // kotlinc's arity rule for an unchecked lambda: the DECLARED (post-desugar)
+                        // parameter count must equal the expected shape's value-parameter count —
+                        // `{ (k, v) -> }` is ONE destructured parameter, so it is not pertinent to a
+                        // two-parameter function/SAM shape, while a lambda with no declared
+                        // parameters still fits arity 0/1 (implicit `it`). Context and receiver
+                        // slots are not value parameters a lambda arrow declares.
+                        let expected_arity = match expected.non_null() {
+                            Ty::Fun(signature) => Some(
+                                signature.params.len()
+                                    - signature.context_count.min(signature.params.len())
+                                    - usize::from(signature.has_receiver),
+                            ),
+                            shape => self.semantic_sam_signature(shape).map(|sam| {
+                                sam.params.len()
+                                    - sam.context_count.min(sam.params.len())
+                                    - usize::from(sam.has_receiver)
+                            }),
+                        };
+                        match expected_arity {
+                            Some(arity) => {
+                                if params.is_empty() {
+                                    arity <= 1
+                                } else {
+                                    let named_contexts = self
+                                        .file
+                                        .anon_fun_context_count
+                                        .get(&argument_expr.0)
+                                        .copied()
+                                        .unwrap_or(0)
+                                        as usize;
+                                    params.len() == arity + named_contexts
+                                }
+                            }
+                            None => expected.is_erased_top(),
                         }
-                        expected.is_some_and(|expected| {
-                            expected.non_null().fun_arity().is_some()
-                                || expected.is_erased_top()
-                                || self.semantic_sam_signature(expected).is_some()
-                        })
                     }
                     Some(actual) => {
                         // This predicate only keeps candidates alive while postponed lambdas are
@@ -42569,7 +42603,23 @@ impl<'a> Checker<'a> {
             self.this_extension_receiver = prev_extension_receiver;
             let mut pts = context_types.to_vec();
             pts.extend(extension_receiver);
-            pts.extend_from_slice(value_types);
+            // A lambda that DECLARES parameters keeps its declared (post-desugar) arity as its
+            // type's arity, even when the expected shape carries a different value-parameter
+            // count: the mismatch then surfaces at the call/assignment boundary exactly as
+            // kotlinc reports it, instead of silently adopting the expected arity and passing an
+            // applicability check the candidate must fail. Destructuring desugars to ONE
+            // synthetic parameter, so `{ (k, v) -> }` against a one-parameter expected type
+            // (`Map.Entry`) keeps arity 1 here.
+            if params.is_empty() {
+                pts.extend_from_slice(value_types);
+            } else {
+                pts.extend((named_context_count..params.len()).map(|i| {
+                    bind_types
+                        .get(i)
+                        .copied()
+                        .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                }));
+            }
             let inferred_ret = self.lambda_ret_ty(scope, e, bret, mode.coerce_return_to_unit);
             let ret = match mode.expected_return {
                 Some(expected) => {
