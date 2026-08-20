@@ -639,20 +639,12 @@ pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static 
     builtin_ids().jvm_builtin.get(&internal).map(|(s, _)| *s)
 }
 
-/// One JDK member kotlinc re-admits over the `.kotlin_builtins` scope of a mapped class
-/// (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`): a mapped Kotlin collection's source scope is
-/// its Kotlin declaration, but these Java default methods are part of the Kotlin API surface too.
-/// Entries are keyed by the JVM owner the signature is declared on, matched by physical name and
-/// erased descriptor — the same key kotlinc's table uses.
+/// One `JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES` entry for a mapped collection.
 struct MappedVisibleMethod {
     jvm_owner: &'static str,
     name: &'static str,
     descriptor: &'static str,
-    /// `Some(face)` — a kotlinc `MUTABLE_METHOD_SIGNATURES` entry, visible only on that mutable
-    /// Kotlin face. `None` — visible on the group's read-only face (the first of its
-    /// [`ErasureGroup::kotlin_names`]); the mutable face inherits it through the Kotlin hierarchy,
-    /// mirroring `JvmMappedScope`, which attaches non-mutating signatures to the read-only
-    /// container only.
+    /// Mutable entries attach to that face; other entries attach to the group's read-only face.
     mutable_face: Option<&'static str>,
 }
 
@@ -683,10 +675,8 @@ const fn mutable(
     }
 }
 
-/// kotlinc 2.4's whitelist for the mapped collection interfaces (the KotlinDeclaration erasure
-/// groups). `kotlin/Throwable`, `kotlin/CharSequence` & co. stay JoinedWithJvm and need no entries;
-/// `java/util/Map.remove(Object,Object)` is omitted because Kotlin's `MutableMap` itself declares
-/// `remove(key, value)` — re-admitting the Java signature would publish a duplicate candidate.
+/// Collection-facing entries from `VISIBLE_METHOD_SIGNATURES`, partitioned by mutability.
+/// `Map.remove(Object,Object)` is already declared by `MutableMap` and is not a visible entry.
 const MAPPED_VISIBLE_METHODS: &[MappedVisibleMethod] = &[
     visible(
         "java/util/Iterator",
@@ -818,9 +808,17 @@ const MAPPED_VISIBLE_METHODS: &[MappedVisibleMethod] = &[
 /// Kotlin face `face` (`kotlin/collections/MutableMap`, …) under kotlinc's
 /// `VISIBLE_METHOD_SIGNATURES` whitelist. Consulted only where the Kotlin declaration is otherwise
 /// authoritative; the JVM face (`java/util/Map` itself) keeps its full classfile scope untouched.
-pub fn mapped_scope_keeps_jvm_method(face: TypeName, name: &str, descriptor: &str) -> bool {
+pub fn mapped_scope_keeps_jvm_method(
+    face: TypeName,
+    jvm_owner: TypeName,
+    name: &str,
+    descriptor: &str,
+) -> bool {
     MAPPED_VISIBLE_METHODS.iter().any(|method| {
-        if method.name != name || method.descriptor != descriptor {
+        if !jvm_owner.matches(method.jvm_owner)
+            || method.name != name
+            || method.descriptor != descriptor
+        {
             return false;
         }
         match method.mutable_face {
@@ -873,8 +871,9 @@ mod tests {
     use super::{
         is_kotlin_collection_type_name, jvm_collection_to_kotlin_type_name,
         jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
-        mapped_builtin_has_authoritative_kotlin_scope, to_jvm_internal, to_jvm_type_name,
-        to_kotlin_internal, wrapper_internal, wrapper_to_kotlin_prim_name,
+        mapped_builtin_has_authoritative_kotlin_scope, mapped_scope_keeps_jvm_method,
+        to_jvm_internal, to_jvm_type_name, to_kotlin_internal, wrapper_internal,
+        wrapper_to_kotlin_prim_name, MAPPED_VISIBLE_METHODS,
     };
     use crate::types::{type_name, Ty};
 
@@ -1001,10 +1000,8 @@ mod tests {
 
     #[test]
     fn builtin_scope_provenance_is_part_of_the_erasure_mapping() {
-        // Collections and String take their source API from the Kotlin declaration. The remaining
-        // mapped classes deliberately keep a joined JVM scope until the JVM-visible-method whitelist
-        // is implemented. Pinning both sides here prevents a caller from inferring policy from package
-        // names or growing another per-class exception list.
+        // Collections and String take their source API from the Kotlin declaration. Other mapped
+        // classes retain a joined JVM scope.
         assert!(mapped_builtin_has_authoritative_kotlin_scope(type_name(
             "kotlin/String"
         )));
@@ -1023,5 +1020,46 @@ mod tests {
         assert!(!mapped_builtin_has_authoritative_kotlin_scope(type_name(
             "example/UserType"
         )));
+    }
+
+    #[test]
+    fn mapped_visible_method_table_is_exact_and_owner_qualified() {
+        let keys = MAPPED_VISIBLE_METHODS
+            .iter()
+            .map(|method| (method.jvm_owner, method.name, method.descriptor))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(MAPPED_VISIBLE_METHODS.len(), 22);
+        assert_eq!(keys.len(), MAPPED_VISIBLE_METHODS.len());
+
+        assert!(mapped_scope_keeps_jvm_method(
+            type_name("kotlin/collections/Collection"),
+            type_name("java/util/Collection"),
+            "stream",
+            "()Ljava/util/stream/Stream;",
+        ));
+        assert!(!mapped_scope_keeps_jvm_method(
+            type_name("kotlin/collections/MutableCollection"),
+            type_name("java/util/Collection"),
+            "stream",
+            "()Ljava/util/stream/Stream;",
+        ));
+        assert!(mapped_scope_keeps_jvm_method(
+            type_name("kotlin/collections/MutableList"),
+            type_name("java/util/List"),
+            "addFirst",
+            "(Ljava/lang/Object;)V",
+        ));
+        assert!(!mapped_scope_keeps_jvm_method(
+            type_name("kotlin/collections/List"),
+            type_name("java/util/List"),
+            "addFirst",
+            "(Ljava/lang/Object;)V",
+        ));
+        assert!(!mapped_scope_keeps_jvm_method(
+            type_name("kotlin/collections/MutableList"),
+            type_name("java/util/Collection"),
+            "addFirst",
+            "(Ljava/lang/Object;)V",
+        ));
     }
 }

@@ -2073,6 +2073,7 @@ struct LambdaExpectation {
     context_types: Vec<Ty>,
     value_params: Vec<Ty>,
     receiver: Option<Ty>,
+    sam_conversion: bool,
 }
 
 /// The expected shape of a lambda argument against the selected candidate's `param`: a Kotlin
@@ -2116,6 +2117,7 @@ fn lambda_expectation(
                 context_types: sig.params[..sig.context_count.min(sig.params.len())].to_vec(),
                 value_params: sig.params.get(skip..).unwrap_or_default().to_vec(),
                 receiver,
+                sam_conversion: false,
             })
         }
         param if has_receiver => {
@@ -2149,6 +2151,7 @@ fn lambda_expectation(
                     .unwrap_or_default(),
                 value_params,
                 receiver: Some(receiver),
+                sam_conversion: false,
             })
         }
         param => crate::symbol_resolver::semantic_sam_signature(lib, param).map(|sam| {
@@ -2156,6 +2159,7 @@ fn lambda_expectation(
                 context_types: Vec::new(),
                 value_params: sam.params,
                 receiver: None,
+                sam_conversion: true,
             }
         }),
     }
@@ -18658,11 +18662,6 @@ struct NamedTopLevelCall<'a> {
 struct SelectedCallable {
     info: crate::libraries::FunctionInfo,
     bindings: crate::symbol_resolver::GSigBinds,
-    /// The winning applicability needed a lambda→SAM conversion for at least one argument.
-    /// Overload resolution prefers a conversion-free candidate over a converted one even ACROSS
-    /// the member/extension tower rung (kotlinc binds the inline stdlib `forEach` extension over
-    /// the whitelisted `java/lang/Iterable.forEach(Consumer)` member for a plain lambda).
-    sam_converted: bool,
 }
 
 impl std::ops::Deref for SelectedCallable {
@@ -19174,7 +19173,15 @@ enum MemberSlotCall {
     Resolved(Ty),
     Ambiguous,
     Rejected,
-    NoMatch(Option<Box<MemberMappingFailure>>),
+    ExtensionRung {
+        extension: ExtensionRungSelection,
+        member_mapping_failure: Option<Box<MemberMappingFailure>>,
+    },
+}
+
+struct ExtensionRungSelection {
+    selection: Option<CallableCandidateSelection>,
+    overloads: Vec<crate::libraries::FunctionInfo>,
 }
 
 struct MemberMappingFailure {
@@ -22198,7 +22205,6 @@ impl<'a> Checker<'a> {
             let selected = SelectedCallable {
                 info: candidate,
                 bindings,
-                sam_converted: sam_converted.contains(&index),
             };
             applicable.push((
                 score.rank,
@@ -22251,20 +22257,20 @@ impl<'a> Checker<'a> {
         }
         if applicable
             .iter()
-            .any(|(_, _, _, _, _, candidate, _)| candidate.kind == crate::libraries::FnKind::Member)
-        {
-            // Kotlin's receiver tower considers applicable members before extensions. Keep that
-            // precedence inside the one contextual selection pass; callers must not probe members
-            // and then run a second extension selector.
-            applicable.retain(|(_, _, _, _, _, candidate, _)| {
-                candidate.kind == crate::libraries::FnKind::Member
-            });
-        }
-        if applicable
-            .iter()
             .any(|(_, _, index, ..)| !sam_converted.contains(index))
         {
             applicable.retain(|(_, _, index, ..)| !sam_converted.contains(index));
+        }
+        if applicable
+            .iter()
+            .any(|(_, _, _, _, _, candidate, _)| candidate.kind == crate::libraries::FnKind::Member)
+        {
+            // A conversion-free candidate beats one that needs lambda-to-SAM adaptation. Among
+            // candidates with the same adaptation cost, an applicable member keeps receiver-tower
+            // precedence over extensions.
+            applicable.retain(|(_, _, _, _, _, candidate, _)| {
+                candidate.kind == crate::libraries::FnKind::Member
+            });
         }
         let best = applicable
             .iter()
@@ -22278,7 +22284,10 @@ impl<'a> Checker<'a> {
             })
             .map(|(_, _, _, _, _, candidate, _)| candidate.receiver_rank)
             .min()?;
-        let prefer_concrete = extension_receiver.is_none()
+        let selecting_extension = applicable
+            .iter()
+            .all(|(_, _, _, _, _, candidate, _)| candidate.is_extension());
+        let prefer_concrete = !selecting_extension
             && applicable
                 .iter()
                 .any(|(rank, generic, _, missing_context, _, candidate, _)| {
@@ -22330,7 +22339,7 @@ impl<'a> Checker<'a> {
                     .collect(),
             ));
         }
-        if extension_receiver.is_some() {
+        if selecting_extension {
             let concrete_shapes = maximal
                 .iter()
                 .filter(|(_, generic, ..)| !generic)
@@ -22349,7 +22358,9 @@ impl<'a> Checker<'a> {
             let ranked = maximal
                 .iter()
                 .map(|(_, _, _, _, _, candidate, params)| {
-                    let params = extension_receiver
+                    let params = selecting_extension
+                        .then_some(extension_receiver)
+                        .flatten()
                         .and(candidate.receiver)
                         .into_iter()
                         .chain(params.iter().copied())
@@ -22358,7 +22369,9 @@ impl<'a> Checker<'a> {
                 })
                 .collect::<Vec<_>>();
             let source = self.fed_source();
-            let argument_kinds = extension_receiver
+            let argument_kinds = selecting_extension
+                .then_some(extension_receiver)
+                .flatten()
                 .map(crate::symbol_resolver::CallArgKind::Typed)
                 .into_iter()
                 .chain(self.checked_call_arg_kinds(scope, args))
@@ -25668,7 +25681,6 @@ impl<'a> Checker<'a> {
         let SelectedCallable {
             info: mut selected,
             bindings: mut selected_bindings,
-            ..
         } = selected;
         let host_checkpoint = (self.in_script_body
             && selected
@@ -35704,18 +35716,9 @@ impl<'a> Checker<'a> {
                 self.member_inline_body_available(member),
             )
         });
-        // A CLASSPATH MEMBER outranks an extension, which is Kotlin's rule and not this function's
-        // invention, so its expectations are asked for before any extension is looked up. The big
-        // member-call path has always asked in this order; the safe-call path asked in the other one,
-        // and reconciling them is the point of having one decision here at all. Asking on
-        // `method_sig` rather than on `module` is deliberate: it is the question the member-call path
-        // asks, and the two differ only when a selected member yields no slot mapping at all.
-        //
-        // A SELECTED MEMBER ends the search. Both extension carriers are gated on there being no
-        // selected member, which is what the member-call path has always done: letting an extension
-        // shape an argument of a call that resolves to a member is not merely a typing difference,
-        // because an inline extension alongside a non-inline member would keep a captured mutable
-        // local direct for a call that does not splice.
+        // A member normally supplies the call's lambda shape. A member that needs lambda-to-SAM
+        // conversion does not suppress a conversion-free extension, because the overload selector
+        // applies that same preference before member precedence.
         let provider = method_sig
             .is_none()
             .then(|| {
@@ -35737,6 +35740,9 @@ impl<'a> Checker<'a> {
             .filter(|expectations| {
                 self.member_expectations_fit_written_lambdas(args, expectations)
             });
+        let provider_needs_sam = provider
+            .as_ref()
+            .is_some_and(|expectations| expectations.iter().flatten().any(|it| it.sam_conversion));
         // An extension is worth looking up only for a call that HAS a lambda or callable-reference
         // argument to shape, on a receiver that typed at all — the member-call path has always
         // guarded its extension lookups this way, and the lookup is the expensive part.
@@ -35747,21 +35753,22 @@ impl<'a> Checker<'a> {
                     Expr::Lambda { .. } | Expr::CallableRef { .. }
                 )
             });
-        let member_extension =
-            (shapeable && method_sig.is_none() && provider.is_none()).then(|| {
-                self.member_extension_lambda_param_types(
-                    scope,
-                    MemberExtensionCall {
-                        extension_receiver: receiver,
-                        name,
-                        args,
-                        partial_arg_tys: partial,
-                        arg_names,
-                        explicit_type_args,
-                        trailing_lambda,
-                    },
-                )
-            });
+        let consider_extension =
+            shapeable && method_sig.is_none() && (provider.is_none() || provider_needs_sam);
+        let member_extension = consider_extension.then(|| {
+            self.member_extension_lambda_param_types(
+                scope,
+                MemberExtensionCall {
+                    extension_receiver: receiver,
+                    name,
+                    args,
+                    partial_arg_tys: partial,
+                    arg_names,
+                    explicit_type_args,
+                    trailing_lambda,
+                },
+            )
+        });
         let extension =
             member_extension
                 .flatten()
@@ -35784,7 +35791,7 @@ impl<'a> Checker<'a> {
                     inline: false,
                 });
         let extension = extension.or_else(|| {
-            (shapeable && method_sig.is_none() && provider.is_none())
+            consider_extension
                 .then(|| {
                     self.extension_lambda_shape(
                         scope,
@@ -35805,6 +35812,9 @@ impl<'a> Checker<'a> {
         // decision: the selector's `it` comes from the receiver's element type, at the lambda's own
         // argument position.
         let extension = extension.or_else(|| {
+            if !consider_extension {
+                return None;
+            }
             let params = self.lambda_return_overload_param_types(receiver, name)?;
             Some(crate::symbol_resolver::LambdaCallShape {
                 generic_formals: Vec::new(),
@@ -35827,6 +35837,9 @@ impl<'a> Checker<'a> {
         // The same fitness rule, applied to the other carrier. See
         // [`Self::shape_fits_written_lambdas`] for why the two count parameters differently.
         let extension = extension.filter(|shape| self.shape_fits_written_lambdas(args, shape));
+        let provider = (extension.is_none() || !provider_needs_sam)
+            .then_some(provider)
+            .flatten();
         CallLambdaShaping {
             module,
             extension,
@@ -37839,7 +37852,7 @@ impl<'a> Checker<'a> {
                         ) {
                             MemberSlotCall::Resolved(ret) => ret,
                             MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => Ty::Error,
-                            MemberSlotCall::NoMatch(_) => self
+                            MemberSlotCall::ExtensionRung { extension, .. } => self
                                 .check_member_extension_function_call(
                                     scope, e, recv, &name, a, arg_tys,
                                 )
@@ -37857,7 +37870,7 @@ impl<'a> Checker<'a> {
                                     )
                                 })
                                 .or_else(|| {
-                                    self.record_extension_call(
+                                    self.record_extension_selection(
                                         scope,
                                         CallArgs {
                                             call: e,
@@ -37867,7 +37880,7 @@ impl<'a> Checker<'a> {
                                         recv,
                                         &name,
                                         &type_args,
-                                        expected,
+                                        extension,
                                     )
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
@@ -37879,7 +37892,7 @@ impl<'a> Checker<'a> {
                         ) {
                             MemberSlotCall::Resolved(ret) => ret,
                             MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => Ty::Error,
-                            MemberSlotCall::NoMatch(_) => self
+                            MemberSlotCall::ExtensionRung { extension, .. } => self
                                 .check_member_extension_function_call(
                                     scope, e, recv, &name, a, arg_tys,
                                 )
@@ -37897,7 +37910,7 @@ impl<'a> Checker<'a> {
                                     )
                                 })
                                 .or_else(|| {
-                                    self.record_extension_call(
+                                    self.record_extension_selection(
                                         scope,
                                         CallArgs {
                                             call: e,
@@ -37907,7 +37920,7 @@ impl<'a> Checker<'a> {
                                         recv,
                                         &name,
                                         &type_args,
-                                        expected,
+                                        extension,
                                     )
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
@@ -40885,6 +40898,39 @@ impl<'a> Checker<'a> {
             expected,
             overloads.clone(),
         );
+        self.record_extension_selection(
+            scope,
+            call_args,
+            rt,
+            name,
+            type_args,
+            ExtensionRungSelection {
+                selection,
+                overloads,
+            },
+        )
+    }
+
+    /// Finish an extension rung whose candidates have already been ranked. This function only
+    /// reports or commits that outcome; it never collects or selects another callable family.
+    fn record_extension_selection(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
+        rt: Ty,
+        name: &str,
+        type_args: &[Ty],
+        extension: ExtensionRungSelection,
+    ) -> Option<Ty> {
+        let ExtensionRungSelection {
+            selection,
+            overloads,
+        } = extension;
+        let CallArgs {
+            call: e,
+            args,
+            arg_tys,
+        } = call_args;
         let selected = match selection {
             None => {
                 if let Some((failure, candidate)) =
@@ -41816,6 +41862,7 @@ impl<'a> Checker<'a> {
         } = call_args;
         let rt = self.apply_postponed_call_bindings(rt);
         let type_args = self.resolved_explicit_type_args(scope, call);
+        let mut extension_rung = None;
         if rt == Ty::String || matches!(rt, Ty::Obj(..)) {
             match self.record_member_call_with_slots(scope, call, rt, name, args, true, expected) {
                 MemberSlotCall::Resolved(ret) => {
@@ -41825,23 +41872,21 @@ impl<'a> Checker<'a> {
                 MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => {
                     return Some(Ty::Error);
                 }
-                // No member was applicable at this receiver-tower rung; imported extensions are
-                // the next distinct rung and are selected exactly once below.
-                MemberSlotCall::NoMatch(_) => {}
+                MemberSlotCall::ExtensionRung { extension, .. } => extension_rung = Some(extension),
             }
         }
-        if let Some(ret) = self.record_extension_call(
-            scope,
-            CallArgs {
-                call,
-                args,
-                arg_tys,
-            },
-            rt,
-            name,
-            &type_args,
-            expected,
-        ) {
+        let call_args = CallArgs {
+            call,
+            args,
+            arg_tys,
+        };
+        let ret = match extension_rung {
+            Some(extension) => {
+                self.record_extension_selection(scope, call_args, rt, name, &type_args, extension)
+            }
+            None => self.record_extension_call(scope, call_args, rt, name, &type_args, expected),
+        };
+        if let Some(ret) = ret {
             self.mark_implicit_receiver_selection(call, receiver);
             return Some(ret);
         }
@@ -45495,19 +45540,26 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|argument| self.expr_types[argument.0 as usize])
             .collect::<Vec<_>>();
-        let overloads = self
-            .resolver()
-            .receiver_callables(rt, name)
+        let callables = self.resolver().receiver_callables(rt, name);
+        let member_overloads = callables
             .functions()
             .iter()
             .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
             .cloned()
             .collect::<Vec<_>>();
-        if overloads.is_empty() {
-            return MemberSlotCall::NoMatch(None);
-        }
+        let extension_overloads = callables
+            .functions()
+            .iter()
+            .filter(|candidate| candidate.kind == crate::libraries::FnKind::Extension)
+            .cloned()
+            .collect::<Vec<_>>();
+        let overloads = member_overloads
+            .iter()
+            .chain(&extension_overloads)
+            .cloned()
+            .collect::<Vec<_>>();
 
-        let selected = match self.select_callable_candidate(
+        let selection = self.select_callable_candidate(
             scope,
             CallArgs {
                 call,
@@ -45515,48 +45567,33 @@ impl<'a> Checker<'a> {
                 arg_tys: &arg_tys,
             },
             &type_arguments,
-            None,
+            Some(rt),
             expected,
-            overloads.clone(),
-        ) {
+            overloads,
+        );
+        let selected = match selection {
             Some(CallableCandidateSelection::Selected(selected)) => {
-                // A member whose applicability needed a lambda→SAM conversion yields the rung to a
-                // conversion-free extension: kotlinc resolves a plain lambda to the Kotlin function
-                // -typed candidate (the inline stdlib `forEach` extension) over the whitelisted JDK
-                // SAM member (`java/lang/Iterable.forEach(Consumer)`). Probe the extension family of
-                // the same receiver-callable set; when none applies conversion-free, the member
-                // keeps the call (no rival exists for `removeIf`, `computeIfAbsent`, …).
-                if selected.sam_converted {
-                    let extensions = self
-                        .resolver()
-                        .receiver_callables(rt, name)
-                        .functions()
-                        .iter()
-                        .filter(|candidate| candidate.kind == crate::libraries::FnKind::Extension)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let conversion_free_extension = (!extensions.is_empty())
-                        && matches!(
-                            self.select_callable_candidate(
-                                scope,
-                                CallArgs {
-                                    call,
-                                    args,
-                                    arg_tys: &arg_tys,
-                                },
-                                &type_arguments,
-                                Some(rt),
-                                expected,
-                                extensions,
-                            ),
-                            Some(CallableCandidateSelection::Selected(extension))
-                                if !extension.sam_converted
-                        );
-                    if conversion_free_extension {
-                        return MemberSlotCall::NoMatch(None);
-                    }
+                if selected.is_extension() {
+                    return MemberSlotCall::ExtensionRung {
+                        extension: ExtensionRungSelection {
+                            selection: Some(CallableCandidateSelection::Selected(selected)),
+                            overloads: extension_overloads,
+                        },
+                        member_mapping_failure: None,
+                    };
                 }
                 selected.info.clone()
+            }
+            Some(CallableCandidateSelection::MissingContext(selected))
+                if selected.is_extension() =>
+            {
+                return MemberSlotCall::ExtensionRung {
+                    extension: ExtensionRungSelection {
+                        selection: Some(CallableCandidateSelection::MissingContext(selected)),
+                        overloads: extension_overloads,
+                    },
+                    member_mapping_failure: None,
+                };
             }
             Some(CallableCandidateSelection::MissingContext(_)) => {
                 self.diags.error(
@@ -45566,12 +45603,18 @@ impl<'a> Checker<'a> {
                 return MemberSlotCall::Rejected;
             }
             Some(CallableCandidateSelection::Ambiguous(candidates)) => {
+                if candidates.iter().all(|candidate| candidate.is_extension()) {
+                    return MemberSlotCall::ExtensionRung {
+                        extension: ExtensionRungSelection {
+                            selection: Some(CallableCandidateSelection::Ambiguous(candidates)),
+                            overloads: extension_overloads,
+                        },
+                        member_mapping_failure: None,
+                    };
+                }
                 self.report_callable_ambiguity(call, name, &candidates);
                 return MemberSlotCall::Ambiguous;
             }
-            // Applicability failure is not terminal: the next scope-tower rung may contain a
-            // member/local/imported extension. The caller reports this retained family only after
-            // every nearer and later rung is exhausted; no candidate is selected again.
             None => {
                 let mapping_failure = self
                     .unanimous_callable_mapping_failure(
@@ -45579,12 +45622,18 @@ impl<'a> Checker<'a> {
                         call,
                         args,
                         &type_arguments,
-                        &overloads,
+                        &member_overloads,
                     )
                     .map(|(failure, candidate)| {
                         Box::new(MemberMappingFailure { failure, candidate })
                     });
-                return MemberSlotCall::NoMatch(mapping_failure);
+                return MemberSlotCall::ExtensionRung {
+                    extension: ExtensionRungSelection {
+                        selection: None,
+                        overloads: extension_overloads,
+                    },
+                    member_mapping_failure: mapping_failure,
+                };
             }
         };
 
@@ -49019,13 +49068,20 @@ impl<'a> Checker<'a> {
                 // alike. Member/local extensions are nearer than imported extensions and are
                 // therefore handled by their own rungs below before the imported-extension family.
                 let mut member_mapping_failure = None;
+                let mut extension_rung = None;
                 if rt == Ty::String || matches!(rt.non_null(), Ty::Obj(..) | Ty::TyParam(..)) {
                     match self.record_member_call_with_slots(
                         scope, call, rt, &name, args, false, expected,
                     ) {
                         MemberSlotCall::Resolved(ret) => return ret,
                         MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => return Ty::Error,
-                        MemberSlotCall::NoMatch(failure) => member_mapping_failure = failure,
+                        MemberSlotCall::ExtensionRung {
+                            extension,
+                            member_mapping_failure: failure,
+                        } => {
+                            member_mapping_failure = failure;
+                            extension_rung = Some(extension);
+                        }
                     }
                 }
                 // A primitive's own operator method (`Int.rem`) is NOT `infix`, so the infix notation
@@ -49174,19 +49230,31 @@ impl<'a> Checker<'a> {
                 ) {
                     return ret;
                 }
-                if let Some(ret) = self.record_extension_call_from_callables(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys: &arg_tys,
-                    },
-                    rt,
-                    &name,
-                    &call_targs,
-                    expected,
-                    &receiver_callables,
-                ) {
+                let call_args = CallArgs {
+                    call,
+                    args,
+                    arg_tys: &arg_tys,
+                };
+                let extension_ret = match extension_rung {
+                    Some(extension) => self.record_extension_selection(
+                        scope,
+                        call_args,
+                        rt,
+                        &name,
+                        &call_targs,
+                        extension,
+                    ),
+                    None => self.record_extension_call_from_callables(
+                        scope,
+                        call_args,
+                        rt,
+                        &name,
+                        &call_targs,
+                        expected,
+                        &receiver_callables,
+                    ),
+                };
+                if let Some(ret) = extension_ret {
                     return ret;
                 }
                 if let Some((signature, origin)) = self.receiver_function_value(scope, &name) {
@@ -51612,9 +51680,8 @@ impl<'a> Checker<'a> {
                         .then_some(known_sam_signatures)
                 });
                 let (top_level_sam_pick, top_level_sam_ambiguous) = match top_level_sam {
-                    Some(TopLevelSamSelection::Picked(candidate, bindings, signatures)) => {
-                        let converted = signatures.iter().any(Option::is_some);
-                        (Some((*candidate, bindings, converted)), None)
+                    Some(TopLevelSamSelection::Picked(candidate, bindings, _)) => {
+                        (Some((*candidate, bindings)), None)
                     }
                     Some(TopLevelSamSelection::Ambiguous(candidates)) => (None, Some(candidates)),
                     None => (None, None),
@@ -51641,11 +51708,10 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 let top_level = top_level_sam_pick
-                    .map(|(info, bindings, sam_converted)| {
+                    .map(|(info, bindings)| {
                         CallableCandidateSelection::Selected(Box::new(SelectedCallable {
                             info,
                             bindings,
-                            sam_converted,
                         }))
                     })
                     .or_else(|| {
