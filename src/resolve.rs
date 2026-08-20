@@ -61278,25 +61278,48 @@ fun box(): String {
 
     #[test]
     fn source_extension_overloads_cannot_share_a_jvm_descriptor() {
-        err_contains(
-            "operator fun String.plusAssign(value: List<String>) {}\n\
-             operator fun String.plusAssign(value: List<Int>) {}",
-            "conflicting overloads:",
+        let assert_messages = |source: &str, expected: &[&str]| {
+            let (messages, _) = check(source);
+            assert_eq!(
+                messages,
+                expected
+                    .iter()
+                    .map(|message| (*message).to_string())
+                    .collect::<Vec<_>>()
+            );
+        };
+        assert_messages(
+            "class Box<T>\n\
+             operator fun String.plusAssign(value: Box<String>) {}\n\
+             operator fun String.plusAssign(value: Box<Int>) {}",
+            &[
+                "conflicting overloads:\nfun String.plusAssign(value: Box<Int>)",
+                "conflicting overloads:\nfun String.plusAssign(value: Box<String>)",
+            ],
         );
-        err_contains(
+        assert_messages(
             "fun <T> Array<T>.nestedClash(): Int = 1\n\
              fun Array<Any?>.nestedClash(): Int = 2",
-            "conflicting overloads:",
+            &[
+                "conflicting overloads:\nfun Array<Any?>.nestedClash(): Int",
+                "conflicting overloads:\nfun <T> Array<T>.nestedClash(): Int",
+            ],
         );
-        err_contains(
+        assert_messages(
             "fun ((Int) -> Int).functionReceiverClash(): Int = 1\n\
              fun ((String) -> String).functionReceiverClash(): Int = 2",
-            "conflicting overloads:",
+            &[
+                "conflicting overloads:\nfun (String) -> String.functionReceiverClash(): Int",
+                "conflicting overloads:\nfun (Int) -> Int.functionReceiverClash(): Int",
+            ],
         );
-        err_contains(
+        assert_messages(
             "fun Int.unsignedReceiverClash(): Int = 1\n\
              fun UInt.unsignedReceiverClash(): Int = 2",
-            "conflicting overloads:",
+            &[
+                "conflicting overloads:\nfun UInt.unsignedReceiverClash(): Int",
+                "conflicting overloads:\nfun Int.unsignedReceiverClash(): Int",
+            ],
         );
         assert_ne!(
             extension_receiver_physical_key(Ty::obj_args("kotlin/Array", &[Ty::Int])),
