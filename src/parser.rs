@@ -3469,7 +3469,7 @@ impl<'a> Parser<'a> {
             return true;
         }
 
-        if nested.kind == ClassKind::Class {
+        if matches!(nested.kind, ClassKind::Class | ClassKind::Interface) {
             nested.modality = modality_from_modifiers(modifiers);
             // `value class` (and the legacy `inline class` spelling) — like top-level registration,
             // `value`/`inline` is a MODIFIER consumed into `modifiers` before the `class` keyword.
