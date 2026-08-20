@@ -5494,7 +5494,9 @@ mod tests {
         let mut start = 0;
         index
             .encode(None)
-            .chunks_exact(5)
+            .as_chunks::<5>()
+            .0
+            .iter()
             .map(|token| {
                 line += token[0];
                 start = if token[0] == 0 {

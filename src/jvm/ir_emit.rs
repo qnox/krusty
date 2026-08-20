@@ -351,9 +351,7 @@ impl JvmDefaultMode {
 /// middle of the method.
 pub(crate) fn strip_param_assertions(ir: &mut IrFile) {
     for function in &mut ir.functions {
-        for check in &mut function.param_checks {
-            *check = None;
-        }
+        function.param_checks.fill(None);
     }
     for class in &mut ir.classes {
         for parameter in &mut class.ctor_args {

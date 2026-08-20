@@ -346,7 +346,9 @@ impl LspProcess {
         assert_eq!(data.len() % 5, 0, "invalid semantic token stream");
         let mut line = 0u64;
         let mut character = 0u64;
-        data.chunks_exact(5)
+        data.as_chunks::<5>()
+            .0
+            .iter()
             .map(|token| {
                 let delta_line = token[0].as_u64().unwrap();
                 let delta_character = token[1].as_u64().unwrap();

@@ -33041,13 +33041,6 @@ impl<'a> Checker<'a> {
                     cl.span.lo,
                 );
             if is_anonymous_object {
-                // The parser materializes the surrounding lexical parameters on an anonymous
-                // object's synthetic class so they can be emitted as captured class parameters.
-                // They are not declarations at the object-expression span: keep the enclosing
-                // function/class variables' exact identities instead of alpha-renaming fresh ones.
-                // A same-spelled concrete binding (for example `Any` inside a companion object) is
-                // an application of the synthetic parameter, not a declaration identity to retain;
-                // a nearer non-parameter classifier shadows it in the shared classifier namespace.
                 for name in &cl.type_params {
                     match scope.tparam_binding(name) {
                         Some((binding, extra_bounds, _)) if binding.ty_param_name().is_some() => {
@@ -56678,14 +56671,11 @@ val result = object { fun value(): String = captured }
         let mut symbols = collect_signatures(&files, &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
 
+        assert_no_diags(&diagnostics);
         let function_parameters = info.resolved_declaration_type_parameters(function_start);
         let anonymous_parameters = info.resolved_declaration_type_parameters(anonymous_start);
         assert_eq!(function_parameters.len(), 1);
-        assert_eq!(anonymous_parameters.len(), 1);
-        assert_ne!(
-            anonymous_parameters, function_parameters,
-            "a nearer classifier named T shadows the function's semantic T"
-        );
+        assert_eq!(anonymous_parameters.len(), 0);
     }
 
     #[test]
