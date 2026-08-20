@@ -26,15 +26,19 @@ fn reference_accepts(tag: &str, sources: &[&str]) -> bool {
         std::fs::write(&path, source).expect("write main-conflict reference source");
         args.push(path.to_string_lossy().into_owned());
     }
-    let (code, stderr) = common::kotlinc_compile(&args).expect("reference kotlinc unavailable");
+    let (code, _) = common::kotlinc_compile(&args).expect("reference kotlinc unavailable");
     let _ = std::fs::remove_dir_all(&work);
-    if code != 0 {
-        assert!(
-            stderr.contains("conflicting overloads"),
-            "{tag}: unexpected kotlinc rejection: {stderr}"
-        );
-    }
     code == 0
+}
+
+fn assert_diagnostics(actual: Vec<String>, expected: &[&str]) {
+    assert_eq!(
+        actual,
+        expected
+            .iter()
+            .map(|message| message.to_string())
+            .collect::<Vec<_>>()
+    );
 }
 
 fn assert_acceptance_matches_kotlinc(tag: &str, sources: &[&str], expected: bool) -> Vec<String> {
@@ -74,6 +78,30 @@ fn cross_file_parameterless_main_functions_do_not_conflict() {
 }
 
 #[test]
+fn cross_file_vararg_main_functions_do_not_conflict() {
+    assert_acceptance_matches_kotlinc(
+        "vararg-main",
+        &[
+            "package p\nfun main(vararg args: String) {}\n",
+            "package p\nfun main(vararg args: String) {}\n",
+        ],
+        true,
+    );
+}
+
+#[test]
+fn cross_file_defaulted_main_functions_do_not_conflict() {
+    assert_acceptance_matches_kotlinc(
+        "defaulted-main",
+        &[
+            "package p\nfun main(args: Array<String> = emptyArray()) {}\n",
+            "package p\nfun main(args: Array<String> = emptyArray()) {}\n",
+        ],
+        true,
+    );
+}
+
+#[test]
 fn cross_file_expression_body_unit_main_functions_do_not_conflict() {
     assert_acceptance_matches_kotlinc(
         "expression-unit-main",
@@ -107,7 +135,13 @@ fn cross_file_main_with_ordinary_parameter_conflicts() {
         ],
         false,
     );
-    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert_diagnostics(
+        diags,
+        &[
+            "conflicting overloads:\nfun main(x: Int)",
+            "conflicting overloads:\nfun main(x: Int)",
+        ],
+    );
 }
 
 #[test]
@@ -120,7 +154,13 @@ fn cross_file_main_with_non_unit_return_conflicts() {
         ],
         false,
     );
-    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert_diagnostics(
+        diags,
+        &[
+            "conflicting overloads:\nfun main(): String",
+            "conflicting overloads:\nfun main(): String",
+        ],
+    );
 }
 
 #[test]
@@ -133,7 +173,13 @@ fn cross_file_generic_main_functions_conflict() {
         ],
         false,
     );
-    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert_diagnostics(
+        diags,
+        &[
+            "conflicting overloads:\nfun <T> main()",
+            "conflicting overloads:\nfun <T> main()",
+        ],
+    );
 }
 
 #[test]
@@ -161,12 +207,40 @@ fn same_file_main_duplicates_still_conflict() {
     let diags = diagnostics(&[
         "package p\nfun main(rawArgs: Array<String>) {}\nfun main(rawArgs: Array<String>) {}\n",
     ]);
-    assert_eq!(diags.len(), 2, "{diags:?}");
-    assert!(
-        diags
-            .iter()
-            .all(|d| d.starts_with("conflicting overloads:")),
-        "{diags:?}"
+    assert_diagnostics(
+        diags,
+        &[
+            "conflicting overloads:\nfun main(rawArgs: Array<String>)",
+            "conflicting overloads:\nfun main(rawArgs: Array<String>)",
+        ],
+    );
+}
+
+#[test]
+fn same_file_entry_point_and_ordinary_main_conflict() {
+    let diags = assert_acceptance_matches_kotlinc(
+        "same-file-entry-and-generic-main",
+        &["package p\nfun main() {}\nfun <T> main() {}\n"],
+        false,
+    );
+    assert_diagnostics(
+        diags,
+        &[
+            "conflicting overloads:\nfun <T> main()",
+            "conflicting overloads:\nfun main()",
+        ],
+    );
+}
+
+#[test]
+fn nested_and_local_main_functions_do_not_join_the_top_level_scope() {
+    assert_acceptance_matches_kotlinc(
+        "nested-and-local-main",
+        &[
+            "package p\nfun main() {}\nfun holder() { fun main() {} }\n",
+            "package p\nclass Runner { fun main() {} }\n",
+        ],
+        true,
     );
 }
 
@@ -180,12 +254,12 @@ fn cross_file_non_main_duplicates_still_conflict() {
         ],
         false,
     );
-    assert_eq!(diags.len(), 2, "{diags:?}");
-    assert!(
-        diags
-            .iter()
-            .all(|d| d.starts_with("conflicting overloads:")),
-        "{diags:?}"
+    assert_diagnostics(
+        diags,
+        &[
+            "conflicting overloads:\nfun helper(rawArgs: Array<String>)",
+            "conflicting overloads:\nfun helper(rawArgs: Array<String>)",
+        ],
     );
 }
 
@@ -211,7 +285,7 @@ fn cross_file_public_and_private_functions_conflict_in_the_private_file() {
         ],
         false,
     );
-    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_diagnostics(diags, &["conflicting overloads:\nfun helper(x: Int)"]);
     let reversed = assert_acceptance_matches_kotlinc(
         "mixed-helper-visibility-reversed",
         &[
@@ -220,7 +294,7 @@ fn cross_file_public_and_private_functions_conflict_in_the_private_file() {
         ],
         false,
     );
-    assert_eq!(reversed.len(), 1, "{reversed:?}");
+    assert_diagnostics(reversed, &["conflicting overloads:\nfun helper(x: Int)"]);
 }
 
 #[test]
@@ -237,16 +311,23 @@ fn cross_file_private_extension_functions_do_not_conflict() {
 
 #[test]
 fn same_file_private_extension_functions_conflict() {
-    assert_acceptance_matches_kotlinc(
+    let diags = assert_acceptance_matches_kotlinc(
         "same-file-private-extension",
         &["package p\nprivate fun String.helper() {}\nprivate fun String.helper() {}\n"],
         false,
+    );
+    assert_diagnostics(
+        diags,
+        &[
+            "conflicting overloads:\nfun String.helper()",
+            "conflicting overloads:\nfun String.helper()",
+        ],
     );
 }
 
 #[test]
 fn cross_file_public_extension_functions_conflict() {
-    assert_acceptance_matches_kotlinc(
+    let diags = assert_acceptance_matches_kotlinc(
         "public-extension",
         &[
             "package p\nfun String.helper() {}\n",
@@ -254,11 +335,18 @@ fn cross_file_public_extension_functions_conflict() {
         ],
         false,
     );
+    assert_diagnostics(
+        diags,
+        &[
+            "conflicting overloads:\nfun String.helper()",
+            "conflicting overloads:\nfun String.helper()",
+        ],
+    );
 }
 
 #[test]
 fn cross_file_public_and_private_extension_functions_conflict() {
-    assert_acceptance_matches_kotlinc(
+    let diags = assert_acceptance_matches_kotlinc(
         "mixed-extension-visibility",
         &[
             "package p\nfun String.helper() {}\n",
@@ -266,7 +354,8 @@ fn cross_file_public_and_private_extension_functions_conflict() {
         ],
         false,
     );
-    assert_acceptance_matches_kotlinc(
+    assert_diagnostics(diags, &["conflicting overloads:\nfun String.helper()"]);
+    let reversed = assert_acceptance_matches_kotlinc(
         "mixed-extension-visibility-reversed",
         &[
             "package p\nprivate fun String.helper() {}\n",
@@ -274,4 +363,5 @@ fn cross_file_public_and_private_extension_functions_conflict() {
         ],
         false,
     );
+    assert_diagnostics(reversed, &["conflicting overloads:\nfun String.helper()"]);
 }
