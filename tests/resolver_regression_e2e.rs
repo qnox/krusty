@@ -180,6 +180,29 @@ fun box(): String {
 }
 
 #[test]
+fn empty_array_argument_uses_java_platform_parameter_element_type() {
+    // The flexible `Array<String>!` parameter fixes the empty array's element type.
+    let src = r#"
+import java.util.Optional
+fun f(o: Optional<Array<String>>): Int = o.orElse(emptyArray()).size
+fun box(): String = if (f(Optional.of(arrayOf("x"))) == 1) "OK" else "FAIL"
+"#;
+    assert_eq!(run(src, "ResolverEmptyArrayJavaPlatformParam"), "OK");
+}
+
+#[test]
+fn empty_array_with_a_primitive_element_keeps_the_boxed_array_type() {
+    let src = r#"
+import java.util.Optional
+fun box(): String {
+    val values: Array<Int> = Optional.empty<Array<Int>>().orElse(emptyArray())
+    return if (values.javaClass.componentType.name == "java.lang.Integer") "OK" else "FAIL"
+}
+"#;
+    assert_eq!(run(src, "ResolverEmptyArrayBoxedPrimitive"), "OK");
+}
+
+#[test]
 fn source_empty_array_shadows_the_compiler_declaration() {
     let src = r#"
 fun <T> emptyArray(): String = "user"
