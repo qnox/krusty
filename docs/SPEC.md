@@ -2694,26 +2694,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java.util` class that does (`ArrayList`) is not an authoritative name. A member-name probe cannot see
   supertypes, so this needs its own coverage. Tests: `tests/mapped_string_scope_e2e.rs`.
 
-  Still NOT the remaining mapped builtins. kotlinc does not hide every Java method on a mapped type:
-  `JvmBuiltInsCustomizer` re-admits an explicit whitelist
-  (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) on top of the builtins scope. krusty ports that
-  whitelist for the mapped COLLECTION faces as `jvm_class_map::MAPPED_VISIBLE_METHODS` (read-only
-  signatures on the read-only face, mutating ones on the `Mutable*` face, mirroring `JvmMappedScope`),
-  so `MutableMap.computeIfAbsent`/`putIfAbsent`/`merge`, `List.stream`, and friends resolve exactly as
-  kotlinc 2.4 admits them. Tests: `tests/mapped_collection_scope_e2e.rs`. Measured against
-  kotlinc, making the remaining names authoritative would WRONGLY reject `java.lang.CharSequence.chars` /
-  `codePoints`, `java.lang.Enum.name` / `ordinal`, and `java.lang.Throwable.fillInStackTrace` /
-  `getLocalizedMessage` / `getStackTrace` / `getSuppressed` / `initCause` / `setStackTrace` — all of which
-  kotlinc keeps. (`kotlin/Throwable` is also the one place a leak survives in the other direction: kotlinc
-  hides `getCause`/`getMessage` in favour of the `cause`/`message` properties, and krusty still accepts
-  them.) A residual leak still reaches `String` itself, one rung up from `kotlin/CharSequence` — kept
-  JOINED precisely so `chars`/`codePoints` survive. Its size is **JDK-DEPENDENT**, because it is whatever
-  `java.lang.CharSequence` happens to declare: `charAt` on every JDK, plus `getChars` as of **JDK 25**,
-  which added it as a `default` method. That makes any negative test over the `String` scope invalid if it
-  probes a name `CharSequence` also declares — `getChars` passes such a probe on a JDK 21 developer machine
-  and fails on a JDK 25 CI runner. Probe `java.lang.String`-ONLY members (`concat`, `replaceAll`,
-  `equalsIgnoreCase`, `compareToIgnoreCase`, `getBytes`). Widening further is gated on porting that
-  whitelist, not on anything in the member-scope model.
+  Mapped collection scopes also admit `jvm_class_map::MAPPED_VISIBLE_METHODS`, matching
+  `JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`. Read-only signatures such as `stream` and
+  `getOrDefault` are visible on both collection faces; mutating signatures such as `removeIf`,
+  `computeIfAbsent`, and `merge` require a `Mutable*` receiver. Tests:
+  `tests/mapped_collection_scope_e2e.rs`.
+
+  Other mapped built-ins retain their JVM scope. This keeps `CharSequence.chars`, `Enum.name`, and the
+  visible `Throwable` methods available. `kotlin/Throwable` still exposes Java `getCause` and
+  `getMessage` in addition to the Kotlin properties. The inherited `String` scope is JDK-dependent, so
+  negative String-scope tests use members declared only by `java.lang.String`, not members that may be
+  added to `java.lang.CharSequence`.
 
 - **Kotlin members on JVM-mapped built-ins (`CharSequence`/`Number`/`Comparable`).** kotlinc maps these
   Kotlin types to JVM classes (`java/lang/CharSequence`, …) but their Kotlin API differs from the JVM

@@ -1,18 +1,69 @@
-//! A mapped Kotlin collection's member scope is its `.kotlin_builtins` declaration plus kotlinc's
-//! explicit JDK-member whitelist (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`), not the whole
-//! method set of the `java.util` class it maps to. `java.util.List` declares `remove(int)` (remove BY
-//! INDEX) alongside `remove(Object)` (remove the ELEMENT); Kotlin's `MutableList` declares only
-//! `MutableCollection.remove(element: E)`, with the index-taking method reachable solely as
-//! `removeAt`. Taking the Java set MISCOMPILED `list.remove(10)` — an `Int` argument fits the
-//! primitive `int` parameter exactly, so it won overload resolution and removed whichever element sat
-//! at index 10. Dropping the whitelist instead under-resolves the JDK default methods kotlinc keeps
-//! (`MutableMap.computeIfAbsent`, `List.stream`, …) — mutating ones on the mutable face only.
-//!
-//! Two receiver shapes, two mechanisms, mirroring kotlinc. A MAPPED name resolves against the builtins
-//! declaration directly. A real JVM class in the hierarchy (`java.util.ArrayList`) keeps its Java scope,
-//! with a method that a renamed builtin covers exposed under the Kotlin name instead of its own.
+//! Mapped collection faces use their Kotlin declarations plus the explicit visible-JVM-method
+//! whitelist. Concrete JVM collection classes retain their Java scope, including Kotlin renames such
+//! as `remove(int)` to `removeAt`.
 
 use super::common;
+
+fn assert_kotlinc_accepts(tag: &str, source: &str) {
+    let (code, diagnostics) = common::kotlinc_source_result(tag, source);
+    assert_eq!(code, 0, "kotlinc rejected {tag}: {diagnostics}");
+}
+
+fn assert_kotlinc_rejects(tag: &str, source: &str) {
+    let (code, _) = common::kotlinc_source_result(tag, source);
+    assert_ne!(code, 0, "kotlinc accepted {tag}");
+}
+
+#[test]
+fn visible_method_matrix_matches_kotlinc() {
+    assert_kotlinc_accepts(
+        "MappedCollectionVisibleMatrix",
+        r#"
+        fun accepted(
+            iterator: Iterator<Int>,
+            iterable: Iterable<Int>,
+            collection: Collection<Int>,
+            list: MutableList<Int>,
+            map: MutableMap<String, Int>,
+            consumer: java.util.function.Consumer<Int>,
+            biConsumer: java.util.function.BiConsumer<String, Int>,
+        ) {
+            iterator.forEachRemaining(consumer)
+            iterable.forEach(consumer)
+            iterable.spliterator()
+            collection.spliterator()
+            collection.parallelStream()
+            collection.stream()
+            list.removeIf { true }
+            list.replaceAll { it + 1 }
+            list.addFirst(1)
+            list.addLast(1)
+            list.removeFirst()
+            list.removeLast()
+            map.getOrDefault("k", 1)
+            map.forEach(biConsumer)
+            map.computeIfAbsent("a") { 1 }
+            map.computeIfPresent("b") { _, value -> value }
+            map.compute("c") { _, value -> value }
+            map.merge("d", 1) { left, right -> left + right }
+            map.putIfAbsent("e", 1)
+            map.replaceAll { _, value -> value }
+            map.replace("f", 1)
+            map.replace("g", 1, 2)
+        }
+        "#,
+    );
+    assert_kotlinc_rejects(
+        "MappedCollectionHiddenMatrix",
+        r#"
+        fun rejected(list: List<Int>, map: Map<String, Int>) {
+            list.removeIf { true }
+            list.addFirst(1)
+            map.computeIfAbsent("k") { 1 }
+        }
+        "#,
+    );
+}
 
 #[test]
 fn remove_on_a_mapped_receiver_takes_the_element_overload() {
@@ -173,15 +224,12 @@ fn remove_at_override_satisfies_the_java_util_abstract() {
 
 #[test]
 fn java_only_members_are_not_in_the_kotlin_scope() {
-    // The members the JVM class declares and the Kotlin API does not. Each of these compiled before the
-    // scope came from the builtins declaration; kotlinc reports every one as unresolved.
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     for (member, source) in [
         ("getFirst", "fun f(l: List<Int>) { l.getFirst() }"),
         ("add", "fun f(l: List<Int>) { l.add(1) }"),
-        // Mutating JDK defaults stay hidden on the READ-ONLY face even though the whitelist below
-        // re-admits them on the mutable one (kotlinc `MUTABLE_METHOD_SIGNATURES`).
+        // Mutating JDK defaults stay hidden on the read-only face.
         ("removeIf", "fun f(l: List<Int>) { l.removeIf { true } }"),
         ("replaceAll", "fun f(l: List<Int>) { l.replaceAll { it } }"),
         (
@@ -195,28 +243,19 @@ fn java_only_members_are_not_in_the_kotlin_scope() {
     ] {
         let diagnostics =
             common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
-        assert!(
-            diagnostics
-                .iter()
-                .any(|message| message.contains(&format!("unresolved reference '{member}'"))),
-            "{member} should not be a member of the Kotlin scope: {diagnostics:?}"
+        assert_eq!(
+            diagnostics,
+            [format!("unresolved reference '{member}'.")],
+            "{source}"
         );
     }
 }
 
-// kotlinc re-admits an explicit JDK-member whitelist over the builtins scope of a mapped collection
-// (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`): read-only Java defaults (`stream`,
-// `spliterator`, `getOrDefault`, `forEach`, …) on both faces, mutating defaults
-// (`MUTABLE_METHOD_SIGNATURES`: `putIfAbsent`, `computeIfAbsent`, `merge`, `removeIf`, …) only on
-// the `Mutable*` face. Every case below is pinned against kotlinc 2.4.10.
-
 #[test]
 fn whitelisted_map_default_methods_run_on_a_mutable_receiver() {
-    // Golden output captured from kotlinc 2.4.10 running this exact source. The two-parameter lambda
-    // fits only the whitelisted `BiConsumer`/`BiFunction`/`Function` SAM members, and
+    // The two-parameter lambda fits the whitelisted `BiConsumer`/`BiFunction`/`Function` members, and
     // `return@computeIfAbsent` labels the lambda of the Java member.
-    let output = common::expect_box_run_with_stdlib(
-        r#"
+    let source = r#"
         fun box(): String {
             val m: MutableMap<String, String> = mutableMapOf("a" to "1")
             val out = StringBuilder()
@@ -244,9 +283,8 @@ fn whitelisted_map_default_methods_run_on_a_mutable_receiver() {
             out.append(m.toString())
             return out.toString()
         }
-        "#,
-        "Main",
-    );
+        "#;
+    let output = common::expect_box_run_with_stdlib(source, "Main");
     assert_eq!(
         output,
         "1|null|C|1a|d|3|1a|true|lbl|{a=a9, b=b7, c=cC, d=dd, e=e3, z=zlbl}"
@@ -255,9 +293,6 @@ fn whitelisted_map_default_methods_run_on_a_mutable_receiver() {
 
 #[test]
 fn whitelisted_read_only_members_resolve_on_read_only_receivers() {
-    // kotlinc 2.4.10 accepts every one of these on the read-only face: `stream`/`parallelStream`/
-    // `spliterator` (java.util.Collection whitelist), `spliterator`/`forEach` (java.lang.Iterable),
-    // `forEachRemaining` (java.util.Iterator), `getOrDefault`/`forEach` (java.util.Map).
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     for source in [
@@ -265,19 +300,19 @@ fn whitelisted_read_only_members_resolve_on_read_only_receivers() {
         "fun f(l: List<Int>) = l.parallelStream()",
         "fun f(l: List<Int>) = l.spliterator()",
         "fun f(c: Collection<Int>) = c.stream()",
+        "fun f(c: Collection<Int>) = c.spliterator()",
         "fun f(i: Iterable<Int>) = i.spliterator()",
+        "fun f(i: Iterable<Int>, c: java.util.function.Consumer<Int>) { i.forEach(c) }",
         "fun f(i: Iterator<Int>) = i.forEachRemaining { println(it) }",
         "fun f(i: MutableIterator<Int>) = i.forEachRemaining { println(it) }",
         "fun f(m: Map<String, Int>) = m.getOrDefault(\"k\", 1)",
+        "fun f(m: Map<String, Int>, c: java.util.function.BiConsumer<String, Int>) { m.forEach(c) }",
         "fun f(m: Map<String, Int>) = m.forEach { (k, _) -> println(k) }",
         "fun f(s: Set<Int>) = s.stream()",
     ] {
         let diagnostics =
             common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
-        assert!(
-            diagnostics.is_empty(),
-            "kotlinc accepts this on the read-only face: {source}\n{diagnostics:?}"
-        );
+        assert_eq!(diagnostics, Vec::<String>::new(), "{source}");
     }
 }
 
@@ -289,19 +324,19 @@ fn whitelisted_mutating_members_resolve_only_on_mutable_receivers() {
         "fun f(l: MutableList<Int>) { l.removeIf { true } }",
         "fun f(l: MutableList<Int>) { l.replaceAll { it + 1 } }",
         "fun f(l: MutableList<Int>) { l.addFirst(1) }",
+        "fun f(l: MutableList<Int>) { l.addLast(1) }",
+        "fun f(l: MutableList<Int>) = l.removeFirst()",
         "fun f(l: MutableList<Int>) = l.removeLast()",
         "fun f(c: MutableCollection<Int>) { c.removeIf { true } }",
         "fun f(s: MutableSet<Int>) { s.removeIf { true } }",
         "fun f(m: MutableMap<String, Int>) = m.replace(\"k\", 1)",
+        "fun f(m: MutableMap<String, Int>) = m.remove(\"k\", 1)",
     ] {
         let diagnostics =
             common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
-        assert!(
-            diagnostics.is_empty(),
-            "kotlinc accepts this on the mutable face: {source}\n{diagnostics:?}"
-        );
+        assert_eq!(diagnostics, Vec::<String>::new(), "{source}");
     }
-    // …and the same members stay hidden on the read-only face, exactly as kotlinc rejects them.
+    // The same members stay hidden on the read-only face.
     for (member, source) in [
         ("addFirst", "fun f(l: List<Int>) { l.addFirst(1) }"),
         (
@@ -315,30 +350,27 @@ fn whitelisted_mutating_members_resolve_only_on_mutable_receivers() {
     ] {
         let diagnostics =
             common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
-        assert!(
-            diagnostics
-                .iter()
-                .any(|message| message.contains(&format!("unresolved reference '{member}'"))),
-            "{member} must stay hidden on the read-only face (kotlinc rejects it): {diagnostics:?}"
+        assert_eq!(
+            diagnostics,
+            [format!("unresolved reference '{member}'.")],
+            "{source}"
         );
     }
 }
 
 #[test]
-fn for_each_still_binds_the_inline_stdlib_extension() {
+fn for_each_binds_the_inline_stdlib_extension() {
     // `MutableMap.forEach` is whitelisted, but a lambda with ONE (destructured `Map.Entry`)
     // parameter fits only the stdlib extension, and a plain lambda prefers the extension over the
-    // SAM member — kotlinc inlines it. The destructure shape must keep compiling and running.
-    let output = common::expect_box_run_with_stdlib(
-        r#"
+    // SAM member. The destructure shape must keep compiling and running.
+    let source = r#"
         fun box(): String {
             val m: MutableMap<String, Int> = mutableMapOf("a" to 1, "b" to 2)
             val out = StringBuilder()
             m.forEach { (k, v) -> out.append(k).append(v) }
             return out.toString()
         }
-        "#,
-        "Main",
-    );
+        "#;
+    let output = common::expect_box_run_with_stdlib(source, "Main");
     assert_eq!(output, "a1b2");
 }
