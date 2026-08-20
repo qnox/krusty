@@ -113,8 +113,6 @@ fn capture_used_in_property_initializer() {
 
 #[test]
 fn captures_smart_cast_val() {
-    // The capture must record the NARROWED binding (kotlinc accepts): discovery used to keep the
-    // outer declared `String?` binding and reject `t.length` inside the object body.
     run_ok(
         "AnonSmartVal",
         "interface L { fun g(): Int }\n\
@@ -132,7 +130,6 @@ fn captures_smart_cast_val() {
 
 #[test]
 fn captures_inner_shadowed_local() {
-    // Plain lexical shadowing: the capture is the INNER `t` (`String`), never the outer `Int`.
     run_ok(
         "AnonInnerShadow",
         "interface L { fun g(): Int }\n\

@@ -4050,9 +4050,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **An anonymous object captures the INNERMOST binding of a name.** Capture discovery walks the
   scope tower innermost-first and keeps the first candidate of each name — the same binding a read
   at the construction site resolves to. That keeps smart casts visible inside the object body
-  (`if (t != null) { object { fun g() = t.length } }`, val and var alike) and binds a shadowed
-  local to its inner declaration
-  (`tests/anon_object_capture_e2e.rs::captures_smart_cast_val` / `captures_smart_cast_var` /
+  (`if (t != null) { object { fun g() = t.length } }`) and binds a shadowed local to its inner
+  declaration (`tests/anon_object_capture_e2e.rs::captures_smart_cast_val` /
   `captures_inner_shadowed_local` — runtime-verified).
 
 - **A Java accessor pair without `@Metadata` is a writable synthetic property.** `x.text = v` on a
