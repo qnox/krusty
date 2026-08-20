@@ -166,6 +166,61 @@ fn colliding_classifier_names_are_qualified_in_type_mismatches() {
 }
 
 #[test]
+fn explicit_empty_array_type_is_not_replaced_by_a_projected_expectation() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "ExplicitEmptyArray.kt",
+            "fun take(values: Array<out String>) {}\n\nfun use() {\n    take(emptyArray<Any>())\n}",
+        )],
+        &[common::stdlib_jar()],
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let expected = vec![ObservedError {
+        file: "ExplicitEmptyArray.kt".to_string(),
+        line: 4,
+        column: 10,
+        message: "argument type mismatch: actual type is 'Array<Any>', but 'Array<out String>' was expected."
+            .to_string(),
+    }];
+
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(krusty_errors.len(), 1);
+    assert_eq!(kotlinc_errors.len(), 1);
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}
+
+#[test]
+fn empty_reference_array_does_not_match_a_primitive_array_parameter() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "EmptyReferenceForPrimitive.kt",
+            "fun take(values: IntArray) {}\n\nfun use() {\n    take(emptyArray<Int>())\n}",
+        )],
+        &[common::stdlib_jar()],
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let expected = vec![ObservedError {
+        file: "EmptyReferenceForPrimitive.kt".to_string(),
+        line: 4,
+        column: 10,
+        message:
+            "argument type mismatch: actual type is 'Array<Int>', but 'IntArray' was expected."
+                .to_string(),
+    }];
+
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(krusty_errors.len(), 1);
+    assert_eq!(kotlinc_errors.len(), 1);
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}
+
+#[test]
 fn subjectless_when_fallthrough_diagnostics_match_kotlinc() {
     let result = common::compiler_diagnostics(
         &[(
