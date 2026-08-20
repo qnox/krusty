@@ -353,6 +353,16 @@ impl SymbolSource for DependencyPlatform {
     }
 }
 
+impl crate::libraries::PlatformAccessControl for DependencyPlatform {
+    fn platform_access(
+        &self,
+        context: AccessContext,
+        candidate: crate::libraries::PlatformAccessCandidate<'_>,
+    ) -> crate::libraries::PlatformAccessDecision {
+        self.platform.platform_access(context, candidate)
+    }
+}
+
 impl SemanticPlatform for DependencyPlatform {
     fn function_type(&self, arity: usize) -> Option<Ty> {
         self.platform.function_type(arity)
@@ -503,6 +513,7 @@ mod tests {
         }
     }
 
+    impl crate::libraries::PlatformAccessControl for TypeVisibility {}
     impl SemanticPlatform for TypeVisibility {}
 
     fn type_shape(is_public: bool) -> LibraryType {

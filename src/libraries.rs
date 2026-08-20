@@ -486,7 +486,49 @@ pub struct AliasExpansion {
     pub expansion_spelling: crate::spelling::Spelled,
 }
 
-pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
+/// Exact normalized declaration presented to a target's access-control policy. Core never interprets
+/// target access flags or target-specific visibility categories.
+#[derive(Clone, Copy)]
+pub enum PlatformAccessCandidate<'a> {
+    Callable {
+        source_name: &'a str,
+        callable: &'a LibraryCallable,
+        visibility: Visibility,
+    },
+    Member {
+        owner: TypeName,
+        source_name: &'a str,
+        member: &'a LibraryMember,
+    },
+    Property {
+        owner: TypeName,
+        source_name: &'a str,
+        ty: Ty,
+        visibility: Visibility,
+    },
+}
+
+/// Result of target-owned access control. `Core` leaves the decision to Kotlin visibility;
+/// `Allowed` means the target explicitly admits the declaration; `Denied` supplies the complete
+/// target diagnostic without exposing the target rule to common resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlatformAccessDecision {
+    Core,
+    Allowed,
+    Denied(String),
+}
+
+pub trait PlatformAccessControl {
+    fn platform_access(
+        &self,
+        _context: AccessContext,
+        _candidate: PlatformAccessCandidate<'_>,
+    ) -> PlatformAccessDecision {
+        PlatformAccessDecision::Core
+    }
+}
+
+pub trait SemanticPlatform: crate::symbol_source::SymbolSource + PlatformAccessControl {
     /// Semantic interface/class used by the platform libraries to model a function value of `arity`.
     fn function_type(&self, _arity: usize) -> Option<Ty> {
         None
@@ -675,63 +717,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
 
     fn iterable_element_type_name(&self, _internal: TypeName) -> Option<Ty> {
         None
-    }
-
-    /// Platform-specific access diagnostic for a member the core checker has already resolved.
-    /// The core supplies the resolved `owner`, member `name`, and core `visibility` (already filtered
-    /// through the platform-independent rules). If the platform has an additional restriction
-    /// (e.g. JVM package-private), return the user-facing diagnostic; otherwise return `None`.
-    fn member_access_diagnostic(
-        &self,
-        _context: AccessContext,
-        _receiver: Ty,
-        _name: &str,
-        _owner: TypeName,
-        _visibility: Visibility,
-        _is_field: bool,
-    ) -> Option<String> {
-        None
-    }
-
-    /// Platform-specific diagnostic for an unresolved member reference. If the platform knows of an
-    /// inaccessible member that matches the reference, return the diagnostic to emit instead of the
-    /// generic "unresolved reference"; otherwise return `None`.
-    fn unresolved_member_diagnostic(
-        &self,
-        _context: AccessContext,
-        _receiver: Ty,
-        _name: &str,
-    ) -> Option<String> {
-        None
-    }
-
-    /// Effective visibility for a field considered as a Kotlin property in the current access
-    /// context. The core resolver found a field named `name` on `owner` with the given declared
-    /// core `visibility`. Return `Some(vis)` to override the effective visibility, or `None` to
-    /// apply the core visibility rules. This lets platforms enforce target-specific field access
-    /// without adding target visibilities to the shared model.
-    fn field_visible_as_property(
-        &self,
-        _context: AccessContext,
-        _owner: TypeName,
-        _name: &str,
-        _visibility: Visibility,
-    ) -> Option<Visibility> {
-        None
-    }
-
-    /// Whether a callable is visible from the current access context. The default accepts every
-    /// candidate; platforms use this to hide target-specific inaccessible members (e.g. JVM
-    /// package-private methods) before overload selection runs.
-    fn callable_visible_in_context(
-        &self,
-        _context: AccessContext,
-        _owner: TypeName,
-        _name: &str,
-        _descriptor: &str,
-        _visibility: Visibility,
-    ) -> bool {
-        true
     }
 }
 
@@ -2847,6 +2832,7 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
         })
     }
 }
+impl PlatformAccessControl for EmptySymbolSource {}
 impl SemanticPlatform for EmptySymbolSource {}
 
 #[cfg(test)]
@@ -3063,6 +3049,7 @@ mod tests {
     fn semantic_platform_does_not_require_runtime_abi() {
         struct SemanticOnly;
         impl crate::symbol_source::SymbolSource for SemanticOnly {}
+        impl super::PlatformAccessControl for SemanticOnly {}
         impl super::SemanticPlatform for SemanticOnly {
             fn platform_default_import_packages(&self) -> &'static [&'static str] {
                 &["kotlin"]

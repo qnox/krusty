@@ -1814,8 +1814,8 @@ pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
 /// `@Metadata`/bytecode flags of a library declaration. `PRIVATE_TO_THIS` folds into `Private`;
 /// `LOCAL` is not represented (locals are never surfaced as declarations). This records what a
 /// declaration IS; whether a given call site may access it (`protected`/`internal`/`private`) is a
-/// separate context-dependent decision made during resolution. JVM package-private access is not
-/// represented here; classpath members carry an optional `package_private_owner` instead.
+/// separate context-dependent decision made during resolution. Target-specific restrictions are
+/// interpreted by the target's access-control policy and are not represented by this enum.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Visibility {
     #[default]

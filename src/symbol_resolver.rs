@@ -3881,13 +3881,14 @@ impl Symbol {
     }
 }
 
-/// A selected property setter with the semantic access fact needed by the checker. Lowering receives
-/// only `callable` after the checker has accepted `visibility`; it never reconstructs either fact.
+/// A selected property setter with the access facts needed by the checker. The checker applies core
+/// visibility and any opaque target denial before lowering consumes the already-selected callable.
 #[derive(Clone, Debug)]
 pub struct ResolvedPropertySetter {
     pub callable: LibraryCallable,
     pub visibility: crate::types::Visibility,
     pub source_member: Option<SourceMember>,
+    pub platform_access_diagnostic: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4137,12 +4138,16 @@ impl<'a> SymbolResolver<'a> {
             .iter()
             .filter(|function| function.kind == FnKind::Member)
             .filter(|function| {
-                self.lib.callable_visible_in_context(
-                    context,
-                    function.callable.owner,
-                    &function.callable.name,
-                    &function.callable.descriptor,
-                    function.visibility,
+                !matches!(
+                    self.lib.platform_access(
+                        context,
+                        crate::libraries::PlatformAccessCandidate::Callable {
+                            source_name: name,
+                            callable: &function.callable,
+                            visibility: function.visibility,
+                        },
+                    ),
+                    crate::libraries::PlatformAccessDecision::Denied(_)
                 )
             })
             .cloned()
@@ -4152,12 +4157,16 @@ impl<'a> SymbolResolver<'a> {
             .iter()
             .filter(|property| property.kind == PropKind::Member)
             .filter(|property| {
-                self.lib.callable_visible_in_context(
-                    context,
-                    property.owner,
-                    &property.getter.name,
-                    &property.getter.descriptor,
-                    property.visibility,
+                !matches!(
+                    self.lib.platform_access(
+                        context,
+                        crate::libraries::PlatformAccessCandidate::Callable {
+                            source_name: &property.name,
+                            callable: &property.getter,
+                            visibility: property.visibility,
+                        },
+                    ),
+                    crate::libraries::PlatformAccessDecision::Denied(_)
                 )
             })
             .cloned()
@@ -4233,6 +4242,7 @@ impl<'a> SymbolResolver<'a> {
             ExtCtx {
                 fn_scope: self.fn_scope,
                 source: &self.src,
+                access_context: self.access_context(),
             },
             callables.functions(),
             IndexedConvention::Ordinary,
@@ -4256,6 +4266,7 @@ impl<'a> SymbolResolver<'a> {
             ExtCtx {
                 fn_scope: self.fn_scope,
                 source: &self.src,
+                access_context: self.access_context(),
             },
             callables.functions(),
             IndexedConvention::Get,
@@ -4338,6 +4349,7 @@ impl<'a> SymbolResolver<'a> {
             ExtCtx {
                 fn_scope: self.fn_scope,
                 source: &self.src,
+                access_context: self.access_context(),
             },
             callables.functions(),
             IndexedConvention::Set,
@@ -4442,6 +4454,7 @@ impl<'a> SymbolResolver<'a> {
             ExtCtx {
                 fn_scope: self.fn_scope,
                 source: &self.src,
+                access_context: self.access_context(),
             },
             callables.functions(),
             IndexedConvention::Ordinary,
@@ -4617,6 +4630,167 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
+    fn platform_denial(
+        &self,
+        candidate: crate::libraries::PlatformAccessCandidate<'_>,
+    ) -> Option<String> {
+        match self.lib.platform_access(self.access_context(), candidate) {
+            crate::libraries::PlatformAccessDecision::Denied(diagnostic) => Some(diagnostic),
+            crate::libraries::PlatformAccessDecision::Core
+            | crate::libraries::PlatformAccessDecision::Allowed => None,
+        }
+    }
+
+    /// Target-owned access failure for an unresolved instance member. Candidate enumeration stays
+    /// in the common hierarchy; the platform sees each exact normalized declaration and returns the
+    /// diagnostic without exposing its access categories to core.
+    pub(crate) fn platform_member_access_diagnostic(
+        &self,
+        receiver: Ty,
+        name: &str,
+    ) -> Option<String> {
+        let callables = members_in_hierarchy(&self.src, receiver, name);
+        let mut denied = None;
+        for function in callables
+            .functions()
+            .iter()
+            .filter(|function| function.kind == FnKind::Member)
+        {
+            let candidate = crate::libraries::PlatformAccessCandidate::Callable {
+                source_name: name,
+                callable: &function.callable,
+                visibility: function.visibility,
+            };
+            if let Some(diagnostic) = self.platform_denial(candidate) {
+                denied.get_or_insert(diagnostic);
+            } else if matches!(
+                function.visibility,
+                crate::types::Visibility::Public | crate::types::Visibility::Protected
+            ) {
+                return None;
+            }
+        }
+        for property in callables
+            .properties()
+            .iter()
+            .filter(|property| property.kind == PropKind::Member)
+        {
+            let candidate = crate::libraries::PlatformAccessCandidate::Callable {
+                source_name: &property.name,
+                callable: &property.getter,
+                visibility: property.visibility,
+            };
+            if let Some(diagnostic) = self.platform_denial(candidate) {
+                denied.get_or_insert(diagnostic);
+            } else if matches!(
+                property.visibility,
+                crate::types::Visibility::Public | crate::types::Visibility::Protected
+            ) {
+                return None;
+            }
+        }
+
+        let mut queue = std::collections::VecDeque::from([receiver]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = queue.pop_front() {
+            let Some(owner) = current.kotlin_class_internal() else {
+                continue;
+            };
+            if !seen.insert(owner) {
+                continue;
+            }
+            let Some(classifier) = self.src.classifier(owner) else {
+                continue;
+            };
+            if let Some(field) = classifier
+                .fields
+                .iter()
+                .find(|field| field.name == name && !field.is_static)
+            {
+                let candidate = crate::libraries::PlatformAccessCandidate::Property {
+                    owner,
+                    source_name: &field.name,
+                    ty: field.ty,
+                    visibility: field.visibility,
+                };
+                if let Some(diagnostic) = self.platform_denial(candidate) {
+                    denied.get_or_insert(diagnostic);
+                } else if matches!(
+                    field.visibility,
+                    crate::types::Visibility::Public | crate::types::Visibility::Protected
+                ) {
+                    return None;
+                }
+                break;
+            }
+            queue.extend(direct_supertypes_from_classifier(&classifier, current));
+        }
+        denied
+    }
+
+    pub(crate) fn platform_classifier_access_diagnostic(
+        &self,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<String> {
+        let mut denied = None;
+        let mut queue = std::collections::VecDeque::from([Ty::obj_name(internal)]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = queue.pop_front() {
+            let Some(owner) = current.kotlin_class_internal() else {
+                continue;
+            };
+            if !seen.insert(owner) {
+                continue;
+            }
+            let Some(classifier) = self.src.classifier(owner) else {
+                continue;
+            };
+            for member in classifier
+                .classifier_callables(owner)
+                .into_iter()
+                .filter(|member| member.name == name)
+            {
+                let declaration_owner = member.owner.unwrap_or(owner);
+                let candidate = crate::libraries::PlatformAccessCandidate::Member {
+                    owner: declaration_owner,
+                    source_name: name,
+                    member: &member,
+                };
+                if let Some(diagnostic) = self.platform_denial(candidate) {
+                    denied.get_or_insert(diagnostic);
+                } else if matches!(
+                    member.visibility,
+                    crate::types::Visibility::Public | crate::types::Visibility::Protected
+                ) {
+                    return None;
+                }
+            }
+            if let Some(field) = classifier
+                .fields
+                .iter()
+                .find(|field| field.name == name && field.is_static)
+            {
+                let candidate = crate::libraries::PlatformAccessCandidate::Property {
+                    owner,
+                    source_name: &field.name,
+                    ty: field.ty,
+                    visibility: field.visibility,
+                };
+                if let Some(diagnostic) = self.platform_denial(candidate) {
+                    denied.get_or_insert(diagnostic);
+                } else if matches!(
+                    field.visibility,
+                    crate::types::Visibility::Public | crate::types::Visibility::Protected
+                ) {
+                    return None;
+                }
+            }
+            queue.extend(direct_supertypes_from_classifier(&classifier, current));
+        }
+        denied
+    }
+
     /// The declared type of the member property `name` on `recv` — the property itself, with no accessor
     /// in the answer. A property is a declaration, not a method: whether the target realizes reading it
     /// through a method at all is not a resolution question, so a read must not be made to depend on
@@ -4653,12 +4827,16 @@ impl<'a> SymbolResolver<'a> {
                 .filter(|property| property.kind == PropKind::Member && property.receiver_rank == 0)
                 .min_by_key(|property| property.receiver_rank);
             let property_visible = local_property.as_ref().is_some_and(|property| {
-                self.lib.callable_visible_in_context(
-                    context,
-                    property.owner,
-                    &property.getter.name,
-                    &property.getter.descriptor,
-                    property.visibility,
+                !matches!(
+                    self.lib.platform_access(
+                        context,
+                        crate::libraries::PlatformAccessCandidate::Callable {
+                            source_name: &property.name,
+                            callable: &property.getter,
+                            visibility: property.visibility,
+                        },
+                    ),
+                    crate::libraries::PlatformAccessDecision::Denied(_)
                 )
             });
             if property_visible {
@@ -4720,10 +4898,21 @@ impl<'a> SymbolResolver<'a> {
                 if field.is_static {
                     return None;
                 }
-                let effective_visibility = self
-                    .lib
-                    .field_visible_as_property(context, internal, &field.name, field.visibility)
-                    .unwrap_or(field.visibility);
+                let effective_visibility = match self.lib.platform_access(
+                    context,
+                    crate::libraries::PlatformAccessCandidate::Property {
+                        owner: internal,
+                        source_name: &field.name,
+                        ty: field.ty,
+                        visibility: field.visibility,
+                    },
+                ) {
+                    crate::libraries::PlatformAccessDecision::Denied(_) => return None,
+                    crate::libraries::PlatformAccessDecision::Allowed => {
+                        crate::types::Visibility::Public
+                    }
+                    crate::libraries::PlatformAccessDecision::Core => field.visibility,
+                };
                 if effective_visibility == crate::types::Visibility::Private {
                     return None;
                 }
@@ -4797,7 +4986,15 @@ impl<'a> SymbolResolver<'a> {
                 .copied()
                 .map(CallArgKind::Typed)
                 .collect::<Vec<_>>();
-            return select_companion_member(self.lib, &self.src, internal, name, &arguments, &[]);
+            return select_companion_member(
+                self.lib,
+                &self.src,
+                self.access_context(),
+                internal,
+                name,
+                &arguments,
+                &[],
+            );
         }
 
         let classifier = self.src.classifier(internal)?;
@@ -4807,12 +5004,16 @@ impl<'a> SymbolResolver<'a> {
             .into_iter()
             .filter(|member| member.name == name)
             .filter(|candidate| {
-                self.lib.callable_visible_in_context(
-                    context,
-                    candidate.owner.unwrap_or(internal),
-                    &candidate.name,
-                    &candidate.descriptor,
-                    candidate.visibility,
+                !matches!(
+                    self.lib.platform_access(
+                        context,
+                        crate::libraries::PlatformAccessCandidate::Member {
+                            owner: candidate.owner.unwrap_or(internal),
+                            source_name: name,
+                            member: candidate,
+                        },
+                    ),
+                    crate::libraries::PlatformAccessDecision::Denied(_)
                 )
             });
         let selected = candidates.next()?;
@@ -4874,12 +5075,16 @@ impl<'a> SymbolResolver<'a> {
                     .into_iter()
                     .filter(|member| member.name == name)
                     .filter(|candidate| {
-                        self.lib.callable_visible_in_context(
-                            context,
-                            candidate.owner.unwrap_or(internal),
-                            &candidate.name,
-                            &candidate.descriptor,
-                            candidate.visibility,
+                        !matches!(
+                            self.lib.platform_access(
+                                context,
+                                crate::libraries::PlatformAccessCandidate::Member {
+                                    owner: candidate.owner.unwrap_or(internal),
+                                    source_name: name,
+                                    member: candidate,
+                                },
+                            ),
+                            crate::libraries::PlatformAccessDecision::Denied(_)
                         )
                     })
                     .map(|member| FunctionInfo::classifier_member(FnKind::Member, internal, member))
@@ -4947,6 +5152,7 @@ impl<'a> SymbolResolver<'a> {
                     ExtCtx {
                         fn_scope: self.fn_scope,
                         source: &self.src,
+                        access_context: self.access_context(),
                     },
                     Some(callables.functions()),
                     &mut call_ambiguous,
@@ -4966,9 +5172,13 @@ impl<'a> SymbolResolver<'a> {
                 let read = member_property
                     .as_ref()
                     .and_then(|property| member_property_read_from_declaration(ty, property));
-                let write = member_property
-                    .as_ref()
-                    .and_then(member_property_write_from_declaration);
+                let write = member_property.as_ref().and_then(|property| {
+                    member_property_write_from_declaration(
+                        self.lib,
+                        self.access_context(),
+                        property,
+                    )
+                });
                 let method_ref = member_dispatch
                     .then(|| select_instance_reference_from_functions(ty, callables.functions()))
                     .flatten();
@@ -5150,19 +5360,38 @@ impl<'a> SymbolResolver<'a> {
                     // physical default invocation required by that application. This is one callable
                     // selection result: consumers never retry a rejected direct constructor as a
                     // separate name-resolution fallback.
-                    select_constructor_call(self.lib, &self.src, internal, args)
-                        .map(Symbol::Constructor)
+                    select_constructor_call(
+                        self.lib,
+                        &self.src,
+                        self.access_context(),
+                        internal,
+                        args,
+                    )
+                    .map(Symbol::Constructor)
                 } else {
                     // `Type.name(args)` — an object/companion instance member, else a static/companion
                     // member. The resolver discovers which.
-                    select_instance_member_name(self.lib, &self.src, internal, name, args)
-                        .map(Symbol::Instance)
-                        .or_else(|| {
-                            select_companion_member(
-                                self.lib, &self.src, internal, name, args, type_args,
-                            )
-                            .map(Symbol::Companion)
-                        })
+                    select_instance_member_name(
+                        self.lib,
+                        &self.src,
+                        self.access_context(),
+                        internal,
+                        name,
+                        args,
+                    )
+                    .map(Symbol::Instance)
+                    .or_else(|| {
+                        select_companion_member(
+                            self.lib,
+                            &self.src,
+                            self.access_context(),
+                            internal,
+                            name,
+                            args,
+                            type_args,
+                        )
+                        .map(Symbol::Companion)
+                    })
                 }
             }
         }
@@ -5178,7 +5407,8 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         args: &[CallArgKind],
     ) -> Option<LibraryMember> {
-        let selected = select_instance_info(self.lib, &self.src, recv, name, args)?;
+        let selected =
+            select_instance_info(self.lib, &self.src, self.access_context(), recv, name, args)?;
         if selected.flags.is_abstract {
             return None;
         }
@@ -6127,11 +6357,12 @@ pub enum SelectedConstructorCall {
 fn select_constructor_call(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
+    context: crate::libraries::AccessContext,
     internal: TypeName,
     args: &[CallArgKind],
 ) -> Option<SelectedConstructorCall> {
     let classifier = src.classifier(internal)?;
-    select_constructor_call_from_type(lib, src, internal, &classifier, args)
+    select_constructor_call_from_type(lib, src, context, internal, &classifier, args)
 }
 
 /// Select one semantic constructor overload, then couple that declaration to its opaque platform
@@ -6140,6 +6371,7 @@ fn select_constructor_call(
 pub(crate) fn select_constructor_call_from_type(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
+    context: crate::libraries::AccessContext,
     internal: TypeName,
     classifier: &crate::libraries::LibraryType,
     args: &[CallArgKind],
@@ -6157,7 +6389,8 @@ pub(crate) fn select_constructor_call_from_type(
             ))
             .collect::<Vec<_>>()
     );
-    let declaration = select_constructor_declaration_from_type(lib, src, classifier, args)?;
+    let declaration =
+        select_constructor_declaration_from_type(lib, src, context, internal, classifier, args)?;
     let omitted = args.len() < declaration.params.len();
     if omitted || (declaration.descriptor.is_empty() && declaration.default_realization.is_some()) {
         let realization = declaration.default_realization.as_deref()?;
@@ -6182,12 +6415,27 @@ pub(crate) fn select_constructor_call_from_type(
 pub(crate) fn select_constructor_declaration_from_type(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
+    context: crate::libraries::AccessContext,
+    internal: TypeName,
     classifier: &crate::libraries::LibraryType,
     args: &[CallArgKind],
 ) -> Option<LibraryMember> {
     let candidates = classifier
         .constructors
         .iter()
+        .filter(|constructor| {
+            !matches!(
+                lib.platform_access(
+                    context,
+                    crate::libraries::PlatformAccessCandidate::Member {
+                        owner: constructor.owner.unwrap_or(internal),
+                        source_name: "<init>",
+                        member: constructor,
+                    },
+                ),
+                crate::libraries::PlatformAccessDecision::Denied(_)
+            )
+        })
         .map(|constructor| {
             let mut declaration = constructor.clone();
             declaration.params = specialized_constructor_params(constructor, args);
@@ -6202,13 +6450,30 @@ pub(crate) fn select_constructor_declaration_from_type(
 fn select_companion_member(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
+    context: crate::libraries::AccessContext,
     internal: TypeName,
     name: &str,
     args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Option<LibraryMember> {
     let t = src.classifier(internal)?;
-    let candidates = t.classifier_callables(internal);
+    let candidates = t
+        .classifier_callables(internal)
+        .into_iter()
+        .filter(|member| {
+            !matches!(
+                lib.platform_access(
+                    context,
+                    crate::libraries::PlatformAccessCandidate::Member {
+                        owner: member.owner.unwrap_or(internal),
+                        source_name: name,
+                        member,
+                    },
+                ),
+                crate::libraries::PlatformAccessDecision::Denied(_)
+            )
+        })
+        .collect::<Vec<_>>();
     best_callable_member_overload(lib, src, candidates.iter(), name, args, type_args).map(
         |selected| {
             let params = specialized_member_params(selected, args, type_args);
@@ -6241,11 +6506,12 @@ fn select_companion_member(
 fn select_instance_member_name(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
+    context: crate::libraries::AccessContext,
     internal: TypeName,
     name: &str,
     args: &[CallArgKind],
 ) -> Option<LibraryMember> {
-    select_instance_member_ty(lib, src, Ty::obj_name(internal), name, args)
+    select_instance_member_ty(lib, src, context, Ty::obj_name(internal), name, args)
 }
 
 /// [`select_instance_member_name`] against an APPLIED receiver type — the form that keeps type arguments, so a
@@ -6253,11 +6519,12 @@ fn select_instance_member_name(
 fn select_instance_member_ty(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
+    context: crate::libraries::AccessContext,
     recv: Ty,
     name: &str,
     args: &[CallArgKind],
 ) -> Option<LibraryMember> {
-    select_instance_info(lib, src, recv, name, args).map(|o| {
+    select_instance_info(lib, src, context, recv, name, args).map(|o| {
         let ret = o.ret.apply(o.callable.ret);
         o.member_with_return(ret)
     })
@@ -6585,19 +6852,35 @@ fn member_property_read_from_declaration(
 }
 
 fn member_property_write_from_declaration(
+    platform: &dyn SemanticPlatform,
+    context: crate::libraries::AccessContext,
     declaration: &PropertyInfo,
 ) -> Option<ResolvedPropertySetter> {
     let setter = declaration.setter.clone()?;
+    let platform_access_diagnostic = match platform.platform_access(
+        context,
+        crate::libraries::PlatformAccessCandidate::Callable {
+            source_name: &declaration.name,
+            callable: &setter,
+            visibility: declaration.setter_visibility,
+        },
+    ) {
+        crate::libraries::PlatformAccessDecision::Denied(diagnostic) => Some(diagnostic),
+        crate::libraries::PlatformAccessDecision::Core
+        | crate::libraries::PlatformAccessDecision::Allowed => None,
+    };
     (setter.params.len() == 1 && setter.ret == Ty::Unit).then_some(ResolvedPropertySetter {
         callable: setter,
         visibility: declaration.setter_visibility,
         source_member: declaration.source_member,
+        platform_access_diagnostic,
     })
 }
 
 fn select_instance_info(
     lib: &dyn SemanticPlatform,
     source: &dyn SymbolSource,
+    context: crate::libraries::AccessContext,
     recv: Ty,
     name: &str,
     args: &[CallArgKind],
@@ -6612,6 +6895,7 @@ fn select_instance_info(
         ExtCtx {
             fn_scope: None,
             source,
+            access_context: context,
         },
     )
 }
@@ -6961,13 +7245,14 @@ fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<FunctionScopeRef<'_>>) -> bool
     }
 }
 
-/// Extension-selection context for [`select_overload`]: whether non-public `@InlineOnly` candidates are
-/// admitted (the bytecode inliner), and the packages in scope for an extension (`None` = unscoped). Both
-/// only affect EXTENSION selection — a member is always visible on its type.
+/// Selection context for [`select_overload`]: the packages in scope for extensions and the current
+/// access site supplied to target-owned member policy. Extension scope never changes member lookup;
+/// target policy can still reject a member declaration before overload ranking.
 #[derive(Clone, Copy)]
 struct ExtCtx<'a> {
     fn_scope: Option<FunctionScopeRef<'a>>,
     source: &'a dyn SymbolSource,
+    access_context: crate::libraries::AccessContext,
 }
 
 #[derive(Clone, Debug)]
@@ -7322,6 +7607,19 @@ fn select_overload_tracking_with_functions(
                 .iter()
                 .copied()
                 .filter(|o| o.kind == FnKind::Member)
+                .filter(|o| {
+                    !matches!(
+                        lib.platform_access(
+                            ext.access_context,
+                            crate::libraries::PlatformAccessCandidate::Callable {
+                                source_name: name,
+                                callable: &o.callable,
+                                visibility: o.visibility,
+                            },
+                        ),
+                        crate::libraries::PlatformAccessDecision::Denied(_)
+                    )
+                })
                 .map(|o| (0, o.receiver_rank, recv, o)),
         );
     }
@@ -8088,6 +8386,7 @@ mod tests {
 
     struct EmptySource;
     impl SymbolSource for EmptySource {}
+    impl crate::libraries::PlatformAccessControl for EmptySource {}
     impl SemanticPlatform for EmptySource {}
     const EMPTY_SOURCE: EmptySource = EmptySource;
 
@@ -8824,6 +9123,8 @@ mod tests {
         info: FunctionInfo,
     }
 
+    impl crate::libraries::PlatformAccessControl for FakeSource {}
+
     impl SymbolSource for FakeSource {
         fn symbols(
             &self,
@@ -8910,6 +9211,8 @@ mod tests {
         counted_name: &'static str,
         queries: std::cell::Cell<usize>,
     }
+
+    impl crate::libraries::PlatformAccessControl for CountingSource {}
 
     impl SymbolSource for CountingSource {
         fn symbols(
@@ -9047,6 +9350,10 @@ mod tests {
             select_constructor_call_from_type(
                 &source,
                 &source,
+                crate::libraries::AccessContext {
+                    package: TypeName::ROOT,
+                    file: 0,
+                },
                 crate::types::type_name("demo/Category"),
                 &classifier,
                 &[CallArgKind::Typed(Ty::Int)],
@@ -9086,6 +9393,11 @@ mod tests {
         let selected = select_constructor_declaration_from_type(
             &source,
             &source,
+            crate::libraries::AccessContext {
+                package: TypeName::ROOT,
+                file: 0,
+            },
+            crate::types::type_name("demo/Category"),
             &classifier,
             &[CallArgKind::IntegerLiteral {
                 ty: Ty::Int,
@@ -9163,6 +9475,11 @@ mod tests {
         let selected = select_constructor_declaration_from_type(
             &source,
             &source,
+            crate::libraries::AccessContext {
+                package: TypeName::ROOT,
+                file: 0,
+            },
+            crate::types::type_name("demo/Category"),
             &classifier,
             &[CallArgKind::Typed(Ty::array(Ty::String))],
         )
@@ -9734,6 +10051,7 @@ mod tests {
             }
         }
 
+        impl crate::libraries::PlatformAccessControl for DefaultSource {}
         impl crate::libraries::SemanticPlatform for DefaultSource {}
 
         let bridge = top_level_default_uint_info();
@@ -9780,6 +10098,7 @@ mod tests {
             }
         }
 
+        impl crate::libraries::PlatformAccessControl for DefaultSource {}
         impl crate::libraries::SemanticPlatform for DefaultSource {}
 
         let any = Ty::obj("kotlin/Any");

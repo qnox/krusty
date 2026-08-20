@@ -38655,11 +38655,10 @@ impl<'a> Checker<'a> {
                     let ty = self.record_external_static_field(Some(e), field);
                     return self.set(e, ty);
                 }
-                if let Some(diagnostic) = self.syms.libraries.unresolved_member_diagnostic(
-                    self.access_context(),
-                    Ty::obj_name(owner),
-                    &name,
-                ) {
+                if let Some(diagnostic) = self
+                    .resolver()
+                    .platform_classifier_access_diagnostic(owner, &name)
+                {
                     self.diags.error(self.span(e), diagnostic);
                     return self.set(e, Ty::Error);
                 }
@@ -39281,6 +39280,37 @@ impl<'a> Checker<'a> {
         if classifier.is_object() || classifier.is_annotation() {
             return None;
         }
+        let classifier_is_accessible = self
+            .resolver()
+            .inaccessible_classifier_access(internal)
+            .is_none();
+        let mut classifier = (*classifier).clone();
+        let mut platform_denial = None;
+        classifier.constructors.retain(|constructor| {
+            match self.syms.libraries.platform_access(
+                self.access_context(),
+                crate::libraries::PlatformAccessCandidate::Member {
+                    owner: constructor.owner.unwrap_or(internal),
+                    source_name: &internal.segment(),
+                    member: constructor,
+                },
+            ) {
+                crate::libraries::PlatformAccessDecision::Denied(diagnostic) => {
+                    platform_denial.get_or_insert(diagnostic);
+                    false
+                }
+                crate::libraries::PlatformAccessDecision::Allowed => true,
+                crate::libraries::PlatformAccessDecision::Core => {
+                    self.member_accessible(constructor.visibility, internal)
+                }
+            }
+        });
+        if classifier_is_accessible && classifier.constructors.is_empty() {
+            if let Some(diagnostic) = platform_denial {
+                self.diags.error(self.span(expression), diagnostic);
+                return Some(Ty::Error);
+            }
+        }
         let outer = classifier.outer_instance.map(Ty::obj_name);
         let outer_is_bound = !matches!(outer_binding, ConstructorReferenceOuter::Unbound);
         let expected_function = match expected {
@@ -39309,6 +39339,8 @@ impl<'a> Checker<'a> {
             let direct = crate::symbol_resolver::select_constructor_declaration_from_type(
                 &*self.syms.libraries,
                 &source,
+                self.access_context(),
+                internal,
                 &classifier,
                 &arguments,
             );
@@ -43214,10 +43246,32 @@ impl<'a> Checker<'a> {
         let mut members = Vec::new();
         let mut candidates = Vec::new();
         let mut mapping_failures = Vec::new();
+        let mut platform_denial = None;
+        let classifier_is_accessible = self
+            .resolver()
+            .inaccessible_classifier_access(internal)
+            .is_none();
 
         for declaration in &classifier.constructors {
-            if !self.member_accessible(declaration.visibility, internal) {
-                continue;
+            match self.syms.libraries.platform_access(
+                self.access_context(),
+                crate::libraries::PlatformAccessCandidate::Member {
+                    owner: declaration.owner.unwrap_or(internal),
+                    source_name: &internal.segment(),
+                    member: declaration,
+                },
+            ) {
+                crate::libraries::PlatformAccessDecision::Denied(diagnostic) => {
+                    platform_denial.get_or_insert(diagnostic);
+                    continue;
+                }
+                crate::libraries::PlatformAccessDecision::Core
+                    if !self.member_accessible(declaration.visibility, internal) =>
+                {
+                    continue;
+                }
+                crate::libraries::PlatformAccessDecision::Core
+                | crate::libraries::PlatformAccessDecision::Allowed => {}
             }
             let mut member = declaration.clone();
             let parameter_count = member.params.len();
@@ -43306,6 +43360,12 @@ impl<'a> Checker<'a> {
                     resolved,
                 } => (candidate_index, *resolved),
                 SourceConstructorSelection::NoMatch | SourceConstructorSelection::Ambiguous => {
+                    if classifier_is_accessible && candidates.is_empty() {
+                        if let Some(diagnostic) = platform_denial {
+                            self.diags.error(self.span(call), diagnostic);
+                            return Ok(None);
+                        }
+                    }
                     if candidates.is_empty() {
                         if let Some((failure, ())) =
                             take_unanimous_mapping_error(&mut mapping_failures)
@@ -45119,11 +45179,10 @@ impl<'a> Checker<'a> {
             "name={name} receiver={rt:?} expression={mexpr:?} span={diagnostic_span:?}",
         );
         if !rt.is_nullable() {
-            if let Some(diagnostic) = self.syms.libraries.unresolved_member_diagnostic(
-                self.access_context(),
-                rt.non_null(),
-                name,
-            ) {
+            if let Some(diagnostic) = self
+                .resolver()
+                .platform_member_access_diagnostic(rt.non_null(), name)
+            {
                 self.diags.error(diagnostic_span, diagnostic);
                 return Ty::Error;
             }
@@ -48262,6 +48321,7 @@ impl<'a> Checker<'a> {
                             .as_deref()
                             .is_none_or(|t| internal.qualifier_matches(t))
                     };
+                    let mut platform_denial = None;
                     if let Some(internal) = dispatch_receiver.ty.obj_internal() {
                         let declared = self.syms.class_by_type_name(internal);
                         let declared_super = declared.and_then(|c| c.super_internal);
@@ -48294,7 +48354,13 @@ impl<'a> Checker<'a> {
                             // semantic signature and its opaque physical realization, so there is no
                             // origin retry and no later owner reconstruction.
                             if let Some(m) = applied_sup.and_then(|recv| {
-                                self.select_super_instance(recv, &name, &arg_kinds)
+                                let selected = self.select_super_instance(recv, &name, &arg_kinds);
+                                if selected.is_none() {
+                                    platform_denial = self
+                                        .resolver()
+                                        .platform_member_access_diagnostic(recv, &name);
+                                }
+                                selected
                             }) {
                                 let ret = m.ret;
                                 if let Some(target) = ResolvedSuperCall::selected(
@@ -48343,8 +48409,11 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    self.diags
-                        .error(span, format!("krusty: unresolved super method '{name}'"));
+                    self.diags.error(
+                        span,
+                        platform_denial
+                            .unwrap_or_else(|| format!("krusty: unresolved super method '{name}'")),
+                    );
                     return Ty::Error;
                 }
                 // Resolve the receiver prefix once, from left to right. A value root stays a value;
@@ -48415,12 +48484,10 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                     if self.resolved_type_name(classifier).is_some() {
-                        let receiver_ty = Ty::obj_name(classifier);
-                        if let Some(diagnostic) = self.syms.libraries.unresolved_member_diagnostic(
-                            self.access_context(),
-                            receiver_ty,
-                            &name,
-                        ) {
+                        if let Some(diagnostic) = self
+                            .resolver()
+                            .platform_classifier_access_diagnostic(classifier, &name)
+                        {
                             self.diags.error(span, diagnostic);
                             return Ty::Error;
                         }
@@ -49126,11 +49193,10 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 if inapplicable_candidates.is_empty() && rt != Ty::Error && !rt.is_nullable() {
-                    if let Some(diagnostic) = self.syms.libraries.unresolved_member_diagnostic(
-                        self.access_context(),
-                        rt.non_null(),
-                        &name,
-                    ) {
+                    if let Some(diagnostic) = self
+                        .resolver()
+                        .platform_member_access_diagnostic(rt.non_null(), &name)
+                    {
                         self.diags
                             .error(self.call_callee_name_span(call), diagnostic);
                         return Ty::Error;
@@ -52772,7 +52838,10 @@ impl<'a> Checker<'a> {
                                 self.mark_extension_receiver_stmt_span_used(s, span);
                             }
                             if let Some(setter) = resolution.setter.as_ref() {
-                                if setter.visibility != Visibility::Public {
+                                if let Some(diagnostic) = setter.platform_access_diagnostic.as_ref()
+                                {
+                                    self.diags.error(target_span, diagnostic.clone());
+                                } else if setter.visibility != Visibility::Public {
                                     self.reject_if_inaccessible(
                                         setter.visibility,
                                         &name,
@@ -53109,11 +53178,15 @@ impl<'a> Checker<'a> {
             return;
         }
         if let Some(setter) = property_setter {
+            if let Some(diagnostic) = setter.platform_access_diagnostic.as_ref() {
+                self.diags.error(target_span, diagnostic.clone());
+            }
+            let platform_denied = setter.platform_access_diagnostic.is_some();
             let callable = setter.callable;
             let pty = callable.params.first().copied().unwrap_or(Ty::Error);
             self.expect_assignable(pty, vt, self.value_diagnostic_span(value, vt), "assignment");
             let owner = callable.owner;
-            if setter.visibility != Visibility::Public {
+            if !platform_denied && setter.visibility != Visibility::Public {
                 self.reject_if_inaccessible(setter.visibility, &name, owner, target_span);
             }
             self.stmt_lowers.insert(
@@ -56493,6 +56566,8 @@ fun box(): String {
     }
 
     struct FakeMemberPlatform;
+
+    impl crate::libraries::PlatformAccessControl for FakeMemberPlatform {}
 
     impl FakeMemberPlatform {
         fn callable_symbols(&self, name: &str) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {

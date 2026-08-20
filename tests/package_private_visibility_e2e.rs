@@ -66,6 +66,42 @@ fn mixed_diagnostics(java: &[(&str, &str)], kotlin: &str) -> Option<Vec<String>>
     Some(diagnostics)
 }
 
+/// Run the production prefix-analysis path, which wraps the JVM provider in `DependencyPlatform`
+/// when support sources follow the checked prefix.
+fn mixed_prefix_diagnostics(
+    java: &[(&str, &str)],
+    kotlin: &str,
+    support: &str,
+) -> Option<Vec<String>> {
+    let (javadir, _) = compile_java(java)?;
+    let jdk = common::jdk_modules();
+    let mut classpath = common::classpath_jars_for(kotlin);
+    classpath.push(javadir.clone());
+    let cp = common::cached_classpath(&classpath, Some(jdk.as_path()));
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let inputs = [
+        krusty::frontend::SourceInput::kotlin(kotlin),
+        krusty::frontend::SourceInput::kotlin(support),
+    ];
+    let mut diagnostics = krusty::diag::DiagSink::new();
+    let _ = krusty::frontend::analyze_source_set_prefix_with_features(
+        &inputs,
+        1,
+        1,
+        platform,
+        &krusty::features::LangFeatures::new(),
+        &mut diagnostics,
+    );
+    cleanup(&javadir);
+    Some(
+        diagnostics
+            .diags
+            .into_iter()
+            .map(|diagnostic| diagnostic.msg)
+            .collect(),
+    )
+}
+
 /// Write a set of emitted class files into a directory tree, preserving package subdirectories.
 fn write_classes_to_dir(dir: &Path, classes: &[(String, Vec<u8>)]) {
     for (name, bytes) in classes {
@@ -178,6 +214,44 @@ fn cross_package_static_constant_rejected() {
     assert_package_private_rejection(&diagnostics, "TAG");
 }
 
+#[test]
+fn cross_package_inherited_static_constant_rejected() {
+    let diagnostics = mixed_diagnostics(
+        &[
+            (
+                "p/Base.java",
+                "package p; public class Base { static final String TAG = \"bad\"; }",
+            ),
+            (
+                "p/Child.java",
+                "package p; public class Child extends Base {}",
+            ),
+        ],
+        "package q\nfun bad(): String = p.Child.TAG\n",
+    )
+    .expect("javac");
+    assert_package_private_rejection(&diagnostics, "TAG");
+}
+
+#[test]
+fn cross_package_inherited_static_function_rejected() {
+    let diagnostics = mixed_diagnostics(
+        &[
+            (
+                "p/Base.java",
+                "package p; public class Base { static String secret() { return \"bad\"; } }",
+            ),
+            (
+                "p/Child.java",
+                "package p; public class Child extends Base {}",
+            ),
+        ],
+        "package q\nfun bad(): String = p.Child.secret()\n",
+    )
+    .expect("javac");
+    assert_package_private_rejection(&diagnostics, "secret");
+}
+
 // ---------------------------------------------------------------------------
 // Instance functions and fields-as-properties
 // ---------------------------------------------------------------------------
@@ -247,6 +321,26 @@ fn same_package_package_private_constructor() {
         )],
         "package p\nfun box(): String = Gate().open()\n",
     );
+}
+
+#[test]
+fn cross_package_package_private_constructor_rejected() {
+    let diagnostics = mixed_diagnostics(
+        &[("p/Gate.java", "package p; public class Gate { Gate() {} }")],
+        "package q\nfun bad(): Any = p.Gate()\n",
+    )
+    .expect("javac");
+    assert_package_private_rejection(&diagnostics, "Gate");
+}
+
+#[test]
+fn cross_package_package_private_constructor_reference_rejected() {
+    let diagnostics = mixed_diagnostics(
+        &[("p/Gate.java", "package p; public class Gate { Gate() {} }")],
+        "package q\nimport p.Gate\nval bad = ::Gate\n",
+    )
+    .expect("javac");
+    assert_package_private_rejection(&diagnostics, "Gate");
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +428,57 @@ fn cross_package_inherited_instance_method_rejected() {
     )
     .expect("javac");
     assert_package_private_rejection(&diagnostics, "baseValue");
+}
+
+#[test]
+fn cross_package_explicit_super_package_private_method_rejected() {
+    let diagnostics = mixed_diagnostics(
+        &[(
+            "p/Base.java",
+            "package p; public class Base { public Base() {} String secret() { return \"bad\"; } }",
+        )],
+        "package q\nclass Derived : p.Base() { fun bad(): String = super.secret() }\n",
+    )
+    .expect("javac");
+    assert_package_private_rejection(&diagnostics, "secret");
+}
+
+#[test]
+fn cross_package_package_private_method_rejected_through_dependency_wrapper() {
+    let diagnostics = mixed_prefix_diagnostics(
+        &[(
+            "p/Helper.java",
+            "package p; public class Helper { String secret() { return \"bad\"; } }",
+        )],
+        "package q\nfun bad(h: p.Helper): String = h.secret()\n",
+        "package support\nclass Marker\n",
+    )
+    .expect("javac");
+    assert_package_private_rejection(&diagnostics, "secret");
+}
+
+#[test]
+fn cross_package_package_private_java_setter_rejected() {
+    let diagnostics = mixed_diagnostics(
+        &[(
+            "p/Bean.java",
+            "package p; public class Bean { private String value; public String getValue() { return value; } void setValue(String value) { this.value = value; } }",
+        )],
+        "package q\nfun bad(bean: p.Bean) { bean.value = \"bad\" }\n",
+    )
+    .expect("javac");
+    assert_package_private_rejection(&diagnostics, "value");
+}
+
+#[test]
+fn same_package_package_private_java_setter() {
+    run_mixed(
+        &[(
+            "p/Bean.java",
+            "package p; public class Bean { private String value = \"bad\"; public String getValue() { return value; } void setValue(String value) { this.value = value; } }",
+        )],
+        "package p\nfun box(): String { val bean = Bean(); bean.value = \"OK\"; return bean.value }\n",
+    );
 }
 
 #[test]

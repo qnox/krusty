@@ -813,24 +813,6 @@ fn same_precedence_extension_properties_are_ambiguous() {
 }
 
 #[test]
-fn debug_value_case() {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let source = "
-        class Token(val value: String)
-        class Container(val value: Int) {
-            val Token.marker: Int
-                get() = buildString {
-                    append(value.length)
-                }.length
-        }
-    ";
-    let diagnostics =
-        common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
-    println!("DEBUG_DIAGS: {diagnostics:?}");
-}
-
-#[test]
 fn member_extension_classpath_members() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();

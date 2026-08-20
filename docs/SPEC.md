@@ -2938,33 +2938,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (value-facet and static-namespace) instead of dropping it. Test:
   `sam_classpath_e2e::java_static_sam_lambda_return_label_runs`.
 
-- **Java package-private members are visible from Kotlin in the SAME package.** `Visibility` gained
-  `PackagePrivate` (a Java class-file-only fact); the classfile decoder retains package-private
-  methods/fields instead of dropping or erasing them, and the single `member_accessible` gate admits
-  them iff the current file's package equals the owner's package — statics, instance methods, fields,
-  and constructors all flow through that one arm. Cross-package access reports kotlinc's exact pair:
+- **Java package-private members are visible from Kotlin in the SAME package.** Package-private is
+  not a core `Visibility`: the required target access policy receives an exact normalized callable,
+  constructor, or property plus the access site, and the JVM implementation alone interprets raw
+  classfile flags. Kotlin metadata remains authoritative whenever it is present. Dependency wrappers
+  must forward this policy explicitly, so target access cannot disappear behind a default semantic
+  hook. Cross-package access reports kotlinc's exact pair:
   `cannot access 'class Helper : Any': it is package-private in file.` at the qualifier and
   `cannot access 'static fun adjust(): Unit': it is package-private in 'p.Helper'.` at the callee.
   Tests: `java_source_interop_e2e::package_private_java_static_callable_within_same_package`,
   `java_source_interop_e2e::package_private_java_static_rejected_cross_package`.
   An INACCESSIBLE package-private candidate never shadows an accessible one: the
-  `select_member_property` walk declines to bind a package-private field the current file's package
-  cannot read (one `package_private_member_accessible` check beside the existing private/static
-  hides-without-binding cases), so `HashMap.size`'s package-private field no longer hides the public
-  `size()` property facet from non-`java.util` code — the `cannot access` diagnostic fires only when
-  the package-private declaration is the sole candidate. Tests:
+  common candidate walk asks the target policy before overload selection and reports a denial only
+  when no accessible sibling can answer. Thus `HashMap.size`'s inaccessible Java field does not hide
+  the public `size()` property facet from non-`java.util` code. Constructors, constructor references,
+  explicit `super` calls, Java synthetic setters, and inherited classifier members use the same
+  policy. Tests: `package_private_visibility_e2e`,
   `map_entry_destructure_e2e::discarded_map_put_does_not_unbox_null`,
   `ir_lower_deep_coverage_e2e::map_index_get_set`.
 
-- **A package-private static FIELD of a public Java class follows the same rule.** The classpath
-  `static_field_name` decoder retains package-private static fields (only `private` is dropped) and
-  `StaticFieldRef` carries the declared `visibility`; the three checker read sites (qualified
-  classifier read, member-read fallback, `read_classifier_member`) all pass through the one
-  `record_static_field_gated` helper — same-package reads bind and emit `getstatic`, cross-package
-  reads report `cannot access 'static field count: Int': it is package-private in 'p.Pub'.` at the
-  member segment. Tests:
-  `java_source_interop_e2e::package_private_java_static_field_read_within_same_package`,
-  `java_source_interop_e2e::package_private_java_static_field_rejected_cross_package`.
+- **A Java field is a PROPERTY access in core.** `PlatformAccessCandidate::Property` carries only its
+  semantic owner, source name, type, and Kotlin visibility. The JVM policy may map that identity to a
+  classfile field to inspect access flags and produce JVM-specific diagnostic wording; the selected
+  lowering handle separately retains the opaque descriptor needed for `getfield`/`getstatic`.
+  Same-package reads bind and emit the field access, while cross-package reads report the denial at
+  the property segment. Tests:
+  `java_source_interop_e2e::package_private_java_field_within_same_package`,
+  `java_source_interop_e2e::package_private_java_field_rejected_cross_package`, and
+  `package_private_visibility_e2e::cross_package_inherited_static_constant_rejected`.
 
 - **Generic classpath extension properties retain Kotlin return semantics.** The metadata decoder
   preserves property formals, receiver, return type, bounds, and nullability. Resolution specializes

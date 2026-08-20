@@ -365,6 +365,9 @@ pub(crate) fn analyze_standalone_source_inputs(inputs: &[SourceInput<'_>]) -> So
 struct StandaloneKotlinSymbols;
 
 #[cfg(test)]
+impl krusty::libraries::PlatformAccessControl for StandaloneKotlinSymbols {}
+
+#[cfg(test)]
 impl krusty::symbol_source::SymbolSource for StandaloneKotlinSymbols {
     fn package_exists(&self, parent: krusty::types::TypeName, name: &str) -> bool {
         krusty::libraries::EmptySymbolSource.package_exists(parent, name)

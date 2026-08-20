@@ -755,6 +755,8 @@ mod tests {
 
     struct ExistingLibrary;
 
+    impl crate::libraries::PlatformAccessControl for ExistingLibrary {}
+
     impl ExistingLibrary {
         fn classifier_internal(
             namespace: crate::symbol_source::SymbolNamespace,
