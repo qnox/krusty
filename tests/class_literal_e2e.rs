@@ -8,6 +8,19 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }
 
+fn assert_array_literal_runs(tag: &str, source: &str) {
+    let (reference_code, reference_stderr) = common::kotlinc_source_result(tag, source);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected {tag}: {reference_stderr}"
+    );
+    assert_eq!(
+        common::front_end_diagnostics_files_with_stdlib(&[source]),
+        Vec::<String>::new()
+    );
+    assert_eq!(common::expect_box_run_with_stdlib(source, tag), "OK");
+}
+
 #[test]
 fn unbound_user_and_library_class_literals() {
     const SRC: &str = "class Foo\n\
@@ -81,30 +94,47 @@ fun box(): String = if (Foo(\"a\") == Foo(\"a\") && Foo(\"a\") != Foo(\"b\")) \"
 
 #[test]
 fn array_class_literals() {
-    // An array type name is an unbound literal exactly like any other reference type:
-    // `Array<String>::class.java` is the `String[]` class constant, `IntArray::class.java` the
-    // primitive `int[]` one — the element type is part of the JVM descriptor, so the literal's
-    // type arguments must reach the represented type.
     const SRC: &str = "fun box(): String {\n\
     if (Array<String>::class.java.getName() != \"[Ljava.lang.String;\") return \"Fail 1\"\n\
     if (IntArray::class.java.getName() != \"[I\") return \"Fail 2\"\n\
     if (Array<Int>::class.java.getName() != \"[Ljava.lang.Integer;\") return \"Fail 3\"\n\
-    if (Array<Array<String>>::class.java.getName() != \"[[Ljava.lang.String;\") return \"Fail 4\"\n\
-    if (Array<String>::class != Array<String>::class) return \"Fail 5\"\n\
+    if (Array<String>::class != Array<String>::class) return \"Fail 4\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("array class literals"), "OK");
+    assert_array_literal_runs("ArrayClassLiteral", SRC);
+}
+
+#[test]
+fn nested_array_class_literal() {
+    const SRC: &str = "fun box(): String =\n\
+        if (Array<Array<String>>::class.java.getName() == \"[[Ljava.lang.String;\") \"OK\" else \"FAIL\"\n";
+    assert_array_literal_runs("NestedArrayClassLiteral", SRC);
+}
+
+#[test]
+fn qualified_array_class_literal() {
+    const SRC: &str = "fun box(): String =\n\
+        if (kotlin.Array<String>::class.java.getName() == \"[Ljava.lang.String;\") \"OK\" else \"FAIL\"\n";
+    assert_array_literal_runs("QualifiedArrayClassLiteral", SRC);
+}
+
+#[test]
+fn typealias_array_class_literal() {
+    const SRC: &str = "typealias Strings = Array<String>\n\
+fun box(): String =\n\
+    if (Strings::class.java.getName() == \"[Ljava.lang.String;\") \"OK\" else \"FAIL\"\n";
+    assert_array_literal_runs("TypeAliasArrayClassLiteral", SRC);
 }
 
 #[test]
 fn array_class_literals_report_no_diagnostic() {
-    // kotlinc accepts every array class-literal form silently.
     let diags = common::front_end_diagnostics_files_with_stdlib(&["fun f() {\n\
          \u{20}   val a = Array<String>::class\n\
          \u{20}   val b = Array<String>::class.java\n\
          \u{20}   val c = IntArray::class\n\
          \u{20}   val d = IntArray::class.java\n\
          \u{20}   val e = Array<Array<String>>::class.java\n\
+         \u{20}   val f = kotlin.Array<String>::class.java\n\
          }\n"]);
     assert_eq!(diags, Vec::<String>::new());
 }
