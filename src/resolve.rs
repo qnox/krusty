@@ -90,7 +90,13 @@ fn resolved_jvm_name(file: &File, function: &FunDecl, class_names: &ClassNames) 
         })
         .unwrap_or_else(|| function.name.clone())
 }
-type TopLevelFunctionConflictKey = (String, String, Vec<ErasedTypeKey>);
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TopLevelFunctionConflictKey {
+    package: String,
+    receiver: Option<ErasedTypeKey>,
+    name: String,
+    params: Vec<ErasedTypeKey>,
+}
 
 /// The committed meaning of a dotted expression's prefix.
 ///
@@ -335,6 +341,8 @@ struct TopLevelFunctionConflictCandidate {
 
 #[derive(Default)]
 struct TopLevelFunctionConflictGroup {
+    /// Cross-file-visible, non-entry-point declarations. Entry points and file-private declarations
+    /// still participate in their declaring file's candidate list below.
     public_candidates: Vec<TopLevelFunctionConflictCandidate>,
     public_count: usize,
     retained_public_count: usize,
@@ -346,11 +354,12 @@ struct TopLevelFunctionConflictGroup {
 #[derive(Default)]
 struct TopLevelFunctionConflictFile {
     declaration_count: usize,
-    private_count: usize,
-    retained_private_count: usize,
+    retained_local_count: usize,
+    first_declaration: Option<TopLevelFunctionConflictDecl>,
     first_public: Option<TopLevelFunctionConflictDecl>,
-    first_private: Option<TopLevelFunctionConflictDecl>,
-    private_candidates: Vec<TopLevelFunctionConflictCandidate>,
+    first_local: Option<TopLevelFunctionConflictDecl>,
+    ordinary_private_declarations: Vec<TopLevelFunctionConflictDecl>,
+    candidates: Vec<TopLevelFunctionConflictCandidate>,
 }
 
 #[derive(Default)]
@@ -375,23 +384,46 @@ impl TopLevelFunctionConflictGroups {
 #[derive(Clone, Default)]
 struct TopLevelFunctionConflictCandidates {
     public: Vec<TopLevelFunctionConflictCandidate>,
-    private_by_file: HashMap<u32, Vec<TopLevelFunctionConflictCandidate>>,
+    by_file: HashMap<u32, Vec<TopLevelFunctionConflictCandidate>>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingTopLevelFunctionConflict {
+    group: usize,
+    include_cross_file_public: bool,
+}
+
+struct TopLevelFunctionConflictRegistration {
+    key: TopLevelFunctionConflictKey,
+    declaration: TopLevelFunctionConflictDecl,
+    private: bool,
+    entry_point: bool,
 }
 
 fn retain_conflict_diagnostic(
-    pending: &mut HashMap<TopLevelFunctionConflictDecl, usize>,
+    pending: &mut HashMap<TopLevelFunctionConflictDecl, PendingTopLevelFunctionConflict>,
     reserved_bytes: &mut usize,
     declaration: TopLevelFunctionConflictDecl,
     group: usize,
+    include_cross_file_public: bool,
 ) {
-    if pending.contains_key(&declaration)
-        || reserved_bytes.saturating_add(CONFLICTING_OVERLOAD_PREFIX.len())
-            > MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES
+    if let Some(existing) = pending.get_mut(&declaration) {
+        existing.include_cross_file_public |= include_cross_file_public;
+        return;
+    }
+    if reserved_bytes.saturating_add(CONFLICTING_OVERLOAD_PREFIX.len())
+        > MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES
     {
         return;
     }
     *reserved_bytes += CONFLICTING_OVERLOAD_PREFIX.len();
-    pending.insert(declaration, group);
+    pending.insert(
+        declaration,
+        PendingTopLevelFunctionConflict {
+            group,
+            include_cross_file_public,
+        },
+    );
 }
 
 fn retain_conflict_candidate(
@@ -430,6 +462,217 @@ fn retain_conflict_candidate(
         declaration: declaration.declaration,
         display,
     });
+}
+
+fn is_kotlin_main_entry_point(function: &FunDecl, params: &[Ty], ret: Ty) -> bool {
+    function.name == "main"
+        && function.receiver.is_none()
+        && function.type_params.is_empty()
+        && function.context_count == 0
+        && ret == Ty::Unit
+        && match params {
+            [] => true,
+            [parameter] => parameter.array_read_elem() == Some(Ty::String),
+            _ => false,
+        }
+}
+
+fn register_top_level_function_conflict(
+    files: &[File],
+    groups: &mut TopLevelFunctionConflictGroups,
+    registration: TopLevelFunctionConflictRegistration,
+    pending: &mut HashMap<TopLevelFunctionConflictDecl, PendingTopLevelFunctionConflict>,
+    reserved_diagnostic_bytes: &mut usize,
+    retained_display_bytes: &mut usize,
+) -> bool {
+    let TopLevelFunctionConflictRegistration {
+        key,
+        declaration: current,
+        private,
+        entry_point,
+    } = registration;
+    let group_index = groups.get_or_insert(key);
+    let group = &mut groups.groups[group_index].1;
+    let file_state = group.files.get(&current.file);
+    let first_in_file = file_state.and_then(|state| state.first_declaration);
+    let first_file_public = file_state.and_then(|state| state.first_public);
+    let first_file_local = file_state.and_then(|state| state.first_local);
+    let retained_local_count = file_state
+        .map(|state| state.retained_local_count)
+        .unwrap_or_default();
+    let local = private || entry_point;
+    let retained = if local {
+        retained_local_count < MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES
+    } else {
+        group.retained_public_count < MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES
+    };
+
+    // Every declaration shares its file's top-level scope, including an entry point or a private
+    // declaration. Cross-file exceptions never suppress a same-file conflict.
+    if let Some(first) = first_in_file {
+        group.conflicts = true;
+        retain_conflict_diagnostic(
+            pending,
+            reserved_diagnostic_bytes,
+            first,
+            group_index,
+            false,
+        );
+        retain_conflict_diagnostic(
+            pending,
+            reserved_diagnostic_bytes,
+            current,
+            group_index,
+            false,
+        );
+        if let Some(first_public) = first_file_public {
+            retain_conflict_candidate(
+                files,
+                &mut group.public_candidates,
+                retained_display_bytes,
+                first_public,
+            );
+        }
+        if let Some(first_local) = first_file_local {
+            retain_conflict_candidate(
+                files,
+                &mut group.files.entry(current.file).or_default().candidates,
+                retained_display_bytes,
+                first_local,
+            );
+        }
+        if local {
+            retain_conflict_candidate(
+                files,
+                &mut group.files.entry(current.file).or_default().candidates,
+                retained_display_bytes,
+                current,
+            );
+        } else {
+            retain_conflict_candidate(
+                files,
+                &mut group.public_candidates,
+                retained_display_bytes,
+                current,
+            );
+        }
+    }
+
+    // A real application entry point is omitted from cross-file overload-conflict consideration.
+    // An ordinary private declaration is isolated only from declarations in other private files;
+    // a package-visible declaration is also visible in the private declaration's file and conflicts
+    // there. The diagnostic therefore belongs to the private declaration, not the public one.
+    if !entry_point && private && group.public_count > 0 {
+        group.conflicts = true;
+        retain_conflict_diagnostic(
+            pending,
+            reserved_diagnostic_bytes,
+            current,
+            group_index,
+            true,
+        );
+        if let Some(first_public) = group.first_public {
+            retain_conflict_candidate(
+                files,
+                &mut group.public_candidates,
+                retained_display_bytes,
+                first_public,
+            );
+        }
+        retain_conflict_candidate(
+            files,
+            &mut group.files.entry(current.file).or_default().candidates,
+            retained_display_bytes,
+            current,
+        );
+    }
+
+    if !entry_point && !private {
+        if group.public_count > 0 {
+            group.conflicts = true;
+            if let Some(first_public) = group.first_public {
+                retain_conflict_diagnostic(
+                    pending,
+                    reserved_diagnostic_bytes,
+                    first_public,
+                    group_index,
+                    true,
+                );
+                retain_conflict_candidate(
+                    files,
+                    &mut group.public_candidates,
+                    retained_display_bytes,
+                    first_public,
+                );
+            }
+            retain_conflict_diagnostic(
+                pending,
+                reserved_diagnostic_bytes,
+                current,
+                group_index,
+                true,
+            );
+            retain_conflict_candidate(
+                files,
+                &mut group.public_candidates,
+                retained_display_bytes,
+                current,
+            );
+        } else {
+            // This is the first package-visible ordinary declaration. Any ordinary private
+            // declarations collected earlier now conflict in their own files. Retain only the
+            // bounded declaration inventory needed by the bounded diagnostic surface.
+            let prior_private = group
+                .files
+                .iter()
+                .filter(|(&file, _)| file != current.file)
+                .flat_map(|(_, state)| state.ordinary_private_declarations.iter().copied())
+                .collect::<Vec<_>>();
+            if !prior_private.is_empty() {
+                group.conflicts = true;
+                retain_conflict_candidate(
+                    files,
+                    &mut group.public_candidates,
+                    retained_display_bytes,
+                    current,
+                );
+                for declaration in prior_private {
+                    retain_conflict_diagnostic(
+                        pending,
+                        reserved_diagnostic_bytes,
+                        declaration,
+                        group_index,
+                        true,
+                    );
+                    retain_conflict_candidate(
+                        files,
+                        &mut group.files.entry(declaration.file).or_default().candidates,
+                        retained_display_bytes,
+                        declaration,
+                    );
+                }
+            }
+        }
+    }
+
+    let file_state = group.files.entry(current.file).or_default();
+    file_state.declaration_count += 1;
+    file_state.first_declaration.get_or_insert(current);
+    if local {
+        file_state.retained_local_count += usize::from(retained);
+        file_state.first_local.get_or_insert(current);
+        if !entry_point
+            && file_state.ordinary_private_declarations.len() < MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES
+        {
+            file_state.ordinary_private_declarations.push(current);
+        }
+    } else {
+        file_state.first_public.get_or_insert(current);
+        group.retained_public_count += usize::from(retained);
+        group.public_count += 1;
+        group.first_public.get_or_insert(current);
+    }
+    retained
 }
 
 pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
@@ -2752,13 +2995,13 @@ impl SymbolTable {
             for candidate in &mut candidates.public {
                 candidate.file += offset;
             }
-            candidates.private_by_file = std::mem::take(&mut candidates.private_by_file)
+            candidates.by_file = std::mem::take(&mut candidates.by_file)
                 .into_iter()
-                .map(|(file, mut private)| {
-                    for candidate in &mut private {
+                .map(|(file, mut local)| {
+                    for candidate in &mut local {
                         candidate.file += offset;
                     }
-                    (file + offset, private)
+                    (file + offset, local)
                 })
                 .collect();
         }
@@ -6178,12 +6421,6 @@ fn collect_signatures_with_cp_impl(
     let mut pending_conflict_diagnostics = HashMap::new();
     let mut reserved_conflict_diagnostic_bytes = 0usize;
     let mut retained_conflict_display_bytes = 0usize;
-    let mut seen_ext_fun_keys: std::collections::HashSet<(
-        String,
-        ErasedTypeKey,
-        String,
-        Vec<ErasedTypeKey>,
-    )> = std::collections::HashSet::new();
     // Unannotated MEMBER expression getters whose first-pass inference hit `Error` — a referenced
     // class may simply be collected later (another file, or a later class in this one). Each entry
     // keeps the exact scope of its first pass; retried to a fixpoint after the walk (see
@@ -6455,24 +6692,43 @@ fn collect_signatures_with_cp_impl(
                         plugin_expression: None,
                     };
                     let package = sig.package.clone();
+                    let jvm_name = resolved_jvm_name(file, f, &class_names);
+                    if jvm_name != f.name {
+                        table
+                            .toplevel_jvm_names
+                            .insert((i as u32, d.0), jvm_name.clone());
+                    }
+                    let current = TopLevelFunctionConflictDecl {
+                        file: i as u32,
+                        declaration: d,
+                    };
+                    let private = f.visibility.is_private();
+                    let entry_point = is_kotlin_main_entry_point(f, &sig.params, sig.ret);
                     if f.receiver.is_some() {
                         let recv_ty = sig
                             .source_receiver
                             .expect("extension signature has a resolved source receiver");
-                        let erased_params = erased_params_semantic_key(&sig);
-                        let erased_receiver = extension_receiver_physical_key(recv_ty);
                         let source_receiver = recv_ty.extension_recv_key();
-                        let physical_key = (
+                        let conflict_key = TopLevelFunctionConflictKey {
                             package,
-                            erased_receiver.clone(),
-                            f.name.clone(),
-                            erased_params,
+                            receiver: Some(extension_receiver_physical_key(recv_ty)),
+                            name: jvm_name,
+                            params: erased_params_semantic_key(&sig),
+                        };
+                        let retained = register_top_level_function_conflict(
+                            files,
+                            &mut top_level_fun_groups,
+                            TopLevelFunctionConflictRegistration {
+                                key: conflict_key,
+                                declaration: current,
+                                private,
+                                entry_point,
+                            },
+                            &mut pending_conflict_diagnostics,
+                            &mut reserved_conflict_diagnostic_bytes,
+                            &mut retained_conflict_display_bytes,
                         );
-                        let erased_clash = seen_ext_fun_keys.contains(&physical_key);
-                        if erased_clash {
-                            diags.error(f.span, "krusty: conflicting extension functions with the same erased receiver and name".to_string());
-                        } else {
-                            seen_ext_fun_keys.insert(physical_key);
+                        if retained {
                             let overloads = table
                                 .ext_funs
                                 .entry(f.name.clone())
@@ -6487,156 +6743,32 @@ fn collect_signatures_with_cp_impl(
                             );
                         }
                     } else {
-                        let key = erased_params_semantic_key(&sig);
                         // A platform declaration clash is decided on the emitted JVM NAME, not the
                         // source name: `g(String)` and `g(String?)` erase to the same descriptor and
                         // clash only while both are spelled `g`, so an `@JvmName` on either one
                         // separates them (kotlinc's rule). Overload SELECTION is unaffected — the
                         // source name still keys `table.funs` above.
-                        let jvm_name = resolved_jvm_name(file, f, &class_names);
-                        let overloads = table.funs.entry(f.name.clone()).or_default();
-                        if jvm_name != f.name {
-                            table
-                                .toplevel_jvm_names
-                                .insert((i as u32, d.0), jvm_name.clone());
-                        }
-                        let group_index =
-                            top_level_fun_groups.get_or_insert((package, jvm_name, key));
-                        let group = &mut top_level_fun_groups.groups[group_index].1;
-                        let private = f.visibility.is_private();
-                        let current = TopLevelFunctionConflictDecl {
-                            file: i as u32,
-                            declaration: d,
+                        let conflict_key = TopLevelFunctionConflictKey {
+                            package,
+                            receiver: None,
+                            name: jvm_name,
+                            params: erased_params_semantic_key(&sig),
                         };
-                        let (
-                            file_declaration_count,
-                            file_private_count,
-                            first_file_public,
-                            first_file_private,
-                            retained_private_count,
-                        ) = group
-                            .files
-                            .get(&(i as u32))
-                            .map(|state| {
-                                (
-                                    state.declaration_count,
-                                    state.private_count,
-                                    state.first_public,
-                                    state.first_private,
-                                    state.retained_private_count,
-                                )
-                            })
-                            .unwrap_or_default();
-                        // kotlinc exempts entry-point `main` functions from CROSS-FILE overload
-                        // conflicts — each file's facade class hosts its own — so like a private
-                        // declaration, a `main` clashes only with a same-file candidate.
-                        let same_file_only = private || f.name == "main";
-                        let conflicts_existing = if same_file_only {
-                            file_declaration_count > 0
-                        } else {
-                            group.public_count > 0 || file_private_count > 0
-                        };
-                        let retained = if private {
-                            retained_private_count < MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES
-                        } else {
-                            group.retained_public_count < MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES
-                        };
-                        if conflicts_existing {
-                            group.conflicts = true;
-                            if private {
-                                if let Some(first) = first_file_public {
-                                    retain_conflict_diagnostic(
-                                        &mut pending_conflict_diagnostics,
-                                        &mut reserved_conflict_diagnostic_bytes,
-                                        first,
-                                        group_index,
-                                    );
-                                    retain_conflict_candidate(
-                                        files,
-                                        &mut group.public_candidates,
-                                        &mut retained_conflict_display_bytes,
-                                        first,
-                                    );
-                                }
-                                let file_state = group.files.entry(i as u32).or_default();
-                                if let Some(first) = first_file_private {
-                                    retain_conflict_diagnostic(
-                                        &mut pending_conflict_diagnostics,
-                                        &mut reserved_conflict_diagnostic_bytes,
-                                        first,
-                                        group_index,
-                                    );
-                                    retain_conflict_candidate(
-                                        files,
-                                        &mut file_state.private_candidates,
-                                        &mut retained_conflict_display_bytes,
-                                        first,
-                                    );
-                                }
-                                retain_conflict_candidate(
-                                    files,
-                                    &mut file_state.private_candidates,
-                                    &mut retained_conflict_display_bytes,
-                                    current,
-                                );
-                            } else {
-                                if let Some(first) = group.first_public {
-                                    retain_conflict_diagnostic(
-                                        &mut pending_conflict_diagnostics,
-                                        &mut reserved_conflict_diagnostic_bytes,
-                                        first,
-                                        group_index,
-                                    );
-                                    retain_conflict_candidate(
-                                        files,
-                                        &mut group.public_candidates,
-                                        &mut retained_conflict_display_bytes,
-                                        first,
-                                    );
-                                }
-                                retain_conflict_candidate(
-                                    files,
-                                    &mut group.public_candidates,
-                                    &mut retained_conflict_display_bytes,
-                                    current,
-                                );
-                                if let Some(first) = first_file_private {
-                                    retain_conflict_diagnostic(
-                                        &mut pending_conflict_diagnostics,
-                                        &mut reserved_conflict_diagnostic_bytes,
-                                        first,
-                                        group_index,
-                                    );
-                                    let file_state = group.files.entry(i as u32).or_default();
-                                    retain_conflict_candidate(
-                                        files,
-                                        &mut file_state.private_candidates,
-                                        &mut retained_conflict_display_bytes,
-                                        first,
-                                    );
-                                }
-                            }
-                            retain_conflict_diagnostic(
-                                &mut pending_conflict_diagnostics,
-                                &mut reserved_conflict_diagnostic_bytes,
-                                current,
-                                group_index,
-                            );
-                        }
-                        let file_state = group.files.entry(i as u32).or_default();
-                        file_state.declaration_count += 1;
-                        if private {
-                            file_state.first_private.get_or_insert(current);
-                            file_state.private_count += 1;
-                            file_state.retained_private_count += usize::from(retained);
-                        } else {
-                            file_state.first_public.get_or_insert(current);
-                            group.public_count += 1;
-                            group.retained_public_count += usize::from(retained);
-                            group.first_public.get_or_insert(current);
-                        }
+                        let retained = register_top_level_function_conflict(
+                            files,
+                            &mut top_level_fun_groups,
+                            TopLevelFunctionConflictRegistration {
+                                key: conflict_key,
+                                declaration: current,
+                                private,
+                                entry_point,
+                            },
+                            &mut pending_conflict_diagnostics,
+                            &mut reserved_conflict_diagnostic_bytes,
+                            &mut retained_conflict_display_bytes,
+                        );
                         if retained {
-                            overloads.push(sig);
+                            table.funs.entry(f.name.clone()).or_default().push(sig);
                         }
                     }
                 }
@@ -8983,11 +9115,11 @@ fn collect_signatures_with_cp_impl(
                 key.clone(),
                 TopLevelFunctionConflictCandidates {
                     public: group.public_candidates.clone(),
-                    private_by_file: group
+                    by_file: group
                         .files
                         .iter()
-                        .filter(|&(_, state)| !state.private_candidates.is_empty())
-                        .map(|(&file, state)| (file, state.private_candidates.clone()))
+                        .filter(|&(_, state)| !state.candidates.is_empty())
+                        .map(|(&file, state)| (file, state.candidates.clone()))
                         .collect(),
                 },
             )
@@ -8995,28 +9127,78 @@ fn collect_signatures_with_cp_impl(
         .collect();
     for (name, signatures) in &table.funs {
         for signature in signatures {
-            let Some((file, declaration)) = signature
-                .source_file
-                .zip(signature.source_decl.map(|declaration| declaration.0))
-            else {
+            let Some((file, declaration)) = signature.source_file.zip(signature.source_decl) else {
                 continue;
             };
-            let key = (
-                signature.package.clone(),
-                name.clone(),
-                erased_params_semantic_key(signature),
-            );
+            let jvm_name = table
+                .toplevel_jvm_names
+                .get(&(file, declaration.0))
+                .cloned()
+                .unwrap_or_else(|| name.clone());
+            let key = TopLevelFunctionConflictKey {
+                package: signature.package.clone(),
+                receiver: None,
+                name: jvm_name,
+                params: erased_params_semantic_key(signature),
+            };
+            let source_is_local = signature.visibility.is_private()
+                || files
+                    .get(file as usize)
+                    .and_then(|source| match source.decl(declaration) {
+                        Decl::Fun(function) => Some(is_kotlin_main_entry_point(
+                            function,
+                            &signature.params,
+                            signature.ret,
+                        )),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
             let retained_for_recovery = table
                 .conflicting_top_level_candidates
                 .get(&key)
                 .is_some_and(|candidates| {
-                    !signature.visibility.is_private()
-                        || candidates.private_by_file.contains_key(&file)
+                    !source_is_local || candidates.by_file.contains_key(&file)
                 });
             if retained_for_recovery {
                 table
                     .conflicting_top_level_key_by_source
-                    .insert((file, declaration), key);
+                    .insert((file, declaration.0), key);
+            }
+        }
+    }
+    for (name, receivers) in &table.ext_funs {
+        for signatures in receivers.values() {
+            for signature in signatures {
+                let Some((file, declaration, receiver)) = signature
+                    .source_file
+                    .zip(signature.source_decl)
+                    .zip(signature.source_receiver)
+                    .map(|((file, declaration), receiver)| (file, declaration, receiver))
+                else {
+                    continue;
+                };
+                let jvm_name = table
+                    .toplevel_jvm_names
+                    .get(&(file, declaration.0))
+                    .cloned()
+                    .unwrap_or_else(|| name.clone());
+                let key = TopLevelFunctionConflictKey {
+                    package: signature.package.clone(),
+                    receiver: Some(extension_receiver_physical_key(receiver)),
+                    name: jvm_name,
+                    params: erased_params_semantic_key(signature),
+                };
+                let retained_for_recovery = table
+                    .conflicting_top_level_candidates
+                    .get(&key)
+                    .is_some_and(|candidates| {
+                        !signature.visibility.is_private() || candidates.by_file.contains_key(&file)
+                    });
+                if retained_for_recovery {
+                    table
+                        .conflicting_top_level_key_by_source
+                        .insert((file, declaration.0), key);
+                }
             }
         }
     }
@@ -9558,7 +9740,7 @@ fn direct_supertypes(table: &SymbolTable, current: TypeName) -> Vec<TypeName> {
 fn report_conflicting_top_level_overloads(
     files: &[File],
     groups: &TopLevelFunctionConflictGroups,
-    pending: &HashMap<TopLevelFunctionConflictDecl, usize>,
+    pending: &HashMap<TopLevelFunctionConflictDecl, PendingTopLevelFunctionConflict>,
     reserved_message_bytes: usize,
     diags: &mut DiagSink,
 ) -> std::collections::HashSet<TopLevelFunctionConflictKey> {
@@ -9577,29 +9759,31 @@ fn report_conflicting_top_level_overloads(
                 file: file_index as u32,
                 declaration,
             };
-            let Some(&group_index) = pending.get(&current) else {
+            let Some(&pending_conflict) = pending.get(&current) else {
                 continue;
             };
-            let Some((_, group)) = groups.groups.get(group_index) else {
+            let Some((_, group)) = groups.groups.get(pending_conflict.group) else {
                 continue;
             };
             let Decl::Fun(function) = file.decl(declaration) else {
                 continue;
             };
-            let current_private = function.visibility.is_private();
-            let private_candidates = group
+            let file_candidates = group
                 .files
                 .get(&current.file)
-                .map(|state| state.private_candidates.as_slice())
+                .map(|state| state.candidates.as_slice())
                 .unwrap_or_default();
             let public_candidates = group
                 .public_candidates
                 .iter()
-                .filter(|candidate| !current_private || candidate.file == current.file);
-            let first_public = public_candidates.clone().find(|candidate| {
+                .filter(|candidate| {
+                    pending_conflict.include_cross_file_public || candidate.file == current.file
+                })
+                .collect::<Vec<_>>();
+            let first_public = public_candidates.iter().copied().find(|candidate| {
                 candidate.file != current.file || candidate.declaration != current.declaration
             });
-            let first_private = private_candidates.iter().find(|candidate| {
+            let first_file = file_candidates.iter().find(|candidate| {
                 candidate.file != current.file || candidate.declaration != current.declaration
             });
             let mut displays = Vec::with_capacity(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
@@ -9607,9 +9791,9 @@ fn report_conflicting_top_level_overloads(
             let mut display_bytes = 0usize;
             for candidate in first_public
                 .into_iter()
-                .chain(first_private)
-                .chain(public_candidates)
-                .chain(private_candidates)
+                .chain(first_file)
+                .chain(public_candidates.iter().copied())
+                .chain(file_candidates)
             {
                 if displays.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES {
                     break;
@@ -26072,8 +26256,8 @@ impl<'a> Checker<'a> {
             let Some(conflicts) = self.syms.conflicting_top_level_candidates.get(&key) else {
                 continue;
             };
-            let private = conflicts
-                .private_by_file
+            let local = conflicts
+                .by_file
                 .get(&self.file_index)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
@@ -26081,9 +26265,9 @@ impl<'a> Checker<'a> {
                 .public
                 .first()
                 .into_iter()
-                .chain(private.first())
+                .chain(local.first())
                 .chain(&conflicts.public)
-                .chain(private)
+                .chain(local)
             {
                 if displays.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES {
                     break;
@@ -61059,22 +61243,22 @@ fun box(): String {
         err_contains(
             "operator fun String.plusAssign(value: List<String>) {}\n\
              operator fun String.plusAssign(value: List<Int>) {}",
-            "conflicting extension functions with the same erased receiver and name",
+            "conflicting overloads:",
         );
         err_contains(
             "fun <T> Array<T>.nestedClash(): Int = 1\n\
              fun Array<Any?>.nestedClash(): Int = 2",
-            "conflicting extension functions with the same erased receiver and name",
+            "conflicting overloads:",
         );
         err_contains(
             "fun ((Int) -> Int).functionReceiverClash(): Int = 1\n\
              fun ((String) -> String).functionReceiverClash(): Int = 2",
-            "conflicting extension functions with the same erased receiver and name",
+            "conflicting overloads:",
         );
         err_contains(
             "fun Int.unsignedReceiverClash(): Int = 1\n\
              fun UInt.unsignedReceiverClash(): Int = 2",
-            "conflicting extension functions with the same erased receiver and name",
+            "conflicting overloads:",
         );
         assert_ne!(
             extension_receiver_physical_key(Ty::obj_args("kotlin/Array", &[Ty::Int])),

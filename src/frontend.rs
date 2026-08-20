@@ -1504,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_file_private_top_level_functions_do_not_conflict_or_escape_scope() {
+    fn cross_file_private_top_level_function_conflicts_with_public_but_does_not_escape_scope() {
         let target = "fun namedPair(left: Int, right: String): Int = left\n\
                       fun missingNamedArgument(): Int = namedPair(left = 1)";
         let inputs = [
@@ -1531,13 +1531,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["no value passed for parameter 'right'."]
         );
-        assert!(
+        assert_eq!(
             diagnostics
                 .diags
                 .iter()
-                .all(|diagnostic| !diagnostic.msg.starts_with("conflicting overloads:")),
-            "{:?}",
-            diagnostics.diags
+                .filter(|diagnostic| diagnostic.file == 1)
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            ["conflicting overloads:\nfun namedPair(left: Int, right: String): Int"]
         );
     }
 
