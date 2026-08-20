@@ -29109,14 +29109,15 @@ impl<'a> Checker<'a> {
         )
     }
 
-    /// If a bare type name `n` denotes a reference type usable as an unbound class literal `n::class`,
-    /// its `Ty`. The receiver of an unbound literal is a TYPE, so the spelling resolves through the
-    /// ordinary typeref channel — including any type arguments the parser attached to the reference
-    /// node (`Array<String>::class`, where the element type is part of the represented array's JVM
-    /// descriptor) — exactly as in a declared-type position. A name that binds a VALUE is a bound
-    /// literal instead (`x::class`), and a type parameter is left to the reified channel. Primitive
-    /// or unknown names return `None`.
-    fn class_literal_unbound_ty(&self, scope: &CheckerScope<'_>, e: ExprId, n: &str) -> Option<Ty> {
+    /// Resolve a bare unbound class-literal receiver through the ordinary type-reference channel,
+    /// including parser-owned type arguments. Values remain bound literals and type parameters use
+    /// the reified path.
+    fn class_literal_unbound_ty(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        n: &str,
+    ) -> Option<Ty> {
         if scope.tparam_contains(n) {
             return None;
         }
@@ -29137,7 +29138,7 @@ impl<'a> Checker<'a> {
             fun_params: Vec::new(),
             fun_context_count: 0,
         };
-        let ty = self.type_ref_ty_silent(scope, &reference);
+        let ty = self.type_ref_ty(scope, &reference);
         if ty == Ty::Error {
             return None;
         }
@@ -40043,10 +40044,24 @@ impl<'a> Checker<'a> {
                     // A QUALIFIED type name (`pkg.Cls::class`, `java.util.ArrayList::class`,
                     // `Outer.Nested::class`) is an unbound literal exactly like the simple name an
                     // import would bind — the receiver is a classifier, not a value to evaluate.
-                    self.qualifier(scope, QualifierInput::Expression(recv))
+                    let classifier = self
+                        .qualifier(scope, QualifierInput::Expression(recv))
                         .ok()
                         .and_then(ResolvedQualifier::classifier)
-                        .map(Ty::obj_name)
+                        .map(|internal| {
+                            let arguments = self
+                                .file
+                                .call_type_args
+                                .get(&e.0)
+                                .cloned()
+                                .unwrap_or_default();
+                            if arguments.is_empty() {
+                                Ty::obj_name(internal)
+                            } else {
+                                self.classifier_type_with_arguments(scope, internal, &arguments)
+                            }
+                        });
+                    classifier
                 };
                 if unbound.is_none() {
                     // Bound: a reference receiver, or a boxable primitive (boxed then `getClass`).
@@ -52485,7 +52500,7 @@ impl<'a> Checker<'a> {
 
     /// Whether `e` is an UNBOUND callable reference — `::foo`, or `Type::member` on a classifier name
     /// (as opposed to `value::member`, which captures a receiver).
-    fn unbound_callable_reference(&self, scope: &CheckerScope<'_>, e: ExprId) -> bool {
+    fn unbound_callable_reference(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> bool {
         let Expr::CallableRef { receiver, name } = self.file.expr(e) else {
             return false;
         };
