@@ -76,16 +76,22 @@ mod tests {
         (outputs, diags)
     }
 
+    fn diagnostic_messages(diags: &DiagSink) -> Vec<&str> {
+        diags.diags.iter().map(|diag| diag.msg.as_str()).collect()
+    }
+
     #[test]
     fn js_backend_runs_through_common_compiler_driver() {
         let (outputs, diags) = compile_js_sources(&[("Main", "fun box(): Int = 1 + 2")]);
 
-        assert!(!diags.has_errors(), "{:?}", diags.diags);
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].0, "Main.js");
-        let js = std::str::from_utf8(&outputs[0].1).unwrap();
-        assert!(js.contains("function box()"));
-        assert!(js.contains("return (1 + 2);"));
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        assert_eq!(
+            outputs,
+            vec![(
+                "Main.js".to_string(),
+                b"function box() {\n  return (1 + 2);\n}\n".to_vec(),
+            )]
+        );
     }
 
     #[test]
@@ -95,36 +101,59 @@ mod tests {
             ("B", "fun second(): Int = 2"),
         ]);
 
-        assert!(!diags.has_errors(), "{:?}", diags.diags);
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0].0, "A.js");
-        assert_eq!(outputs[1].0, "B.js");
-        let js = std::str::from_utf8(&outputs[1].1).unwrap();
-        assert!(js.contains("function second()"));
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        assert_eq!(
+            outputs,
+            vec![
+                (
+                    "A.js".to_string(),
+                    b"function first() {\n  return 1;\n}\n".to_vec(),
+                ),
+                (
+                    "B.js".to_string(),
+                    b"function second() {\n  return 2;\n}\n".to_vec(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn js_backend_emits_statement_when_with_value_arm() {
+        let (outputs, diags) = compile_js_sources(&[(
+            "Main",
+            "fun side(): Int = 1\n\
+             fun box() {\n\
+                 when {\n\
+                     true -> {}\n\
+                     else -> side()\n\
+                 }\n\
+             }",
+        )]);
+
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        assert_eq!(
+            outputs,
+            vec![(
+                "Main.js".to_string(),
+                b"function side() {\n  return 1;\n}\nfunction box() {\n  if (true) {\n    undefined;\n  }\n  else {\n    side();\n    undefined;\n  }\n}\n"
+                    .to_vec(),
+            )]
+        );
     }
 
     #[test]
     fn js_backend_reports_unsupported_ir_lowering() {
-        // A `tailrec` MEMBER function is a whole-file lowering gate (`gate:tailrec-member`), so
-        // `lower_file` returns `None` and the backend must report it rather than emit. The fixture uses
-        // no library symbols — this harness has no stdlib on its classpath, so a stdlib-dependent
-        // fixture would fail in the FRONT END and never reach lowering. Mixed vararg spreads used to
-        // sit here too; they lower now.
+        // A `tailrec` member function is rejected by common lowering before backend emission.
         let (outputs, diags) = compile_js_sources(&[(
             "Main",
             "class C { tailrec fun f(n: Int): Int = if (n == 0) 0 else f(n - 1) }\n\
              fun box(): Int = C().f(3)",
         )]);
 
-        assert!(outputs.is_empty());
-        assert!(diags.has_errors());
-        assert!(
-            diags
-                .diags
-                .iter()
-                .any(|d| d.msg.contains("not yet supported by the IR backend")),
-            "{:?}",
-            diags.diags
+        assert_eq!(outputs, Vec::<Artifact>::new());
+        assert_eq!(
+            diagnostic_messages(&diags),
+            vec!["krusty: this construct is not yet supported by the IR backend"]
         );
     }
 }
