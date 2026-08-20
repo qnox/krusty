@@ -280,6 +280,30 @@ val x: View<Int> = TextImpl()
 }
 
 #[test]
+fn member_delegated_property_keeps_the_delegate_value_type() {
+    let src = r#"
+class C(val count: Int) {
+    val h by lazy { 31 * count }
+    fun use(): Int = h
+}
+fun box(): String = if (C(7).use() == 217) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverMemberDelegatedProperty");
+}
+
+#[test]
+fn member_delegated_property_with_explicit_lazy_mode_keeps_the_delegate_value_type() {
+    let src = r#"
+class C(val count: Int) {
+    val h by lazy(LazyThreadSafetyMode.PUBLICATION) { 31 * count }
+    fun use(): Int = h
+}
+fun box(): String = if (C(7).use() == 217) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverMemberDelegatedLazyMode");
+}
+
+#[test]
 fn selected_generic_member_keeps_its_inferred_return() {
     let src = r#"
 class C {
