@@ -1,19 +1,4 @@
-//! Additional coverage for the alternate `js` backend (krusty-ir → JavaScript), run end-to-end on
-//! Node. Companion to `js_backend_e2e.rs`: lower Kotlin to backend-agnostic IR, emit JS, run it, and
-//! assert the printed result. Each test drives a DISTINCT construct through `emit_stmt` /
-//! `emit_expr_node` in `src/js/mod.rs` so more of that emitter runs — arithmetic across the operator
-//! set, comparisons/boolean logic, `if`/`when` in both value and statement position, every loop form
-//! (range/until/downTo/step, `while`, `do`/`while`), `break`/`continue` (including inside `when`),
-//! string templates + concatenation, recursion, nested functions, classes (fields, init bodies,
-//! virtual dispatch, overrides), `is`/cast, primitive arrays, null/elvis, and top-level `var` state.
-//!
-//! Skips cleanly when the kotlin-stdlib jar / JDK modules (for front-end resolution) or `node` are
-//! unavailable. Constructs the JS backend does not model are intentionally NOT tested here — they
-//! emit `undefined` or reference an undefined intrinsic and belong to the JVM backend, not this
-//! IR-neutrality probe. Confirmed-unsupported (dropped) shapes: string interpolation / templates
-//! (`"$x"`), the elvis operator `?:`, `for` with `step` (a `step()` progression intrinsic), a `when`
-//! with an equality subject (`when (x) { 1 -> ... }`), `is Int` (JS has no `Int` class), and String
-//! `.length`/index that lower to virtual `length()`/`get()` calls rather than the handled externals.
+//! End-to-end coverage for common IR emitted as JavaScript and executed by Node.
 
 use super::common;
 
@@ -133,6 +118,22 @@ fn nested_if_expression() {
     check(
         "fun box(): String { val n = 0; return if (n > 0) \"pos\" else if (n < 0) \"neg\" else \"zero\" }",
         "zero",
+    );
+}
+
+#[test]
+fn anonymous_object_captures_inner_shadowed_local() {
+    check(
+        "fun box(): Int {\n\
+         val value = 1\n\
+         if (true) {\n\
+             val value = 42\n\
+             val captured = object { fun get(): Int = value }\n\
+             return captured.get()\n\
+         }\n\
+         return value\n\
+         }",
+        "42",
     );
 }
 
