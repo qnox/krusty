@@ -145,6 +145,141 @@ fun box(): String = if (build<String>().toString() == "shadowed") "OK" else "FAI
 }
 
 #[test]
+fn constructor_call_binds_unconstrained_type_parameter_from_expected_return() {
+    let src = r#"
+interface MyMap<K, V> { fun describe(): String }
+class MapImpl<K, E, V>(val f: Factory<K, E>) : MyMap<K, V> {
+    override fun describe(): String = "OK"
+}
+interface Factory<K, E> {
+    fun <V> createMap(): MyMap<K, V> = MapImpl(this)
+}
+class StrFactory : Factory<String, Char>
+fun box(): String = StrFactory().createMap<Int>().describe()
+"#;
+    let (code, diagnostics) =
+        common::kotlinc_source_result("ResolverCtorExpectedTypeBindingReference", src);
+    assert_eq!((code, diagnostics), (0, String::new()));
+    assert_eq!(run(src, "ResolverCtorExpectedTypeBinding"), "OK");
+}
+
+#[test]
+fn classpath_constructor_binds_unconstrained_type_parameter_from_expected_return() {
+    let library = r#"
+package lib
+interface MyMap<K, V> { fun describe(): String }
+class MapImpl<K, E, V>(val factory: Factory<K, E>) : MyMap<K, V> {
+    override fun describe(): String = "OK"
+}
+interface Factory<K, E>
+class StrFactory : Factory<String, Char>
+"#;
+    let main = r#"
+import lib.Factory
+import lib.MapImpl
+import lib.MyMap
+import lib.StrFactory
+fun create(factory: Factory<String, Char>): MyMap<String, Int> = MapImpl(factory)
+fun box(): String = create(StrFactory()).describe()
+"#;
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(library, main).as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
+fn constructor_call_contradicting_the_expected_type_still_errors() {
+    let src = r#"
+interface MyMap<K, V>
+class MapImpl<K, E, V>(val f: Factory<K, E>) : MyMap<K, V>
+interface Factory<K, E>
+class StrFactory : Factory<String, Char>
+val x: MyMap<String, Int> = MapImpl<Char, Char, String>(StrFactory())
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("CtorExpectedContradiction", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [
+            ObservedDiagnostic {
+                file: "CtorExpectedContradiction.kt".to_string(),
+                line: 6,
+                column: 27,
+                message: "initializer type mismatch: expected 'MyMap<String, Int>', actual 'MapImpl<Char, Char, String>'.".to_string(),
+            },
+            ObservedDiagnostic {
+                file: "CtorExpectedContradiction.kt".to_string(),
+                line: 6,
+                column: 57,
+                message: "argument type mismatch: actual type is 'StrFactory', but 'Factory<Char, Char>' was expected.".to_string(),
+            },
+        ]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        [
+            "argument type mismatch: actual type is 'StrFactory', but 'Factory<Char, Char>' was expected."
+                .to_string(),
+            "initializer type mismatch: expected 'MyMap<String, Int>', actual 'MapImpl<Char, Char, String>'."
+                .to_string(),
+        ]
+    );
+}
+
+#[test]
+fn constructor_expected_return_does_not_hide_an_unconstrained_parameter() {
+    let src = r#"
+interface MyMap<K, V>
+class MapImpl<K, E, V>(val key: K) : MyMap<K, V>
+val x: MyMap<String, Int> = MapImpl("value")
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("CtorExpectedPartial", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "CtorExpectedPartial.kt".to_string(),
+            line: 4,
+            column: 29,
+            message: "cannot infer type for type parameter 'E'. Specify it explicitly.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["initializer type mismatch: expected 'MyMap<String, Int>', actual 'MapImpl<String, Any?, Any?>'."
+            .to_string()]
+    );
+}
+
+#[test]
+fn constructor_expected_return_respects_type_parameter_bounds() {
+    let src = r#"
+interface View<V>
+class TextImpl<V : CharSequence> : View<V>
+val x: View<Int> = TextImpl()
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("CtorExpectedBound", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "CtorExpectedBound.kt".to_string(),
+            line: 4,
+            column: 20,
+            message: "cannot infer type for type parameter 'V'. Specify it explicitly.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        [
+            "initializer type mismatch: expected 'View<Int>', actual 'TextImpl<CharSequence>'."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
 fn selected_generic_member_keeps_its_inferred_return() {
     let src = r#"
 class C {
