@@ -1,6 +1,4 @@
-//! Class literals `T::class` / `expr::class`. krusty models the result as a `java/lang/Class` (its
-//! identity makes `==` agree with kotlinc's `KClass`). UNBOUND `T::class` (reference type name) lowers to
-//! a class constant; BOUND `expr::class` lowers to `expr.getClass()`. Round-tripped on the JVM.
+//! Class literals `T::class` and `expr::class`, checked against JVM runtime behavior.
 
 use super::common;
 
@@ -124,6 +122,33 @@ fn typealias_array_class_literal() {
 fun box(): String =\n\
     if (Strings::class.java.getName() == \"[Ljava.lang.String;\") \"OK\" else \"FAIL\"\n";
     assert_array_literal_runs("TypeAliasArrayClassLiteral", SRC);
+}
+
+#[test]
+fn sibling_typealias_array_class_literal() {
+    const ALIAS: &str = "package sample\ntypealias Strings = Array<String>\n";
+    const MAIN: &str = "package sample\n\
+fun box(): String =\n\
+    if (Strings::class.java.getName() == \"[Ljava.lang.String;\") \"OK\" else \"FAIL\"\n";
+
+    assert_eq!(
+        common::front_end_diagnostics_files_with_stdlib(&[ALIAS, MAIN]),
+        Vec::<String>::new()
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[("Alias.kt", ALIAS), ("Main.kt", MAIN)],
+        "SiblingTypeAliasArrayClassLiteral",
+    );
+}
+
+#[test]
+fn classpath_typealias_array_class_literal() {
+    const LIBRARY: &str = "package library\ntypealias Strings = Array<String>\n";
+    const MAIN: &str = "import library.Strings\n\
+fun box(): String =\n\
+    if (Strings::class.java.getName() == \"[Ljava.lang.String;\") \"OK\" else \"FAIL\"\n";
+
+    common::expect_box_ok_against("classpath_array_class_literal", LIBRARY, MAIN);
 }
 
 #[test]
