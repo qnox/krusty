@@ -79,7 +79,6 @@ fun box(): String {\n\
 
 #[test]
 fn bound_class_literal_smartcast_in_equals() {
-    // KT-16291: `other::class == this::class` inside an overridden `equals` (bound literals on values).
     const SRC: &str = "class Foo(val s: String) {\n\
     override fun equals(other: Any?): Boolean {\n\
         return other != null && other::class == this::class && s == (other as Foo).s\n\
@@ -114,6 +113,29 @@ fn qualified_array_class_literal() {
     const SRC: &str = "fun box(): String =\n\
         if (kotlin.Array<String>::class.java.getName() == \"[Ljava.lang.String;\") \"OK\" else \"FAIL\"\n";
     assert_array_literal_runs("QualifiedArrayClassLiteral", SRC);
+}
+
+#[test]
+fn imported_alias_array_class_literal() {
+    const SRC: &str = "import kotlin.Array as KotlinArray\n\
+fun box(): String =\n\
+    if (KotlinArray<String>::class.java.getName() == \"[Ljava.lang.String;\") \"OK\" else \"FAIL\"\n";
+    assert_array_literal_runs("ImportedAliasArrayClassLiteral", SRC);
+}
+
+#[test]
+fn user_array_classifier_is_not_the_builtin_array() {
+    const SRC: &str = "class Array<T>\n\
+fun f() { val literal = Array<String>::class }\n";
+    let (reference_code, _) = common::kotlinc_source_result("UserArrayClassLiteral", SRC);
+    assert_ne!(
+        reference_code, 0,
+        "kotlinc accepted a generic class literal"
+    );
+    assert_eq!(
+        common::front_end_diagnostics_files_with_stdlib(&[SRC]),
+        vec!["only classes are allowed on the left-hand side of a class literal.".to_string()]
+    );
 }
 
 #[test]

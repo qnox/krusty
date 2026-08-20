@@ -29145,16 +29145,29 @@ impl<'a> Checker<'a> {
         if ty.is_reference() {
             return Some(ty);
         }
-        // A primitive type literal (`Int::class`) is modeled by its boxed wrapper class (`Integer`), so it
-        // compares equal to a bound literal on a value of that type (`42::class` → `Integer.getClass()`).
-        // (Like the reference case, this is a `Class`-not-`KClass` approximation: `==`/`!=` agree with
-        // kotlinc, but `.java.isPrimitive` would observe `Integer` where kotlinc's `KClass<Int>` reports
-        // the primitive `int` — no corpus file exercises that, and the gate would flag it as a FAIL.)
-        // Unsigned types box to an inline-class wrapper (`kotlin/UInt`), not a plain `java/lang/*` — skip.
+        // Bound and unbound primitive literals use the same boxed classifier identity.
+        // Unsigned inline classes are not primitive wrappers.
         if ty.is_unsigned() {
             return None;
         }
         ty.boxed_ref()
+    }
+
+    fn validate_class_literal_type_arguments(&mut self, e: ExprId, ty: Ty) -> Ty {
+        let has_type_arguments = self
+            .file
+            .call_type_args
+            .get(&e.0)
+            .is_some_and(|arguments| !arguments.is_empty());
+        if has_type_arguments && !ty.is_reference_array() {
+            self.diags.error(
+                self.span(e),
+                "only classes are allowed on the left-hand side of a class literal.".to_string(),
+            );
+            Ty::Error
+        } else {
+            ty
+        }
     }
 
     fn obj_with_targs_name(
@@ -40006,10 +40019,7 @@ impl<'a> Checker<'a> {
         name: String,
     ) -> Ty {
         let t = {
-            // Class literal. UNBOUND on a reference type name (`String::class`, `UserType::class`)
-            // lowers to `ldc <ty>.class`; BOUND on a value expression (`x::class`, `this::class`)
-            // lowers to `expr.getClass()`. A primitive receiver (`Int::class`, `42::class`) needs the
-            // `Integer.TYPE`/box-then-getClass form and is not modeled.
+            // A classifier receiver is unbound; a value receiver is bound and evaluated.
             if name == "class" {
                 let unsupported = |s: &mut Self| {
                     s.diags.error(
@@ -40063,6 +40073,10 @@ impl<'a> Checker<'a> {
                         });
                     classifier
                 };
+                let unbound = unbound.map(|ty| self.validate_class_literal_type_arguments(e, ty));
+                if unbound == Some(Ty::Error) {
+                    return self.set(e, Ty::Error);
+                }
                 if unbound.is_none() {
                     // Bound: a reference receiver, or a boxable primitive (boxed then `getClass`).
                     let rt = self.expr(scope, recv);
