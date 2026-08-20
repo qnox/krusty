@@ -21,6 +21,26 @@ fun box(): String = if (widened == 42L) "OK" else "wrong"
 }
 
 #[test]
+fn nested_sealed_interface_keeps_its_exhaustive_subclass_tree() {
+    // `WithValue` must remain sealed so exhaustiveness traversal reaches its `Step` subclass.
+    let src = r#"
+sealed interface G<out T> {
+    data object Empty : G<Nothing>
+    sealed interface WithValue<T> : G<T> { val value: T }
+    data class Step<T>(override val value: T) : WithValue<T>
+}
+fun <R> G<R>.describe(): Int = when (this) {
+    is G.Step<*> -> 1
+    is G.Empty -> 2
+}
+fun box(): String = if (G.Step("x").describe() == 1) "OK" else "FAIL"
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverNestedSealedInterface", src);
+    assert_eq!((code, diagnostics.as_str()), (0, ""));
+    assert_eq!(run(src, "ResolverNestedSealedInterface"), "OK");
+}
+
+#[test]
 fn selected_generic_member_keeps_its_inferred_return() {
     let src = r#"
 class C {
