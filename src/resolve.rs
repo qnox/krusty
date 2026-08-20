@@ -14602,8 +14602,8 @@ pub struct TypeInfo {
     /// Value receivers that must still be evaluated before an inlined constant member read. Classifier
     /// and package qualifiers are absent: they are names, not runtime expressions.
     pub resolved_constant_receivers: HashMap<ExprId, ExprId>,
-    /// Selected enum-entry owners keyed by member-read expression.
-    pub resolved_enum_entries: HashMap<ExprId, TypeName>,
+    /// Selected enum entries keyed by expression: owner and declared entry name.
+    pub resolved_enum_entries: HashMap<ExprId, (TypeName, String)>,
     /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
     /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
@@ -15661,9 +15661,11 @@ impl TypeInfo {
     pub fn resolved_constant_receiver(&self, e: ExprId) -> Option<ExprId> {
         self.resolved_constant_receivers.get(&e).copied()
     }
-    /// The selected enum-entry owner for member-read expression `e`.
-    pub fn resolved_enum_entry_owner(&self, e: ExprId) -> Option<TypeName> {
-        self.resolved_enum_entries.get(&e).copied()
+    /// The selected enum entry for expression `e`.
+    pub fn resolved_enum_entry(&self, e: ExprId) -> Option<(TypeName, &str)> {
+        self.resolved_enum_entries
+            .get(&e)
+            .map(|(owner, name)| (*owner, name.as_str()))
     }
     /// The extension callable the checker resolved for a synthesized protocol call.
     pub fn synthetic_ext(
@@ -19459,7 +19461,7 @@ struct Checker<'a> {
     resolved_default_member_calls: HashMap<ExprId, ResolvedDefaultMemberCall>,
     resolved_constants: HashMap<ExprId, crate::libraries::LibraryConst>,
     resolved_constant_receivers: HashMap<ExprId, ExprId>,
-    resolved_enum_entries: HashMap<ExprId, TypeName>,
+    resolved_enum_entries: HashMap<ExprId, (TypeName, String)>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     /// See [`TypeInfo::platform_narrowings`].
@@ -30639,14 +30641,14 @@ impl<'a> Checker<'a> {
             .filter(|arm| arm.guard.is_none())
             .flat_map(|arm| &arm.conditions)
         {
-            match self.file.expr(*condition) {
-                Expr::Member { name, .. }
-                    if self.resolved_enum_entries.get(condition) == Some(&internal) =>
-                {
-                    covered.insert(name.clone());
+            if let Some((owner, entry)) = self.resolved_enum_entries.get(condition) {
+                if *owner == internal {
+                    covered.insert(entry.clone());
                 }
-                Expr::NullLit => covers_null = true,
-                _ => {}
+                continue;
+            }
+            if let Expr::NullLit = self.file.expr(*condition) {
+                covers_null = true;
             }
         }
 
@@ -31746,6 +31748,11 @@ impl<'a> Checker<'a> {
         use crate::synthetics::SyntheticKind;
         use crate::types::AnnotationValue;
 
+        // Consume the resolved identity so qualified, bare, and aliased spellings fold alike.
+        if let Some((owner, entry)) = self.resolved_enum_entries.get(&e) {
+            return Some(AnnotationValue::Enum(*owner, entry.clone()));
+        }
+
         let value = match self.file.expr(e) {
             Expr::StringLit(value) => AnnotationValue::String(value.clone()),
             // An integer LITERAL takes the element's declared width too. Emitting `I` for a
@@ -31775,14 +31782,8 @@ impl<'a> Checker<'a> {
                 )
             }
             Expr::UnsupportedAnnotationArgument(_) => return None,
-            // A qualified read is an enum entry (`DeprecationLevel.HIDDEN`) OR a named constant
-            // reached through its owner (`Rules.AUTHENTICATED`, a `const val` on a companion).
-            // Only the first was folded, so every constant-qualified annotation argument was
-            // rejected as "not a supported compile-time constant".
-            Expr::Member { name, .. } => match self.resolved_enum_entries.get(&e).copied() {
-                Some(owner) => AnnotationValue::Enum(owner, name.clone()),
-                None => self.folded_library_constant(e, expected)?,
-            },
+            // Non-enum qualified reads may still be compile-time constants.
+            Expr::Member { .. } => self.folded_library_constant(e, expected)?,
             Expr::CallableRef {
                 receiver: Some(_),
                 name,
@@ -39637,7 +39638,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Some(owner) = enum_entry_owner {
-                    self.resolved_enum_entries.insert(e, owner);
+                    self.resolved_enum_entries.insert(e, (owner, n.clone()));
                     return self.set(e, Ty::obj_name(owner));
                 }
                 for implicit_receiver in deferred_receivers {
@@ -39762,6 +39763,8 @@ impl<'a> Checker<'a> {
                         self.mark_implicit_receiver_selection(e, receiver);
                     }
                     self.set(e, ty)
+                } else if let Some(ty) = self.imported_classifier_member(e, &n) {
+                    self.set(e, ty)
                 } else if let Ok(ResolvedQualifier::Classifier(internal)) =
                     self.qualifier(scope, QualifierInput::Root(&n))
                 {
@@ -39771,7 +39774,7 @@ impl<'a> Checker<'a> {
                     self.diags
                         .error(self.span(e), format!("unresolved reference '{n}'."));
                     Ty::Error
-                } else if let Some(field) = self.imported_static_field(&n) {
+                } else if let Some(field) = self.imported_package_static_field(&n) {
                     self.record_external_static_field(Some(e), field)
                 } else if let Some((implicit_receiver, member)) =
                     implicit_receivers.iter().copied().find_map(|receiver| {
@@ -47379,7 +47382,8 @@ impl<'a> Checker<'a> {
                 .resolved_type_name(field.owner)
                 .is_some_and(|ty| ty.is_enum_entry(&field.name))
             {
-                self.resolved_enum_entries.insert(expr, field.owner);
+                self.resolved_enum_entries
+                    .insert(expr, (field.owner, field.name.clone()));
             }
             self.expr_lowers.insert(
                 expr,
@@ -48224,7 +48228,8 @@ impl<'a> Checker<'a> {
                 .resolved_type_name(owner)
                 .is_some_and(|classifier| classifier.is_enum_entry(name));
         if is_entry {
-            self.resolved_enum_entries.insert(expression, owner);
+            self.resolved_enum_entries
+                .insert(expression, (owner, name.to_string()));
             return Some(Ty::obj_name(owner));
         }
         // `pkg.Cls.Companion` — the companion singleton named EXPLICITLY. Every companion is emitted
@@ -48333,17 +48338,26 @@ impl<'a> Checker<'a> {
         ))
     }
 
-    fn imported_static_field(&self, name: &str) -> Option<crate::libraries::StaticFieldRef> {
+    fn imported_package_static_field(
+        &self,
+        name: &str,
+    ) -> Option<crate::libraries::StaticFieldRef> {
         let (namespace, declared_name) = self.function_import_scope.explicit_target(name)?;
-        match namespace {
-            crate::symbol_source::SymbolNamespace::Package(package) => self
-                .syms
-                .libraries
-                .top_level_static_field(package, &declared_name),
-            crate::symbol_source::SymbolNamespace::Classifier(owner) => {
-                self.resolver().static_field(owner, &declared_name)
-            }
-        }
+        let crate::symbol_source::SymbolNamespace::Package(package) = namespace else {
+            return None;
+        };
+        self.syms
+            .libraries
+            .top_level_static_field(package, &declared_name)
+    }
+
+    /// Read an explicitly imported classifier member through the qualified-member path.
+    fn imported_classifier_member(&mut self, expression: ExprId, name: &str) -> Option<Ty> {
+        let (namespace, declared_name) = self.function_import_scope.explicit_target(name)?;
+        let crate::symbol_source::SymbolNamespace::Classifier(owner) = namespace else {
+            return None;
+        };
+        self.read_classifier_member(expression, owner, &declared_name)
     }
 
     /// The constructor shapes each argument of `Name(args)` is typed against, in SOURCE-ARGUMENT
@@ -58931,7 +58945,7 @@ fun box(): String {
             .expect("source should contain Kind.PENDING member read");
         assert_eq!(info.ty(member), Ty::String);
         assert!(
-            info.resolved_enum_entry_owner(member).is_none(),
+            info.resolved_enum_entry(member).is_none(),
             "local value root must not be recorded as an enum-entry classifier path"
         );
     }
