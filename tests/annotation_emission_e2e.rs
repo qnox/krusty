@@ -161,13 +161,18 @@ fn compile_both_with(
         kotlinc_args.push(library.to_string_lossy().to_string());
     }
     let (code, stderr) = common::kotlinc_compile(&kotlinc_args)?;
-    assert_eq!(code, 0, "{name}: kotlinc rejected the fixture: {stderr}");
+    assert_eq!((code, stderr.as_str()), (0, ""), "{name}");
 
     let stem = file.strip_suffix(".kt").expect("fixture is a .kt file");
     let mut classpath = vec![stdlib];
     if let Some(library) = library {
         classpath.push(library.to_path_buf());
     }
+    assert_eq!(
+        common::front_end_diagnostics(src, &classpath, Some(common::jdk_modules().as_path())),
+        Vec::<String>::new(),
+        "{name}"
+    );
     let classes =
         common::compile_in_process(src, stem, &classpath, Some(common::jdk_modules().as_path()))
             .unwrap_or_else(|| panic!("{name}: krusty failed to compile the fixture"));
@@ -584,6 +589,39 @@ fn hidden_deprecated_primary_constructor_is_synthetic() {
         "p/C",
         "package p\n\n\
          class C @Deprecated(\"gone\", level = DeprecationLevel.HIDDEN) constructor(val x: Int)\n",
+    );
+}
+
+#[test]
+fn concatenated_string_constant_matches_kotlinc() {
+    require_same_annotations(
+        "concat",
+        "Concat.kt",
+        "q/ConcatKt",
+        &[
+            "old(java.lang.String)",
+            "older(java.lang.String)",
+            "primitive(java.lang.String)",
+            "primitives(java.lang.String)",
+            "floatEdges(java.lang.String)",
+            "surrogate(java.lang.String)",
+        ],
+        "package q\n\
+         const val PREFIX = \"dep: \"\n\
+         const val SUFFIX = \"gone\"\n\
+         const val COUNT = 1\n\
+         @Deprecated(\"first\" + \" part, \" + \"second part\")\n\
+         fun old(x: String): String = x\n\
+         @Deprecated(PREFIX + SUFFIX)\n\
+         fun older(y: String): String = y\n\
+         @Deprecated(\"count=\" + COUNT)\n\
+         fun primitive(value: String): String = value\n\
+         @Deprecated(\"values=\" + true + ':' + 2L + ':' + 1.5F + ':' + 2.5)\n\
+         fun primitives(value: String): String = value\n\
+         @Deprecated(\"float=\" + 1.0E7F + ':' + 1.0E-4F + ':' + 1.0E7 + ':' + 1.0E-4)\n\
+         fun floatEdges(value: String): String = value\n\
+         @Deprecated(\"edge:\" + \"\\uD800\")\n\
+         fun surrogate(z: String): String = z\n",
     );
 }
 
