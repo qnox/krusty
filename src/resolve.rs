@@ -36204,9 +36204,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Whether the checker-selected call can infer an unbound generic return from `expected`.
-    /// This is a fact of the selected declaration, independent of whether the source spelled the
-    /// callee as a bare name, a member access, or another qualified form.
+    /// Whether a selected call can infer its result from `expected`. This is a fact of the selected
+    /// declaration or compiler synthetic, independent of the source expression shape.
     fn call_result_can_bind_expected(&self, expression: ExprId, expected: Ty) -> bool {
         if self
             .file
@@ -36215,6 +36214,15 @@ impl<'a> Checker<'a> {
             .is_some_and(|arguments| !arguments.is_empty())
         {
             return false;
+        }
+        if matches!(
+            self.expr_lowers.get(&expression),
+            Some(ExprLowering::CompilerSynthetic(
+                crate::synthetics::SyntheticKind::EmptyReference
+            ))
+        ) {
+            let expected = expected.non_null();
+            return expected.is_reference_array() && expected.array_elem().is_some();
         }
         if matches!(self.file.expr(expression), Expr::Call { .. }) {
             let expected_owner = expected.kotlin_class_internal();
@@ -37809,7 +37817,8 @@ impl<'a> Checker<'a> {
             let at = self.expr(scope, array);
             let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
             if let [index] = indices.as_slice() {
-                if let Some(elem) = at.array_elem() {
+                // A read consumes the projection rather than exposing it as an expression type.
+                if let Some(elem) = at.array_read_elem() {
                     self.expect_assignable(Ty::Int, its[0], self.span(*index), "array index");
                     return self.set(e, elem);
                 }
@@ -42865,7 +42874,8 @@ impl<'a> Checker<'a> {
         // `Array<out Bound>` / `Array<in Bound>` constrains the produced array but does not select its
         // invariant element type. Infer that type from `arrayOf`'s arguments, then let the enclosing
         // assignability check validate the concrete `Array<T>` against the projection.
-        let element_hint = element_hint.filter(|element| element.projection_inner().is_none());
+        let raw_hint = element_hint;
+        let element_hint = raw_hint.filter(|element| element.projection_inner().is_none());
         if let SyntheticKind::PrimitiveVararg(elem) = synthetic.kind {
             for &argument in args {
                 let actual = self.expr_expected(scope, argument, elem);
@@ -42874,12 +42884,11 @@ impl<'a> Checker<'a> {
             return Some(Ty::array(elem));
         }
         if synthetic.kind == SyntheticKind::EmptyReference && args.is_empty() {
-            // `emptyArray<T>()` takes `T` from an explicit type argument or the selected call's
-            // expected array type. With neither, its provisional result stays erased until a selected
-            // declaration supplies that expectation.
-            return Some(Ty::array(
-                element_hint.unwrap_or_else(|| Ty::obj("kotlin/Any")),
-            ));
+            // With no elements, an explicit or contextual type is the only element evidence.
+            let element = raw_hint
+                .map(|element| element.projection_inner().unwrap_or(element))
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            return Some(Ty::obj_args("kotlin/Array", &[element]));
         }
         if synthetic.kind == SyntheticKind::ReferenceVararg {
             // An explicit type argument (`arrayOf<Byte>(1)`) or contextual `Array<T>` expectation fixes
