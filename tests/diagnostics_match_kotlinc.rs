@@ -54,6 +54,51 @@ fn generic_cast_is_accepted_by_both_frontends() {
 }
 
 #[test]
+fn anonymous_objects_do_not_restore_cut_outer_type_parameters() {
+    let companion = "class CompanionOuter<T> {\n\
+                     \x20   companion object {\n\
+                     \x20       val marker = object {\n\
+                     \x20           fun value(): T = error(\"unreachable\")\n\
+                     \x20       }\n\
+                     \x20   }\n\
+                     }\n";
+    let nested = "class NestedOuter<T> {\n\
+                  \x20   class Nested {\n\
+                  \x20       val marker = object {\n\
+                  \x20           fun value(): T = error(\"unreachable\")\n\
+                  \x20       }\n\
+                  \x20   }\n\
+                  }\n";
+    let result = common::compiler_diagnostics(
+        &[
+            ("AnonymousObjectCompanionCut.kt", companion),
+            ("AnonymousObjectNestedCut.kt", nested),
+        ],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+
+    let expected = vec![
+        ObservedError {
+            file: "AnonymousObjectCompanionCut.kt".to_string(),
+            line: 4,
+            column: 26,
+            message: "unresolved reference 'T'.".to_string(),
+        },
+        ObservedError {
+            file: "AnonymousObjectNestedCut.kt".to_string(),
+            line: 4,
+            column: 26,
+            message: "unresolved reference 'T'.".to_string(),
+        },
+    ];
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+    assert_eq!(errors(&result.reference_stderr), expected);
+}
+
+#[test]
 fn mutable_local_smart_cast_diagnostics_match_kotlinc() {
     let result = common::compiler_diagnostics(
         &[

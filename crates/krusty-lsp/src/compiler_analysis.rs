@@ -513,7 +513,7 @@ mod tests {
         let diagnostics = &analysis.files[0].diagnostics;
         assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
 
-        for pair in diagnostics.chunks_exact(2) {
+        for pair in diagnostics.as_chunks::<2>().0 {
             assert_eq!(pair[0].severity, Severity::Warning);
             assert_eq!(pair[0].kind, DiagnosticKind::Inspection);
             assert_eq!(pair[0].msg, BOOLEAN_EXPRESSION_SIMPLIFICATION);
@@ -919,7 +919,7 @@ mod tests {
         let diagnostics = &analysis.files[0].diagnostics;
         assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
 
-        for pair in diagnostics.chunks_exact(2) {
+        for pair in diagnostics.as_chunks::<2>().0 {
             assert_eq!(pair[0].severity, Severity::Warning);
             assert_eq!(pair[0].msg, BOOLEAN_EXPRESSION_SIMPLIFICATION);
             assert_eq!(pair[0].span, pair[1].span);
