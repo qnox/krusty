@@ -1,16 +1,24 @@
-//! Top-level extension functions overloaded by arity on the same receiver — `fun R.f()` and
-//! `fun R.f(x)` — were wrongly rejected at signature collection ("conflicting extension functions
-//! with the same erased receiver and name"). `ext_funs` now holds all overloads; each call resolves
-//! (checker) and lowers (backend) to the overload matching its argument count. Same-file, JVM.
+//! Top-level extension overload selection and conflict diagnostics.
 use super::common;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }
 
+fn assert_exact_unresolved_diagnostics(tag: &str, source: &str, expected: &[&str]) {
+    let (reference_code, _) = common::kotlinc_source_result(tag, source);
+    assert_ne!(reference_code, 0, "kotlinc accepted {tag}");
+    assert_eq!(
+        common::front_end_diagnostics_files_with_stdlib(&[source]),
+        expected
+            .iter()
+            .map(|message| (*message).to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn arity_overloaded_extension_on_user_class() {
-    // `Box.f()` delegates to `Box.f(1)`; both overloads coexist and each call binds its own arity.
     const SRC: &str = "\
 class Box(val n: Int)\n\
 fun Box.f() = f(1)\n\
@@ -22,8 +30,6 @@ fun box(): String =\n\
 
 #[test]
 fn arity_overloaded_extension_distinct_bodies() {
-    // Three overloads by arity, each with its own body — verifies per-overload dispatch, not just
-    // that two coexist.
     const SRC: &str = "\
 class S(val v: String)\n\
 fun S.tag() = \"none\"\n\
@@ -38,22 +44,52 @@ fun box(): String {\n\
 }
 
 #[test]
-fn unresolved_receiver_types_do_not_confuse_erasure_clash_detection() {
-    // Two same-named extensions whose receiver types both fail to resolve: the erasure key must
-    // not collapse both receivers to the same error key — kotlinc reports only the unresolved
-    // references, no "conflicting extension functions" diagnostic.
-    let mut diags = common::front_end_diagnostics_files_with_stdlib(&[
-        "inline fun <T> SpanBuilder.use(operation: (Span) -> T): T = TODO()\n\
-         inline fun <T> Span.use(operation: (Span) -> T): T = TODO()\n",
-    ]);
-    diags.sort();
-    assert_eq!(
-        diags,
-        vec![
-            "unresolved reference 'Span'.".to_string(),
-            "unresolved reference 'Span'.".to_string(),
-            "unresolved reference 'Span'.".to_string(),
-            "unresolved reference 'SpanBuilder'.".to_string(),
+fn error_typed_conflict_key_ignores_unresolved_receivers() {
+    assert_exact_unresolved_diagnostics(
+        "UnresolvedExtensionReceivers",
+        "fun MissingReceiverA.use() {}\nfun MissingReceiverB.use() {}\n",
+        &[
+            "unresolved reference 'MissingReceiverA'.",
+            "unresolved reference 'MissingReceiverB'.",
+        ],
+    );
+}
+
+#[test]
+fn error_typed_conflict_key_ignores_unresolved_extension_parameters() {
+    assert_exact_unresolved_diagnostics(
+        "UnresolvedExtensionParameters",
+        "fun String.use(value: MissingParameterA) {}\n\
+         fun String.use(value: MissingParameterB) {}\n",
+        &[
+            "unresolved reference 'MissingParameterA'.",
+            "unresolved reference 'MissingParameterB'.",
+        ],
+    );
+}
+
+#[test]
+fn error_typed_conflict_key_ignores_unresolved_ordinary_parameters() {
+    assert_exact_unresolved_diagnostics(
+        "UnresolvedOrdinaryParameters",
+        "fun use(value: MissingParameterA) {}\n\
+         fun use(value: MissingParameterB) {}\n",
+        &[
+            "unresolved reference 'MissingParameterA'.",
+            "unresolved reference 'MissingParameterB'.",
+        ],
+    );
+}
+
+#[test]
+fn error_typed_conflict_key_ignores_nested_unresolved_parameters() {
+    assert_exact_unresolved_diagnostics(
+        "NestedUnresolvedParameters",
+        "fun use(value: List<MissingArgumentA>) {}\n\
+         fun use(value: List<MissingArgumentB>) {}\n",
+        &[
+            "unresolved reference 'MissingArgumentA'.",
+            "unresolved reference 'MissingArgumentB'.",
         ],
     );
 }
