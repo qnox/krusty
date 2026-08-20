@@ -1152,6 +1152,7 @@ pub struct SecondaryCtor {
     pub params: Vec<Param>,
     pub delegation: CtorDelegation,
     pub body: Option<ExprId>,
+    /// Source range from `constructor` through its delegation call or body.
     pub span: Span,
 }
 
@@ -1533,9 +1534,8 @@ pub struct File {
     /// File-scope type-alias declarations with their complete syntax and exact declaration spans.
     /// The parallel semantic tables above are retained for existing consumers.
     pub type_alias_decls: Vec<TypeAliasDecl>,
-    /// File-level annotations (`@file:Foo(args…)`) as `(simple_name, arg ExprIds)`. Lets a plugin read
-    /// e.g. `@file:UseContextualSerialization(MyDate::class)` to mark matching property types contextual.
-    pub file_annotations: Vec<(String, Vec<ExprId>)>,
+    /// File-level annotations (`@file:Foo(args…)`) and their argument expressions.
+    pub file_annotations: Vec<(AnnotationRef, Vec<ExprId>)>,
     /// `ExprId`s of call arguments written with the spread operator (`*arr`). The marked id is the
     /// inner expression (the `arr` of `*arr`), which is what appears in the call's `args`. Lets the
     /// vararg lowering pass the array through (`Arrays.copyOf`) instead of packing it as one element.

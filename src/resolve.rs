@@ -20584,6 +20584,7 @@ impl<'a> Checker<'a> {
         name: &str,
         expected: Option<&'static crate::types::FnSig>,
         binding: CallableReferenceBinding,
+        invisible_reference_suppressed: bool,
     ) -> ExtensionRefSelection {
         let unbound = matches!(binding, CallableReferenceBinding::Unbound);
         let mut inaccessible = false;
@@ -20625,7 +20626,7 @@ impl<'a> Checker<'a> {
                     .source_key
                     .is_some_and(|(file, _)| file == self.file_index)
                     || function.flags.inline.must_inline();
-                if !accessible {
+                if !accessible && !invisible_reference_suppressed {
                     inaccessible = true;
                     return None;
                 }
@@ -20867,8 +20868,9 @@ impl<'a> Checker<'a> {
                 Some(Ty::Error)
             }
             ExtensionRefSelection::Inaccessible => {
+                let span = self.member_name_span(expression, name);
                 self.diags.error(
-                    self.member_name_span(expression, name),
+                    span,
                     format!("cannot access '{name}': it is private in its file"),
                 );
                 Some(Ty::Error)
@@ -20887,6 +20889,7 @@ impl<'a> Checker<'a> {
         name: &str,
         expected: Option<Ty>,
         binding: CallableReferenceBinding,
+        invisible_reference_suppressed: bool,
     ) -> ExtensionCallableRefSelection {
         let expected_function = match expected {
             Some(Ty::Fun(function)) => Some(function),
@@ -20913,6 +20916,7 @@ impl<'a> Checker<'a> {
             name,
             expected_function,
             binding,
+            invisible_reference_suppressed,
         );
         if !matches!(function, ExtensionRefSelection::None) {
             return ExtensionCallableRefSelection::Function(Box::new(function));
@@ -21846,6 +21850,8 @@ impl<'a> Checker<'a> {
         expected: &'static crate::types::FnSig,
     ) -> Option<Ty> {
         let mut inaccessible = false;
+        let invisible_reference_suppressed =
+            self.invisible_reference_suppressed(self.member_name_span(expression, name));
         let mut structurally_adaptable = Vec::new();
         let mut unavailable_default = None;
         let mut unresolved_type_arguments = false;
@@ -21879,7 +21885,7 @@ impl<'a> Checker<'a> {
                     .source_key
                     .is_some_and(|(file, _)| file == self.file_index)
                     || function.flags.inline.must_inline();
-                if !accessible {
+                if !accessible && !invisible_reference_suppressed {
                     inaccessible = true;
                     return None;
                 }
@@ -22053,8 +22059,9 @@ impl<'a> Checker<'a> {
                 return Some(Ty::Error);
             }
             if inaccessible {
+                let span = self.member_name_span(expression, name);
                 self.diags.error(
-                    self.member_name_span(expression, name),
+                    span,
                     format!("cannot access '{name}': it is private in its file"),
                 );
                 return Some(Ty::Error);
@@ -22210,6 +22217,8 @@ impl<'a> Checker<'a> {
         } = call_args;
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let invisible_reference_suppressed =
+            self.invisible_reference_suppressed(self.call_callee_name_span(call));
         let partial = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
         let shape_without_implicit_context =
             |params: &[Ty], call_sig: &CallSig, context_count: usize| {
@@ -22247,7 +22256,7 @@ impl<'a> Checker<'a> {
             if self.file.infix_calls.contains(&call.0) && !candidate.flags.infix {
                 continue;
             }
-            if !self.source_callable_visible(&candidate) {
+            if !self.source_callable_visible(&candidate) && !invisible_reference_suppressed {
                 crate::trace_compiler!(
                     "resolve",
                     "candidate {} rejected: not visible",
@@ -25563,13 +25572,8 @@ impl<'a> Checker<'a> {
                 );
                 return None;
             };
-            if !self.member_accessible(selected.visibility, selected.callable.owner) {
-                self.reject_if_inaccessible(
-                    selected.visibility,
-                    name,
-                    selected.callable.owner,
-                    span,
-                );
+            if self.reject_if_inaccessible(selected.visibility, name, selected.callable.owner, span)
+            {
                 return None;
             }
             let target = if selected.kind == crate::libraries::FnKind::Member {
@@ -25648,8 +25652,7 @@ impl<'a> Checker<'a> {
                             sig.projected_return_hazard,
                             Origin::Module { facade: owner },
                         ));
-                    if !self.member_accessible(sig.visibility, owner) {
-                        self.reject_if_inaccessible(sig.visibility, name, owner, span);
+                    if self.reject_if_inaccessible(sig.visibility, name, owner, span) {
                         return Some((Ty::Error, target));
                     }
                     self.expect_call_args(scope, &sig.params, false, arg_exprs, arg_tys);
@@ -26577,13 +26580,18 @@ impl<'a> Checker<'a> {
         let inaccessible_private = candidates
             .iter()
             .any(|candidate| !self.source_callable_visible(candidate));
+        let invisible_reference_suppressed =
+            self.invisible_reference_suppressed(self.call_callee_name_span(call));
         let candidates = candidates
             .into_iter()
-            .filter(|candidate| self.source_callable_visible(candidate))
+            .filter(|candidate| {
+                self.source_callable_visible(candidate) || invisible_reference_suppressed
+            })
             .collect::<Vec<_>>();
         if candidates.is_empty() && inaccessible_private {
+            let span = self.call_callee_name_span(call);
             self.diags.error(
-                self.call_callee_name_span(call),
+                span,
                 format!("cannot access '{name}': it is private in its file"),
             );
             return true;
@@ -27639,13 +27647,14 @@ impl<'a> Checker<'a> {
                     let owner = member
                         .owner
                         .expect("a selected member invoke has a declaring classifier");
-                    if !self.selected_member_accessible(&access_probe, owner) {
-                        self.reject_if_inaccessible(
+                    if !self.selected_member_accessible(&access_probe, owner)
+                        && self.reject_if_inaccessible(
                             member.visibility,
                             &member.name,
                             owner,
                             self.call_callee_name_span(call),
-                        );
+                        )
+                    {
                         return InvokeResolution::Selected(Ty::Error);
                     }
                     let defaults = selected.default_values.clone();
@@ -30226,7 +30235,7 @@ impl<'a> Checker<'a> {
         }
         if !scope.tparam_contains(&r.name) {
             if let Some(internal) = resolved.non_null().kotlin_class_internal() {
-                if !r.is_import() {
+                if !r.is_import() && !self.invisible_reference_suppressed(r.span) {
                     if let Some(access) = self.resolver().inaccessible_classifier_access(internal) {
                         self.diags.error_with_identity(
                             r.span,
@@ -41324,6 +41333,7 @@ impl<'a> Checker<'a> {
                 name,
                 expected,
                 CallableReferenceBinding::Unbound,
+                self.invisible_reference_suppressed(self.member_name_span(expression, name)),
             );
             if let Some(ty) = self.record_extension_callable_ref_selection(
                 expression,
@@ -41362,6 +41372,7 @@ impl<'a> Checker<'a> {
                     name,
                     expected,
                     CallableReferenceBinding::Bound,
+                    self.invisible_reference_suppressed(self.member_name_span(expression, name)),
                 );
                 if let Some(ty) = self.record_extension_callable_ref_selection(
                     expression,
@@ -41594,6 +41605,7 @@ impl<'a> Checker<'a> {
                         &name,
                         expected,
                         CallableReferenceBinding::ImplicitThis,
+                        self.invisible_reference_suppressed(self.member_name_span(e, &name)),
                     );
                     if let Some(ty) = self.record_extension_callable_ref_selection(
                         e,
@@ -42036,6 +42048,7 @@ impl<'a> Checker<'a> {
                     &name,
                     expected,
                     CallableReferenceBinding::Bound,
+                    self.invisible_reference_suppressed(self.member_name_span(e, &name)),
                 );
                 if let Some(ty) = self.record_extension_callable_ref_selection(
                     e,
@@ -43107,7 +43120,9 @@ impl<'a> Checker<'a> {
         mut selected: crate::symbol_resolver::ResolvedMember,
     ) -> Option<Ty> {
         let owner = selected.member.owner?;
-        if !self.selected_member_accessible(&selected, owner) {
+        if !self.selected_member_accessible(&selected, owner)
+            && !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+        {
             if matches!(
                 selected.member.visibility,
                 Visibility::PackagePrivate | Visibility::Protected
@@ -43448,23 +43463,27 @@ impl<'a> Checker<'a> {
                 .owner
                 .expect("a selected convention member has a declaring classifier");
             if !self.selected_member_accessible(&resolved, owner) {
-                if let Some(span) = diagnostic_span {
-                    let visibility = match selected.visibility {
-                        Visibility::Private => "private",
-                        Visibility::Protected => "protected",
-                        Visibility::Internal => "internal",
-                        Visibility::PackagePrivate => "package-private",
-                        Visibility::Public => "public",
-                    };
-                    self.diags.error(
-                        span,
-                        format!(
-                            "cannot access '{name}': it is {visibility} in '{}'",
-                            owner.render()
-                        ),
-                    );
+                let suppressed =
+                    diagnostic_span.is_some_and(|span| self.invisible_reference_suppressed(span));
+                if !suppressed {
+                    if let Some(span) = diagnostic_span {
+                        let visibility = match selected.visibility {
+                            Visibility::Private => "private",
+                            Visibility::Protected => "protected",
+                            Visibility::Internal => "internal",
+                            Visibility::PackagePrivate => "package-private",
+                            Visibility::Public => "public",
+                        };
+                        self.diags.error(
+                            span,
+                            format!(
+                                "cannot access '{name}': it is {visibility} in '{}'",
+                                owner.render()
+                            ),
+                        );
+                    }
+                    return Err(());
                 }
-                return Err(());
             }
             return Ok(Some(ResolvedCall::Member(resolved)));
         }
@@ -43750,8 +43769,7 @@ impl<'a> Checker<'a> {
             );
             return Err(());
         }
-        if !self.member_accessible(candidate.visibility, candidate.owner) {
-            self.reject_if_inaccessible(candidate.visibility, name, candidate.owner, span);
+        if self.reject_if_inaccessible(candidate.visibility, name, candidate.owner, span) {
             return Err(());
         }
         let interface = self
@@ -44974,7 +44992,9 @@ impl<'a> Checker<'a> {
         let Some(member) = members.get(candidate_index).cloned() else {
             return Ok(LibraryConstructorSelection::NoMatch);
         };
-        if !self.member_accessible(member.visibility, internal) {
+        if !self.member_accessible(member.visibility, internal)
+            && !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+        {
             if member.visibility == Visibility::PackagePrivate {
                 self.diags.error(
                     self.call_callee_name_span(call),
@@ -45476,6 +45496,9 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         internal: TypeName,
     ) -> bool {
+        if self.invisible_reference_suppressed(self.span(expression)) {
+            return false;
+        }
         let Some(access) = self.resolver().inaccessible_classifier_access(internal) else {
             return false;
         };
@@ -45509,10 +45532,145 @@ impl<'a> Checker<'a> {
         true
     }
 
+    fn invisible_reference_suppressed(&self, span: Span) -> bool {
+        const KEY: &str = "INVISIBLE_REFERENCE";
+        let args_contain_key = |arguments: &[ExprId]| {
+            arguments.iter().any(|argument| {
+                self.file
+                    .const_string_value(*argument)
+                    .is_some_and(|value| value.to_lossy() == KEY)
+            })
+        };
+        if self
+            .file
+            .file_annotations
+            .iter()
+            .any(|(annotation, arguments)| {
+                self.syms
+                    .resolved_annotation(self.file_index, annotation)
+                    .is_some_and(|name| name.matches("kotlin/Suppress"))
+                    && args_contain_key(arguments)
+            })
+        {
+            return true;
+        }
+        self.file
+            .decls
+            .iter()
+            .any(|&declaration| self.decl_suppresses_invisible_reference(declaration, span))
+            || self.file.stmt_arena.iter().any(|statement| {
+                matches!(statement, Stmt::LocalFun(function)
+                    if self.fun_suppresses_invisible_reference(function, span))
+            })
+    }
+
+    fn fun_suppresses_invisible_reference(&self, function: &FunDecl, span: Span) -> bool {
+        Self::span_contains(function.span, span)
+            && self.annotations_suppress_invisible_reference(
+                &function.annotations,
+                &function.annotation_args,
+            )
+    }
+
+    fn property_suppresses_invisible_reference(&self, property: &PropDecl, span: Span) -> bool {
+        Self::span_contains(property.span, span)
+            && self.annotations_suppress_invisible_reference(
+                &property.annotations,
+                &property.annotation_args,
+            )
+    }
+
+    fn primary_constructor_suppresses_invisible_reference(
+        &self,
+        class: &ClassDecl,
+        span: Span,
+    ) -> bool {
+        let Some(annotations) = class.primary_ctor_annotations.as_deref() else {
+            return false;
+        };
+        self.annotations_suppress_invisible_reference(
+            annotations,
+            &class.primary_ctor_annotation_args,
+        ) && class.props.iter().any(|parameter| {
+            Self::span_contains(parameter.ty.span, span)
+                || parameter
+                    .default
+                    .is_some_and(|default| Self::span_contains(self.span(default), span))
+        })
+    }
+
+    fn span_contains(outer: Span, inner: Span) -> bool {
+        inner.lo >= outer.lo && inner.hi <= outer.hi
+    }
+
+    fn decl_suppresses_invisible_reference(&self, declaration: DeclId, span: Span) -> bool {
+        match self.file.decl(declaration) {
+            Decl::Fun(function) => self.fun_suppresses_invisible_reference(function, span),
+            Decl::Class(class) => {
+                if !Self::span_contains(class.span, span) {
+                    return false;
+                }
+                if self.annotations_suppress_invisible_reference(
+                    &class.annotations,
+                    &class.annotation_args,
+                ) {
+                    return true;
+                }
+                class
+                    .methods
+                    .iter()
+                    .any(|method| self.fun_suppresses_invisible_reference(method, span))
+                    || self.primary_constructor_suppresses_invisible_reference(class, span)
+                    || class.body_props.iter().any(|property| {
+                        self.property_suppresses_invisible_reference(property, span)
+                    })
+                    || class.secondary_ctors.iter().any(|constructor| {
+                        Self::span_contains(constructor.span, span)
+                            && self.annotations_suppress_invisible_reference(
+                                &constructor.annotations,
+                                &constructor.annotation_args,
+                            )
+                    })
+                    || class.companion.is_some_and(|companion| {
+                        self.decl_suppresses_invisible_reference(companion, span)
+                    })
+            }
+            Decl::Property(property) => {
+                self.property_suppresses_invisible_reference(property, span)
+            }
+        }
+    }
+
+    fn annotations_suppress_invisible_reference(
+        &self,
+        annotations: &[AnnotationRef],
+        annotation_args: &[Vec<ExprId>],
+    ) -> bool {
+        annotations
+            .iter()
+            .zip(annotation_args)
+            .any(|(annotation, arguments)| {
+                self.syms
+                    .resolved_annotation(self.file_index, annotation)
+                    .is_some_and(|name| name.matches("kotlin/Suppress"))
+                    && arguments.iter().any(|argument| {
+                        self.file
+                            .const_string_value(*argument)
+                            .is_some_and(|value| value.to_lossy() == "INVISIBLE_REFERENCE")
+                    })
+            })
+    }
+
     /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is NOT reachable
     /// from the current site. Shared by the property-read and member-call checks.
-    fn reject_if_inaccessible(&mut self, vis: Visibility, name: &str, owner: TypeName, span: Span) {
-        if !self.member_accessible(vis, owner) {
+    fn reject_if_inaccessible(
+        &mut self,
+        vis: Visibility,
+        name: &str,
+        owner: TypeName,
+        span: Span,
+    ) -> bool {
+        if !self.member_accessible(vis, owner) && !self.invisible_reference_suppressed(span) {
             let kind = match vis {
                 Visibility::Private => "private",
                 Visibility::Protected => "protected",
@@ -45527,6 +45685,9 @@ impl<'a> Checker<'a> {
                     owner.render()
                 ),
             );
+            true
+        } else {
+            false
         }
     }
 
@@ -46842,6 +47003,7 @@ impl<'a> Checker<'a> {
                 if let Some((visibility, owner)) = selection.access() {
                     if visibility != Visibility::Public
                         && !self.receiver_member_accessible(visibility, owner, rt)
+                        && !self.invisible_reference_suppressed(span)
                     {
                         if matches!(
                             visibility,
@@ -47014,11 +47176,12 @@ impl<'a> Checker<'a> {
         expr: Option<ExprId>,
         field: crate::libraries::StaticFieldRef,
     ) -> Ty {
+        let diagnostic_span = expr.map(|expr| self.member_name_span(expr, &field.name));
         if field.visibility != Visibility::Public
             && !self.member_accessible(field.visibility, field.owner)
+            && !diagnostic_span.is_some_and(|span| self.invisible_reference_suppressed(span))
         {
-            if let Some(expr) = expr {
-                let span = self.member_name_span(expr, &field.name);
+            if let Some(span) = diagnostic_span {
                 if field.visibility == Visibility::PackagePrivate {
                     self.diags.error(
                         span,
@@ -47746,13 +47909,12 @@ impl<'a> Checker<'a> {
                 self.unbound_classifier_value_calls.insert(call);
             }
             let selected_owner = selected.callable.owner_type();
-            if !self.member_accessible(selected.visibility, selected_owner) {
-                self.reject_if_inaccessible(
-                    selected.visibility,
-                    name,
-                    selected_owner,
-                    self.call_callee_name_span(call),
-                );
+            if self.reject_if_inaccessible(
+                selected.visibility,
+                name,
+                selected_owner,
+                self.call_callee_name_span(call),
+            ) {
                 return ClassifierValueCall::Checked(Ty::Error);
             }
             let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
@@ -50924,14 +51086,13 @@ impl<'a> Checker<'a> {
                     Ok(Some(selection)) => {
                         if let Some((visibility, owner)) = selection.access() {
                             if visibility != Visibility::Public
-                                && !self.member_accessible(visibility, owner)
-                            {
-                                self.reject_if_inaccessible(
+                                && self.reject_if_inaccessible(
                                     visibility,
                                     &name,
                                     owner,
                                     self.call_callee_name_span(call),
-                                );
+                                )
+                            {
                                 return Ty::Error;
                             }
                         }
@@ -50982,14 +51143,13 @@ impl<'a> Checker<'a> {
                             Ok(Some(selection)) if is_function_property_shape(selection.ty()) => {
                                 if let Some((visibility, owner)) = selection.access() {
                                     if visibility != Visibility::Public
-                                        && !self.member_accessible(visibility, owner)
-                                    {
-                                        self.reject_if_inaccessible(
+                                        && self.reject_if_inaccessible(
                                             visibility,
                                             &name,
                                             owner,
                                             self.call_callee_name_span(call),
-                                        );
+                                        )
+                                    {
                                         return Ty::Error;
                                     }
                                 }
@@ -53367,17 +53527,20 @@ impl<'a> Checker<'a> {
                     .into_iter()
                     .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                     .collect::<Vec<_>>();
-                if top_level_candidates.iter().any(|candidate| {
-                    candidate.visibility == Visibility::Private
-                        && candidate
-                            .source_key
-                            .is_some_and(|(source_file, _)| source_file != self.file_index)
-                }) && top_level_candidates
-                    .iter()
-                    .all(|candidate| !self.source_callable_visible(candidate))
+                if !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+                    && top_level_candidates.iter().any(|candidate| {
+                        candidate.visibility == Visibility::Private
+                            && candidate
+                                .source_key
+                                .is_some_and(|(source_file, _)| source_file != self.file_index)
+                    })
+                    && top_level_candidates
+                        .iter()
+                        .all(|candidate| !self.source_callable_visible(candidate))
                 {
+                    let span = self.call_callee_name_span(call);
                     self.diags.error(
-                        self.call_callee_name_span(call),
+                        span,
                         format!("cannot access '{fname}': it is private in its file"),
                     );
                     return Ty::Error;
@@ -53685,13 +53848,17 @@ impl<'a> Checker<'a> {
                     (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None)
                 } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
                 {
-                    (
-                        inaccessible_classifier_message(&fname, access),
-                        Some(DiagnosticIdentity::ClassifierAccess {
-                            reference: span,
-                            classifier: internal,
-                        }),
-                    )
+                    if self.invisible_reference_suppressed(span) {
+                        (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None)
+                    } else {
+                        (
+                            inaccessible_classifier_message(&fname, access),
+                            Some(DiagnosticIdentity::ClassifierAccess {
+                                reference: span,
+                                classifier: internal,
+                            }),
+                        )
+                    }
                 } else {
                     // kotlinc has no "unresolved function" diagnostic: a callee that names nothing at
                     // all is UNRESOLVED_REFERENCE, the same diagnostic a bare unresolved name gets.
@@ -54937,7 +55104,9 @@ impl<'a> Checker<'a> {
         if let Ok(ResolvedQualifier::Classifier(owner)) = receiver_qualifier {
             if let Some(field) = self.resolver().static_field(owner, &name) {
                 let member_span = self.assignment_member_name_span(s, &name);
-                if !self.member_accessible(field.visibility, field.owner) {
+                if !self.member_accessible(field.visibility, field.owner)
+                    && !self.invisible_reference_suppressed(member_span)
+                {
                     if field.visibility == Visibility::PackagePrivate {
                         self.diags.error(
                             member_span,
