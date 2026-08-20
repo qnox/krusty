@@ -98,6 +98,29 @@ struct TopLevelFunctionConflictKey {
     params: Vec<ErasedTypeKey>,
 }
 
+impl TopLevelFunctionConflictKey {
+    fn from_signature(signature: &Signature, name: String) -> Option<Self> {
+        if signature
+            .params
+            .iter()
+            .any(|parameter| parameter.contains_error())
+        {
+            return None;
+        }
+        let receiver = match signature.source_receiver {
+            Some(receiver) if receiver.contains_error() => return None,
+            Some(receiver) => Some(extension_receiver_physical_key(receiver)),
+            None => None,
+        };
+        Some(Self {
+            package: signature.package.clone(),
+            receiver,
+            name,
+            params: erased_params_semantic_key(signature),
+        })
+    }
+}
+
 /// The committed meaning of a dotted expression's prefix.
 ///
 /// Kotlin resolves the root at scope-tower priority before looking at later segments. A value root
@@ -6691,7 +6714,6 @@ fn collect_signatures_with_cp_impl(
                         contract: None,
                         plugin_expression: None,
                     };
-                    let package = sig.package.clone();
                     let jvm_name = resolved_jvm_name(file, f, &class_names);
                     if jvm_name != f.name {
                         table
@@ -6704,30 +6726,27 @@ fn collect_signatures_with_cp_impl(
                     };
                     let private = f.visibility.is_private();
                     let entry_point = is_kotlin_main_entry_point(f, &sig.params, sig.ret);
+                    let retained = TopLevelFunctionConflictKey::from_signature(&sig, jvm_name)
+                        .is_none_or(|key| {
+                            register_top_level_function_conflict(
+                                files,
+                                &mut top_level_fun_groups,
+                                TopLevelFunctionConflictRegistration {
+                                    key,
+                                    declaration: current,
+                                    private,
+                                    entry_point,
+                                },
+                                &mut pending_conflict_diagnostics,
+                                &mut reserved_conflict_diagnostic_bytes,
+                                &mut retained_conflict_display_bytes,
+                            )
+                        });
                     if f.receiver.is_some() {
                         let recv_ty = sig
                             .source_receiver
                             .expect("extension signature has a resolved source receiver");
                         let source_receiver = recv_ty.extension_recv_key();
-                        let conflict_key = TopLevelFunctionConflictKey {
-                            package,
-                            receiver: Some(extension_receiver_physical_key(recv_ty)),
-                            name: jvm_name,
-                            params: erased_params_semantic_key(&sig),
-                        };
-                        let retained = register_top_level_function_conflict(
-                            files,
-                            &mut top_level_fun_groups,
-                            TopLevelFunctionConflictRegistration {
-                                key: conflict_key,
-                                declaration: current,
-                                private,
-                                entry_point,
-                            },
-                            &mut pending_conflict_diagnostics,
-                            &mut reserved_conflict_diagnostic_bytes,
-                            &mut retained_conflict_display_bytes,
-                        );
                         if retained {
                             let overloads = table
                                 .ext_funs
@@ -6748,25 +6767,6 @@ fn collect_signatures_with_cp_impl(
                         // clash only while both are spelled `g`, so an `@JvmName` on either one
                         // separates them (kotlinc's rule). Overload SELECTION is unaffected — the
                         // source name still keys `table.funs` above.
-                        let conflict_key = TopLevelFunctionConflictKey {
-                            package,
-                            receiver: None,
-                            name: jvm_name,
-                            params: erased_params_semantic_key(&sig),
-                        };
-                        let retained = register_top_level_function_conflict(
-                            files,
-                            &mut top_level_fun_groups,
-                            TopLevelFunctionConflictRegistration {
-                                key: conflict_key,
-                                declaration: current,
-                                private,
-                                entry_point,
-                            },
-                            &mut pending_conflict_diagnostics,
-                            &mut reserved_conflict_diagnostic_bytes,
-                            &mut retained_conflict_display_bytes,
-                        );
                         if retained {
                             table.funs.entry(f.name.clone()).or_default().push(sig);
                         }
@@ -9135,11 +9135,8 @@ fn collect_signatures_with_cp_impl(
                 .get(&(file, declaration.0))
                 .cloned()
                 .unwrap_or_else(|| name.clone());
-            let key = TopLevelFunctionConflictKey {
-                package: signature.package.clone(),
-                receiver: None,
-                name: jvm_name,
-                params: erased_params_semantic_key(signature),
+            let Some(key) = TopLevelFunctionConflictKey::from_signature(signature, jvm_name) else {
+                continue;
             };
             let source_is_local = signature.visibility.is_private()
                 || files
@@ -9169,7 +9166,7 @@ fn collect_signatures_with_cp_impl(
     for (name, receivers) in &table.ext_funs {
         for signatures in receivers.values() {
             for signature in signatures {
-                let Some((file, declaration, receiver)) = signature
+                let Some((file, declaration, _receiver)) = signature
                     .source_file
                     .zip(signature.source_decl)
                     .zip(signature.source_receiver)
@@ -9182,11 +9179,9 @@ fn collect_signatures_with_cp_impl(
                     .get(&(file, declaration.0))
                     .cloned()
                     .unwrap_or_else(|| name.clone());
-                let key = TopLevelFunctionConflictKey {
-                    package: signature.package.clone(),
-                    receiver: Some(extension_receiver_physical_key(receiver)),
-                    name: jvm_name,
-                    params: erased_params_semantic_key(signature),
+                let Some(key) = TopLevelFunctionConflictKey::from_signature(signature, jvm_name)
+                else {
+                    continue;
                 };
                 let retained_for_recovery = table
                     .conflicting_top_level_candidates
