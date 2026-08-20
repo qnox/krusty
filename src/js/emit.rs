@@ -275,6 +275,8 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             IrConst::String(s) => js_string(s),
             IrConst::Null => "null".to_string(),
         },
+        // JavaScript represents Kotlin's `Unit` value as `undefined`.
+        IrExpr::UnitInstance => "undefined".to_string(),
         IrExpr::GetValue(i) => val_name(*i, inst),
         IrExpr::GetStatic(i) => ir.statics[*i as usize].name.clone(),
         IrExpr::GetField {
