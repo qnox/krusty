@@ -9,6 +9,16 @@ fn run(src: &str, stem: &str) -> String {
     common::expect_box_run_with_stdlib(src, stem)
 }
 
+fn assert_accepted_and_runs(src: &str, stem: &str) {
+    let (reference_code, reference_diagnostics) = common::kotlinc_source_result(stem, src);
+    assert_eq!((reference_code, reference_diagnostics.as_str()), (0, ""));
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        Vec::<String>::new()
+    );
+    assert_eq!(run(src, stem), "OK");
+}
+
 #[test]
 fn inferred_function_call_types_an_inferred_property() {
     let src = r#"
@@ -38,6 +48,53 @@ fun box(): String = if (G.Step("x").describe() == 1) "OK" else "FAIL"
     let (code, diagnostics) = common::kotlinc_source_result("ResolverNestedSealedInterface", src);
     assert_eq!((code, diagnostics.as_str()), (0, ""));
     assert_eq!(run(src, "ResolverNestedSealedInterface"), "OK");
+}
+
+#[test]
+fn companion_anonymous_object_does_not_capture_outer_type_parameter() {
+    let src = r#"
+class Attempt<T> private constructor(private val value: T) {
+    companion object {
+        fun <T> tryAgain(): Attempt<T> {
+            @Suppress("UNCHECKED_CAST")
+            return Attempt(tryAgain) as Attempt<T>
+        }
+        private val tryAgain: Any = object {
+            override fun toString(): String = "try again"
+        }
+    }
+}
+fun box(): String {
+    Attempt.tryAgain<String>()
+    return "OK"
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverAnonObjectCompanionScope");
+}
+
+#[test]
+fn plain_nested_class_anonymous_object_does_not_capture_outer_type_parameter() {
+    let src = r#"
+class Outer<T>(val value: T) {
+    class Nested {
+        val marker = object { override fun toString() = "nested" }
+    }
+}
+fun box(): String = if (Outer.Nested().marker.toString() == "nested") "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAnonObjectNestedClassScope");
+}
+
+#[test]
+fn local_classifier_shadows_type_parameter_for_anonymous_object() {
+    let src = r#"
+fun <T> build(): Any {
+    class T
+    return object { override fun toString() = "shadowed" }
+}
+fun box(): String = if (build<String>().toString() == "shadowed") "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAnonObjectLocalClassifierScope");
 }
 
 #[test]
