@@ -1,9 +1,4 @@
-//! `x ?: return` (or any elvis whose right-hand side never completes — `throw`, `break`,
-//! `continue`, a `Nothing`-typed call) proves `x` non-null for the rest of the straight-line
-//! block, exactly like an `if (x == null) return` guard. kotlinc smart-casts the later reads;
-//! krusty only narrowed on the `if`-guard form, so a later use of `x` at a non-null parameter
-//! failed with "type mismatch: inferred type is Int but Int was expected" (KT-9277 shape).
-//! Round-tripped on the JVM.
+//! Smart casts established by an elvis expression with a diverging right-hand side.
 
 use super::common;
 
@@ -97,8 +92,6 @@ fun box(): String { foo(null); return \"OK\" }\n";
 
 #[test]
 fn closure_reassigned_var_is_not_narrowed() {
-    // A `var` written inside a closure can be reset to null on a deferred path — kotlinc refuses
-    // the smart-cast, and so must krusty.
     const SRC: &str = "fun bar(y: Int) {}\n\
 fun foo() {\n\
     var x: Int? = 5\n\
@@ -108,7 +101,12 @@ fun foo() {\n\
     bar(y = x)\n\
 }\n\
 fun box(): String { foo(); return \"OK\" }\n";
-    assert_rejected(SRC);
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics,
+        ["smart cast to 'Int' is impossible, because 'x' is a local variable that is mutated in a capturing closure."]
+    );
 }
 
 #[test]
