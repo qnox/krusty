@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Focused unit coverage for the standalone LSP audit tools."""
 
+import contextlib
 import importlib.util
+import io
+import json
 import pathlib
 import queue
 import struct
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
@@ -33,22 +38,187 @@ def diagnostic(message, start, end):
     }
 
 
+def run_lsp_diff(directory, fake_lsp, report_path=None):
+    argv = [
+        "lsp-diff.py",
+        directory,
+        "--reference",
+        "reference-server",
+        "--krusty",
+        "krusty-server",
+        "--limit",
+        "1",
+    ]
+    if report_path is not None:
+        argv.extend(("--json", str(report_path)))
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        mock.patch.object(LSP_DIFF, "Lsp", fake_lsp),
+        mock.patch.object(sys, "argv", argv),
+        contextlib.redirect_stdout(stdout),
+        contextlib.redirect_stderr(stderr),
+    ):
+        result = LSP_DIFF.main()
+    return result, stdout.getvalue(), stderr.getvalue()
+
+
+def fake_lsp(events, initialize_error=None, timeout_server=None):
+    class FakeLsp:
+        def __init__(self, _argv, _root, name):
+            self.name = name
+            events.append(("start", name))
+
+        def initialize(self, _root, _timeout):
+            events.append(("initialize", self.name))
+            if initialize_error is not None:
+                raise initialize_error
+
+        def diagnostics_for(self, _path, _timeout):
+            events.append(("diagnostics", self.name))
+            if self.name == timeout_server:
+                raise TimeoutError(f"{self.name}: textDocument/diagnostic timed out")
+            return []
+
+        def shutdown(self):
+            events.append(("shutdown", self.name))
+
+    return FakeLsp
+
+
 class LspDiffTests(unittest.TestCase):
+    def test_main_stops_reference_before_starting_krusty(self):
+        events = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "Main.kt").write_text("fun value() = 1", encoding="utf-8")
+            result, stdout, _stderr = run_lsp_diff(directory, fake_lsp(events))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            events,
+            [
+                ("start", "reference"),
+                ("initialize", "reference"),
+                ("diagnostics", "reference"),
+                ("shutdown", "reference"),
+                ("start", "krusty"),
+                ("initialize", "krusty"),
+                ("diagnostics", "krusty"),
+                ("shutdown", "krusty"),
+            ],
+        )
+        self.assertEqual(
+            stdout,
+            "lsp-diff: matched=0 extra=0 missing=0 wording=0 moved=0 unanswered=0 files=1\n",
+        )
+
+    def test_main_stops_reference_when_initialize_fails(self):
+        events = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "Main.kt").write_text("fun value() = 1", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "^reference initialize failed$"):
+                run_lsp_diff(
+                    directory,
+                    fake_lsp(events, initialize_error=RuntimeError("reference initialize failed")),
+                )
+
+        self.assertEqual(
+            events,
+            [
+                ("start", "reference"),
+                ("initialize", "reference"),
+                ("shutdown", "reference"),
+            ],
+        )
+
+    def test_main_preserves_the_exact_timeout_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "Main.kt").write_text("fun value() = 1", encoding="utf-8")
+            report_path = pathlib.Path(directory, "report.json")
+            result, stdout, stderr = run_lsp_diff(
+                directory,
+                fake_lsp([], timeout_server="reference"),
+                report_path,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                json.loads(report_path.read_text(encoding="utf-8")),
+                {
+                    "root": directory,
+                    "files": {
+                        "Main.kt": {
+                            "timeout": "reference: textDocument/diagnostic timed out"
+                        }
+                    },
+                    "totals": {
+                        "matched": 0,
+                        "extra": 0,
+                        "missing": 0,
+                        "wording": 0,
+                        "moved": 0,
+                        "unanswered": 1,
+                        "files": 0,
+                    },
+                },
+            )
+
+        self.assertEqual(
+            stdout,
+            "lsp-diff: matched=0 extra=0 missing=0 wording=0 moved=0 unanswered=1 files=0\n",
+        )
+        self.assertEqual(
+            stderr,
+            "[lsp-diff] reference: initializing reference-server\n"
+            "[lsp-diff] krusty: initializing krusty-server\n"
+            "[lsp-diff] Main.kt: reference: textDocument/diagnostic timed out\n",
+        )
+
     def test_same_message_with_a_different_end_is_moved(self):
         result = LSP_DIFF.compare(
             [diagnostic("Same message", (1, 2), (1, 5))],
             [diagnostic("Same message", (1, 2), (1, 6))],
         )
-        self.assertEqual(result["matched"], [])
-        self.assertEqual(len(result["moved"]), 1)
+        self.assertEqual(
+            result,
+            {
+                "matched": [],
+                "extra": [],
+                "missing": [],
+                "wording": [],
+                "moved": [
+                    {
+                        "message": "Same message",
+                        "reference_at": (1, 2, 1, 5),
+                        "krusty_at": (1, 2, 1, 6),
+                    }
+                ],
+            },
+        )
 
     def test_same_full_range_with_a_different_message_is_wording(self):
         result = LSP_DIFF.compare(
             [diagnostic("Reference", (1, 2), (1, 5))],
             [diagnostic("Krusty", (1, 2), (1, 5))],
         )
-        self.assertEqual(result["matched"], [])
-        self.assertEqual(len(result["wording"]), 1)
+        self.assertEqual(
+            result,
+            {
+                "matched": [],
+                "extra": [],
+                "missing": [],
+                "wording": [
+                    {
+                        "at": (1, 2, 1, 5),
+                        "reference": "Reference",
+                        "krusty": "Krusty",
+                    }
+                ],
+                "moved": [],
+            },
+        )
 
     def test_timed_out_request_restores_deferred_notifications(self):
         client = LSP_DIFF.Lsp.__new__(LSP_DIFF.Lsp)
