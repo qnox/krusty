@@ -46270,6 +46270,7 @@ impl<'a> Checker<'a> {
             .and_then(|signature| signature.receiver)
             .unwrap_or(function.receiver_ty);
         crate::symbol_resolver::unify_ty(declared_receiver, extension_receiver, &mut bindings);
+        let receiver_bindings = bindings.clone();
         let declared_params = generic.map_or(function.signature.params.as_slice(), |signature| {
             signature.params.as_slice()
         });
@@ -46310,30 +46311,47 @@ impl<'a> Checker<'a> {
         .enumerate()
         .map(|(source, parameter)| (parameter, source))
         .collect::<Vec<_>>();
-        for &(visible_parameter, source) in &argument_parameters {
-            let Some(Some(actual)) = partial_arg_tys.get(source) else {
-                continue;
-            };
-            let parameter = *parameter_indices.get(visible_parameter)?;
-            let Some(&declared) = declared_params.get(parameter) else {
-                continue;
-            };
-            let vararg = full_call_sig.vararg_index == Some(parameter);
-            // Generic signatures describe a vararg slot as its ARRAY (`Array<T>`), while call-site
-            // inference is over its element. A spread contributes the source array's element and an
-            // ordinary argument contributes its own type. Normalizing both sides to the element keeps
-            // `render(*intArray)` and `render(1)` on one inference path and works for non-final varargs.
-            let declared = if vararg {
-                declared.array_read_elem().unwrap_or(declared)
-            } else {
-                declared
-            };
-            let actual = if vararg && self.file.is_spread_arg(args[source]) {
-                actual.array_read_elem().unwrap_or(*actual)
-            } else {
-                *actual
-            };
-            crate::symbol_resolver::unify_ty(declared, actual, &mut bindings);
+        if let Some(signature) = generic {
+            let mut actuals = Vec::new();
+            for &(visible_parameter, source) in &argument_parameters {
+                let Some(Some(actual)) = partial_arg_tys.get(source) else {
+                    continue;
+                };
+                let parameter = *parameter_indices.get(visible_parameter)?;
+                if declared_params.get(parameter).is_none() {
+                    continue;
+                }
+                let actual = if full_call_sig.vararg_index == Some(parameter)
+                    && self.file.is_spread_arg(args[source])
+                {
+                    actual.array_read_elem().unwrap_or(*actual)
+                } else {
+                    *actual
+                };
+                actuals.push((parameter, actual, false));
+            }
+            let source = self.fed_source();
+            let inferred = crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
+                &source,
+                signature,
+                actuals,
+                full_call_sig.vararg_index,
+            );
+            crate::symbol_resolver::merge_call_argument_bindings(
+                &source,
+                signature,
+                explicit_type_args.len(),
+                &receiver_bindings,
+                &mut bindings,
+                inferred.bindings,
+            );
+            if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+                signature,
+                &bindings,
+                |actual, bound| self.receiver_is_assignable(actual, bound),
+            ) {
+                return None;
+            }
         }
         for (index, parameter) in method_type_params {
             let fallback = generic

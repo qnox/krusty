@@ -10,7 +10,7 @@ mod semantic;
 mod signature_help;
 mod source_scan;
 
-use krusty::ast::{ClassDecl, Decl, File, FunBody, FunDecl, PropDecl, Stmt};
+use krusty::ast::{ClassDecl, Decl, File, FunBody, FunDecl, PropDecl, Stmt, TypeRef};
 use krusty::diag::{DiagSink, Diagnostic, DiagnosticKind, Severity};
 use krusty::features::LangFeatures;
 use krusty::frontend;
@@ -51,9 +51,6 @@ pub struct SourceSetAnalysis {
     pub symbols: FrontendSymbols,
 }
 
-/// Follow the AST's outer-class-to-companion edge. A companion is an ordinary nested singleton
-/// declaration; editor consumers must inspect that declaration instead of depending on flattened
-/// companion/static member copies.
 fn companion_class<'a>(file: &'a File, class: &ClassDecl) -> Option<&'a ClassDecl> {
     match file.decl(class.companion?) {
         Decl::Class(companion) => Some(companion),
@@ -262,14 +259,6 @@ fn add_unused_extension_receiver_inspections(
                 for function in &class.methods {
                     add_unused_extension_receiver_inspection(types, function, &mut inspections);
                 }
-                if let Some(companion) = companion_class(file, class) {
-                    for function in &companion.methods {
-                        add_unused_extension_receiver_inspection(types, function, &mut inspections);
-                    }
-                    for property in &companion.body_props {
-                        add_unused_extension_property_inspection(types, property, &mut inspections);
-                    }
-                }
                 for entry in &class.enum_entries {
                     for function in &entry.methods {
                         add_unused_extension_receiver_inspection(types, function, &mut inspections);
@@ -307,6 +296,9 @@ fn add_unused_extension_receiver_inspection(
     if matches!(function.body, FunBody::None) || types.extension_receiver_is_used(receiver) {
         return;
     }
+    if receiver_type_parameter_shared_with_result(types, receiver, function.ret.as_ref()) {
+        return;
+    }
     diagnostics.push(Diagnostic {
         span: receiver.span,
         editor_span: None,
@@ -334,6 +326,9 @@ fn add_unused_extension_property_inspection(
     if !has_accessor_body || types.extension_receiver_is_used(receiver) {
         return;
     }
+    if receiver_type_parameter_shared_with_result(types, receiver, property.ty.as_ref()) {
+        return;
+    }
     diagnostics.push(Diagnostic {
         span: receiver.span,
         editor_span: None,
@@ -343,6 +338,56 @@ fn add_unused_extension_property_inspection(
         msg: UNUSED_EXTENSION_RECEIVER.to_string(),
         file: 0,
     });
+}
+
+/// Type-parameter identities mentioned anywhere in `ty`.
+fn type_parameters_mentioned(ty: Ty, names: &mut std::collections::HashSet<&'static str>) {
+    match ty {
+        Ty::TyParam(name, _) => {
+            names.insert(name);
+        }
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+            type_parameters_mentioned(*inner, names)
+        }
+        Ty::InProjection(inner) | Ty::OutProjection(inner) => {
+            type_parameters_mentioned(*inner, names)
+        }
+        Ty::Obj(_, args) => {
+            for &arg in args {
+                type_parameters_mentioned(arg, names);
+            }
+        }
+        Ty::Fun(signature) => {
+            for &parameter in &signature.params {
+                type_parameters_mentioned(parameter, names);
+            }
+            type_parameters_mentioned(signature.ret, names);
+        }
+        _ => {}
+    }
+}
+
+fn receiver_type_parameter_shared_with_result(
+    types: &FrontendTypeInfo,
+    receiver: &TypeRef,
+    result: Option<&TypeRef>,
+) -> bool {
+    let (Some(receiver_ty), Some(result_ty)) = (
+        types.resolved_type(receiver),
+        result.and_then(|result| types.resolved_type(result)),
+    ) else {
+        return false;
+    };
+    let mut receiver_params = std::collections::HashSet::new();
+    type_parameters_mentioned(receiver_ty, &mut receiver_params);
+    if receiver_params.is_empty() {
+        return false;
+    }
+    let mut result_params = std::collections::HashSet::new();
+    type_parameters_mentioned(result_ty, &mut result_params);
+    result_params
+        .iter()
+        .any(|name| receiver_params.contains(name))
 }
 
 #[cfg(test)]
