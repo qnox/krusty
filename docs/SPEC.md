@@ -2926,12 +2926,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the template result is used only when a lambda result actually contributed a binding. Tests:
   `tests/lambda_result_inference_e2e.rs`.
 
-- **A delegated property's getter coerces the erased `getValue` result to the property type.** A
-  generic delegate's `getValue` physically returns `Object`; both the member and the top-level
-  getter bridge it through `coerce_to_static` (unbox for a scalar property, `checkcast` for a
-  reference narrowing), and an inferred property type comes from the checker's
-  `property_decl_types`, not the erased return. Tests: `lambda_result_inference_e2e`,
-  `delegated_prop_e2e`.
+- **A delegated property's getter coerces the physical `getValue` result to the checked property
+  type.** Lowering consumes the property type recorded by the checker. The backend unboxes a
+  primitive result or checkcasts a narrower reference result at the accessor boundary. Tests:
+  `lambda_result_inference_e2e`, `delegated_prop_e2e`.
 
 - **String-template interpolation allows line breaks around the expression.** `"${" NL* expression
   NL* "}"` per the Kotlin grammar — a multiline lambda inside `${…}` (common in raw strings) parses.
