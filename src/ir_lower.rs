@@ -24485,10 +24485,17 @@ impl<'a> Lower<'a> {
             if let Some(read) = self.lower_recorded_singleton_value(e) {
                 return Some(read);
             }
+            if let Some(lc) = self.info.resolved_constant(e) {
+                let value = self.emit_const(library_const_ir(&lc));
+                if let Some(receiver) = self.info.resolved_constant_receiver(e) {
+                    let effect = self.expr(receiver)?;
+                    return Some(self.emit_block(vec![effect], Some(value)));
+                }
+                return Some(value);
+            }
             // A TOP-LEVEL property named through its PACKAGE (`pkg.topLevelProp`): the selected
             // facade's receiver-less static getter. Same handoff as the bare-name rung — the qualifier
-            // is a package, so there is no receiver to lower, and descending into it would try to
-            // evaluate the package name as a value.
+            // is a package, so there is no receiver to lower.
             if let Some(ExprLowering::TopLevelPropertyGet(property)) =
                 self.info.expr_lowers.get(&e).cloned()
             {
@@ -24523,20 +24530,6 @@ impl<'a> Lower<'a> {
                     &context_params,
                     &context_args,
                 );
-            }
-            // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / ... selected by the checker.
-            if let Some(lc) = self.info.resolved_constant(e) {
-                // Through the SHARED helper, which narrows an integer `ConstantValue` to the constant's
-                // own Kotlin type. `Char.MAX_VALUE` must box as `Character`, and `Byte.MIN_VALUE` as
-                // `Byte` — read as an `Int` it compared unequal to the same value held in a `byte`
-                // field (corpus `evaluate/intrinsicConst/incDec.kt`).
-                let c = library_const_ir(&lc);
-                let value = self.emit_const(c);
-                if let Some(receiver) = self.info.resolved_constant_receiver(e) {
-                    let effect = self.expr(receiver)?;
-                    return Some(self.emit_block(vec![effect], Some(value)));
-                }
-                return Some(value);
             }
             if let Some(entry) = self.lower_resolved_enum_entry(e) {
                 return Some(entry);
