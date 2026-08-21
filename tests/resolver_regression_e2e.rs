@@ -1,7 +1,54 @@
 //! Focused classpath resolver regressions. These duplicate a few cases from the larger feature bundle so
 //! resolver/provider cleanup gets a small, direct failure when metadata or inline-overload selection drifts.
 
+use std::path::Path;
+
 use super::common;
+
+#[derive(Debug, PartialEq, Eq)]
+struct ObservedDiagnostic {
+    file: String,
+    line: usize,
+    column: usize,
+    message: String,
+}
+
+fn reference_errors(output: &str) -> Vec<ObservedDiagnostic> {
+    let lines = output.lines().collect::<Vec<_>>();
+    let (diagnostics, remainder) = lines.as_chunks::<3>();
+    assert_eq!(remainder.len(), 0);
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let line = diagnostic[0];
+            let (location, message) = line
+                .split_once(": error: ")
+                .unwrap_or_else(|| panic!("unexpected kotlinc diagnostic: {line}"));
+            let mut fields = location.rsplitn(3, ':');
+            let column = fields
+                .next()
+                .expect("kotlinc diagnostic column")
+                .parse()
+                .expect("numeric kotlinc diagnostic column");
+            let line = fields
+                .next()
+                .expect("kotlinc diagnostic line")
+                .parse()
+                .expect("numeric kotlinc diagnostic line");
+            let path = fields.next().expect("kotlinc diagnostic path");
+            ObservedDiagnostic {
+                file: Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("UTF-8 kotlinc diagnostic filename")
+                    .to_string(),
+                line,
+                column,
+                message: message.to_string(),
+            }
+        })
+        .collect()
+}
 
 /// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics, so callers
 /// cannot turn either failure into a passing skip.
@@ -1140,4 +1187,81 @@ fun box(): String {
     let out =
         common::compile_and_run_box(src, "PrimitiveBuiltinInfixAmbiguity", &[stdlib], Some(&jdk));
     assert_eq!(out.as_deref(), Some("OK"));
+}
+
+#[test]
+fn member_extension_null_literal_binds_receiver_bound_formal() {
+    let source = r#"
+class Box<out T : Any?> private constructor(private val value: Any?) {
+    companion object {
+        fun <T> Box<T>.getOrNull(): T? = getOrDefault(null)
+        fun <T> Box<T>.getOrDefault(defaultValue: T): T = defaultValue
+    }
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("MemberExtensionNullFormal", source);
+    assert_eq!((code, diagnostics), (0, String::new()));
+    let (diagnostics, selected) = common::inspect_checker_with_stdlib(source, |file, info, _| {
+        file.expr_arena
+            .iter()
+            .enumerate()
+            .filter(|(_, expression)| matches!(expression, krusty::ast::Expr::Call { .. }))
+            .map(|(index, _)| krusty::ast::ExprId(index as u32))
+            .map(|call| {
+                let (owner, name, receiver, parameters) = info
+                    .resolved_member_abi_signature(call)
+                    .expect("selected member extension");
+                (
+                    owner,
+                    name.to_string(),
+                    receiver,
+                    parameters.to_vec(),
+                    info.resolved_call_is_member(call),
+                    info.resolved_call_is_extension(call),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(diagnostics, Vec::<String>::new());
+    assert_eq!(
+        selected,
+        [(
+            krusty::types::type_name("Box$Companion"),
+            "getOrDefault".to_string(),
+            Some(krusty::types::Ty::obj_args(
+                "Box",
+                &[krusty::types::Ty::obj("kotlin/Any")],
+            )),
+            vec![krusty::types::Ty::obj("kotlin/Any")],
+            true,
+            true,
+        )]
+    );
+}
+
+#[test]
+fn member_extension_null_literal_still_rejected_for_invariant_receiver() {
+    let source = r#"
+class MutBox<T>(var v: T) {
+    companion object {
+        fun <T> MutBox<T>.getOrDefault(defaultValue: T): T = defaultValue
+        fun read(box: MutBox<String>): String = box.getOrDefault(null)
+    }
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("MemberExtensionInvariantNull", source);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "MemberExtensionInvariantNull.kt".to_string(),
+            line: 5,
+            column: 66,
+            message: "null cannot be a value of a non-null type 'String'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(source),
+        ["unresolved reference 'getOrDefault'.".to_string()]
+    );
 }
