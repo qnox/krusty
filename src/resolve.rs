@@ -35922,8 +35922,9 @@ impl<'a> Checker<'a> {
             "resolve",
             "assignability failure context={ctx} expected={expected:?} actual={actual:?} span={span:?}"
         );
+        let context = [expected, actual];
         let render = |ty: Ty| {
-            ty.source_name_with_type_parameter(&|parameter| {
+            ty.source_name_with_type_parameter_in(&context, &|parameter| {
                 let source = crate::types::type_parameter_source_name(parameter);
                 match &self.diagnostic_function {
                     Some((function, parameters))

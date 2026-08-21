@@ -136,6 +136,36 @@ fn mutable_local_smart_cast_diagnostics_match_kotlinc() {
 }
 
 #[test]
+fn colliding_classifier_names_are_qualified_in_type_mismatches() {
+    let result = common::compiler_diagnostics(
+        &[
+            ("a/Foo.kt", "package a\nclass Foo"),
+            ("b/Foo.kt", "package b\nclass Foo"),
+            (
+                "Main.kt",
+                "fun take(value: a.Foo) {}\n\nfun use() {\n    take(b.Foo())\n}",
+            ),
+        ],
+        &[],
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let expected = vec![ObservedError {
+        file: "Main.kt".to_string(),
+        line: 4,
+        column: 10,
+        message: "argument type mismatch: actual type is 'b.Foo', but 'a.Foo' was expected."
+            .to_string(),
+    }];
+
+    assert_eq!(krusty_errors.len(), 1);
+    assert_eq!(kotlinc_errors.len(), 1);
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}
+
+#[test]
 fn subjectless_when_fallthrough_diagnostics_match_kotlinc() {
     let result = common::compiler_diagnostics(
         &[(

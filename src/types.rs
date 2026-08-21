@@ -1395,6 +1395,17 @@ impl Ty {
         self,
         type_parameter: &dyn Fn(&str) -> String,
     ) -> String {
+        self.source_name_with_type_parameter_in(std::slice::from_ref(&self), type_parameter)
+    }
+
+    /// Render one type among the types named by the same diagnostic. Classifiers normally use their
+    /// simple source name; colliding classifiers retain their package so the message distinguishes
+    /// them.
+    pub(crate) fn source_name_with_type_parameter_in(
+        self,
+        context: &[Ty],
+        type_parameter: &dyn Fn(&str) -> String,
+    ) -> String {
         match self {
             Ty::Int => "Int".to_string(),
             Ty::Byte => "Byte".to_string(),
@@ -1411,18 +1422,23 @@ impl Ty {
             Ty::String => "String".to_string(),
             Ty::Unit => "Unit".to_string(),
             Ty::Obj(n, args) => {
-                let internal = n.render();
-                let base = internal
-                    .strip_prefix("kotlin/collections/")
-                    .or_else(|| internal.strip_prefix("kotlin/"))
-                    .unwrap_or(&internal)
-                    .replace(['/', '$'], ".");
+                let base = if context
+                    .iter()
+                    .copied()
+                    .any(|ty| ty.contains_distinct_classifier_with_segment(n))
+                {
+                    n.render().replace(['/', '$'], ".")
+                } else {
+                    n.segment_ref().replace('$', ".")
+                };
                 if args.is_empty() {
                     base
                 } else {
                     let arguments = args
                         .iter()
-                        .map(|argument| argument.source_name_with_type_parameter(type_parameter))
+                        .map(|argument| {
+                            argument.source_name_with_type_parameter_in(context, type_parameter)
+                        })
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("{base}<{arguments}>")
@@ -1435,7 +1451,9 @@ impl Ty {
                 let parameters = signature
                     .params
                     .iter()
-                    .map(|parameter| parameter.source_name_with_type_parameter(type_parameter))
+                    .map(|parameter| {
+                        parameter.source_name_with_type_parameter_in(context, type_parameter)
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let suspend = if signature.suspend { "suspend " } else { "" };
@@ -1443,11 +1461,11 @@ impl Ty {
                     "{suspend}({parameters}) -> {}",
                     signature
                         .ret
-                        .source_name_with_type_parameter(type_parameter)
+                        .source_name_with_type_parameter_in(context, type_parameter)
                 )
             }
             Ty::Nullable(inner) => {
-                let rendered = inner.source_name_with_type_parameter(type_parameter);
+                let rendered = inner.source_name_with_type_parameter_in(context, type_parameter);
                 if matches!(*inner, Ty::Fun(_)) {
                     format!("({rendered})?")
                 } else {
@@ -1455,20 +1473,48 @@ impl Ty {
                 }
             }
             Ty::PlatformNullable(inner) => {
-                format!("{}!", inner.source_name_with_type_parameter(type_parameter))
+                format!(
+                    "{}!",
+                    inner.source_name_with_type_parameter_in(context, type_parameter)
+                )
             }
             Ty::InProjection(inner) => format!(
                 "in {}",
-                inner.source_name_with_type_parameter(type_parameter)
+                inner.source_name_with_type_parameter_in(context, type_parameter)
             ),
             Ty::OutProjection(inner) => format!(
                 "out {}",
-                inner.source_name_with_type_parameter(type_parameter)
+                inner.source_name_with_type_parameter_in(context, type_parameter)
             ),
             Ty::TyParam(n, _) => type_parameter(n),
             // Only reachable from a diagnostic rendered while the declaration is still being
             // resolved; it never names a real type.
             Ty::Pending => "<not determined>".to_string(),
+        }
+    }
+
+    fn contains_distinct_classifier_with_segment(self, classifier: TypeName) -> bool {
+        match self {
+            Ty::Obj(name, arguments) => {
+                (name != classifier && name.segment_ref() == classifier.segment_ref())
+                    || arguments.iter().copied().any(|argument| {
+                        argument.contains_distinct_classifier_with_segment(classifier)
+                    })
+            }
+            Ty::Fun(signature) => {
+                signature.params.iter().copied().any(|parameter| {
+                    parameter.contains_distinct_classifier_with_segment(classifier)
+                }) || signature
+                    .ret
+                    .contains_distinct_classifier_with_segment(classifier)
+            }
+            Ty::Nullable(inner)
+            | Ty::PlatformNullable(inner)
+            | Ty::InProjection(inner)
+            | Ty::OutProjection(inner) => {
+                inner.contains_distinct_classifier_with_segment(classifier)
+            }
+            _ => false,
         }
     }
 
@@ -2513,7 +2559,7 @@ mod tests {
     }
 
     #[test]
-    fn source_name_renders_qualified_generic_nullable_types() {
+    fn source_name_renders_simple_generic_nullable_types() {
         let ty = Ty::nullable(Ty::obj_args(
             "demo/Outer$Holder",
             &[
@@ -2521,6 +2567,26 @@ mod tests {
                 Ty::obj_args("kotlin/collections/List", &[Ty::Int]),
             ],
         ));
-        assert_eq!(ty.source_name(), "demo.Outer.Holder<String, List<Int>>?");
+        assert_eq!(ty.source_name(), "Outer.Holder<String, List<Int>>?");
+    }
+
+    #[test]
+    fn diagnostic_source_names_qualify_colliding_classifiers() {
+        let actual = Ty::nullable(Ty::obj("right/Box"));
+        let expected = Ty::obj("left/Box");
+        let context = [actual, expected];
+
+        assert_eq!(
+            actual.source_name_with_type_parameter_in(&context, &|name: &str| {
+                type_parameter_source_name(name).to_string()
+            }),
+            "right.Box?"
+        );
+        assert_eq!(
+            expected.source_name_with_type_parameter_in(&context, &|name: &str| {
+                type_parameter_source_name(name).to_string()
+            }),
+            "left.Box"
+        );
     }
 }
