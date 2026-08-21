@@ -185,3 +185,18 @@ fn array_class_literals_report_no_diagnostic() {
          }\n"]);
     assert_eq!(diags, Vec::<String>::new());
 }
+
+#[test]
+fn unresolved_class_literal_receiver_adds_no_unsupported_cascade() {
+    let diags = common::front_end_diagnostics_files_with_stdlib(&["fun f(u: FirstMissing) {\n\
+         \u{20}   val a = SecondMissing::class\n\
+         \u{20}   val b = u::class\n\
+         }\n"]);
+    assert_eq!(
+        diags,
+        vec![
+            "unresolved reference 'FirstMissing'.".to_string(),
+            "unresolved reference 'SecondMissing'.".to_string(),
+        ],
+    );
+}
