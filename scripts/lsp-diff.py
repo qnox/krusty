@@ -362,53 +362,58 @@ def main():
     if not files:
         raise SystemExit("no Kotlin files selected")
 
-    servers = {}
-    try:
-        for name, argv in (("reference", reference_argv), ("krusty", krusty_argv)):
-            # Register BEFORE initializing: a server that dies during `initialize` has already
-            # forked its JVM, and the finally below is the only thing that will stop it.
-            servers[name] = Lsp(argv, root, name)
+    # Each server indexes the project, so stop the reference before starting krusty.
+    collected = {}
+    for name, argv in (("reference", reference_argv), ("krusty", krusty_argv)):
+        server = Lsp(argv, root, name)
+        try:
             print(f"[lsp-diff] {name}: initializing {argv[0]}", file=sys.stderr, flush=True)
-            servers[name].initialize(root, args.init_timeout)
-
-        report = {"root": root, "files": {}}
-        # Every exit path must stop the servers: a stray keeps indexing and eats a core.
-        totals = {"matched": 0, "extra": 0, "missing": 0, "wording": 0, "moved": 0,
-                  "unanswered": 0, "files": 0}
-        for path in files:
-            relative = os.path.relpath(path, root)
-            try:
-                reference = servers["reference"].diagnostics_for(path, args.timeout)
-                krusty = servers["krusty"].diagnostics_for(path, args.timeout)
-            except TimeoutError as timeout:
-                # One slow document must not lose the whole run's results.
-                totals["unanswered"] += 1
-                report["files"][relative] = {"timeout": str(timeout)}
-                print(f"[lsp-diff] {relative}: {timeout}", file=sys.stderr, flush=True)
-                continue
-            if reference is None or krusty is None:
-                totals["unanswered"] += 1
-                report["files"][relative] = {"unanswered": {
-                    "reference": reference is None, "krusty": krusty is None}}
-                print(f"[lsp-diff] {relative}: no diagnostics published "
-                      f"(reference={reference is None} krusty={krusty is None})",
-                      file=sys.stderr, flush=True)
-                continue
-            comparison = compare(reference, krusty)
-            totals["files"] += 1
-            for kind in ("matched", "extra", "missing", "wording", "moved"):
-                totals[kind] += len(comparison[kind])
-            report["files"][relative] = comparison
-            print(f"[lsp-diff] {relative}: matched={len(comparison['matched'])} "
-                  f"extra={len(comparison['extra'])} missing={len(comparison['missing'])} "
-                  f"wording={len(comparison['wording'])} moved={len(comparison['moved'])}",
-                  file=sys.stderr, flush=True)
-
-
-    finally:
-        # A language server keeps indexing after the client walks away: always stop both.
-        for server in servers.values():
+            server.initialize(root, args.init_timeout)
+            diagnostics = {}
+            for path in files:
+                relative = os.path.relpath(path, root)
+                try:
+                    diagnostics[relative] = server.diagnostics_for(path, args.timeout)
+                except TimeoutError as timeout:
+                    diagnostics[relative] = timeout
+            collected[name] = diagnostics
+        finally:
             server.shutdown()
+
+    report = {"root": root, "files": {}}
+    # One slow document must not lose the whole run's results.
+    totals = {"matched": 0, "extra": 0, "missing": 0, "wording": 0, "moved": 0,
+              "unanswered": 0, "files": 0}
+    for path in files:
+        relative = os.path.relpath(path, root)
+        reference = collected["reference"].get(relative)
+        krusty = collected["krusty"].get(relative)
+        timeout = next(
+            (result for result in (reference, krusty) if isinstance(result, TimeoutError)),
+            None,
+        )
+        if timeout is not None:
+            totals["unanswered"] += 1
+            report["files"][relative] = {"timeout": str(timeout)}
+            print(f"[lsp-diff] {relative}: {timeout}", file=sys.stderr, flush=True)
+            continue
+        if reference is None or krusty is None:
+            totals["unanswered"] += 1
+            report["files"][relative] = {"unanswered": {
+                "reference": reference is None, "krusty": krusty is None}}
+            print(f"[lsp-diff] {relative}: no diagnostics published "
+                  f"(reference={reference is None} krusty={krusty is None})",
+                  file=sys.stderr, flush=True)
+            continue
+        comparison = compare(reference, krusty)
+        totals["files"] += 1
+        for kind in ("matched", "extra", "missing", "wording", "moved"):
+            totals[kind] += len(comparison[kind])
+        report["files"][relative] = comparison
+        print(f"[lsp-diff] {relative}: matched={len(comparison['matched'])} "
+              f"extra={len(comparison['extra'])} missing={len(comparison['missing'])} "
+              f"wording={len(comparison['wording'])} moved={len(comparison['moved'])}",
+              file=sys.stderr, flush=True)
 
     report["totals"] = totals
     print("lsp-diff: " + " ".join(f"{key}={value}" for key, value in totals.items()))
