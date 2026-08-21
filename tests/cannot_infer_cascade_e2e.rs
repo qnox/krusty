@@ -101,6 +101,19 @@ fn member_property_with_failed_initializer_keeps_member_probes_silent() {
 }
 
 #[test]
+fn declared_type_error_still_reports_member_probes() {
+    // kotlinc: an unresolved DECLARED type is the other flavor — `v.length` reports the member.
+    assert_diagnostics(
+        "member probes on a declared-type error",
+        "package sample\nval v: Missing = 1\nfun u() = v.length\n",
+        &[
+            "unresolved reference 'Missing'.",
+            "unresolved reference 'length'.",
+        ],
+    );
+}
+
+#[test]
 fn eager_failure_reads_of_the_error_typed_property_stay_silent() {
     // kotlinc diagnoses the failed initializer and nothing else: reads of the error-typed
     // property resolve silently (an error type is assignable everywhere and member probes on it

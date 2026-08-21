@@ -2818,6 +2818,7 @@ struct PropertyReadMemberSelection {
     getter: Option<crate::symbol_resolver::ResolvedMember>,
     context_access: Option<Box<ResolvedPropertyAccess>>,
     compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
+    source_member: Option<crate::libraries::SourceMember>,
     access: Option<(Visibility, TypeName)>,
 }
 
@@ -16305,6 +16306,13 @@ impl TypeInfo {
     }
 }
 
+/// Whether an error-typed binding was already diagnosed at its source expression.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorProvenance {
+    None,
+    Diagnosed,
+}
+
 #[derive(Clone, Copy)]
 struct Local {
     /// Current read type in this scope. A branch narrowing shadow may replace it.
@@ -16313,6 +16321,8 @@ struct Local {
     /// shadows so mutation checks never confuse flow stability with `val`-ness.
     write_ty: Option<Ty>,
     is_var: bool,
+    /// Meaningful only when `ty` is `Ty::Error`.
+    error_provenance: ErrorProvenance,
     origin: ReceiverFnValueOrigin,
     callable_reference_type: Option<Ty>,
 }
@@ -17151,6 +17161,13 @@ struct ScopedProperty {
     is_var: bool,
     owner: TypeName,
     class_storage: Option<u32>,
+    source_member: Option<crate::libraries::SourceMember>,
+}
+
+struct DispatchPropertyBinding {
+    read_ty: Ty,
+    declared_ty: Ty,
+    error_provenance: ErrorProvenance,
 }
 
 /// The packages in scope for an unqualified top-level or extension call.
@@ -17327,6 +17344,7 @@ fn make_checker<'a>(
         discarded_exprs: std::collections::HashSet::new(),
         narrowed_read_base: HashMap::new(),
         declined_read_targets: HashMap::new(),
+        silent_error_exprs: std::collections::HashSet::new(),
         local_decl_types: HashMap::new(),
         property_decl_types: HashMap::new(),
         resolved_call_type_args: HashMap::new(),
@@ -19340,6 +19358,8 @@ struct Checker<'a> {
     narrowed_read_base: HashMap<ExprId, Ty>,
     /// Declined smart-cast target for a local read, keyed by its exact source span.
     declined_read_targets: HashMap<Span, (String, Ty)>,
+    /// Error expressions whose originating diagnostic remains authoritative for later accesses.
+    silent_error_exprs: std::collections::HashSet<ExprId>,
     local_decl_types: HashMap<StmtId, Ty>,
     property_decl_types: HashMap<(u32, u32), Ty>,
     resolved_call_type_args: HashMap<ExprId, Vec<Option<Ty>>>,
@@ -21165,12 +21185,153 @@ impl<'a> Checker<'a> {
         true
     }
 
+    /// Lambdas still participate in selection even when provisional checking produced `Ty::Error`.
+    fn call_has_error_argument(&self, args: &[ExprId]) -> bool {
+        args.iter().any(|&argument| {
+            !matches!(self.file.expr(argument), Expr::Lambda { .. })
+                && self.expr_types[argument.0 as usize] == Ty::Error
+        })
+    }
+
+    /// Distinguishes a diagnosed expression error from an unresolved declared type.
+    fn error_receiver_expression_flavored(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+        receiver_diag_mark: usize,
+    ) -> bool {
+        if self.diags.diags[receiver_diag_mark..]
+            .iter()
+            .any(|d| d.severity == crate::diag::Severity::Error)
+        {
+            return true;
+        }
+        if self.silent_error_exprs.contains(&receiver) {
+            return true;
+        }
+        match self.file.expr(receiver) {
+            Expr::Name(name) => self
+                .lookup(scope, name)
+                .is_some_and(|local| local.error_provenance == ErrorProvenance::Diagnosed),
+            _ => false,
+        }
+    }
+
+    fn property_inference_key(property: &crate::libraries::PropertyInfo) -> Option<DeclKey> {
+        property
+            .source_key
+            .map(|(file, declaration)| DeclKey::declaration(file, declaration))
+            .or_else(|| Self::source_member_inference_key(property.source_member))
+    }
+
+    fn source_member_inference_key(
+        source_member: Option<crate::libraries::SourceMember>,
+    ) -> Option<DeclKey> {
+        match source_member {
+            Some(crate::libraries::SourceMember::ClassProperty {
+                file,
+                owner,
+                property,
+            }) => Some(DeclKey::member(file, owner, property)),
+            _ => None,
+        }
+    }
+
+    fn property_inference_failed(&self, property: &crate::libraries::PropertyInfo) -> bool {
+        Self::property_inference_key(property)
+            .is_some_and(|key| self.syms.property_inference_failures.contains_key(&key))
+    }
+
+    fn source_member_inference_failed(
+        &self,
+        source_member: Option<crate::libraries::SourceMember>,
+    ) -> bool {
+        Self::source_member_inference_key(source_member)
+            .is_some_and(|key| self.syms.property_inference_failures.contains_key(&key))
+    }
+
+    fn report_error_operand_not(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        operand: ExprId,
+        operand_diag_mark: usize,
+        e: ExprId,
+    ) {
+        if !self.error_receiver_expression_flavored(scope, operand, operand_diag_mark) {
+            self.diags.error(
+                self.span(e),
+                "unresolved reference 'not' for operator '!'.".to_string(),
+            );
+        }
+    }
+
+    /// Bind `Any` members and visible extensions on the compiler's error receiver.
+    fn bind_error_receiver_call(&mut self, call: ExprId, name: &str) -> Option<Ty> {
+        use crate::symbol_resolver::ErrorReceiverSelection;
+        let candidate = match self.resolver().error_receiver_functions(name) {
+            ErrorReceiverSelection::Absent => return None,
+            ErrorReceiverSelection::Silent => return Some(Ty::Error),
+            ErrorReceiverSelection::Bind(candidates) => candidates.into_iter().next()?,
+        };
+        let signature = candidate.semantic_signature().into_owned();
+        let bindings = crate::symbol_resolver::seeded_gsig_binds(&signature, &[]);
+        let ret = crate::symbol_resolver::ty_subst_keep_unbound(candidate.callable.ret, &bindings);
+        let ret = if ret.mentions_ty_param() {
+            Ty::Error
+        } else {
+            ret
+        };
+        if candidate.kind == crate::libraries::FnKind::Member {
+            let member = self
+                .resolver()
+                .commit_selected_member_function(Ty::obj("kotlin/Any"), candidate);
+            self.resolved_calls
+                .insert(call, ResolvedCall::Member(member));
+        } else if candidate.source_key.is_some() {
+            let target = self.resolved_source_extension_call(
+                &candidate,
+                Ty::Error,
+                ret,
+                Vec::new(),
+                candidate.default_values.clone(),
+            );
+            self.resolved_calls.insert(call, target);
+        } else {
+            self.resolved_calls.insert(
+                call,
+                ResolvedCall::library_extension(candidate.callable.clone()),
+            );
+        }
+        Some(ret)
+    }
+
+    /// Property counterpart of [`Self::bind_error_receiver_call`].
+    fn bind_error_receiver_property(&mut self, name: &str) -> Option<Ty> {
+        use crate::symbol_resolver::ErrorReceiverSelection;
+        let property = match self.resolver().error_receiver_properties(name) {
+            ErrorReceiverSelection::Absent => return None,
+            ErrorReceiverSelection::Silent => return Some(Ty::Error),
+            ErrorReceiverSelection::Bind(candidates) => candidates.into_iter().next()?,
+        };
+        let ty = property.ty;
+        Some(if ty.mentions_ty_param() {
+            Ty::Error
+        } else {
+            ty
+        })
+    }
+
     fn report_callable_ambiguity(
         &mut self,
         call: ExprId,
         name: &str,
         candidates: &[crate::libraries::FunctionInfo],
     ) {
+        if let Expr::Call { args, .. } = self.file.expr(call) {
+            if self.call_has_error_argument(args) {
+                return;
+            }
+        }
         let mut message = "overload resolution ambiguity between candidates:".to_string();
         for candidate in candidates {
             message.push('\n');
@@ -26347,6 +26508,9 @@ impl<'a> Checker<'a> {
             mapping_error_reported,
             explicit_type_args,
         } = site;
+        if self.call_has_error_argument(args) {
+            return true;
+        }
         let inaccessible_private = candidates
             .iter()
             .any(|candidate| !self.source_callable_visible(candidate));
@@ -27660,7 +27824,32 @@ impl<'a> Checker<'a> {
         refs + calls
     }
     fn declare(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty, is_var: bool) {
-        self.declare_with_origin(scope, name, ty, is_var, ReceiverFnValueOrigin::Local);
+        self.declare_with_origin(
+            scope,
+            name,
+            ty,
+            is_var,
+            ReceiverFnValueOrigin::Local,
+            ErrorProvenance::None,
+        );
+    }
+
+    fn declare_inferred(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        ty: Ty,
+        is_var: bool,
+        error_provenance: ErrorProvenance,
+    ) {
+        self.declare_with_origin(
+            scope,
+            name,
+            ty,
+            is_var,
+            ReceiverFnValueOrigin::Local,
+            error_provenance,
+        );
     }
 
     fn declare_callable_reference(
@@ -27679,6 +27868,7 @@ impl<'a> Checker<'a> {
                 ty,
                 write_ty: is_var.then_some(ty),
                 is_var,
+                error_provenance: ErrorProvenance::None,
                 origin: ReceiverFnValueOrigin::Local,
                 callable_reference_type: Some(function_type),
             }),
@@ -27694,6 +27884,27 @@ impl<'a> Checker<'a> {
         owner: TypeName,
         declared_ty: Ty,
     ) {
+        self.declare_dispatch_property_with_provenance(
+            scope,
+            name,
+            DispatchPropertyBinding {
+                read_ty: ty,
+                declared_ty,
+                error_provenance: ErrorProvenance::None,
+            },
+            is_var,
+            owner,
+        );
+    }
+
+    fn declare_dispatch_property_with_provenance(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        binding: DispatchPropertyBinding,
+        is_var: bool,
+        owner: TypeName,
+    ) {
         let receiver_identity = self
             .implicit_receivers(scope)
             .into_iter()
@@ -27703,13 +27914,14 @@ impl<'a> Checker<'a> {
         self.declare_with_origin(
             scope,
             name,
-            ty,
+            binding.read_ty,
             is_var,
             ReceiverFnValueOrigin::DispatchProperty {
                 owner,
                 receiver_identity,
-                declared_ty,
+                declared_ty: binding.declared_ty,
             },
+            binding.error_provenance,
         );
     }
 
@@ -27723,24 +27935,34 @@ impl<'a> Checker<'a> {
             self.declare_class_storage(scope, &property.name, property.ty, property.is_var, field);
             return;
         }
-        self.declare_dispatch_property(
+        let error_provenance = if property.ty == Ty::Error
+            && self.source_member_inference_failed(property.source_member)
+        {
+            ErrorProvenance::Diagnosed
+        } else {
+            ErrorProvenance::None
+        };
+        self.declare_dispatch_property_with_provenance(
             scope,
             &property.name,
-            if owner_storage_visible {
-                // A narrower BACKING-FIELD type is visible inside the owner — but only when it is a
-                // type. While the field's own initializer is being determined it is the marker, and
-                // taking it then makes every read of the property inside its own class undetermined
-                // even though the PROPERTY's type is already known.
-                property
-                    .owner_storage_ty
-                    .filter(|storage| !storage.mentions_pending())
-                    .unwrap_or(property.ty)
-            } else {
-                property.ty
+            DispatchPropertyBinding {
+                read_ty: if owner_storage_visible {
+                    // A narrower BACKING-FIELD type is visible inside the owner — but only when it is a
+                    // type. While the field's own initializer is being determined it is the marker, and
+                    // taking it then makes every read of the property inside its own class undetermined
+                    // even though the PROPERTY's type is already known.
+                    property
+                        .owner_storage_ty
+                        .filter(|storage| !storage.mentions_pending())
+                        .unwrap_or(property.ty)
+                } else {
+                    property.ty
+                },
+                declared_ty: property.ty,
+                error_provenance,
             },
             property.is_var,
             property.owner,
-            property.ty,
         );
     }
 
@@ -27758,6 +27980,7 @@ impl<'a> Checker<'a> {
             ty,
             is_var,
             ReceiverFnValueOrigin::ClassStorage(field),
+            ErrorProvenance::None,
         );
     }
 
@@ -27768,6 +27991,7 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         origin: ReceiverFnValueOrigin,
+        error_provenance: ErrorProvenance,
     ) {
         // A NEW binding under an existing name invalidates the property-path narrowings rooted at
         // the old one (`if (a.p == null) return; val a = …` — the proof was about the OLD `a`).
@@ -27784,6 +28008,7 @@ impl<'a> Checker<'a> {
                 ty,
                 write_ty,
                 is_var,
+                error_provenance,
                 origin,
                 callable_reference_type: matches!(ty, Ty::Fun(_)).then_some(ty),
             }),
@@ -27807,6 +28032,9 @@ impl<'a> Checker<'a> {
         let callable_reference_type = previous.and_then(|local| local.callable_reference_type);
         let write_ty = previous.and_then(|local| local.write_ty);
         let is_var = previous.map(|local| local.is_var).unwrap_or(false);
+        let error_provenance = previous
+            .map(|local| local.error_provenance)
+            .unwrap_or(ErrorProvenance::None);
         scope.rebind(
             name,
             Ns::Value,
@@ -27814,6 +28042,7 @@ impl<'a> Checker<'a> {
                 ty,
                 write_ty,
                 is_var,
+                error_provenance,
                 origin,
                 callable_reference_type,
             }),
@@ -27864,6 +28093,7 @@ impl<'a> Checker<'a> {
                         is_var: property.setter_name.is_some(),
                         owner,
                         class_storage: None,
+                        source_member: property.source_member,
                     }),
             );
         }
@@ -32924,6 +33154,7 @@ impl<'a> Checker<'a> {
                                 is_var: property.is_var,
                                 owner: entry_owner,
                                 class_storage: None,
+                                source_member: None,
                             });
                         }
                     }
@@ -33213,6 +33444,7 @@ impl<'a> Checker<'a> {
                         is_var: bp.is_var,
                         owner,
                         class_storage: Some(field as u32),
+                        source_member: None,
                     });
                 }
                 for (entry_method, bm) in entry.methods.iter().enumerate() {
@@ -37297,8 +37529,13 @@ impl<'a> Checker<'a> {
             }
             Expr::Name(n) => return self.expr_inner_name(scope, e, n),
             Expr::Unary { op, operand } => {
+                let operand_diag_mark = self.diags.diags.len();
                 let ot = self.expr(scope, operand);
-                self.check_unary(scope, e, op, ot, self.span(e))
+                let ty = self.check_unary(scope, e, op, ot, self.span(e));
+                if matches!(op, UnOp::Not) && ot == Ty::Error {
+                    self.report_error_operand_not(scope, operand, operand_diag_mark, e);
+                }
+                ty
             }
             Expr::Binary {
                 op,
@@ -39200,21 +39437,24 @@ impl<'a> Checker<'a> {
                         TopLevelPropertySelection::Selected(property)
                             if property.property.ty == Ty::Pending =>
                         {
-                            match self.demand_name.and_then(|demand| demand(&n)) {
-                                Some(ty) => {
-                                    self.expr_lowers
-                                        .insert(e, ExprLowering::TopLevelPropertyGet(property));
-                                    ty
-                                }
-                                None => {
-                                    self.expr_lowers
-                                        .insert(e, ExprLowering::TopLevelPropertyGet(property));
-                                    Ty::Error
-                                }
+                            let ty = self
+                                .demand_name
+                                .and_then(|demand| demand(&n))
+                                .unwrap_or(Ty::Error);
+                            if ty == Ty::Error && self.property_inference_failed(&property.property)
+                            {
+                                self.silent_error_exprs.insert(e);
                             }
+                            self.expr_lowers
+                                .insert(e, ExprLowering::TopLevelPropertyGet(property));
+                            ty
                         }
                         TopLevelPropertySelection::Selected(property) => {
                             let ty = property.property.ty;
+                            if ty == Ty::Error && self.property_inference_failed(&property.property)
+                            {
+                                self.silent_error_exprs.insert(e);
+                            }
                             self.expr_lowers
                                 .insert(e, ExprLowering::TopLevelPropertyGet(property));
                             ty
@@ -39709,7 +39949,25 @@ impl<'a> Checker<'a> {
                     return self.set(e, ty);
                 }
             }
+            let diag_mark = self.diags.diags.len();
             let rt = self.expr(scope, receiver);
+            if rt == Ty::Error {
+                if let Some(ty) = self.bind_error_receiver_property(&name) {
+                    return self.set(e, ty);
+                }
+                if !self.error_receiver_expression_flavored(scope, receiver, diag_mark) {
+                    self.diags.error(
+                        self.member_name_span(e, &name),
+                        format!("unresolved reference '{name}'."),
+                    );
+                } else if matches!(
+                    self.resolver().error_receiver_functions(&name),
+                    crate::symbol_resolver::ErrorReceiverSelection::Absent
+                ) {
+                    self.silent_error_exprs.insert(e);
+                }
+                return self.set(e, Ty::Error);
+            }
             let declared = self.check_member(scope, rt, &name, self.span(e), Some(e));
             // A member whose own type is still being determined reads as a placeholder. Ask the
             // engine for that declaration before accepting the failure. This sits here rather than
@@ -40909,6 +41167,9 @@ impl<'a> Checker<'a> {
                 if unbound.is_none() {
                     // Bound: a reference receiver, or a boxable primitive (boxed then `getClass`).
                     let rt = self.expr(scope, recv);
+                    if rt == Ty::Error {
+                        return self.set(e, Ty::Error);
+                    }
                     let boxable = rt.jvm_boxed_ref().is_some();
                     if !rt.is_reference() && !boxable {
                         return unsupported(self);
@@ -46090,6 +46351,9 @@ impl<'a> Checker<'a> {
                         compiler_intrinsic: selected_property
                             .as_ref()
                             .and_then(|property| property.getter.compiler_intrinsic),
+                        source_member: selected_property
+                            .as_ref()
+                            .and_then(|property| property.source_member),
                         access: (visibility != Visibility::Public).then_some((visibility, owner)),
                     },
                 ))));
@@ -46142,6 +46406,19 @@ impl<'a> Checker<'a> {
         let Some(expression) = expression else {
             return ty;
         };
+        let inference_failed = ty == Ty::Error
+            && match &selection {
+                PropertyReadSelection::Member(member) => {
+                    self.source_member_inference_failed(member.source_member)
+                }
+                PropertyReadSelection::Extension(access) => {
+                    self.property_inference_failed(&access.property)
+                }
+                PropertyReadSelection::MemberExtension(_) => false,
+            };
+        if inference_failed {
+            self.silent_error_exprs.insert(expression);
+        }
         match selection {
             PropertyReadSelection::Member(member) => {
                 let PropertyReadMemberSelection {
@@ -49749,6 +50026,7 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                 }
+                let receiver_diag_mark = self.diags.diags.len();
                 let rt = self.expr(scope, receiver);
                 let receiver_callables = if rt != Ty::Error {
                     self.resolver().receiver_callables(rt, &name)
@@ -50096,6 +50374,18 @@ impl<'a> Checker<'a> {
                     "member call={name} arguments={args:?} types={arg_tys:?} kinds={provider_member_arg_kinds:?}",
                 );
                 if rt == Ty::Error {
+                    if let Some(ty) = self.bind_error_receiver_call(call, &name) {
+                        return ty;
+                    }
+                    if !self.error_receiver_expression_flavored(scope, receiver, receiver_diag_mark)
+                    {
+                        self.diags.error(
+                            self.member_name_span(callee, &name),
+                            format!("unresolved reference '{name}'."),
+                        );
+                    } else {
+                        self.silent_error_exprs.insert(call);
+                    }
                     return Ty::Error;
                 }
                 // `invoke` is a member of the semantic function value, so it precedes extensions and
@@ -50451,15 +50741,20 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                 }
-                if let Some(failure) = member_mapping_failure {
-                    self.report_retained_member_mapping_failure(call, &name, args, *failure);
-                    return Ty::Error;
-                }
                 let inapplicable_candidates = self
                     .resolver()
                     .receiver_callables(rt, &name)
                     .functions()
                     .to_vec();
+                if self.call_has_error_argument(args)
+                    && (member_mapping_failure.is_some() || !inapplicable_candidates.is_empty())
+                {
+                    return Ty::Error;
+                }
+                if let Some(failure) = member_mapping_failure {
+                    self.report_retained_member_mapping_failure(call, &name, args, *failure);
+                    return Ty::Error;
+                }
                 crate::trace_compiler!(
                     "unresolved_call",
                     "name={name} receiver={rt:?} call={call:?} args={arg_tys:?} candidates={}",
@@ -52861,22 +53156,27 @@ impl<'a> Checker<'a> {
                 // Report only after closer implicit-receiver and context callables had their turn.
                 // The candidate list itself is provider-neutral and therefore uses the same
                 // ambiguity rule for source, sibling-module, and dependency declarations.
+                let error_argument = self.call_has_error_argument(args);
                 if let Some(candidates) = top_level_sam_ambiguous {
-                    let mut message =
-                        "overload resolution ambiguity between candidates:".to_string();
-                    for candidate in &candidates {
-                        message.push('\n');
-                        message.push_str(&Self::callable_candidate_display(&fname, candidate));
+                    if !error_argument {
+                        let mut message =
+                            "overload resolution ambiguity between candidates:".to_string();
+                        for candidate in &candidates {
+                            message.push('\n');
+                            message.push_str(&Self::callable_candidate_display(&fname, candidate));
+                        }
+                        self.diags.error(self.call_callee_name_span(call), message);
                     }
-                    self.diags.error(self.call_callee_name_span(call), message);
                     return Ty::Error;
                 }
                 if let Some(selection) = top_level {
                     if matches!(selection, CallableCandidateSelection::Ambiguous(_)) {
-                        self.diags.error(
-                            self.call_callee_name_span(call),
-                            "overload resolution ambiguity".to_string(),
-                        );
+                        if !error_argument {
+                            self.diags.error(
+                                self.call_callee_name_span(call),
+                                "overload resolution ambiguity".to_string(),
+                            );
+                        }
                         return Ty::Error;
                     }
                     if matches!(selection, CallableCandidateSelection::MissingContext(_))
@@ -53725,12 +54025,29 @@ impl<'a> Checker<'a> {
         // Deferred declarations have a synthetic `null` but no source `=`.
         let deferred = ty.is_some() && !self.file.value_operator_spans.contains_key(&init.0);
         // Propagate an annotation's expected type through the initializer.
+        let init_diag_mark = self.diags.diags.len();
         let it = match declared {
             Some(d) => self.expr_expected(scope, init, d),
             _ => self.expr(scope, init),
         };
         let unbound_initializer =
             declared.is_none() && self.report_unbound_call_result_type_parameter(init);
+        let error_provenance = if declared.is_some() || (it != Ty::Error && !unbound_initializer) {
+            ErrorProvenance::None
+        } else if self.diags.diags[init_diag_mark..]
+            .iter()
+            .any(|d| d.severity == crate::diag::Severity::Error)
+            || match self.file.expr(init) {
+                Expr::Name(n) => self
+                    .lookup(scope, n)
+                    .is_some_and(|local| local.error_provenance == ErrorProvenance::Diagnosed),
+                _ => self.silent_error_exprs.contains(&init),
+            }
+        {
+            ErrorProvenance::Diagnosed
+        } else {
+            ErrorProvenance::None
+        };
         let bind = match declared {
             Some(d) => {
                 if !deferred {
@@ -53797,7 +54114,7 @@ impl<'a> Checker<'a> {
         {
             self.declare_callable_reference(scope, &name, bound_ty, is_var, function_type);
         } else {
-            self.declare(scope, &name, bound_ty, is_var);
+            self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance);
         }
         // An explicit broader declaration retains its storage type while straight-line reads use the
         // initializer's proven subtype (`var x: Base = Derived()`, `var n: Int? = 10`). A null

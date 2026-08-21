@@ -382,6 +382,58 @@ fn failed_property_inference_diagnostics_match_kotlinc_exactly() {
 }
 
 #[test]
+fn error_receiver_diagnostics_match_kotlinc_exactly() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "ErrorReceivers.kt",
+            "fun declared(u: Missing) {\n    u.method()\n    println(u.name)\n}\n\
+             fun failed() {\n    val value = missingFn()\n    value.method()\n}\n\
+             fun argument(builder: StringBuilder) {\n    builder.append(missingFn())\n}\n",
+        )],
+        &[],
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let expected = vec![
+        ObservedError {
+            file: "ErrorReceivers.kt".to_string(),
+            line: 1,
+            column: 17,
+            message: "unresolved reference 'Missing'.".to_string(),
+        },
+        ObservedError {
+            file: "ErrorReceivers.kt".to_string(),
+            line: 2,
+            column: 7,
+            message: "unresolved reference 'method'.".to_string(),
+        },
+        ObservedError {
+            file: "ErrorReceivers.kt".to_string(),
+            line: 3,
+            column: 15,
+            message: "unresolved reference 'name'.".to_string(),
+        },
+        ObservedError {
+            file: "ErrorReceivers.kt".to_string(),
+            line: 6,
+            column: 17,
+            message: "unresolved reference 'missingFn'.".to_string(),
+        },
+        ObservedError {
+            file: "ErrorReceivers.kt".to_string(),
+            line: 10,
+            column: 20,
+            message: "unresolved reference 'missingFn'.".to_string(),
+        },
+    ];
+    assert_eq!(krusty_errors.len(), expected.len());
+    assert_eq!(kotlinc_errors.len(), expected.len());
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}
+
+#[test]
 fn generic_method_result_binds_outer_type_parameter() {
     common::expect_front_end_ok_files_with_stdlib(
         &["class C { fun <T> get(value: Any): T = value as T }\n\

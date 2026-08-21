@@ -75,9 +75,9 @@ Review these before reading a diff linearly:
 7. Duplicate constructor/call/property candidate structures or copied overload-selection loops.
 8. New `#[allow(dead_code)]`, silent `Ty::Error` recovery, skipped diagnostics, or tests weakened to
    fit the implementation.
-9. Diagnostic tests that use substring/prefix checks, search with `any`, or assert only rejection.
-   Assert the complete ordered diagnostics and their count. Differential tests also assert exact
-   file, line, column, message, and order.
+9. Diagnostic tests that use substring/prefix checks, search with `any`, sort output before
+   comparison, or assert only rejection. Assert the complete emitted diagnostics and their count.
+   Differential tests also assert exact file, line, column, message, and order.
 
 Useful audit commands:
 
@@ -85,7 +85,7 @@ Useful audit commands:
 rg -n '\.render\(\)' src
 rg -n 'resolve_|get_class|classpath|fallback|or_else' src/ir_lower.rs
 rg -n '#\[allow\(dead_code\)\]' src
-rg --pcre2 -n -U '(front_end_diagnostics|compiler_diagnostics|krusty_(stderr|stdout|errors)|\bdiags?\b|\bdiagnostics\b)[\s\S]{0,240}(contains|starts_with|ends_with|\.(any|all)\()' tests
+rg --pcre2 -n -U '(front_end_diagnostics|compiler_diagnostics|krusty_(stderr|stdout|errors)|\bdiags?\b|\bdiagnostics\b)[\s\S]{0,240}(contains|starts_with|ends_with|\.(any|all|sort|sort_by|sort_by_key)\()' tests
 ```
 
 Every hit requires semantic review; the commands are smell detectors, not blind bans.

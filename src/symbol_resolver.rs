@@ -3988,6 +3988,13 @@ struct ExtensionCallShape {
     determined: bool,
 }
 
+/// Binding result for a name on the compiler's error receiver.
+pub(crate) enum ErrorReceiverSelection<T> {
+    Absent,
+    Bind(Vec<T>),
+    Silent,
+}
+
 impl<'a> SymbolResolver<'a> {
     pub fn new(lib: &'a dyn SemanticPlatform) -> Self {
         SymbolResolver {
@@ -4314,6 +4321,67 @@ impl<'a> SymbolResolver<'a> {
                 overloads: properties,
             },
         )
+    }
+
+    /// `Any` members precede visible extensions on an error receiver.
+    pub(crate) fn error_receiver_functions(
+        &self,
+        name: &str,
+    ) -> ErrorReceiverSelection<FunctionInfo> {
+        let members: Vec<FunctionInfo> =
+            members_in_hierarchy(&self.src, Ty::obj("kotlin/Any"), name)
+                .functions()
+                .iter()
+                .filter(|function| function.kind == FnKind::Member)
+                .cloned()
+                .collect();
+        if !members.is_empty() {
+            return ErrorReceiverSelection::Bind(members);
+        }
+        self.error_receiver_extensions(name, |callables| {
+            callables
+                .functions()
+                .iter()
+                .filter(|function| function.is_extension())
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// Visible extension properties on an error receiver.
+    pub(crate) fn error_receiver_properties(
+        &self,
+        name: &str,
+    ) -> ErrorReceiverSelection<PropertyInfo> {
+        self.error_receiver_extensions(name, |callables| {
+            callables
+                .properties()
+                .iter()
+                .filter(|property| property.kind == PropKind::Extension)
+                .cloned()
+                .collect()
+        })
+    }
+
+    fn error_receiver_extensions<T>(
+        &self,
+        name: &str,
+        facet: impl Fn(&Callables) -> Vec<T>,
+    ) -> ErrorReceiverSelection<T> {
+        let Some(scope) = self.fn_scope else {
+            return ErrorReceiverSelection::Absent;
+        };
+        for level in tagged_symbol_levels_in_function_scope(&self.src, name, scope) {
+            let candidates = facet(&callables_from_symbols(&level.symbols));
+            if candidates.is_empty() {
+                continue;
+            }
+            if level.kind.ambiguity_checks() && candidates.len() > 1 {
+                return ErrorReceiverSelection::Silent;
+            }
+            return ErrorReceiverSelection::Bind(candidates);
+        }
+        ErrorReceiverSelection::Absent
     }
 
     pub(crate) fn select_receiver_function(
@@ -6987,11 +7055,44 @@ fn symbol_levels_in_function_scope(
     name: &str,
     scope: FunctionScopeRef<'_>,
 ) -> Vec<Vec<std::rc::Rc<crate::libraries::ResolvedSymbols>>> {
+    tagged_symbol_levels_in_function_scope(src, name, scope)
+        .into_iter()
+        .map(|level| level.symbols)
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+enum FunctionScopeLevelKind {
+    Flat,
+    Explicit,
+    CurrentPackage,
+    Import,
+}
+
+impl FunctionScopeLevelKind {
+    fn ambiguity_checks(self) -> bool {
+        matches!(self, Self::Import)
+    }
+}
+
+struct FunctionScopeLevel {
+    kind: FunctionScopeLevelKind,
+    symbols: Vec<std::rc::Rc<crate::libraries::ResolvedSymbols>>,
+}
+
+fn tagged_symbol_levels_in_function_scope(
+    src: &dyn SymbolSource,
+    name: &str,
+    scope: FunctionScopeRef<'_>,
+) -> Vec<FunctionScopeLevel> {
     match scope {
         FunctionScopeRef::Flat(packages) => {
             let records = symbols_at_scope_level(src, name, packages);
             (!records.is_empty())
-                .then_some(records)
+                .then_some(FunctionScopeLevel {
+                    kind: FunctionScopeLevelKind::Flat,
+                    symbols: records,
+                })
                 .into_iter()
                 .collect()
         }
@@ -7011,10 +7112,13 @@ fn symbol_levels_in_function_scope(
                     records.len()
                 );
                 if !records.is_empty() {
-                    result.push(records);
+                    result.push(FunctionScopeLevel {
+                        kind: FunctionScopeLevelKind::Explicit,
+                        symbols: records,
+                    });
                 }
             }
-            for level in imports.levels() {
+            for (index, level) in imports.levels().iter().enumerate() {
                 let records = symbols_at_scope_level(src, name, level)
                     .into_iter()
                     .filter(|record| has_callables(record))
@@ -7026,7 +7130,14 @@ fn symbol_levels_in_function_scope(
                         level.len(),
                         records.len()
                     );
-                    result.push(records);
+                    result.push(FunctionScopeLevel {
+                        kind: if index == 0 {
+                            FunctionScopeLevelKind::CurrentPackage
+                        } else {
+                            FunctionScopeLevelKind::Import
+                        },
+                        symbols: records,
+                    });
                 }
             }
             result

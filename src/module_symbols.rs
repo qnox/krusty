@@ -1042,7 +1042,21 @@ impl SymbolSource for ModuleSymbols<'_> {
         // Receiver applicability is selected above this package-scoped source boundary.
         let any = Ty::obj("kotlin/Any");
         if let Some(families) = self.syms.ext_funs.get(&name) {
-            for (recv, sigs) in families {
+            // `ext_funs` groups overloads by receiver in a hash map; surface them in DECLARATION
+            // order — kotlinc's first-declared rule at one scope level — not hash order.
+            let mut declared: Vec<(&Ty, &Signature)> = families
+                .iter()
+                .flat_map(|(recv, sigs)| sigs.iter().map(move |sig| (recv, sig)))
+                .collect();
+            declared.sort_by_key(|(_, signature)| {
+                (
+                    signature.source_file.unwrap_or(u32::MAX),
+                    signature
+                        .source_decl
+                        .map_or(u32::MAX, |declaration| declaration.0),
+                )
+            });
+            for (recv, sig) in declared {
                 let rank = if recv.non_null().is_ty_param() || recv.non_null() == any {
                     1
                 } else {
@@ -1050,25 +1064,23 @@ impl SymbolSource for ModuleSymbols<'_> {
                 };
                 // Surface EVERY overload registered for this (receiver, name) so the resolver's
                 // overload picker can choose by arity/argument types (`fun R.f()` vs `fun R.f(x)`).
-                for sig in sigs {
-                    if !package.is_some_and(|package| package.matches(&sig.package)) {
-                        continue;
-                    }
-                    overloads.push(fn_info(
-                        FnKind::Extension,
-                        sig,
-                        Some(*recv),
-                        CallableOwner {
-                            internal: crate::types::type_name(""),
-                            is_interface: false,
-                        },
-                        &name,
-                        rank,
-                        Origin::Module {
-                            facade: type_name(""),
-                        },
-                    ));
+                if !package.is_some_and(|package| package.matches(&sig.package)) {
+                    continue;
                 }
+                overloads.push(fn_info(
+                    FnKind::Extension,
+                    sig,
+                    Some(*recv),
+                    CallableOwner {
+                        internal: crate::types::type_name(""),
+                        is_interface: false,
+                    },
+                    &name,
+                    rank,
+                    Origin::Module {
+                        facade: type_name(""),
+                    },
+                ));
             }
         }
         let mut properties = Vec::new();
