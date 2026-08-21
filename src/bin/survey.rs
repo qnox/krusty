@@ -1,4 +1,4 @@
-use krusty::diag::{line_col, DiagSink};
+use krusty::diag::{line_col, DiagSink, Severity};
 use krusty::frontend::{
     check_file, check_file_in_source_set, collect_signatures_with_cp, FrontendSymbols,
 };
@@ -452,6 +452,180 @@ fn main() {
     run();
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParseFailureStage {
+    Harness,
+    Lex,
+    Parse,
+    Integrity,
+    Panic,
+}
+
+impl ParseFailureStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Harness => "harness",
+            Self::Lex => "lex",
+            Self::Parse => "parse",
+            Self::Integrity => "integrity",
+            Self::Panic => "panic",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ParseFailure {
+    block: String,
+    stage: ParseFailureStage,
+    line: usize,
+    column: usize,
+    message: String,
+    source_line: String,
+}
+
+#[derive(Debug)]
+struct ParseSurveyOutcome {
+    kotlin_blocks: usize,
+    failures: Vec<ParseFailure>,
+}
+
+fn parse_block_name(block: &krusty::conformance::KotlinSourceBlock) -> String {
+    match &block.module {
+        Some(module) => format!("{module}/{}.kt", block.name),
+        None => format!("{}.kt", block.name),
+    }
+}
+
+fn diagnostic_failures(
+    block: &krusty::conformance::KotlinSourceBlock,
+    diagnostics: &DiagSink,
+    stage: ParseFailureStage,
+) -> Vec<ParseFailure> {
+    diagnostics
+        .diags
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .map(|diagnostic| {
+            let (line, column) = line_col(&block.source, diagnostic.span.lo);
+            ParseFailure {
+                block: parse_block_name(block),
+                stage,
+                line,
+                column,
+                message: diagnostic.msg.clone(),
+                source_line: block
+                    .source
+                    .lines()
+                    .nth(line.saturating_sub(1))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+            }
+        })
+        .collect()
+}
+
+fn survey_parse_file(file: &Path) -> ParseSurveyOutcome {
+    let raw = match std::fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(error) => {
+            return ParseSurveyOutcome {
+                kotlin_blocks: 0,
+                failures: vec![ParseFailure {
+                    block: "<case>".into(),
+                    stage: ParseFailureStage::Harness,
+                    line: 1,
+                    column: 1,
+                    message: format!("cannot read {}: {error}", file.display()),
+                    source_line: String::new(),
+                }],
+            }
+        }
+    };
+    let source = krusty::conformance::prepare_test_source(&raw);
+    let fallback = file
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("File");
+    let blocks = match krusty::conformance::kotlin_source_blocks(&source, fallback) {
+        Ok(blocks) => blocks,
+        Err(error) => {
+            return ParseSurveyOutcome {
+                kotlin_blocks: 0,
+                failures: vec![ParseFailure {
+                    block: "<case>".into(),
+                    stage: ParseFailureStage::Harness,
+                    line: 1,
+                    column: 1,
+                    message: error,
+                    source_line: String::new(),
+                }],
+            }
+        }
+    };
+    let features = krusty::features::LangFeatures::from_source(&source);
+    let mut failures = Vec::new();
+    for block in &blocks {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut diagnostics = DiagSink::new();
+            let tokens = lex(&block.source, &mut diagnostics);
+            if diagnostics.has_errors() {
+                return diagnostic_failures(block, &diagnostics, ParseFailureStage::Lex);
+            }
+            let ast = krusty::parser::parse_with_features(
+                &block.source,
+                &tokens,
+                &mut diagnostics,
+                &features,
+            );
+            if diagnostics.has_errors() {
+                let stage = if diagnostics.diags.iter().any(|diagnostic| {
+                    diagnostic.severity == Severity::Error
+                        && diagnostic.msg.starts_with("invalid parser AST:")
+                }) {
+                    ParseFailureStage::Integrity
+                } else {
+                    ParseFailureStage::Parse
+                };
+                return diagnostic_failures(block, &diagnostics, stage);
+            }
+            if let Err(error) = ast.validate_integrity(&block.source) {
+                return vec![ParseFailure {
+                    block: parse_block_name(block),
+                    stage: ParseFailureStage::Integrity,
+                    line: 1,
+                    column: 1,
+                    message: error,
+                    source_line: block.source.lines().next().unwrap_or("").trim().to_string(),
+                }];
+            }
+            Vec::new()
+        }));
+        match result {
+            Ok(mut block_failures) => failures.append(&mut block_failures),
+            Err(panic) => {
+                let message = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("non-string panic payload");
+                failures.push(ParseFailure {
+                    block: parse_block_name(block),
+                    stage: ParseFailureStage::Panic,
+                    line: 1,
+                    column: 1,
+                    message: message.to_string(),
+                    source_line: block.source.lines().next().unwrap_or("").trim().to_string(),
+                });
+            }
+        }
+    }
+    ParseSurveyOutcome {
+        kotlin_blocks: blocks.len(),
+        failures,
+    }
+}
+
 #[derive(Debug)]
 enum SurveyOutcome {
     Passed,
@@ -525,18 +699,162 @@ fn survey_file(
     }
 }
 
+fn tsv_field(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
+fn run_parse_only(files: Vec<PathBuf>, print_failures: bool, report_path: Option<PathBuf>) {
+    let jobs = std::env::var("KRUSTY_SURVEY_JOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+        })
+        .max(1)
+        .min(files.len().max(1));
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(Vec::with_capacity(files.len()));
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(jobs);
+        for worker in 0..jobs {
+            let files = &files;
+            let next = &next;
+            let results = &results;
+            workers.push(
+                std::thread::Builder::new()
+                    .name(format!("parse-survey-{worker}"))
+                    .stack_size(64 * 1024 * 1024)
+                    .spawn_scoped(scope, move || loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(file) = files.get(index) else { break };
+                        let outcome = survey_parse_file(file);
+                        results
+                            .lock()
+                            .expect("parse survey result lock poisoned")
+                            .push((file.to_string_lossy().into_owned(), outcome));
+                    })
+                    .expect("spawn parse survey worker"),
+            );
+        }
+        for worker in workers {
+            worker.join().expect("parse survey worker panicked");
+        }
+    });
+
+    let mut results = results
+        .into_inner()
+        .expect("parse survey result lock poisoned");
+    results.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let discovered = results.len();
+    let kotlin_blocks: usize = results
+        .iter()
+        .map(|(_, outcome)| outcome.kotlin_blocks)
+        .sum();
+    let parsed = results
+        .iter()
+        .filter(|(_, outcome)| outcome.failures.is_empty())
+        .count();
+    let count_cases = |stage| {
+        results
+            .iter()
+            .filter(|(_, outcome)| {
+                outcome
+                    .failures
+                    .iter()
+                    .any(|failure| failure.stage == stage)
+            })
+            .count()
+    };
+    let lex_failures = count_cases(ParseFailureStage::Lex);
+    let parse_failures = count_cases(ParseFailureStage::Parse);
+    let integrity_failures = count_cases(ParseFailureStage::Integrity);
+    let panics = count_cases(ParseFailureStage::Panic);
+    let harness_failures = count_cases(ParseFailureStage::Harness);
+
+    if print_failures {
+        for (file, outcome) in &results {
+            if outcome.failures.is_empty() {
+                println!(
+                    "File: {file}\nParse: OK ({} Kotlin blocks)",
+                    outcome.kotlin_blocks
+                );
+            } else {
+                for failure in &outcome.failures {
+                    println!(
+                        "File: {file}\nBlock: {}\n{}:{}:{}: {}: {}\n{}",
+                        failure.block,
+                        failure.block,
+                        failure.line,
+                        failure.column,
+                        failure.stage.as_str(),
+                        failure.message,
+                        failure.source_line,
+                    );
+                }
+            }
+        }
+    }
+
+    println!("Discovered cases: {discovered}");
+    println!("Kotlin blocks:    {kotlin_blocks}");
+    println!("Parsed cases:     {parsed}");
+    println!("Lex failures:     {lex_failures}");
+    println!("Parse failures:   {parse_failures}");
+    println!("AST failures:     {integrity_failures}");
+    println!("Panics:           {panics}");
+    if harness_failures != 0 {
+        println!("Harness failures: {harness_failures}");
+    }
+
+    if let Some(path) = report_path {
+        let mut report = String::from("file\tblock\tstage\tline\tcolumn\tdiagnostic\tsource\n");
+        for (file, outcome) in &results {
+            for failure in &outcome.failures {
+                report.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    tsv_field(file),
+                    tsv_field(&failure.block),
+                    failure.stage.as_str(),
+                    failure.line,
+                    failure.column,
+                    tsv_field(&failure.message),
+                    tsv_field(&failure.source_line),
+                ));
+            }
+        }
+        std::fs::write(&path, report).unwrap_or_else(|error| {
+            panic!(
+                "failed to write parse survey report {}: {error}",
+                path.display()
+            )
+        });
+    }
+
+    if parsed != discovered {
+        std::process::exit(1);
+    }
+}
+
 fn run() {
     let mut args = std::env::args().skip(1);
     let box_dir = args.next().expect(
-        "usage: survey <box_dir> [--frontend-only] [--file <path>] [--samples <category>] [--report <path>]",
+        "usage: survey <box_dir> [--parse-only | --frontend-only] [--file <path>] [--samples <category>] [--report <path>]",
     );
     let mut samples_cat = None;
     let mut report_path = None;
     let mut only_file = None;
     let mut frontend_only = false;
+    let mut parse_only = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--frontend-only" => frontend_only = true,
+            "--parse-only" => parse_only = true,
             "--file" => {
                 only_file = Some(PathBuf::from(args.next().expect("--file requires a path")));
             }
@@ -552,7 +870,10 @@ fn run() {
         }
     }
 
-    let jdk_modules = krusty::toolchain::jdk_modules();
+    if parse_only && frontend_only {
+        panic!("--parse-only and --frontend-only are mutually exclusive");
+    }
+
     let limit = std::env::var("KRUSTY_BOX_LIMIT")
         .ok()
         .filter(|value| !value.is_empty())
@@ -569,6 +890,11 @@ fn run() {
             limit,
         ),
     };
+    if parse_only {
+        run_parse_only(files, only_file.is_some(), report_path);
+        return;
+    }
+    let jdk_modules = krusty::toolchain::jdk_modules();
     let jobs = std::env::var("KRUSTY_SURVEY_JOBS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())

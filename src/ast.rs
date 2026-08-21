@@ -286,6 +286,12 @@ pub enum Expr {
         receiver: ExprId,
         name: String,
     },
+    /// `receiver.(callable)` — binds `receiver` as the extension receiver of a function value. A
+    /// following ordinary [`Expr::Call`] supplies the callable's value arguments.
+    ExtensionAccess {
+        receiver: ExprId,
+        callable: ExprId,
+    },
     /// `array[i]` / `receiver[i, j, …]` — a subscript. A SINGLE index is an array element access or a
     /// unary `get` operator; TWO OR MORE is always a `get(i, j, …)` operator (there is no built-in
     /// multi-dimensional array in Kotlin). `indices` always has at least one element.
@@ -456,6 +462,25 @@ pub enum Stmt {
     /// and lowering treat it like any other class. A capturing local class fails to resolve its outer
     /// references (it's checked with no enclosing scope) → the file skips, never miscompiles.
     LocalClass(ClassDecl),
+    /// A local `typealias Name<T…> = Target` declaration.
+    LocalTypeAlias(TypeAliasDecl),
+    /// A compound assignment whose target is not a writable name/member/index expression, such as
+    /// `factory() += value`. Semantic checking selects `plusAssign`/`minusAssign`/… and validates
+    /// whether the target form is legal; the parser retains the operator without desugaring it.
+    CompoundAssign {
+        target: ExprId,
+        value: ExprId,
+        op: BinOp,
+        operator_span: Span,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct TypeAliasDecl {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub target: TypeRef,
+    pub span: Span,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1007,6 +1032,9 @@ pub struct ClassDecl {
     pub base_args: Vec<ExprId>,
     /// Secondary constructors: `constructor(params) : this/super(args) { body }`.
     pub secondary_ctors: Vec<SecondaryCtor>,
+    /// Nested type-alias declarations in source order. They remain declarations even when later
+    /// semantic phases cannot yet make the alias visible from the enclosing classifier.
+    pub type_aliases: Vec<TypeAliasDecl>,
     /// Annotation names on the primary constructor. `None` means there is no primary constructor;
     /// `Some([])` is an implicit or unannotated primary constructor.
     pub primary_ctor_annotations: Option<Vec<AnnotationRef>>,
@@ -1218,16 +1246,23 @@ pub struct PropDecl {
     /// must not emit `ACC_FINAL` on them (same rule as `FunDecl::is_open`).
     pub is_open: bool,
     pub is_override: bool,
-    /// `None` for a `lateinit var` (declared without an initializer; the backing field defaults to
-    /// null and is assigned later).
+    /// No initializer was written for `None`. This is valid syntax for abstract, expect, external,
+    /// lateinit, deferred, and accessor-defined properties; semantic validation decides whether the
+    /// declaration context permits the omission.
     pub init: Option<ExprId>,
-    /// `true` if declared `lateinit` — a no-initializer property is only allowed when lateinit
-    /// (otherwise it's an abstract/interface property, which krusty rejects).
+    /// `true` if declared `lateinit`.
     pub is_lateinit: bool,
+    /// `true` if the source declaration carried the `external` modifier.
+    pub is_external: bool,
+    /// `true` if the source declaration carried the `expect` modifier.
+    pub is_expect: bool,
     /// A custom getter body (`val x: T get() = expr`/`get() { … }`). With no initializer and no
     /// `field` reference it is a computed property (no backing field); with an initializer or a
     /// `field` reference it reads the backing field.
     pub getter: Option<FunBody>,
+    /// Whether a getter accessor was written at all. This distinguishes an absent accessor from an
+    /// explicitly declared default/body-less accessor while keeping `getter` reserved for bodies.
+    pub getter_declared: bool,
     /// An explicit getter return type (`get(): T`). Kept apart from the property's annotation so
     /// the checker can validate that both declarations agree.
     pub getter_ty: Option<TypeRef>,
@@ -1348,6 +1383,9 @@ pub struct File {
     pub value_operator_spans: std::collections::HashMap<u32, Span>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: std::collections::HashMap<u32, Span>,
+    /// Labels written on declaration statements (`label@ val …`, `label@ fun …`), keyed by the
+    /// declaration statement. The value retains both spelling and exact label-token span.
+    pub statement_labels: std::collections::HashMap<StmtId, (String, Span)>,
     /// Parser-desugared member/index inc/dec value blocks whose access operands are deliberately
     /// shared between the read and write. Lowering spills the operands that semantic resolution
     /// proved are runtime values; package/classifier/`super` qualifiers have no value type and stay
@@ -1452,6 +1490,10 @@ pub struct File {
     /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
     /// Absent ⇒ the whole destructuring is positional.
     pub destructure_source_props: std::collections::HashMap<u32, Vec<Option<String>>>,
+    /// Context parameters written on a local property declaration, keyed by that declaration's
+    /// statement id. Later semantic phases may reject the ownership form, but syntax and spans are
+    /// retained by the parser.
+    pub local_property_context_params: std::collections::HashMap<StmtId, Vec<Param>>,
     /// NAMED super-constructor arguments (`class D : Base(name = …, addr = …)`): the per-argument name
     /// (parallel to the class's `base_args`; `None` for a positional arg), keyed by the FIRST base
     /// argument's `ExprId.0`. The checker/lowerer reorder the base args to the base constructor's
@@ -1488,6 +1530,9 @@ pub struct File {
     /// the complete source target shape. Resolution binds this once for semantic use and metadata;
     /// the parser's same-file structural expansion also uses it for function-type aliases.
     pub type_alias_fun: Vec<(String, Vec<String>, TypeRef)>,
+    /// File-scope type-alias declarations with their complete syntax and exact declaration spans.
+    /// The parallel semantic tables above are retained for existing consumers.
+    pub type_alias_decls: Vec<TypeAliasDecl>,
     /// File-level annotations (`@file:Foo(args…)`) as `(simple_name, arg ExprIds)`. Lets a plugin read
     /// e.g. `@file:UseContextualSerialization(MyDate::class)` to mark matching property types contextual.
     pub file_annotations: Vec<(String, Vec<ExprId>)>,
@@ -1835,6 +1880,7 @@ impl File {
                 value, start, end, ..
             } => fe(*value) || fe(*start) || fe(*end),
             Expr::Member { receiver, .. } => fe(*receiver),
+            Expr::ExtensionAccess { receiver, callable } => fe(*receiver) || fe(*callable),
             Expr::Index { array, indices } => fe(*array) || indices.iter().any(|&i| fe(i)),
             Expr::Call { callee, args } => fe(*callee) || args.iter().any(|&a| fe(a)),
             Expr::SafeCall { receiver, args, .. } => {
@@ -1898,7 +1944,8 @@ impl File {
             Stmt::ForEach { iterable, body, .. } => fe(*iterable) || fe(*body),
             Stmt::LocalFun(f) => matches!(&f.body, FunBody::Expr(b) | FunBody::Block(b) if fe(*b)),
             // A local class's members are hoisted + walked separately; it has no inline child expr here.
-            Stmt::LocalClass(_) => false,
+            Stmt::LocalClass(_) | Stmt::LocalTypeAlias(_) => false,
+            Stmt::CompoundAssign { target, value, .. } => fe(*target) || fe(*value),
         }
     }
 
@@ -2413,6 +2460,13 @@ impl File {
                 self.write_expr(*receiver, out);
                 out.push_str(&format!(" {name})"));
             }
+            Expr::ExtensionAccess { receiver, callable } => {
+                out.push_str("(.invoke ");
+                self.write_expr(*receiver, out);
+                out.push(' ');
+                self.write_expr(*callable, out);
+                out.push(')');
+            }
             Expr::Call { callee, args } => {
                 out.push_str("(call ");
                 self.write_expr(*callee, out);
@@ -2621,6 +2675,21 @@ impl File {
             }
             Stmt::LocalClass(c) => {
                 out.push_str(&format!("(local-class {})", c.name));
+            }
+            Stmt::LocalTypeAlias(alias) => {
+                out.push_str(&format!(
+                    "(local-typealias {} {})",
+                    alias.name, alias.target.name
+                ));
+            }
+            Stmt::CompoundAssign {
+                target, value, op, ..
+            } => {
+                out.push_str(&format!("(compound-{} ", binop(*op)));
+                self.write_expr(*target, out);
+                out.push(' ');
+                self.write_expr(*value, out);
+                out.push(')');
             }
         }
     }
