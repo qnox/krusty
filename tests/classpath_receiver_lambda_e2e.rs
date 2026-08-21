@@ -451,12 +451,10 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
         ),
     ] {
         let nullable_join_diagnostics = common::front_end_diagnostics(source, &cp, Some(&jdk));
-        assert!(
-            nullable_join_diagnostics
-                .iter()
-                .any(|message| message.contains("actual type is 'lib.Box?'")
-                    && message.contains("'lib.Box' was expected")),
-            "{case} must keep the nullable member receiver and block extension pretyping: {nullable_join_diagnostics:?}"
+        assert_eq!(
+            nullable_join_diagnostics,
+            ["argument type mismatch: actual type is 'Box?', but 'Box' was expected."],
+            "{case} must keep the nullable member receiver and block extension pretyping"
         );
     }
     let blocked_by_inner_receiver =
