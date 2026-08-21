@@ -40441,6 +40441,15 @@ impl<'a> Checker<'a> {
                 // walk stops at the first non-diverging then-branch: control can fall through
                 // it with its condition TRUE, so neither its negation nor anything deeper holds.
                 if let Stmt::Expr(ie) = self.file.stmt(*s).clone() {
+                    // A completed expression statement proves the casts that ran inside it:
+                    // `x as T` as a bare statement narrows `x` to `T` for the rest of the
+                    // block. Apply these before stronger fall-through facts from guards or
+                    // contracts.
+                    if !self.stmt_diverges(*s) {
+                        let mut casts = Vec::new();
+                        self.as_cast_narrowings(scope, ie, &mut casts);
+                        self.apply_narrowings(scope, &casts, &[], false);
+                    }
                     let mut level = ie;
                     while let Expr::If {
                         cond,
