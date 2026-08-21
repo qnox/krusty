@@ -362,7 +362,7 @@ impl<'a> PluginContext<'a> {
         };
         file.file_annotations
             .iter()
-            .filter(|(ann, _)| annotation_simple_name(ann) == annotation)
+            .filter(|(ann, _)| annotation_simple_name(&ann.name) == annotation)
             .flat_map(|(_, args)| args)
             .filter_map(|&arg| class_literal_name(file, arg))
             .map(|name| canonical_type_name(file, name))

@@ -1854,11 +1854,14 @@ impl<'a> Parser<'a> {
         }
         let (qname, annotation_span) = self.parse_annotation_reference();
         let args = self.parse_annotation_args();
-        // A `@file:Foo(args)` annotation applies to the file, not the next declaration — record it for
-        // plugins (e.g. `@file:UseContextualSerialization(MyDate::class)`) rather than dropping it.
         if target == "file" && !qname.is_empty() {
-            let simple = qname.rsplit('.').next().unwrap_or(&qname).to_string();
-            self.file.file_annotations.push((simple, args.clone()));
+            self.file.file_annotations.push((
+                AnnotationRef {
+                    name: qname.clone(),
+                    span: annotation_span,
+                },
+                args.clone(),
+            ));
         }
         if use_site || qname.is_empty() {
             (None, args)
@@ -2873,6 +2876,8 @@ impl<'a> Parser<'a> {
                         let body = self
                             .at(TokenKind::LBrace)
                             .then(|| self.parse_block_expr(false));
+                        let ctor_span =
+                            Span::new(ctor_span.lo, self.t[self.i.saturating_sub(1)].span.hi);
                         secondary_ctors.push(SecondaryCtor {
                             annotations,
                             annotation_args,
@@ -3775,6 +3780,8 @@ impl<'a> Parser<'a> {
                         } else {
                             None
                         };
+                        let ctor_span =
+                            Span::new(ctor_span.lo, self.t[self.i.saturating_sub(1)].span.hi);
                         secondary_ctors.push(SecondaryCtor {
                             annotations,
                             annotation_args,
