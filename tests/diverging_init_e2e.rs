@@ -29,15 +29,19 @@ fun box(): String {
 fn diverging_property_initializer_runs() {
     let java_home = common::java_home();
     let stdlib = common::stdlib_jar();
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
-    // Sanity: the checker accepts it (with the stdlib classpath).
+    // Sanity: the checker accepts it with the same semantic classpath used for compilation.
     let mut d = DiagSink::new();
     let toks = lex(SRC, &mut d);
     let files = vec![parse(SRC, &toks, &mut d)];
     let mut syms = collect_signatures_with_cp(
         &files,
         Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![stdlib.clone()])),
+            std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+                stdlib.clone(),
+                jdk.clone(),
+            ])),
         )),
         &mut d,
     );
@@ -47,8 +51,6 @@ fn diverging_property_initializer_runs() {
         "krusty errors: {:?}",
         d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
     );
-
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     assert_eq!(
         common::expect_box_run(SRC, "Div", &[stdlib], Some(&jdk)),
         "OK"

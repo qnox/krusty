@@ -1583,3 +1583,133 @@ fn cross_file_generic_diagnostic_matches_kotlinc() {
     );
     assert_eq!(krusty_error, kotlinc_error);
 }
+
+#[test]
+fn unresolved_catch_type_reports_only_the_unresolved_reference() {
+    let source = "fun f() { try {} catch (e: DefinitelyMissingException) {} }\n";
+    let result = common::compiler_diagnostics(&[("MissingCatch.kt", source)], &[]);
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let expected = vec![ObservedError {
+        file: "MissingCatch.kt".to_string(),
+        line: 1,
+        column: 28,
+        message: "unresolved reference 'DefinitelyMissingException'.".to_string(),
+    }];
+
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(result.reference_code, 0, "kotlinc silently accepted source");
+    assert_eq!(krusty_errors.len(), 1);
+    assert_eq!(kotlinc_errors.len(), 1);
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}
+
+#[test]
+fn non_throwable_catch_type_matches_kotlinc_throwable_mismatch() {
+    let stdlib = common::stdlib_jar();
+    for (source, line, message) in [
+        (
+            "fun f() { try {} catch (e: Int) {} }\n",
+            1,
+            "throwable type mismatch: actual type is 'Int'.",
+        ),
+        (
+            "fun f() { try {} catch (e: () -> Unit) {} }\n",
+            1,
+            "throwable type mismatch: actual type is '() -> Unit'.",
+        ),
+        (
+            "fun f() { try {} catch (e: RuntimeException?) {} }\n",
+            1,
+            "throwable type mismatch: actual type is 'RuntimeException?'.",
+        ),
+        (
+            "fun f() { try {} catch (e: String) {} }\n",
+            1,
+            "throwable type mismatch: actual type is 'String'.",
+        ),
+        (
+            "class Plain\nfun f() { try {} catch (e: Plain) {} }\n",
+            2,
+            "throwable type mismatch: actual type is 'Plain'.",
+        ),
+    ] {
+        let result = common::compiler_diagnostics(
+            &[("CatchMismatch.kt", source)],
+            std::slice::from_ref(&stdlib),
+        );
+        let mut krusty_errors = errors(&result.krusty_stderr);
+        krusty_errors.extend(errors(&result.krusty_stdout));
+        let kotlinc_errors = errors(&result.reference_stderr);
+        let expected = vec![ObservedError {
+            file: "CatchMismatch.kt".to_string(),
+            line,
+            column: 25,
+            message: message.to_string(),
+        }];
+
+        assert_ne!(result.krusty_code, 0, "krusty accepted {source:?}");
+        assert_ne!(result.reference_code, 0, "kotlinc accepted {source:?}");
+        assert_eq!(krusty_errors.len(), 1, "source: {source:?}");
+        assert_eq!(kotlinc_errors.len(), 1, "source: {source:?}");
+        assert_eq!(krusty_errors, expected, "source: {source:?}");
+        assert_eq!(kotlinc_errors, expected, "source: {source:?}");
+    }
+}
+
+#[test]
+fn throwable_catch_types_are_accepted() {
+    let source = "class LocalProblem : RuntimeException()\n\
+        fun a() { try {} catch (e: Throwable) {} }\n\
+        fun b() { try {} catch (e: Exception) {} }\n\
+        fun c() { try {} catch (e: RuntimeException) {} }\n\
+        fun d() { try {} catch (e: NotImplementedError) {} }\n\
+        fun e() { try {} catch (e: LocalProblem) {} }\n";
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("ThrowableCatch.kt", source)],
+        std::slice::from_ref(&stdlib),
+    );
+
+    assert_eq!(result.krusty_code, 0, "{}", result.krusty_stderr);
+    assert_eq!(result.reference_code, 0, "{}", result.reference_stderr);
+    assert_eq!(errors(&result.krusty_stderr), []);
+    assert_eq!(errors(&result.krusty_stdout), []);
+    assert_eq!(errors(&result.reference_stderr), []);
+}
+
+#[test]
+fn classpath_catch_types_follow_the_declared_hierarchy() {
+    let library = common::compile_libs_ref(
+        "catch_type_hierarchy",
+        &[(
+            "Library.kt",
+            "package lib\nclass ExternalProblem : RuntimeException()\nclass ExternalPlain",
+        )],
+    )
+    .expect("reference compiler unavailable");
+    let source = "fun accepted() { try {} catch (e: lib.ExternalProblem) {} }\n\
+        fun rejected() { try {} catch (e: lib.ExternalPlain) {} }\n";
+    let result = common::compiler_diagnostics(
+        &[("ClasspathCatch.kt", source)],
+        &[library, common::stdlib_jar()],
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let expected = vec![ObservedError {
+        file: "ClasspathCatch.kt".to_string(),
+        line: 2,
+        column: 32,
+        message: "throwable type mismatch: actual type is 'ExternalPlain'.".to_string(),
+    }];
+
+    assert_ne!(result.krusty_code, 0, "krusty accepted ExternalPlain");
+    assert_ne!(result.reference_code, 0, "kotlinc accepted ExternalPlain");
+    assert_eq!(krusty_errors.len(), 1);
+    assert_eq!(kotlinc_errors.len(), 1);
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}

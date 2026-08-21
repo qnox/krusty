@@ -8031,6 +8031,7 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 // Annotations on the catch parameter (`catch (@Marker e: E)`): consume and discard —
                 // a catch parameter is never referenced by annotation, so its markers carry no codegen.
+                let param_start = self.tok().span;
                 while self.at(TokenKind::At) {
                     self.parse_annotation();
                     self.skip_newlines();
@@ -8048,10 +8049,12 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::RParen, "')'");
                 self.skip_newlines();
                 let cbody = self.parse_block_expr(true);
+                let param_span = Span::new(param_start.lo, ty.span.hi);
                 catches.push(CatchClause {
                     name,
                     ty,
                     body: cbody,
+                    param_span,
                 });
             } else if self.at(TokenKind::Ident) && self.keyword_text("finally") {
                 self.bump(); // 'finally'
