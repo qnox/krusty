@@ -38,43 +38,6 @@ impl<'a> ModuleSymbols<'a> {
         }
     }
 
-    /// The module's package namespace: the package of every declared classifier and of every top-level
-    /// facade, plus each of their ancestors. There is no separate package table in the symbol table —
-    /// a package exists exactly because something is declared in it — so it is derived here once and
-    /// memoized. Ancestors are included because a qualifier walk steps through them
-    /// (`a` then `a.b` then `a.b.C`) even when only the leaf owns declarations.
-    fn packages(&self) -> std::rc::Rc<std::collections::HashSet<TypeName>> {
-        if self.syms.module_cache_enabled() {
-            if let Some(packages) = self.syms.module_package_cache.borrow().as_ref() {
-                return packages.clone();
-            }
-        }
-        let mut packages = std::collections::HashSet::new();
-        packages.extend(self.syms.source_packages.iter().copied());
-        let owners = self
-            .syms
-            .classes
-            .keys()
-            .copied()
-            .chain(self.syms.fn_facades.values().copied());
-        for owner in owners {
-            // A nested classifier's package is the package of its outermost owner: the `$` segments are
-            // nesting, not path.
-            let mut package = owner.parent();
-            while let Some(current) = package {
-                if current == crate::types::type_name("") || !packages.insert(current) {
-                    break;
-                }
-                package = current.parent();
-            }
-        }
-        let packages = std::rc::Rc::new(packages);
-        if self.syms.module_cache_enabled() {
-            *self.syms.module_package_cache.borrow_mut() = Some(packages.clone());
-        }
-        packages
-    }
-
     /// The declaring facade of a top-level `name`, if the multi-file driver recorded one. `None` means
     /// "the file being compiled" — the lowerer then resolves it as a same-file local.
     fn facade_of(&self, name: &str) -> Option<TypeName> {
@@ -979,7 +942,7 @@ fn source_property(
 impl SymbolSource for ModuleSymbols<'_> {
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         crate::types::existing_type_name_child(parent, name)
-            .is_some_and(|package| self.packages().contains(&package))
+            .is_some_and(|package| self.syms.source_packages.contains(&package))
     }
 
     fn symbols(
@@ -1640,6 +1603,48 @@ mod tests {
         assert!(absent.is_empty());
         assert_eq!(first.module_symbol_cache.borrow().len(), 1);
         assert_eq!(second.module_symbol_cache.borrow().len(), 1);
+    }
+
+    #[test]
+    fn inserted_classifier_updates_the_module_package_namespace() {
+        let mut symbols = FrontendSymbols::default();
+        symbols.finish_module_mutation();
+
+        let root = type_name("");
+        let _demo = type_name("demo");
+        assert!(!ModuleSymbols::new(&symbols).package_exists(root, "demo"));
+
+        symbols.insert_class(class("demo/Widget"));
+
+        assert!(
+            ModuleSymbols::new(&symbols).package_exists(root, "demo"),
+            "inserting a classifier must update the explicit package namespace even after a prior lookup"
+        );
+    }
+
+    #[test]
+    fn mutation_phase_package_lookup_does_not_scan_declarations() {
+        let mut symbols = FrontendSymbols::default();
+        for index in 0..4_096 {
+            symbols.insert_class(class(&format!("package{index}/Widget")));
+        }
+        // Keep the module in its default mutation phase: this is where the symbol/shape caches are
+        // intentionally disabled and the former derived package cache rebuilt all declarations for
+        // every lookup. The generous ceiling separates a few thousand hash lookups from the old
+        // tens of millions of package-set insertions without making normal machine variance relevant.
+        let module = ModuleSymbols::new(&symbols);
+        let root = type_name("");
+        let started = std::time::Instant::now();
+        for _ in 0..4_096 {
+            assert!(std::hint::black_box(
+                module.package_exists(root, "package0")
+            ));
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "mutation-phase package lookup scanned declarations: {elapsed:?}"
+        );
     }
 
     #[test]

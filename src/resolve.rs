@@ -2894,8 +2894,6 @@ pub struct SymbolTable {
     pub(crate) module_shape_cache: std::cell::RefCell<
         HashMap<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>,
     >,
-    pub(crate) module_package_cache:
-        std::cell::RefCell<Option<std::rc::Rc<std::collections::HashSet<TypeName>>>>,
     module_cache_enabled: std::cell::Cell<bool>,
     /// How many mutation brackets are open — see [`SymbolTable::begin_module_mutation`].
     module_mutation_depth: std::cell::Cell<usize>,
@@ -2909,8 +2907,9 @@ pub struct SymbolTable {
     /// never evicts the other. This is a strict invariant: source aliases live in the separate
     /// declaration-keyed alias index below and never introduce a differently shaped key here.
     pub classes: HashMap<TypeName, ClassSig>,
-    /// Package namespace declared by the source files, including ancestor packages. This is syntax
-    /// metadata, independent of whether declarations in a package survive conflict recovery.
+    /// Authoritative package namespace declared by the source files, including ancestor packages.
+    /// Signature collection seeds the complete set before it queries provisional declarations, so
+    /// package lookup stays O(1) while the class/callable tables continue to mutate.
     pub(crate) source_packages: std::collections::HashSet<TypeName>,
     /// Declaration-header facts keyed by classifier identity, available before full signatures are
     /// collected. Forward property inference may need to classify a later-file source singleton; this
@@ -3050,7 +3049,6 @@ impl Default for SymbolTable {
             compilation_id: NEXT_COMPILATION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             module_symbol_cache: Default::default(),
             module_shape_cache: Default::default(),
-            module_package_cache: Default::default(),
             module_cache_enabled: std::cell::Cell::new(false),
             module_mutation_depth: std::cell::Cell::new(0),
             funs: HashMap::new(),
@@ -3129,7 +3127,16 @@ impl SymbolTable {
     fn clear_module_symbol_cache(&self) {
         self.module_symbol_cache.borrow_mut().clear();
         self.module_shape_cache.borrow_mut().clear();
-        *self.module_package_cache.borrow_mut() = None;
+    }
+
+    fn register_source_package_for_owner(&mut self, owner: TypeName) {
+        let mut package = owner.parent();
+        while let Some(current) = package {
+            if current == type_name("") || !self.source_packages.insert(current) {
+                break;
+            }
+            package = current.parent();
+        }
     }
     /// Record the JVM module registrar's complete answer for one source function. `Some` is the
     /// concrete facade static the lowerer may reference; `None` is an explicit promise that no
@@ -3143,6 +3150,7 @@ impl SymbolTable {
     ) {
         let key = (file, declaration.0);
         if let Some(facade) = facade {
+            self.register_source_package_for_owner(facade);
             self.unemitted_fn_facades_by_decl.remove(&key);
             self.fn_facades_by_decl.insert(key, facade);
         } else {
@@ -3275,11 +3283,13 @@ impl SymbolTable {
     /// Insert under the class's own internal name (the map's key scheme).
     pub fn insert_class(&mut self, sig: ClassSig) -> Option<ClassSig> {
         let internal = sig.internal;
+        self.register_source_package_for_owner(internal);
         self.classes.insert(internal, sig)
     }
 
     pub fn insert_class_sig(&mut self, internal: TypeName, sig: ClassSig) -> Option<ClassSig> {
         debug_assert_eq!(internal, sig.internal);
+        self.register_source_package_for_owner(internal);
         self.classes.insert(internal, sig)
     }
 
@@ -6566,6 +6576,9 @@ fn collect_signatures_with_cp_impl(
         };
         table.annotation_retentions.insert(annotation, retention);
     }
+    // Seed the complete source package namespace before declaration collection starts. Package
+    // qualification is syntax-derived and does not change as provisional class/callable signatures
+    // are installed below, so ModuleSymbols can query this set directly during mutation.
     for file in files {
         let Some(package) = file.package.as_deref() else {
             continue;
