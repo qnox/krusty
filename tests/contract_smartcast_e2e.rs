@@ -191,13 +191,16 @@ fun box(): String {\n\
 }
 
 #[test]
-fn var_receiver_does_not_narrow() {
+fn var_receiver_narrows() {
     const SRC: &str = "fun box(): String {\n\
     var s: String? = \"x\"\n\
     if (!s.isNullOrEmpty()) return if (s.length == 1) \"OK\" else \"FAIL\"\n\
     return \"FAIL\"\n\
 }\n";
-    assert_rejected(SRC);
+    assert_eq!(
+        run(SRC).expect("var receiver smartcast compiles + runs"),
+        "OK"
+    );
 }
 
 #[test]
@@ -215,14 +218,17 @@ fun box(): String = if (f(B(C(7))) == 7 && f(B(null)) == 0 && f(null) == 0) \"OK
 }
 
 #[test]
-fn var_safe_call_receiver_does_not_narrow() {
+fn var_safe_call_receiver_narrows_root() {
     const SRC: &str = "class B(val prop: String?)\n\
 fun box(): String {\n\
     var b: B? = B(\"x\")\n\
     if (b?.prop != null) return if (b.prop == \"x\") \"OK\" else \"FAIL\"\n\
     return \"FAIL\"\n\
 }\n";
-    assert_rejected(SRC);
+    assert_eq!(
+        run(SRC).expect("var safe-call root smartcast compiles + runs"),
+        "OK"
+    );
 }
 
 #[test]
