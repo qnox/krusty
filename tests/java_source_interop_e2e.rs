@@ -114,7 +114,7 @@ fun box(): String {
     assert_eq!(result.as_deref(), Some("OKnull"));
     assert_eq!(
         nullable_diagnostics,
-        ["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'p.Box<String>?'."]
+        ["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Box<String>?'."]
     );
 }
 

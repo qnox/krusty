@@ -78,15 +78,13 @@ fn non_null_member_parameter_remains_strict() {
         \x20 val absent: Tgt? = null\n\
         \x20 return Api().strict(absent)\n\
         }\n";
-    if let Some(diags) = common::checker_diags_against("cpnullparamstrict", LIB, main) {
-        assert!(
-            diags.iter().any(|message| {
-                message
-                == "argument type mismatch: actual type is 'lib.Tgt?', but 'lib.Tgt' was expected."
-            }),
-            "{diags:?}"
-        );
-    }
+    let Some(diags) = common::checker_diags_against("cpnullparamstrict", LIB, main) else {
+        return;
+    };
+    assert_eq!(
+        diags,
+        ["argument type mismatch: actual type is 'Tgt?', but 'Tgt' was expected."]
+    );
 }
 
 #[test]

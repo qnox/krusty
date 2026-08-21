@@ -264,7 +264,7 @@ fn two_sam_overload_top_level_lambda_is_ambiguous() {
     );
     assert_eq!(
         diags,
-        ["overload resolution ambiguity between candidates:\nfun two(r: java.lang.Runnable): String\nfun two(c: java.util.function.Consumer<String>): String"]
+        ["overload resolution ambiguity between candidates:\nfun two(r: Runnable): String\nfun two(c: Consumer<String>): String"]
     );
 }
 
@@ -287,7 +287,7 @@ fn two_sam_overload_member_lambda_is_ambiguous() {
     let diags = diagnostics(SOURCE);
     assert_eq!(
         diags,
-        ["overload resolution ambiguity between candidates:\nfun perform(c: java.util.function.Consumer<String>): String\nfun perform(r: java.lang.Runnable): String"]
+        ["overload resolution ambiguity between candidates:\nfun perform(c: Consumer<String>): String\nfun perform(r: Runnable): String"]
     );
 }
 
@@ -349,7 +349,7 @@ fn destructured_lambda_does_not_fit_a_two_parameter_sam() {
         [
             "krusty: cannot destructure this type (no operator 'component1')",
             "krusty: cannot destructure this type (no operator 'component2')",
-            "argument type mismatch: actual type is '(Any) -> Unit', but 'java.util.function.BiConsumer<String, Int>' was expected.",
+            "argument type mismatch: actual type is '(Any) -> Unit', but 'BiConsumer<String, Int>' was expected.",
         ]
     );
 }
@@ -469,8 +469,8 @@ fn user_defined_sam_hierarchy_substitutes_through_the_supertype() {
     assert_eq!(
         rejected,
         [
-            "argument type mismatch: actual type is '() -> Unit', but 'fixtures.Both' was expected.",
-            "argument type mismatch: actual type is '() -> Unit', but 'fixtures.NoSam' was expected.",
+            "argument type mismatch: actual type is '() -> Unit', but 'Both' was expected.",
+            "argument type mismatch: actual type is '() -> Unit', but 'NoSam' was expected.",
         ]
     );
     let output = common::compile_and_run_box(ACCEPTED, "Main", &classpath, Some(&jdk));
