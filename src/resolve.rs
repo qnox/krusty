@@ -37959,24 +37959,27 @@ impl<'a> Checker<'a> {
             let mut result = bt;
             for c in &catches {
                 let resolved_catch = self.type_ref_ty(scope, &c.ty);
-                let cty = match resolved_catch.non_null().obj_internal() {
-                    // A catch type SHOULD be a `Throwable` subtype, but krusty's exception-hierarchy
-                    // walk is incomplete (`NotImplementedError` and other stdlib errors don't chain
-                    // to `Throwable`), so enforcing it here false-rejects valid catches. Deferred
-                    // until the hierarchy is complete.
-                    Some(_) if !c.ty.nullable() => resolved_catch,
-                    None => {
-                        self.diags.error(
-                            c.ty.span,
-                            "krusty: catch type is not a known exception class".to_string(),
-                        );
-                        Ty::Error
-                    }
-                    Some(_) => {
-                        self.diags
-                            .error(c.ty.span, "krusty: catch type must be non-null".to_string());
-                        Ty::Error
-                    }
+                let cty = if resolved_catch.contains_error() {
+                    self.report_unresolved_type_ref(&c.ty);
+                    Ty::Error
+                } else if !c.ty.nullable()
+                    && crate::assignable::is_subtype(
+                        &crate::assignable::TyCtx::new(),
+                        self,
+                        resolved_catch,
+                        Ty::obj("kotlin/Throwable"),
+                    )
+                {
+                    resolved_catch
+                } else {
+                    self.diags.error(
+                        c.param_span,
+                        format!(
+                            "throwable type mismatch: actual type is '{}'.",
+                            resolved_catch.source_name()
+                        ),
+                    );
+                    Ty::Error
                 };
                 let ht = {
                     let catch_scope = scope.child(ScopeKind::Block);

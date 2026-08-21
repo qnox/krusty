@@ -333,6 +333,8 @@ pub struct CatchClause {
     pub name: String,
     pub ty: TypeRef,
     pub body: ExprId,
+    /// The full catch parameter (`name: ty`) span used by parameter diagnostics.
+    pub param_span: Span,
 }
 
 #[derive(Clone, Debug)]
