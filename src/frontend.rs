@@ -21,11 +21,11 @@ pub use crate::resolve::{
     CompoundAssignmentTarget, SourceConstructorMatcher,
 };
 pub(crate) use crate::resolve::{
-    check_preinferred_file_in_source_set, function_import_scope, AdaptedRefArgument,
-    CallableReferenceBinding, CallableReferenceTarget, ConstructorReferenceOuter, CtorDefaultValue,
-    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FunctionImportScope,
-    ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InvokeKind, LambdaCapture,
-    LambdaInfo, PlatformNarrowing, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
+    check_preinferred_file_in_source_set, AdaptedRefArgument, CallableReferenceBinding,
+    CallableReferenceTarget, ConstructorReferenceOuter, CtorDefaultValue, DelegateGetValueTarget,
+    DestructureComponentTarget, ExprLowering, ImplicitPropertyWriteTarget,
+    ImplicitReceiverSelection, IncDecSite, InvokeKind, LambdaCapture, LambdaInfo,
+    PlatformNarrowing, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
     ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
     ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
     ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
