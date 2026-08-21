@@ -39948,17 +39948,35 @@ impl<'a> Checker<'a> {
                     "'when' expression must contain at most one 'else' branch".to_string(),
                 );
             }
+            // A later subjectless arm runs only when every earlier arm's conditions were false.
+            // Carry those false-branch facts into its conditions and body.
+            let mut fallthrough_casts: Vec<(NarrowPath, Ty)> = Vec::new();
+            let mut fallthrough_declined: Vec<(String, Ty)> = Vec::new();
             for arm in &arms {
                 if arm.conditions.is_empty() {
                     has_else = true;
                 }
+                // Keep accumulated facts in the subjectless arm's child scope. Subject-form
+                // conditions continue to compare against the subject in the enclosing scope.
+                let arm_scope = scope.child(ScopeKind::Block);
+                let cond_scope = if subj_ty.is_none() {
+                    self.apply_narrowings(
+                        &arm_scope,
+                        &fallthrough_casts,
+                        &fallthrough_declined,
+                        false,
+                    );
+                    &arm_scope
+                } else {
+                    scope
+                };
                 for &cnd in &arm.conditions {
                     // An `is T` / `in range` (or `!`-forms) condition is a *boolean test* on the
                     // subject — built by the parser as a structural `Is`/`InRange` node — not a value
                     // to compare with `==`, so it carries no comparability constraint with the subject.
                     let is_type_test =
                         matches!(self.file.expr(cnd), Expr::Is { .. } | Expr::InRange { .. });
-                    let ct = self.expr(scope, cnd);
+                    let ct = self.expr(cond_scope, cnd);
                     match subj_ty {
                         // A type-test arm (`is T`) compares by `instanceof`, not `==` — no
                         // comparability constraint (it already validated its own operand/target).
@@ -39991,23 +40009,34 @@ impl<'a> Checker<'a> {
                         _ => {}
                     }
                 }
-                // Smart-cast the body of a single positive `is T` arm (the subject is a stable
-                // binding or property path). Apply through the same support gate as `if`/`while`:
-                // extending root-only behavior to member reads must not bypass
-                // backend representation limits such as an `Any` property narrowed to a value class.
-                let mut arm_declined = Vec::new();
-                let arm_casts = match arm.conditions.as_slice() {
-                    [cnd] => self.smartcast_narrowings(scope, *cnd, false, &mut arm_declined),
-                    _ => Vec::new(),
+                // Accumulate this arm's false-branch facts for later subjectless arms.
+                if subj_ty.is_none() && arm.guard.is_none() {
+                    for &cnd in &arm.conditions {
+                        let (mut casts, mut declined) =
+                            self.condition_narrowings(cond_scope, cnd, false);
+                        crate::trace_compiler!(
+                            "smartcast",
+                            "when fallthrough condition={} casts={casts:?} declined={declined:?}",
+                            cnd.0,
+                        );
+                        fallthrough_casts.append(&mut casts);
+                        fallthrough_declined.append(&mut declined);
+                    }
+                }
+                // A single condition establishes its true-branch facts in the arm body. Conditions
+                // separated by commas are alternatives, so none of their facts holds for every
+                // path into the body.
+                let (arm_casts, arm_declined) = match arm.conditions.as_slice() {
+                    [cnd] => self.condition_narrowings(cond_scope, *cnd, true),
+                    _ => (Vec::new(), Vec::new()),
                 };
                 // `when (this) { is B -> … }` narrows the implicit receiver to `B` in that arm's
                 // body (the `when`-subject analog of `if (this is B)`).
                 let arm_this_narrow = match arm.conditions.as_slice() {
-                    [cnd] => self.this_is_narrowing(scope, *cnd, false),
+                    [cnd] => self.this_is_narrowing(cond_scope, *cnd, false),
                     _ => None,
                 };
                 let bt = {
-                    let arm_scope = scope.child(ScopeKind::Block);
                     let scope = &arm_scope;
                     self.apply_narrowings(scope, &arm_casts, &arm_declined, false);
                     self.with_this_narrow(arm_this_narrow, |c| {

@@ -136,6 +136,49 @@ fn mutable_local_smart_cast_diagnostics_match_kotlinc() {
 }
 
 #[test]
+fn subjectless_when_fallthrough_diagnostics_match_kotlinc() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "WhenFallthrough.kt",
+            "fun noNarrowing(text: String?, choose: Boolean): Int = when {\n\
+             choose -> text.length\n\
+             else -> -1\n\
+             }\n\
+             fun capturedMutation(): Int {\n\
+             var text: String? = \"abc\"\n\
+             val mutate = { text = null }\n\
+             return when {\n\
+             text == null -> -1\n\
+             else -> text.length\n\
+             }\n\
+             }\n",
+        )],
+        &[],
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let expected = vec![
+        ObservedError {
+            file: "WhenFallthrough.kt".to_string(),
+            line: 2,
+            column: 15,
+            message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.".to_string(),
+        },
+        ObservedError {
+            file: "WhenFallthrough.kt".to_string(),
+            line: 10,
+            column: 9,
+            message: "smart cast to 'String' is impossible, because 'text' is a local variable that is mutated in a capturing closure.".to_string(),
+        },
+    ];
+    assert_eq!(krusty_errors.len(), 2);
+    assert_eq!(kotlinc_errors.len(), 2);
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
+}
+
+#[test]
 fn declaration_type_parameter_annotations_are_accepted_by_both_frontends() {
     let source = r#"
 @Target(AnnotationTarget.TYPE_PARAMETER)

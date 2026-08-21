@@ -726,9 +726,9 @@ pub fn compile_js_in_process(
 
 /// Run the front end (`lex → parse → collect signatures → check`) on `src` and return every
 /// diagnostic message it produced (parse errors, then resolve/check errors). Empty ⇒ the snippet is
-/// accepted. Lets tests exercise ERROR paths — assert a bad snippet yields a diagnostic (optionally
-/// matching a substring). `cp_jars`/`jdk_modules` supply the resolution classpath, like the box
-/// helpers; pass `&[]`/`None` for snippets that need no library symbols.
+/// accepted. Rejection tests compare the complete ordered vector so extra or changed diagnostics
+/// fail the test. `cp_jars`/`jdk_modules` supply the resolution classpath, like the box helpers; pass
+/// `&[]`/`None` for snippets that need no library symbols.
 #[allow(dead_code)]
 pub fn front_end_diagnostics(
     src: &str,
