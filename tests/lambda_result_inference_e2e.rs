@@ -44,3 +44,25 @@ fn member_lazy_delegate_infers_value_type_from_lambda_result() {
         "class C {\n    val x by lazy { 1 }\n    fun g(i: Int) = i\n    val y = g(x)\n}\n",
     );
 }
+
+#[test]
+fn top_level_lazy_getter_unboxes_its_inferred_result() {
+    const LIB: &str = "val number by lazy { 42 }\n";
+    const MAIN: &str = "fun box(): String = if (number == 42) \"OK\" else \"Fail: $number\"\n";
+    assert_eq!(
+        common::expect_box_run_against("inferred-lazy-int", LIB, MAIN)
+            .expect("kotlinc/JVM toolchain unavailable"),
+        "OK"
+    );
+}
+
+#[test]
+fn top_level_lazy_getter_narrows_its_inferred_reference_result() {
+    const LIB: &str = "val text by lazy { \"OK\" }\n";
+    const MAIN: &str = "fun box(): String = text\n";
+    assert_eq!(
+        common::expect_box_run_against("inferred-lazy-string", LIB, MAIN)
+            .expect("kotlinc/JVM toolchain unavailable"),
+        "OK"
+    );
+}

@@ -2645,17 +2645,8 @@ fn lower_file_at_reporting_impl(
                 if p.receiver.is_some() {
                     return lo.bail("gate:extension-delegated-property");
                 }
-                let ty = if let Some(tref) = p.ty.as_ref() {
-                    checked_type(info, tref)
-                } else {
-                    // Inferring the property type from the delegate's `getValue` return is only
-                    // modeled for simple source delegates; anything else skips here.
-                    lo.set_bail("gate:delegated-property-inferred-type");
-                    let delegate_ty = info.ty(p.delegate?);
-                    let internal = delegate_ty.obj_internal()?;
-                    let ty = lo.delegate_getvalue_info(p.delegate?, internal)?.2;
-                    lo.set_bail("deep:property-register"); // survived; restore the phase marker
-                    ty
+                let Some(&ty) = info.property_decl_types.get(&(p.span.lo, p.span.hi)) else {
+                    return lo.bail("checker did not record delegated property type");
                 };
                 let fid = lo.ir.add_fun(IrFunction {
                     name: property_getter_name(&p.name),
@@ -8951,10 +8942,9 @@ impl<'a> Lower<'a> {
         // (`operator fun Lazy<T>.getValue(...)` in `LazyKt`, `@InlineOnly` → `this.value`).
         let (gv_owner, gv_desc, gv_ret, gv_inline, gv_is_ext, gv_name, gv_interface) =
             self.delegate_getvalue_info(delegate_expr, delegate_internal)?;
-        let prop_ty =
-            p.ty.as_ref()
-                .map(|r| checked_type(self.info, r))
-                .unwrap_or(gv_ret);
+        let Some(&prop_ty) = self.info.property_decl_types.get(&(p.span.lo, p.span.hi)) else {
+            return self.bail("checker did not record delegated property type");
+        };
 
         // x$delegate: Del — init = lowered delegate expression.
         let delegate_ir = ty_to_ir(delegate_ty);
@@ -9024,7 +9014,8 @@ impl<'a> Lower<'a> {
                 vec![null_a, get_p],
             )
         };
-        let ret = self.emit_return(Some(call));
+        let coerced = self.coerce_to_static(call, prop_ty, gv_ret);
+        let ret = self.emit_return(Some(coerced));
         let body = self.emit_block(vec![ret], None);
         let (fid, _) = self.computed_props[&p.name];
         self.ir.functions[fid as usize].body = Some(body);
