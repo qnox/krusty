@@ -1066,12 +1066,10 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     }
 }
 
-/// The type arguments of a constructed generic type INFERRED from a construction's argument types
-/// (`Pair(1, 2)` → `[Int, Int]`, so `Pair(1, 2)` types as `Pair<Int, Int>`). Each of the type's formal
-/// parameters (`ty.type_params`) is bound by unifying the matching-arity constructor's parsed generic
-/// parameter signatures against `arg_tys`; an unbound formal defaults to `Any`. `None` when the type is
-/// non-generic or no constructor carries a generic signature to unify.
+/// Infer constructed type arguments from value arguments and the expected result.
+/// Expected applied supertypes seed only a complete set of otherwise unbound formals.
 pub(crate) fn infer_constructor_type_args(
+    source: &dyn SymbolSource,
     owner: TypeName,
     ty: &crate::libraries::LibraryType,
     arg_tys: &[Ty],
@@ -1094,6 +1092,14 @@ pub(crate) fn infer_constructor_type_args(
         break;
     }
     constrain_constructor_result(owner, &ty.type_params, expected, &mut binds);
+    seed_unbound_constructor_result_from_symbols(
+        source,
+        owner,
+        &ty.type_params,
+        &ty.type_param_bounds,
+        expected,
+        &mut binds,
+    );
     if binds.is_empty() {
         return None;
     }
@@ -1130,6 +1136,66 @@ pub(crate) fn constrain_constructor_result(
             actual.projection_inner().unwrap_or(actual),
             binds,
         );
+    }
+}
+
+/// Seed every unbound constructor formal from an expected applied supertype, or none of them.
+pub(crate) fn seed_unbound_constructor_result_from_symbols(
+    source: &dyn SymbolSource,
+    owner: TypeName,
+    type_params: &[String],
+    type_param_bounds: &[Vec<Ty>],
+    expected: Option<Ty>,
+    bindings: &mut GSigBinds,
+) {
+    let Some(expected) = expected.filter(|expected| *expected != Ty::Error) else {
+        return;
+    };
+    let symbolic_arguments = type_params
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let bound = type_param_bounds
+                .get(index)
+                .and_then(|bounds| bounds.first())
+                .copied()
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+            Ty::ty_param(name, bound)
+        })
+        .collect::<Vec<_>>();
+    let signature = GenericSig {
+        formals: type_params.to_vec(),
+        formal_bounds: type_param_bounds.to_vec(),
+        receiver: None,
+        params: Vec::new(),
+        ret: Ty::obj_args_name(owner, &symbolic_arguments),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let Some(seeds) = infer_generic_return_bindings_from_symbols(
+        source,
+        &signature,
+        expected,
+        |actual, bound| {
+            crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                &SourceOracle(source),
+                actual,
+                bound,
+            )
+        },
+    ) else {
+        return;
+    };
+    if !type_params
+        .iter()
+        .all(|formal| bindings.contains_key(formal) || seeds.contains_key(formal))
+    {
+        return;
+    }
+    for formal in type_params {
+        if let Some(&seed) = seeds.get(formal) {
+            bindings.entry(formal.clone()).or_insert(seed);
+        }
     }
 }
 
@@ -9564,6 +9630,7 @@ mod tests {
 
         assert_eq!(
             infer_constructor_type_args(
+                &EMPTY_SOURCE,
                 owner,
                 &classifier,
                 &[Ty::String],

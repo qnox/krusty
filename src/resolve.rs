@@ -35452,6 +35452,38 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        let formal_bounds = class
+            .type_param_bounds
+            .iter()
+            .map(|bound| {
+                (*bound != Ty::Error)
+                    .then_some(*bound)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut result_bindings = class
+            .type_params
+            .iter()
+            .cloned()
+            .zip(bindings.iter().copied())
+            .filter(|(_, binding)| *binding != Ty::Error)
+            .collect::<HashMap<_, _>>();
+        crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
+            &self.fed_source(),
+            class.internal_name(),
+            &class.type_params,
+            &formal_bounds,
+            expected_result,
+            &mut result_bindings,
+        );
+        for (index, formal) in class.type_params.iter().enumerate().skip(explicit_count) {
+            if bindings[index] == Ty::Error {
+                if let Some(&seed) = result_bindings.get(formal) {
+                    bindings[index] = seed;
+                }
+            }
+        }
         // Prefer the declared bound over an unconstrained `Any` join.
         for type_parameter in explicit_count..bindings.len() {
             let Some(&declared_bound) = class
@@ -40954,6 +40986,7 @@ impl<'a> Checker<'a> {
         let inference_parameters = expected_constructor_params.unwrap_or_default();
         let inferred_result = if target.type_args().is_empty() {
             crate::symbol_resolver::infer_constructor_type_args(
+                &source,
                 internal,
                 &classifier,
                 inference_parameters,
@@ -45213,9 +45246,15 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|&a| self.expr_types[a.0 as usize])
                 .collect();
-            if let Some(inferred) = self.resolved_type_name(internal).and_then(|t| {
+            let classifier = self.resolved_type_name(internal);
+            let source = self.fed_source();
+            if let Some(inferred) = classifier.and_then(|classifier| {
                 crate::symbol_resolver::infer_constructor_type_args(
-                    internal, &t, &arg_tys, expected,
+                    &source,
+                    internal,
+                    &classifier,
+                    &arg_tys,
+                    expected,
                 )
             }) {
                 if inferred.iter().any(|t| !t.is_erased_top()) {
