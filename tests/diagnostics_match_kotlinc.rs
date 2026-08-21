@@ -1,5 +1,4 @@
-//! krusty's diagnostics should match kotlinc's message and source location. For a set of erroneous
-//! snippets, compile with both and assert the first error's file, line, column, and text match exactly.
+//! Exact diagnostic comparisons between krusty and kotlinc.
 
 use std::path::Path;
 
@@ -50,6 +49,88 @@ fn generic_cast_is_accepted_by_both_frontends() {
     let (code, stderr) = common::kotlinc_source_result("GenericCast", source);
     assert_eq!(code, 0, "kotlinc rejected generic cast: {stderr}");
     common::expect_front_end_ok_files_with_stdlib(&[source], "generic cast parity");
+}
+
+#[test]
+fn mutable_local_smart_cast_diagnostics_match_kotlinc() {
+    let result = common::compiler_diagnostics(
+        &[
+            (
+                "ActiveClosure.kt",
+                "fun active(): Int {\n\
+                 var text: String? = \"abc\"\n\
+                 val mutate = { text = null }\n\
+                 if (text != null) {\n\
+                     return text.length\n\
+                 }\n\
+                 return -1\n\
+                 }\n",
+            ),
+            (
+                "ClosureCreatedInsideProof.kt",
+                "fun createdInsideProof(): Int {\n\
+                 var text: String? = \"abc\"\n\
+                 if (text != null) {\n\
+                     val mutate = { text = null }\n\
+                     return text.length\n\
+                 }\n\
+                 return -1\n\
+                 }\n",
+            ),
+            (
+                "ElvisArgument.kt",
+                "fun take(value: Int) {}\n\
+                 fun elvisArgument() {\n\
+                 var value: Int? = 5\n\
+                 val reset = { value = null }\n\
+                 value ?: return\n\
+                 reset()\n\
+                 take(value)\n\
+                 }\n",
+            ),
+            (
+                "FutureClosure.kt",
+                "fun futureClosure(): Int {\n\
+                 var text: String? = \"abc\"\n\
+                 if (text != null) {\n\
+                     val length = text.length\n\
+                     val mutate = { text = null }\n\
+                     return length\n\
+                 }\n\
+                 return -1\n\
+                 }\n",
+            ),
+        ],
+        &[],
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let message = "smart cast to 'String' is impossible, because 'text' is a local variable that is mutated in a capturing closure.".to_string();
+    let expected = vec![
+        ObservedError {
+            file: "ActiveClosure.kt".to_string(),
+            line: 5,
+            column: 8,
+            message: message.clone(),
+        },
+        ObservedError {
+            file: "ClosureCreatedInsideProof.kt".to_string(),
+            line: 5,
+            column: 8,
+            message,
+        },
+        ObservedError {
+            file: "ElvisArgument.kt".to_string(),
+            line: 7,
+            column: 6,
+            message: "smart cast to 'Int' is impossible, because 'value' is a local variable that is mutated in a capturing closure.".to_string(),
+        },
+    ];
+    assert_eq!(krusty_errors.len(), 3);
+    assert_eq!(kotlinc_errors.len(), 3);
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(kotlinc_errors, expected);
 }
 
 #[test]

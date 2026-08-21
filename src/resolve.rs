@@ -10570,56 +10570,75 @@ fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::Ha
     *out = cell.into_inner();
 }
 
-/// Names reassigned (`=`/`++`/`--`) INSIDE a nested lambda within `e`. A closure that writes a captured
-/// `var` (possibly to null) could run between a narrowing assignment and a later read, so such a `var`
-/// must never be flow-narrowed (soundness for the scope chain's straight-line reads). Mirrors
-/// [`collect_all_reassigned`]
-/// but only collects once the traversal has descended into a lambda body.
-fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
+/// One closure-captured write: the variable's name, the enclosing-lambda stack at the write, and
+/// the assigned value when the write is an assignment (`None` for inc/dec).
+type ClosureWrite = (String, Vec<ExprId>, Option<ExprId>);
+
+/// Collect captured writes and the lambda chain that controls when each write can execute.
+fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut Vec<ClosureWrite>) {
+    // The child walk takes two closures at once, so the accumulators go through `RefCell`s; the
+    // lambda stack keeps its push/pop discipline because every borrow ends inside the recursive
+    // call that took it.
     let cell = std::cell::RefCell::new(std::mem::take(out));
+    let stack = std::cell::RefCell::new(Vec::new());
     fn ce(
         file: &File,
         e: ExprId,
-        in_closure: bool,
-        cell: &std::cell::RefCell<std::collections::HashSet<String>>,
+        stack: &std::cell::RefCell<Vec<ExprId>>,
+        cell: &std::cell::RefCell<Vec<ClosureWrite>>,
     ) {
-        let in_closure = in_closure || matches!(file.expr(e), Expr::Lambda { .. });
-        if in_closure {
+        let is_lambda = matches!(file.expr(e), Expr::Lambda { .. });
+        if is_lambda {
+            stack.borrow_mut().push(e);
+        }
+        if !stack.borrow().is_empty() {
             if let Expr::IncDec { target, .. } = file.expr(e) {
                 if let Expr::Name(n) = file.expr(*target) {
-                    cell.borrow_mut().insert(n.clone());
+                    cell.borrow_mut()
+                        .push((n.clone(), stack.borrow().clone(), None));
                 }
             }
         }
         file.any_child_expr(
             e,
             &mut |c| {
-                ce(file, c, in_closure, cell);
+                ce(file, c, stack, cell);
                 false
             },
             &mut |s| {
-                cs(file, s, in_closure, cell);
+                cs(file, s, stack, cell);
                 false
             },
         );
+        if is_lambda {
+            stack.borrow_mut().pop();
+        }
     }
     fn cs(
         file: &File,
         s: StmtId,
-        in_closure: bool,
-        cell: &std::cell::RefCell<std::collections::HashSet<String>>,
+        stack: &std::cell::RefCell<Vec<ExprId>>,
+        cell: &std::cell::RefCell<Vec<ClosureWrite>>,
     ) {
-        if in_closure {
-            if let Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } = file.stmt(s) {
-                cell.borrow_mut().insert(name.clone());
+        if !stack.borrow().is_empty() {
+            match file.stmt(s) {
+                Stmt::Assign { name, value } => {
+                    cell.borrow_mut()
+                        .push((name.clone(), stack.borrow().clone(), Some(*value)));
+                }
+                Stmt::IncDec { name, .. } => {
+                    cell.borrow_mut()
+                        .push((name.clone(), stack.borrow().clone(), None));
+                }
+                _ => {}
             }
         }
         file.any_child_stmt(s, &mut |c| {
-            ce(file, c, in_closure, cell);
+            ce(file, c, stack, cell);
             false
         });
     }
-    ce(file, e, false, &cell);
+    ce(file, e, &stack, &cell);
     *out = cell.into_inner();
 }
 
@@ -17244,6 +17263,8 @@ fn make_checker<'a>(
         stmt_return_targets: HashMap::new(),
         expr_return_targets: HashMap::new(),
         discarded_exprs: std::collections::HashSet::new(),
+        narrowed_read_base: HashMap::new(),
+        declined_read_targets: HashMap::new(),
         local_decl_types: HashMap::new(),
         property_decl_types: HashMap::new(),
         resolved_call_type_args: HashMap::new(),
@@ -17280,7 +17301,7 @@ fn make_checker<'a>(
         super_ctor_params: HashMap::new(),
         context_args: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
-        fn_closure_reassigned: std::collections::HashSet::new(),
+        fn_closure_reassigned: Vec::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
         symbolic_signature_inference: false,
@@ -19251,6 +19272,13 @@ struct Checker<'a> {
     stmt_return_targets: HashMap<StmtId, ReturnTarget>,
     expr_return_targets: HashMap<ExprId, ReturnTarget>,
     discarded_exprs: std::collections::HashSet<ExprId>,
+    /// Declared type of a local read whose type a narrowing shadow replaced (a `t = null` write
+    /// narrows the flow type to `Nothing?`). kotlinc still resolves a member against the DECLARED
+    /// type before rejecting the access on the narrowed nullable receiver, so the nullable-receiver
+    /// existence probes consult this base when the narrowed type itself lacks the member.
+    narrowed_read_base: HashMap<ExprId, Ty>,
+    /// Declined smart-cast target for a local read, keyed by its exact source span.
+    declined_read_targets: HashMap<Span, (String, Ty)>,
     local_decl_types: HashMap<StmtId, Ty>,
     property_decl_types: HashMap<(u32, u32), Ty>,
     resolved_call_type_args: HashMap<ExprId, Vec<Option<Ty>>>,
@@ -19302,10 +19330,8 @@ struct Checker<'a> {
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
     fn_reassigned: std::collections::HashSet<String>,
-    /// Names reassigned INSIDE a closure (lambda) within the function body. A `var` in here can be set
-    /// (e.g. to null) by a closure invoked between a narrowing assignment and a later read, so it is
-    /// never flow-narrowed after an assignment (soundness for [`scope::Flow`] straight-line reads).
-    fn_closure_reassigned: std::collections::HashSet<String>,
+    /// Captured writes, with their enclosing lambdas and assigned expression when one exists.
+    fn_closure_reassigned: Vec<(String, Vec<ExprId>, Option<ExprId>)>,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -19368,7 +19394,7 @@ struct BodyState {
     allow_lambda_mutation: bool,
     symbolic_signature_inference: bool,
     fn_reassigned: std::collections::HashSet<String>,
-    fn_closure_reassigned: std::collections::HashSet<String>,
+    fn_closure_reassigned: Vec<(String, Vec<ExprId>, Option<ExprId>)>,
     lexical_class_context: Vec<TypeName>,
     exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
 }
@@ -25000,12 +25026,15 @@ impl<'a> Checker<'a> {
     /// narrowings for stable access paths. Only sound forms narrow: `x != null`, `x is T`
     /// (positive), the boolean argument itself (recursed through the ordinary condition
     /// machinery), and `&&` compounds. `x == null`, `!is`, `||`, and constants yield nothing.
+    /// A proof declined only because a capturing closure mutates the variable lands in `declined`
+    /// exactly as for the ordinary condition machinery.
     fn conclusion_narrowings(
         &self,
         scope: &CheckerScope<'_>,
         call: ExprId,
         conclusion: &crate::contracts::Condition,
         out: &mut Vec<(NarrowPath, Ty)>,
+        declined: &mut Vec<(String, Ty)>,
     ) {
         use crate::contracts::{Condition, ConditionType};
         match conclusion {
@@ -25018,9 +25047,7 @@ impl<'a> Checker<'a> {
                 };
                 // Shared with the flow smart-cast paths (`stable_path_ty`): `this`,
                 // `var`-rejection, and the nullable unwrap must not drift by condition shape.
-                if let Some(Ty::Nullable(inner)) = self.stable_path_ty(scope, &path) {
-                    out.push((path, *inner));
-                }
+                self.null_proof_or_decline(scope, &path, out, declined, self.span(call));
             }
             Condition::IsType {
                 param,
@@ -25030,13 +25057,14 @@ impl<'a> Checker<'a> {
                 let Some(path) = self.contract_stable_arg_path(call, *param) else {
                     return;
                 };
-                if !self.path_is_stable(scope, &path) {
+                let tt = self.type_ref_ty_silent(scope, tyref);
+                if tt == Ty::Error || !tt.is_reference() {
                     return;
                 }
-                let tt = self.type_ref_ty_silent(scope, tyref);
-                if tt != Ty::Error && tt.is_reference() {
-                    out.push((path, tt));
+                if !self.is_proof_stable_or_decline(scope, &path, tt, declined, self.span(call)) {
+                    return;
                 }
+                out.push((path, tt));
             }
             Condition::IsType {
                 param,
@@ -25049,22 +25077,23 @@ impl<'a> Checker<'a> {
                 let Some(path) = self.contract_stable_arg_path(call, *param) else {
                     return;
                 };
-                if !self.path_is_stable(scope, &path) {
+                let tt = self.subst_contract_metadata_ty(call, *ty);
+                if tt == Ty::Error || !tt.is_reference() || tt.is_ty_param() {
                     return;
                 }
-                let tt = self.subst_contract_metadata_ty(call, *ty);
-                if tt != Ty::Error && tt.is_reference() && !tt.is_ty_param() {
-                    out.push((path, tt));
+                if !self.is_proof_stable_or_decline(scope, &path, tt, declined, self.span(call)) {
+                    return;
                 }
+                out.push((path, tt));
             }
             Condition::BoolParam(param) => {
                 if let Some(arg) = self.contract_arg_expr(call, *param) {
-                    self.collect_condition_narrowings(scope, arg, true, out);
+                    self.collect_condition_narrowings(scope, arg, true, out, declined);
                 }
             }
             Condition::And(l, r) => {
-                self.conclusion_narrowings(scope, call, l, out);
-                self.conclusion_narrowings(scope, call, r, out);
+                self.conclusion_narrowings(scope, call, l, out, declined);
+                self.conclusion_narrowings(scope, call, r, out, declined);
             }
             _ => {}
         }
@@ -25144,6 +25173,7 @@ impl<'a> Checker<'a> {
         cond: ExprId,
         truth: bool,
         out: &mut Vec<(NarrowPath, Ty)>,
+        declined: &mut Vec<(String, Ty)>,
     ) {
         let Some(contract) = self.contract_for_call(cond) else {
             return;
@@ -25158,7 +25188,7 @@ impl<'a> Checker<'a> {
             };
             let applies = matches!(returns, crate::contracts::ReturnsValue::Bool(b) if *b == truth);
             if applies {
-                self.conclusion_narrowings(scope, cond, conclusion, out);
+                self.conclusion_narrowings(scope, cond, conclusion, out, declined);
             }
         }
     }
@@ -25669,6 +25699,49 @@ impl<'a> Checker<'a> {
                 receiver.source_name()
             ),
         );
+    }
+
+    /// The declined smart cast a receiver use needed, if any: `probe` is the report site's own
+    /// "callee exists on the non-null receiver" test, run against the declined target — only a
+    /// use that actually needed the cast reports it. Returns the variable's name, the declined
+    /// target, and the RECEIVER span (kotlinc underlines the variable, not the member).
+    /// The closure-mutation verdict is re-checked at the use because callable selection may have
+    /// established that a lambda is inline-spliced since the proof was recorded.
+    fn declined_smartcast_target(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+        probe: impl FnOnce(&Self, Ty) -> bool,
+    ) -> Option<(String, Ty, Span)> {
+        let Expr::Name(n) = self.file.expr(receiver) else {
+            return None;
+        };
+        if !self.closure_reassigned_before(n, self.span(receiver)) {
+            return None;
+        }
+        let target = scope.declined_cast(n)?;
+        if !probe(self, target) {
+            return None;
+        }
+        Some((n.clone(), target, self.span(receiver)))
+    }
+
+    /// kotlinc's SMARTCAST_IMPOSSIBLE for a [`Self::declined_smartcast_target`] hit; the caller
+    /// falls back to the plain nullable-receiver error when this returns false.
+    fn report_declined_smartcast(&mut self, found: Option<(String, Ty, Span)>) -> bool {
+        let Some((n, target, span)) = found else {
+            return false;
+        };
+        self.diags
+            .error(span, Self::declined_smartcast_message(&n, target));
+        true
+    }
+
+    fn declined_smartcast_message(name: &str, target: Ty) -> String {
+        format!(
+            "smart cast to '{}' is impossible, because '{name}' is a local variable that is mutated in a capturing closure.",
+            target.source_name()
+        )
     }
 
     fn call_open_paren_span(&self, call: ExprId) -> Span {
@@ -27654,7 +27727,8 @@ impl<'a> Checker<'a> {
 
     /// Shadow a binding with its flow-narrowed type (`if (x != null) …`). Unlike a fresh
     /// declaration this re-binds the SAME runtime value, so property-path narrowings rooted at it
-    /// stay valid.
+    /// stay valid. A narrowed `var` stays writable (kotlinc allows `if (x != null) { x = null }`);
+    /// `stmt_assign` then replaces or kills the shadow's proven type.
     fn declare_narrowing_shadow(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty) {
         // Narrowing changes only the type of the existing value, never where that value comes from.
         // In particular, a bare member property is represented in the lexical namespace with a
@@ -27667,13 +27741,14 @@ impl<'a> Checker<'a> {
             .unwrap_or(ReceiverFnValueOrigin::Local);
         let callable_reference_type = previous.and_then(|local| local.callable_reference_type);
         let write_ty = previous.and_then(|local| local.write_ty);
+        let is_var = previous.map(|local| local.is_var).unwrap_or(false);
         scope.rebind(
             name,
             Ns::Value,
             ScopeBinding::Value(Local {
                 ty,
                 write_ty,
-                is_var: false,
+                is_var,
                 origin,
                 callable_reference_type,
             }),
@@ -27924,14 +27999,52 @@ impl<'a> Checker<'a> {
 
     /// The exact read type proven by assigning `actual` into a mutable `storage` binding. Kotlin's
     /// straight-line data flow is not limited to null removal: `var x: Base; x = Derived()` reads as
-    /// `Derived` until a wider assignment invalidates that fact. Captured writes make the proof
+    /// `Derived` until a wider assignment invalidates that fact, and `x = null` reads as `Nothing?`
+    /// (kotlinc's exact receiver wording after a null write). Captured writes make the proof
     /// unstable, so they deliberately clear it.
-    fn assignment_narrowing(&self, name: &str, storage: Ty, actual: Ty) -> Option<Ty> {
-        (actual != storage
-            && !matches!(actual, Ty::Null | Ty::Error | Ty::Nothing)
-            && !self.fn_closure_reassigned.contains(name)
-            && self.receiver_is_assignable(actual, storage))
-        .then_some(actual)
+    fn assignment_narrowing(&self, name: &str, storage: Ty, actual: Ty, site: Span) -> Option<Ty> {
+        let flow = if actual == Ty::Null {
+            Ty::nullable(Ty::Nothing)
+        } else {
+            actual
+        };
+        (flow != storage
+            && !matches!(actual, Ty::Error | Ty::Nothing)
+            && !self.closure_reassigned_before(name, site)
+            && self.receiver_is_assignable(flow, storage))
+        .then_some(flow)
+    }
+
+    /// Whether a non-inline lambda that exists by `site` can mutate `name`.
+    fn closure_reassigned_before(&self, name: &str, site: Span) -> bool {
+        self.fn_closure_reassigned.iter().any(|(n, chain, _)| {
+            n == name
+                && chain.iter().any(|&lambda| {
+                    self.span(lambda).lo <= site.lo && !self.lambda_is_inline_spliced(lambda)
+                })
+        })
+    }
+
+    /// Whether every relevant capturing-lambda write stores the null literal.
+    fn closure_writes_only_null(&self, name: &str, site: Span) -> bool {
+        self.fn_closure_reassigned
+            .iter()
+            .filter(|(n, chain, _)| {
+                n == name
+                    && chain.iter().any(|&lambda| {
+                        self.span(lambda).lo <= site.lo && !self.lambda_is_inline_spliced(lambda)
+                    })
+            })
+            .all(|(_, _, value)| value.is_some_and(|v| matches!(self.file.expr(v), Expr::NullLit)))
+    }
+
+    /// The checker's recorded capture decision for a lambda expression (set when the enclosing
+    /// call is checked against an inline callee).
+    fn lambda_is_inline_spliced(&self, e: ExprId) -> bool {
+        matches!(
+            self.expr_lowers.get(&e),
+            Some(ExprLowering::Lambda(info)) if info.capture == LambdaCapture::InlineSplice
+        )
     }
     /// Whether `name` is already declared in the *innermost* (current) scope — a conflicting
     /// redeclaration (kotlinc rejects it). A declaration in an *outer* scope is legal shadowing.
@@ -30482,17 +30595,28 @@ impl<'a> Checker<'a> {
 
     /// The DECLARED type of a stable access path — `None` when any step can change between a
     /// proof and a later re-read, so no smart cast is sound. kotlinc's stability rules:
-    /// * the ROOT is `this` or a local `val`/parameter (a `var` can be reassigned);
+    /// * the ROOT is `this` or a local `val`/parameter, or a local `var` that no changing closure
+    ///   captures (a straight-line reassignment replaces the flow fact via `stmt_assign`; a write
+    ///   captured by a closure could run between proof and use);
     /// * every SEGMENT is a `val` (no setter) without a custom getter or delegate (a computed
     ///   read can return a different value per call), and cannot be overridden on the receiver's
     ///   statically possible runtime types. A final property on an open class is stable; an open
     ///   property is stable only when the receiver type itself is final.
-    fn stable_path_ty(&self, scope: &CheckerScope<'_>, path: &NarrowPath) -> Option<Ty> {
+    fn stable_path_ty(
+        &self,
+        scope: &CheckerScope<'_>,
+        path: &NarrowPath,
+        site: Span,
+    ) -> Option<Ty> {
         let mut ty = if path.root == "this" {
             scope.this_ty()?
         } else {
             let local = self.lookup(scope, &path.root)?;
-            if local.is_var {
+            if local.is_var
+                && (!path.segments.is_empty()
+                    || !matches!(local.origin, ReceiverFnValueOrigin::Local)
+                    || self.closure_reassigned_before(&path.root, site))
+            {
                 return None;
             }
             // A bare own-member read (`label`) is an alias for a dispatch-property read
@@ -30509,11 +30633,12 @@ impl<'a> Checker<'a> {
                         root: "this".to_string(),
                         segments: vec![path.root.clone()],
                     },
+                    site,
                 );
             }
             // A member/top-level property as the ROOT of a longer path re-reads through its
             // accessor each time; only a plain local/`val` slot is a stable root there. (For a
-            // ROOT-ONLY top-level path, the historical shadowing mechanism remains conservative;
+            // ROOT-ONLY top-level path, the shadowing mechanism remains conservative;
             // dispatch properties were normalized to `this.<name>` above.)
             if !path.segments.is_empty() && !matches!(local.origin, ReceiverFnValueOrigin::Local) {
                 return None;
@@ -30541,12 +30666,101 @@ impl<'a> Checker<'a> {
         Some(ty)
     }
 
-    /// Whether a proof about `path` can soundly narrow later re-reads of it. A root-only path
-    /// uses the same full stability check as a segmented path. In particular, a bare own member is
-    /// normalized to `this.<name>` by [`Self::stable_path_ty`] so it cannot bypass getter/modality
-    /// checks merely because member properties are installed in the lexical scope.
-    fn path_is_stable(&self, scope: &CheckerScope<'_>, path: &NarrowPath) -> bool {
-        self.stable_path_ty(scope, path).is_some()
+    /// The one stability failure kotlinc reports as SMARTCAST_IMPOSSIBLE: the path's root is a
+    /// local `var` a capturing closure mutates. Returns the variable's name and its DECLARED type
+    /// (the proof's starting point) so the declined cast can be recorded next to the narrowings
+    /// and named at the use that needed it.
+    fn closure_mutated_decline(
+        &self,
+        scope: &CheckerScope<'_>,
+        path: &NarrowPath,
+        site: Span,
+    ) -> Option<(String, Ty)> {
+        if !path.segments.is_empty() {
+            return None;
+        }
+        let local = self.lookup(scope, &path.root)?;
+        if local.is_var
+            && matches!(local.origin, ReceiverFnValueOrigin::Local)
+            && self.closure_reassigned_before(&path.root, site)
+        {
+            Some((path.root.clone(), local.write_ty.unwrap_or(local.ty)))
+        } else {
+            None
+        }
+    }
+
+    /// The stability gate for an `is T` proof, shared by the condition and contract shapes: a
+    /// stable path narrows; a path declined only because a capturing closure mutates its root
+    /// records the cast (with its target) so the use that needed it reports kotlinc's
+    /// SMARTCAST_IMPOSSIBLE.
+    fn is_proof_stable_or_decline(
+        &self,
+        scope: &CheckerScope<'_>,
+        path: &NarrowPath,
+        target: Ty,
+        declined: &mut Vec<(String, Ty)>,
+        site: Span,
+    ) -> bool {
+        if self.stable_path_ty(scope, path, site).is_some() {
+            return true;
+        }
+        if let Some((name, _)) = self.closure_mutated_decline(scope, path, site) {
+            declined.push((name, target));
+        }
+        false
+    }
+
+    /// `x != null` proves a stable path non-null. When the proof is declined only because a
+    /// capturing closure mutates the variable, the cast kotlinc will report at the next use is
+    /// recorded instead.
+    fn null_proof_or_decline(
+        &self,
+        scope: &CheckerScope<'_>,
+        path: &NarrowPath,
+        out: &mut Vec<(NarrowPath, Ty)>,
+        declined: &mut Vec<(String, Ty)>,
+        site: Span,
+    ) {
+        match self.stable_path_ty(scope, path, site) {
+            Some(Ty::Nullable(inner)) => out.push((path.clone(), *inner)),
+            _ => {
+                if let Some((name, Ty::Nullable(inner))) =
+                    self.closure_mutated_decline(scope, path, site)
+                {
+                    declined.push((name, *inner));
+                }
+            }
+        }
+    }
+
+    /// The NULL branch of a null check: the operand is proven null, so a stable nullable path
+    /// narrows to `Nothing?` (kotlinc's exact receiver wording there). A root-only local made
+    /// unstable only by closure writes still narrows when every such write stores null — the
+    /// proven null joined with the writes kotlinc can interleave stays `Nothing?`. A SAFE-CALL
+    /// chain proves nothing here: a null result means SOME link failed, not which one.
+    fn null_branch_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        operand: ExprId,
+        out: &mut Vec<(NarrowPath, Ty)>,
+    ) {
+        if matches!(self.file.expr(operand), Expr::SafeCall { .. }) {
+            return;
+        }
+        let Some(path) = self.expr_access_path(operand) else {
+            return;
+        };
+        let site = self.span(operand);
+        if matches!(self.stable_path_ty(scope, &path, site), Some(ty) if ty.is_nullable()) {
+            out.push((path, Ty::nullable(Ty::Nothing)));
+            return;
+        }
+        if let Some((name, Ty::Nullable(_))) = self.closure_mutated_decline(scope, &path, site) {
+            if self.closure_writes_only_null(&name, site) {
+                out.push((path, Ty::nullable(Ty::Nothing)));
+            }
+        }
     }
 
     /// Narrowings from a `!= null`/`== null` proof on `operand`: the operand's whole ACCESS PATH
@@ -30558,6 +30772,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         operand: ExprId,
         out: &mut Vec<(NarrowPath, Ty)>,
+        declined: &mut Vec<(String, Ty)>,
     ) {
         let Some(path) = self.expr_access_path(operand) else {
             // Not a property path. A SAFE-CALL chain ending in a method (`u?.f() != null`,
@@ -30569,9 +30784,7 @@ impl<'a> Checker<'a> {
             }
             if let Expr::Name(n) = self.file.expr(root).clone() {
                 let root_path = NarrowPath::root_only(&n);
-                if let Some(Ty::Nullable(inner)) = self.stable_path_ty(scope, &root_path) {
-                    out.push((root_path, *inner));
-                }
+                self.null_proof_or_decline(scope, &root_path, out, declined, self.span(operand));
             }
             return;
         };
@@ -30586,34 +30799,38 @@ impl<'a> Checker<'a> {
                 root: path.root.clone(),
                 segments: path.segments[..len].to_vec(),
             };
-            if let Some(Ty::Nullable(inner)) = self.stable_path_ty(scope, &prefix) {
-                out.push((prefix, *inner));
-            }
+            self.null_proof_or_decline(scope, &prefix, out, declined, self.span(operand));
         }
     }
 
     /// The flow narrowings a condition establishes for the branch where it holds (`for_else` =
     /// the FALSE branch): `x != null`, `x is T`, and their safe-call/property-path forms. Each
-    /// entry is a stable [`NarrowPath`] and the type it is proven to have.
+    /// entry is a stable [`NarrowPath`] and the type it is proven to have. A proof declined only
+    /// because a capturing closure mutates the variable is recorded in `declined` (name + target)
+    /// so the use that needed it can report kotlinc's SMARTCAST_IMPOSSIBLE.
     fn smartcast_narrowings(
         &self,
         scope: &CheckerScope<'_>,
         cond: ExprId,
         for_else: bool,
+        declined: &mut Vec<(String, Ty)>,
     ) -> Vec<(NarrowPath, Ty)> {
         let mut out = Vec::new();
-        // `x != null` (then-branch) / `x == null` (else-branch) narrows `T?` to `T`.
+        // `x != null` (then-branch) / `x == null` (else-branch) narrows `T?` to `T`; the opposite
+        // branch proves the operand null and narrows it to `Nothing?`.
         if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
             if matches!(op, BinOp::Ne | BinOp::Eq) {
                 let narrows_then = matches!(op, BinOp::Ne); // `!= null` narrows in the then-branch
-                if narrows_then != for_else {
-                    let operand = match (self.file.expr(lhs), self.file.expr(rhs)) {
-                        (_, Expr::NullLit) => Some(lhs),
-                        (Expr::NullLit, _) => Some(rhs),
-                        _ => None,
-                    };
-                    if let Some(operand) = operand {
-                        self.null_check_narrowings(scope, operand, &mut out);
+                let operand = match (self.file.expr(lhs), self.file.expr(rhs)) {
+                    (_, Expr::NullLit) => Some(lhs),
+                    (Expr::NullLit, _) => Some(rhs),
+                    _ => None,
+                };
+                if let Some(operand) = operand {
+                    if narrows_then != for_else {
+                        self.null_check_narrowings(scope, operand, &mut out, declined);
+                    } else {
+                        self.null_branch_narrowings(scope, operand, &mut out);
                     }
                 }
             }
@@ -30639,21 +30856,14 @@ impl<'a> Checker<'a> {
             );
             return out;
         };
-        // Only stable values smart-cast soundly — a `var`/computed property could change.
-        if !self.path_is_stable(scope, &path) {
-            crate::trace_compiler!(
-                "smartcast",
-                "condition expression={} path={path:?} rejected: unstable",
-                cond.0,
-            );
-            return out;
-        }
+        // The target is computed before the stability gate so a DECLINED proof can still name it.
+        let site = self.span(cond);
+        let stable_ty = self.stable_path_ty(scope, &path, site);
         let tt = self.type_ref_ty_silent(scope, &ty);
         let runtime_tt =
             crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), tt)
                 .unwrap_or(tt);
-        let runtime_tt = self
-            .stable_path_ty(scope, &path)
+        let runtime_tt = stable_ty
             .map(|declared| {
                 crate::symbol_resolver::apply_subtype_arguments_from_supertype(
                     &self.fed_source(),
@@ -30675,6 +30885,20 @@ impl<'a> Checker<'a> {
             // `kotlin.UInt` type isn't modeled (krusty erases unsigned to `int`).
             (tt.is_numeric_or_char() || tt == Ty::Boolean).then_some(tt)
         };
+        // Only stable values smart-cast soundly — a `var`/computed property could change.
+        if stable_ty.is_none() {
+            if let Some(narrowed) = narrowed {
+                if let Some((name, _)) = self.closure_mutated_decline(scope, &path, site) {
+                    declined.push((name, narrowed));
+                }
+            }
+            crate::trace_compiler!(
+                "smartcast",
+                "condition expression={} path={path:?} rejected: unstable",
+                cond.0,
+            );
+            return out;
+        }
         if let Some(narrowed) = narrowed {
             crate::trace_compiler!(
                 "smartcast",
@@ -30697,9 +30921,10 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         cond: ExprId,
         truth: bool,
-    ) -> Vec<(NarrowPath, Ty)> {
+    ) -> (Vec<(NarrowPath, Ty)>, Vec<(String, Ty)>) {
         let mut candidates = Vec::new();
-        self.collect_condition_narrowings(scope, cond, truth, &mut candidates);
+        let mut declined = Vec::new();
+        self.collect_condition_narrowings(scope, cond, truth, &mut candidates, &mut declined);
         let nonnull: std::collections::HashSet<NarrowPath> = candidates
             .iter()
             .filter_map(|(path, ty)| (!ty.is_nullable()).then_some(path.clone()))
@@ -30727,7 +30952,7 @@ impl<'a> Checker<'a> {
                 conflicts.insert(path);
             }
         }
-        result
+        (result, declined)
     }
 
     fn collect_condition_narrowings(
@@ -30736,6 +30961,7 @@ impl<'a> Checker<'a> {
         cond: ExprId,
         truth: bool,
         out: &mut Vec<(NarrowPath, Ty)>,
+        declined: &mut Vec<(String, Ty)>,
     ) {
         // `!cond` flips the branch facts: the narrowings of `cond`-false hold when `!cond` is true
         // (and vice versa). Recursing with a flipped `truth` also yields De Morgan for `!(a && b)` /
@@ -30745,28 +30971,30 @@ impl<'a> Checker<'a> {
             operand,
         } = self.file.expr(cond).clone()
         {
-            self.collect_condition_narrowings(scope, operand, !truth, out);
+            self.collect_condition_narrowings(scope, operand, !truth, out, declined);
             return;
         }
         if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
             let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
             if combines {
-                self.collect_condition_narrowings(scope, lhs, truth, out);
-                self.collect_condition_narrowings(scope, rhs, truth, out);
+                self.collect_condition_narrowings(scope, lhs, truth, out, declined);
+                self.collect_condition_narrowings(scope, rhs, truth, out, declined);
                 return;
             }
         }
-        self.contract_condition_narrowings(scope, cond, truth, out);
-        out.extend(self.smartcast_narrowings(scope, cond, !truth));
+        self.contract_condition_narrowings(scope, cond, truth, out, declined);
+        out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
     }
 
     /// Bring the narrowings a condition proves into scope for a guarded region. The single
     /// application point for every site (`if`/`while` branches, `&&`/`||` right operands,
-    /// early-return guards, contract statements).
+    /// early-return guards, contract statements). `declined` casts (a capturing closure mutates
+    /// the variable) live in the same frame so a later nullable-receiver use can name them.
     fn apply_narrowings(
         &mut self,
         scope: &CheckerScope<'_>,
         casts: &[(NarrowPath, Ty)],
+        declined: &[(String, Ty)],
         compound: bool,
     ) {
         for (path, ty) in casts {
@@ -30775,6 +31003,9 @@ impl<'a> Checker<'a> {
                 "apply path={path:?} target={ty:?} compound={compound}",
             );
             self.apply_narrowing_unchecked(scope, path, *ty);
+        }
+        for (name, ty) in declined {
+            scope.decline_cast(name, *ty);
         }
     }
 
@@ -30870,7 +31101,7 @@ impl<'a> Checker<'a> {
             return declared;
         };
         let still_valid = self
-            .stable_path_ty(scope, &path)
+            .stable_path_ty(scope, &path, self.span(receiver))
             .is_some_and(|current| current.non_null() == declared.non_null());
         if narrowed != declared && still_valid {
             narrowed
@@ -35088,6 +35319,13 @@ impl<'a> Checker<'a> {
             return;
         }
         if actual.is_nullable() && !expected.is_nullable() {
+            if let Some((name, target)) = self.declined_read_targets.get(&span).cloned() {
+                if self.receiver_is_assignable(target, expected) {
+                    self.diags
+                        .error(span, Self::declined_smartcast_message(&name, target));
+                    return;
+                }
+            }
             self.report_assignability_error(expected, actual, span, ctx);
             return;
         }
@@ -37889,6 +38127,7 @@ impl<'a> Checker<'a> {
                                     &name,
                                     storage_ty,
                                     resolution.updated_ty,
+                                    self.span(e),
                                 );
                                 self.set_local_narrow(scope, &name, narrowing);
                             }
@@ -37959,9 +38198,10 @@ impl<'a> Checker<'a> {
                 // Unsigned stays unnarrowed because its value-box unbox to `kotlin.UInt` is
                 // not modeled.
                 let mut proven = Vec::new();
-                self.null_check_narrowings(scope, lhs, &mut proven);
+                let mut declined = Vec::new();
+                self.null_check_narrowings(scope, lhs, &mut proven, &mut declined);
                 proven.retain(|(_, ty)| !ty.is_unsigned());
-                self.apply_narrowings(scope, &proven, false);
+                self.apply_narrowings(scope, &proven, &declined, false);
                 match lt0 {
                     Ty::Nullable(inner) => *inner,
                     _ => lt,
@@ -38524,6 +38764,7 @@ impl<'a> Checker<'a> {
     }
 
     fn expr_inner_name(&mut self, scope: &CheckerScope<'_>, e: ExprId, n: String) -> Ty {
+        self.declined_read_targets.remove(&self.span(e));
         let mut lookup = self.lookup(scope, &n);
         // A binding whose type is not determined YET — a sibling member, or one inherited from a
         // base class, that the engine has not resolved. Ask for it at the READ, where it is
@@ -38659,6 +38900,22 @@ impl<'a> Checker<'a> {
                         {
                             return self.set(e, answered);
                         }
+                    }
+                }
+                if let Some(declared) = l.write_ty {
+                    if declared != ty {
+                        // A narrowing shadow replaced the read type (a `t = null` write narrows
+                        // the flow to `Nothing?`); member probes on the narrowed receiver still
+                        // consult the declared type before reporting, exactly as kotlinc does.
+                        self.narrowed_read_base.insert(e, declared);
+                    }
+                }
+                if matches!(l.origin, ReceiverFnValueOrigin::Local)
+                    && self.closure_reassigned_before(&n, self.span(e))
+                {
+                    if let Some(target) = scope.declined_cast(&n) {
+                        self.declined_read_targets
+                            .insert(self.span(e), (n.clone(), target));
                     }
                 }
                 ty
@@ -38902,11 +39159,11 @@ impl<'a> Checker<'a> {
         let t = {
             if matches!(op, BinOp::And | BinOp::Or) {
                 let lt = self.expr(scope, lhs);
-                let casts = self.condition_narrowings(scope, lhs, op == BinOp::And);
+                let (casts, declined) = self.condition_narrowings(scope, lhs, op == BinOp::And);
                 let rt = {
                     let rhs_scope = scope.child(ScopeKind::Block);
                     let scope = &rhs_scope;
-                    self.apply_narrowings(scope, &casts, true);
+                    self.apply_narrowings(scope, &casts, &declined, true);
                     self.expr(scope, rhs)
                 };
                 // `check_binary` enforces both operands are `Boolean` (and reports the same
@@ -39320,12 +39577,12 @@ impl<'a> Checker<'a> {
         let t = {
             let ct = self.expr(scope, cond);
             self.expect_assignable(Ty::Boolean, ct, self.span(cond), "if condition");
-            let then_casts = self.condition_narrowings(scope, cond, true);
+            let (then_casts, then_declined) = self.condition_narrowings(scope, cond, true);
             let then_compound = matches!(self.file.expr(cond), Expr::Binary { op: BinOp::And, .. });
             let tt = {
                 let branch_scope = scope.child(ScopeKind::Block);
                 let scope = &branch_scope;
-                self.apply_narrowings(scope, &then_casts, then_compound);
+                self.apply_narrowings(scope, &then_casts, &then_declined, then_compound);
                 // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
                 self.with_this_narrow(self.this_is_narrowing(scope, cond, false), |c| {
                     c.expr_result(scope, then_branch, wanted.expected, wanted.value_required)
@@ -39333,13 +39590,13 @@ impl<'a> Checker<'a> {
             };
             match else_branch {
                 Some(eb) => {
-                    let else_casts = self.condition_narrowings(scope, cond, false);
+                    let (else_casts, else_declined) = self.condition_narrowings(scope, cond, false);
                     let else_compound =
                         matches!(self.file.expr(cond), Expr::Binary { op: BinOp::Or, .. });
                     let et = {
                         let branch_scope = scope.child(ScopeKind::Block);
                         let scope = &branch_scope;
-                        self.apply_narrowings(scope, &else_casts, else_compound);
+                        self.apply_narrowings(scope, &else_casts, &else_declined, else_compound);
                         self.with_this_narrow(self.this_is_narrowing(scope, cond, true), |c| {
                             c.expr_result(scope, eb, wanted.expected, wanted.value_required)
                         })
@@ -39407,10 +39664,10 @@ impl<'a> Checker<'a> {
                         if !self.expr_diverges(then_branch) {
                             break;
                         }
-                        let casts = self.condition_narrowings(scope, cond, false);
+                        let (casts, declined) = self.condition_narrowings(scope, cond, false);
                         let compound =
                             matches!(self.file.expr(cond), Expr::Binary { op: BinOp::Or, .. });
-                        self.apply_narrowings(scope, &casts, compound);
+                        self.apply_narrowings(scope, &casts, &declined, compound);
                         match else_branch {
                             Some(eb) => level = eb,
                             None => break,
@@ -39429,10 +39686,17 @@ impl<'a> Checker<'a> {
                                 } = effect
                                 {
                                     let mut casts = Vec::new();
-                                    self.conclusion_narrowings(scope, ie, conclusion, &mut casts);
+                                    let mut declined = Vec::new();
+                                    self.conclusion_narrowings(
+                                        scope,
+                                        ie,
+                                        conclusion,
+                                        &mut casts,
+                                        &mut declined,
+                                    );
                                     let compound =
                                         matches!(conclusion, crate::contracts::Condition::And(..));
-                                    self.apply_narrowings(scope, &casts, compound);
+                                    self.apply_narrowings(scope, &casts, &declined, compound);
                                 }
                             }
                         }
@@ -39557,10 +39821,11 @@ impl<'a> Checker<'a> {
                 }
                 // Smart-cast the body of a single positive `is T` arm (the subject is a stable
                 // binding or property path). Apply through the same support gate as `if`/`while`:
-                // extending the historical root-only behavior to member reads must not bypass
+                // extending root-only behavior to member reads must not bypass
                 // backend representation limits such as an `Any` property narrowed to a value class.
+                let mut arm_declined = Vec::new();
                 let arm_casts = match arm.conditions.as_slice() {
-                    [cnd] => self.smartcast_narrowings(scope, *cnd, false),
+                    [cnd] => self.smartcast_narrowings(scope, *cnd, false, &mut arm_declined),
                     _ => Vec::new(),
                 };
                 // `when (this) { is B -> … }` narrows the implicit receiver to `B` in that arm's
@@ -39572,7 +39837,7 @@ impl<'a> Checker<'a> {
                 let bt = {
                     let arm_scope = scope.child(ScopeKind::Block);
                     let scope = &arm_scope;
-                    self.apply_narrowings(scope, &arm_casts, false);
+                    self.apply_narrowings(scope, &arm_casts, &arm_declined, false);
                     self.with_this_narrow(arm_this_narrow, |c| {
                         if let Some(guard) = arm.guard {
                             let guard_ty = c.expr(scope, guard);
@@ -45880,17 +46145,41 @@ impl<'a> Checker<'a> {
         }
         let diagnostic_span = mexpr.map_or(span, |member| self.member_name_span(member, name));
         if rt.is_nullable() {
-            let non_null = rt.non_null();
-            let exists_on_non_null = matches!((non_null, name), (Ty::String, "length"))
-                || (name == "size" && non_null.array_elem().is_some())
-                || !matches!(self.select_property_read(scope, non_null, name), Ok(None))
-                || self.select_instance_member(non_null, name, &[]).is_some()
-                || self
-                    .syms
-                    .libraries
-                    .intrinsic_property(non_null, name)
-                    .is_some();
-            if exists_on_non_null {
+            let exists_on_non_null = |this: &Self, recv: Ty| {
+                let non_null = recv.non_null();
+                matches!((non_null, name), (Ty::String, "length"))
+                    || (name == "size" && non_null.array_elem().is_some())
+                    || !matches!(this.select_property_read(scope, non_null, name), Ok(None))
+                    || this.select_instance_member(non_null, name, &[]).is_some()
+                    || this
+                        .syms
+                        .libraries
+                        .intrinsic_property(non_null, name)
+                        .is_some()
+            };
+            // A narrowing shadow may have replaced the receiver's flow type with one that has no
+            // members (`Nothing?` after a `t = null` write); kotlinc still resolves the member
+            // against the DECLARED type before rejecting the call on the narrowed receiver.
+            let declined_receiver = match mexpr {
+                Some(me) => match self.file.expr(me) {
+                    Expr::Member { receiver, .. } => Some(*receiver),
+                    _ => None,
+                },
+                None => None,
+            };
+            let narrowed_base = declined_receiver
+                .and_then(|receiver| self.narrowed_read_base.get(&receiver).copied());
+            if declined_receiver.is_some_and(|receiver| {
+                let found = self.declined_smartcast_target(scope, receiver, |this, target| {
+                    exists_on_non_null(this, target)
+                });
+                self.report_declined_smartcast(found)
+            }) {
+                return Ty::Error;
+            }
+            if exists_on_non_null(self, rt)
+                || narrowed_base.is_some_and(|base| exists_on_non_null(self, base))
+            {
                 let nullable_member_span =
                     Span::new(diagnostic_span.lo.saturating_sub(1), diagnostic_span.hi);
                 self.diags.error(
@@ -49928,10 +50217,36 @@ impl<'a> Checker<'a> {
                             }
                             Ok(Some(_) | None) => false,
                         };
+                    // kotlinc rejects the dot call on a nullable receiver whenever the CALLEE
+                    // would resolve on the non-null receiver — members AND in-scope extensions
+                    // whose declared receiver accepts it (`s.trim()` on `String?`). A narrowing
+                    // shadow may have replaced the flow type with a memberless one (`Nothing?`
+                    // after a `t = null` write); the DECLARED type still answers the probe.
+                    let extension_exists = |recv: Ty| {
+                        let context = crate::assignable::TyCtx::new();
+                        receiver_callables.functions().iter().any(|function| {
+                            function.is_extension()
+                                && function.semantic_receiver().is_some_and(|extension| {
+                                    crate::assignable::is_subtype(&context, self, recv, extension)
+                                })
+                        })
+                    };
                     let exists_on_non_null = self.member_name_exists_on(scope, non_null, &name)
-                        || callable_property_exists;
+                        || callable_property_exists
+                        || extension_exists(non_null)
+                        || self.narrowed_read_base.get(&receiver).is_some_and(|base| {
+                            self.member_name_exists_on(scope, *base, &name)
+                                || extension_exists(base.non_null())
+                        });
                     if exists_on_non_null {
-                        self.report_nullable_receiver_call(call, rt);
+                        let found =
+                            self.declined_smartcast_target(scope, receiver, |this, target| {
+                                this.member_name_exists_on(scope, target, &name)
+                                    || extension_exists(target)
+                            });
+                        if !self.report_declined_smartcast(found) {
+                            self.report_nullable_receiver_call(call, rt);
+                        }
                         return Ty::Error;
                     }
                 }
@@ -53056,12 +53371,12 @@ impl<'a> Checker<'a> {
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 // `while (x != null) …` — the condition holds on body entry, so narrow stable
                 // bindings exactly like an `if` then-branch (kotlinc does the same).
-                let casts = self.condition_narrowings(scope, cond, true);
+                let (casts, declined) = self.condition_narrowings(scope, cond, true);
                 let compound = matches!(self.file.expr(cond), Expr::Binary { op: BinOp::And, .. });
                 {
                     let body_scope = scope.child(ScopeKind::Block);
                     let scope = &body_scope;
-                    self.apply_narrowings(scope, &casts, compound);
+                    self.apply_narrowings(scope, &casts, &declined, compound);
                     self.check_loop_body(scope, body, &label);
                 }
             }
@@ -53284,9 +53599,15 @@ impl<'a> Checker<'a> {
             self.declare(scope, &name, bound_ty, is_var);
         }
         // An explicit broader declaration retains its storage type while straight-line reads use the
-        // initializer's proven subtype (`var x: Base = Derived()`, `var n: Int? = 10`).
+        // initializer's proven subtype (`var x: Base = Derived()`, `var n: Int? = 10`). A null
+        // INITIALIZER is the exception: kotlinc keeps the declared type there and only narrows to
+        // `Nothing?` on a null ASSIGNMENT.
         if is_var {
-            let narrowing = self.assignment_narrowing(&name, bind, it);
+            let narrowing = if it == Ty::Null {
+                None
+            } else {
+                self.assignment_narrowing(&name, bind, it, self.span(init))
+            };
             self.set_local_narrow(scope, &name, narrowing);
         }
     }
@@ -53484,8 +53805,12 @@ impl<'a> Checker<'a> {
                     span,
                 ) {
                     if local.is_some() {
-                        let narrowing =
-                            self.assignment_narrowing(&name, storage_ty, resolution.updated_ty);
+                        let narrowing = self.assignment_narrowing(
+                            &name,
+                            storage_ty,
+                            resolution.updated_ty,
+                            span,
+                        );
                         self.set_local_narrow(scope, &name, narrowing);
                     }
                 }
@@ -53592,8 +53917,48 @@ impl<'a> Checker<'a> {
                     // A write replaces the prior data-flow fact with the assigned value's exact
                     // subtype, or clears it when the value is as wide as storage / unstable.
                     if is_var {
-                        let narrowing = self.assignment_narrowing(&name, lty, vt);
+                        let narrowing = self.assignment_narrowing(&name, lty, vt, target_span);
                         self.set_local_narrow(scope, &name, narrowing);
+                        // A write under a live smart-cast shadow must also move the PROOF binding:
+                        // reads below the shadow's rung type the variable through it, so a stale
+                        // shadow would keep a killed cast alive (`if (t != null) { t = null;
+                        // t.length }`). A write in the shadow's OWN rung is dominated by the
+                        // guard, so the new flow type is exact; a write in a nested rung may not
+                        // execute, so the proof keeps the wider of the old and new facts (the
+                        // conservative join falls back to the declared type).
+                        if let Some(cur) = scoped {
+                            let declared = cur.write_ty.unwrap_or(cur.ty);
+                            if matches!(cur.origin, ReceiverFnValueOrigin::Local)
+                                && cur.is_var
+                                && cur.ty != declared
+                            {
+                                if self.closure_reassigned_before(&name, target_span) {
+                                    scope.decline_cast_at_binding(&name, cur.ty);
+                                }
+                                let flow = narrowing.unwrap_or(declared);
+                                let context = crate::assignable::TyCtx::new();
+                                // The join of the old proof and the new fact: the wider of the two
+                                // when comparable, the declared type otherwise (kotlinc's LUB —
+                                // `if (t != null) { run { t = null } }` rejoins to `String?`).
+                                let joined = if crate::assignable::is_subtype(
+                                    &context, self, flow, cur.ty,
+                                ) {
+                                    cur.ty
+                                } else if crate::assignable::is_subtype(
+                                    &context, self, cur.ty, flow,
+                                ) {
+                                    flow
+                                } else {
+                                    declared
+                                };
+                                scope.rebind_nearest(&name, Ns::Value, |_, depth| {
+                                    ScopeBinding::Value(Local {
+                                        ty: if depth == 0 { flow } else { joined },
+                                        ..cur
+                                    })
+                                });
+                            }
+                        }
                     }
                 }
                 None => {

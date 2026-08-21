@@ -372,18 +372,6 @@ fn call_non_callable_property() {
 }
 
 // ---------------------------------------------------------------------------
-// Smart-cast on a `var` does not narrow (member absent after `is`)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn no_smart_cast_on_var() {
-    let d = diags(
-        "fun box(): Int { var a: Any = \"hi\"; if (a is String) { return a.length }; return 0 }",
-    );
-    assert_rejected(&d, "no smart-cast on a var receiver");
-}
-
-// ---------------------------------------------------------------------------
 // Binary operator on incompatible operand types
 // ---------------------------------------------------------------------------
 

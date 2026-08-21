@@ -2042,14 +2042,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Nothing`-typed call): completing an elvis whose right-hand side is `Nothing` proves a stable
   `val`/parameter non-null, exactly like an `if (x == null) return` guard. A nullable-primitive local
   narrows to its unboxed primitive (the lowerer's `Name` path unboxes the reference slot on use); a
-  nullable reference already reads as its non-null type. `var`s are not narrowed (a closure could reset
-  them to null), and unsigned stays unnarrowed (its value-box unbox isn't modeled).
+  nullable reference already reads as its non-null type. A local `var` narrows like a `val` when no
+  active capturing closure can mutate it (see the var smart-cast entry below); unsigned stays unnarrowed (its
+  value-box unbox isn't modeled).
   `tests/elvis_return_smartcast_e2e.rs`.
 - **`u?.member ?: return` smart-casts the safe-call ROOT receiver** for the code that follows: the
   elvis only completes when every `?.` in the left side held, which proves the chain's root non-null.
-  The root must be a stable `val`/parameter name; the same `var`/unsigned exclusions as the bare-name
-  form apply. (Intermediate chain links narrow too when they are stable property paths — see the
-  access-path entry below.) `tests/elvis_return_smartcast_e2e.rs`,
+  The root must be a stable `val`/parameter name or a local `var` no active capturing closure can mutate; the
+  same unsigned exclusions as the bare-name form apply. (Intermediate chain links narrow too when
+  they are stable property paths — see the access-path entry below.) `tests/elvis_return_smartcast_e2e.rs`,
   `crates/krusty-lsp/src/compiler_analysis.rs::source_set_narrows_safe_call_root_after_elvis_return`.
 - **Smart casts apply to stable ACCESS PATHS, not only plain names** (`tests/path_smartcast_e2e.rs`).
   `==`/`!=` null checks, `is`/`!is` type tests, and contract conclusions (`returns(false) implies
@@ -2060,8 +2061,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   contract statements, elvis guards) by the same `apply_narrowings`. A root-only fact shadows the
   binding (the classic mechanism); a segmented fact is recorded per scope frame and consulted when a
   member read is typed, the lowerer emitting its generic `checkcast`/unbox from the recorded type.
-  kotlinc's stability rules gate every step: the root is `this` or a local `val`/parameter (never a
-  `var`); each segment is a `val` (no setter) without a custom getter or delegate whose getter cannot
+  kotlinc's stability rules gate every step: the root is `this` or a local `val`/parameter, or a
+  local `var` no active capturing closure can mutate (see the var smart-cast entry below); each segment is a
+  `val` (no setter) without a custom getter or delegate whose getter cannot
   be replaced at runtime — a final property is stable even on an open class, while an open property
   requires a statically final receiver type. Its type is substituted like the member read
   (`Box<T>(val v: T)` narrows through the receiver's actual type argument). A
@@ -2072,6 +2074,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   narrowing applies only while `this` is still the receiver it was proven against (never inside a
   receiver lambda or inner class); and the bare/`this.`-qualified forms of an own member `val`
   share one narrowing.
+- **A local `var` smart-casts like a `val`** when no already-created capturing closure can mutate it
+  (`tests/var_smartcast_e2e.rs`). Straight-line assignments replace the flow type, while writes in
+  nested control flow join with the prior fact. Inline-spliced lambdas follow the same ordered flow;
+  a lambda declared later does not invalidate an earlier proof. Assigning `null` narrows the read to
+  `Nothing?`, while a null initializer keeps the declared type. Member selection still uses that
+  declared type before reporting nullable-receiver diagnostics against the flow type. When an active
+  capturing closure makes a cast unstable, every receiver use that needs it reports the exact
+  smart-cast-impossible diagnostic instead of a generic unsafe-call error. The null branch may still
+  narrow to `Nothing?` when every interfering closure write also stores null.
 - **An `if`/`else if` chain of diverging guards narrows level by level** for the rest of the block:
   `if (x is A) return …; else if (x !is B) return …` proves `x !is A && x is B` afterwards, because
   falling through a level whose then-branch diverges means that level's condition was false. The walk

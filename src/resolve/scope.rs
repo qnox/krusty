@@ -86,6 +86,12 @@ pub(crate) struct Flow {
     /// reads as `Int`). Sound only along one statement sequence in one scope, so lookups read the
     /// CURRENT scope's frame and never walk outward.
     locals: HashMap<String, Ty>,
+    /// Smart casts a condition ATTEMPTED but the stability gate declined because the root is a
+    /// local `var` a capturing closure mutates: the variable's name and the target type the
+    /// condition tried to prove. The fact dies with the guarded region like a real narrowing; a
+    /// later nullable-receiver use reports kotlinc's SMARTCAST_IMPOSSIBLE instead of the plain
+    /// unsafe-call error.
+    declined: Vec<(String, Ty)>,
 }
 
 /// Kotlin's namespaces are distinct: `fun Foo()` and `val Foo` may coexist in one scope, and a
@@ -469,6 +475,16 @@ impl<'p, B> Scope<'p, B> {
         match ty {
             Some(ty) => {
                 self.flow.borrow_mut().locals.insert(name.to_string(), ty);
+                // A nested write invalidates an enclosing straight-line fact for the same binding.
+                if self.declared_here(name, Ns::Value) {
+                    return;
+                }
+                for rung in self.ancestors().skip(1) {
+                    rung.flow.borrow_mut().locals.remove(name);
+                    if rung.declared_here(name, Ns::Value) {
+                        return;
+                    }
+                }
             }
             None => {
                 // Stop at the rung DECLARING `name`: an assignment to a shadowing variable of the
@@ -487,6 +503,69 @@ impl<'p, B> Scope<'p, B> {
     /// outward: a narrowing proven before a branch does not hold inside it.
     pub(crate) fn local_narrowing(&self, name: &str) -> Option<Ty> {
         self.flow.borrow().locals.get(name).copied()
+    }
+
+    /// Record that a condition guarding THIS scope tried to smart-cast `name` to `ty` but the
+    /// proof was declined — the variable is a local `var` a capturing closure mutates.
+    pub(crate) fn decline_cast(&self, name: &str, ty: Ty) {
+        self.flow.borrow_mut().declined.push((name.to_string(), ty));
+    }
+
+    /// Record a declined cast at the rung that owns the active binding.
+    pub(crate) fn decline_cast_at_binding(&self, name: &str, ty: Ty) {
+        for rung in self.ancestors() {
+            if rung.declared_here(name, Ns::Value) {
+                rung.flow.borrow_mut().declined.push((name.to_string(), ty));
+                return;
+            }
+        }
+    }
+
+    /// The target a condition tried to smart-cast `name` to in THIS or an enclosing scope, if
+    /// any. Walks outward like a read of the variable and stops at the rung declaring it: a
+    /// shadowing binding is not the variable the condition spoke about.
+    pub(crate) fn declined_cast(&self, name: &str) -> Option<Ty> {
+        for rung in self.ancestors() {
+            if let Some((_, ty)) = rung
+                .flow
+                .borrow()
+                .declined
+                .iter()
+                .rev()
+                .find(|(n, _)| n == name)
+            {
+                return Some(*ty);
+            }
+            if rung.declared_here(name, Ns::Value) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Replace the payload of the innermost `name` binding in `ns` wherever it lives in the
+    /// chain, returning how many rungs up it was found (0 = THIS rung). Unlike [`Self::rebind`]
+    /// (this rung only) this follows the binding: a smart-cast shadow of a `var` must track a
+    /// reassignment even when the write sits in a nested block under the shadow's rung. The
+    /// closure receives the current payload and the rung depth.
+    pub(crate) fn rebind_nearest(
+        &self,
+        name: &str,
+        ns: Ns,
+        f: impl FnOnce(&B, usize) -> B,
+    ) -> Option<usize> {
+        for (depth, rung) in self.ancestors().enumerate() {
+            let mut bindings = rung.bindings.borrow_mut();
+            if let Some(slot) = bindings
+                .iter_mut()
+                .rev()
+                .find(|b| b.ns == ns && b.name == name)
+            {
+                slot.payload = f(&slot.payload, depth);
+                return Some(depth);
+            }
+        }
+        None
     }
 
     /// Every straight-line narrowing THIS scope holds, by name.
@@ -964,8 +1043,8 @@ mod tests {
         drop(branch);
         assert_eq!(
             function.local_narrowing("x"),
-            Some(Ty::Int),
-            "and a narrowing proven inside a branch does not escape it"
+            None,
+            "a branch write invalidates the enclosing fact"
         );
     }
 

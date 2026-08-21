@@ -129,6 +129,23 @@ fn captures_smart_cast_val() {
 }
 
 #[test]
+fn captures_smart_cast_var() {
+    run_ok(
+        "AnonSmartVar",
+        "interface L { fun g(): Int }\n\
+         fun f(p: String?): Int {\n\
+         var t: String? = p\n\
+         if (t != null) {\n\
+         val o = object : L { override fun g() = t.length }\n\
+         return o.g() }\n\
+         return -1 }\n\
+         fun box(): String {\n\
+         if (f(null) != -1) return \"FAIL null\"\n\
+         return if (f(\"abc\") == 3) \"OK\" else \"FAIL\" }\n",
+    );
+}
+
+#[test]
 fn captures_inner_shadowed_local() {
     run_ok(
         "AnonInnerShadow",
