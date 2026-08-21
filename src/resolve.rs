@@ -5674,6 +5674,46 @@ fn validate_context_property(property: &PropDecl, abstract_allowed: bool, diags:
     }
 }
 
+/// Declaration-context validity for a syntactically complete property. These checks deliberately
+/// live after parsing: the same absent initializer is valid on abstract/expect/external/lateinit
+/// declarations and on members definitely assigned by a constructor.
+fn validate_top_level_property(property: &PropDecl, diags: &mut DiagSink) {
+    let has_value =
+        property.init.is_some() || property.delegate.is_some() || property.getter.is_some();
+    if !has_value
+        && !property.is_lateinit
+        && !property.is_abstract
+        && !property.is_external
+        && !property.is_expect
+    {
+        diags.error(property.span, "property must be initialized or be abstract");
+    }
+}
+
+fn validate_member_property(property: &PropDecl, owner: &ClassDecl, diags: &mut DiagSink) {
+    if owner.is_interface() && property.init.is_some() {
+        diags.error(
+            property.span,
+            "property initializers are not allowed in interfaces",
+        );
+    }
+    // A written default getter supplies no value of its own. Unlike an entirely accessor-less
+    // member, it cannot be a deferred constructor assignment. Keep this distinction in the AST and
+    // diagnose it here; general definite assignment remains the constructor-flow checker's job.
+    if property.getter_declared
+        && property.getter.is_none()
+        && property.init.is_none()
+        && property.delegate.is_none()
+        && !owner.is_interface()
+        && !property.is_lateinit
+        && !property.is_abstract
+        && !property.is_external
+        && !property.is_expect
+    {
+        diags.error(property.span, "property must be initialized or be abstract");
+    }
+}
+
 fn validate_explicit_backing_field(property: &PropDecl, diags: &mut DiagSink) {
     if property.explicit_backing_field.is_some()
         && (property.is_var
@@ -7636,6 +7676,7 @@ fn collect_signatures_with_cp_impl(
                         .with_implicit_value(implicit_value)
                         .with_implicit_instance(Some(member_this));
                     for (body_property_index, bp) in c.body_props.iter().enumerate() {
+                        validate_member_property(bp, c, diags);
                         validate_context_property(bp, c.is_interface() || bp.is_abstract, diags);
                         validate_explicit_backing_field(bp, diags);
                         let resolve = |name: &str| class_names.get(name);
@@ -8827,6 +8868,7 @@ fn collect_signatures_with_cp_impl(
                         &mut annotation_resolution,
                         diags,
                     );
+                    validate_top_level_property(p, diags);
                     validate_context_property(p, false, diags);
                     // Extension property `val Recv.name: T get() = …`: register by (erased receiver,
                     // name); emitted as a static `getName(Recv)`/`setName(Recv, T)`.
@@ -10536,11 +10578,16 @@ fn collect_lambda_outer_writes(
                 ce(file, *body, &body_active, out);
             }
             Stmt::Expr(e) => ce(file, *e, active, out),
+            Stmt::CompoundAssign { target, value, .. } => {
+                ce(file, *target, active, out);
+                ce(file, *value, active, out);
+            }
             Stmt::Return(None, _)
             | Stmt::Break(_)
             | Stmt::Continue(_)
             | Stmt::LocalFun(_)
-            | Stmt::LocalClass(_) => {}
+            | Stmt::LocalClass(_)
+            | Stmt::LocalTypeAlias(_) => {}
         }
     }
     ce(file, e, outer_names, out);
@@ -37334,6 +37381,15 @@ impl<'a> Checker<'a> {
             // Annotation array literals are typed and consumed by `check_annotation_arguments`;
             // they do not independently participate in ordinary expression inference.
             Expr::AnnotationArrayLiteral(_) => Ty::Error,
+            Expr::ExtensionAccess { receiver, callable } => {
+                self.expr(scope, receiver);
+                self.expr(scope, callable);
+                self.diags.error(
+                    self.span(e),
+                    "extension-function expression invocation is not supported",
+                );
+                Ty::Error
+            }
             Expr::NotNull { operand } => {
                 // The value with its non-null type; `T?!!` narrows to `T`.
                 let t = self.expr(scope, operand);
@@ -54152,6 +54208,18 @@ impl<'a> Checker<'a> {
             }
             Stmt::LocalFun(f) => {
                 self.check_local_fun(scope, &f.clone(), s);
+            }
+            Stmt::LocalTypeAlias(alias) => {
+                self.diags
+                    .error(alias.span, "local typealias semantics are not supported");
+            }
+            Stmt::CompoundAssign { target, value, .. } => {
+                self.expr(scope, target);
+                self.expr(scope, value);
+                self.diags.error(
+                    self.file.stmt_spans[s.0 as usize],
+                    "compound assignment to this target is not supported",
+                );
             }
             // A local class is checked HERE, from the scope it was written in — the enclosing
             // function's parameters and locals are visible to it, so a capture resolves instead of

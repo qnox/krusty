@@ -7,8 +7,11 @@ parameters.
 
 - Use `./run-tests.sh` for the full suite; it provisions kotlinc and the Kotlin codegen/box corpus.
 - Use focused harness runs, not raw `cargo test`, while iterating. Standalone suites still use `./run-tests.sh --test <name> -- --nocapture`; grouped e2e tests use a test-name filter, e.g. `./run-tests.sh --test e2e lambda_e2e::lambdas_run -- --nocapture`.
+- Use `./run-tests.sh --survey --parse-only --report /tmp/krusty-parse.tsv` for the syntax-only
+  conformance gate. It parses every Kotlin block independently, ignores Java fixture blocks, checks
+  AST integrity, and never enters signature collection or checking.
 - Use `./run-tests.sh --survey --frontend-only` to audit parser/signature/checker skips against the
-  pinned corpus without building or running the backend.
+  pinned corpus without building or running the backend. This is deliberately not a parser metric.
 - Do not pass `--release`; the gate profile is the intended fast edit/build/test loop.
 - For Kotlin box conformance changes, run `./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture` and keep `FAIL: 0`.
 - For performance work, start with the harness timing output or `KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1`.
@@ -212,10 +215,15 @@ For corpus triage, use the survey binary through the gate profile:
 
 ```sh
 ./run-tests.sh --survey
+./run-tests.sh --survey --parse-only --report /tmp/krusty-parse.tsv
 ./run-tests.sh --survey --frontend-only --report /tmp/krusty-frontend-survey.tsv
 ./run-tests.sh --survey --frontend-only --file coroutines/example.kt
 ./run-tests.sh --survey --samples "inline splice failed"
 ```
+
+The parse-only TSV records exact corpus file, Kotlin block, failure stage, line, column, diagnostic,
+and source line. Its summary separately reports discovered cases, Kotlin blocks, parsed cases, lex
+failures, parse failures, AST failures, and panics; any failed case makes the command fail.
 
 The harness builds the survey with the normal `gate` profile, applies the configurable
 `KRUSTY_TEST_TIMEOUT_SECONDS` deadline, provisions the same toolchain/corpus, and reports specific

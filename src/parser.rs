@@ -76,6 +76,13 @@ fn parse_with_features_and_script(
     // would allocate and free a fresh grown segment — per statement. With it, the per-level
     // checks in `parse_bp` are a stack-pointer read that only grows on genuinely deep nesting.
     crate::wide_stack::on_wide_stack(|| p.parse_file());
+    p.skip_newlines();
+    if !p.at(TokenKind::Eof) || p.i + 1 != p.t.len() {
+        p.diags.error(
+            p.tok().span,
+            "parser did not consume every non-trivia token",
+        );
+    }
     if !p.script_stmts.is_empty() {
         let first = p.file.stmt_spans[p.script_stmts[0].0 as usize];
         let last = p.file.stmt_spans[p.script_stmts[p.script_stmts.len() - 1].0 as usize];
@@ -106,6 +113,12 @@ fn parse_with_features_and_script(
     fixup_parenless_base_classes(&mut p.file);
     fill_class_decl_lines(&mut p.file, src);
     expand_fun_type_aliases(&mut p.file);
+    if !p.diags.has_errors() {
+        if let Err(error) = p.file.validate_integrity(src) {
+            p.diags
+                .error(Span::new(0, 0), format!("invalid parser AST: {error}"));
+        }
+    }
     p.file
 }
 
@@ -313,6 +326,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         primary_ctor_annotations: Some(Vec::new()),
         primary_ctor_annotation_args: Vec::new(),
         secondary_ctors: Vec::new(),
+        type_aliases: Vec::new(),
         span,
         ctor_close_line: 0,
         decl_line: 0,
@@ -1088,6 +1102,13 @@ impl<'a> Parser<'a> {
                 .get(self.i + 1)
                 .is_some_and(|t| t.kind == TokenKind::Eq)
     }
+    fn at_companion_declaration(&self) -> bool {
+        self.at(TokenKind::Ident)
+            && self.keyword_text("companion")
+            && self.t.get(self.i + 1).is_some_and(|token| {
+                token.kind == TokenKind::LBrace || self.token_keyword_text(*token, "object")
+            })
+    }
     fn bump(&mut self) -> Token {
         let t = self.t[self.i];
         if self.i + 1 < self.t.len() {
@@ -1284,6 +1305,29 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
+            // `+CompanionBlocksAndExtensions`: `companion fun/val/var C.member …` is a real
+            // top-level declaration modifier. It is intentionally consumed only at file scope;
+            // inside a classifier, `companion object` and `companion { … }` select member grammar
+            // productions and must remain visible to that dispatcher.
+            if self.at(TokenKind::Ident) && self.keyword_text("companion") {
+                let save = self.i;
+                self.bump(); // `companion`
+                let mut tail = if self.at(TokenKind::At) || self.at_modifier() {
+                    self.skip_decl_prefix()
+                } else {
+                    Vec::new()
+                };
+                self.skip_newlines();
+                if matches!(
+                    self.kind(),
+                    TokenKind::KwFun | TokenKind::KwVal | TokenKind::KwVar
+                ) {
+                    mods.push("companion".to_string());
+                    mods.append(&mut tail);
+                } else {
+                    self.i = save;
+                }
+            }
             // `context` is a soft keyword and only starts a clause before a declaration.
             mods.extend(self.maybe_parse_context_receivers());
             // A `sealed` class is implicitly abstract and open (subclasses live in the same module).
@@ -1340,10 +1384,6 @@ impl<'a> Parser<'a> {
                             alias,
                         });
                     }
-                    // tolerate any remaining trailing tokens to end of line
-                    while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
-                        self.bump();
-                    }
                 }
                 // `fun interface F { fun m(…): R }` — a SAM interface (parsed as an interface).
                 TokenKind::KwFun
@@ -1381,6 +1421,8 @@ impl<'a> Parser<'a> {
                     );
                     d.visibility = visibility_of(&mods);
                     d.is_override = mods.iter().any(|m| m == "override");
+                    d.is_external = mods.iter().any(|m| m == "external");
+                    d.is_expect = is_expect;
                     let id = self.file.add_decl(Decl::Property(d));
                     self.file.decls.push(id);
                 }
@@ -1456,88 +1498,30 @@ impl<'a> Parser<'a> {
                 }
                 // `typealias Name[<T,...>] = Type`
                 TokenKind::Ident if self.keyword_text("typealias") => {
-                    let start = self.tok().span;
-                    self.bump(); // `typealias`
-                    let alias = if self.at(TokenKind::Ident) {
-                        self.bump().text(self.src).to_string()
-                    } else {
-                        String::new()
-                    };
-                    let alias_type_params = if self.at(TokenKind::Lt) {
-                        self.parse_type_params(start.lo).0
-                    } else {
-                        Vec::new()
-                    };
-                    if !alias_type_params.is_empty() {
-                        self.file.type_alias_declaration_starts.insert(start.lo);
+                    let declaration = self.parse_type_alias_syntax();
+                    if !declaration.type_params.is_empty() {
+                        self.file
+                            .type_alias_declaration_starts
+                            .insert(declaration.span.lo);
                     }
-                    self.eat(TokenKind::Eq);
-                    // Parse and retain every alias's complete target shape. The simple target edge
-                    // below supports legacy constructor/name lookup; metadata emission and structural
-                    // substitution consume this declaration record instead of reconstructing it.
-                    let fn_target = self.t[self.i..]
-                        .iter()
-                        .take_while(|t| t.kind != TokenKind::Newline && t.kind != TokenKind::Eof)
-                        .any(|t| t.kind == TokenKind::Arrow);
-                    // Parse the target type name, including dotted FQNs (e.g. java.lang.Exception).
-                    let target = if fn_target {
-                        let t = self.parse_type();
-                        let is_fun = !t.fun_params.is_empty() || t.name == "<fun>";
-                        // A class target can contain a function type argument. It still needs
-                        // structural expansion so those arguments survive (`Handlers` must mean
-                        // `Map<String, (Int) -> Int>`, not raw `Map`); the presence of the nested
-                        // arrow must not classify the alias itself as a function type.
-                        if !alias.is_empty() {
-                            self.file.type_alias_fun.push((
-                                alias.clone(),
-                                alias_type_params.clone(),
-                                t.clone(),
-                            ));
-                        }
-                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
-                            self.bump();
-                        }
-                        if is_fun {
-                            String::new()
-                        } else {
-                            // The Arrow that triggered the scan sat inside a CLASS target's type
-                            // argument (`Map<String, (Int) -> Int>`) — keep the class-name alias
-                            // exactly as the plain-name path records it.
-                            t.name.clone()
-                        }
-                    } else if self.at(TokenKind::Ident) {
-                        // Parse the target as a full type — a dotted FQN and its type ARGUMENTS alike.
-                        // Discarding the arguments made `typealias IntList = List<Int>` an alias for a
-                        // raw `List`, so `for (x in xs)` handed back the erased bound.
-                        let t = self.parse_type();
-                        // Every alias keeps its structural declaration, including a generic alias over
-                        // a non-generic target and a parameterless bare target.
-                        if !alias.is_empty() {
-                            self.file.type_alias_fun.push((
-                                alias.clone(),
-                                alias_type_params.clone(),
-                                t.clone(),
-                            ));
-                        }
-                        // Skip any remaining tokens on this line.
-                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
-                            self.bump();
-                        }
-                        t.name.clone()
-                    } else {
-                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
-                            self.bump();
-                        }
-                        String::new()
-                    };
-                    if !alias.is_empty() && !target.is_empty() {
-                        self.file.type_aliases.push((alias.clone(), target));
+                    self.file.type_alias_fun.push((
+                        declaration.name.clone(),
+                        declaration.type_params.clone(),
+                        declaration.target.clone(),
+                    ));
+                    if declaration.target.name != "<fun>" {
+                        self.file
+                            .type_aliases
+                            .push((declaration.name.clone(), declaration.target.name.clone()));
                     }
+                    self.file.type_alias_decls.push(declaration.clone());
                     // The alias's declared visibility survives into `@Metadata`, including aliases
                     // whose target is a function type and therefore has no legacy classifier edge.
                     let vis = visibility_of(&mods);
-                    if !alias.is_empty() && vis != Visibility::Public {
-                        self.file.type_alias_visibility.insert(alias, vis);
+                    if vis != Visibility::Public {
+                        self.file
+                            .type_alias_visibility
+                            .insert(declaration.name, vis);
                     }
                 }
                 _ => {
@@ -1700,8 +1684,8 @@ impl<'a> Parser<'a> {
 
     /// Consume leading annotations (`@Foo`, `@file:Bar(...)`) and soft modifiers (`public`, `open`,
     /// `inline`, `operator`, `suspend`, …) that precede a declaration. Modifiers that change the
-    /// declaration *kind* (`enum`, `annotation`, `sealed`, `data`, `value`, `object`, …) are NOT
-    /// skipped, so those declarations remain unsupported (and the file is cleanly skipped).
+    /// declaration *kind* (`enum`, `annotation`, `data`, `object`, …) are left for their real
+    /// declaration productions rather than being mistaken for ordinary modifiers.
     fn skip_decl_prefix(&mut self) -> Vec<String> {
         let mut mods = Vec::new();
         self.pending_annotations.clear();
@@ -1985,10 +1969,33 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `abstract_ok` — allow missing initializer (abstract/interface props, class/object body props
-    /// with init blocks, etc.). Top-level properties always require an initializer.
-    fn parse_top_property(&mut self, is_lateinit: bool, abstract_ok: bool) -> PropDecl {
-        self.parse_top_property_c(is_lateinit, abstract_ok, false, false)
+    /// Parse the complete declaration-shaped part of a type alias. Semantic registration differs
+    /// between file, classifier, and local scopes, but no scope is allowed to skip its tokens.
+    fn parse_type_alias_syntax(&mut self) -> crate::ast::TypeAliasDecl {
+        let start = self.tok().span;
+        self.bump(); // `typealias`
+        let name = self.ident_or_error("typealias name");
+        let type_params = if self.at(TokenKind::Lt) {
+            self.parse_type_params(start.lo).0
+        } else {
+            Vec::new()
+        };
+        self.expect(TokenKind::Eq, "'='");
+        self.skip_plain_newlines();
+        let target = self.parse_type();
+        let end = self.t[self.i.saturating_sub(1)].span;
+        crate::ast::TypeAliasDecl {
+            name,
+            type_params,
+            target,
+            span: Span::new(start.lo, end.hi),
+        }
+    }
+
+    /// Parse a property declaration. Whether an absent initializer is legal belongs to semantic
+    /// checking, because the answer depends on declaration ownership and modifiers.
+    fn parse_top_property(&mut self, is_lateinit: bool, semantic_context: bool) -> PropDecl {
+        self.parse_top_property_c(is_lateinit, semantic_context, false, false)
     }
 
     /// Consume an initializer's `=` when the next non-newline token is one.
@@ -2013,7 +2020,7 @@ impl<'a> Parser<'a> {
     fn parse_top_property_c(
         &mut self,
         is_lateinit: bool,
-        abstract_ok: bool,
+        _abstract_ok: bool,
         is_const: bool,
         is_abstract: bool,
     ) -> PropDecl {
@@ -2025,12 +2032,16 @@ impl<'a> Parser<'a> {
         self.bump(); // val/var
                      // Optional generic type parameters on an extension property (`val <T> T.foo: T`) —
                      // erased, but retained so they scope over the receiver, type, and accessor bodies.
-        let (type_params, _tp_non_null, _tp_reified, type_param_bounds, _) =
+        let (type_params, _tp_non_null, _tp_reified, mut type_param_bounds, _) =
             if self.at(TokenKind::Lt) {
                 self.parse_type_params(start.lo)
             } else {
                 Default::default()
             };
+        while self.at(TokenKind::At) {
+            let _ = self.parse_annotation(); // receiver use-site annotation
+            self.skip_plain_newlines();
+        }
         let (receiver, name) = self.parse_receiver_and_declaration_name("property name");
         let ty = if self.eat(TokenKind::Colon) {
             // `… (':' NL* type)?` — the type may start on the next line, which is where a formatter
@@ -2052,23 +2063,25 @@ impl<'a> Parser<'a> {
         }
         // `val x: T by <expr>` — a delegated property (in place of `= init`). Reads/writes route through
         // the delegate's `getValue`/`setValue` operators.
+        let delegate_start = self.i;
+        self.skip_plain_newlines();
         let delegate = if init.is_none() && self.at(TokenKind::Ident) && self.keyword_text("by") {
             self.bump(); // 'by'
             self.skip_newlines();
             Some(self.parse_expr())
         } else {
+            self.i = delegate_start;
             None
         };
+        type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
         // Optional custom accessors: `get() = expr` / `get() { … }` and/or `[private] set(v) { … }`
         // / `private set`. Either order; at most one of each. An accessor begins with `get`/`set`
         // (optionally preceded by a visibility modifier) — anything else ends the property.
         let mut getter: Option<FunBody> = None;
+        let mut getter_declared = false;
         let mut getter_ty: Option<TypeRef> = None;
         let mut setter: Option<PropAccessor> = None;
         let mut explicit_backing_field = None;
-        // A bare `get`/`set` (default accessor with no body) was seen — the property then has a real
-        // backing field and MUST be initialized (a bare accessor is not an abstract declaration).
-        let mut saw_bare_accessor = false;
         'accessors: loop {
             let save = self.i;
             self.skip_newlines();
@@ -2144,6 +2157,7 @@ impl<'a> Parser<'a> {
             let is_get = self.keyword_text("get");
             self.bump(); // 'get' / 'set'
             if is_get {
+                getter_declared = true;
                 // A custom getter is `get() = expr` / `get() { … }`. A bare `get` or a `get()` with
                 // no body is the (redundant) explicit DEFAULT getter — consume its optional `()` and
                 // leave `getter` unset (the property keeps its default field accessor).
@@ -2158,8 +2172,6 @@ impl<'a> Parser<'a> {
                         self.tok().span,
                         "expected '=' or '{' for a property getter".to_string(),
                     );
-                } else {
-                    saw_bare_accessor = true;
                 }
                 let _ = is_private; // getter visibility not modeled (rare); ignored
             } else {
@@ -2173,9 +2185,6 @@ impl<'a> Parser<'a> {
                 } else {
                     None // default-bodied setter (e.g. `private set`)
                 };
-                if body.is_none() {
-                    saw_bare_accessor = true;
-                }
                 setter = Some(PropAccessor {
                     param,
                     body,
@@ -2183,38 +2192,10 @@ impl<'a> Parser<'a> {
                 });
             }
         }
-        // A property with no initializer, no getter, and no backing-field need must be `lateinit`
-        // (or an abstract/interface property); an extension property always has a getter, so it is
-        // exempt.
-        if init.is_none()
-            && delegate.is_none()
-            && getter.is_none()
-            && setter.is_none()
-            && !is_lateinit
-            && !abstract_ok
-            && !is_abstract
-            && receiver.is_none()
-            && context_params.is_empty()
-        {
-            self.diags.error(
-                start,
-                "krusty: a property without an initializer must be 'lateinit'",
-            );
-        }
-        // A bare `get`/`set` (default accessor, no body) means the property has a real backing field,
-        // so it is NOT an abstract declaration and MUST be initialized.
-        if saw_bare_accessor
-            && init.is_none()
-            && delegate.is_none()
-            && !is_lateinit
-            && receiver.is_none()
-            && context_params.is_empty()
-        {
-            self.diags.error(
-                start,
-                "krusty: a property with a default accessor must be initialized".to_string(),
-            );
-        }
+        // Initializer requirements are semantic. The syntax layer retains a missing initializer for
+        // abstract/expect/external members, deferred initialization, delegated/default-accessor
+        // combinations, and invalid neighboring forms alike; signature collection/checking decides
+        // which declaration contexts permit it.
         let end = self.t[self.i.saturating_sub(1)].span;
         let getter_reads_field = getter
             .as_ref()
@@ -2238,7 +2219,10 @@ impl<'a> Parser<'a> {
             is_var,
             is_override: false,
             is_lateinit,
+            is_external: false,
+            is_expect: false,
             getter,
+            getter_declared,
             getter_ty,
             getter_reads_field,
             setter,
@@ -2427,7 +2411,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse `companion object [Name]` as an ordinary nested singleton class and return its arena id.
+    /// Parse `companion object [Name]` or `companion { … }` as an ordinary nested singleton class
+    /// and return its arena id.
     /// The enclosing declaration keeps only this relationship edge; all declaration data belongs to
     /// the nested class itself.
     fn parse_companion(&mut self, outer: &str, modifiers: &[String]) -> DeclId {
@@ -2436,8 +2421,11 @@ impl<'a> Parser<'a> {
         let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
         self.bump(); // 'companion'
-        self.bump(); // 'object'
-        let simple_name = if self.at(TokenKind::Ident) {
+        let has_object_keyword = self.at(TokenKind::Ident) && self.keyword_text("object");
+        if has_object_keyword {
+            self.bump(); // 'object'
+        }
+        let simple_name = if has_object_keyword && self.at(TokenKind::Ident) {
             self.bump().text(self.src).to_string()
         } else {
             "Companion".to_string()
@@ -2455,6 +2443,7 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         let mut props = Vec::new();
         let mut init_order = Vec::new();
+        let mut type_aliases = Vec::new();
         self.skip_newlines();
         if self.eat(TokenKind::LBrace) {
             loop {
@@ -2481,6 +2470,8 @@ impl<'a> Parser<'a> {
                         property.is_open = !mods.iter().any(|m| m == "final")
                             && mods.iter().any(|m| m == "open" || m == "override");
                         property.is_override = mods.iter().any(|m| m == "override");
+                        property.is_external = mods.iter().any(|m| m == "external");
+                        property.is_expect = mods.iter().any(|m| m == "expect");
                         init_order.push(ClassInit::PropInit(props.len()));
                         props.push(property);
                     }
@@ -2494,10 +2485,13 @@ impl<'a> Parser<'a> {
                         self.bump();
                         init_order.push(ClassInit::Block(self.parse_block_expr(false)));
                     }
+                    TokenKind::Ident if self.keyword_text("typealias") => {
+                        type_aliases.push(self.parse_type_alias_syntax());
+                    }
                     _ => {
                         self.diags.error(
                             self.tok().span,
-                            "companion object body accepts class members",
+                            "expected a companion-object member declaration",
                         );
                         self.bump();
                     }
@@ -2538,6 +2532,7 @@ impl<'a> Parser<'a> {
             base_type_args,
             base_args,
             secondary_ctors: Vec::new(),
+            type_aliases,
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
@@ -2557,7 +2552,11 @@ impl<'a> Parser<'a> {
         self.bump(); // 'enum'
         self.bump(); // 'class'
         let name = self.ident_or_error("enum name");
-        // Optional primary constructor: `enum class C(val rgb: Int, …)`.
+        // Optional explicit `constructor` keyword and primary constructor:
+        // `enum class C constructor(val rgb: Int, …)`.
+        if self.at(TokenKind::Ident) && self.keyword_text("constructor") {
+            self.bump();
+        }
         let mut props = Vec::new();
         let has_primary_ctor = self.eat(TokenKind::LParen);
         if has_primary_ctor {
@@ -2625,6 +2624,7 @@ impl<'a> Parser<'a> {
         // A `companion object { … }` in the enum body (`enum class E { A; companion object { … } }`).
         let mut companion = None;
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
+        let mut type_aliases = Vec::new();
         self.skip_newlines();
         if self.eat(TokenKind::LBrace) {
             // `enum class E {; ... }` has no entries. The lexer represents `;` and a physical line
@@ -2730,7 +2730,7 @@ impl<'a> Parser<'a> {
                             } else {
                                 self.diags.error(
                                     self.tok().span,
-                                    "unsupported declaration in an enum entry body",
+                                    "expected an enum-entry member declaration",
                                 );
                                 while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                                     self.bump();
@@ -2784,6 +2784,8 @@ impl<'a> Parser<'a> {
                         p.is_open = !emods.iter().any(|x| x == "final")
                             && emods.iter().any(|x| x == "open" || x == "override");
                         p.is_override = emods.iter().any(|m| m == "override");
+                        p.is_external = emods.iter().any(|m| m == "external");
+                        p.is_expect = emods.iter().any(|m| m == "expect");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -2844,16 +2846,13 @@ impl<'a> Parser<'a> {
                             span: ctor_span,
                         });
                     }
-                    TokenKind::Ident
-                        if self.keyword_text("companion")
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .is_some_and(|t| self.token_keyword_text(*t, "object")) =>
-                    {
+                    TokenKind::Ident if self.at_companion_declaration() => {
                         // `companion object { … }` in the enum body — parse it like a regular class's
                         // companion (anonymous name allowed) and attach its members to the enum.
                         companion = Some(self.parse_companion(&name, &emods));
+                    }
+                    TokenKind::Ident if self.keyword_text("typealias") => {
+                        type_aliases.push(self.parse_type_alias_syntax());
                     }
                     _ => break,
                 }
@@ -2861,7 +2860,7 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             if !self.at(TokenKind::RBrace) {
                 self.diags
-                    .error(self.tok().span, "krusty: unsupported enum member");
+                    .error(self.tok().span, "expected an enum member declaration");
                 while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                     self.bump();
                 }
@@ -2901,6 +2900,7 @@ impl<'a> Parser<'a> {
             base_type_args: Vec::new(),
             base_args: Vec::new(),
             secondary_ctors,
+            type_aliases,
             primary_ctor_annotations: has_primary_ctor.then_some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
@@ -2935,12 +2935,6 @@ impl<'a> Parser<'a> {
             return bounds;
         }
         self.bump(); // 'where'
-                     // Track per-name FUNCTION-TYPE bounds: an intersection (`where T : () -> Unit,
-                     // T : (Boolean) -> Unit`) makes a `T` value convertible to several SAM shapes, and krusty's
-                     // SAM conversion adapts lambda literals, not values behind an erased `T` — a call would
-                     // pass the raw value where kotlinc synthesizes a wrapper (`ClassCastException`). Reject.
-        let mut fn_bounds: std::collections::HashMap<String, u32> =
-            std::collections::HashMap::new();
         loop {
             self.skip_newlines();
             let mut tp_name = String::new();
@@ -2959,16 +2953,6 @@ impl<'a> Parser<'a> {
             }
             if self.eat(TokenKind::Colon) {
                 let bound = self.parse_type();
-                if !bound.fun_params.is_empty() || bound.name == "<fun>" {
-                    let n = fn_bounds.entry(tp_name.clone()).or_default();
-                    *n += 1;
-                    if *n > 1 {
-                        self.diags.error(
-                            bound.span,
-                            format!("krusty: type parameter '{tp_name}' with multiple function-type bounds is not supported"),
-                        );
-                    }
-                }
                 if !tp_name.is_empty() {
                     bounds.push((tp_name.clone(), bound));
                 }
@@ -3033,47 +3017,6 @@ impl<'a> Parser<'a> {
                     .expect("an operator modifier must retain its source token")
             });
         self.bump(); // 'fun'
-                     // `fun interface` is a SAM/functional interface declaration — not a regular function.
-                     // Skip the entire interface body with a clean unsupported-feature message.
-        if self.at(TokenKind::Ident) && self.keyword_text("interface") {
-            self.diags.error(
-                start,
-                "krusty: 'fun interface' (SAM interfaces) are not supported",
-            );
-            self.bump(); // 'interface'
-            if self.at(TokenKind::Ident) {
-                self.bump();
-            } // interface name
-            self.parse_type_args();
-            let (supertypes, _, _, _, _, _, _) = self.parse_supertypes();
-            let _ = supertypes;
-            if self.at(TokenKind::LBrace) {
-                let _ = self.parse_block_expr(false);
-            }
-            return FunDecl {
-                name: "<fun-interface>".to_string(),
-                receiver: None,
-                params: vec![],
-                context_count: 0,
-                ret: None,
-                body: FunBody::None,
-                type_params: vec![],
-                type_param_bounds: Vec::new(),
-                non_null_type_params: Default::default(),
-                reified_type_params: Default::default(),
-                span: start,
-                signature_span: start,
-                override_span: None,
-                operator_span: None,
-                flags: FdFlags::default(),
-                visibility: Visibility::Public,
-                annotations,
-                annotation_args,
-                decl_line: 0, // filled by the parser post-pass
-                sig_line: 0,
-                body_close_line: 0,
-            };
-        }
         let (type_params, non_null_type_params, reified_type_params, type_param_bounds, _) =
             if self.at(TokenKind::Lt) {
                 self.parse_type_params(start.lo)
@@ -3088,6 +3031,10 @@ impl<'a> Parser<'a> {
             };
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
+        while self.at(TokenKind::At) {
+            let _ = self.parse_annotation(); // receiver use-site annotation
+            self.skip_plain_newlines();
+        }
         let (receiver, name) = self.parse_receiver_and_declaration_name("extension function name");
         let mut params = self.parse_param_list();
         // Context parameters (`context(a: A) fun f()`), parsed at the declaration site into
@@ -3415,6 +3362,17 @@ impl<'a> Parser<'a> {
                 let nested = self.parse_class();
                 (nested, true)
             }
+            TokenKind::KwFun
+                if self
+                    .t
+                    .get(self.i + 1)
+                    .is_some_and(|token| self.token_keyword_text(*token, "interface")) =>
+            {
+                self.bump(); // `fun`
+                let mut nested = self.parse_interface();
+                nested.is_fun_interface = true;
+                (nested, false)
+            }
             TokenKind::Ident
                 if self.keyword_text("data")
                     && self.t.get(self.i + 1).is_some_and(|token| {
@@ -3660,6 +3618,7 @@ impl<'a> Parser<'a> {
         let mut init_order: Vec<ClassInit> = Vec::new();
         let mut companion = None;
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
+        let mut type_aliases = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
@@ -3693,6 +3652,8 @@ impl<'a> Parser<'a> {
                         p.is_open = !mods.iter().any(|x| x == "final")
                             && mods.iter().any(|x| x == "open" || x == "override");
                         p.is_override = mods.iter().any(|m| m == "override");
+                        p.is_external = mods.iter().any(|m| m == "external");
+                        p.is_expect = mods.iter().any(|m| m == "expect");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -3708,13 +3669,7 @@ impl<'a> Parser<'a> {
                         init_order.push(ClassInit::Block(block));
                     }
                     // A companion is a nested singleton declaration linked from this class.
-                    TokenKind::Ident
-                        if self.keyword_text("companion")
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .is_some_and(|t| self.token_keyword_text(*t, "object")) =>
-                    {
+                    TokenKind::Ident if self.at_companion_declaration() => {
                         companion = Some(self.parse_companion(&name, &mods));
                     }
                     TokenKind::Ident
@@ -3776,15 +3731,11 @@ impl<'a> Parser<'a> {
                         });
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
-                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
-                            self.bump();
-                        }
+                        type_aliases.push(self.parse_type_alias_syntax());
                     }
                     _ => {
-                        self.diags.error(
-                            self.tok().span,
-                            "v0: class bodies support member 'fun', 'val'/'var', and 'init' blocks",
-                        );
+                        self.diags
+                            .error(self.tok().span, "expected a class member declaration");
                         self.bump();
                     }
                 }
@@ -3831,6 +3782,7 @@ impl<'a> Parser<'a> {
                 .then_some(primary_constructor_annotations),
             primary_ctor_annotation_args: primary_constructor_annotation_args,
             secondary_ctors,
+            type_aliases,
             span: Span::new(start.lo, end.hi),
             ctor_close_line: ctor_close_lo,
             decl_line: 0,
@@ -3866,6 +3818,19 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let sup_span = self.tok().span;
+                let mut supertype_annotations = Vec::new();
+                while self.at(TokenKind::At) {
+                    let (annotation, _) = self.parse_annotation();
+                    if let Some(annotation) = annotation {
+                        supertype_annotations.push(annotation);
+                    }
+                    self.skip_plain_newlines();
+                }
+                if !supertype_annotations.is_empty() {
+                    self.file
+                        .type_annotations
+                        .insert(self.tok().span.lo, supertype_annotations);
+                }
                 // A FUNCTION-TYPE supertype (`class C : () -> R`, `(A) -> R`, `Recv.() -> R`): a class
                 // implementing a function type implements `kotlin/jvm/functions/FunctionN` (arity N =
                 // value parameters, with an extension receiver folded in as the first). Parse the type
@@ -3875,12 +3840,10 @@ impl<'a> Parser<'a> {
                     let ft = self.parse_type();
                     let arity = ft.fun_params.len();
                     if ft.fun_suspend() || arity > 22 {
-                        // A `suspend` function type (a distinct `SuspendFunctionN` shape) and an arity
-                        // beyond the stdlib's `Function0..22` (big-arity `FunctionN`) are not modeled.
-                        self.diags.error(
-                            sup_span,
-                            "krusty: this function-type supertype is not supported".to_string(),
-                        );
+                        // Preserve source-valid suspend and big-arity function supertypes in their
+                        // semantic Kotlin shape. Signature collection may reject an unsupported
+                        // representation later; parsing must not erase the declared supertype.
+                        ifaces.push(ft);
                     } else {
                         let mut targs = ft.fun_params.clone();
                         if let Some(ret) = ft.arg.as_deref() {
@@ -3993,9 +3956,8 @@ impl<'a> Parser<'a> {
                         fun_context_count: 0,
                     });
                 }
-                // Class delegation: `: Iface by delegate`. A simple-name delegate (a `val` ctor-param
-                // field) is supported — record `(iface, delegate)`; any other delegate expression is
-                // skipped (parsed but marked unsupported).
+                // Class delegation: `: Iface by delegate`. Preserve both the simple-name field form
+                // and a general delegate expression; representation support belongs to later phases.
                 if self.at(TokenKind::Ident) && self.keyword_text("by") {
                     self.bump(); // 'by'
                     if self.at(TokenKind::Ident) {
@@ -4071,6 +4033,7 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut companion = None;
+        let mut type_aliases = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
@@ -4096,28 +4059,20 @@ impl<'a> Parser<'a> {
                         let mut p = self.parse_top_property(false, true);
                         p.visibility = visibility_of(&imods);
                         p.is_override = imods.iter().any(|m| m == "override");
-                        if p.init.is_some() {
-                            self.diags.error(p.span, "krusty: interface properties with an initializer/getter are not supported");
-                        }
+                        p.is_external = imods.iter().any(|m| m == "external");
+                        p.is_expect = imods.iter().any(|m| m == "expect");
                         body_props.push(p);
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
-                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
-                            self.bump();
-                        }
+                        type_aliases.push(self.parse_type_alias_syntax());
                     }
                     // `interface I { companion object { … } }` — same as a class companion.
-                    TokenKind::Ident
-                        if self.keyword_text("companion")
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .is_some_and(|t| self.token_keyword_text(*t, "object")) =>
-                    {
+                    TokenKind::Ident if self.at_companion_declaration() => {
                         companion = Some(self.parse_companion(&name, &imods));
                     }
                     _ => {
-                        self.diags.error(self.tok().span, "v0: interface bodies support abstract 'fun' and 'val'/'var' declarations");
+                        self.diags
+                            .error(self.tok().span, "expected an interface member declaration");
                         self.bump();
                     }
                 }
@@ -4157,6 +4112,7 @@ impl<'a> Parser<'a> {
             base_type_args: Vec::new(),
             base_args: Vec::new(),
             secondary_ctors: Vec::new(),
+            type_aliases,
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
@@ -4167,10 +4123,18 @@ impl<'a> Parser<'a> {
 
     /// `object Name { fun … }` — a singleton with member functions (no primary constructor).
     /// Parse an object/anonymous-object body `{ fun…/val…/init… }`, returning its members.
-    fn parse_object_body(&mut self) -> (Vec<FunDecl>, Vec<PropDecl>, Vec<ClassInit>) {
+    fn parse_object_body(
+        &mut self,
+    ) -> (
+        Vec<FunDecl>,
+        Vec<PropDecl>,
+        Vec<ClassInit>,
+        Vec<crate::ast::TypeAliasDecl>,
+    ) {
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
+        let mut type_aliases = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
@@ -4195,6 +4159,8 @@ impl<'a> Parser<'a> {
                         p.is_open = !mods.iter().any(|x| x == "final")
                             && mods.iter().any(|x| x == "open" || x == "override");
                         p.is_override = mods.iter().any(|m| m == "override");
+                        p.is_external = mods.iter().any(|m| m == "external");
+                        p.is_expect = mods.iter().any(|m| m == "expect");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -4228,22 +4194,18 @@ impl<'a> Parser<'a> {
                         let _ = self.parse_nested_type_decl();
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
-                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
-                            self.bump();
-                        }
+                        type_aliases.push(self.parse_type_alias_syntax());
                     }
                     _ => {
-                        self.diags.error(
-                            self.tok().span,
-                            "krusty: object bodies support 'fun', 'val'/'var', and 'init' blocks",
-                        );
+                        self.diags
+                            .error(self.tok().span, "expected an object member declaration");
                         self.bump();
                     }
                 }
             }
             self.expect(TokenKind::RBrace, "'}'");
         }
-        (methods, body_props, init_order)
+        (methods, body_props, init_order, type_aliases)
     }
 
     fn parse_anon_object(&mut self, span: Span) -> ExprId {
@@ -4257,7 +4219,7 @@ impl<'a> Parser<'a> {
             delegations,
             delegation_exprs,
         ) = self.parse_supertypes();
-        let (methods, body_props, init_order) = self.parse_object_body();
+        let (methods, body_props, init_order, type_aliases) = self.parse_object_body();
         let end = self.t[self.i.saturating_sub(1)].span;
         let name = format!("Anon$anon${}", span.lo);
         let synth = ClassDecl {
@@ -4291,6 +4253,7 @@ impl<'a> Parser<'a> {
             base_type_args,
             base_args,
             secondary_ctors: Vec::new(),
+            type_aliases,
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(span.lo, end.hi),
@@ -4331,6 +4294,7 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
+        let mut type_aliases = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
@@ -4362,6 +4326,8 @@ impl<'a> Parser<'a> {
                         p.is_open = !mods.iter().any(|x| x == "final")
                             && mods.iter().any(|x| x == "open" || x == "override");
                         p.is_override = mods.iter().any(|m| m == "override");
+                        p.is_external = mods.iter().any(|m| m == "external");
+                        p.is_expect = mods.iter().any(|m| m == "expect");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -4386,15 +4352,11 @@ impl<'a> Parser<'a> {
                         let _ = self.parse_nested_type_decl();
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
-                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
-                            self.bump();
-                        }
+                        type_aliases.push(self.parse_type_alias_syntax());
                     }
                     _ => {
-                        self.diags.error(
-                            self.tok().span,
-                            "krusty: object bodies support 'fun', 'val'/'var', and 'init' blocks",
-                        );
+                        self.diags
+                            .error(self.tok().span, "expected an object member declaration");
                         self.bump();
                     }
                 }
@@ -4434,6 +4396,7 @@ impl<'a> Parser<'a> {
             base_type_args,
             base_args,
             secondary_ctors: Vec::new(),
+            type_aliases,
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
@@ -5485,6 +5448,29 @@ impl<'a> Parser<'a> {
                 let write = self.file.add_expr(Expr::Member { receiver, name }, span);
                 Some((vec![receiver], read, write))
             }
+            Expr::SafeCall {
+                receiver,
+                name,
+                args: None,
+            } => {
+                let read = self.file.add_expr(
+                    Expr::SafeCall {
+                        receiver,
+                        name: name.clone(),
+                        args: None,
+                    },
+                    span,
+                );
+                let write = self.file.add_expr(
+                    Expr::SafeCall {
+                        receiver,
+                        name,
+                        args: None,
+                    },
+                    span,
+                );
+                Some((vec![receiver], read, write))
+            }
             Expr::Index { array, indices } => {
                 let mut operands = Vec::with_capacity(indices.len() + 1);
                 operands.push(array);
@@ -5608,6 +5594,34 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt_inner(&mut self) -> StmtId {
+        // Labels may prefix declarations as well as loops/lambdas. Keep the declaration as its real
+        // statement node and retain the label in the file's sparse source metadata.
+        if self.at(TokenKind::Ident)
+            && self
+                .t
+                .get(self.i + 1)
+                .is_some_and(|token| token.kind == TokenKind::At)
+        {
+            let after = self.after_plain_newlines(self.i + 2);
+            let declaration_follows = self.t.get(after).is_some_and(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::KwVal | TokenKind::KwVar | TokenKind::KwFun
+                ) || self.token_keyword_text(*token, "typealias")
+            });
+            if declaration_follows {
+                let label = self.text().to_string();
+                let label_span = self.tok().span;
+                self.bump(); // label
+                self.bump(); // '@'
+                self.skip_plain_newlines();
+                let statement = self.parse_stmt();
+                self.file
+                    .statement_labels
+                    .insert(statement, (label, label_span));
+                return statement;
+            }
+        }
         // Labeled loop: `l1@ while(…)` / `l1@ for(…)` / `l1@ do {…}`. Capture the label and thread it
         // onto the loop so `break@l1`/`continue@l1` can target it.
         let mut loop_label: Option<String> = None;
@@ -5651,13 +5665,7 @@ impl<'a> Parser<'a> {
                 }
                 if self.kind() != kind {
                     let mods = self.parse_member_decl_prefix();
-                    if !self.pending_context_params.is_empty() {
-                        self.diags.error(
-                            start,
-                            "context receivers on local properties are not supported",
-                        );
-                        self.pending_context_params.clear();
-                    }
+                    let context_params = std::mem::take(&mut self.pending_context_params);
                     self.pending_annotations.clear();
                     self.pending_annotation_args.clear();
                     if kind == TokenKind::KwVar
@@ -5667,9 +5675,21 @@ impl<'a> Parser<'a> {
                         let name = self.ident_or_error("variable name");
                         self.expect(TokenKind::Colon, "':'");
                         let ty = self.parse_type();
-                        return self.finish_stmt(Stmt::LocalLateinit { name, ty }, start);
+                        let statement = self.finish_stmt(Stmt::LocalLateinit { name, ty }, start);
+                        if !context_params.is_empty() {
+                            self.file
+                                .local_property_context_params
+                                .insert(statement, context_params);
+                        }
+                        return statement;
                     }
-                    return self.parse_stmt();
+                    let statement = self.parse_stmt();
+                    if !context_params.is_empty() {
+                        self.file
+                            .local_property_context_params
+                            .insert(statement, context_params);
+                    }
+                    return statement;
                 }
             }
         }
@@ -5928,6 +5948,10 @@ impl<'a> Parser<'a> {
                 let function = self.parse_fun(&[]);
                 self.finish_stmt(Stmt::LocalFun(function), start)
             }
+            TokenKind::Ident if self.keyword_text("typealias") => {
+                let alias = self.parse_type_alias_syntax();
+                self.finish_stmt(Stmt::LocalTypeAlias(alias), start)
+            }
             // Local class declaration inside a function body (`class`/`data class`/`enum class`/
             // `sealed class`/`annotation class`/`interface Name`, optionally `open`/`abstract`/… prefixed).
             // Consume leading modifiers/annotations (as the top-level path does), then apply `open`/
@@ -6117,6 +6141,42 @@ impl<'a> Parser<'a> {
                                 target_span,
                             );
                         }
+                        Expr::SafeCall {
+                            receiver,
+                            name,
+                            args: None,
+                        } => {
+                            self.bump();
+                            self.skip_newlines();
+                            let rhs = self.parse_expr();
+                            let lhs = self.file.add_expr(
+                                Expr::SafeCall {
+                                    receiver,
+                                    name: name.clone(),
+                                    args: None,
+                                },
+                                target_span,
+                            );
+                            let value = self.file.add_expr(
+                                Expr::Binary {
+                                    op,
+                                    lhs,
+                                    rhs,
+                                    operator_span: op_span,
+                                },
+                                Span::new(target_span.lo, self.file.expr_spans[rhs.0 as usize].hi),
+                            );
+                            return self.finish_assignment_stmt(
+                                Stmt::AssignMember {
+                                    receiver,
+                                    name,
+                                    value,
+                                    safe: true,
+                                },
+                                start,
+                                target_span,
+                            );
+                        }
                         Expr::Index { array, indices } => {
                             self.bump();
                             self.skip_newlines();
@@ -6142,6 +6202,21 @@ impl<'a> Parser<'a> {
                                     array,
                                     indices,
                                     value,
+                                },
+                                start,
+                                target_span,
+                            );
+                        }
+                        Expr::Call { .. } => {
+                            self.bump();
+                            self.skip_newlines();
+                            let value = self.parse_expr();
+                            return self.finish_assignment_stmt(
+                                Stmt::CompoundAssign {
+                                    target: e,
+                                    value,
+                                    op,
+                                    operator_span: op_span,
                                 },
                                 start,
                                 target_span,
@@ -6239,6 +6314,10 @@ impl<'a> Parser<'a> {
         // operator is left for the `for`-specific range handling below (not swallowed into a
         // `RangeTo` value expression).
         let rstart = self.parse_bp(9);
+        // A parenthesized or control-flow range bound may end on its own line before the range
+        // operator. Physical newlines are allowed here; an explicit semicolon still terminates the
+        // iterable expression and is deliberately left visible.
+        self.skip_plain_newlines();
         let kind = if self.eat(TokenKind::DotDot) {
             RangeKind::Through
         } else if self.eat(TokenKind::DotDotLt) {
@@ -6578,7 +6657,10 @@ impl<'a> Parser<'a> {
 
     fn assignment_target_span(&self, expression: ExprId) -> Span {
         match self.file.expr(expression) {
-            Expr::Member { name, .. } => self
+            Expr::Member { name, .. }
+            | Expr::SafeCall {
+                name, args: None, ..
+            } => self
                 .file
                 .exact_member_name_spans
                 .get(&expression.0)
@@ -7447,6 +7529,20 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Dot => {
                     let dot_span = self.bump().span;
+                    if self.eat(TokenKind::LParen) {
+                        let callable = self.parse_expr();
+                        let end = self.tok().span;
+                        self.expect(TokenKind::RParen, "')'");
+                        let lspan = self.file.expr_spans[lhs.0 as usize];
+                        lhs = self.file.add_expr(
+                            Expr::ExtensionAccess {
+                                receiver: lhs,
+                                callable,
+                            },
+                            Span::new(lspan.lo, end.hi),
+                        );
+                        continue;
+                    }
                     let name_token = self.tok();
                     let name_span = self.syntactic_ident_span(name_token);
                     let name = self.ident_or_error("member name");
@@ -8068,7 +8164,7 @@ impl<'a> Parser<'a> {
         }
         if catches.is_empty() && finally.is_none() {
             self.diags
-                .error(start, "try without a catch or finally is not supported");
+                .error(start, "expected 'catch' or 'finally' after try body");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         self.file.add_expr(
@@ -8097,6 +8193,16 @@ impl<'a> Parser<'a> {
                 name,
                 value,
                 safe: false,
+            },
+            Expr::SafeCall {
+                receiver,
+                name,
+                args: None,
+            } => Stmt::AssignMember {
+                receiver,
+                name,
+                value,
+                safe: true,
             },
             Expr::Index { array, indices } => Stmt::AssignIndex {
                 array,
@@ -8550,8 +8656,7 @@ fn function_flags(modifiers: &[String]) -> FdFlags {
 type DestructureEntries = (Vec<(String, bool)>, Vec<Option<String>>);
 
 fn is_modifier(text: &str) -> bool {
-    // NOTE: `external` is deliberately excluded — ignoring it (no native body) would *miscompile*
-    // rather than skip. `tailrec` IS recognized: the lowerer rewrites the tail self-calls into a loop
+    // `tailrec` is recognized: the lowerer rewrites the tail self-calls into a loop
     // (so deep recursion doesn't overflow); a non-tail-optimizable `tailrec` falls back to plain
     // recursion (kotlinc warns; same runtime for the shallow cases).
     matches!(
@@ -8580,6 +8685,7 @@ fn is_modifier(text: &str) -> bool {
             | "expect"
             | "value"
             | "inner"
+            | "external"
     )
 }
 
@@ -10277,6 +10383,180 @@ typealias Box<@Marker T> = List<T>
                 .map(|diagnostic| diagnostic.msg.as_str())
                 .collect::<Vec<_>>(),
             ["multi-dollar string interpolation is disabled by the language feature set"]
+        );
+    }
+
+    #[test]
+    fn parser_retains_function_supertypes_multiple_bounds_and_property_forms() {
+        let source =
+            "abstract class Holder<T> : (T) -> T where T : () -> Int, T : (String) -> String {\n\
+                          abstract val missing: String\n\
+                          lateinit var later: String\n\
+                          val delegated: String by lazy { \"OK\" }\n\
+                          val defaulted: String\n\
+                              get\n\
+                          typealias Nested<U> = List<U>\n\
+                      }\n\
+                      fun interface Action { fun run(): String }\n";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|d| d.msg.as_str())
+                .collect::<Vec<_>>(),
+            [] as [&str; 0]
+        );
+
+        let holder = file
+            .decl_arena
+            .iter()
+            .find_map(|declaration| match declaration {
+                Decl::Class(class) if class.name == "Holder" => Some(class),
+                _ => None,
+            })
+            .expect("Holder class");
+        assert_eq!(holder.supertypes.len(), 1);
+        assert_eq!(holder.supertypes[0].fun_params.len(), 1);
+        assert_eq!(holder.type_param_bounds.len(), 2);
+        assert_eq!(holder.body_props.len(), 4);
+        assert!(holder.body_props[0].init.is_none());
+        assert!(holder.body_props[1].init.is_none());
+        assert!(holder.body_props[2].delegate.is_some());
+        assert!(holder.body_props[3].init.is_none());
+        assert!(holder.body_props[3].getter.is_none());
+        assert_eq!(holder.type_aliases.len(), 1);
+        let alias = &holder.type_aliases[0];
+        assert_eq!(alias.name, "Nested");
+        assert_eq!(alias.type_params, ["U"]);
+        assert_eq!(alias.target.name, "List");
+        assert_eq!(
+            &source[alias.span.lo as usize..alias.span.hi as usize],
+            "typealias Nested<U> = List<U>"
+        );
+
+        let action = file
+            .decl_arena
+            .iter()
+            .find_map(|declaration| match declaration {
+                Decl::Class(class) if class.name == "Action" => Some(class),
+                _ => None,
+            })
+            .expect("fun interface");
+        assert!(action.is_fun_interface);
+        assert_eq!(action.methods.len(), 1);
+        assert_eq!(action.methods[0].name, "run");
+        file.validate_integrity(source).expect("valid AST");
+    }
+
+    #[test]
+    fn parser_retains_extension_access_compound_target_and_label_spans() {
+        let source = "fun syntax(receiver: String, callable: () -> Unit, value: Box) {\n\
+                          receiver.(callable)()\n\
+                          makeBox() += value\n\
+                          local@ typealias Alias<T> = List<T>\n\
+                      }\n";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|d| d.msg.as_str())
+                .collect::<Vec<_>>(),
+            [] as [&str; 0]
+        );
+
+        let extension = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| match expression {
+                Expr::ExtensionAccess { receiver, callable } => {
+                    Some((ExprId(index as u32), *receiver, *callable))
+                }
+                _ => None,
+            })
+            .expect("extension-function expression access");
+        assert_eq!(
+            &source[file.expr_spans[extension.0 .0 as usize].lo as usize
+                ..file.expr_spans[extension.0 .0 as usize].hi as usize],
+            "receiver.(callable)"
+        );
+        assert!(matches!(file.expr(extension.1), Expr::Name(name) if name == "receiver"));
+        assert!(matches!(file.expr(extension.2), Expr::Name(name) if name == "callable"));
+
+        let compound = file
+            .stmt_arena
+            .iter()
+            .find_map(|statement| match statement {
+                Stmt::CompoundAssign {
+                    target,
+                    value,
+                    op,
+                    operator_span,
+                } => Some((*target, *value, *op, *operator_span)),
+                _ => None,
+            })
+            .expect("compound call target");
+        assert_eq!(compound.2, BinOp::Add);
+        assert_eq!(
+            &source[compound.3.lo as usize..compound.3.hi as usize],
+            "+="
+        );
+        assert!(matches!(file.expr(compound.0), Expr::Call { .. }));
+        assert!(matches!(file.expr(compound.1), Expr::Name(name) if name == "value"));
+
+        let (&label_statement, (label, label_span)) = file
+            .statement_labels
+            .iter()
+            .next()
+            .expect("declaration label");
+        assert_eq!(label, "local");
+        assert_eq!(
+            &source[label_span.lo as usize..label_span.hi as usize],
+            "local"
+        );
+        assert!(
+            matches!(file.stmt(label_statement), Stmt::LocalTypeAlias(alias) if alias.name == "Alias")
+        );
+        file.validate_integrity(source).expect("valid AST");
+    }
+
+    #[test]
+    fn multiline_control_expression_before_down_to_is_one_for_range() {
+        let source = "fun range(flag: Boolean) {\n\
+                          for (i in (if (flag) 3 else 2)\n\
+                              downTo 0) { }\n\
+                      }\n";
+        let file = script(source);
+        assert!(file.stmt_arena.iter().any(|statement| matches!(
+            statement,
+            Stmt::For {
+                range: ForRange {
+                    kind: RangeKind::DownTo,
+                    ..
+                },
+                ..
+            }
+        )));
+        file.validate_integrity(source).expect("valid AST");
+    }
+
+    #[test]
+    fn malformed_nested_typealias_reports_the_complete_exact_diagnostic() {
+        let source = "class Broken { typealias Alias List<Int> }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let _ = parse(source, &tokens, &mut diagnostics);
+        assert_eq!(diagnostics.diags.len(), 1);
+        assert_eq!(diagnostics.diags[0].msg, "expected '='");
+        assert_eq!(
+            &source[diagnostics.diags[0].span.lo as usize..diagnostics.diags[0].span.hi as usize],
+            "List"
         );
     }
 }
