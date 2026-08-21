@@ -20491,6 +20491,8 @@ impl<'a> Lower<'a> {
             // A local class is lowered via its hoisted top-level `Decl::Class`; the in-body statement
             // emits nothing.
             Stmt::LocalClass(_) => Some(self.emit_block(vec![], None)),
+            Stmt::LocalTypeAlias(_) => Some(self.emit_block(vec![], None)),
+            Stmt::CompoundAssign { .. } => None,
         }
     }
 
@@ -22809,6 +22811,7 @@ impl<'a> Lower<'a> {
             // The checker either diagnosed this node at an emitted annotation application or left
             // it inert at a source position this compiler does not consume. It has no IR value.
             Expr::UnsupportedAnnotationArgument(_) | Expr::AnnotationArrayLiteral(_) => return None,
+            Expr::ExtensionAccess { .. } => return None,
             // `throw e` — throw the exception value; control never returns.
             Expr::Throw { operand } => {
                 let v = self.expr(operand)?;

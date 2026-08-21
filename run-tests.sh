@@ -22,8 +22,8 @@ source "$(dirname "$0")/scripts/libtest-shards.sh"
 
 # Frontend/corpus diagnosis is part of the test workflow, not a separate release-build path. Keep it
 # behind this harness so it receives the same provisioned Kotlin version and global deadline as the
-# conformance gate. Extra arguments are passed directly to `survey` (`--frontend-only`, `--file`,
-# `--samples`, `--report`).
+# conformance gate. Extra arguments are passed directly to `survey` (`--parse-only`,
+# `--frontend-only`, `--file`, `--samples`, `--report`).
 if [ "${1:-}" = "--survey" ]; then
   shift
   command -v just >/dev/null 2>&1 || {

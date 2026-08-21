@@ -354,6 +354,91 @@ pub fn inject_support_module(mods: &mut Vec<ModuleBlock>, helpers: &str) {
 /// including `.java`.
 pub type SourceBlock = (String, String);
 
+/// One Kotlin source block discovered inside a codegen test case.
+///
+/// Parse conformance is backend-independent and operates on the source files the test runner would
+/// hand to Kotlin, not on compilation units. Keeping the module name separate from the file stem
+/// makes a diagnostic unambiguous when two modules both contain (for example) `main.kt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KotlinSourceBlock {
+    pub module: Option<String>,
+    pub name: String,
+    pub source: String,
+}
+
+/// Discover every Kotlin source block in a prepared codegen test case.
+///
+/// Java `// FILE:` blocks are deliberately omitted: the parse-only conformance gate measures Kotlin
+/// lexing and parsing. A source without test-runner partition markers is one Kotlin block named by
+/// `fallback_stem`. `// MODULE:` and `// FILE:` interpretation delegates to the same splitters used by
+/// the compilation conformance gate so the two paths cannot acquire different testdata grammars.
+pub fn kotlin_source_blocks(
+    src: &str,
+    fallback_stem: &str,
+) -> Result<Vec<KotlinSourceBlock>, String> {
+    if src.contains("// MODULE:") || src.contains("// FILE:") {
+        let mut blocks = Vec::new();
+        let mut module: Option<String> = None;
+        let mut file_name: Option<String> = None;
+        let mut ignore_non_kotlin_file = false;
+        let mut body = String::new();
+        let flush = |blocks: &mut Vec<KotlinSourceBlock>,
+                     module: &Option<String>,
+                     file_name: &mut Option<String>,
+                     body: &mut String| {
+            if let Some(name) = file_name.take() {
+                blocks.push(KotlinSourceBlock {
+                    module: module.clone(),
+                    name,
+                    source: std::mem::take(body),
+                });
+            } else {
+                body.clear();
+            }
+        };
+        for line in src.lines() {
+            let trimmed = line.trim_start();
+            if let Some(header) = trimmed.strip_prefix("// MODULE:") {
+                flush(&mut blocks, &module, &mut file_name, &mut body);
+                let header = header.trim();
+                let name_end = header.find('(').unwrap_or(header.len());
+                module = Some(header[..name_end].trim().to_string());
+                ignore_non_kotlin_file = false;
+            } else if let Some(path) = trimmed.strip_prefix("// FILE:") {
+                flush(&mut blocks, &module, &mut file_name, &mut body);
+                let path = path.trim();
+                if let Some(stem) = path.strip_suffix(".kt") {
+                    file_name = Some(stem.rsplit('/').next().unwrap_or(stem).to_string());
+                    ignore_non_kotlin_file = false;
+                } else {
+                    // Java, JavaScript, and other backend fixture files are not Kotlin source blocks.
+                    ignore_non_kotlin_file = true;
+                }
+            } else if file_name.is_some() {
+                body.push_str(line);
+                body.push('\n');
+            } else if module.is_some()
+                && !ignore_non_kotlin_file
+                && !trimmed.is_empty()
+                && !trimmed.starts_with("//")
+            {
+                // The testdata convention permits one implicit Kotlin file immediately under a
+                // module header. Name it after the module, just like `split_modules`.
+                file_name = module.clone();
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        flush(&mut blocks, &module, &mut file_name, &mut body);
+        return Ok(blocks);
+    }
+    Ok(vec![KotlinSourceBlock {
+        module: None,
+        name: fallback_stem.to_string(),
+        source: src.to_string(),
+    }])
+}
+
 /// Split a `// FILE:`-partitioned (single-module) test into Kotlin `(stem, content)` and Java
 /// `(leaf name incl. .java, content)` blocks. The preamble before the first marker is directives and
 /// belongs to no block. Non-`.java` files are treated as Kotlin (backend directives filter JS-target
@@ -1052,6 +1137,62 @@ fun box(): String = \"OK\"
         let (kt, java) = split_files("fun box(): String = \"OK\"\n");
         assert!(kt.is_empty());
         assert!(java.is_empty());
+    }
+
+    #[test]
+    fn kotlin_source_blocks_keeps_all_backends_and_ignores_java() {
+        let src = "// TARGET_BACKEND: JS\n\
+// FILE: first.kt\nval first = 1\n\
+// FILE: Helper.java\nclass Helper {}\n\
+// FILE: nested/second.kt\nval second = 2\n";
+        assert_eq!(
+            kotlin_source_blocks(src, "fallback").unwrap(),
+            vec![
+                KotlinSourceBlock {
+                    module: None,
+                    name: "first".into(),
+                    source: "val first = 1\n".into(),
+                },
+                KotlinSourceBlock {
+                    module: None,
+                    name: "second".into(),
+                    source: "val second = 2\n".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn kotlin_source_blocks_retains_module_identity() {
+        let src = "// MODULE: lib\n// FILE: same.kt\nval lib = 1\n\
+// MODULE: main(lib)\n// FILE: same.kt\nval main = 2\n";
+        assert_eq!(
+            kotlin_source_blocks(src, "fallback").unwrap(),
+            vec![
+                KotlinSourceBlock {
+                    module: Some("lib".into()),
+                    name: "same".into(),
+                    source: "val lib = 1\n".into(),
+                },
+                KotlinSourceBlock {
+                    module: Some("main".into()),
+                    name: "same".into(),
+                    source: "val main = 2\n".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn kotlin_source_blocks_unpartitioned_source_is_one_block() {
+        assert_eq!(
+            kotlin_source_blocks("val answer = 42\n", "answer").unwrap(),
+            vec![KotlinSourceBlock {
+                module: None,
+                name: "answer".into(),
+                source: "val answer = 42\n".into(),
+            }]
+        );
     }
 
     #[test]
