@@ -304,6 +304,131 @@ fun box(): String = if (C(7).use() == 217) "OK" else "FAIL"
 }
 
 #[test]
+fn as_cast_in_condition_smart_casts_on_fallthrough() {
+    let src = r#"
+fun f(a: Any?, len: Int): Boolean {
+    if (a == null || len != (a as CharSequence).length) return false
+    return a.length > 0
+}
+fun box(): String = if (f("abc", 3)) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAsConditionSmartCast");
+}
+
+#[test]
+fn safe_as_cast_in_condition_does_not_smart_cast_on_fallthrough() {
+    let src = r#"
+fun g(a: Any?, len: Int): Boolean {
+    if (a == null || len != ((a as? CharSequence)?.length ?: -1)) return false
+    return a.length > 0
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverSafeAsCondition", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverSafeAsCondition.kt".to_string(),
+            line: 4,
+            column: 14,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn conditionally_evaluated_as_cast_does_not_smart_cast() {
+    let src = r#"
+fun f(a: Any?, skip: Boolean): Int {
+    if (skip || (a as CharSequence).length == 0) return a.length
+    return 0
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverConditionalAs", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverConditionalAs.kt".to_string(),
+            line: 3,
+            column: 59,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn closure_mutated_value_does_not_smart_cast_after_as_cast() {
+    let src = r#"
+fun f(value: Any?): Int {
+    var current = value
+    val clear = { current = null }
+    if ((current as CharSequence).length == 0) return 0
+    return current.length
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverUnstableAs", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverUnstableAs.kt".to_string(),
+            line: 6,
+            column: 20,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn nullable_target_as_cast_narrows_to_the_nullable_target() {
+    let src = r#"
+fun f(a: Any?): Int {
+    if ((a as CharSequence?) == null) return -1
+    return a.length
+}
+fun box(): String = if (f("abc") == 3 && f(null) == -1) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverNullableTargetAs");
+}
+
+#[test]
+fn as_cast_in_third_disjunct_smart_casts_on_fallthrough() {
+    let src = r#"
+fun f(value: Any?, blocked: Boolean): Int {
+    if (value == null || blocked || (value as CharSequence).length == 0) return 0
+    return value.length
+}
+fun box(): String = if (f("abc", false) == 3) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAsConditionThirdDisjunct");
+}
+
+#[test]
+fn as_cast_in_nested_if_condition_smart_casts_on_both_outcomes() {
+    let src = r#"
+fun f(value: Any): Boolean {
+    if (if (value as Boolean) true else false) return value
+    return value
+}
+fun box(): String = if (f(true) && !f(false)) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAsNestedIfCondition");
+}
+
+#[test]
 fn selected_generic_member_keeps_its_inferred_return() {
     let src = r#"
 class C {
