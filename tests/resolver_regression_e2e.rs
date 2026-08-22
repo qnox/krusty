@@ -429,6 +429,127 @@ fun box(): String = if (f(true) && !f(false)) "OK" else "FAIL"
 }
 
 #[test]
+fn bare_as_statement_smart_casts_on_fallthrough() {
+    let src = r#"
+interface Named { val data: String }
+class N(override val data: String) : Named
+fun f(other: Any): String {
+    other as Named
+    return other.data
+}
+fun box(): String = if (f(N("ok")) == "ok") "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAsStatementSmartCast");
+}
+
+#[test]
+fn nullable_target_as_statement_keeps_its_proven_type() {
+    let src = r#"
+@Suppress("UNUSED_EXPRESSION")
+fun f(value: Any?): Int {
+    value as CharSequence?
+    if (value == null) return -1
+    return value.length
+}
+fun box(): String = if (f("abc") == 3 && f(null) == -1) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverNullableAsStatement");
+}
+
+#[test]
+fn as_cast_in_evaluated_call_argument_smart_casts_after_statement() {
+    let src = r#"
+fun consume(value: Int) {}
+fun f(value: Any): Int {
+    consume((value as CharSequence).length)
+    return value.length
+}
+fun box(): String = if (f("abc") == 3) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverCallArgumentAsStatement");
+}
+
+#[test]
+fn safe_as_statement_does_not_smart_cast() {
+    let src = r#"
+@Suppress("UNUSED_EXPRESSION")
+fun f(value: Any?): Int {
+    value as? CharSequence
+    return value.length
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverSafeAsStatement", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverSafeAsStatement.kt".to_string(),
+            line: 5,
+            column: 18,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn conditional_as_in_statement_does_not_smart_cast() {
+    let src = r#"
+@Suppress("UNUSED_EXPRESSION")
+fun f(value: Any?, skip: Boolean): Int {
+    skip || (value as CharSequence).isEmpty()
+    return value.length
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverConditionalAsStatement", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverConditionalAsStatement.kt".to_string(),
+            line: 5,
+            column: 18,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn closure_mutated_value_does_not_smart_cast_after_as_statement() {
+    let src = r#"
+@Suppress("UNUSED_EXPRESSION")
+fun f(value: Any?): Int {
+    var current = value
+    val clear = { current = null }
+    current as CharSequence
+    return current.length
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverUnstableAsStatement", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverUnstableAsStatement.kt".to_string(),
+            line: 7,
+            column: 20,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
 fn selected_generic_member_keeps_its_inferred_return() {
     let src = r#"
 class C {
