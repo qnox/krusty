@@ -573,6 +573,7 @@ mod tests {
             setter,
             setter_visibility: visibility,
             is_const: false,
+            compile_time_constant: None,
             visibility,
             owner,
             receiver_rank: 0,

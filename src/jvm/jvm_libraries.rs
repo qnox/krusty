@@ -1040,6 +1040,7 @@ impl JvmLibraries {
                 setter,
                 setter_visibility: property.visibility,
                 is_const: property.is_const,
+                compile_time_constant: None,
                 visibility: property.visibility,
                 owner,
                 receiver_rank: 0,
@@ -3815,6 +3816,7 @@ impl JvmLibraries {
                     setter,
                     setter_visibility: mp.visibility,
                     is_const: mp.is_const,
+                    compile_time_constant: None,
                     visibility: mp.visibility,
                     owner: cn,
                     receiver_rank: 0,
@@ -3852,6 +3854,7 @@ impl JvmLibraries {
                     setter: None,
                     setter_visibility: function.visibility,
                     is_const: false,
+                    compile_time_constant: None,
                     visibility: function.visibility,
                     owner: function.callable.owner,
                     receiver_rank: 0,
@@ -3919,6 +3922,7 @@ impl JvmLibraries {
                         setter,
                         setter_visibility,
                         is_const: false,
+                        compile_time_constant: None,
                         visibility,
                         owner,
                         receiver_rank: 0,
@@ -4319,87 +4323,97 @@ impl JvmLibraries {
                 let receiver_params = usize::from(mp.is_extension);
                 let mp = mp.clone();
                 let property_gsig = mp.generic_sig.clone();
-                let Some(getter_sig) = mp.getter else {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: metadata has no getter realization"
-                    );
-                    continue;
-                };
-                let Some(getter_method) =
-                    self.cp
-                        .facade_static(&facade_rendered, &getter_sig.name, &getter_sig.desc)
-                else {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: getter {}{} is absent from facade {}",
-                        getter_sig.name,
-                        getter_sig.desc,
-                        facade.render()
-                    );
-                    continue;
-                };
-                if !getter_method.public {
-                    continue;
-                }
-                let Some((gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: malformed getter descriptor {}",
-                        getter_sig.desc
-                    );
-                    continue;
-                };
-                if gparams.len() != receiver_params {
-                    crate::trace_compiler!(
-                        "metadata_properties",
-                        "property {fqn} rejected: getter parameter count {} != metadata receiver count {receiver_params}",
-                        gparams.len()
-                    );
-                    continue;
-                }
                 let generic_receiver = property_gsig.as_ref().and_then(|gsig| gsig.receiver);
-                let fallback_ret = mp.ret_class.map_or(gret, kotlin_type_name_to_ty);
-                let property_ty = property_gsig.as_ref().map_or_else(
-                    || {
-                        if mp.ret_nullable {
-                            Ty::nullable(fallback_ret)
-                        } else {
-                            fallback_ret
+                let (getter, setter, property_ty, compile_time_constant) = if mp.is_const
+                    && !mp.is_extension
+                {
+                    let Some(field) = self.static_field_name(facade, name) else {
+                        continue;
+                    };
+                    let Some(constant) = field.constant.clone() else {
+                        continue;
+                    };
+                    let property_ty = property_gsig.as_ref().map_or_else(
+                        || {
+                            let fallback = mp.ret_class.map_or(field.ty, kotlin_type_name_to_ty);
+                            if mp.ret_nullable {
+                                Ty::nullable(fallback)
+                            } else {
+                                fallback
+                            }
+                        },
+                        |gsig| gsig.ret,
+                    );
+                    let getter = LibraryCallable::library(
+                        field.owner,
+                        name.to_string(),
+                        Vec::new(),
+                        property_ty,
+                        field.ty,
+                        String::new(),
+                    );
+                    (getter, None, property_ty, Some(constant))
+                } else {
+                    let Some(getter_sig) = mp.getter else {
+                        continue;
+                    };
+                    let Some(getter_method) =
+                        self.cp
+                            .facade_static(&facade_rendered, &getter_sig.name, &getter_sig.desc)
+                    else {
+                        continue;
+                    };
+                    if !getter_method.public {
+                        continue;
+                    }
+                    let Some((gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
+                        continue;
+                    };
+                    if gparams.len() != receiver_params {
+                        continue;
+                    }
+                    let fallback_ret = mp.ret_class.map_or(gret, kotlin_type_name_to_ty);
+                    let property_ty = property_gsig.as_ref().map_or_else(
+                        || {
+                            if mp.ret_nullable {
+                                Ty::nullable(fallback_ret)
+                            } else {
+                                fallback_ret
+                            }
+                        },
+                        |gsig| gsig.ret,
+                    );
+                    let getter = LibraryCallable::library(
+                        getter_method.owner,
+                        getter_sig.name,
+                        gparams,
+                        property_ty,
+                        gret,
+                        getter_sig.desc,
+                    );
+                    let setter = mp.setter.and_then(|setter_sig| {
+                        let (sparams, sret) = parse_method_desc(&setter_sig.desc)?;
+                        if sparams.len() != receiver_params + 1 || sret != Ty::Unit {
+                            return None;
                         }
-                    },
-                    |gsig| gsig.ret,
-                );
-                let getter = LibraryCallable::library(
-                    getter_method.owner,
-                    getter_sig.name,
-                    gparams,
-                    property_ty,
-                    gret,
-                    getter_sig.desc,
-                );
-                let setter = mp.setter.and_then(|setter_sig| {
-                    let (sparams, sret) = parse_method_desc(&setter_sig.desc)?;
-                    if sparams.len() != receiver_params + 1 || sret != Ty::Unit {
-                        return None;
-                    }
-                    let setter_method = self.cp.facade_static(
-                        &facade_rendered,
-                        &setter_sig.name,
-                        &setter_sig.desc,
-                    )?;
-                    if !setter_method.public {
-                        return None;
-                    }
-                    Some(LibraryCallable::library(
-                        setter_method.owner,
-                        setter_sig.name,
-                        sparams,
-                        Ty::Unit,
-                        sret,
-                        setter_sig.desc,
-                    ))
-                });
+                        let setter_method = self.cp.facade_static(
+                            &facade_rendered,
+                            &setter_sig.name,
+                            &setter_sig.desc,
+                        )?;
+                        setter_method.public.then(|| {
+                            LibraryCallable::library(
+                                setter_method.owner,
+                                setter_sig.name,
+                                sparams,
+                                Ty::Unit,
+                                sret,
+                                setter_sig.desc,
+                            )
+                        })
+                    });
+                    (getter, setter, property_ty, None)
+                };
                 props.push(PropertyInfo {
                     name: name.to_string(),
                     kind: if mp.is_extension {
@@ -4424,6 +4438,7 @@ impl JvmLibraries {
                     setter,
                     setter_visibility: mp.visibility,
                     is_const: mp.is_const,
+                    compile_time_constant,
                     visibility: mp.visibility,
                     owner: facade,
                     receiver_rank: 0,
@@ -4590,9 +4605,7 @@ impl JvmLibraries {
         };
         let importable_declaration = core.importable_declaration
             || match namespace {
-                SymbolNamespace::Package(package) => {
-                    self.top_level_static_field(package, name).is_some()
-                }
+                SymbolNamespace::Package(_) => false,
                 SymbolNamespace::Classifier(owner) => self.static_field_name(owner, name).is_some(),
             };
         self.cp.memoize_symbols(
@@ -5284,20 +5297,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     fn static_field(&self, internal: &str, name: &str) -> Option<crate::libraries::StaticFieldRef> {
         let internal = crate::types::existing_type_name(internal)?;
         self.static_field_name(internal, name)
-    }
-
-    fn top_level_static_field(
-        &self,
-        package: TypeName,
-        name: &str,
-    ) -> Option<crate::libraries::StaticFieldRef> {
-        // A top-level `const val` is a `public static final` field on the package FACADE that carries
-        // the declaration (`kotlin.math.PI` → `kotlin/math/MathKt.PI`). Which facade that is, is a
-        // platform fact, so the scan lives here rather than in the resolver.
-        self.cp
-            .package_facades_name(package)
-            .into_iter()
-            .find_map(|facade| self.static_field_name(facade, name))
     }
 
     fn static_field_name(

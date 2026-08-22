@@ -843,6 +843,7 @@ mod tests {
                                 setter: None,
                                 setter_visibility: crate::types::Visibility::Public,
                                 is_const: false,
+                                compile_time_constant: None,
                                 visibility: Visibility::Private,
                                 owner: internal,
                                 receiver_rank: 0,

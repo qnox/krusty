@@ -708,6 +708,67 @@ fun read(holder: Outer<String>.Holder): String = holder.current()
 }
 
 #[test]
+fn default_imported_const_val_is_a_top_level_property() {
+    let source = r#"
+fun read(bufferSize: Int = DEFAULT_BUFFER_SIZE): Int = bufferSize
+
+fun box(): String = if (read() == 8192) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(source, "DefaultImportedConstVal");
+}
+
+#[test]
+fn imported_const_val_alias_selects_the_constant_property() {
+    let source = r#"
+import kotlin.io.DEFAULT_BUFFER_SIZE as BUFFER_SIZE
+
+fun box(): String = if (BUFFER_SIZE == 8192) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(source, "ImportedConstValAlias");
+}
+
+#[test]
+fn qualified_const_val_selects_the_constant_property() {
+    let source = r#"
+fun box(): String = if (kotlin.io.DEFAULT_BUFFER_SIZE == 8192) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(source, "QualifiedConstVal");
+}
+
+#[test]
+fn non_const_property_keeps_its_getter() {
+    let source = r#"
+var offset: Int = 0
+val bufferSize: Int = 7
+    get() = field + offset
+
+fun box(): String {
+    val first = bufferSize
+    offset = 1
+    val second = bufferSize
+    return if (first == 7 && second == 8) "OK" else "FAIL"
+}
+"#;
+    assert_accepted_and_runs(source, "NonConstPropertyGetter");
+}
+
+#[test]
+fn star_imported_property_outprioritizes_a_default_imported_const_val() {
+    const DECLARATION: &str = "package selected\nconst val DEFAULT_BUFFER_SIZE: Int = 7\n";
+    const USE: &str = r#"
+package use
+
+import selected.*
+
+fun box(): String = if (DEFAULT_BUFFER_SIZE == 7) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs_files(
+        &[("Declaration.kt", DECLARATION), ("Use.kt", USE)],
+        "ImportedConstValPrecedence",
+    );
+}
+
+#[test]
 fn selected_generic_member_keeps_its_inferred_return() {
     let src = r#"
 class C {

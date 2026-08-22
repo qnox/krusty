@@ -25943,6 +25943,61 @@ impl<'a> Checker<'a> {
             _ => TopLevelPropertySelection::Ambiguous,
         }
     }
+
+    fn read_top_level_property(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        name: &str,
+    ) -> Option<Ty> {
+        match self.select_top_level_property(scope, name) {
+            TopLevelPropertySelection::Selected(property)
+                if property.property.ty == Ty::Pending =>
+            {
+                let ty = self
+                    .demand_name
+                    .and_then(|demand| demand(name))
+                    .unwrap_or(Ty::Error);
+                if ty == Ty::Error && self.property_inference_failed(&property.property) {
+                    self.silent_error_exprs.insert(expression);
+                }
+                self.expr_lowers
+                    .insert(expression, ExprLowering::TopLevelPropertyGet(property));
+                Some(ty)
+            }
+            TopLevelPropertySelection::Selected(property) => {
+                let ty = property.property.ty;
+                if ty == Ty::Error && self.property_inference_failed(&property.property) {
+                    self.silent_error_exprs.insert(expression);
+                }
+                if let Some(constant) = property.property.compile_time_constant.clone() {
+                    self.resolved_constants.insert(expression, constant);
+                }
+                self.expr_lowers
+                    .insert(expression, ExprLowering::TopLevelPropertyGet(property));
+                Some(ty)
+            }
+            TopLevelPropertySelection::Ambiguous => {
+                self.diags.error(
+                    self.span(expression),
+                    format!("overload resolution ambiguity for property '{name}'"),
+                );
+                Some(Ty::Error)
+            }
+            TopLevelPropertySelection::MissingContext(missing, names) => {
+                self.diags.error(
+                    self.span(expression),
+                    format!(
+                        "no context argument for '{}' found.",
+                        missing.display(&names)
+                    ),
+                );
+                Some(Ty::Error)
+            }
+            TopLevelPropertySelection::None => None,
+        }
+    }
+
     fn set(&mut self, e: ExprId, t: Ty) -> Ty {
         let previous = self.expr_types[e.0 as usize];
         if previous != t && previous != Ty::Error {
@@ -39854,76 +39909,13 @@ impl<'a> Checker<'a> {
                 } else if self.syms.context_prop_names.contains(&n)
                     || self.syms.props.contains_key(&n)
                 {
-                    match self.select_top_level_property(scope, &n) {
-                        // A module property is REGISTERED before its type is known, as a placeholder
-                        // the engine fills in later. Selection therefore succeeds with `Ty::Error`,
-                        // or fails outright, while the declaration is still being resolved — both
-                        // mean "not yet", not "no such property", so both ask the engine.
-                        TopLevelPropertySelection::Selected(property)
-                            if property.property.ty == Ty::Pending =>
-                        {
-                            let ty = self
-                                .demand_name
-                                .and_then(|demand| demand(&n))
-                                .unwrap_or(Ty::Error);
-                            if ty == Ty::Error && self.property_inference_failed(&property.property)
-                            {
-                                self.silent_error_exprs.insert(e);
-                            }
-                            self.expr_lowers
-                                .insert(e, ExprLowering::TopLevelPropertyGet(property));
-                            ty
-                        }
-                        TopLevelPropertySelection::Selected(property) => {
-                            let ty = property.property.ty;
-                            if ty == Ty::Error && self.property_inference_failed(&property.property)
-                            {
-                                self.silent_error_exprs.insert(e);
-                            }
-                            if property.property.is_const {
-                                if let Some(constant) = property
-                                    .property
-                                    .source_key
-                                    .and_then(|key| self.syms.source_props.get(&key))
-                                    .and_then(|signature| signature.compile_time_constant.clone())
-                                {
-                                    self.resolved_constants.insert(e, constant);
-                                }
-                            }
-                            self.expr_lowers
-                                .insert(e, ExprLowering::TopLevelPropertyGet(property));
-                            ty
-                        }
-                        TopLevelPropertySelection::Ambiguous => {
-                            self.diags.error(
-                                self.span(e),
-                                format!("overload resolution ambiguity for property '{n}'"),
-                            );
+                    self.read_top_level_property(scope, e, &n)
+                        .or_else(|| self.demand_name.and_then(|demand| demand(&n)))
+                        .unwrap_or_else(|| {
+                            self.diags
+                                .error(self.span(e), format!("unresolved reference '{n}'."));
                             Ty::Error
-                        }
-                        TopLevelPropertySelection::MissingContext(missing, names) => {
-                            self.diags.error(
-                                self.span(e),
-                                format!(
-                                    "no context argument for '{}' found.",
-                                    missing.display(&names)
-                                ),
-                            );
-                            Ty::Error
-                        }
-                        TopLevelPropertySelection::None => {
-                            match self.demand_name.and_then(|demand| demand(&n)) {
-                                Some(ty) => ty,
-                                None => {
-                                    self.diags.error(
-                                        self.span(e),
-                                        format!("unresolved reference '{n}'."),
-                                    );
-                                    Ty::Error
-                                }
-                            }
-                        }
-                    }
+                        })
                 } else if let Some((receiver, declared_name)) = self.imported_singleton_member(&n) {
                     let ty = self.check_member(
                         scope,
@@ -39947,8 +39939,6 @@ impl<'a> Checker<'a> {
                     self.diags
                         .error(self.span(e), format!("unresolved reference '{n}'."));
                     Ty::Error
-                } else if let Some(field) = self.imported_package_static_field(&n) {
-                    self.record_external_static_field(Some(e), field)
                 } else if let Some((implicit_receiver, member)) =
                     implicit_receivers.iter().copied().find_map(|receiver| {
                         self.syms
@@ -39962,23 +39952,7 @@ impl<'a> Checker<'a> {
                     self.expr_lowers
                         .insert(e, ExprLowering::IntrinsicProperty(Box::new(member)));
                     ret
-                } else if let Some(property) = self
-                    .resolver()
-                    .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &n, &[], &[])
-                    .and_then(crate::symbol_resolver::Symbol::value)
-                    .filter(|property| property.getter.ret.is_read_value_result())
-                {
-                    // A TOP-LEVEL property read (`import pkg.plugin; plugin`): its value is its declaring
-                    // facade's static getter call. Last among the value rungs — every enclosing scope
-                    // (locals, members, objects) shadows an imported top-level property.
-                    let ty = property.ty;
-                    self.expr_lowers.insert(
-                        e,
-                        ExprLowering::TopLevelPropertyGet(Box::new(ResolvedPropertyAccess {
-                            property,
-                            context_args: Vec::new(),
-                        })),
-                    );
+                } else if let Some(ty) = self.read_top_level_property(scope, e, &n) {
                     ty
                 } else if let Some(ty) = self.demand_name.and_then(|demand| demand(&n)) {
                     // Every ordinary rung has been tried and none knew the name. When this checker
@@ -48444,41 +48418,29 @@ impl<'a> Checker<'a> {
         Some(self.record_external_static_field(Some(expression), field))
     }
 
-    /// A read of a TOP-LEVEL property named through its package (`pkg.topLevelProp`, `pkg.TOP_CONST`).
-    /// The package is the only scope consulted — a fully-qualified reference names one declaration, so
-    /// nothing about the file's imports may shadow or widen it. A `const val` has no accessor, so the
-    /// platform's field storage answers it; everything else reads through its getter, exactly as the
-    /// imported spelling does.
+    /// A read of a top-level property named through its package (`pkg.topLevelProp`).
     fn read_package_property(
         &mut self,
         expression: ExprId,
         package: TypeName,
         name: &str,
     ) -> Option<Ty> {
-        if let Some(field) = self.syms.libraries.top_level_static_field(package, name) {
-            return Some(self.record_external_static_field(Some(expression), field));
-        }
         let property = self
             .resolver_in_scope(std::slice::from_ref(&package))
             .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
             .and_then(crate::symbol_resolver::Symbol::value)
             .filter(|property| property.getter.ret.is_read_value_result())?;
         let ty = property.ty;
-        // A `const val` has NO accessor — the value lives in a field on the declaring facade, and
-        // calling the getter that its property shape nominally carries throws `NoSuchMethodError`.
-        let lowering = if property.is_const {
-            ExprLowering::StaticPropertyRead {
-                owner: property.owner,
-                name: name.to_string(),
-                descriptor: None,
-            }
-        } else {
+        if let Some(constant) = property.compile_time_constant.clone() {
+            self.resolved_constants.insert(expression, constant);
+        }
+        self.expr_lowers.insert(
+            expression,
             ExprLowering::TopLevelPropertyGet(Box::new(ResolvedPropertyAccess {
                 property,
                 context_args: Vec::new(),
-            }))
-        };
-        self.expr_lowers.insert(expression, lowering);
+            })),
+        );
         Some(ty)
     }
 
@@ -48509,19 +48471,6 @@ impl<'a> Checker<'a> {
             },
             declared_name,
         ))
-    }
-
-    fn imported_package_static_field(
-        &self,
-        name: &str,
-    ) -> Option<crate::libraries::StaticFieldRef> {
-        let (namespace, declared_name) = self.function_import_scope.explicit_target(name)?;
-        let crate::symbol_source::SymbolNamespace::Package(package) = namespace else {
-            return None;
-        };
-        self.syms
-            .libraries
-            .top_level_static_field(package, &declared_name)
     }
 
     /// Read an explicitly imported classifier member through the qualified-member path.
